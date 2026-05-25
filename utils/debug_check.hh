@@ -1,0 +1,38 @@
+/**
+ * @file debug_check.hh
+ * @author your name (you@domain.com)
+ * @brief 
+ * @version 0.1
+ * @date 2026-05-25
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
+
+#pragma once
+
+#include <stdexcept>
+
+#ifndef NDEBUG
+    #define DEBUG_CHECK_ENABLED
+#endif
+
+#ifdef DEBUG_CHECK_ENABLED
+#define CHECK(condition) utils::check(condition, \
+    std::string("Debug check failed: ") + #condition \
+    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
+#else
+#define CHECK(condition) // do nothing
+#endif
+
+namespace utils
+{
+
+inline void check(bool condition, std::string message = "Debug check failed")
+{
+    if (!condition)
+    {
+        throw std::runtime_error(message);
+    }
+}
+} // namespace utils
