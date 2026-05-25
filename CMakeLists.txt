@@ -1,0 +1,40 @@
+cmake_minimum_required(VERSION 3.10)
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+project(SimpleFluid C CXX)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(Trilinos REQUIRED COMPONENTS Tpetra)
+find_package(MPI REQUIRED COMPONENTS CXX)
+
+# Add source files
+set(SOURCES "geometry/Mesh.cc" )
+
+# Create library or executable
+add_library(SimpleFluid STATIC ${SOURCES})
+
+target_include_directories(SimpleFluid PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(SimpleFluid PUBLIC Trilinos::all_selected_libs MPI::MPI_CXX)
+
+# Optional: Add executable if main.cpp exists
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cc")
+    add_executable(SimpleFluid_app ${SOURCES})
+    target_include_directories(SimpleFluid_app PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()
+
+find_package(GTest)
+
+enable_testing()
+include(GoogleTest)
+
+add_subdirectory(geometry/unitTests)
+
