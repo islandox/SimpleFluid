@@ -1,5 +1,5 @@
 /**
- * @file Mesh.cc
+ * @file MeshFactory.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief 
  * @version 0.1
@@ -8,11 +8,3 @@
  * @copyright Copyright (c) 2026
  * 
  */
-
-#include "Mesh.hh"
-#include "Mesh.tcc"
-
-namespace SimpleFluid
-{
-    template class Mesh<TpetraTypes<>>;
-}
