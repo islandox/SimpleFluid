@@ -16,6 +16,10 @@
 
 #include <Teuchos_RCP.hpp>
 
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 namespace SimpleFluid
 {
 
@@ -75,6 +79,7 @@ public:
 //-------------------------------- assemble ----------------------------------//
 public:
     void assemble();
+    void export_vtu(const std::string& filename) const;
 
 private:
     void create_maps();

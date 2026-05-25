@@ -11,6 +11,12 @@
 
 #include "Mesh.hh"
 
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <stdexcept>
+#include <string>
+
 namespace SimpleFluid
 {
 
@@ -40,6 +46,139 @@ void Mesh<Pack>::assemble()
     check_connectivity();
     create_maps();
     create_device_views();
+}
+
+template<TpetraTypePack Pack>
+void Mesh<Pack>::export_vtu(const std::string& filename) const
+{
+    check_connectivity();
+
+    std::ofstream out(filename);
+    if (!out)
+    {
+        throw std::runtime_error("Failed to open VTU output file: " + filename);
+    }
+
+    auto vtk_cell_type = [](CellType type, std::size_t node_count) -> int
+    {
+        switch (type)
+        {
+            case CellType::HEXAHEDRON:
+                if (node_count != 8)
+                {
+                    throw std::runtime_error("VTU export expects 8 nodes for hexahedron cells.");
+                }
+                return 12;
+            case CellType::TRIPRISM:
+                if (node_count != 6)
+                {
+                    throw std::runtime_error("VTU export expects 6 nodes for triangular-prism cells.");
+                }
+                return 13;
+        }
+
+        throw std::runtime_error("VTU export encountered an unsupported cell type.");
+    };
+
+    out << std::setprecision(std::numeric_limits<real_t>::max_digits10);
+    out << "<?xml version=\"1.0\"?>\n";
+    out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
+    out << "  <UnstructuredGrid>\n";
+    out << "    <Piece NumberOfPoints=\"" << d_num_nodes
+        << "\" NumberOfCells=\"" << d_num_local_cells << "\">\n";
+
+    out << "      <PointData/>\n";
+    out << "      <CellData>\n";
+    out << "        <DataArray type=\"Int64\" Name=\"cell_gid\" format=\"ascii\">\n";
+    out << "          ";
+    for (local_ordinal_type lid = 0; lid < d_num_local_cells; ++lid)
+    {
+        out << d_cell_gid[lid] << (lid + 1 == d_num_local_cells ? "" : " ");
+    }
+    out << "\n";
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"Int32\" Name=\"cell_type\" format=\"ascii\">\n";
+    out << "          ";
+    for (local_ordinal_type lid = 0; lid < d_num_local_cells; ++lid)
+    {
+        out << d_cell_type[lid] << (lid + 1 == d_num_local_cells ? "" : " ");
+    }
+    out << "\n";
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"Float64\" Name=\"cell_volume\" format=\"ascii\">\n";
+    out << "          ";
+    for (local_ordinal_type lid = 0; lid < d_num_local_cells; ++lid)
+    {
+        out << d_cell_volume[lid] << (lid + 1 == d_num_local_cells ? "" : " ");
+    }
+    out << "\n";
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"Float64\" Name=\"cell_centroid\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+    for (const auto& centroid : d_cell_centroid)
+    {
+        out << "          " << centroid.x << " " << centroid.y << " " << centroid.z << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "      </CellData>\n";
+
+    out << "      <Points>\n";
+    out << "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+    for (const auto& coord : d_node_coord)
+    {
+        out << "          " << coord.x << " " << coord.y << " " << coord.z << "\n";
+    }
+    out << "        </DataArray>\n";
+    out << "      </Points>\n";
+
+    out << "      <Cells>\n";
+    out << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n";
+    for (local_ordinal_type lid = 0; lid < d_num_local_cells; ++lid)
+    {
+        const auto begin = static_cast<std::size_t>(d_cell_node_offset[lid]);
+        const auto end = static_cast<std::size_t>(d_cell_node_offset[static_cast<std::size_t>(lid) + 1]);
+
+        out << "          ";
+        for (std::size_t i = begin; i < end; ++i)
+        {
+            out << d_cell_node_ids[i] << (i + 1 == end ? "" : " ");
+        }
+        out << "\n";
+    }
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n";
+    out << "          ";
+    for (local_ordinal_type lid = 0; lid < d_num_local_cells; ++lid)
+    {
+        const auto offset = d_cell_node_offset[static_cast<std::size_t>(lid) + 1];
+        out << offset << (lid + 1 == d_num_local_cells ? "" : " ");
+    }
+    out << "\n";
+    out << "        </DataArray>\n";
+
+    out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
+    out << "          ";
+    for (local_ordinal_type lid = 0; lid < d_num_local_cells; ++lid)
+    {
+        const auto begin = static_cast<std::size_t>(d_cell_node_offset[lid]);
+        const auto end = static_cast<std::size_t>(d_cell_node_offset[static_cast<std::size_t>(lid) + 1]);
+        const auto type = static_cast<CellType>(d_cell_type[lid]);
+        out << vtk_cell_type(type, end - begin) << (lid + 1 == d_num_local_cells ? "" : " ");
+    }
+    out << "\n";
+    out << "        </DataArray>\n";
+    out << "      </Cells>\n";
+    out << "    </Piece>\n";
+    out << "  </UnstructuredGrid>\n";
+    out << "</VTKFile>\n";
+
+    if (!out)
+    {
+        throw std::runtime_error("Failed while writing VTU output file: " + filename);
+    }
 }
 
 template<TpetraTypePack Pack>
