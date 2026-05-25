@@ -1,6 +1,6 @@
 /**
  * @file testMesh.cc
- * @author your name (you@domain.com)
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief unit tests for Mesh class
  * @version 0.1
  * @date 2026-05-25

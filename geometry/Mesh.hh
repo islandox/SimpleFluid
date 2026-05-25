@@ -1,6 +1,6 @@
 /**
  * @file Mesh.hh
- * @author your name (you@domain.com)
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief 
  * @version 0.1
  * @date 2026-05-22
