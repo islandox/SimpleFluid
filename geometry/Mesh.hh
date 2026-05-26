@@ -15,8 +15,17 @@
 #include "utils/debug_check.hh"
 
 #include <Teuchos_RCP.hpp>
+#include <stk_io/StkMeshIoBroker.hpp>
+#include <stk_mesh/base/BulkData.hpp>
+#include <stk_mesh/base/Entity.hpp>
+#include <stk_mesh/base/Field.hpp>
+#include <stk_mesh/base/MetaData.hpp>
+#include <stk_mesh/base/Types.hpp>
+#include <stk_topology/topology.hpp>
 
 #include <string>
+#include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -47,7 +56,77 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using comm_type = typename Pack::comm_type;
 
+    using Entity = stk::mesh::Entity;
+    using EntityId = stk::mesh::EntityId;
+
+    using BulkData = stk::mesh::BulkData;
+    using MetaData = stk::mesh::MetaData;
+
     using Vec3 = vec3<real_t>;
+
+    static constexpr int invalid_boundary_id = -1;
+
+    struct Options {
+        /*
+         * Optional mapping from STK sideset/side-part names to your boundary IDs.
+         *
+         * Example:
+         *   boundary_name_to_id["wall"] = 1;
+         *   boundary_name_to_id["inlet"] = 2;
+         */
+        std::unordered_map<std::string, int> boundary_name_to_id;
+
+        /*
+         * If true, side-rank STK parts not listed in boundary_name_to_id
+         * receive automatically generated IDs.
+         */
+        bool auto_assign_boundary_ids = true;
+    };
+
+    struct CellInfo {
+        EntityId global_id = 0;
+        stk::topology topology;
+        Vec3 center;
+        double volume = 0.0;
+        bool owned = false;
+        std::vector<local_ordinal_type> faces;
+    };
+
+    struct FaceInfo {
+        /*
+         * Node IDs in the local side order from the first element that
+         * introduced this face. Sorted copies are used internally for matching.
+         */
+        std::vector<EntityId> node_ids;
+
+        /*
+         * owner and neighbor are local cell indices in this StkFvmMesh object.
+         *
+         * owner is preferred to be a locally owned cell when exactly one side
+         * is owned and the other side is ghost/aura.
+         */
+        local_ordinal_type owner = 0;
+        std::optional<local_ordinal_type> neighbor;
+
+        Vec3 center;
+
+        /*
+         * Unit normal pointing outward from owner.
+         * For a specific cell c, use face_normal_outward(c, f).
+         */
+        Vec3 unit_normal_from_owner;
+        Vec3 unit_normal_from_neighbor;
+
+        double area = 0.0;
+
+        /*
+         * Physical boundary ID from Exodus sideset/STK side part.
+         * invalid_boundary_id means no physical boundary part was detected.
+         */
+        int boundary_id = invalid_boundary_id;
+        std::string boundary_name;
+    };
+
     using ArrVec3 = std::vector<Vec3>;
     using ArrLO = std::vector<local_ordinal_type>;
     using ArrGO = std::vector<global_ordinal_type>;
@@ -74,7 +153,7 @@ public:
 
     struct DeviceViews;
 
-    Mesh() = default;
+    Mesh();
 
 //-------------------------------- assemble ----------------------------------//
 public:
@@ -85,59 +164,99 @@ private:
     void create_maps();
     void create_device_views();
 
+    void build_cell_list();
+    void compute_cell_geometry();
+
+    void build_face_table();
+    void prefer_owned_face_owners();
+    void compute_face_geometry();
+
+    void assign_boundary_ids_from_stk_side_parts();
+
+    void initialize_boundary_id_maps();
+    int get_or_create_boundary_id(const std::string& name);
+
+    static bool is_supported_volume_topology(stk::topology topo);
+    static std::vector<unsigned> side_node_ordinals(stk::topology topo,
+                                                    unsigned side_ordinal);
+
+    static std::string make_face_key(std::vector<EntityId> node_ids);
+
+    bool is_candidate_boundary_part(const stk::mesh::Part& part,
+                                    stk::mesh::EntityRank side_rank) const;
+
+    const stk::mesh::Part* choose_boundary_part(
+        const stk::mesh::Bucket& bucket,
+        stk::mesh::EntityRank side_rank) const;
+
 //------------------------- one-by-one setting -------------------------------//
 public:
-    inline local_ordinal_type add_cell(global_ordinal_type gid, CellType type, 
-                                real_t volume, const Vec3& centroid);
-    inline local_ordinal_type add_face(local_ordinal_type owner, local_ordinal_type neighbor, 
-                                FaceType type, int patch_id,
-                                real_t area, const Vec3& area_vector, const Vec3& centroid);
-    inline local_ordinal_type add_node(const Vec3& coord);
 
-    inline void set_cell_faces(local_ordinal_type cell_lid, const ArrLO& face_ids);
-    inline void set_cell_nodes(local_ordinal_type cell_lid, const ArrLO& node_ids);
-    inline void set_face_nodes(local_ordinal_type face_lid, const ArrLO& node_ids);
 
 //------------------------------- checks -------------------------------------//
 private:
-    void check_cell(local_ordinal_type lid) const {CHECK(lid < d_num_local_cells);};
-    void check_face(local_ordinal_type lid) const {CHECK(lid < d_num_faces);};
-    void check_node(local_ordinal_type lid) const {CHECK(lid < d_num_nodes);};
+    void check_cell(local_ordinal_type lid) const {CHECK(lid < num_local_cells());};
+    void check_face(local_ordinal_type lid) const {CHECK(lid < num_faces());};
 
     void check_connectivity() const;
 
 //----------------------------- accessors ------------------------------------//
 public:
-    DeviceViews device_views() const { return d_device_views; }
+    DeviceViews device_views() const noexcept { return d_device_views; }
+
+    const MetaData& meta() const noexcept { return d_meta; }
+    const BulkData& bulk() const noexcept { return d_bulk; }
+    MetaData& meta() noexcept { return d_meta; }
+    BulkData& bulk() noexcept { return d_bulk; }
+
+    const ArrLO& owned_cell_ids() const noexcept { return d_owned_cell_ids; }
+    const Arr<EntityId>& owned_cell_global_ids() const noexcept { return d_owned_cell_global_ids; }
 
     RCP<const map_type> owned_cell_map() const { return d_owned_cell_map; }
     RCP<const map_type> overlap_cell_map() const { return d_overlap_cell_map; }
 
-    local_ordinal_type num_owned_cells() const { return d_num_owned_cells; }
-    local_ordinal_type num_local_cells() const { return d_num_local_cells; }
-    local_ordinal_type num_faces() const { return d_num_faces; }
-    local_ordinal_type num_nodes() const { return d_num_nodes; }
+//------------------------------ random access -------------------------------//
+    inline const CellInfo& cell(local_ordinal_type lid) const;
+    inline const FaceInfo& face(local_ordinal_type lid) const;
+    inline const EntityId& cell_global_id(local_ordinal_type lid) const;
 
 //-------------------------------- queries -----------------------------------//
-    inline global_ordinal_type cell_global_id(local_ordinal_type lid) const;
-    inline local_ordinal_type cell_local_id(global_ordinal_type gid) const;
 
-    inline CellType        cell_type(local_ordinal_type lid) const;
-    inline real_t          cell_volume(local_ordinal_type lid) const;
-    inline const Vec3&     cell_centroid(local_ordinal_type lid) const;
+    size_t spatial_dimension() const noexcept { return d_meta.spatial_dimension(); }
 
-    inline local_ordinal_type face_owner(local_ordinal_type fid) const;
-    inline local_ordinal_type face_neighbor(local_ordinal_type fid) const;
-    inline FaceType           face_type(local_ordinal_type fid) const;
-    inline int                face_patch(local_ordinal_type fid) const;
+    size_t num_local_cells() const noexcept { return d_cells.size(); }
+    size_t num_owned_cells() const noexcept { return d_owned_cell_ids.size(); }
+    size_t num_faces() const noexcept { return d_faces.size(); }
+
+    inline bool is_owned_cell(local_ordinal_type lid) const;
+
+    inline const ArrLO& faces(local_ordinal_type cell_lid) const;
+
+    inline Vec3 node_coord(stk::mesh::Entity node) const;
+    inline Vec3 node_coord_by_id(EntityId node_id) const;
+    inline Arr<Vec3> element_node_coords(stk::mesh::Entity elem) const;
+
+    inline real_t cell_volume(local_ordinal_type lid) const;
+    inline const Vec3& cell_centroid(local_ordinal_type lid) const;
+
+    inline local_ordinal_type owner_cell(local_ordinal_type fid) const;
+    inline local_ordinal_type neighbor_cell(local_ordinal_type fid) const;
+    inline local_ordinal_type opposite_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+
     inline real_t             face_area(local_ordinal_type fid) const;
-    inline const Vec3&        face_area_vector(local_ordinal_type fid) const;
+    inline const Vec3&        face_normal(local_ordinal_type fid) const;
     inline const Vec3&        face_centroid(local_ordinal_type fid) const;
+    inline const Vec3&        face_normal_outward(local_ordinal_type fid, local_ordinal_type cell_lid) const;
 
-    inline local_ordinal_type cell_face_begin(local_ordinal_type lid) const;
-    inline local_ordinal_type cell_face_end(local_ordinal_type lid) const;
+    inline bool is_exterior_face(local_ordinal_type fid) const;
+    inline bool is_interior_face(local_ordinal_type fid) const;
+    inline bool is_boundary_face(local_ordinal_type fid) const;
 
-    inline local_ordinal_type cell_face(local_ordinal_type cell_lid, local_ordinal_type i) const;
+    inline int boundary_id(local_ordinal_type fid) const;
+    inline const std::string& boundary_name(local_ordinal_type fid) const;
+    inline const ArrLO& face_patch(int patch_id) const;
+
+    inline local_ordinal_type find_local_cell(EntityId gid) const;
 
 //----------------------------- device views ---------------------------------//
 private:
@@ -151,57 +270,38 @@ private:
 
 //---------------------------------- Data ------------------------------------//
 private:
-    global_ordinal_type d_num_global_cells = 0;
-    local_ordinal_type d_num_owned_cells = 0;
-    local_ordinal_type d_num_local_cells = 0;
+    Options d_options;
+    std::shared_ptr<MetaData> d_meta_storage;
+    std::unique_ptr<BulkData> d_bulk_storage;
+    stk::io::StkMeshIoBroker d_io;
 
-    local_ordinal_type d_num_faces = 0;
-    local_ordinal_type d_num_nodes = 0;
+    MetaData& d_meta;
+    BulkData& d_bulk;
 
-    RCP<const comm_type> d_comm;
+    stk::mesh::Field<double>* d_coord_field = nullptr;
+
+    Arr<Entity> d_cell_entities;
+    Arr<CellInfo> d_cells;
+    Arr<FaceInfo> d_faces;
+
+    ArrLO d_owned_cell_ids;
+    Arr<EntityId> d_owned_cell_global_ids;
+
+    std::unordered_map<EntityId, local_ordinal_type> d_cell_gid_to_lid;
+
+    /*
+     * Internal face lookup: sorted node IDs encoded as a string key.
+     * This is only used at setup time, so simplicity is preferred over speed.
+     */
+    std::unordered_map<std::string, local_ordinal_type> face_key_to_face_;
+
+    std::unordered_map<int, std::string> d_boundary_id_to_name;
+    std::unordered_map<std::string, int> d_boundary_name_to_id;
+    std::unordered_map<int, ArrLO> d_boundary_id_to_faces;
+    int d_next_boundary_id = 1; // Start from 1 since 0 is reserved for invalid_boundary_id
 
     RCP<const map_type> d_owned_cell_map;
     RCP<const map_type> d_overlap_cell_map;
-
-    /*
-     * Host-side data used during construction and host assembly.
-     *
-     * Owned cells must be first:
-     *
-     *   local cell lid: [0, num_owned_cells)
-     *
-     * Ghost cells come after:
-     *
-     *   local ghost lid: [num_owned_cells, num_local_cells)
-     */
-    ArrGO   d_cell_gid;
-
-    ArrInt  d_cell_type;
-    ArrReal d_cell_volume;
-    ArrVec3 d_cell_centroid;
-
-    ArrLO   d_cell_face_offset = {0};
-    ArrLO   d_cell_face_ids;
-
-    ArrLO   d_face_owner;
-    ArrLO   d_face_neighbor;
-
-    ArrInt  d_face_type;
-    ArrInt  d_face_patch;
-
-    ArrReal d_face_area;
-    ArrVec3 d_face_area_vector;
-    ArrVec3 d_face_centroid;
-
-    ArrVec3 d_node_coord;
-
-    ArrLO   d_cell_node_offset = {0};
-    ArrLO   d_cell_node_ids;
-
-    ArrLO   d_face_node_offset = {0};
-    ArrLO   d_face_node_ids;
-
-    std::unordered_map<global_ordinal_type, local_ordinal_type> d_cell_gid_to_lid;
 
     DeviceViews d_device_views;
 };

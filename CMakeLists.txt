@@ -8,11 +8,12 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Trilinos REQUIRED COMPONENTS Tpetra)
+find_package(Trilinos REQUIRED COMPONENTS Tpetra STKIO STKMesh STKTopology STKUtil)
 find_package(MPI REQUIRED COMPONENTS CXX)
 
 # Add source files
-set(SOURCES "geometry/Mesh.cc" )
+set(SOURCES "geometry/Mesh.cc"
+            "geometry/MeshFactory.cc")
 
 # Create library or executable
 add_library(SimpleFluid STATIC ${SOURCES})
@@ -37,4 +38,3 @@ enable_testing()
 include(GoogleTest)
 
 add_subdirectory(geometry/unitTests)
-

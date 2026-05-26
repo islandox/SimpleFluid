@@ -100,7 +100,7 @@ void Database::set(const std::string& key, T&& value)
     }
     else
     {
-        static_assert(always_false<T>, "Unsupported type for Database::set");
+        static_assert(false, "Unsupported type for Database::set");
     }
 }
 
@@ -133,7 +133,7 @@ T& Database::get(const std::string& key)
     }
     else
     {
-        static_assert(always_false<T>, "Unsupported type for Database::get");
+        static_assert(false, "Unsupported type for Database::get");
     }
 }
 
@@ -166,7 +166,7 @@ const T& Database::get(const std::string& key) const
     }
     else
     {
-        static_assert(always_false<T>, "Unsupported type for Database::get");
+        static_assert(false, "Unsupported type for Database::get");
     }
 }
 
