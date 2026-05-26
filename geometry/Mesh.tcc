@@ -150,6 +150,12 @@ void Mesh<Pack>::assemble()
     create_device_views();
 }
 
+template<TpetraTypePack Pack>
+void Mesh<Pack>::export_vtu(const std::string&) const
+{
+    throw std::runtime_error("Mesh::export_vtu requires a concrete mesh backend.");
+}
+
 
 template<TpetraTypePack Pack>
 void Mesh<Pack>::create_maps()
@@ -315,24 +321,6 @@ void Mesh<Pack>::prefer_owned_face_owners()
     }
 }
 
-template<TpetraTypePack Pack>
-std::string Mesh<Pack>::make_face_key(std::vector<global_ordinal_type> node_ids)
-{
-    std::sort(node_ids.begin(), node_ids.end());
-
-    std::ostringstream key;
-    for (std::size_t i = 0; i < node_ids.size(); ++i)
-    {
-        if (i != 0)
-        {
-            key << ':';
-        }
-        key << node_ids[i];
-    }
-
-    return key.str();
-}
-
 
 template<TpetraTypePack Pack>
 void Mesh<Pack>::check_connectivity() const
@@ -365,9 +353,9 @@ void Mesh<Pack>::check_connectivity() const
     {
         const auto& face = d_faces[fid];
         CHECK(static_cast<std::size_t>(face.owner) < d_cells.size());
-        CHECK(face.neighbor != invalid_id<local_ordinal_type>()
-              || static_cast<std::size_t>(*face.neighbor) < d_cells.size());
-        CHECK((face.type == FaceType::TRI && face.node_ids.size() == 3)
+        CHECK(face.neighbor == invalid_id<local_ordinal_type>()
+              || static_cast<std::size_t>(face.neighbor) < d_cells.size());
+        CHECK((face.type == FaceType::TRIANGLE && face.node_ids.size() == 3)
          || (face.type == FaceType::QUAD && face.node_ids.size() == 4));
         CHECK(face.area >= 0.0);
 
