@@ -4,69 +4,184 @@
  * @brief unit tests for Mesh class
  * @version 0.1
  * @date 2026-05-25
- * 
+ *
  * @copyright Copyright (c) 2026
- * 
+ *
  */
 
 #include <gtest/gtest.h>
 #include "geometry/Mesh.hh"
 
+#include <Kokkos_Core.hpp>
+#include <mpi.h>
+#include <stk_mesh/base/FEMHelpers.hpp>
+#include <stk_mesh/base/FieldBase.hpp>
+#include <stk_mesh/base/MetaData.hpp>
+
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
+
+namespace
+{
+
+using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
+
+class KokkosEnvironment : public testing::Environment
+{
+public:
+    void SetUp() override
+    {
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (!mpi_initialized)
+        {
+            MPI_Init(nullptr, nullptr);
+            d_initialized_mpi = true;
+        }
+
+        if (!Kokkos::is_initialized())
+        {
+            Kokkos::initialize();
+            d_initialized_kokkos = true;
+        }
+    }
+
+    void TearDown() override
+    {
+        if (d_initialized_kokkos && Kokkos::is_initialized())
+        {
+            Kokkos::finalize();
+        }
+
+        int mpi_finalized = 0;
+        MPI_Finalized(&mpi_finalized);
+        if (d_initialized_mpi && !mpi_finalized)
+        {
+            MPI_Finalize();
+        }
+    }
+
+private:
+    bool d_initialized_mpi = false;
+    bool d_initialized_kokkos = false;
+};
+
+testing::Environment* const kokkos_environment =
+    testing::AddGlobalTestEnvironment(new KokkosEnvironment);
+
+stk::mesh::Field<double>& declare_coordinate_field(MeshType& mesh)
+{
+    auto& meta = mesh.meta();
+    auto& coord_field = meta.declare_field<double>(stk::topology::NODE_RANK, "coordinates");
+    stk::mesh::put_field_on_mesh(coord_field, meta.universal_part(), 3, nullptr);
+    meta.set_coordinate_field(&coord_field);
+    return coord_field;
+}
+
+void set_node_coord(stk::mesh::Field<double>& coord_field,
+                    stk::mesh::Entity node,
+                    const std::array<double, 3>& coord)
+{
+    auto* data = stk::mesh::field_data(coord_field, node);
+    std::copy(coord.begin(), coord.end(), data);
+}
+
+void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
+{
+    auto& coord_field = declare_coordinate_field(mesh);
+    auto& meta = mesh.meta();
+    auto& hex_part = meta.declare_part_with_topology("hexes", stk::topology::HEX_8);
+    auto& bulk = mesh.bulk();
+
+    bulk.modification_begin();
+
+    const stk::mesh::EntityIdVector node_ids{1, 2, 3, 4, 5, 6, 7, 8};
+    stk::mesh::declare_element(bulk, hex_part, elem_id, node_ids);
+
+    const std::array<std::array<double, 3>, 8> coords{{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {1.0, 1.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+        {1.0, 0.0, 1.0},
+        {1.0, 1.0, 1.0},
+        {0.0, 1.0, 1.0},
+    }};
+
+    for (std::size_t i = 0; i < node_ids.size(); ++i)
+    {
+        const auto node = bulk.get_entity(stk::topology::NODE_RANK, node_ids[i]);
+        set_node_coord(coord_field, node, coords[i]);
+    }
+
+    bulk.modification_end();
+}
+
+void populate_two_adjacent_hexes(MeshType& mesh)
+{
+    auto& coord_field = declare_coordinate_field(mesh);
+    auto& meta = mesh.meta();
+    auto& hex_part = meta.declare_part_with_topology("hexes", stk::topology::HEX_8);
+    auto& bulk = mesh.bulk();
+
+    bulk.modification_begin();
+
+    stk::mesh::declare_element(bulk, hex_part, 1, {1, 2, 3, 4, 5, 6, 7, 8});
+    stk::mesh::declare_element(bulk, hex_part, 2, {2, 9, 10, 3, 6, 11, 12, 7});
+
+    const std::vector<std::pair<stk::mesh::EntityId, std::array<double, 3>>> coords{
+        {1, {0.0, 0.0, 0.0}},
+        {2, {1.0, 0.0, 0.0}},
+        {3, {1.0, 1.0, 0.0}},
+        {4, {0.0, 1.0, 0.0}},
+        {5, {0.0, 0.0, 1.0}},
+        {6, {1.0, 0.0, 1.0}},
+        {7, {1.0, 1.0, 1.0}},
+        {8, {0.0, 1.0, 1.0}},
+        {9, {2.0, 0.0, 0.0}},
+        {10, {2.0, 1.0, 0.0}},
+        {11, {2.0, 0.0, 1.0}},
+        {12, {2.0, 1.0, 1.0}},
+    };
+
+    for (const auto& [node_id, coord] : coords)
+    {
+        const auto node = bulk.get_entity(stk::topology::NODE_RANK, node_id);
+        set_node_coord(coord_field, node, coord);
+    }
+
+    bulk.modification_end();
+}
+
+} // namespace
 
 TEST(MeshTest, AssembleMeshWithoutThrowing)
 {
-    using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
     MeshType mesh;
+    populate_two_adjacent_hexes(mesh);
 
-    // Add some cells, faces, and nodes to the mesh
-    auto cell0 = mesh.add_cell(0, MeshType::CellType::HEXAHEDRON, 1.0, {0.5, 0.5, 0.5});
-    auto cell1 = mesh.add_cell(1, MeshType::CellType::HEXAHEDRON, 1.0, {1.5, 0.5, 0.5});
-
-    auto face0 = mesh.add_face(cell0, cell1, MeshType::FaceType::QUAD, 0, 1.0, {1.0, 0.0, 0.0}, {1.0, 0.5, 0.5});
-    auto face1 = mesh.add_face(cell1, cell0, MeshType::FaceType::QUAD, 0, 1.0, {-1.0, 0.0, 0.0}, {1.5, 0.5, 0.5});
-
-    auto node0 = mesh.add_node({0.0, 0.0, 0.0});
-    auto node1 = mesh.add_node({1.0, 0.0, 0.0});
-    auto node2 = mesh.add_node({1.0, 1.0, 0.0});
-    auto node3 = mesh.add_node({0.0, 1.0, 0.0});
-    auto node4 = mesh.add_node({0.5, 0.5, 1.0});
-
-    // Set connectivity
-    mesh.set_cell_faces(cell0, {face0});
-    mesh.set_cell_faces(cell1, {face1});
-
-    mesh.set_cell_nodes(cell0, {node0, node1, node2, node3});
-    mesh.set_cell_nodes(cell1, {node4});
-
-    mesh.set_face_nodes(face0, {node1});
-    mesh.set_face_nodes(face1, {node4});
-
-    // Assemble the mesh (create maps and device views)
     mesh.assemble();
+
+    EXPECT_EQ(mesh.num_local_cells(), 2u);
+    EXPECT_EQ(mesh.num_owned_cells(), 2u);
+    EXPECT_EQ(mesh.num_faces(), 11u);
+    EXPECT_DOUBLE_EQ(mesh.cell_volume(0), 1.0);
+    EXPECT_DOUBLE_EQ(mesh.cell_volume(1), 1.0);
+    EXPECT_EQ(mesh.find_local_cell(1), 0);
+    EXPECT_EQ(mesh.find_local_cell(2), 1);
 }
 
 TEST(MeshTest, ExportVtuWritesUnstructuredGrid)
 {
-    using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
     MeshType mesh;
-
-    auto cell0 = mesh.add_cell(42, MeshType::CellType::HEXAHEDRON, 1.0, {0.5, 0.5, 0.5});
-
-    auto node0 = mesh.add_node({0.0, 0.0, 0.0});
-    auto node1 = mesh.add_node({1.0, 0.0, 0.0});
-    auto node2 = mesh.add_node({1.0, 1.0, 0.0});
-    auto node3 = mesh.add_node({0.0, 1.0, 0.0});
-    auto node4 = mesh.add_node({0.0, 0.0, 1.0});
-    auto node5 = mesh.add_node({1.0, 0.0, 1.0});
-    auto node6 = mesh.add_node({1.0, 1.0, 1.0});
-    auto node7 = mesh.add_node({0.0, 1.0, 1.0});
-
-    mesh.set_cell_nodes(cell0, {node0, node1, node2, node3, node4, node5, node6, node7});
+    populate_single_hex(mesh, 42);
     mesh.assemble();
 
     const auto unique_id = std::chrono::steady_clock::now().time_since_epoch().count();

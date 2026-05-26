@@ -1,26 +1,24 @@
 /**
  * @file Mesh_inline_functions.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief
  * @version 0.1
  * @date 2026-05-25
- * 
+ *
  * @copyright Copyright (c) 2026
- * 
+ *
  */
 
 #pragma once
 
-#include <Tpetra_Core.hpp>
-#include <Teuchos_OrdinalTraits.hpp>
+#include <Kokkos_Core.hpp>
+#include <stk_mesh/base/FieldBase.hpp>
 
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <utility>
 #include <vector>
 
 namespace SimpleFluid
@@ -28,311 +26,240 @@ namespace SimpleFluid
 
 namespace detail
 {
-    
+
 template <class Ordinal>
 inline constexpr Ordinal invalid_local_ordinal()
 {
     return std::numeric_limits<Ordinal>::max();
 }
 
-/**
- * @brief Checks that a size_t value can be safely converted to an Ordinal.
- * 
- * @tparam Ordinal 
- * @param value 
- * @param label 
- * @return Ordinal converted value
- */
 template <class Ordinal>
 inline Ordinal checked_size_to_ordinal(std::size_t value, std::string_view label)
 {
-    // This check is necessary to prevent overflow when converting from size_t to Ordinal.
-    // Note that max() is reserved for invalid local ordinals, so the maximum valid value is one less than max().
-    if(value >= static_cast<std::size_t>(std::numeric_limits<Ordinal>::max()))
+    if (value >= static_cast<std::size_t>(std::numeric_limits<Ordinal>::max()))
     {
-        throw std::overflow_error("Value for " + std::string(label) + " exceeds maximum representable by ordinal type.");
+        throw std::overflow_error("Value for " + std::string(label)
+                                + " exceeds maximum representable by ordinal type.");
     }
 
     return static_cast<Ordinal>(value);
 }
 
-template <class Ordinal>
-inline void replace_crs_row(Ordinal row,
-                            std::vector<Ordinal>& offsets,
-                            std::vector<Ordinal>& ids,
-                            const std::vector<Ordinal>& values)
-{
-    const auto row_index = static_cast<std::size_t>(row);
-    CHECK(row_index + 1 < offsets.size());
-
-    const auto begin = static_cast<std::size_t>(offsets[row_index]);
-    const auto end = static_cast<std::size_t>(offsets[row_index + 1]);
-    CHECK(begin <= end);
-    CHECK(end <= ids.size());
-
-    const auto old_count = end - begin;
-    const auto new_count = values.size();
-    const auto new_total = ids.size() - old_count + new_count;
-    checked_size_to_ordinal<Ordinal>(new_total, "CRS storage size");
-
-    const auto erase_begin = ids.begin() + static_cast<typename std::vector<Ordinal>::difference_type>(begin);
-    const auto erase_end = ids.begin() + static_cast<typename std::vector<Ordinal>::difference_type>(end);
-    const auto insert_pos = ids.erase(erase_begin, erase_end);
-    ids.insert(insert_pos, values.begin(), values.end());
-
-    if (new_count >= old_count)
-    {
-        const auto delta = checked_size_to_ordinal<Ordinal>(new_count - old_count, "CRS row size delta");
-        for (std::size_t i = row_index + 1; i < offsets.size(); ++i)
-        {
-            offsets[i] += delta;
-        }
-    }
-    else
-    {
-        const auto delta = checked_size_to_ordinal<Ordinal>(old_count - new_count, "CRS row size delta");
-        for (std::size_t i = row_index + 1; i < offsets.size(); ++i)
-        {
-            CHECK(offsets[i] >= delta);
-            offsets[i] -= delta;
-        }
-    }
-}
-
 } // namespace detail
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::add_cell(global_ordinal_type gid, CellType type,
-                                 real_t volume, const Vec3& centroid) -> local_ordinal_type
-{
-    if (d_cell_gid_to_lid.contains(gid))
-    {
-        throw std::invalid_argument("Duplicate cell global id: " + std::to_string(gid));
-    }
-
-    const auto lid = detail::checked_size_to_ordinal<local_ordinal_type>(d_cell_gid.size(), "cell count");
-
-    if (d_cell_face_offset.empty())
-    {
-        d_cell_face_offset.push_back(0);
-    }
-    if (d_cell_node_offset.empty())
-    {
-        d_cell_node_offset.push_back(0);
-    }
-
-    d_cell_gid.push_back(gid);
-    d_cell_gid_to_lid.emplace(gid, lid);
-
-    d_cell_type.push_back(static_cast<int>(type));
-    d_cell_volume.push_back(volume);
-    d_cell_centroid.push_back(centroid);
-
-    d_cell_face_offset.push_back(d_cell_face_offset.back());
-    d_cell_node_offset.push_back(d_cell_node_offset.back());
-
-    d_num_local_cells = detail::checked_size_to_ordinal<local_ordinal_type>(d_cell_gid.size(), "cell count");
-    d_num_owned_cells = d_num_local_cells;
-    d_num_global_cells = static_cast<global_ordinal_type>(d_num_owned_cells);
-
-    return lid;
-}
-
-template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::add_face(local_ordinal_type owner, local_ordinal_type neighbor,
-                                 FaceType type, int patch_id,
-                                 real_t area, const Vec3& area_vector,
-                                 const Vec3& centroid) -> local_ordinal_type
-{
-    check_cell(owner);
-
-    const auto invalid_lid = detail::invalid_local_ordinal<local_ordinal_type>();
-    if (neighbor != invalid_lid)
-    {
-        check_cell(neighbor);
-    }
-
-    const auto lid = detail::checked_size_to_ordinal<local_ordinal_type>(d_face_owner.size(), "face count");
-
-    if (d_face_node_offset.empty())
-    {
-        d_face_node_offset.push_back(0);
-    }
-
-    d_face_owner.push_back(owner);
-    d_face_neighbor.push_back(neighbor);
-
-    d_face_type.push_back(static_cast<int>(type));
-    d_face_patch.push_back(patch_id);
-
-    d_face_area.push_back(area);
-    d_face_area_vector.push_back(area_vector);
-    d_face_centroid.push_back(centroid);
-
-    d_face_node_offset.push_back(d_face_node_offset.back());
-
-    d_num_faces = detail::checked_size_to_ordinal<local_ordinal_type>(d_face_owner.size(), "face count");
-
-    return lid;
-}
-
-template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::add_node(const Vec3& coord) -> local_ordinal_type
-{
-    const auto lid = detail::checked_size_to_ordinal<local_ordinal_type>(d_node_coord.size(), "node count");
-
-    d_node_coord.push_back(coord);
-    d_num_nodes = detail::checked_size_to_ordinal<local_ordinal_type>(d_node_coord.size(), "node count");
-
-    return lid;
-}
-
-template<TpetraTypePack Pack>
-inline void Mesh<Pack>::set_cell_faces(local_ordinal_type cell_lid, const ArrLO& face_ids)
-{
-    check_cell(cell_lid);
-    for (const auto face_id : face_ids)
-    {
-        check_face(face_id);
-    }
-
-    detail::replace_crs_row(cell_lid, d_cell_face_offset, d_cell_face_ids, face_ids);
-}
-
-template<TpetraTypePack Pack>
-inline void Mesh<Pack>::set_cell_nodes(local_ordinal_type cell_lid, const ArrLO& node_ids)
-{
-    check_cell(cell_lid);
-    for (const auto node_id : node_ids)
-    {
-        check_node(node_id);
-    }
-
-    detail::replace_crs_row(cell_lid, d_cell_node_offset, d_cell_node_ids, node_ids);
-}
-
-template<TpetraTypePack Pack>
-inline void Mesh<Pack>::set_face_nodes(local_ordinal_type face_lid, const ArrLO& node_ids)
-{
-    check_face(face_lid);
-    for (const auto node_id : node_ids)
-    {
-        check_node(node_id);
-    }
-
-    detail::replace_crs_row(face_lid, d_face_node_offset, d_face_node_ids, node_ids);
-}
-
-template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> global_ordinal_type
+inline auto Mesh<Pack>::cell(local_ordinal_type lid) const -> const CellInfo&
 {
     check_cell(lid);
-    return d_cell_gid[lid];
+    return d_cells[static_cast<std::size_t>(lid)];
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::cell_local_id(global_ordinal_type gid) const -> local_ordinal_type
+inline auto Mesh<Pack>::face(local_ordinal_type lid) const -> const FaceInfo&
 {
-    const auto iter = d_cell_gid_to_lid.find(gid);
-    if (iter == d_cell_gid_to_lid.end())
+    check_face(lid);
+    return d_faces[static_cast<std::size_t>(lid)];
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const EntityId&
+{
+    return cell(lid).global_id;
+}
+
+template<TpetraTypePack Pack>
+inline bool Mesh<Pack>::is_owned_cell(local_ordinal_type lid) const
+{
+    return cell(lid).owned;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::faces(local_ordinal_type cell_lid) const -> const ArrLO&
+{
+    return cell(cell_lid).faces;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
+{
+    if (!node.is_local_offset_valid() || d_coord_field == nullptr)
     {
-        throw std::out_of_range("Cell global id not found: " + std::to_string(gid));
+        throw std::runtime_error("Cannot read node coordinates from the STK mesh.");
     }
 
-    return iter->second;
+    const double* coord = stk::mesh::field_data(*d_coord_field, node);
+    if (coord == nullptr)
+    {
+        throw std::runtime_error("Coordinate field has no data for node "
+                               + std::to_string(d_bulk.identifier(node)) + ".");
+    }
+
+    const auto dim = spatial_dimension();
+    return Vec3{coord[0], dim > 1 ? coord[1] : 0.0, dim > 2 ? coord[2] : 0.0};
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::cell_type(local_ordinal_type lid) const -> CellType
+inline auto Mesh<Pack>::node_coord_by_id(EntityId node_id) const -> Vec3
 {
-    check_cell(lid);
-    return static_cast<CellType>(d_cell_type[lid]);
+    const auto node = d_bulk.get_entity(stk::topology::NODE_RANK, node_id);
+    if (!node.is_local_offset_valid())
+    {
+        throw std::out_of_range("Node id not found: " + std::to_string(node_id));
+    }
+
+    return node_coord(node);
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::element_node_coords(stk::mesh::Entity elem) const -> Arr<Vec3>
+{
+    if (!elem.is_local_offset_valid())
+    {
+        throw std::out_of_range("Invalid STK element entity.");
+    }
+
+    const auto num_nodes = d_bulk.num_nodes(elem);
+    const auto* nodes = d_bulk.begin_nodes(elem);
+
+    Arr<Vec3> coords;
+    coords.reserve(num_nodes);
+
+    for (unsigned i = 0; i < num_nodes; ++i)
+    {
+        coords.push_back(node_coord(nodes[i]));
+    }
+
+    return coords;
 }
 
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::cell_volume(local_ordinal_type lid) const
 {
-    check_cell(lid);
-    return d_cell_volume[lid];
+    return cell(lid).volume;
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_centroid(local_ordinal_type lid) const -> const Vec3&
 {
-    check_cell(lid);
-    return d_cell_centroid[lid];
+    return cell(lid).center;
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::face_owner(local_ordinal_type fid) const -> local_ordinal_type
+inline auto Mesh<Pack>::owner_cell(local_ordinal_type fid) const -> local_ordinal_type
 {
-    check_face(fid);
-    return d_face_owner[fid];
+    return face(fid).owner;
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::face_neighbor(local_ordinal_type fid) const -> local_ordinal_type
+inline auto Mesh<Pack>::neighbor_cell(local_ordinal_type fid) const -> local_ordinal_type
 {
-    check_face(fid);
-    return d_face_neighbor[fid];
+    const auto& info = face(fid);
+    return info.neighbor.value_or(detail::invalid_local_ordinal<local_ordinal_type>());
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::face_type(local_ordinal_type fid) const -> FaceType
+inline auto Mesh<Pack>::opposite_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const -> local_ordinal_type
 {
-    check_face(fid);
-    return static_cast<FaceType>(d_face_type[fid]);
-}
+    const auto& info = face(fid);
+    check_cell(cell_lid);
 
-template<TpetraTypePack Pack>
-inline int Mesh<Pack>::face_patch(local_ordinal_type fid) const
-{
-    check_face(fid);
-    return d_face_patch[fid];
+    if (info.owner == cell_lid)
+    {
+        return neighbor_cell(fid);
+    }
+    if (info.neighbor && *info.neighbor == cell_lid)
+    {
+        return info.owner;
+    }
+
+    throw std::invalid_argument("Cell is not adjacent to requested face.");
 }
 
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::face_area(local_ordinal_type fid) const
 {
-    check_face(fid);
-    return d_face_area[fid];
+    return face(fid).area;
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::face_area_vector(local_ordinal_type fid) const -> const Vec3&
+inline auto Mesh<Pack>::face_normal(local_ordinal_type fid) const -> const Vec3&
 {
-    check_face(fid);
-    return d_face_area_vector[fid];
+    return face(fid).unit_normal_from_owner;
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_centroid(local_ordinal_type fid) const -> const Vec3&
 {
-    check_face(fid);
-    return d_face_centroid[fid];
+    return face(fid).center;
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::cell_face_begin(local_ordinal_type lid) const -> local_ordinal_type
+inline auto Mesh<Pack>::face_normal_outward(local_ordinal_type fid,
+                                            local_ordinal_type cell_lid) const -> const Vec3&
 {
-    check_cell(lid);
-    return d_cell_face_offset[lid];
+    const auto& info = face(fid);
+    check_cell(cell_lid);
+
+    if (info.owner == cell_lid)
+    {
+        return info.unit_normal_from_owner;
+    }
+    if (info.neighbor && *info.neighbor == cell_lid)
+    {
+        return info.unit_normal_from_neighbor;
+    }
+
+    throw std::invalid_argument("Cell is not adjacent to requested face.");
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::cell_face_end(local_ordinal_type lid) const -> local_ordinal_type
+inline bool Mesh<Pack>::is_exterior_face(local_ordinal_type fid) const
 {
-    check_cell(lid);
-    return d_cell_face_offset[static_cast<std::size_t>(lid) + 1];
+    return !face(fid).neighbor.has_value();
 }
 
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::cell_face(local_ordinal_type cell_lid, local_ordinal_type i) const -> local_ordinal_type
+inline bool Mesh<Pack>::is_interior_face(local_ordinal_type fid) const
 {
-    const auto begin = cell_face_begin(cell_lid);
-    const auto end = cell_face_end(cell_lid);
-    CHECK(i < end - begin);
-    return d_cell_face_ids[begin + i];
+    return face(fid).neighbor.has_value();
+}
+
+template<TpetraTypePack Pack>
+inline bool Mesh<Pack>::is_boundary_face(local_ordinal_type fid) const
+{
+    return is_exterior_face(fid) && boundary_id(fid) != invalid_boundary_id;
+}
+
+template<TpetraTypePack Pack>
+inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
+{
+    return face(fid).boundary_id;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const -> const std::string&
+{
+    return face(fid).boundary_name;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::face_patch(int patch_id) const -> const ArrLO&
+{
+    static const ArrLO empty_patch;
+    const auto iter = d_boundary_id_to_faces.find(patch_id);
+    return iter == d_boundary_id_to_faces.end() ? empty_patch : iter->second;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::find_local_cell(EntityId gid) const -> local_ordinal_type
+{
+    const auto iter = d_cell_gid_to_lid.find(gid);
+    if (iter == d_cell_gid_to_lid.end())
+    {
+        return detail::invalid_local_ordinal<local_ordinal_type>();
+    }
+
+    return iter->second;
 }
 
 template<TpetraTypePack Pack>
@@ -354,7 +281,7 @@ auto Mesh<Pack>::make_vector_view(const std::string& name, const std::vector<T>&
 
 template<TpetraTypePack Pack>
 auto Mesh<Pack>::make_vectorV3D_view(const std::string& name,
-                                            const std::vector<Vec3>& data)
+                                     const std::vector<Vec3>& data)
     -> kokkos_vec3view<const real_t>
 {
     kokkos_vec3view<real_t> view(name, data.size());
