@@ -13,6 +13,9 @@
 
 #include "typedefs.hh"
 
+#include <cstddef>
+#include <iterator>
+
 namespace SimpleFluid
 {
 
@@ -108,7 +111,17 @@ public:
     };
 
 
-    RandomAccessView(const std::vector<T>& data)
+    RandomAccessView()
+        : d_data(nullptr), d_size(0)
+    {
+    }
+
+    RandomAccessView(T* data, size_type size)
+        : d_data(data), d_size(size)
+    {
+    }
+
+    RandomAccessView(std::vector<T>& data)
         : d_data(data.data()), d_size(data.size())
     {
     }
@@ -125,8 +138,8 @@ public:
     bool empty() const { return d_size == 0; }
 
 private:
-    T* const d_data;
-    const std::size_t d_size;
+    T* d_data;
+    std::size_t d_size;
 };
 
 }

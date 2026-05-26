@@ -156,7 +156,7 @@ public:
     virtual void assemble();
     virtual void export_vtu(const std::string& filename) const;
 
-private:
+protected:
     void create_maps();
     void create_device_views();
 
@@ -165,14 +165,15 @@ private:
 
     int get_or_create_boundary_id(const std::string& name);
 
-    static std::string make_face_key(std::vector<global_ordinal_type> node_ids);
+    inline static std::string make_face_key(ViewGO node_ids);
+    inline static std::string make_face_key(ArrGO node_ids);
 
 //------------------------- one-by-one setting -------------------------------//
 public:
 
 
 //------------------------------- checks -------------------------------------//
-private:
+protected:
     void check_cell(local_ordinal_type lid) const {CHECK(lid < num_local_cells());};
     void check_face(local_ordinal_type lid) const {CHECK(lid < num_faces());};
 
@@ -228,7 +229,7 @@ public:
     inline local_ordinal_type global_to_local_cell(global_ordinal_type gid) const;
 
 //----------------------------- device views ---------------------------------//
-private:
+protected:
     template <class T>
     static inline kokkos_1dview<const T> 
     make_vector_view(const std::string& name, const std::vector<T>& data);
@@ -238,7 +239,7 @@ private:
                         const std::vector<Vec3>& data);
 
 //---------------------------------- Data ------------------------------------//
-private:
+protected:
     int d_spatial_dim = 0;
 
     Arr<CellInfo> d_cells;

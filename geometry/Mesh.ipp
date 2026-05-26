@@ -107,7 +107,7 @@ inline auto Mesh<Pack>::opposite_cell(local_ordinal_type fid, local_ordinal_type
     {
         return neighbor_cell(fid);
     }
-    if (info.neighbor && info.neighbor == cell_lid)
+    if (info.neighbor != invalid_id<local_ordinal_type>() && info.neighbor == cell_lid)
     {
         return info.owner;
     }
@@ -144,7 +144,7 @@ inline auto Mesh<Pack>::face_normal_outward(local_ordinal_type fid,
     {
         return info.unit_normal_from_owner;
     }
-    if (info.neighbor && info.neighbor == cell_lid)
+    if (info.neighbor != invalid_id<local_ordinal_type>() && info.neighbor == cell_lid)
     {
         return info.unit_normal_from_neighbor;
     }
@@ -201,6 +201,32 @@ inline auto Mesh<Pack>::global_to_local_cell(global_ordinal_type gid) const
     }
 
     return iter->second;
+}
+
+
+template<TpetraTypePack Pack>
+std::string Mesh<Pack>::make_face_key(ViewGO node_ids)
+{
+    return make_face_key(ArrGO(node_ids.begin(), node_ids.end()));
+}
+
+
+template<TpetraTypePack Pack>
+std::string Mesh<Pack>::make_face_key(ArrGO node_ids)
+{
+    std::sort(node_ids.begin(), node_ids.end());
+
+    std::ostringstream key;
+    for (std::size_t i = 0; i < node_ids.size(); ++i)
+    {
+        if (i != 0)
+        {
+            key << ':';
+        }
+        key << node_ids[i];
+    }
+
+    return key.str();
 }
 
 template<TpetraTypePack Pack>
