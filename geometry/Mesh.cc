@@ -14,5 +14,7 @@
 
 namespace SimpleFluid
 {
-    template class Mesh<TpetraTypes<>>;
+    template class Mesh<DefaultTpetraTypes>;
+//    template class Mesh<TpetraTypes<real_t, local_index_t, global_index_t, 
+//        Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::OpenMP> > >;
 }
