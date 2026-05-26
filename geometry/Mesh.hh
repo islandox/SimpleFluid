@@ -54,7 +54,7 @@ constexpr ID invalid_id() noexcept
  *
  *   A(P,P) and A(P,N) are assembled by looping over faces of owned cell P.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack = DefaultTpetraTypes>
 class Mesh
 {
 public:
