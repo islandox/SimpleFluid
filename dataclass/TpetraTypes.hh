@@ -69,4 +69,6 @@ struct TpetraTypes
     using vector_type = Tpetra::Vector<Scalar, LO, GO, Node>;
 };
 
+using DefaultTpetraTypes = TpetraTypes<>;
+
 }
