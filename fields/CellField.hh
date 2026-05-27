@@ -14,6 +14,7 @@
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
+#include <Tpetra_CombineMode.hpp>
 
 #include <cstddef>
 #include <stdexcept>
@@ -37,6 +38,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using vector_type = typename Pack::vector_type;
     using map_type = typename Pack::map_type;
+    using import_type = typename Pack::import_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -59,6 +61,8 @@ public:
     SP<const mesh_type> mesh_ptr() const noexcept { return d_mesh; }
 
     RCP<const map_type> map() const { return d_data.getMap(); }
+    RCP<const map_type> owned_map() const { return d_data.getMap(); }
+    RCP<const map_type> overlap_map() const { return d_overlap_data.getMap(); }
 
     vector_type& data() noexcept { return d_data; }
     const vector_type& data() const noexcept { return d_data; }
@@ -66,14 +70,28 @@ public:
     vector_type& vector() noexcept { return d_data; }
     const vector_type& vector() const noexcept { return d_data; }
 
+    vector_type& owned_data() noexcept { return d_data; }
+    const vector_type& owned_data() const noexcept { return d_data; }
+
+    vector_type& overlap_data() noexcept { return d_overlap_data; }
+    const vector_type& overlap_data() const noexcept { return d_overlap_data; }
+
     std::size_t num_owned_cells() const
     {
         return d_data.getMap()->getLocalNumElements();
     }
 
-    void put_scalar(const scalar_type& value) { d_data.putScalar(value); }
+    std::size_t num_local_cells() const
+    {
+        return d_overlap_data.getMap()->getLocalNumElements();
+    }
+
+    void put_scalar(const scalar_type& value);
+    void sync_ghosts();
 
     scalar_type value(local_ordinal_type cell_lid) const;
+    scalar_type owned_value(local_ordinal_type cell_lid) const;
+    scalar_type local_value(local_ordinal_type cell_lid) const;
     scalar_type global_value(global_ordinal_type cell_gid) const;
 
     void set_value(local_ordinal_type cell_lid, const scalar_type& value);
@@ -83,18 +101,25 @@ public:
     void sum_into_global_value(global_ordinal_type cell_gid, const scalar_type& value);
 
     bool is_owned_cell(local_ordinal_type cell_lid) const;
+    bool is_local_cell(local_ordinal_type cell_lid) const;
     bool is_owned_global_cell(global_ordinal_type cell_gid) const;
+    bool is_local_global_cell(global_ordinal_type cell_gid) const;
 
 private:
     static RCP<const map_type> require_owned_map(const SP<const mesh_type>& mesh);
+    static RCP<const map_type> require_overlap_map(const SP<const mesh_type>& mesh);
 
     local_ordinal_type owned_row_for_cell(local_ordinal_type cell_lid) const;
     local_ordinal_type owned_row_for_global_cell(global_ordinal_type cell_gid) const;
+    local_ordinal_type local_row_for_cell(local_ordinal_type cell_lid) const;
+    local_ordinal_type local_row_for_global_cell(global_ordinal_type cell_gid) const;
     void check_cell_lid(local_ordinal_type cell_lid) const;
 
     std::string d_name;
     SP<const mesh_type> d_mesh;
     vector_type d_data;
+    vector_type d_overlap_data;
+    RCP<const import_type> d_owned_to_overlap_import;
 };
 
 template<TpetraTypePack Pack>
@@ -103,8 +128,15 @@ CellField<Pack>::CellField(SP<const mesh_type> mesh,
                            bool zero_out)
     : d_name(std::move(name)),
       d_mesh(std::move(mesh)),
-      d_data(require_owned_map(d_mesh), zero_out)
+      d_data(require_owned_map(d_mesh), zero_out),
+      d_overlap_data(require_overlap_map(d_mesh), zero_out),
+      d_owned_to_overlap_import(
+          Teuchos::rcp(new import_type(d_data.getMap(), d_overlap_data.getMap())))
 {
+    if (zero_out)
+    {
+        sync_ghosts();
+    }
 }
 
 template<TpetraTypePack Pack>
@@ -135,18 +167,40 @@ auto CellField<Pack>::require_owned_map(const SP<const mesh_type>& mesh)
 }
 
 template<TpetraTypePack Pack>
+auto CellField<Pack>::require_overlap_map(const SP<const mesh_type>& mesh)
+    -> RCP<const map_type>
+{
+    if (!mesh)
+    {
+        throw std::invalid_argument("CellField requires a non-null mesh.");
+    }
+
+    auto map = mesh->overlap_cell_map();
+    if (map == Teuchos::null)
+    {
+        throw std::runtime_error("CellField requires an assembled mesh with an overlap-cell map.");
+    }
+
+    return map;
+}
+
+template<TpetraTypePack Pack>
 void CellField<Pack>::check_cell_lid(local_ordinal_type cell_lid) const
 {
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
-        CHECK(cell_lid >= 0,
-              "Cell local id cannot be negative: " + std::to_string(cell_lid),
-              std::out_of_range);
+        if (cell_lid < 0)
+        {
+            throw std::out_of_range("Cell local id cannot be negative: "
+                                  + std::to_string(cell_lid));
+        }
     }
 
-    CHECK(static_cast<std::size_t>(cell_lid) < d_mesh->num_local_cells(),
-          "Cell local id is out of bounds: " + std::to_string(cell_lid),
-          std::out_of_range);
+    if (static_cast<std::size_t>(cell_lid) >= d_mesh->num_local_cells())
+    {
+        throw std::out_of_range("Cell local id is out of bounds: "
+                              + std::to_string(cell_lid));
+    }
 }
 
 template<TpetraTypePack Pack>
@@ -154,9 +208,11 @@ auto CellField<Pack>::owned_row_for_global_cell(global_ordinal_type cell_gid) co
     -> local_ordinal_type
 {
     const auto owned_row = d_data.getMap()->getLocalElement(cell_gid);
-    CHECK(owned_row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid(),
-          "Cell global id is not owned by this rank: " + std::to_string(cell_gid),
-          std::out_of_range);
+    if (owned_row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
+    {
+        throw std::out_of_range("Cell global id is not owned by this rank: "
+                              + std::to_string(cell_gid));
+    }
 
     return owned_row;
 }
@@ -166,13 +222,66 @@ auto CellField<Pack>::owned_row_for_cell(local_ordinal_type cell_lid) const
     -> local_ordinal_type
 {
     check_cell_lid(cell_lid);
-    return cell_lid; // Assuming the local cell IDs are 0-based and contiguous for owned cells
+    if (!d_mesh->is_owned_cell(cell_lid))
+    {
+        throw std::out_of_range("Cell local id is not owned by this rank: "
+                              + std::to_string(cell_lid));
+    }
+
+    return owned_row_for_global_cell(d_mesh->cell_global_id(cell_lid));
+}
+
+template<TpetraTypePack Pack>
+auto CellField<Pack>::local_row_for_global_cell(global_ordinal_type cell_gid) const
+    -> local_ordinal_type
+{
+    const auto local_row = d_overlap_data.getMap()->getLocalElement(cell_gid);
+    if (local_row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
+    {
+        throw std::out_of_range("Cell global id is not local to this rank: "
+                              + std::to_string(cell_gid));
+    }
+
+    return local_row;
+}
+
+template<TpetraTypePack Pack>
+auto CellField<Pack>::local_row_for_cell(local_ordinal_type cell_lid) const
+    -> local_ordinal_type
+{
+    check_cell_lid(cell_lid);
+    return local_row_for_global_cell(d_mesh->cell_global_id(cell_lid));
+}
+
+template<TpetraTypePack Pack>
+void CellField<Pack>::put_scalar(const scalar_type& value)
+{
+    d_data.putScalar(value);
+    d_overlap_data.putScalar(value);
+}
+
+template<TpetraTypePack Pack>
+void CellField<Pack>::sync_ghosts()
+{
+    d_overlap_data.doImport(d_data, *d_owned_to_overlap_import, Tpetra::INSERT);
 }
 
 template<TpetraTypePack Pack>
 auto CellField<Pack>::value(local_ordinal_type cell_lid) const -> scalar_type
 {
     return d_data.getData()[owned_row_for_cell(cell_lid)];
+}
+
+template<TpetraTypePack Pack>
+auto CellField<Pack>::owned_value(local_ordinal_type cell_lid) const -> scalar_type
+{
+    return value(cell_lid);
+}
+
+template<TpetraTypePack Pack>
+auto CellField<Pack>::local_value(local_ordinal_type cell_lid) const -> scalar_type
+{
+    return d_overlap_data.getData()[local_row_for_cell(cell_lid)];
 }
 
 template<TpetraTypePack Pack>
@@ -186,6 +295,7 @@ void CellField<Pack>::set_value(local_ordinal_type cell_lid,
                                 const scalar_type& value)
 {
     d_data.replaceLocalValue(owned_row_for_cell(cell_lid), value);
+    d_overlap_data.replaceLocalValue(local_row_for_cell(cell_lid), value);
 }
 
 template<TpetraTypePack Pack>
@@ -193,6 +303,7 @@ void CellField<Pack>::set_global_value(global_ordinal_type cell_gid,
                                        const scalar_type& value)
 {
     d_data.replaceLocalValue(owned_row_for_global_cell(cell_gid), value);
+    d_overlap_data.replaceLocalValue(local_row_for_global_cell(cell_gid), value);
 }
 
 template<TpetraTypePack Pack>
@@ -200,6 +311,7 @@ void CellField<Pack>::sum_into_value(local_ordinal_type cell_lid,
                                      const scalar_type& value)
 {
     d_data.sumIntoLocalValue(owned_row_for_cell(cell_lid), value);
+    d_overlap_data.sumIntoLocalValue(local_row_for_cell(cell_lid), value);
 }
 
 template<TpetraTypePack Pack>
@@ -207,6 +319,7 @@ void CellField<Pack>::sum_into_global_value(global_ordinal_type cell_gid,
                                             const scalar_type& value)
 {
     d_data.sumIntoLocalValue(owned_row_for_global_cell(cell_gid), value);
+    d_overlap_data.sumIntoLocalValue(local_row_for_global_cell(cell_gid), value);
 }
 
 template<TpetraTypePack Pack>
@@ -217,9 +330,23 @@ bool CellField<Pack>::is_owned_cell(local_ordinal_type cell_lid) const
 }
 
 template<TpetraTypePack Pack>
+bool CellField<Pack>::is_local_cell(local_ordinal_type cell_lid) const
+{
+    check_cell_lid(cell_lid);
+    return is_local_global_cell(d_mesh->cell_global_id(cell_lid));
+}
+
+template<TpetraTypePack Pack>
 bool CellField<Pack>::is_owned_global_cell(global_ordinal_type cell_gid) const
 {
     const auto row = d_data.getMap()->getLocalElement(cell_gid);
+    return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
+}
+
+template<TpetraTypePack Pack>
+bool CellField<Pack>::is_local_global_cell(global_ordinal_type cell_gid) const
+{
+    const auto row = d_overlap_data.getMap()->getLocalElement(cell_gid);
     return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
 }
 

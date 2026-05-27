@@ -8,7 +8,7 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Trilinos REQUIRED COMPONENTS Kokkos Teuchos Tpetra STKIO STKMesh STKTopology STKUtil)
+find_package(Trilinos REQUIRED COMPONENTS Kokkos Teuchos Tpetra STKIO STKMesh STKTopology STKUtil Belos)
 find_package(MPI REQUIRED COMPONENTS CXX)
 
 # Add source files
@@ -41,3 +41,8 @@ include(GoogleTest)
 add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)
 add_subdirectory(fields/unitTests)
+add_subdirectory(operators/unitTests)
+add_subdirectory(solvers/unitTests)
+
+add_executable(natural_convection_box examples/natural_convection_box.cc)
+target_link_libraries(natural_convection_box PRIVATE SimpleFluid)

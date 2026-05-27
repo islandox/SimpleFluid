@@ -68,5 +68,11 @@ vcpkg_installed/
 Testing/
 .cache/
 
+# Machine-specific files
 .vscode
 CMakePresets.json
+
+# Copilot / Codex settings
+.github
+.codex
+.agents

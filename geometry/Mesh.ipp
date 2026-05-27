@@ -41,6 +41,44 @@ inline Ordinal checked_size_to_ordinal(std::size_t value, std::string_view label
 } // namespace detail
 
 template<TpetraTypePack Pack>
+inline void Mesh<Pack>::check_cell(local_ordinal_type lid) const
+{
+    if constexpr (std::is_signed_v<local_ordinal_type>)
+    {
+        if (lid < 0)
+        {
+            throw std::out_of_range("Cell local id cannot be negative: "
+                                  + std::to_string(lid));
+        }
+    }
+
+    if (static_cast<std::size_t>(lid) >= num_local_cells())
+    {
+        throw std::out_of_range("Cell local id is out of bounds: "
+                              + std::to_string(lid));
+    }
+}
+
+template<TpetraTypePack Pack>
+inline void Mesh<Pack>::check_face(local_ordinal_type lid) const
+{
+    if constexpr (std::is_signed_v<local_ordinal_type>)
+    {
+        if (lid < 0)
+        {
+            throw std::out_of_range("Face local id cannot be negative: "
+                                  + std::to_string(lid));
+        }
+    }
+
+    if (static_cast<std::size_t>(lid) >= num_faces())
+    {
+        throw std::out_of_range("Face local id is out of bounds: "
+                              + std::to_string(lid));
+    }
+}
+
+template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell(local_ordinal_type lid) const -> const CellInfo&
 {
     check_cell(lid);
@@ -57,7 +95,14 @@ inline auto Mesh<Pack>::face(local_ordinal_type lid) const -> const FaceInfo&
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const global_ordinal_type&
 {
-    return d_owned_cell_global_ids[static_cast<std::size_t>(lid)];
+    check_cell(lid);
+    const auto index = static_cast<std::size_t>(lid);
+    if (index < d_owned_cell_global_ids.size())
+    {
+        return d_owned_cell_global_ids[index];
+    }
+
+    return d_ghost_cell_global_ids[index - d_owned_cell_global_ids.size()];
 }
 
 template<TpetraTypePack Pack>
@@ -178,7 +223,10 @@ inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const -> const std::string&
 {
-    CHECK(is_boundary_face(fid), "Requested face is not a boundary face.");
+    if (!is_boundary_face(fid))
+    {
+        throw std::out_of_range("Requested face is not a boundary face.");
+    }
     return d_boundary_id_to_name.at(face(fid).boundary_id);
 }
 

@@ -23,6 +23,8 @@
 #include <string>
 #include <memory>
 #include <optional>
+#include <limits>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -169,8 +171,8 @@ public:
 
 //------------------------------- checks -------------------------------------//
 protected:
-    void check_cell(local_ordinal_type lid) const {CHECK(lid < num_local_cells());};
-    void check_face(local_ordinal_type lid) const {CHECK(lid < num_faces());};
+    void check_cell(local_ordinal_type lid) const;
+    void check_face(local_ordinal_type lid) const;
 
     void check_connectivity() const;
 

@@ -95,6 +95,24 @@ TEST(CellFieldTest, InitialValueConstructorFillsVector)
     EXPECT_EQ(pressure.name(), "pressure");
     EXPECT_DOUBLE_EQ(pressure.value(0), 101325.0);
     EXPECT_DOUBLE_EQ(pressure.value(1), 101325.0);
+    EXPECT_DOUBLE_EQ(pressure.local_value(0), 101325.0);
+    EXPECT_DOUBLE_EQ(pressure.local_value(1), 101325.0);
+    EXPECT_EQ(pressure.overlap_map()->getLocalNumElements(), mesh->num_local_cells());
+}
+
+TEST(CellFieldTest, SynchronizesOwnedValuesIntoOverlapStorage)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType temperature(mesh, "temperature");
+    temperature.set_value(0, 10.0);
+    temperature.set_value(1, 20.0);
+    temperature.sync_ghosts();
+
+    EXPECT_TRUE(temperature.is_local_cell(0));
+    EXPECT_TRUE(temperature.is_local_global_cell(1));
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), 10.0);
+    EXPECT_DOUBLE_EQ(temperature.local_value(1), 20.0);
 }
 
 #include "geometry/STKMesh.hh"

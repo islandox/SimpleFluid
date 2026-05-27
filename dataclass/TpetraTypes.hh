@@ -18,7 +18,11 @@
 #include <Tpetra_Map.hpp>
 #include <Teuchos_Comm.hpp>
 #include <Tpetra_Vector.hpp>
+#include <Tpetra_MultiVector.hpp>
 #include <Tpetra_CrsGraph.hpp>
+#include <Tpetra_CrsMatrix.hpp>
+#include <Tpetra_Import.hpp>
+#include <Tpetra_Operator.hpp>
 #include <Kokkos_Core.hpp>
 
 namespace SimpleFluid
@@ -42,12 +46,16 @@ concept TpetraTypePack = requires {
     typename Pack::node_type;
     typename Pack::map_type;
     typename Pack::graph_type;
+    typename Pack::matrix_type;
+    typename Pack::operator_type;
+    typename Pack::import_type;
     typename Pack::device_type;
     typename Pack::execution_space;
     typename Pack::memory_space;
     typename Pack::size_type;
 
     typename Pack::vector_type;
+    typename Pack::multi_vector_type;
 
 } && (std::numeric_limits<typename Pack::local_ordinal_type>::max() <= 
     std::numeric_limits<typename Pack::global_ordinal_type>::max());
@@ -60,9 +68,13 @@ struct TpetraTypes
 {
     using Map = Tpetra::Map<LO, GO, Node>;
     using Graph = Tpetra::CrsGraph<LO, GO, Node>;
+    using Matrix = Tpetra::CrsMatrix<Scalar, LO, GO, Node>;
+    using Operator = Tpetra::Operator<Scalar, LO, GO, Node>;
 
     using Comm = Teuchos::Comm<int>;
     using Vector = Tpetra::Vector<Scalar, LO, GO, Node>;
+    using MultiVector = Tpetra::MultiVector<Scalar, LO, GO, Node>;
+    using Import = Tpetra::Import<LO, GO, Node>;
 
     using scalar_type = Scalar;
     using local_ordinal_type = LO;
@@ -72,6 +84,9 @@ struct TpetraTypes
 
     using map_type = Tpetra::Map<LO, GO, Node>;
     using graph_type = Tpetra::CrsGraph<LO, GO, Node>;
+    using matrix_type = Tpetra::CrsMatrix<Scalar, LO, GO, Node>;
+    using operator_type = Tpetra::Operator<Scalar, LO, GO, Node>;
+    using import_type = Tpetra::Import<LO, GO, Node>;
 
     using device_type = typename Node::device_type;
     using execution_space = typename device_type::execution_space;
@@ -80,6 +95,7 @@ struct TpetraTypes
     using size_type = typename Kokkos::View<LO*, device_type>::size_type;
 
     using vector_type = Tpetra::Vector<Scalar, LO, GO, Node>;
+    using multi_vector_type = Tpetra::MultiVector<Scalar, LO, GO, Node>;
 };
 
 using DefaultTpetraTypes = TpetraTypes<>;
