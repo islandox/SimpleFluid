@@ -1,5 +1,5 @@
 /**
- * @file USEFUL_MARCOS.h
+ * @file USEFUL_MACROS.h
  * @author islandox (59904740+islandox@users.noreply.github.com)
  * @brief 
  * @version 0.1
