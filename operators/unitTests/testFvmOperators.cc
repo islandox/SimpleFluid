@@ -1,6 +1,12 @@
 /**
  * @file testFvmOperators.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief unit tests for finite-volume helper operators
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -51,6 +57,9 @@ SimpleFluid::SP<MeshType> make_mesh()
 
 } // namespace
 
+/**
+ * @brief Sets a linear scalar field and verifies the cell_gradient operator recovers the exact gradient.
+ */
 TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
 {
     auto mesh = make_mesh();

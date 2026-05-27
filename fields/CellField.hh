@@ -122,6 +122,16 @@ private:
     RCP<const import_type> d_owned_to_overlap_import;
 };
 
+/**
+ * @brief Construct a cell field over the owned cells of a mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Optional field name for I/O.
+ * @param zero_out If true, initialize all entries to zero.
+ * @throws std::invalid_argument if the mesh is null.
+ * @throws std::runtime_error if the mesh does not have an owned-cell map.
+ */
 template<TpetraTypePack Pack>
 CellField<Pack>::CellField(SP<const mesh_type> mesh,
                            std::string name,
@@ -139,6 +149,14 @@ CellField<Pack>::CellField(SP<const mesh_type> mesh,
     }
 }
 
+/**
+ * @brief Construct a cell field initialized with a uniform value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param initial_value Scalar value to fill all entries.
+ * @param name Optional field name for I/O.
+ */
 template<TpetraTypePack Pack>
 CellField<Pack>::CellField(SP<const mesh_type> mesh,
                            const scalar_type& initial_value,
@@ -148,6 +166,15 @@ CellField<Pack>::CellField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
+/**
+ * @brief Validate and retrieve the owned-cell map from the mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the mesh.
+ * @return RCP to the owned-cell Tpetra map.
+ * @throws std::invalid_argument if the mesh is null.
+ * @throws std::runtime_error if the mesh has no owned-cell map.
+ */
 template<TpetraTypePack Pack>
 auto CellField<Pack>::require_owned_map(const SP<const mesh_type>& mesh)
     -> RCP<const map_type>
@@ -166,6 +193,15 @@ auto CellField<Pack>::require_owned_map(const SP<const mesh_type>& mesh)
     return map;
 }
 
+/**
+ * @brief Validate and retrieve the overlap-cell map from the mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the mesh.
+ * @return RCP to the overlap-cell Tpetra map.
+ * @throws std::invalid_argument if the mesh is null.
+ * @throws std::runtime_error if the mesh has no overlap-cell map.
+ */
 template<TpetraTypePack Pack>
 auto CellField<Pack>::require_overlap_map(const SP<const mesh_type>& mesh)
     -> RCP<const map_type>
@@ -184,6 +220,13 @@ auto CellField<Pack>::require_overlap_map(const SP<const mesh_type>& mesh)
     return map;
 }
 
+/**
+ * @brief Validate that a cell local ID is in range.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param cell_lid Cell local ID to validate.
+ * @throws std::out_of_range if the ID is negative or exceeds the local cell count.
+ */
 template<TpetraTypePack Pack>
 void CellField<Pack>::check_cell_lid(local_ordinal_type cell_lid) const
 {
@@ -203,6 +246,14 @@ void CellField<Pack>::check_cell_lid(local_ordinal_type cell_lid) const
     }
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a given cell global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param cell_gid Cell global ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if the cell is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 auto CellField<Pack>::owned_row_for_global_cell(global_ordinal_type cell_gid) const
     -> local_ordinal_type
@@ -217,6 +268,14 @@ auto CellField<Pack>::owned_row_for_global_cell(global_ordinal_type cell_gid) co
     return owned_row;
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a given cell local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param cell_lid Cell local ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if the cell is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 auto CellField<Pack>::owned_row_for_cell(local_ordinal_type cell_lid) const
     -> local_ordinal_type
@@ -231,6 +290,14 @@ auto CellField<Pack>::owned_row_for_cell(local_ordinal_type cell_lid) const
     return owned_row_for_global_cell(d_mesh->cell_global_id(cell_lid));
 }
 
+/**
+ * @brief Look up the overlap (ghost) Tpetra row index for a given cell global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param cell_gid Cell global ID.
+ * @return Local row index in the overlap data vector.
+ * @throws std::out_of_range if the cell is not local to this rank.
+ */
 template<TpetraTypePack Pack>
 auto CellField<Pack>::local_row_for_global_cell(global_ordinal_type cell_gid) const
     -> local_ordinal_type
@@ -245,6 +312,13 @@ auto CellField<Pack>::local_row_for_global_cell(global_ordinal_type cell_gid) co
     return local_row;
 }
 
+/**
+ * @brief Look up the overlap (ghost) Tpetra row index for a given cell local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param cell_lid Cell local ID.
+ * @return Local row index in the overlap data vector.
+ */
 template<TpetraTypePack Pack>
 auto CellField<Pack>::local_row_for_cell(local_ordinal_type cell_lid) const
     -> local_ordinal_type
@@ -260,6 +334,11 @@ void CellField<Pack>::put_scalar(const scalar_type& value)
     d_overlap_data.putScalar(value);
 }
 
+/**
+ * @brief Synchronize owned values into the overlap (ghost) data vector.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void CellField<Pack>::sync_ghosts()
 {

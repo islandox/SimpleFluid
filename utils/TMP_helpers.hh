@@ -16,6 +16,11 @@
 namespace utils
 {
 
+/**
+ * @brief Always-false type trait used for static_assert in constexpr-if branches.
+ *
+ * @tparam T Any type.
+ */
 template <typename T>
 struct always_false
 {

@@ -117,6 +117,16 @@ private:
     vector_type d_data;
 };
 
+/**
+ * @brief Construct a face field over faces owned by locally owned cells.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Optional field name for I/O.
+ * @param zero_out If true, initialize all entries to zero.
+ * @throws std::invalid_argument if the mesh is null.
+ * @throws std::runtime_error if the mesh does not have an owned-cell map.
+ */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            std::string name,
@@ -130,6 +140,14 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
 {
 }
 
+/**
+ * @brief Construct a face field initialized with a uniform value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param initial_value Scalar value to fill all owned face entries.
+ * @param name Optional field name for I/O.
+ */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            const scalar_type& initial_value,
@@ -139,6 +157,17 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
+/**
+ * @brief Construct the owned-face Tpetra map from mesh face ownership.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param owned_face_ids Output list of locally owned face local IDs.
+ * @param face_lid_to_owned_row Output mapping from face local ID to owned row index.
+ * @return RCP to the owned-face Tpetra map.
+ * @throws std::invalid_argument if the mesh is null.
+ * @throws std::runtime_error if the mesh does not have an owned-cell map.
+ */
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::make_owned_face_map(
     const SP<const mesh_type>& mesh,
@@ -187,6 +216,13 @@ auto FaceField<Pack>::make_owned_face_map(
                                      comm));
 }
 
+/**
+ * @brief Validate that a face local ID is in range.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Face local ID to validate.
+ * @throws std::out_of_range if the ID is negative or exceeds the face count.
+ */
 template<TpetraTypePack Pack>
 void FaceField<Pack>::check_face_lid(local_ordinal_type face_lid) const
 {
@@ -206,6 +242,14 @@ void FaceField<Pack>::check_face_lid(local_ordinal_type face_lid) const
     }
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a given face local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Face local ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if the face is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::owned_row_for_face(local_ordinal_type face_lid) const
     -> local_ordinal_type
@@ -223,6 +267,14 @@ auto FaceField<Pack>::owned_row_for_face(local_ordinal_type face_lid) const
     return owned_row;
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a given face global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Face global ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if the face is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::owned_row_for_global_face(global_ordinal_type face_gid) const
     -> local_ordinal_type

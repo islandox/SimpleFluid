@@ -1,7 +1,7 @@
 /**
  * @file Database.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief
+ * @brief Simple typed key-value database for mesh and solver configuration.
  * @version 0.1
  * @date 2026-05-25
  *
@@ -92,6 +92,13 @@ private:
     std::unordered_map<std::string, NodeKind> d_key_types;
 };
 
+/**
+ * @brief Erase a key from the appropriate typed storage node.
+ *
+ * @param key Key to erase.
+ * @param kind Typed node kind indicating which storage to use.
+ * @return true if the key existed and was erased, false otherwise.
+ */
 inline bool Database::erase_from_node(const std::string& key, NodeKind kind)
 {
     switch (kind)
@@ -115,6 +122,12 @@ inline bool Database::erase_from_node(const std::string& key, NodeKind kind)
     return false;
 }
 
+/**
+ * @brief Erase a key and its value from the database.
+ *
+ * @param key Key to erase.
+ * @return true if the key existed and was erased, false otherwise.
+ */
 inline bool Database::erase(const std::string& key)
 {
     const auto iter = d_key_types.find(key);
@@ -128,6 +141,13 @@ inline bool Database::erase(const std::string& key)
     return erased;
 }
 
+/**
+ * @brief Store a value under a given key, replacing any previous value.
+ *
+ * @tparam T Type of the value to store.
+ * @param key Key to associate with the value.
+ * @param value Value to store.
+ */
 template <class T>
 void Database::set(const std::string& key, T&& value)
 {
@@ -176,6 +196,14 @@ void Database::set(const std::string& key, T&& value)
     }
 }
 
+/**
+ * @brief Retrieve a mutable reference to a value by key.
+ *
+ * @tparam T Expected type of the stored value.
+ * @param key Key to look up.
+ * @return Mutable reference to the stored value.
+ * @throws std::out_of_range if the key is missing or the type does not match.
+ */
 template <class T>
 T& Database::get(const std::string& key)
 {
@@ -213,6 +241,14 @@ T& Database::get(const std::string& key)
     }
 }
 
+/**
+ * @brief Retrieve a const reference to a value by key.
+ *
+ * @tparam T Expected type of the stored value.
+ * @param key Key to look up.
+ * @return Const reference to the stored value.
+ * @throws std::out_of_range if the key is missing or the type does not match.
+ */
 template <class T>
 const T& Database::get(const std::string& key) const
 {

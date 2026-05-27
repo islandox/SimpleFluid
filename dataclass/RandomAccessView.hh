@@ -32,6 +32,9 @@ public:
     using const_reference = const T&;
     using size_type = std::size_t;
 
+    /**
+     * @brief Mutable random-access iterator for RandomAccessView.
+     */
     class iterator
     {
     public:
@@ -74,6 +77,9 @@ public:
         T* d_ptr = nullptr;
     };
 
+    /**
+     * @brief Const random-access iterator for RandomAccessView.
+     */
     class const_iterator
     {
     public:

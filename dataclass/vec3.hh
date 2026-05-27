@@ -1,7 +1,7 @@
 /**
  * @file vec3.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief A generic 3D vector class with arithmetic and geometric operations.
  * @version 0.1
  * @date 2026-05-22
  * 

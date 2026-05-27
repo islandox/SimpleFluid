@@ -1,6 +1,12 @@
 /**
  * @file testBoussinesqSolver.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief smoke tests for the Boussinesq solver
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -42,6 +48,9 @@ SimpleFluid::SP<MeshType> make_box_mesh()
 
 } // namespace
 
+/**
+ * @brief Runs a small heated-box simulation for 2 steps and checks finite temperature and velocity values.
+ */
 TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
 {
     auto mesh = make_box_mesh();

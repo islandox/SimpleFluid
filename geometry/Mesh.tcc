@@ -1,7 +1,7 @@
 /**
  * @file Mesh.tcc
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief
+ * @brief Out-of-line template method implementations for the Mesh class.
  * @version 0.1
  * @date 2026-05-25
  *
@@ -30,6 +30,11 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Default constructor for Mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 Mesh<Pack>::Mesh()
 {
@@ -244,6 +249,11 @@ void Mesh<Pack>::prefer_owned_face_owners()
 }
 
 
+/**
+ * @brief Validate internal consistency of the mesh connectivity and data structures.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void Mesh<Pack>::check_connectivity() const
 {

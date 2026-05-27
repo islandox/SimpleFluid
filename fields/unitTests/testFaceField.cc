@@ -90,6 +90,9 @@ public:
 
 } // namespace
 
+/**
+ * @brief Validates storage, retrieval, and face ownership for a two-hex mesh face field.
+ */
 TEST(FaceFieldTest, StoresValuesOnOwnedFaceMap)
 {
     auto mesh = make_two_hex_mesh();
@@ -129,6 +132,9 @@ TEST(FaceFieldTest, StoresValuesOnOwnedFaceMap)
 #endif
 }
 
+/**
+ * @brief Confirms the initial-value constructor fills all owned face entries.
+ */
 TEST(FaceFieldTest, InitialValueConstructorFillsVector)
 {
     auto mesh = make_two_hex_mesh();
@@ -144,6 +150,9 @@ TEST(FaceFieldTest, InitialValueConstructorFillsVector)
     }
 }
 
+/**
+ * @brief Ensures only faces whose owner cell is locally owned appear in the field map.
+ */
 TEST(FaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 {
     auto mesh = std::make_shared<MinimalFaceOwnershipMesh>();

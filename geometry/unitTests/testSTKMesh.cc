@@ -149,6 +149,9 @@ void populate_two_adjacent_hexes(MeshType& mesh)
 
 } // namespace
 
+/**
+ * @brief Verifies that assembling a two-hex mesh yields correct cell counts, volumes, and face count.
+ */
 TEST(STKMeshTest, AssembleMeshWithoutThrowing)
 {
     MeshType mesh;
@@ -165,6 +168,9 @@ TEST(STKMeshTest, AssembleMeshWithoutThrowing)
     EXPECT_EQ(mesh.global_to_local_cell(2), 1);
 }
 
+/**
+ * @brief Exports a single-hex mesh to VTU and validates key XML elements and cell data arrays.
+ */
 TEST(STKMeshTest, ExportVtuWritesUnstructuredGrid)
 {
     MeshType mesh;

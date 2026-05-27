@@ -1,7 +1,7 @@
 /**
  * @file MeshUtils.hh
  * @author islandox (59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Mesh utility functions for geometry computations (volume, area, centroid).
  * @version 0.1
  * @date 2026-05-27
  * 
@@ -19,6 +19,9 @@ namespace SimpleFluid
 
 namespace MeshUtils
 {
+/**
+ * @brief Enumeration of supported cell element types.
+ */
 enum class CellType : uint8_t
 {
     INVALID = 0,
@@ -27,6 +30,9 @@ enum class CellType : uint8_t
     TRIPRISM = 3
 };
 
+/**
+ * @brief Enumeration of supported face element types.
+ */
 enum class FaceType : uint8_t
 {
     INVALID = 0,

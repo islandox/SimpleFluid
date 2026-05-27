@@ -1,6 +1,12 @@
 /**
  * @file FvmOperators.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Finite-volume helper operators for cell and face fields.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -22,11 +28,25 @@ namespace SimpleFluid::FvmOperators
 namespace detail
 {
 
+/**
+ * @brief Access the i-th component of a Vec3 by reference.
+ *
+ * @param vector 3D vector.
+ * @param index Component index (0=x, 1=y, 2=z).
+ * @return Reference to the selected component.
+ */
 inline real_t& component(MeshUtils::Vec3& vector, std::size_t index)
 {
     return index == 0 ? vector.x : (index == 1 ? vector.y : vector.z);
 }
 
+/**
+ * @brief Solve a 3x3 linear system using Gaussian elimination with partial pivoting.
+ *
+ * @param a 3x3 matrix (modified in place).
+ * @param b Right-hand side vector (modified in place, overwritten with solution).
+ * @return The solution vector (reference to modified b).
+ */
 inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
                                  MeshUtils::Vec3& b)
 {
@@ -81,6 +101,13 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
 
 } // namespace detail
 
+/**
+ * @brief Compute cell-centered gradients using a least-squares approach over face neighbors.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param field Cell-centered scalar field.
+ * @return Vector of gradients, one per owned cell.
+ */
 template<TpetraTypePack Pack>
 std::vector<typename Mesh<Pack>::Vec3>
 cell_gradient(const CellField<Pack>& field)
@@ -132,6 +159,14 @@ cell_gradient(const CellField<Pack>& field)
     return gradients;
 }
 
+/**
+ * @brief Compute the cell-centered divergence of a face flux field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh The finite-volume mesh.
+ * @param flux Face-centered flux field.
+ * @return Vector of divergence values, one per owned cell.
+ */
 template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
 cell_divergence(const Mesh<Pack>& mesh, const FaceField<Pack>& flux)
@@ -161,6 +196,14 @@ cell_divergence(const Mesh<Pack>& mesh, const FaceField<Pack>& flux)
     return divergence;
 }
 
+/**
+ * @brief Build a diagonal (identity) Tpetra matrix over the given map.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param map Tpetra map defining the matrix row distribution.
+ * @param diagonal Value to place on the diagonal.
+ * @return RCP to the filled identity matrix.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
@@ -182,6 +225,15 @@ identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
     return matrix;
 }
 
+/**
+ * @brief Assemble a finite-volume diffusion matrix with a constant diffusivity.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh The finite-volume mesh providing connectivity and geometry.
+ * @param diffusivity Constant diffusion coefficient.
+ * @return RCP to the filled diffusion matrix.
+ * @throws std::runtime_error if coincident cells have zero face-center distance.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)

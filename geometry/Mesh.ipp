@@ -1,7 +1,7 @@
 /**
- * @file Mesh_inline_functions.hh
+ * @file Mesh.ipp
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief
+ * @brief Inline method definitions and detail helpers for the Mesh class.
  * @version 0.1
  * @date 2026-05-25
  *
@@ -259,6 +259,14 @@ inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
     return face(fid).boundary_id;
 }
 
+/**
+ * @brief Retrieve the boundary name for a boundary face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param fid Face local ID.
+ * @return Const reference to the boundary name string.
+ * @throws std::out_of_range if the face is not a boundary face.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const -> const std::string&
 {
@@ -291,6 +299,15 @@ inline auto Mesh<Pack>::global_to_local_cell(global_ordinal_type gid) const
 }
 
 
+/**
+ * @brief Create a unique string key from a set of face node global IDs.
+ *
+ * Sorts the node IDs and concatenates them with ':' separators.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param node_ids View of node global IDs defining the face.
+ * @return Sorted, colon-separated string key uniquely identifying the face.
+ */
 template<TpetraTypePack Pack>
 std::string Mesh<Pack>::make_face_key(ViewGO node_ids)
 {
@@ -298,6 +315,15 @@ std::string Mesh<Pack>::make_face_key(ViewGO node_ids)
 }
 
 
+/**
+ * @brief Create a unique string key from a sorted vector of face node global IDs.
+ *
+ * Concatenates sorted node IDs with ':' separators to form a unique face key.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param node_ids Vector of node global IDs (sorted in place).
+ * @return Sorted, colon-separated string key uniquely identifying the face.
+ */
 template<TpetraTypePack Pack>
 std::string Mesh<Pack>::make_face_key(ArrGO node_ids)
 {
@@ -316,6 +342,17 @@ std::string Mesh<Pack>::make_face_key(ArrGO node_ids)
     return key.str();
 }
 
+/**
+ * @brief Create a 1D Kokkos device view from a host vector.
+ *
+ * Copies the host data to a mirror view, then deep-copies to the device.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam T Data type stored in the vector.
+ * @param name Label for the Kokkos view.
+ * @param data Host vector to copy to the device.
+ * @return 1D Kokkos view on the device containing a const copy of the data.
+ */
 template<TpetraTypePack Pack>
 template <class T>
 auto Mesh<Pack>::make_vector_view(const std::string& name, const std::vector<T>& data)
@@ -333,6 +370,16 @@ auto Mesh<Pack>::make_vector_view(const std::string& name, const std::vector<T>&
     return view;
 }
 
+/**
+ * @brief Create a 2D Kokkos device view (Nx3) from a vector of Vec3.
+ *
+ * Copies the x, y, z components of each Vec3 to a 2D Kokkos view on the device.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param name Label for the Kokkos view.
+ * @param data Host vector of 3D vectors to copy to the device.
+ * @return N×3 Kokkos view on the device containing a const copy of the data.
+ */
 template<TpetraTypePack Pack>
 auto Mesh<Pack>::make_vectorV3D_view(const std::string& name,
                                      const std::vector<Vec3>& data)

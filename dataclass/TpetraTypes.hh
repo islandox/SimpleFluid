@@ -1,7 +1,7 @@
 /**
  * @file TpetraTypes.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Tpetra type pack concept and default type definitions for Trilinos assembly.
  * @version 0.1
  * @date 2026-05-22
  * 
@@ -60,6 +60,14 @@ concept TpetraTypePack = requires {
 } && (std::numeric_limits<typename Pack::local_ordinal_type>::max() <= 
     std::numeric_limits<typename Pack::global_ordinal_type>::max());
 
+/**
+ * @brief Aggregated Tpetra type definitions parameterized by scalar, local ordinal, global ordinal, and node types.
+ *
+ * @tparam Scalar Scalar type for vectors and matrices.
+ * @tparam LO Local ordinal type.
+ * @tparam GO Global ordinal type.
+ * @tparam Node Kokkos node type.
+ */
 template <class Scalar = real_t,
           class LO = local_index_t,
           class GO = global_index_t,

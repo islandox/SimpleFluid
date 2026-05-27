@@ -1,7 +1,7 @@
 /**
  * @file USEFUL_MACROS.h
  * @author islandox (59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Preprocessor macro utilities for argument counting and dispatch.
  * @version 0.1
  * @date 2026-05-27
  * 

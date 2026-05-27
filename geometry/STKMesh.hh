@@ -1,7 +1,7 @@
 /**
  * @file STKMesh.hh
  * @author islandox (59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief STK-based concrete implementation of the finite-volume Mesh.
  * @version 0.1
  * @date 2026-05-26
  * 
@@ -73,7 +73,7 @@ struct STKMeshContainer
 };
 
 /**
- * Cell-centered finite-volume mesh for a hybrid triangular-prism / hexahedral mesh.
+ * @brief Cell-centered finite-volume mesh for a hybrid triangular-prism / hexahedral mesh.
  *
  * Designed for Trilinos/Tpetra assembly:
  *
@@ -85,6 +85,8 @@ struct STKMeshContainer
  * Typical FVM stencil:
  *
  *   A(P,P) and A(P,N) are assembled by looping over faces of owned cell P.
+ *
+ * @tparam Pack Tpetra type pack used for map and vector types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class STKMesh : public Mesh<Pack>

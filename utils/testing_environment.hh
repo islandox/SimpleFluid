@@ -1,7 +1,7 @@
 /**
  * @file testing_environment.hh
  * @author islandox (59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Google Test environment that initializes MPI and Kokkos for unit tests.
  * @version 0.1
  * @date 2026-05-27
  * 
