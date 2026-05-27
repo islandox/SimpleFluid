@@ -23,6 +23,9 @@ namespace
 
 using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
 
+/**
+ * @brief Global Google Test environment to initialize MPI and Kokkos.
+ */
 class KokkosEnvironment : public testing::Environment
 {
 public:

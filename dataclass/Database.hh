@@ -17,6 +17,11 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Simple typed key-value database.
+ *
+ * Stores values of several predefined types and provides type-safe accessors.
+ */
 class Database
 {
 public:

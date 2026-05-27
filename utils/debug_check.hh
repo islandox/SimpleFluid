@@ -28,6 +28,12 @@
 namespace utils
 {
 
+/**
+ * @brief Perform a debug-only runtime check and throw on failure.
+ *
+ * @param condition Condition that must be true.
+ * @param message Error message used when the check fails.
+ */
 inline void check(bool condition, std::string message = "Debug check failed")
 {
     if (!condition)

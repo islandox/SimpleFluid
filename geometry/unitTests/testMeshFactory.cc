@@ -24,6 +24,9 @@ namespace
 
 using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
 
+/**
+ * @brief Global Google Test environment to initialize MPI and Kokkos.
+ */
 class KokkosEnvironment : public testing::Environment
 {
 public:
@@ -67,6 +70,11 @@ private:
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/**
+ * @brief Create a database for a two-cell hexahedral box mesh.
+ *
+ * @return Shared pointer to a configured Database.
+ */
 SimpleFluid::SP<const SimpleFluid::Database> make_two_hex_box_database()
 {
     auto db = std::make_shared<SimpleFluid::Database>();

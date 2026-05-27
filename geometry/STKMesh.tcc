@@ -32,6 +32,11 @@ namespace SimpleFluid
 namespace stkmesh_detail
 {
 
+/**
+ * @brief Create and configure STK metadata for a 3D mesh.
+ *
+ * @return Shared pointer to STK metadata.
+ */
 inline std::shared_ptr<stk::mesh::MetaData> make_stk_meta_data()
 {
     stk::mesh::MeshBuilder builder(stk::parallel_machine_world());
@@ -39,6 +44,12 @@ inline std::shared_ptr<stk::mesh::MetaData> make_stk_meta_data()
     return builder.create_meta_data();
 }
 
+/**
+ * @brief Create STK bulk data object for a mesh.
+ *
+ * @param meta STK metadata describing the mesh topology and fields.
+ * @return Shared pointer to STK bulk data.
+ */
 inline std::shared_ptr<stk::mesh::BulkData>
 make_stk_bulk_data(const std::shared_ptr<stk::mesh::MetaData>& meta)
 {
@@ -46,6 +57,13 @@ make_stk_bulk_data(const std::shared_ptr<stk::mesh::MetaData>& meta)
     return std::shared_ptr<stk::mesh::BulkData>(builder.create(meta).release());
 }
 
+/**
+ * @brief Compute the arithmetic average of a list of points.
+ *
+ * @tparam Vec3 Vector type supporting addition and scalar division.
+ * @param points Points to average.
+ * @return Centroid of the input points.
+ */
 template <class Vec3>
 inline Vec3 average(const std::vector<Vec3>& points)
 {
@@ -63,12 +81,29 @@ inline Vec3 average(const std::vector<Vec3>& points)
     return result / static_cast<typename Vec3::scalar_t>(points.size());
 }
 
+/**
+ * @brief Compute the volume of a tetrahedron.
+ *
+ * @tparam Vec3 Vector type supporting dot and cross products.
+ * @param a First tetrahedron vertex.
+ * @param b Second tetrahedron vertex.
+ * @param c Third tetrahedron vertex.
+ * @param d Fourth tetrahedron vertex.
+ * @return Signed volume magnitude of the tetrahedron.
+ */
 template <class Vec3>
 inline real_t tetra_volume(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d)
 {
     return std::abs((b - a).dot((c - a).cross(d - a))) / 6.0;
 }
 
+/**
+ * @brief Estimate hexahedral cell volume using tetrahedral decomposition.
+ *
+ * @tparam Vec3 Vector type used for point coordinates.
+ * @param x Hexahedral vertex coordinates.
+ * @return Total hexahedral volume.
+ */
 template <class Vec3>
 inline real_t hex_volume(const std::vector<Vec3>& x)
 {
@@ -80,6 +115,13 @@ inline real_t hex_volume(const std::vector<Vec3>& x)
          + tetra_volume(x[1], x[3], x[4], x[6]);
 }
 
+/**
+ * @brief Estimate wedge cell volume using tetrahedral decomposition.
+ *
+ * @tparam Vec3 Vector type used for point coordinates.
+ * @param x Wedge vertex coordinates.
+ * @return Total wedge volume.
+ */
 template <class Vec3>
 inline real_t wedge_volume(const std::vector<Vec3>& x)
 {
@@ -89,6 +131,13 @@ inline real_t wedge_volume(const std::vector<Vec3>& x)
          + tetra_volume(x[2], x[4], x[5], x[3]);
 }
 
+/**
+ * @brief Compute the oriented area vector for a face.
+ *
+ * @tparam Vec3 Vector type used for point coordinates.
+ * @param x Face vertex coordinates in order.
+ * @return Area vector of the face.
+ */
 template <class Vec3>
 inline Vec3 face_area_vector(const std::vector<Vec3>& x)
 {
@@ -103,6 +152,14 @@ inline Vec3 face_area_vector(const std::vector<Vec3>& x)
           + (x[2] - x[0]).cross(x[3] - x[0])) * 0.5;
 }
 
+/**
+ * @brief Convert an STK topology to the mesh cell type enum.
+ *
+ * @tparam Pack Tpetra type pack used by STKMesh.
+ * @param topo STK cell topology.
+ * @return Corresponding STKMesh cell type.
+ * @throws std::runtime_error for unsupported topologies.
+ */
 template <TpetraTypePack Pack>
 inline auto topology_to_cell_type(stk::topology topo) -> typename STKMesh<Pack>::CellType
 {
@@ -118,6 +175,14 @@ inline auto topology_to_cell_type(stk::topology topo) -> typename STKMesh<Pack>:
     throw std::runtime_error("Unsupported cell topology: " + topo.name());
 }
 
+/**
+ * @brief Determine face type from its node count.
+ *
+ * @tparam Pack Tpetra type pack used by STKMesh.
+ * @param node_count Number of nodes on the face.
+ * @return Corresponding STKMesh face type.
+ * @throws std::runtime_error for unsupported face node counts.
+ */
 template <TpetraTypePack Pack>
 inline auto face_type_from_node_count(std::size_t node_count) -> typename STKMesh<Pack>::FaceType
 {
@@ -134,6 +199,14 @@ inline auto face_type_from_node_count(std::size_t node_count) -> typename STKMes
                            + std::to_string(node_count));
 }
 
+/**
+ * @brief Convert mesh cell type to VTU cell type identifier.
+ *
+ * @tparam Pack Tpetra type pack used by STKMesh.
+ * @param type Mesh cell type.
+ * @return VTU cell type code.
+ * @throws std::runtime_error if the cell type cannot be exported.
+ */
 template <TpetraTypePack Pack>
 inline int vtk_cell_type(typename STKMesh<Pack>::CellType type)
 {
@@ -152,6 +225,11 @@ inline int vtk_cell_type(typename STKMesh<Pack>::CellType type)
 
 } // namespace stkmesh_detail
 
+/**
+ * @brief Construct an empty STK-based mesh.
+ *
+ * Initializes STK metadata, bulk data, and coordinate I/O support.
+ */
 template<TpetraTypePack Pack>
 STKMesh<Pack>::STKMesh()
     : Mesh<Pack>()
@@ -162,6 +240,12 @@ STKMesh<Pack>::STKMesh()
     d_spatial_dim = static_cast<int>(d_stk.meta->spatial_dimension());
 }
 
+/**
+ * @brief Construct an STK mesh by reading an external mesh file.
+ *
+ * @param mesh_filename Path to the Exodus mesh file.
+ * @param options Optional STK mesh reading options.
+ */
 template<TpetraTypePack Pack>
 STKMesh<Pack>::STKMesh(const std::string& mesh_filename, const Options& options)
     : Mesh<Pack>()
@@ -181,6 +265,9 @@ STKMesh<Pack>::STKMesh(const std::string& mesh_filename, const Options& options)
     d_spatial_dim = static_cast<int>(d_stk.meta->spatial_dimension());
 }
 
+/**
+ * @brief Assemble the mesh geometry and connectivity into host and device views.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::assemble()
 {
@@ -196,6 +283,11 @@ void STKMesh<Pack>::assemble()
     create_device_views();
 }
 
+/**
+ * @brief Populate the internal cell list from STK mesh elements.
+ *
+ * This creates cell records, captures node IDs, and builds ownership maps.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::build_cell_list()
 {
@@ -316,6 +408,9 @@ void STKMesh<Pack>::build_cell_list()
     }
 }
 
+/**
+ * @brief Compute centroids and volumes for all cells.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::compute_cell_geometry()
 {
@@ -341,6 +436,9 @@ void STKMesh<Pack>::compute_cell_geometry()
     }
 }
 
+/**
+ * @brief Build face connectivity and owner/neighbor relationships.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::build_face_table()
 {
@@ -439,6 +537,9 @@ void STKMesh<Pack>::build_face_table()
     }
 }
 
+/**
+ * @brief Compute face centroids, areas, and unit normals.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::compute_face_geometry()
 {
@@ -474,6 +575,9 @@ void STKMesh<Pack>::compute_face_geometry()
     }
 }
 
+/**
+ * @brief Initialize boundary ID mappings from options.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::initialize_boundary_id_maps()
 {
@@ -506,6 +610,13 @@ void STKMesh<Pack>::initialize_boundary_id_maps()
     }
 }
 
+/**
+ * @brief Get or create a boundary ID for a named side part.
+ *
+ * @param name Boundary part name.
+ * @return Numeric boundary id.
+ * @throws std::out_of_range if boundary names are not auto-assigned and the name is unknown.
+ */
 template<TpetraTypePack Pack>
 int STKMesh<Pack>::get_or_create_boundary_id(const std::string& name)
 {
@@ -526,6 +637,9 @@ int STKMesh<Pack>::get_or_create_boundary_id(const std::string& name)
     return id;
 }
 
+/**
+ * @brief Assign boundary IDs to exterior faces based on STK side parts.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
 {
@@ -592,12 +706,25 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
     }
 }
 
+/**
+ * @brief Check whether a topology is a supported volume cell type.
+ *
+ * @param topo STK topology to query.
+ * @return True if the topology is supported, false otherwise.
+ */
 template<TpetraTypePack Pack>
 bool STKMesh<Pack>::is_supported_volume_topology(stk::topology topo)
 {
     return topo == stk::topology::HEX_8 || topo == stk::topology::WEDGE_6;
 }
 
+/**
+ * @brief Retrieve the node ordinals for a face on a volume topology.
+ *
+ * @param topo Volume cell topology.
+ * @param side_ordinal Side ordinal to query.
+ * @return List of node ordinals defining the side.
+ */
 template<TpetraTypePack Pack>
 auto STKMesh<Pack>::side_node_ordinals(stk::topology topo,
                                        unsigned side_ordinal) -> std::vector<unsigned>
@@ -613,6 +740,13 @@ auto STKMesh<Pack>::side_node_ordinals(stk::topology topo,
     return ordinals;
 }
 
+/**
+ * @brief Check whether a part should be considered a candidate boundary part.
+ *
+ * @param part STK part to examine.
+ * @param side_rank Side rank in the mesh.
+ * @return True if the part is a candidate boundary part.
+ */
 template<TpetraTypePack Pack>
 bool STKMesh<Pack>::is_candidate_boundary_part(const stk::mesh::Part& part,
                                                stk::mesh::EntityRank side_rank) const
@@ -633,6 +767,13 @@ bool STKMesh<Pack>::is_candidate_boundary_part(const stk::mesh::Part& part,
     return d_stk.options.auto_assign_boundary_ids;
 }
 
+/**
+ * @brief Choose the best boundary part for a side bucket.
+ *
+ * @param bucket Side bucket containing candidate parts.
+ * @param side_rank Side rank to filter by.
+ * @return Pointer to the chosen STK part, or nullptr if none qualify.
+ */
 template<TpetraTypePack Pack>
 auto STKMesh<Pack>::choose_boundary_part(const stk::mesh::Bucket& bucket,
                                          stk::mesh::EntityRank side_rank) const
@@ -665,6 +806,9 @@ auto STKMesh<Pack>::choose_boundary_part(const stk::mesh::Bucket& bucket,
     return first_io_surface != nullptr ? first_io_surface : first_candidate;
 }
 
+/**
+ * @brief Create Kokkos device views from host mesh data.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::create_device_views()
 {
@@ -799,6 +943,12 @@ void STKMesh<Pack>::create_device_views()
     d_device_views.face_node_ids = make_vector_view("face_node_ids", face_node_ids);
 }
 
+/**
+ * @brief Export the mesh to a VTU file.
+ *
+ * @param filename Output VTU filename.
+ * @throws std::runtime_error if file writing fails.
+ */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::export_vtu(const std::string& filename) const
 {
