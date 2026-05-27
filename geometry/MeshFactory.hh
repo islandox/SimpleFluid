@@ -11,6 +11,7 @@
 #pragma once
 
 #include "Mesh.hh"
+#include "STKMesh.hh"
 #include "dataclass/Database.hh"
 
 namespace SimpleFluid
@@ -43,7 +44,7 @@ public:
 
 private:
     template <TpetraTypePack Pack>
-    void build_box_mesh(SP<Mesh<Pack>>& mesh);
+    void build_box_mesh(SP<STKMesh<Pack>>& mesh);
 
 private:
     DomainType d_domain_type;

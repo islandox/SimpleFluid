@@ -73,7 +73,6 @@ SP<Mesh<Pack>> MeshFactory::build()
     if (d_domain_type == DomainType::BOX)
     {
         build_box_mesh(mesh);
-        return mesh;
     }
     else if (d_domain_type == DomainType::CYLINDER)
     {
@@ -87,12 +86,12 @@ SP<Mesh<Pack>> MeshFactory::build()
     {
         mesh = std::make_shared<STKMesh<Pack>>(d_external_mesh_file);
         mesh->assemble();
-        return mesh;
     }
     else
     {
         throw std::runtime_error("Unsupported domain type for MeshFactory::build");
     }
+    return mesh;
 }
 
 /**
@@ -103,7 +102,7 @@ SP<Mesh<Pack>> MeshFactory::build()
  * @throws std::runtime_error if the domain is not 3D or boundary metadata is invalid.
  */
 template <TpetraTypePack Pack>
-void MeshFactory::build_box_mesh(SP<Mesh<Pack>>& mesh)
+void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
 {
     if (d_dimension != 3)
     {
