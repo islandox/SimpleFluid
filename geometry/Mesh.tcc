@@ -127,15 +127,15 @@ void Mesh<Pack>::create_device_views()
         face_centroid_values.push_back(face_info.center);
     }
 
-    ArrVec3 node_coord_values;
+    ArrVec3 node_coord_values = d_node_coords;
     ArrLO cell_node_offset{0};
     ArrLO cell_node_ids;
     ArrLO face_node_offset{0};
     ArrLO face_node_ids;
 
-    for (const auto cell : d_cells)
+    for (const auto& cell : d_cells)
     {
-        for (auto node_id : cell.node_ids)
+        for (auto node_id : cell.node_gids)
         {
             cell_node_ids.push_back(d_node_gid_to_lid.at(node_id));
         }
@@ -146,7 +146,7 @@ void Mesh<Pack>::create_device_views()
 
     for (const auto& face_info : d_faces)
     {
-        for (const auto node_id : face_info.node_ids)
+        for (const auto node_id : face_info.node_gids)
         {
             face_node_ids.push_back(d_node_gid_to_lid.at(node_id));
         }
@@ -225,15 +225,17 @@ void Mesh<Pack>::check_connectivity() const
 
     for (const auto lid : d_owned_cell_ids)
     {
-        CHECK(d_owned_cell_global_ids[lid] != d_cell_gid_to_lid.end());
-        CHECK(lid == d_cell_gid_to_lid.at(d_owned_cell_global_ids[static_cast<std::size_t>(lid)]));
+        auto gid = d_owned_cell_global_ids[static_cast<std::size_t>(lid)];
+        CHECK(d_cell_gid_to_lid.find(gid) != d_cell_gid_to_lid.end());
+        CHECK(lid == d_cell_gid_to_lid.at(gid));
         CHECK(static_cast<std::size_t>(lid) < d_cells.size());
         CHECK(d_cells[static_cast<std::size_t>(lid)].owned);
     }
     for (auto gid : d_ghost_cell_global_ids)
     {
         CHECK(d_cell_gid_to_lid.find(gid) != d_cell_gid_to_lid.end());
-        CHECK(gid == d_cell_gid_to_lid.at(gid));
+        auto lid = d_cell_gid_to_lid.at(gid);
+        CHECK(lid == d_cell_gid_to_lid.at(gid));
     }
 
     for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
@@ -242,8 +244,8 @@ void Mesh<Pack>::check_connectivity() const
         CHECK(static_cast<std::size_t>(face.owner) < d_cells.size());
         CHECK(face.neighbor == invalid_id<local_ordinal_type>()
               || static_cast<std::size_t>(face.neighbor) < d_cells.size());
-        CHECK((face.type == FaceType::TRIANGLE && face.node_ids.size() == 3)
-         || (face.type == FaceType::QUAD && face.node_ids.size() == 4));
+        CHECK((face.type == FaceType::TRIANGLE && face.node_gids.size() == 3)
+         || (face.type == FaceType::QUAD && face.node_gids.size() == 4));
         CHECK(face.area >= 0.0);
 
         if (face.boundary_id != invalid_boundary_id)

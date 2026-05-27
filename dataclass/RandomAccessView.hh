@@ -41,19 +41,22 @@ public:
         using pointer = T*;
         using reference = T&;
 
+        iterator() = default;
+
         iterator& operator++() { ++d_ptr; return *this; }
         iterator operator++(int) { iterator tmp = *this; ++d_ptr; return tmp; }
         iterator& operator--() { --d_ptr; return *this; }
         iterator operator--(int) { iterator tmp = *this; --d_ptr; return tmp; }
         
-        reference operator*() { return *d_ptr; }
-        pointer operator->() { return d_ptr; }
-        reference operator[](difference_type n) { return d_ptr[n]; }
+        reference operator*() const { return *d_ptr; }
+        pointer operator->() const { return d_ptr; }
+        reference operator[](difference_type n) const { return d_ptr[n]; }
         
         iterator& operator+=(difference_type n) { d_ptr += n; return *this; }
         iterator& operator-=(difference_type n) { d_ptr -= n; return *this; }
         iterator operator+(difference_type n) const { return iterator(d_ptr + n); }
         iterator operator-(difference_type n) const { return iterator(d_ptr - n); }
+        friend iterator operator+(difference_type n, iterator iter) { return iter + n; }
         
         difference_type operator-(const iterator& other) const { return d_ptr - other.d_ptr; }
         
@@ -68,7 +71,7 @@ public:
         friend class RandomAccessView;
 
         iterator(T* ptr) : d_ptr(ptr) {}
-        T* d_ptr;
+        T* d_ptr = nullptr;
     };
 
     class const_iterator
@@ -79,6 +82,8 @@ public:
         using difference_type = std::ptrdiff_t;
         using pointer = const T*;
         using reference = const T&;
+
+        const_iterator() = default;
 
         const_iterator& operator++() { ++d_ptr; return *this; }
         const_iterator operator++(int) { const_iterator tmp = *this; ++d_ptr; return tmp; }
@@ -93,6 +98,7 @@ public:
         const_iterator& operator-=(difference_type n) { d_ptr -= n; return *this; }
         const_iterator operator+(difference_type n) const { return const_iterator(d_ptr + n); }
         const_iterator operator-(difference_type n) const { return const_iterator(d_ptr - n); }
+        friend const_iterator operator+(difference_type n, const_iterator iter) { return iter + n; }
         
         difference_type operator-(const const_iterator& other) const { return d_ptr - other.d_ptr; }
         
@@ -107,7 +113,7 @@ public:
         friend class RandomAccessView;
 
         const_iterator(const T* ptr) : d_ptr(ptr) {}
-        const T* d_ptr;
+        const T* d_ptr = nullptr;
     };
 
 
