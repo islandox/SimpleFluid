@@ -11,8 +11,12 @@
 #pragma once
 
 #include "typedefs.hh"
+#include "utils/TMP_helpers.hh"
 
 #include "DBNode.hh"
+
+#include <type_traits>
+#include <utility>
 
 namespace SimpleFluid
 {
@@ -45,9 +49,15 @@ public:
 
     bool erase(const std::string& key)
     {
-        return int_node.erase(key) || real_node.erase(key) ||
-               string_node.erase(key) || bool_node.erase(key) ||
-               vec_int_node.erase(key) || vec_real_node.erase(key) || vec_string_node.erase(key);
+        bool erased = false;
+        erased = int_node.erase(key) || erased;
+        erased = real_node.erase(key) || erased;
+        erased = string_node.erase(key) || erased;
+        erased = bool_node.erase(key) || erased;
+        erased = vec_int_node.erase(key) || erased;
+        erased = vec_real_node.erase(key) || erased;
+        erased = vec_string_node.erase(key) || erased;
+        return erased;
     }
 
     void clear()
@@ -81,37 +91,41 @@ private:
 template <class T>
 void Database::set(const std::string& key, T&& value)
 {
-    if constexpr (std::same_as<T, int>)
+    using Value = std::remove_cvref_t<T>;
+
+    erase(key);
+
+    if constexpr (std::same_as<Value, int>)
     {
-        int_node.set(key, value);
+        int_node.set(key, std::forward<T>(value));
     }
-    else if constexpr (std::same_as<T, real_t>)
+    else if constexpr (std::same_as<Value, real_t>)
     {
-        real_node.set(key, value);
+        real_node.set(key, std::forward<T>(value));
     }
-    else if constexpr (std::same_as<T, std::string>)
+    else if constexpr (std::same_as<Value, std::string>)
     {
-        string_node.set(key, value);
+        string_node.set(key, std::forward<T>(value));
     }
-    else if constexpr (std::same_as<T, bool>)
+    else if constexpr (std::same_as<Value, bool>)
     {
-        bool_node.set(key, value);
+        bool_node.set(key, std::forward<T>(value));
     }
-    else if constexpr (std::same_as<T, std::vector<int>>)
+    else if constexpr (std::same_as<Value, std::vector<int>>)
     {
-        vec_int_node.set(key, value);
+        vec_int_node.set(key, std::forward<T>(value));
     }
-    else if constexpr (std::same_as<T, std::vector<real_t>>)
+    else if constexpr (std::same_as<Value, std::vector<real_t>>)
     {
-        vec_real_node.set(key, value);
+        vec_real_node.set(key, std::forward<T>(value));
     }
-    else if constexpr (std::same_as<T, std::vector<std::string>>)
+    else if constexpr (std::same_as<Value, std::vector<std::string>>)
     {
-        vec_string_node.set(key, value);
+        vec_string_node.set(key, std::forward<T>(value));
     }
     else
     {
-        static_assert(false, "Unsupported type for Database::set");
+        static_assert(utils::always_false_v<Value>, "Unsupported type for Database::set");
     }
 }
 
@@ -148,7 +162,7 @@ T& Database::get(const std::string& key)
     }
     else
     {
-        static_assert(false, "Unsupported type for Database::get");
+        static_assert(utils::always_false_v<T>, "Unsupported type for Database::get");
     }
 }
 
@@ -185,7 +199,7 @@ const T& Database::get(const std::string& key) const
     }
     else
     {
-        static_assert(false, "Unsupported type for Database::get");
+        static_assert(utils::always_false_v<T>, "Unsupported type for Database::get");
     }
 }
 

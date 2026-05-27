@@ -1,3 +1,13 @@
+/**
+ * @file DBNode.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Typed key-value node for the Database class.
+ * @version 0.1
+ * @date 2026-05-27
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
 #pragma once
 
 
@@ -28,16 +38,14 @@ public:
 
     DBNode() = default;
 
-    void set(const key_type& key, value_type& value)
+    void set(const key_type& key, const value_type& value)
     {
-        node.erase(key);
-        node.insert_or_assign(std::move(key), value);
+        node.insert_or_assign(key, value);
     }
 
     void set(const key_type& key, value_type&& value)
     {
-        node.erase(key);
-        node.insert_or_assign(std::move(key), std::move(value));
+        node.insert_or_assign(key, std::move(value));
     }
 
     bool contains(const key_type& key) const
