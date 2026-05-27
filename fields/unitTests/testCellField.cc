@@ -1,0 +1,142 @@
+/**
+ * @file testCellField.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief unit tests for CellField class
+ * @version 0.1
+ * @date 2026-05-27
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
+#include <gtest/gtest.h>
+#include "fields/CellField.hh"
+
+#include "geometry/MeshFactory.hh"
+
+#include <Kokkos_Core.hpp>
+#include <mpi.h>
+
+#include <stdexcept>
+#include <string>
+
+namespace
+{
+
+using Pack = SimpleFluid::TpetraTypes<>;
+using MeshType = SimpleFluid::Mesh<Pack>;
+using FieldType = SimpleFluid::CellField<Pack>;
+
+class KokkosEnvironment : public testing::Environment
+{
+public:
+    void SetUp() override
+    {
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (!mpi_initialized)
+        {
+            MPI_Init(nullptr, nullptr);
+            d_initialized_mpi = true;
+        }
+
+        if (!Kokkos::is_initialized())
+        {
+            Kokkos::initialize();
+            d_initialized_kokkos = true;
+        }
+    }
+
+    void TearDown() override
+    {
+        if (d_initialized_kokkos && Kokkos::is_initialized())
+        {
+            Kokkos::finalize();
+        }
+
+        int mpi_finalized = 0;
+        MPI_Finalized(&mpi_finalized);
+        if (d_initialized_mpi && !mpi_finalized)
+        {
+            MPI_Finalize();
+        }
+    }
+
+private:
+    bool d_initialized_mpi = false;
+    bool d_initialized_kokkos = false;
+};
+
+testing::Environment* const kokkos_environment =
+    testing::AddGlobalTestEnvironment(new KokkosEnvironment);
+
+SimpleFluid::SP<const SimpleFluid::Database> make_two_hex_box_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
+    db->set("X", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
+    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+
+    return db;
+}
+
+SimpleFluid::SP<MeshType> make_two_hex_mesh()
+{
+    auto db = make_two_hex_box_database();
+    SimpleFluid::MeshFactory factory(db);
+    return factory.build<Pack>();
+}
+
+} // namespace
+
+TEST(CellFieldTest, StoresValuesOnOwnedCellMap)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType temperature(mesh, "temperature");
+
+    EXPECT_EQ(temperature.name(), "temperature");
+    EXPECT_EQ(temperature.mesh_ptr(), mesh);
+    EXPECT_EQ(temperature.num_owned_cells(), 2u);
+    EXPECT_EQ(temperature.map()->getLocalNumElements(), mesh->num_owned_cells());
+    EXPECT_DOUBLE_EQ(temperature.value(0), 0.0);
+    EXPECT_DOUBLE_EQ(temperature.value(1), 0.0);
+
+    temperature.set_value(0, 2.5);
+    temperature.set_global_value(2, 4.0);
+    temperature.sum_into_value(0, 0.5);
+    temperature.sum_into_global_value(2, 1.0);
+
+    EXPECT_DOUBLE_EQ(temperature.value(0), 3.0);
+    EXPECT_DOUBLE_EQ(temperature.global_value(1), 3.0);
+    EXPECT_DOUBLE_EQ(temperature.value(1), 5.0);
+    EXPECT_DOUBLE_EQ(temperature.global_value(2), 5.0);
+    EXPECT_TRUE(temperature.is_owned_cell(0));
+    EXPECT_TRUE(temperature.is_owned_global_cell(2));
+    EXPECT_FALSE(temperature.is_owned_global_cell(77));
+}
+
+TEST(CellFieldTest, InitialValueConstructorFillsVector)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType pressure(mesh, 101325.0, "pressure");
+
+    EXPECT_EQ(pressure.name(), "pressure");
+    EXPECT_DOUBLE_EQ(pressure.value(0), 101325.0);
+    EXPECT_DOUBLE_EQ(pressure.value(1), 101325.0);
+}
+
+TEST(CellFieldTest, RequiresAssembledMesh)
+{
+    auto unassembled_mesh = std::make_shared<MeshType>();
+
+    EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
+}
