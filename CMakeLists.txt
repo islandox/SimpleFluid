@@ -38,5 +38,6 @@ find_package(GTest)
 enable_testing()
 include(GoogleTest)
 
+add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)
 add_subdirectory(fields/unitTests)
