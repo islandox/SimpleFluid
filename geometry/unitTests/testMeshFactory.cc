@@ -50,6 +50,37 @@ SimpleFluid::SP<const SimpleFluid::Database> make_27_hex_box_database()
     return db;
 }
 
+SimpleFluid::SP<const SimpleFluid::Database> make_cylinder_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::CYLINDER));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("height", SimpleFluid::real_t{2.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"radial", "zmin", "zmax"});
+
+    return db;
+}
+
+SimpleFluid::SP<const SimpleFluid::Database> make_sphere_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::SPHERE));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"surface"});
+
+    return db;
+}
+
 } // namespace
 
 TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
@@ -119,4 +150,75 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_EQ(boundary_counts["ymax"], 9u);
     EXPECT_EQ(boundary_counts["zmin"], 9u);
     EXPECT_EQ(boundary_counts["zmax"], 9u);
+}
+
+TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
+{
+    auto db = make_cylinder_database();
+    SimpleFluid::MeshFactory factory(db);
+
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_EQ(mesh->spatial_dimension(), 3u);
+    EXPECT_EQ(mesh->num_local_cells(), 16u);
+    EXPECT_EQ(mesh->num_owned_cells(), 16u);
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::TRIPRISM);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+    }
+
+    std::unordered_map<std::string, std::size_t> boundary_counts;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+        {
+            ++boundary_counts[mesh->boundary_name(fid)];
+        }
+    }
+
+    EXPECT_EQ(boundary_counts["radial"], 16u);
+    EXPECT_EQ(boundary_counts["zmin"], 8u);
+    EXPECT_EQ(boundary_counts["zmax"], 8u);
+}
+
+TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
+{
+    auto db = make_sphere_database();
+    SimpleFluid::MeshFactory factory(db);
+
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_EQ(mesh->spatial_dimension(), 3u);
+    EXPECT_EQ(mesh->num_local_cells(), 8u);
+    EXPECT_EQ(mesh->num_owned_cells(), 8u);
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::HEXAHEDRON);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+    }
+
+    std::size_t surface_faces = 0;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+        {
+            EXPECT_EQ(mesh->boundary_name(fid), "surface");
+            ++surface_faces;
+        }
+    }
+
+    EXPECT_EQ(surface_faces, 24u);
 }

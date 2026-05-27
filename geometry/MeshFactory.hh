@@ -37,7 +37,7 @@ public:
     };
 
 public:
-    MeshFactory(SP<const Database>& db);
+    MeshFactory(SP<const Database> db);
 
     template <TpetraTypePack Pack = DefaultTpetraTypes>
     SP<Mesh<Pack>> build();
@@ -45,6 +45,12 @@ public:
 private:
     template <TpetraTypePack Pack>
     void build_box_mesh(SP<STKMesh<Pack>>& mesh);
+
+    template <TpetraTypePack Pack>
+    void build_cylinder_mesh(SP<STKMesh<Pack>>& mesh);
+
+    template <TpetraTypePack Pack>
+    void build_sphere_mesh(SP<STKMesh<Pack>>& mesh);
 
 private:
     DomainType d_domain_type;
