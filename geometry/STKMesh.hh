@@ -176,6 +176,7 @@ private:
     using Base::d_face_owned_node_global_ids;
     using Base::d_faces;
     using Base::d_next_boundary_id;
+    using Base::d_node_coords;
     using Base::d_node_gid_to_lid;
     using Base::d_owned_cell_global_ids;
     using Base::d_ghost_cell_global_ids;

@@ -75,9 +75,23 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_EQ(mesh->cell_centroid(1), (SimpleFluid::vec3{1.5, 0.5, 0.5}));
     EXPECT_EQ(mesh->cell_centroid(26), (SimpleFluid::vec3{2.5, 2.5, 2.5}));
 
-    EXPECT_EQ(mesh->face_centroid(0), (SimpleFluid::vec3{0.0, 0.5, 0.5}));
-    EXPECT_EQ(mesh->face_centroid(1), (SimpleFluid::vec3{1.0, 0.5, 0.5}));
-    EXPECT_EQ(mesh->face_centroid(2), (SimpleFluid::vec3{2.0, 0.5, 0.5}));
+    auto has_face_centroid = [&](const MeshType::Vec3& expected)
+    {
+        for (MeshType::local_ordinal_type fid = 0;
+             fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+             ++fid)
+        {
+            if (mesh->face_centroid(fid) == expected)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    EXPECT_TRUE(has_face_centroid(SimpleFluid::vec3{0.0, 0.5, 0.5}));
+    EXPECT_TRUE(has_face_centroid(SimpleFluid::vec3{1.0, 0.5, 0.5}));
+    EXPECT_TRUE(has_face_centroid(SimpleFluid::vec3{2.0, 0.5, 0.5}));
 
     std::unordered_map<std::string, std::size_t> boundary_counts;
     for (MeshType::local_ordinal_type fid = 0;

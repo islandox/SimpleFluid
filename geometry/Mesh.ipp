@@ -178,7 +178,8 @@ inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const -> const std::string&
 {
-    return face(fid).boundary_name;
+    CHECK(is_boundary_face(fid), "Requested face is not a boundary face.");
+    return d_boundary_id_to_name.at(face(fid).boundary_id);
 }
 
 template<TpetraTypePack Pack>

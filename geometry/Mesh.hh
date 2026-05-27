@@ -102,7 +102,7 @@ public:
         Vec3 center;                         // Cell centroid coordinates.
         double volume = 0.0;                 // Cell volume.
         ViewLO faces;                        // Local face IDs of the faces that bound this cell, in the local face order from the first element that introduced this cell.
-        ViewGO node_ids;                     // Global node IDs of the nodes that define this cell, in the local node order from the first element that introduced this cell.
+        ViewGO node_gids;                     // Global node IDs of the nodes that define this cell, in the local node order from the first element that introduced this cell.
     };
 
     /**
@@ -130,7 +130,7 @@ public:
          * Node IDs in the local side order from the first element that
          * introduced this face. Sorted copies are used internally for matching.
          */
-        ViewGO node_ids;
+        ViewGO node_gids;
 
         MeshUtils::Vec3 center;
 
@@ -142,8 +142,6 @@ public:
         MeshUtils::Vec3 unit_normal_from_neighbor;
 
         double area = 0.0;
-
-        std::string boundary_name;
     };
 
 
@@ -239,8 +237,10 @@ protected:
 protected:
     int d_spatial_dim = 0;
 
+    //!<@brief Cell information stored on host for easy random access.
+    //!<@note ghost cells are always stored after owned cells, so owned cells are contiguous at the beginning of d_cells.
     Arr<CellInfo> d_cells;
-    Arr<FaceInfo> d_faces;
+    Arr<FaceInfo> d_faces;   //!< Face information stored on host for easy random access.
 
     ArrLO d_owned_cell_ids;
     ArrGO d_owned_cell_global_ids;
@@ -249,12 +249,13 @@ protected:
     ArrLO d_cell_owned_face_ids;
     ArrGO d_cell_owned_node_global_ids;
     ArrGO d_face_owned_node_global_ids;
+    ArrVec3 d_node_coords;
 
     GO2LOMap d_cell_gid_to_lid;
     GO2LOMap d_node_gid_to_lid;
 
     /*
-     * Internal face lookup: sorted node IDs encoded as a string key.
+     * @brief Internal face lookup: sorted node IDs encoded as a string key.
      * This is only used at setup time, so simplicity is preferred over speed.
      */
     std::unordered_map<std::string, local_ordinal_type> d_face_key_to_face;

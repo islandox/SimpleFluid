@@ -58,101 +58,6 @@ make_stk_bulk_data(const std::shared_ptr<stk::mesh::MetaData>& meta)
 }
 
 /**
- * @brief Compute the arithmetic average of a list of points.
- *
- * @tparam Vec3 Vector type supporting addition and scalar division.
- * @param points Points to average.
- * @return Centroid of the input points.
- */
-template <class Vec3>
-inline Vec3 average(const std::vector<Vec3>& points)
-{
-    Vec3 result;
-    if (points.empty())
-    {
-        return result;
-    }
-
-    for (const auto& point : points)
-    {
-        result = result + point;
-    }
-
-    return result / static_cast<typename Vec3::scalar_t>(points.size());
-}
-
-/**
- * @brief Compute the volume of a tetrahedron.
- *
- * @tparam Vec3 Vector type supporting dot and cross products.
- * @param a First tetrahedron vertex.
- * @param b Second tetrahedron vertex.
- * @param c Third tetrahedron vertex.
- * @param d Fourth tetrahedron vertex.
- * @return Signed volume magnitude of the tetrahedron.
- */
-template <class Vec3>
-inline real_t tetra_volume(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d)
-{
-    return std::abs((b - a).dot((c - a).cross(d - a))) / 6.0;
-}
-
-/**
- * @brief Estimate hexahedral cell volume using tetrahedral decomposition.
- *
- * @tparam Vec3 Vector type used for point coordinates.
- * @param x Hexahedral vertex coordinates.
- * @return Total hexahedral volume.
- */
-template <class Vec3>
-inline real_t hex_volume(const std::vector<Vec3>& x)
-{
-    CHECK(x.size() >= 8);
-    return tetra_volume(x[0], x[1], x[3], x[4])
-         + tetra_volume(x[1], x[2], x[3], x[6])
-         + tetra_volume(x[1], x[4], x[5], x[6])
-         + tetra_volume(x[3], x[4], x[6], x[7])
-         + tetra_volume(x[1], x[3], x[4], x[6]);
-}
-
-/**
- * @brief Estimate wedge cell volume using tetrahedral decomposition.
- *
- * @tparam Vec3 Vector type used for point coordinates.
- * @param x Wedge vertex coordinates.
- * @return Total wedge volume.
- */
-template <class Vec3>
-inline real_t wedge_volume(const std::vector<Vec3>& x)
-{
-    CHECK(x.size() >= 6);
-    return tetra_volume(x[0], x[1], x[2], x[3])
-         + tetra_volume(x[1], x[2], x[4], x[3])
-         + tetra_volume(x[2], x[4], x[5], x[3]);
-}
-
-/**
- * @brief Compute the oriented area vector for a face.
- *
- * @tparam Vec3 Vector type used for point coordinates.
- * @param x Face vertex coordinates in order.
- * @return Area vector of the face.
- */
-template <class Vec3>
-inline Vec3 face_area_vector(const std::vector<Vec3>& x)
-{
-    CHECK(x.size() == 3 || x.size() == 4);
-
-    if (x.size() == 3)
-    {
-        return (x[1] - x[0]).cross(x[2] - x[0]) * 0.5;
-    }
-
-    return ((x[1] - x[0]).cross(x[2] - x[0])
-          + (x[2] - x[0]).cross(x[3] - x[0])) * 0.5;
-}
-
-/**
  * @brief Convert an STK topology to the mesh cell type enum.
  *
  * @tparam Pack Tpetra type pack used by STKMesh.
@@ -174,6 +79,7 @@ inline auto topology_to_cell_type(stk::topology topo) -> typename STKMesh<Pack>:
 
     throw std::runtime_error("Unsupported cell topology: " + topo.name());
 }
+
 
 /**
  * @brief Determine face type from its node count.
@@ -303,6 +209,7 @@ void STKMesh<Pack>::build_cell_list()
     d_cell_owned_face_ids.clear();
     d_cell_owned_node_global_ids.clear();
     d_face_owned_node_global_ids.clear();
+    d_node_coords.clear();
     d_cell_gid_to_lid.clear();
     d_node_gid_to_lid.clear();
     d_face_key_to_face.clear();
@@ -371,8 +278,17 @@ void STKMesh<Pack>::build_cell_list()
                 node_ids.reserve(num_nodes);
                 for (unsigned i = 0; i < num_nodes; ++i)
                 {
-                    node_ids.push_back(static_cast<global_ordinal_type>(
-                        d_stk.bulk->identifier(nodes[i])));
+                    const auto node_gid = static_cast<global_ordinal_type>(
+                        d_stk.bulk->identifier(nodes[i]));
+                    node_ids.push_back(node_gid);
+
+                    if (d_node_gid_to_lid.find(node_gid) == d_node_gid_to_lid.end())
+                    {
+                        const auto node_lid = detail::checked_size_to_ordinal<local_ordinal_type>(
+                            d_node_coords.size(), "node count");
+                        d_node_gid_to_lid.emplace(node_gid, node_lid);
+                        d_node_coords.push_back(node_coord(nodes[i]));
+                    }
                 }
 
                 d_stk.cell_entities.push_back(elem);
@@ -408,7 +324,7 @@ void STKMesh<Pack>::build_cell_list()
         d_cell_owned_node_global_ids.insert(d_cell_owned_node_global_ids.end(),
                                             cell_node_ids[lid].begin(),
                                             cell_node_ids[lid].end());
-        d_cells[lid].node_ids = ViewGO(d_cell_owned_node_global_ids.data() + offset,
+        d_cells[lid].node_gids = ViewGO(d_cell_owned_node_global_ids.data() + offset,
                                        cell_node_ids[lid].size());
     }
 }
@@ -424,15 +340,15 @@ void STKMesh<Pack>::compute_cell_geometry()
         const auto coords = element_node_coords(d_stk.cell_entities[lid]);
         auto& cell_info = d_cells[lid];
 
-        cell_info.center = stkmesh_detail::average(coords);
+        cell_info.center = MeshUtils::average(coords);
 
         if (cell_info.type == CellType::HEXAHEDRON)
         {
-            cell_info.volume = stkmesh_detail::hex_volume(coords);
+            cell_info.volume = MeshUtils::hex_volume(coords);
         }
         else if (cell_info.type == CellType::TRIPRISM)
         {
-            cell_info.volume = stkmesh_detail::wedge_volume(coords);
+            cell_info.volume = MeshUtils::wedge_volume(coords);
         }
         else
         {
@@ -503,7 +419,7 @@ void STKMesh<Pack>::build_face_table()
                     face_node_ids.size());
                 face_info.owner = cell_lid;
                 face_info.neighbor = invalid_id<local_ordinal_type>();
-                face_info.node_ids = ViewGO(d_face_owned_node_global_ids.data() + offset,
+                face_info.node_gids = ViewGO(d_face_owned_node_global_ids.data() + offset,
                                             face_node_ids.size());
 
                 d_faces.push_back(std::move(face_info));
@@ -551,16 +467,16 @@ void STKMesh<Pack>::compute_face_geometry()
     for (auto& face_info : d_faces)
     {
         std::vector<Vec3> coords;
-        coords.reserve(face_info.node_ids.size());
+        coords.reserve(face_info.node_gids.size());
 
-        for (const auto node_id : face_info.node_ids)
+        for (const auto node_id : face_info.node_gids)
         {
             coords.push_back(node_coord_by_id(static_cast<EntityId>(node_id)));
         }
 
-        face_info.center = stkmesh_detail::average(coords);
+        face_info.center = MeshUtils::average(coords);
 
-        auto area_vector = stkmesh_detail::face_area_vector(coords);
+        auto area_vector = MeshUtils::face_area_vector(coords);
         face_info.area = area_vector.norm();
         if (face_info.area <= 0.0)
         {
@@ -691,21 +607,20 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
     {
         auto& face_info = d_faces[fid];
         face_info.boundary_id = invalid_boundary_id;
-        face_info.boundary_name.clear();
 
         if (face_info.neighbor != invalid_id<local_ordinal_type>())
         {
             continue;
         }
 
-        const auto iter = face_key_to_part.find(make_face_key(face_info.node_ids));
+        const auto iter = face_key_to_part.find(make_face_key(face_info.node_gids));
         if (iter == face_key_to_part.end())
         {
             continue;
         }
 
-        face_info.boundary_name = iter->second->name();
-        face_info.boundary_id = get_or_create_boundary_id(face_info.boundary_name);
+        auto boundary_name = iter->second->name();
+        face_info.boundary_id = get_or_create_boundary_id(boundary_name);
         d_boundary_id_to_faces[face_info.boundary_id].push_back(
             static_cast<local_ordinal_type>(fid));
     }
