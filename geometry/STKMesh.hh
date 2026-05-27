@@ -24,6 +24,12 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Container for STK mesh objects and I/O state.
+ *
+ * The container stores STK metadata, bulk data, coordinate field handles,
+ * and the mesh I/O broker used to read external meshes.
+ */
 struct STKMeshContainer
 {
     using Entity = stk::mesh::Entity;
@@ -32,8 +38,14 @@ struct STKMeshContainer
     using BulkData = stk::mesh::BulkData;
     using MetaData = stk::mesh::MetaData;
 
+    /**
+     * @brief STK mesh construction options.
+     *
+     * Provides boundary part mapping and auto-assignment behavior for
+     * external meshes loaded through STK.
+     */
     struct Options {
-        /*
+        /**
          * Optional mapping from STK sideset/side-part names to your boundary IDs.
          *
          * Example:
@@ -42,7 +54,7 @@ struct STKMeshContainer
          */
         std::unordered_map<std::string, int> boundary_name_to_id;
 
-        /*
+        /**
          * If true, side-rank STK parts not listed in boundary_name_to_id
          * receive automatically generated IDs.
          */

@@ -32,6 +32,9 @@ namespace
 
 using MeshType = SimpleFluid::STKMesh<SimpleFluid::TpetraTypes<>>;
 
+/**
+ * @brief Global Google Test environment to initialize MPI and Kokkos.
+ */
 class KokkosEnvironment : public testing::Environment
 {
 public:
@@ -75,6 +78,12 @@ private:
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/**
+ * @brief Declare the STK coordinate field for a mesh.
+ *
+ * @param mesh STK mesh instance that will own the coordinate field.
+ * @return Reference to the declared coordinate field.
+ */
 stk::mesh::Field<double>& declare_coordinate_field(MeshType& mesh)
 {
     auto meta = mesh.meta();
@@ -84,6 +93,13 @@ stk::mesh::Field<double>& declare_coordinate_field(MeshType& mesh)
     return coord_field;
 }
 
+/**
+ * @brief Set the coordinates of a STK node.
+ *
+ * @param coord_field Coordinate field attached to the mesh.
+ * @param node STK node entity.
+ * @param coord Coordinate values to assign.
+ */
 void set_node_coord(stk::mesh::Field<double>& coord_field,
                     stk::mesh::Entity node,
                     const std::array<double, 3>& coord)
@@ -92,6 +108,12 @@ void set_node_coord(stk::mesh::Field<double>& coord_field,
     std::copy(coord.begin(), coord.end(), data);
 }
 
+/**
+ * @brief Populate the mesh with a single hexahedral element.
+ *
+ * @param mesh STK mesh to populate.
+ * @param elem_id Global ID for the new element.
+ */
 void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
 {
     auto& coord_field = declare_coordinate_field(mesh);
@@ -124,6 +146,13 @@ void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
     bulk->modification_end();
 }
 
+/**
+ * @brief Populate the mesh with two adjacent hexahedral elements.
+ *
+ * The function constructs a shared face between the two elements.
+ *
+ * @param mesh STK mesh to populate.
+ */
 void populate_two_adjacent_hexes(MeshType& mesh)
 {
     auto& coord_field = declare_coordinate_field(mesh);

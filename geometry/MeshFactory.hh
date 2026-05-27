@@ -15,14 +15,18 @@
 
 namespace SimpleFluid
 {
+/**
+ * @brief Factory that constructs mesh instances from database configuration.
+ *
+ * The factory reads mesh shape, size, and boundary metadata from a
+ * Database and produces a concrete Mesh implementation.
+ */
 class MeshFactory
 {
 public:
-    MeshFactory(SP<const Database>& db);
-
-    template <TpetraTypePack Pack = DefaultTpetraTypes>
-    SP<Mesh<Pack>> build();
-
+    /**
+     * @brief Supported domain types for mesh generation.
+     */
     enum class DomainType : uint8_t
     {
         BOX = 0,
@@ -30,6 +34,16 @@ public:
         SPHERE = 2,
         EXTERNAL = 3
     };
+
+public:
+    MeshFactory(SP<const Database>& db);
+
+    template <TpetraTypePack Pack = DefaultTpetraTypes>
+    SP<Mesh<Pack>> build();
+
+private:
+    template <TpetraTypePack Pack>
+    void build_box_mesh(SP<Mesh<Pack>>& mesh);
 
 private:
     DomainType d_domain_type;
