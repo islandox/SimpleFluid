@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "USEFUL_MARCOS.h"
+#include "USEFUL_MACROS.h"
 
 #include <stdexcept>
 
