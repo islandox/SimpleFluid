@@ -42,6 +42,7 @@ add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)
 add_subdirectory(fields/unitTests)
 add_subdirectory(operators/unitTests)
+add_subdirectory(equations/unitTests)
 add_subdirectory(solvers/unitTests)
 
 add_executable(natural_convection_box examples/natural_convection_box.cc)
