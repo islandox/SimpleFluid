@@ -30,149 +30,22 @@
 namespace SimpleFluid
 {
 
-namespace detail
-{
-
-template <class Vec3>
-inline Vec3 average(const std::vector<Vec3>& points)
-{
-    Vec3 result;
-    if (points.empty())
-    {
-        return result;
-    }
-
-    for (const auto& point : points)
-    {
-        result = result + point;
-    }
-
-    return result / static_cast<typename Vec3::scalar_t>(points.size());
-}
-
-template <class Vec3>
-inline real_t tetra_volume(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d)
-{
-    return std::abs((b - a).dot((c - a).cross(d - a))) / 6.0;
-}
-
-template <class Vec3>
-inline real_t hex_volume(const std::vector<Vec3>& x)
-{
-    CHECK(x.size() >= 8);
-    return tetra_volume(x[0], x[1], x[3], x[4])
-         + tetra_volume(x[1], x[2], x[3], x[6])
-         + tetra_volume(x[1], x[4], x[5], x[6])
-         + tetra_volume(x[3], x[4], x[6], x[7])
-         + tetra_volume(x[1], x[3], x[4], x[6]);
-}
-
-template <class Vec3>
-inline real_t wedge_volume(const std::vector<Vec3>& x)
-{
-    CHECK(x.size() >= 6);
-    return tetra_volume(x[0], x[1], x[2], x[3])
-         + tetra_volume(x[1], x[2], x[4], x[3])
-         + tetra_volume(x[2], x[4], x[5], x[3]);
-}
-
-template <class Vec3>
-inline Vec3 face_area_vector(const std::vector<Vec3>& x)
-{
-    CHECK(x.size() == 3 || x.size() == 4);
-
-    if (x.size() == 3)
-    {
-        return (x[1] - x[0]).cross(x[2] - x[0]) * 0.5;
-    }
-
-    return ((x[1] - x[0]).cross(x[2] - x[0])
-          + (x[2] - x[0]).cross(x[3] - x[0])) * 0.5;
-}
-
-inline int vtk_cell_type(stk::topology topo)
-{
-    if (topo == stk::topology::HEX_8)
-    {
-        return 12;
-    }
-    if (topo == stk::topology::WEDGE_6)
-    {
-        return 13;
-    }
-
-    throw std::runtime_error("VTU export encountered an unsupported cell topology: "
-                           + topo.name());
-}
-
-inline int mesh_cell_type(stk::topology topo)
-{
-    if (topo == stk::topology::HEX_8)
-    {
-        return 4;
-    }
-    if (topo == stk::topology::WEDGE_6)
-    {
-        return 3;
-    }
-
-    throw std::runtime_error("Unsupported cell topology: " + topo.name());
-}
-
-inline int mesh_face_type(std::size_t node_count)
-{
-    if (node_count == 3)
-    {
-        return 3;
-    }
-    if (node_count == 4)
-    {
-        return 4;
-    }
-
-    throw std::runtime_error("Unsupported face node count: "
-                           + std::to_string(node_count));
-}
-
-} // namespace detail
-
 template<TpetraTypePack Pack>
 Mesh<Pack>::Mesh()
 {
 }
 
-template<TpetraTypePack Pack>
-void Mesh<Pack>::assemble()
-{
-    prefer_owned_face_owners();
-    check_connectivity();
-    create_maps();
-    create_device_views();
-}
-
-template<TpetraTypePack Pack>
-void Mesh<Pack>::export_vtu(const std::string&) const
-{
-    throw std::runtime_error("Mesh::export_vtu requires a concrete mesh backend.");
-}
-
-
+/**
+ * @brief create Tpetra maps for owned and overlap cells based on the mesh connectivity information.
+ * 
+ * @tparam Pack 
+ */
 template<TpetraTypePack Pack>
 void Mesh<Pack>::create_maps()
 {
-    ArrGO owned_gids;
-    owned_gids.reserve(d_owned_cell_global_ids.size());
-    for (const auto gid : d_owned_cell_global_ids)
-    {
-        owned_gids.push_back(static_cast<global_ordinal_type>(gid));
-    }
-
-    ArrGO overlap_gids;
-    overlap_gids.reserve(d_cells.size());
-    for (const auto& cell_info : d_cells)
-    {
-        overlap_gids.push_back(static_cast<global_ordinal_type>(cell_info.global_id));
-    }
+    ArrGO overlap_gids = d_owned_cell_global_ids;
+    overlap_gids.reserve(overlap_gids.size() + d_ghost_cell_global_ids.size());
+    overlap_gids.insert(overlap_gids.end(), d_ghost_cell_global_ids.begin(), d_ghost_cell_global_ids.end());
 
     const auto invalid_global_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
     const global_ordinal_type index_base = 0;
@@ -180,8 +53,8 @@ void Mesh<Pack>::create_maps()
 
     d_owned_cell_map = Teuchos::rcp(new map_type(
         invalid_global_size,
-        owned_gids.data(),
-        detail::checked_size_to_ordinal<local_ordinal_type>(owned_gids.size(), "owned cell map"),
+        d_owned_cell_global_ids.data(),
+        detail::checked_size_to_ordinal<local_ordinal_type>(d_owned_cell_global_ids.size(), "owned cell map"),
         index_base,
         comm));
 
@@ -193,6 +66,11 @@ void Mesh<Pack>::create_maps()
         comm));
 }
 
+/**
+ * @brief create Kokkos views for mesh data on the device.
+ * 
+ * @tparam Pack 
+ */
 template<TpetraTypePack Pack>
 void Mesh<Pack>::create_device_views()
 {
@@ -208,9 +86,11 @@ void Mesh<Pack>::create_device_views()
     cell_volume_values.reserve(d_cells.size());
     cell_centroid_values.reserve(d_cells.size());
 
+    cell_gid.append_range(d_owned_cell_global_ids);
+    cell_gid.append_range(d_ghost_cell_global_ids);
+
     for (const auto& cell_info : d_cells)
     {
-        cell_gid.push_back(static_cast<global_ordinal_type>(cell_info.global_id));
         cell_type.push_back(static_cast<int>(cell_info.type));
         cell_volume_values.push_back(cell_info.volume);
         cell_centroid_values.push_back(cell_info.center);
@@ -302,7 +182,11 @@ void Mesh<Pack>::create_device_views()
     d_device_views.face_node_ids = make_vector_view("face_node_ids", face_node_ids);
 }
 
-
+/**
+ * @brief Change face owner to a locally owned cell if the current owner is a ghost cell and the neighbor is owned.
+ * 
+ * @tparam Pack 
+ */
 template<TpetraTypePack Pack>
 void Mesh<Pack>::prefer_owned_face_owners()
 {
@@ -328,14 +212,10 @@ void Mesh<Pack>::check_connectivity() const
     CHECK(d_owned_cell_ids.size() == d_owned_cell_global_ids.size());
     CHECK(d_owned_cell_ids.size() <= d_cells.size());
 
-    for (size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto& cell = d_cells[lid];
         CHECK(cell.type != CellType::INVALID);
-
-        const auto iter = d_cell_gid_to_lid.find(cell.global_id);
-        CHECK(iter != d_cell_gid_to_lid.end());
-        CHECK(iter->second == static_cast<local_ordinal_type>(lid));
 
         for (const auto fid : cell.faces)
         {
@@ -345,8 +225,15 @@ void Mesh<Pack>::check_connectivity() const
 
     for (const auto lid : d_owned_cell_ids)
     {
+        CHECK(d_owned_cell_global_ids[lid] != d_cell_gid_to_lid.end());
+        CHECK(lid == d_cell_gid_to_lid.at(d_owned_cell_global_ids[static_cast<std::size_t>(lid)]));
         CHECK(static_cast<std::size_t>(lid) < d_cells.size());
         CHECK(d_cells[static_cast<std::size_t>(lid)].owned);
+    }
+    for (auto gid : d_ghost_cell_global_ids)
+    {
+        CHECK(d_cell_gid_to_lid.find(gid) != d_cell_gid_to_lid.end());
+        CHECK(gid == d_cell_gid_to_lid.at(gid));
     }
 
     for (std::size_t fid = 0; fid < d_faces.size(); ++fid)

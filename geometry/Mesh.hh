@@ -15,6 +15,8 @@
 #include "dataclass/RandomAccessView.hh"
 #include "utils/debug_check.hh"
 
+#include "MeshUtils.hh"
+
 #include <Teuchos_RCP.hpp>
 #include <Kokkos_Core.hpp>
 
@@ -41,8 +43,9 @@ constexpr ID invalid_id() noexcept
 }
 
 /**
- * Cell-centered finite-volume mesh for a hybrid triangular-prism / hexahedral mesh.
+ * @brief finite-volume mesh for a hybrid triangular-prism / hexahedral mesh.
  *
+ * @details
  * Designed for Trilinos/Tpetra assembly:
  *
  *   - owned cells correspond to Tpetra rows;
@@ -53,6 +56,8 @@ constexpr ID invalid_id() noexcept
  * Typical FVM stencil:
  *
  *   A(P,P) and A(P,N) are assembled by looping over faces of owned cell P.
+ * 
+ * @tparam Pack Tpetra type pack used for map and vector types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class Mesh
@@ -64,12 +69,14 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using comm_type = typename Pack::comm_type;
 
-    using Vec3 = vec3<real_t>;
     using ViewLO = RandomAccessView<local_ordinal_type>;
     using ViewGO = RandomAccessView<global_ordinal_type>;
 
     static constexpr int invalid_boundary_id = invalid_id<int>();
 
+    using Vec3 = MeshUtils::Vec3;
+    using CellType = MeshUtils::CellType;
+    using FaceType = MeshUtils::FaceType;
     using ArrVec3 = std::vector<Vec3>;
     using ArrLO = std::vector<local_ordinal_type>;
     using ArrGO = std::vector<global_ordinal_type>;
@@ -85,30 +92,23 @@ public:
     template <class T>
     using RCP = Teuchos::RCP<T>;
 
-    enum class CellType : uint8_t 
-    {
-        INVALID = 0,
-        TRIPRISM = 3,
-        HEXAHEDRON = 4
-    };
-    enum class FaceType : uint8_t 
-    {
-        INVALID = 0,
-        TRIANGLE = 3,
-        QUAD = 4
-    };
-
-
+    /**
+     * @brief Information about a cell, accessible by local cell ID.
+     * 
+     */
     struct CellInfo {
-        bool owned = false;
-        CellType type = CellType::INVALID;
-        Vec3 center;
-        double volume = 0.0;
-        global_ordinal_type global_id = 0;
-        ViewLO faces;
-        ViewGO node_ids;
+        bool owned = false;                  // Whether this cell is owned by the local process (true) or is a ghost cell (false).
+        CellType type = CellType::INVALID;   // Cell type (e.g., TETRAHEDRON, HEXAHEDRON, TRIPRISM).
+        Vec3 center;                         // Cell centroid coordinates.
+        double volume = 0.0;                 // Cell volume.
+        ViewLO faces;                        // Local face IDs of the faces that bound this cell, in the local face order from the first element that introduced this cell.
+        ViewGO node_ids;                     // Global node IDs of the nodes that define this cell, in the local node order from the first element that introduced this cell.
     };
 
+    /**
+     * @brief Information about a face, accessible by local face ID.
+     * 
+     */
     struct FaceInfo {
         FaceType type = FaceType::INVALID;
         /*
@@ -132,14 +132,14 @@ public:
          */
         ViewGO node_ids;
 
-        Vec3 center;
+        MeshUtils::Vec3 center;
 
         /*
          * Unit normal pointing outward from owner.
          * For a specific cell c, use face_normal_outward(c, f).
          */
-        Vec3 unit_normal_from_owner;
-        Vec3 unit_normal_from_neighbor;
+        MeshUtils::Vec3 unit_normal_from_owner;
+        MeshUtils::Vec3 unit_normal_from_neighbor;
 
         double area = 0.0;
 
@@ -153,17 +153,14 @@ public:
 
 //-------------------------------- assemble ----------------------------------//
 public:
-    virtual void assemble();
-    virtual void export_vtu(const std::string& filename) const;
+    virtual void assemble() = 0;
+    virtual void export_vtu(const std::string& filename) const = 0;
 
 protected:
     void create_maps();
     void create_device_views();
 
     void prefer_owned_face_owners();
-    void compute_face_geometry();
-
-    int get_or_create_boundary_id(const std::string& name);
 
     inline static std::string make_face_key(ViewGO node_ids);
     inline static std::string make_face_key(ArrGO node_ids);
@@ -247,6 +244,7 @@ protected:
 
     ArrLO d_owned_cell_ids;
     ArrGO d_owned_cell_global_ids;
+    ArrGO d_ghost_cell_global_ids;
 
     ArrLO d_cell_owned_face_ids;
     ArrGO d_cell_owned_node_global_ids;

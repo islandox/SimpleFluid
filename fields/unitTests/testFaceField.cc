@@ -64,9 +64,7 @@ public:
     {
         d_cells.resize(2);
         d_cells[0].owned = true;
-        d_cells[0].global_id = 1;
         d_cells[1].owned = false;
-        d_cells[1].global_id = 2;
 
         d_owned_cell_ids = {0};
         d_owned_cell_global_ids = {1};
@@ -77,6 +75,16 @@ public:
         d_faces[1].owner = 1;
 
         create_maps();
+    }
+
+    void assemble() override
+    {
+        // No-op since this mesh is already in an assembled state.
+    }
+
+    void export_vtu(const std::string& filename) const override
+    {
+        throw std::runtime_error("export_to_vtk not implemented for MinimalFaceOwnershipMesh");
     }
 };
 
@@ -155,9 +163,11 @@ TEST(FaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
     EXPECT_THROW(flux.value(1), std::out_of_range);
 }
 
+#include "geometry/STKMesh.hh"
+
 TEST(FaceFieldTest, RequiresAssembledMesh)
 {
-    auto unassembled_mesh = std::make_shared<MeshType>();
+    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::STKMesh<>>();
 
     EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
 }
