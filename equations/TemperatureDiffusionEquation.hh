@@ -5,6 +5,7 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
+#include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
 
 #include <cstddef>
@@ -44,25 +45,26 @@ public:
                           field_type& temperature) const;
 
 private:
+    struct BoundaryTemperature
+    {
+        scalar_type value = scalar_type{};
+        std::uint8_t has_dirichlet = 0;
+    };
+
     scalar_type cached_boundary_value(local_ordinal_type face_lid,
                                       scalar_type fallback) const;
 
     SP<const mesh_type> d_mesh;
-    std::vector<scalar_type> d_face_boundary_temperature;
-    std::vector<std::uint8_t> d_face_has_dirichlet_temperature;
+    std::vector<BoundaryTemperature> d_face_boundary_temperature;
 };
 
 template<TpetraTypePack Pack>
 TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
     SP<const mesh_type> mesh,
     const BoundaryConditionSet& boundary_conditions)
-    : d_mesh(std::move(mesh))
+    : d_mesh(EquationValidation::require_non_null_mesh(
+          std::move(mesh), "TemperatureDiffusionEquation"))
 {
-    if (!d_mesh)
-    {
-        throw std::invalid_argument("TemperatureDiffusionEquation requires a non-null mesh.");
-    }
-
     refresh_boundary_cache(boundary_conditions);
 }
 
@@ -76,8 +78,7 @@ template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache(
     const BoundaryConditionSet& boundary_conditions)
 {
-    d_face_boundary_temperature.assign(d_mesh->num_faces(), scalar_type{});
-    d_face_has_dirichlet_temperature.assign(d_mesh->num_faces(), std::uint8_t{0});
+    d_face_boundary_temperature.assign(d_mesh->num_faces(), BoundaryTemperature{});
 
     for (std::size_t face = 0; face < d_mesh->num_faces(); ++face)
     {
@@ -95,8 +96,7 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache(
             continue;
         }
 
-        d_face_boundary_temperature[face] = iter->second.value;
-        d_face_has_dirichlet_temperature[face] = 1;
+        d_face_boundary_temperature[face] = {iter->second.value, 1};
     }
 }
 
@@ -114,8 +114,9 @@ auto TemperatureDiffusionEquation<Pack>::cached_boundary_value(
     scalar_type fallback) const -> scalar_type
 {
     const auto index = static_cast<std::size_t>(face_lid);
-    return d_face_has_dirichlet_temperature[index]
-         ? d_face_boundary_temperature[index]
+    const auto& boundary = d_face_boundary_temperature[index];
+    return boundary.has_dirichlet
+         ? boundary.value
          : fallback;
 }
 
@@ -137,22 +138,14 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
     scalar_type thermal_diffusivity,
     field_type& temperature) const
 {
-    if (&temperature.mesh() != d_mesh.get())
-    {
-        throw std::invalid_argument("TemperatureDiffusionEquation field mesh mismatch.");
-    }
-    if (time_step < 0.0)
-    {
-        throw std::invalid_argument("TemperatureDiffusionEquation requires non-negative time step.");
-    }
-    if (thermal_diffusivity < 0.0)
-    {
-        throw std::invalid_argument("TemperatureDiffusionEquation requires non-negative diffusivity.");
-    }
-    if (old_temperature.size() < d_mesh->num_local_cells())
-    {
-        throw std::invalid_argument("TemperatureDiffusionEquation old temperature cache is too small.");
-    }
+    EquationValidation::require_mesh_match(*d_mesh, temperature,
+                                           "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(time_step, "time step",
+                                             "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
+                                             "TemperatureDiffusionEquation");
+    EquationValidation::assert_sufficient_cache_size(old_temperature.size(),
+                                                     d_mesh->num_local_cells());
 
     for (std::size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
@@ -190,9 +183,9 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         }
 
         laplacian /= d_mesh->cell_volume(cell_lid);
-        temperature.set_value(cell_lid,
-                              temp_p
-                            + time_step * thermal_diffusivity * laplacian);
+        temperature.set_owned_value(cell_lid,
+                                    temp_p
+                                  + time_step * thermal_diffusivity * laplacian);
     }
 }
 

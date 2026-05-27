@@ -271,13 +271,10 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::step()
 {
-    d_temperature.sync_ghosts();
-    d_velocity_z.sync_ghosts();
-
-    if (d_old_temperature.size() != d_mesh->num_local_cells())
+    if (d_step_index == 0)
     {
-        d_old_temperature.resize(d_mesh->num_local_cells());
-        d_old_velocity_z.resize(d_mesh->num_local_cells());
+        d_temperature.sync_ghosts();
+        d_velocity_z.sync_ghosts();
     }
 
     for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)

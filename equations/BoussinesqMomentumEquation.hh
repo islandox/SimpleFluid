@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "equations/EquationValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
 
@@ -46,12 +47,9 @@ private:
 template<TpetraTypePack Pack>
 BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
     SP<const mesh_type> mesh)
-    : d_mesh(std::move(mesh))
+    : d_mesh(EquationValidation::require_non_null_mesh(
+          std::move(mesh), "BoussinesqMomentumEquation"))
 {
-    if (!d_mesh)
-    {
-        throw std::invalid_argument("BoussinesqMomentumEquation requires a non-null mesh.");
-    }
 }
 
 /**
@@ -70,22 +68,16 @@ void BoussinesqMomentumEquation<Pack>::advance_vertical_velocity(
     const TimeStepperOptions& options,
     field_type& velocity_z) const
 {
-    if (&temperature.mesh() != d_mesh.get() || &velocity_z.mesh() != d_mesh.get())
-    {
-        throw std::invalid_argument("BoussinesqMomentumEquation field mesh mismatch.");
-    }
-    if (options.time_step < 0.0)
-    {
-        throw std::invalid_argument("BoussinesqMomentumEquation requires non-negative time step.");
-    }
-    if (options.kinematic_viscosity < 0.0)
-    {
-        throw std::invalid_argument("BoussinesqMomentumEquation requires non-negative viscosity.");
-    }
-    if (old_velocity_z.size() < d_mesh->num_local_cells())
-    {
-        throw std::invalid_argument("BoussinesqMomentumEquation velocity cache is too small.");
-    }
+    EquationValidation::require_mesh_match(*d_mesh, temperature,
+                                           "BoussinesqMomentumEquation");
+    EquationValidation::require_mesh_match(*d_mesh, velocity_z,
+                                           "BoussinesqMomentumEquation");
+    EquationValidation::require_non_negative(options.time_step, "time step",
+                                             "BoussinesqMomentumEquation");
+    EquationValidation::require_non_negative(options.kinematic_viscosity, "viscosity",
+                                             "BoussinesqMomentumEquation");
+    EquationValidation::assert_sufficient_cache_size(old_velocity_z.size(),
+                                                     d_mesh->num_local_cells());
 
     const auto damping =
         1.0 / (1.0 + options.time_step * options.kinematic_viscosity);
@@ -98,9 +90,9 @@ void BoussinesqMomentumEquation<Pack>::advance_vertical_velocity(
           * (temperature.value(cell_lid) - options.reference_temperature)
           * (-options.gravity_z);
 
-        velocity_z.set_value(cell_lid,
-                             (old_velocity_z[cell]
-                            + options.time_step * buoyancy) * damping);
+        velocity_z.set_owned_value(cell_lid,
+                                   (old_velocity_z[cell]
+                                  + options.time_step * buoyancy) * damping);
     }
 }
 
