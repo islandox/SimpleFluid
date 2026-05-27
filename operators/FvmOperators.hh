@@ -10,6 +10,7 @@
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
@@ -21,11 +22,14 @@ namespace SimpleFluid::FvmOperators
 namespace detail
 {
 
-inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3> a,
-                                 MeshUtils::Vec3 b)
+inline real_t& component(MeshUtils::Vec3& vector, std::size_t index)
 {
-    std::array<real_t, 3> rhs{b.x, b.y, b.z};
+    return index == 0 ? vector.x : (index == 1 ? vector.y : vector.z);
+}
 
+inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
+                                 MeshUtils::Vec3& b)
+{
     for (std::size_t pivot = 0; pivot < 3; ++pivot)
     {
         std::size_t best = pivot;
@@ -39,13 +43,14 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3> a,
 
         if (std::abs(a[best][pivot]) < 1.0e-14)
         {
+            b = {};
             return {};
         }
 
         if (best != pivot)
         {
             std::swap(a[best], a[pivot]);
-            std::swap(rhs[best], rhs[pivot]);
+            std::swap(component(b, best), component(b, pivot));
         }
 
         const auto inv = 1.0 / a[pivot][pivot];
@@ -53,7 +58,7 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3> a,
         {
             a[pivot][col] *= inv;
         }
-        rhs[pivot] *= inv;
+        component(b, pivot) *= inv;
 
         for (std::size_t row = 0; row < 3; ++row)
         {
@@ -67,11 +72,11 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3> a,
             {
                 a[row][col] -= factor * a[pivot][col];
             }
-            rhs[row] -= factor * rhs[pivot];
+            component(b, row) -= factor * component(b, pivot);
         }
     }
 
-    return {rhs[0], rhs[1], rhs[2]};
+    return b;
 }
 
 } // namespace detail
@@ -204,8 +209,7 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
             }
 
             const auto other = mesh.opposite_cell(face_lid, cell_lid);
-            const auto distance =
-                (mesh.cell_centroid(other) - mesh.cell_centroid(cell_lid)).norm();
+            const auto distance = mesh.face_cell_center_distance(face_lid);
             if (distance <= 0.0)
             {
                 throw std::runtime_error("Cannot assemble diffusion across coincident cells.");

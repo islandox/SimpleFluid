@@ -67,6 +67,38 @@ void Mesh<Pack>::create_maps()
 }
 
 /**
+ * @brief Precompute static distances from each cell center to its face centers.
+ */
+template<TpetraTypePack Pack>
+void Mesh<Pack>::create_cell_face_distances()
+{
+    d_cell_face_distances.clear();
+
+    std::size_t total_cell_faces = 0;
+    for (const auto& cell_info : d_cells)
+    {
+        total_cell_faces += cell_info.faces.size();
+    }
+    d_cell_face_distances.reserve(total_cell_faces);
+
+    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    {
+        const auto cell_lid =
+            detail::checked_size_to_ordinal<local_ordinal_type>(lid, "cell local id");
+        const auto offset = d_cell_face_distances.size();
+
+        for (const auto face_lid : d_cells[lid].faces)
+        {
+            d_cell_face_distances.push_back(cell_to_face_distance(face_lid, cell_lid));
+        }
+
+        d_cells[lid].face_distances =
+            ViewReal(d_cell_face_distances.data() + offset,
+                     d_cells[lid].faces.size());
+    }
+}
+
+/**
  * @brief create Kokkos views for mesh data on the device.
  * 
  * @tparam Pack 
@@ -80,6 +112,7 @@ void Mesh<Pack>::create_device_views()
     ArrVec3 cell_centroid_values;
     ArrLO cell_face_offset{0};
     ArrLO cell_face_ids;
+    ArrReal cell_face_distance_values;
 
     cell_gid.reserve(d_cells.size());
     cell_type.reserve(d_cells.size());
@@ -96,6 +129,9 @@ void Mesh<Pack>::create_device_views()
         cell_centroid_values.push_back(cell_info.center);
 
         cell_face_ids.insert(cell_face_ids.end(), cell_info.faces.begin(), cell_info.faces.end());
+        cell_face_distance_values.insert(cell_face_distance_values.end(),
+                                         cell_info.face_distances.begin(),
+                                         cell_info.face_distances.end());
         cell_face_offset.push_back(detail::checked_size_to_ordinal<local_ordinal_type>(
             cell_face_ids.size(), "cell-face connectivity"));
     }
@@ -163,6 +199,8 @@ void Mesh<Pack>::create_device_views()
 
     d_device_views.cell_face_offset = make_vector_view("cell_face_offset", cell_face_offset);
     d_device_views.cell_face_ids = make_vector_view("cell_face_ids", cell_face_ids);
+    d_device_views.cell_face_distance = make_vector_view("cell_face_distance",
+                                                         cell_face_distance_values);
 
     d_device_views.face_owner = make_vector_view("face_owner", face_owner);
     d_device_views.face_neighbor = make_vector_view("face_neighbor", face_neighbor);

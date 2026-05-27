@@ -73,6 +73,7 @@ public:
 
     using ViewLO = RandomAccessView<local_ordinal_type>;
     using ViewGO = RandomAccessView<global_ordinal_type>;
+    using ViewReal = RandomAccessView<real_t>;
 
     static constexpr int invalid_boundary_id = invalid_id<int>();
 
@@ -104,6 +105,7 @@ public:
         Vec3 center;                         // Cell centroid coordinates.
         double volume = 0.0;                 // Cell volume.
         ViewLO faces;                        // Local face IDs of the faces that bound this cell, in the local face order from the first element that introduced this cell.
+        ViewReal face_distances;             // Distances from this cell centroid to each face centroid, parallel to faces.
         ViewGO node_gids;                     // Global node IDs of the nodes that define this cell, in the local node order from the first element that introduced this cell.
     };
 
@@ -144,6 +146,9 @@ public:
         MeshUtils::Vec3 unit_normal_from_neighbor;
 
         double area = 0.0;
+        double owner_to_face_distance = 0.0;
+        double neighbor_to_face_distance = 0.0;
+        double cell_center_distance = 0.0;
     };
 
 
@@ -158,6 +163,7 @@ public:
 
 protected:
     void create_maps();
+    void create_cell_face_distances();
     void create_device_views();
 
     void prefer_owned_face_owners();
@@ -202,6 +208,7 @@ public:
     inline bool is_owned_cell(local_ordinal_type lid) const;
 
     inline const ViewLO& faces(local_ordinal_type cell_lid) const;
+    inline const ViewReal& face_distances(local_ordinal_type cell_lid) const;
 
     inline real_t cell_volume(local_ordinal_type lid) const;
     inline const Vec3& cell_centroid(local_ordinal_type lid) const;
@@ -211,6 +218,8 @@ public:
     inline local_ordinal_type opposite_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const;
 
     inline real_t             face_area(local_ordinal_type fid) const;
+    inline real_t             face_cell_center_distance(local_ordinal_type fid) const;
+    inline real_t             cell_to_face_distance(local_ordinal_type fid, local_ordinal_type cell_lid) const;
     inline const Vec3&        face_normal(local_ordinal_type fid) const;
     inline const Vec3&        face_centroid(local_ordinal_type fid) const;
     inline const Vec3&        face_normal_outward(local_ordinal_type fid, local_ordinal_type cell_lid) const;
@@ -249,6 +258,7 @@ protected:
     ArrGO d_ghost_cell_global_ids;
 
     ArrLO d_cell_owned_face_ids;
+    ArrReal d_cell_face_distances;
     ArrGO d_cell_owned_node_global_ids;
     ArrGO d_face_owned_node_global_ids;
     ArrVec3 d_node_coords;
@@ -284,6 +294,7 @@ struct Mesh<Pack>::DeviceViews
 
     kokkos_1dview<const local_ordinal_type>   cell_face_offset;
     kokkos_1dview<const local_ordinal_type>   cell_face_ids;
+    kokkos_1dview<const real_t>               cell_face_distance;
 
     kokkos_1dview<const local_ordinal_type>   face_owner;
     kokkos_1dview<const local_ordinal_type>   face_neighbor;

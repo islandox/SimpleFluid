@@ -15,7 +15,9 @@
 
 #include "DBNode.hh"
 
+#include <cstdint>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 namespace SimpleFluid
@@ -42,23 +44,10 @@ public:
 
     bool contains(const std::string& key) const
     {
-        return int_node.contains(key) || real_node.contains(key) ||
-               string_node.contains(key) || bool_node.contains(key) ||
-               vec_int_node.contains(key) || vec_real_node.contains(key) || vec_string_node.contains(key);
+        return d_key_types.contains(key);
     }
 
-    bool erase(const std::string& key)
-    {
-        bool erased = false;
-        erased = int_node.erase(key) || erased;
-        erased = real_node.erase(key) || erased;
-        erased = string_node.erase(key) || erased;
-        erased = bool_node.erase(key) || erased;
-        erased = vec_int_node.erase(key) || erased;
-        erased = vec_real_node.erase(key) || erased;
-        erased = vec_string_node.erase(key) || erased;
-        return erased;
-    }
+    bool erase(const std::string& key);
 
     void clear()
     {
@@ -69,15 +58,28 @@ public:
         vec_int_node.clear();
         vec_real_node.clear();
         vec_string_node.clear();
+        d_key_types.clear();
     }
 
     size_t size() const
     {
-        return int_node.size() + real_node.size() + string_node.size() +
-               bool_node.size() + vec_int_node.size() + vec_real_node.size() + vec_string_node.size();
+        return d_key_types.size();
     }
 
 private:
+    enum class NodeKind : uint8_t
+    {
+        Int,
+        Real,
+        String,
+        Bool,
+        VecInt,
+        VecReal,
+        VecString
+    };
+
+    bool erase_from_node(const std::string& key, NodeKind kind);
+
     DBNode<int> int_node;
     DBNode<real_t> real_node;
     DBNode<std::string> string_node;
@@ -86,7 +88,45 @@ private:
     DBNode<std::vector<int>> vec_int_node;
     DBNode<std::vector<real_t>> vec_real_node;
     DBNode<std::vector<std::string>> vec_string_node;
+
+    std::unordered_map<std::string, NodeKind> d_key_types;
 };
+
+inline bool Database::erase_from_node(const std::string& key, NodeKind kind)
+{
+    switch (kind)
+    {
+        case NodeKind::Int:
+            return int_node.erase(key);
+        case NodeKind::Real:
+            return real_node.erase(key);
+        case NodeKind::String:
+            return string_node.erase(key);
+        case NodeKind::Bool:
+            return bool_node.erase(key);
+        case NodeKind::VecInt:
+            return vec_int_node.erase(key);
+        case NodeKind::VecReal:
+            return vec_real_node.erase(key);
+        case NodeKind::VecString:
+            return vec_string_node.erase(key);
+    }
+
+    return false;
+}
+
+inline bool Database::erase(const std::string& key)
+{
+    const auto iter = d_key_types.find(key);
+    if (iter == d_key_types.end())
+    {
+        return false;
+    }
+
+    const auto erased = erase_from_node(key, iter->second);
+    d_key_types.erase(iter);
+    return erased;
+}
 
 template <class T>
 void Database::set(const std::string& key, T&& value)
@@ -98,30 +138,37 @@ void Database::set(const std::string& key, T&& value)
     if constexpr (std::same_as<Value, int>)
     {
         int_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::Int;
     }
     else if constexpr (std::same_as<Value, real_t>)
     {
         real_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::Real;
     }
     else if constexpr (std::same_as<Value, std::string>)
     {
         string_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::String;
     }
     else if constexpr (std::same_as<Value, bool>)
     {
         bool_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::Bool;
     }
     else if constexpr (std::same_as<Value, std::vector<int>>)
     {
         vec_int_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::VecInt;
     }
     else if constexpr (std::same_as<Value, std::vector<real_t>>)
     {
         vec_real_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::VecReal;
     }
     else if constexpr (std::same_as<Value, std::vector<std::string>>)
     {
         vec_string_node.set(key, std::forward<T>(value));
+        d_key_types[key] = NodeKind::VecString;
     }
     else
     {
