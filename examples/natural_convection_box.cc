@@ -57,7 +57,7 @@ int main(int argc, char** argv)
     SimpleFluid::BoussinesqSolver<> solver(mesh, bcs, time_options, linear_options);
     solver.initialize_heated_box(1.0, 0.0);
     solver.run();
-    solver.write_vtu("natural_convection_box.vtu");
+    solver.write_solution_vtu("natural_convection_box.vtu");
 
     if (Tpetra::getDefaultComm()->getRank() == 0)
     {
