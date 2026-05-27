@@ -56,6 +56,8 @@ struct vec3
         return vec3(x / s, y / s, z / s);
     }
 
+    constexpr auto operator<=> (const vec3&) const = default;
+
     // Dot product
     constexpr scalar_t dot(const vec3& v) const {
         return x * v.x + y * v.y + z * v.z;

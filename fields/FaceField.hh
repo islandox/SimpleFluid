@@ -192,16 +192,14 @@ void FaceField<Pack>::check_face_lid(local_ordinal_type face_lid) const
 {
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
-        if (face_lid < 0)
-        {
-            throw std::out_of_range("Face local id is out of range.");
-        }
+        CHECK(face_lid >= 0,
+              "Face local id cannot be negative: " + std::to_string(face_lid),
+              std::out_of_range);
     }
 
-    if (static_cast<std::size_t>(face_lid) >= d_face_lid_to_owned_row.size())
-    {
-        throw std::out_of_range("Face local id is out of range.");
-    }
+    CHECK(static_cast<std::size_t>(face_lid) < d_face_lid_to_owned_row.size(),
+          "Face local id is out of bounds: " + std::to_string(face_lid),
+          std::out_of_range);
 }
 
 template<TpetraTypePack Pack>
@@ -212,11 +210,9 @@ auto FaceField<Pack>::owned_row_for_face(local_ordinal_type face_lid) const
 
     const auto owned_row =
         d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)];
-    if (owned_row == invalid_owned_row())
-    {
-        throw std::out_of_range("Face local id is not owned by this rank: "
-                              + std::to_string(face_lid));
-    }
+    CHECK(owned_row != invalid_owned_row(),
+          "Face local id is not owned by this rank: " + std::to_string(face_lid),
+          std::out_of_range);
 
     return owned_row;
 }
@@ -226,11 +222,9 @@ auto FaceField<Pack>::owned_row_for_global_face(global_ordinal_type face_gid) co
     -> local_ordinal_type
 {
     const auto owned_row = d_data.getMap()->getLocalElement(face_gid);
-    if (owned_row == invalid_owned_row())
-    {
-        throw std::out_of_range("Face global id is not owned by this rank: "
-                              + std::to_string(face_gid));
-    }
+    CHECK(owned_row != invalid_owned_row(),
+          "Face global id is not owned by this rank: " + std::to_string(face_gid),
+          std::out_of_range);
 
     return owned_row;
 }

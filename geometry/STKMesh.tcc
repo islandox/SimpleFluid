@@ -278,6 +278,7 @@ void STKMesh<Pack>::assemble()
     prefer_owned_face_owners();
     compute_face_geometry();
     assign_boundary_ids_from_stk_side_parts();
+
     check_connectivity();
     create_maps();
     create_device_views();
@@ -298,6 +299,7 @@ void STKMesh<Pack>::build_cell_list()
     d_faces.clear();
     d_owned_cell_ids.clear();
     d_owned_cell_global_ids.clear();
+    d_ghost_cell_global_ids.clear();
     d_cell_owned_face_ids.clear();
     d_cell_owned_node_global_ids.clear();
     d_face_owned_node_global_ids.clear();
@@ -360,7 +362,6 @@ void STKMesh<Pack>::build_cell_list()
                 }
 
                 CellInfo cell_info;
-                cell_info.global_id = gid;
                 cell_info.type = stkmesh_detail::topology_to_cell_type<Pack>(topo);
                 cell_info.owned = owned;
 
@@ -382,6 +383,10 @@ void STKMesh<Pack>::build_cell_list()
                 {
                     d_owned_cell_ids.push_back(lid);
                     d_owned_cell_global_ids.push_back(gid);
+                }
+                else
+                {
+                    d_ghost_cell_global_ids.push_back(gid);
                 }
             }
         }
@@ -807,143 +812,6 @@ auto STKMesh<Pack>::choose_boundary_part(const stk::mesh::Bucket& bucket,
 }
 
 /**
- * @brief Create Kokkos device views from host mesh data.
- */
-template<TpetraTypePack Pack>
-void STKMesh<Pack>::create_device_views()
-{
-    ArrGO cell_gid;
-    ArrInt cell_type;
-    ArrReal cell_volume_values;
-    ArrVec3 cell_centroid_values;
-    ArrLO cell_face_offset{0};
-    ArrLO cell_face_ids;
-
-    cell_gid.reserve(d_cells.size());
-    cell_type.reserve(d_cells.size());
-    cell_volume_values.reserve(d_cells.size());
-    cell_centroid_values.reserve(d_cells.size());
-
-    for (const auto& cell_info : d_cells)
-    {
-        cell_gid.push_back(cell_info.global_id);
-        cell_type.push_back(static_cast<int>(cell_info.type));
-        cell_volume_values.push_back(cell_info.volume);
-        cell_centroid_values.push_back(cell_info.center);
-
-        cell_face_ids.insert(cell_face_ids.end(), cell_info.faces.begin(), cell_info.faces.end());
-        cell_face_offset.push_back(detail::checked_size_to_ordinal<local_ordinal_type>(
-            cell_face_ids.size(), "cell-face connectivity"));
-    }
-
-    ArrLO face_owner;
-    ArrLO face_neighbor;
-    ArrInt face_type;
-    ArrInt face_patch_values;
-    ArrReal face_area_values;
-    ArrVec3 face_normal_values;
-    ArrVec3 face_centroid_values;
-
-    face_owner.reserve(d_faces.size());
-    face_neighbor.reserve(d_faces.size());
-    face_type.reserve(d_faces.size());
-    face_patch_values.reserve(d_faces.size());
-    face_area_values.reserve(d_faces.size());
-    face_normal_values.reserve(d_faces.size());
-    face_centroid_values.reserve(d_faces.size());
-
-    for (const auto& face_info : d_faces)
-    {
-        face_owner.push_back(face_info.owner);
-        face_neighbor.push_back(face_info.neighbor);
-        face_type.push_back(static_cast<int>(face_info.type));
-        face_patch_values.push_back(face_info.boundary_id);
-        face_area_values.push_back(face_info.area);
-        face_normal_values.push_back(face_info.unit_normal_from_owner);
-        face_centroid_values.push_back(face_info.center);
-    }
-
-    std::unordered_map<global_ordinal_type, local_ordinal_type> node_id_to_lid;
-    ArrVec3 node_coord_values;
-    ArrLO cell_node_offset{0};
-    ArrLO cell_node_ids;
-    ArrLO face_node_offset{0};
-    ArrLO face_node_ids;
-
-    auto get_node_lid = [&](EntityId stk_node_id) -> local_ordinal_type
-    {
-        const auto node_id = static_cast<global_ordinal_type>(stk_node_id);
-        const auto iter = node_id_to_lid.find(node_id);
-        if (iter != node_id_to_lid.end())
-        {
-            return iter->second;
-        }
-
-        const auto node = d_stk.bulk->get_entity(stk::topology::NODE_RANK, stk_node_id);
-        if (!node.is_local_offset_valid())
-        {
-            throw std::runtime_error("Missing node id: " + std::to_string(stk_node_id));
-        }
-
-        const auto lid = detail::checked_size_to_ordinal<local_ordinal_type>(
-            node_coord_values.size(), "node count");
-        node_id_to_lid.emplace(node_id, lid);
-        d_node_gid_to_lid.emplace(node_id, lid);
-        node_coord_values.push_back(node_coord(node));
-        return lid;
-    };
-
-    d_node_gid_to_lid.clear();
-    for (const auto& cell_info : d_cells)
-    {
-        for (const auto node_id : cell_info.node_ids)
-        {
-            cell_node_ids.push_back(get_node_lid(static_cast<EntityId>(node_id)));
-        }
-
-        cell_node_offset.push_back(detail::checked_size_to_ordinal<local_ordinal_type>(
-            cell_node_ids.size(), "cell-node connectivity"));
-    }
-
-    for (const auto& face_info : d_faces)
-    {
-        for (const auto node_id : face_info.node_ids)
-        {
-            face_node_ids.push_back(get_node_lid(static_cast<EntityId>(node_id)));
-        }
-
-        face_node_offset.push_back(detail::checked_size_to_ordinal<local_ordinal_type>(
-            face_node_ids.size(), "face-node connectivity"));
-    }
-
-    d_device_views.cell_gid = make_vector_view("cell_gid", cell_gid);
-    d_device_views.cell_type = make_vector_view("cell_type", cell_type);
-
-    d_device_views.cell_volume = make_vector_view("cell_volume", cell_volume_values);
-    d_device_views.cell_centroid = make_vectorV3D_view("cell_centroid", cell_centroid_values);
-
-    d_device_views.cell_face_offset = make_vector_view("cell_face_offset", cell_face_offset);
-    d_device_views.cell_face_ids = make_vector_view("cell_face_ids", cell_face_ids);
-
-    d_device_views.face_owner = make_vector_view("face_owner", face_owner);
-    d_device_views.face_neighbor = make_vector_view("face_neighbor", face_neighbor);
-    d_device_views.face_type = make_vector_view("face_type", face_type);
-    d_device_views.face_patch = make_vector_view("face_patch", face_patch_values);
-
-    d_device_views.face_area = make_vector_view("face_area", face_area_values);
-    d_device_views.face_area_vector = make_vectorV3D_view("face_area_vector", face_normal_values);
-    d_device_views.face_centroid = make_vectorV3D_view("face_centroid", face_centroid_values);
-
-    d_device_views.node_coord = make_vectorV3D_view("node_coord", node_coord_values);
-
-    d_device_views.cell_node_offset = make_vector_view("cell_node_offset", cell_node_offset);
-    d_device_views.cell_node_ids = make_vector_view("cell_node_ids", cell_node_ids);
-
-    d_device_views.face_node_offset = make_vector_view("face_node_offset", face_node_offset);
-    d_device_views.face_node_ids = make_vector_view("face_node_ids", face_node_ids);
-}
-
-/**
  * @brief Export the mesh to a VTU file.
  *
  * @param filename Output VTU filename.
@@ -1006,10 +874,15 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
     out << "      <CellData>\n";
     out << "        <DataArray type=\"Int64\" Name=\"cell_gid\" format=\"ascii\">\n";
     out << "          ";
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (auto gid : d_owned_cell_global_ids)
     {
-        out << d_cells[lid].global_id << (lid + 1 == d_cells.size() ? "" : " ");
+        out << gid << " ";
     }
+    for (size_t i = 0; i < d_ghost_cell_global_ids.size(); ++i)
+    {
+        out << d_ghost_cell_global_ids[i] << (i + 1 == d_ghost_cell_global_ids.size() ? "" : " ");
+    }
+
     out << "\n";
     out << "        </DataArray>\n";
 

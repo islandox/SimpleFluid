@@ -97,9 +97,11 @@ TEST(CellFieldTest, InitialValueConstructorFillsVector)
     EXPECT_DOUBLE_EQ(pressure.value(1), 101325.0);
 }
 
+#include "geometry/STKMesh.hh"
+
 TEST(CellFieldTest, RequiresAssembledMesh)
 {
-    auto unassembled_mesh = std::make_shared<MeshType>();
+    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::STKMesh<Pack>>();
 
     EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
 }

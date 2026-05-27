@@ -139,16 +139,14 @@ void CellField<Pack>::check_cell_lid(local_ordinal_type cell_lid) const
 {
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
-        if (cell_lid < 0)
-        {
-            throw std::out_of_range("Cell local id is out of range.");
-        }
+        CHECK(cell_lid >= 0,
+              "Cell local id cannot be negative: " + std::to_string(cell_lid),
+              std::out_of_range);
     }
 
-    if (static_cast<std::size_t>(cell_lid) >= d_mesh->num_local_cells())
-    {
-        throw std::out_of_range("Cell local id is out of range.");
-    }
+    CHECK(static_cast<std::size_t>(cell_lid) < d_mesh->num_local_cells(),
+          "Cell local id is out of bounds: " + std::to_string(cell_lid),
+          std::out_of_range);
 }
 
 template<TpetraTypePack Pack>
@@ -156,11 +154,9 @@ auto CellField<Pack>::owned_row_for_global_cell(global_ordinal_type cell_gid) co
     -> local_ordinal_type
 {
     const auto owned_row = d_data.getMap()->getLocalElement(cell_gid);
-    if (owned_row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
-    {
-        throw std::out_of_range("Cell global id is not owned by this rank: "
-                              + std::to_string(cell_gid));
-    }
+    CHECK(owned_row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid(),
+          "Cell global id is not owned by this rank: " + std::to_string(cell_gid),
+          std::out_of_range);
 
     return owned_row;
 }
@@ -170,7 +166,7 @@ auto CellField<Pack>::owned_row_for_cell(local_ordinal_type cell_lid) const
     -> local_ordinal_type
 {
     check_cell_lid(cell_lid);
-    return owned_row_for_global_cell(d_mesh->cell_global_id(cell_lid));
+    return cell_lid; // Assuming the local cell IDs are 0-based and contiguous for owned cells
 }
 
 template<TpetraTypePack Pack>
@@ -217,8 +213,7 @@ template<TpetraTypePack Pack>
 bool CellField<Pack>::is_owned_cell(local_ordinal_type cell_lid) const
 {
     check_cell_lid(cell_lid);
-    const auto row = d_data.getMap()->getLocalElement(d_mesh->cell_global_id(cell_lid));
-    return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
+    return d_mesh->is_owned_cell(cell_lid);
 }
 
 template<TpetraTypePack Pack>

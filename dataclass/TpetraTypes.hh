@@ -13,6 +13,8 @@
 
 #include "typedefs.hh"
 
+#include <limits>
+
 #include <Tpetra_Map.hpp>
 #include <Teuchos_Comm.hpp>
 #include <Tpetra_Vector.hpp>
@@ -22,6 +24,15 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief concept for Tpetra type packs, which group together related Tpetra types for convenience.
+ * 
+ * @details the pack shall satify:
+ * - define all the required types (scalar_type, local_ordinal_type, global_ordinal_type, comm_type, node_type, map_type, graph_type, device_type, execution_space, memory_space, size_type, vector_type)
+ * - have local_ordinal_type and global_ordinal_type such that all local ordinals can be represented as global ordinals.
+ * 
+ * @tparam Pack 
+ */
 template <class Pack>
 concept TpetraTypePack = requires {
     typename Pack::scalar_type;
@@ -37,7 +48,9 @@ concept TpetraTypePack = requires {
     typename Pack::size_type;
 
     typename Pack::vector_type;
-};
+
+} && (std::numeric_limits<typename Pack::local_ordinal_type>::max() <= 
+    std::numeric_limits<typename Pack::global_ordinal_type>::max());
 
 template <class Scalar = real_t,
           class LO = local_index_t,

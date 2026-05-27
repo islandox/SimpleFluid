@@ -86,7 +86,7 @@ struct STKMeshContainer
  *
  *   A(P,P) and A(P,N) are assembled by looping over faces of owned cell P.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack = DefaultTpetraTypes>
 class STKMesh : public Mesh<Pack>
 {
 public:
@@ -97,10 +97,10 @@ public:
     using typename Base::scalar_type;
     using typename Base::comm_type;
 
-
-    using typename Base::Vec3;
     using typename Base::ViewLO;
     using typename Base::ViewGO;
+
+    using typename Base::Vec3;
     using typename Base::CellType;
     using typename Base::FaceType;
 
@@ -141,8 +141,6 @@ private:
     void build_cell_list();
     void compute_cell_geometry();
 
-    void create_device_views();
-
     int get_or_create_boundary_id(const std::string& name);
     void initialize_boundary_id_maps();
     void assign_boundary_ids_from_stk_side_parts();
@@ -165,6 +163,7 @@ private:
 private:
     using Base::check_connectivity;
     using Base::create_maps;
+    using Base::create_device_views;
     using Base::d_boundary_id_to_faces;
     using Base::d_boundary_id_to_name;
     using Base::d_boundary_name_to_id;
@@ -179,6 +178,7 @@ private:
     using Base::d_next_boundary_id;
     using Base::d_node_gid_to_lid;
     using Base::d_owned_cell_global_ids;
+    using Base::d_ghost_cell_global_ids;
     using Base::d_owned_cell_ids;
     using Base::d_spatial_dim;
     using Base::make_face_key;

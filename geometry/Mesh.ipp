@@ -30,11 +30,10 @@ namespace detail
 template <class Ordinal>
 inline Ordinal checked_size_to_ordinal(std::size_t value, std::string_view label)
 {
-    if (value >= static_cast<std::size_t>(std::numeric_limits<Ordinal>::max()))
-    {
-        throw std::overflow_error("Value for " + std::string(label)
-                                + " exceeds maximum representable by ordinal type.");
-    }
+    CHECK(value < static_cast<std::size_t>(std::numeric_limits<Ordinal>::max()),
+          "Value for " + std::string(label)
+          + " exceeds maximum representable by ordinal type.",
+          std::overflow_error);
 
     return static_cast<Ordinal>(value);
 }
@@ -58,7 +57,7 @@ inline auto Mesh<Pack>::face(local_ordinal_type lid) const -> const FaceInfo&
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const global_ordinal_type&
 {
-    return cell(lid).global_id;
+    return d_owned_cell_global_ids[static_cast<std::size_t>(lid)];
 }
 
 template<TpetraTypePack Pack>
