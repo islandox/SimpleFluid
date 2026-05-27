@@ -114,6 +114,19 @@ inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const gl
 }
 
 template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::node_coord(global_ordinal_type node_gid) const -> const Vec3&
+{
+    const auto iter = d_node_gid_to_lid.find(node_gid);
+    if (iter == d_node_gid_to_lid.end())
+    {
+        throw std::out_of_range("Node global id is not local to this mesh: "
+                              + std::to_string(node_gid));
+    }
+
+    return d_node_coords[static_cast<std::size_t>(iter->second)];
+}
+
+template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_owned_cell(local_ordinal_type lid) const
 {
     return cell(lid).owned;

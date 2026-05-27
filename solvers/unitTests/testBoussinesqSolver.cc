@@ -15,8 +15,13 @@
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
+#include <string>
 
 namespace
 {
@@ -46,6 +51,49 @@ SimpleFluid::SP<MeshType> make_box_mesh()
     return factory.template build<Pack>();
 }
 
+SimpleFluid::SP<MeshType> make_cylinder_mesh()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::CYLINDER));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("height", SimpleFluid::real_t{2.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"radial", "zmin", "zmax"});
+
+    SimpleFluid::MeshFactory factory(db);
+    return factory.template build<Pack>();
+}
+
+SimpleFluid::SP<MeshType> make_split_sphere_mesh()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::SPHERE));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"lower_surface", "upper_surface"});
+
+    SimpleFluid::MeshFactory factory(db);
+    return factory.template build<Pack>();
+}
+
+void expect_finite_solution(const MeshType& mesh,
+                            const SimpleFluid::BoussinesqSolver<Pack>& solver)
+{
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh.num_owned_cells());
+         ++lid)
+    {
+        EXPECT_TRUE(std::isfinite(solver.temperature().value(lid)));
+        EXPECT_TRUE(std::isfinite(solver.velocity_z().value(lid)));
+    }
+}
+
 } // namespace
 
 /**
@@ -73,12 +121,72 @@ TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
 
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GT(solver.time(), 0.0);
+    expect_finite_solution(*mesh, solver);
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
-         ++lid)
-    {
-        EXPECT_TRUE(std::isfinite(solver.temperature().value(lid)));
-        EXPECT_TRUE(std::isfinite(solver.velocity_z().value(lid)));
-    }
+    const auto unique_id = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto output_file = std::filesystem::temp_directory_path()
+                           / ("SimpleFluid_testBoussinesq_solution_"
+                              + std::to_string(unique_id) + ".vtu");
+    solver.write_solution_vtu(output_file.string());
+
+    std::ifstream input(output_file);
+    ASSERT_TRUE(input.good());
+    const std::string contents((std::istreambuf_iterator<char>(input)),
+                               std::istreambuf_iterator<char>());
+    EXPECT_NE(contents.find("Name=\"temperature\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"pressure\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"velocity_z\""), std::string::npos);
+
+    std::filesystem::remove(output_file);
+}
+
+/**
+ * @brief Runs a bottom-hot cylinder vessel simulation for 2 steps.
+ */
+TEST(BoussinesqSolverTest, RunsBottomHotCylinderSmokeCase)
+{
+    auto mesh = make_cylinder_mesh();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["zmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    bcs.temperature["zmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    bcs.temperature["radial"] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 2;
+    time_options.thermal_diffusivity = 1.0e-2;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
+    solver.initialize_bottom_hot_top_cold(1.0, 0.0);
+    solver.run();
+
+    EXPECT_EQ(solver.step_index(), 2);
+    EXPECT_GT(solver.time(), 0.0);
+    expect_finite_solution(*mesh, solver);
+}
+
+/**
+ * @brief Runs a bottom-hot sphere vessel simulation for 2 steps.
+ */
+TEST(BoussinesqSolverTest, RunsBottomHotSphereSmokeCase)
+{
+    auto mesh = make_split_sphere_mesh();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["lower_surface"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    bcs.temperature["upper_surface"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 2;
+    time_options.thermal_diffusivity = 1.0e-2;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
+    solver.initialize_bottom_hot_top_cold(1.0, 0.0);
+    solver.run();
+
+    EXPECT_EQ(solver.step_index(), 2);
+    EXPECT_GT(solver.time(), 0.0);
+    expect_finite_solution(*mesh, solver);
 }

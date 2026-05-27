@@ -196,6 +196,7 @@ public:
     inline const CellInfo& cell(local_ordinal_type lid) const;
     inline const FaceInfo& face(local_ordinal_type lid) const;
     inline const global_ordinal_type& cell_global_id(local_ordinal_type lid) const;
+    inline const Vec3& node_coord(global_ordinal_type node_gid) const;
 
 //-------------------------------- queries -----------------------------------//
 

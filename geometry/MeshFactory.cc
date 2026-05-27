@@ -507,7 +507,7 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
 /**
  * @brief Build a hexahedral spherified-cube mesh for a sphere.
  *
- * Boundary part order is {surface}.
+ * Boundary part order is either {surface} or {lower_surface, upper_surface}.
  */
 template <TpetraTypePack Pack>
 void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
@@ -522,7 +522,9 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
     }
     if (d_domain_exterior_face_types.empty())
     {
-        throw std::runtime_error("SPHERE MeshFactory requires boundary name {surface}.");
+        throw std::runtime_error(
+            "SPHERE MeshFactory requires boundary names {surface} "
+            "or {lower_surface,upper_surface}.");
     }
 
     const auto cell_count = positive_count_from_size(2.0 * d_radius, d_mesh_size);
@@ -538,8 +540,13 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
     auto& hex_part = meta->declare_part_with_topology("sphere_hexes", stk::topology::HEX_8);
     stk::io::put_io_part_attribute(hex_part);
 
-    auto* surface_part = declare_io_part(*meta, d_domain_exterior_face_types[0],
-                                         meta->side_rank());
+    const bool split_surface = d_domain_exterior_face_types.size() >= 2;
+    auto* lower_surface_part = declare_io_part(*meta, d_domain_exterior_face_types[0],
+                                               meta->side_rank());
+    auto* upper_surface_part = split_surface
+                             ? declare_io_part(*meta, d_domain_exterior_face_types[1],
+                                               meta->side_rank())
+                             : nullptr;
 
     auto node_id = [=](std::size_t i, std::size_t j, std::size_t k)
         -> stk::mesh::EntityId
@@ -559,7 +566,7 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
                 const bool surface = i == 0 || i == cell_count
                                   || j == 0 || j == cell_count
                                   || k == 0 || k == cell_count;
-                node_tags.emplace(node_id(i, j, k), FactoryNodeTag{0, 0, surface});
+                node_tags.emplace(node_id(i, j, k), FactoryNodeTag{0, k, surface});
             }
         }
     }
@@ -597,7 +604,23 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
                             std::all_of(tags.begin(), tags.end(),
                                         [](const FactoryNodeTag& tag)
                                         { return tag.surface; });
-                        return all_surface ? surface_part : nullptr;
+                        if (!all_surface)
+                        {
+                            return nullptr;
+                        }
+                        if (!split_surface)
+                        {
+                            return lower_surface_part;
+                        }
+
+                        std::size_t layer_sum = 0;
+                        for (const auto& tag : tags)
+                        {
+                            layer_sum += tag.layer;
+                        }
+                        const auto lower_side =
+                            layer_sum <= (cell_count * tags.size()) / 2;
+                        return lower_side ? lower_surface_part : upper_surface_part;
                     });
             }
         }

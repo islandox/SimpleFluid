@@ -81,6 +81,21 @@ SimpleFluid::SP<const SimpleFluid::Database> make_sphere_database()
     return db;
 }
 
+SimpleFluid::SP<const SimpleFluid::Database> make_split_sphere_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::SPHERE));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"lower_surface", "upper_surface"});
+
+    return db;
+}
+
 } // namespace
 
 /**
@@ -230,4 +245,36 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
     }
 
     EXPECT_EQ(surface_faces, 24u);
+}
+
+/**
+ * @brief Verifies a sphere can split its surface into lower and upper thermal boundary patches.
+ */
+TEST(MeshFactoryTest, SphereBuildsSplitSurfacePatches)
+{
+    auto db = make_split_sphere_database();
+    SimpleFluid::MeshFactory factory(db);
+
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+
+    std::unordered_map<std::string, std::size_t> boundary_counts;
+    std::size_t boundary_faces = 0;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+        {
+            const auto& name = mesh->boundary_name(fid);
+            EXPECT_TRUE(name == "lower_surface" || name == "upper_surface");
+            ++boundary_counts[name];
+            ++boundary_faces;
+        }
+    }
+
+    EXPECT_EQ(boundary_faces, 24u);
+    EXPECT_EQ(boundary_counts["lower_surface"], 12u);
+    EXPECT_EQ(boundary_counts["upper_surface"], 12u);
 }
