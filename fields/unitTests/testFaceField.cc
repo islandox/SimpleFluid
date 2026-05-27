@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "utils/testing_environment.hh"
 #include "fields/FaceField.hh"
 
 #include "geometry/MeshFactory.hh"
@@ -27,45 +28,7 @@ using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::FaceField<Pack>;
 
-class KokkosEnvironment : public testing::Environment
-{
-public:
-    void SetUp() override
-    {
-        int mpi_initialized = 0;
-        MPI_Initialized(&mpi_initialized);
-        if (!mpi_initialized)
-        {
-            MPI_Init(nullptr, nullptr);
-            d_initialized_mpi = true;
-        }
-
-        if (!Kokkos::is_initialized())
-        {
-            Kokkos::initialize();
-            d_initialized_kokkos = true;
-        }
-    }
-
-    void TearDown() override
-    {
-        if (d_initialized_kokkos && Kokkos::is_initialized())
-        {
-            Kokkos::finalize();
-        }
-
-        int mpi_finalized = 0;
-        MPI_Finalized(&mpi_finalized);
-        if (d_initialized_mpi && !mpi_finalized)
-        {
-            MPI_Finalize();
-        }
-    }
-
-private:
-    bool d_initialized_mpi = false;
-    bool d_initialized_kokkos = false;
-};
+using utils_test::KokkosEnvironment;
 
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
@@ -91,7 +54,7 @@ SimpleFluid::SP<MeshType> make_two_hex_mesh()
 {
     auto db = make_two_hex_box_database();
     SimpleFluid::MeshFactory factory(db);
-    return factory.build<Pack>();
+    return factory.template build<Pack>();
 }
 
 class MinimalFaceOwnershipMesh : public MeshType
