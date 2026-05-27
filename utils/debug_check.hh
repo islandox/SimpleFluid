@@ -1,7 +1,7 @@
 /**
  * @file debug_check.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Debug-only runtime assertion macros with configurable exception types.
  * @version 0.1
  * @date 2026-05-25
  * 

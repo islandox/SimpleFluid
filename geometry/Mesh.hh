@@ -1,7 +1,7 @@
 /**
  * @file Mesh.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Abstract finite-volume mesh base class with CRS connectivity and Kokkos device views.
  * @version 0.1
  * @date 2026-05-22
  * 
@@ -283,6 +283,9 @@ protected:
     DeviceViews d_device_views;
 };
 
+/**
+ * @brief Kokkos device-side views for mesh geometry and connectivity data.
+ */
 template<TpetraTypePack Pack>
 struct Mesh<Pack>::DeviceViews
 {

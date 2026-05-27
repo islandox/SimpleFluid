@@ -1,6 +1,12 @@
 /**
  * @file natural_convection_box.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Runnable heated-box Boussinesq smoke example.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/MeshFactory.hh"

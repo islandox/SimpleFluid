@@ -1,6 +1,12 @@
 /**
  * @file BelosLinearSolver.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Small Belos/Tpetra linear-solver wrapper.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -16,6 +22,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Configuration options for the Belos linear solver.
+ */
 struct LinearSolverOptions
 {
     int max_iterations = 200;
@@ -23,6 +32,16 @@ struct LinearSolverOptions
     int verbosity = Belos::Errors + Belos::Warnings;
 };
 
+/**
+ * @brief Solve a linear system using Belos GMRES with the given operator.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param matrix Tpetra operator representing the system matrix.
+ * @param rhs Right-hand side vector.
+ * @param solution On input, initial guess; on output, the solution.
+ * @param options Solver convergence and verbosity options.
+ * @return true if the solver converged, false otherwise.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 bool solve_linear_system(const Teuchos::RCP<const typename Pack::operator_type>& matrix,
                          const typename Pack::vector_type& rhs,
@@ -57,6 +76,19 @@ bool solve_linear_system(const Teuchos::RCP<const typename Pack::operator_type>&
     return solver.solve() == Belos::Converged;
 }
 
+/**
+ * @brief Solve a linear system using Belos GMRES with a Tpetra CrsMatrix.
+ *
+ * This overload wraps the matrix in an operator and delegates to the
+ * operator-based solve.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param matrix Tpetra CRS matrix.
+ * @param rhs Right-hand side vector.
+ * @param solution On input, initial guess; on output, the solution.
+ * @param options Solver convergence and verbosity options.
+ * @return true if the solver converged, false otherwise.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 bool solve_linear_system(const Teuchos::RCP<const typename Pack::matrix_type>& matrix,
                          const typename Pack::vector_type& rhs,

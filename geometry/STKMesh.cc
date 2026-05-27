@@ -1,7 +1,7 @@
 /**
  * @file STKMesh.cc
  * @author islandox (59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Explicit template instantiation for the STKMesh class.
  * @version 0.1
  * @date 2026-05-26
  * 

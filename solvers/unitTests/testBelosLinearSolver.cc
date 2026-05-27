@@ -1,6 +1,12 @@
 /**
  * @file testBelosLinearSolver.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief unit tests for the Belos linear solver wrapper
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -24,6 +30,9 @@ testing::Environment* const kokkos_environment =
 
 } // namespace
 
+/**
+ * @brief Solves an identity system with GMRES and verifies the solution matches the RHS.
+ */
 TEST(BelosLinearSolverTest, SolvesIdentitySystem)
 {
     const auto invalid_global_size =

@@ -1,6 +1,12 @@
 /**
  * @file BoussinesqSolver.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Minimal transient Boussinesq natural-convection driver.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -20,6 +26,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Enumeration of supported boundary condition types.
+ */
 enum class BoundaryConditionType : uint8_t
 {
     Dirichlet = 0,
@@ -27,12 +36,18 @@ enum class BoundaryConditionType : uint8_t
     NoSlip = 2
 };
 
+/**
+ * @brief Stores a single boundary condition with type and value.
+ */
 struct BoundaryCondition
 {
     BoundaryConditionType type = BoundaryConditionType::Neumann;
     real_t value = 0.0;
 };
 
+/**
+ * @brief Collection of boundary conditions for temperature, velocity, and pressure.
+ */
 struct BoundaryConditionSet
 {
     std::unordered_map<std::string, BoundaryCondition> temperature;
@@ -40,6 +55,9 @@ struct BoundaryConditionSet
     std::unordered_map<std::string, BoundaryCondition> pressure;
 };
 
+/**
+ * @brief Time stepping and physical parameters for the Boussinesq solver.
+ */
 struct TimeStepperOptions
 {
     real_t time_step = 1.0e-3;
@@ -51,6 +69,11 @@ struct TimeStepperOptions
     real_t reference_temperature = 0.5;
 };
 
+/**
+ * @brief Minimal transient Boussinesq natural-convection solver.
+ *
+ * @tparam Pack Tpetra type pack used for vector storage and communication.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class BoussinesqSolver
 {
@@ -121,6 +144,16 @@ private:
     int d_step_index = 0;
 };
 
+/**
+ * @brief Construct a Boussinesq solver with mesh, boundary conditions, and solver options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param boundary_conditions Boundary condition set for temperature, velocity, and pressure.
+ * @param time_options Time stepping and physical parameters.
+ * @param linear_options Linear solver convergence options.
+ * @throws std::invalid_argument if the mesh is null or the time step is non-positive.
+ */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(
     SP<const mesh_type> mesh,
@@ -152,6 +185,14 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     refresh_temperature_boundary_cache();
 }
 
+/**
+ * @brief Initialize temperature field as a linear blend between hot and cold walls.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param hot_temperature Temperature at the x-min boundary.
+ * @param cold_temperature Temperature at the x-max boundary.
+ * @param initial_pressure Uniform initial pressure value.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_heated_box(
     scalar_type hot_temperature,
@@ -193,6 +234,11 @@ void BoussinesqSolver<Pack>::initialize_heated_box(
     d_velocity_z.sync_ghosts();
 }
 
+/**
+ * @brief Rebuild the cached lookup of Dirichlet temperature boundary values.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::refresh_temperature_boundary_cache()
 {
@@ -220,6 +266,14 @@ void BoussinesqSolver<Pack>::refresh_temperature_boundary_cache()
     }
 }
 
+/**
+ * @brief Retrieve the cached Dirichlet temperature for a face, or a fallback value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local face index.
+ * @param fallback Value returned when the face has no Dirichlet condition.
+ * @return Cached boundary temperature or the fallback scalar.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::cached_temperature_boundary_value(
     local_ordinal_type face_lid,
@@ -231,6 +285,12 @@ auto BoussinesqSolver<Pack>::cached_temperature_boundary_value(
          : fallback;
 }
 
+/**
+ * @brief Solve the pressure projection system to enforce incompressibility.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @throws std::runtime_error if the linear solver does not converge.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::solve_pressure_projection()
 {
@@ -257,6 +317,14 @@ void BoussinesqSolver<Pack>::solve_pressure_projection()
     d_pressure.sync_ghosts();
 }
 
+/**
+ * @brief Advance the solution by one time step.
+ *
+ * Performs explicit thermal diffusion, buoyancy-driven velocity update,
+ * and a pressure projection solve.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::step()
 {
@@ -338,6 +406,13 @@ void BoussinesqSolver<Pack>::step()
     ++d_step_index;
 }
 
+/**
+ * @brief Advance the solution by a specified number of time steps.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param steps Number of time steps to perform.
+ * @throws std::invalid_argument if steps is negative.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::run(int steps)
 {

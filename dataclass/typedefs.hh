@@ -1,7 +1,7 @@
 /**
  * @file typedefs.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief 
+ * @brief Common type aliases and dimension enum used throughout SimpleFluid.
  * @version 0.1
  * @date 2026-05-22
  * 
@@ -43,6 +43,9 @@ namespace SimpleFluid
     template <class T>
     using WP = std::weak_ptr<T>;
 
+    /**
+     * @brief Enumeration of spatial dimensions for array indexing.
+     */
     enum Dimension : uint8_t
     {
         X = 0,

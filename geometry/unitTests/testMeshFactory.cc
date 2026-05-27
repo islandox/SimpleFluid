@@ -83,6 +83,9 @@ SimpleFluid::SP<const SimpleFluid::Database> make_sphere_database()
 
 } // namespace
 
+/**
+ * @brief Verifies a structured 27-hex BOX mesh has correct cell counts, types, centroids, and boundary faces.
+ */
 TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
 {
     auto db = make_27_hex_box_database();
@@ -152,6 +155,9 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_EQ(boundary_counts["zmax"], 9u);
 }
 
+/**
+ * @brief Verifies a wedge-mesh cylinder has correct cell counts, all cells are TRIPRISM, and boundary parts are properly assigned.
+ */
 TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
 {
     auto db = make_cylinder_database();
@@ -188,6 +194,9 @@ TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
     EXPECT_EQ(boundary_counts["zmax"], 8u);
 }
 
+/**
+ * @brief Verifies a spherified-cube mesh has correct cell count, type, volumes, and a single surface boundary patch.
+ */
 TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
 {
     auto db = make_sphere_database();

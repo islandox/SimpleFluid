@@ -59,6 +59,9 @@ SimpleFluid::SP<MeshType> make_two_hex_mesh()
 
 } // namespace
 
+/**
+ * @brief Validates storage, retrieval, and ownership queries for a cell field on a two-hex mesh.
+ */
 TEST(CellFieldTest, StoresValuesOnOwnedCellMap)
 {
     auto mesh = make_two_hex_mesh();
@@ -86,6 +89,9 @@ TEST(CellFieldTest, StoresValuesOnOwnedCellMap)
     EXPECT_FALSE(temperature.is_owned_global_cell(77));
 }
 
+/**
+ * @brief Confirms the initial-value constructor fills both owned and overlap data.
+ */
 TEST(CellFieldTest, InitialValueConstructorFillsVector)
 {
     auto mesh = make_two_hex_mesh();
@@ -100,6 +106,9 @@ TEST(CellFieldTest, InitialValueConstructorFillsVector)
     EXPECT_EQ(pressure.overlap_map()->getLocalNumElements(), mesh->num_local_cells());
 }
 
+/**
+ * @brief Ensures sync_ghosts() propagates owned values into the overlap storage.
+ */
 TEST(CellFieldTest, SynchronizesOwnedValuesIntoOverlapStorage)
 {
     auto mesh = make_two_hex_mesh();
