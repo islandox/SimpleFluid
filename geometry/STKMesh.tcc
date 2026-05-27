@@ -184,6 +184,7 @@ void STKMesh<Pack>::assemble()
     prefer_owned_face_owners();
     compute_face_geometry();
     assign_boundary_ids_from_stk_side_parts();
+    create_cell_face_distances();
 
     check_connectivity();
     create_maps();
@@ -207,6 +208,7 @@ void STKMesh<Pack>::build_cell_list()
     d_owned_cell_global_ids.clear();
     d_ghost_cell_global_ids.clear();
     d_cell_owned_face_ids.clear();
+    d_cell_face_distances.clear();
     d_cell_owned_node_global_ids.clear();
     d_face_owned_node_global_ids.clear();
     d_node_coords.clear();
@@ -493,6 +495,23 @@ void STKMesh<Pack>::compute_face_geometry()
 
         face_info.unit_normal_from_owner = normal;
         face_info.unit_normal_from_neighbor = normal * -1.0;
+        face_info.owner_to_face_distance = owner_to_face.norm();
+
+        if (face_info.neighbor != invalid_id<local_ordinal_type>())
+        {
+            const auto neighbor_to_face =
+                face_info.center
+              - d_cells[static_cast<std::size_t>(face_info.neighbor)].center;
+            face_info.neighbor_to_face_distance = neighbor_to_face.norm();
+            face_info.cell_center_distance =
+                (d_cells[static_cast<std::size_t>(face_info.neighbor)].center
+               - d_cells[static_cast<std::size_t>(face_info.owner)].center).norm();
+        }
+        else
+        {
+            face_info.neighbor_to_face_distance = 0.0;
+            face_info.cell_center_distance = 0.0;
+        }
     }
 }
 

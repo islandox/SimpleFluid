@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -59,6 +60,7 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using matrix_type = typename Pack::matrix_type;
+    using vector_type = typename Pack::vector_type;
 
     BoussinesqSolver(SP<const mesh_type> mesh,
                      BoundaryConditionSet boundary_conditions,
@@ -91,8 +93,9 @@ public:
     void write_vtu(const std::string& filename) const { d_mesh->export_vtu(filename); }
 
 private:
-    scalar_type temperature_boundary_value(local_ordinal_type face_lid,
-                                           scalar_type fallback) const;
+    void refresh_temperature_boundary_cache();
+    scalar_type cached_temperature_boundary_value(local_ordinal_type face_lid,
+                                                  scalar_type fallback) const;
     void solve_pressure_projection();
 
     SP<const mesh_type> d_mesh;
@@ -107,6 +110,12 @@ private:
     field_type d_velocity_z;
 
     Teuchos::RCP<matrix_type> d_pressure_matrix;
+    vector_type d_pressure_rhs;
+
+    std::vector<scalar_type> d_old_temperature;
+    std::vector<scalar_type> d_old_velocity_z;
+    std::vector<scalar_type> d_face_boundary_temperature;
+    std::vector<std::uint8_t> d_face_has_dirichlet_temperature;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
@@ -126,7 +135,8 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_pressure(d_mesh, "pressure"),
       d_velocity_x(d_mesh, "velocity_x"),
       d_velocity_y(d_mesh, "velocity_y"),
-      d_velocity_z(d_mesh, "velocity_z")
+      d_velocity_z(d_mesh, "velocity_z"),
+      d_pressure_rhs(d_mesh->owned_cell_map(), true)
 {
     if (!d_mesh)
     {
@@ -136,6 +146,10 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     {
         throw std::invalid_argument("BoussinesqSolver requires a positive time step.");
     }
+
+    d_old_temperature.resize(d_mesh->num_local_cells());
+    d_old_velocity_z.resize(d_mesh->num_local_cells());
+    refresh_temperature_boundary_cache();
 }
 
 template<TpetraTypePack Pack>
@@ -176,30 +190,45 @@ void BoussinesqSolver<Pack>::initialize_heated_box(
 
     d_temperature.sync_ghosts();
     d_pressure.sync_ghosts();
-    d_velocity_x.sync_ghosts();
-    d_velocity_y.sync_ghosts();
     d_velocity_z.sync_ghosts();
 }
 
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::temperature_boundary_value(
+void BoussinesqSolver<Pack>::refresh_temperature_boundary_cache()
+{
+    d_face_boundary_temperature.assign(d_mesh->num_faces(), scalar_type{});
+    d_face_has_dirichlet_temperature.assign(d_mesh->num_faces(), std::uint8_t{0});
+
+    for (std::size_t face = 0; face < d_mesh->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<local_ordinal_type>(face);
+        if (!d_mesh->is_boundary_face(face_lid))
+        {
+            continue;
+        }
+
+        const auto iter =
+            d_boundary_conditions.temperature.find(d_mesh->boundary_name(face_lid));
+        if (iter == d_boundary_conditions.temperature.end()
+            || iter->second.type != BoundaryConditionType::Dirichlet)
+        {
+            continue;
+        }
+
+        d_face_boundary_temperature[face] = iter->second.value;
+        d_face_has_dirichlet_temperature[face] = 1;
+    }
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::cached_temperature_boundary_value(
     local_ordinal_type face_lid,
     scalar_type fallback) const -> scalar_type
 {
-    if (!d_mesh->is_boundary_face(face_lid))
-    {
-        return fallback;
-    }
-
-    const auto iter =
-        d_boundary_conditions.temperature.find(d_mesh->boundary_name(face_lid));
-    if (iter == d_boundary_conditions.temperature.end()
-        || iter->second.type != BoundaryConditionType::Dirichlet)
-    {
-        return fallback;
-    }
-
-    return iter->second.value;
+    const auto index = static_cast<std::size_t>(face_lid);
+    return d_face_has_dirichlet_temperature[index]
+         ? d_face_boundary_temperature[index]
+         : fallback;
 }
 
 template<TpetraTypePack Pack>
@@ -211,15 +240,14 @@ void BoussinesqSolver<Pack>::solve_pressure_projection()
             FvmOperators::identity_matrix<Pack>(d_mesh->owned_cell_map());
     }
 
-    typename Pack::vector_type rhs(d_mesh->owned_cell_map(), true);
-    rhs.putScalar(0.0);
+    d_pressure_rhs.putScalar(0.0);
     d_pressure.owned_data().putScalar(0.0);
 
     auto pressure_operator =
         Teuchos::rcp_implicit_cast<const typename Pack::operator_type>(
             d_pressure_matrix);
     const bool converged =
-        solve_linear_system<Pack>(pressure_operator, rhs,
+        solve_linear_system<Pack>(pressure_operator, d_pressure_rhs,
                                   d_pressure.owned_data(), d_linear_options);
     if (!converged)
     {
@@ -235,42 +263,47 @@ void BoussinesqSolver<Pack>::step()
     d_temperature.sync_ghosts();
     d_velocity_z.sync_ghosts();
 
-    std::vector<scalar_type> old_temperature(d_mesh->num_local_cells(), 0.0);
-    std::vector<scalar_type> old_velocity_z(d_mesh->num_local_cells(), 0.0);
+    if (d_old_temperature.size() != d_mesh->num_local_cells())
+    {
+        d_old_temperature.resize(d_mesh->num_local_cells());
+        d_old_velocity_z.resize(d_mesh->num_local_cells());
+    }
+
     for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
-        old_temperature[cell] = d_temperature.local_value(cell_lid);
-        old_velocity_z[cell] = d_velocity_z.local_value(cell_lid);
+        d_old_temperature[cell] = d_temperature.local_value(cell_lid);
+        d_old_velocity_z[cell] = d_velocity_z.local_value(cell_lid);
     }
 
     for (std::size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
-        const auto temp_p = old_temperature[cell];
+        const auto temp_p = d_old_temperature[cell];
         scalar_type laplacian = 0.0;
 
-        for (const auto face_lid : d_mesh->faces(cell_lid))
+        const auto& faces = d_mesh->faces(cell_lid);
+        const auto& face_distances = d_mesh->face_distances(cell_lid);
+        for (std::size_t face_index = 0; face_index < faces.size(); ++face_index)
         {
-            const auto distance_to_face =
-                (d_mesh->face_centroid(face_lid) - d_mesh->cell_centroid(cell_lid)).norm();
+            const auto face_lid = faces[face_index];
 
             if (d_mesh->is_interior_face(face_lid))
             {
                 const auto other = d_mesh->opposite_cell(face_lid, cell_lid);
-                const auto distance =
-                    (d_mesh->cell_centroid(other) - d_mesh->cell_centroid(cell_lid)).norm();
+                const auto distance = d_mesh->face_cell_center_distance(face_lid);
                 if (distance > 0.0)
                 {
-                    laplacian += (old_temperature[static_cast<std::size_t>(other)] - temp_p)
+                    laplacian += (d_old_temperature[static_cast<std::size_t>(other)] - temp_p)
                                * d_mesh->face_area(face_lid)
                                / distance;
                 }
             }
-            else if (distance_to_face > 0.0)
+            else if (const auto distance_to_face = face_distances[face_index];
+                     distance_to_face > 0.0)
             {
                 const auto boundary_temperature =
-                    temperature_boundary_value(face_lid, temp_p);
+                    cached_temperature_boundary_value(face_lid, temp_p);
                 laplacian += (boundary_temperature - temp_p)
                            * d_mesh->face_area(face_lid)
                            / distance_to_face;
@@ -292,17 +325,13 @@ void BoussinesqSolver<Pack>::step()
             1.0 / (1.0 + d_time_options.time_step
                          * d_time_options.kinematic_viscosity);
         d_velocity_z.set_value(cell_lid,
-                               (old_velocity_z[cell]
+                               (d_old_velocity_z[cell]
                               + d_time_options.time_step * buoyancy) * damping);
-        d_velocity_x.set_value(cell_lid, 0.0);
-        d_velocity_y.set_value(cell_lid, 0.0);
     }
 
     solve_pressure_projection();
 
     d_temperature.sync_ghosts();
-    d_velocity_x.sync_ghosts();
-    d_velocity_y.sync_ghosts();
     d_velocity_z.sync_ghosts();
 
     d_time += d_time_options.time_step;

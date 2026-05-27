@@ -43,6 +43,7 @@ inline Ordinal checked_size_to_ordinal(std::size_t value, std::string_view label
 template<TpetraTypePack Pack>
 inline void Mesh<Pack>::check_cell(local_ordinal_type lid) const
 {
+#if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
         if (lid < 0)
@@ -57,11 +58,15 @@ inline void Mesh<Pack>::check_cell(local_ordinal_type lid) const
         throw std::out_of_range("Cell local id is out of bounds: "
                               + std::to_string(lid));
     }
+#else
+    (void)lid;
+#endif
 }
 
 template<TpetraTypePack Pack>
 inline void Mesh<Pack>::check_face(local_ordinal_type lid) const
 {
+#if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
         if (lid < 0)
@@ -76,6 +81,9 @@ inline void Mesh<Pack>::check_face(local_ordinal_type lid) const
         throw std::out_of_range("Face local id is out of bounds: "
                               + std::to_string(lid));
     }
+#else
+    (void)lid;
+#endif
 }
 
 template<TpetraTypePack Pack>
@@ -115,6 +123,12 @@ template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::faces(local_ordinal_type cell_lid) const -> const ViewLO&
 {
     return cell(cell_lid).faces;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::face_distances(local_ordinal_type cell_lid) const -> const ViewReal&
+{
+    return cell(cell_lid).face_distances;
 }
 
 template<TpetraTypePack Pack>
@@ -163,6 +177,31 @@ template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::face_area(local_ordinal_type fid) const
 {
     return face(fid).area;
+}
+
+template<TpetraTypePack Pack>
+inline real_t Mesh<Pack>::face_cell_center_distance(local_ordinal_type fid) const
+{
+    return face(fid).cell_center_distance;
+}
+
+template<TpetraTypePack Pack>
+inline real_t Mesh<Pack>::cell_to_face_distance(local_ordinal_type fid,
+                                                local_ordinal_type cell_lid) const
+{
+    const auto& info = face(fid);
+    check_cell(cell_lid);
+
+    if (info.owner == cell_lid)
+    {
+        return info.owner_to_face_distance;
+    }
+    if (info.neighbor != invalid_id<local_ordinal_type>() && info.neighbor == cell_lid)
+    {
+        return info.neighbor_to_face_distance;
+    }
+
+    throw std::invalid_argument("Cell is not adjacent to requested face.");
 }
 
 template<TpetraTypePack Pack>
