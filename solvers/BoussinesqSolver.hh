@@ -18,12 +18,11 @@
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
 #include "geometry/MeshUtils.hh"
+#include "io/VTUWriter.hh"
 #include "operators/FvmOperators.hh"
 
 #include <algorithm>
-#include <fstream>
-#include <iomanip>
-#include <limits>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -89,7 +88,6 @@ public:
 
 private:
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
-    static int vtu_cell_type(cell_type type);
 
     SP<const mesh_type> d_mesh;
     BoundaryConditionSet d_boundary_conditions;
@@ -343,19 +341,6 @@ void BoussinesqSolver<Pack>::run(int steps)
 }
 
 /**
- * @brief Map a mesh cell type to its VTU cell type identifier.
- *
- * @param type Mesh cell type.
- * @return VTU cell type code.
- * @throws std::runtime_error for unsupported cell types.
- */
-template<TpetraTypePack Pack>
-int BoussinesqSolver<Pack>::vtu_cell_type(cell_type type)
-{
-    return MeshUtils::vtu_cell_type_code(type);
-}
-
-/**
  * @brief Write mesh geometry plus Boussinesq cell fields to VTU.
  *
  * @tparam Pack Tpetra type pack.
@@ -365,12 +350,13 @@ int BoussinesqSolver<Pack>::vtu_cell_type(cell_type type)
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) const
 {
-    std::unordered_map<global_ordinal_type, local_ordinal_type> node_lid;
-    std::vector<vec_type> node_coords;
-    std::vector<local_ordinal_type> cell_node_offset{0};
-    std::vector<local_ordinal_type> cell_node_ids;
+    std::unordered_map<global_ordinal_type, global_index_t> node_lid;
+    VTUWriter::VectorData node_coords;
+    VTUWriter::Int64Data cell_node_offsets;
+    VTUWriter::Int64Data cell_node_ids;
+    VTUWriter::UInt8Data cell_types;
 
-    auto append_node = [&](global_ordinal_type node_gid) -> local_ordinal_type
+    auto append_node = [&](global_ordinal_type node_gid) -> global_index_t
     {
         const auto iter = node_lid.find(node_gid);
         if (iter != node_lid.end())
@@ -378,7 +364,7 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
             return iter->second;
         }
 
-        const auto lid = static_cast<local_ordinal_type>(node_coords.size());
+        const auto lid = static_cast<global_index_t>(node_coords.size());
         node_lid.emplace(node_gid, lid);
         node_coords.push_back(d_mesh->node_coord(node_gid));
         return lid;
@@ -391,107 +377,36 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
         {
             cell_node_ids.push_back(append_node(node_gid));
         }
-        cell_node_offset.push_back(static_cast<local_ordinal_type>(cell_node_ids.size()));
+        cell_node_offsets.push_back(static_cast<global_index_t>(cell_node_ids.size()));
+        cell_types.push_back(static_cast<std::uint8_t>(
+            MeshUtils::vtu_cell_type_code(cell_info.type)));
     }
 
-    std::ofstream out(filename);
-    if (!out)
-    {
-        throw std::runtime_error("Failed to open solution VTU output file: " + filename);
-    }
-
-    auto write_scalar_field = [&](const std::string& name, const field_type& field)
-    {
-        out << "        <DataArray type=\"Float64\" Name=\"" << name
-            << "\" format=\"ascii\">\n";
-        out << "          ";
-        for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
-        {
-            out << field.local_value(static_cast<local_ordinal_type>(lid))
-                << (lid + 1 == d_mesh->num_local_cells() ? "" : " ");
-        }
-        out << "\n        </DataArray>\n";
-    };
-
-    auto write_vector_field =
-        [&](const std::string& name, const velocity_field_type& field)
-    {
-        out << "        <DataArray type=\"Float64\" Name=\"" << name
-            << "\" NumberOfComponents=\"3\" format=\"ascii\">\n";
-        for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
-        {
-            const auto value =
-                field.local_value(static_cast<local_ordinal_type>(lid));
-            out << "          " << value.x << " " << value.y << " " << value.z
-                << "\n";
-        }
-        out << "        </DataArray>\n";
-    };
-
-    out << std::setprecision(std::numeric_limits<real_t>::max_digits10);
-    out << "<?xml version=\"1.0\"?>\n";
-    out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
-    out << "  <UnstructuredGrid>\n";
-    out << "    <Piece NumberOfPoints=\"" << node_coords.size()
-        << "\" NumberOfCells=\"" << d_mesh->num_local_cells() << "\">\n";
-
-    out << "      <PointData/>\n";
-    out << "      <CellData>\n";
-    write_scalar_field("temperature", d_temperature);
-    write_scalar_field("pressure", d_pressure);
-    write_vector_field("velocity", d_velocity);
-    out << "      </CellData>\n";
-
-    out << "      <Points>\n";
-    out << "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n";
-    for (const auto& coord : node_coords)
-    {
-        out << "          " << coord.x << " " << coord.y << " " << coord.z << "\n";
-    }
-    out << "        </DataArray>\n";
-    out << "      </Points>\n";
-
-    out << "      <Cells>\n";
-    out << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n";
+    VTUWriter::ScalarData temperature_values;
+    VTUWriter::ScalarData pressure_values;
+    VTUWriter::VectorData velocity_values;
+    temperature_values.reserve(d_mesh->num_local_cells());
+    pressure_values.reserve(d_mesh->num_local_cells());
+    velocity_values.reserve(d_mesh->num_local_cells());
     for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
     {
-        const auto begin = static_cast<std::size_t>(cell_node_offset[lid]);
-        const auto end = static_cast<std::size_t>(cell_node_offset[lid + 1]);
-        out << "          ";
-        for (std::size_t i = begin; i < end; ++i)
-        {
-            out << cell_node_ids[i] << (i + 1 == end ? "" : " ");
-        }
-        out << "\n";
+        const auto cell_lid = static_cast<local_ordinal_type>(lid);
+        temperature_values.push_back(static_cast<real_t>(
+            d_temperature.local_value(cell_lid)));
+        pressure_values.push_back(static_cast<real_t>(
+            d_pressure.local_value(cell_lid)));
+        velocity_values.push_back(d_velocity.local_value(cell_lid));
     }
-    out << "        </DataArray>\n";
 
-    out << "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n";
-    out << "          ";
-    for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
-    {
-        out << cell_node_offset[lid + 1]
-            << (lid + 1 == d_mesh->num_local_cells() ? "" : " ");
-    }
-    out << "\n        </DataArray>\n";
-
-    out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
-    out << "          ";
-    for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
-    {
-        out << vtu_cell_type(d_mesh->cell(static_cast<local_ordinal_type>(lid)).type)
-            << (lid + 1 == d_mesh->num_local_cells() ? "" : " ");
-    }
-    out << "\n        </DataArray>\n";
-    out << "      </Cells>\n";
-    out << "    </Piece>\n";
-    out << "  </UnstructuredGrid>\n";
-    out << "</VTKFile>\n";
-
-    if (!out)
-    {
-        throw std::runtime_error("Failed while writing solution VTU output file: " + filename);
-    }
+    VTUWriter writer;
+    writer.set_points(std::move(node_coords));
+    writer.set_cells(std::move(cell_node_ids),
+                     std::move(cell_node_offsets),
+                     std::move(cell_types));
+    writer.add_scalar_cell_data("temperature", std::move(temperature_values));
+    writer.add_scalar_cell_data("pressure", std::move(pressure_values));
+    writer.add_vector_cell_data("velocity", std::move(velocity_values));
+    writer.write(filename);
 }
 
 } // namespace SimpleFluid
