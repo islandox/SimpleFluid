@@ -67,3 +67,15 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# MacOS junk files
+.DS_Store
+
+# Machine-specific files
+.vscode
+CMakePresets.json
+
+# Copilot / Codex settings
+.github
+.codex
+.agents
