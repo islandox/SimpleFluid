@@ -14,7 +14,8 @@ find_package(MPI REQUIRED COMPONENTS CXX)
 # Add source files
 set(SOURCES "geometry/Mesh.cc"
             "geometry/STKMesh.cc"
-            "geometry/MeshFactory.cc")
+            "geometry/MeshFactory.cc"
+            "io/VTUWriter.cc")
 
 # Create library or executable
 add_library(SimpleFluid STATIC ${SOURCES})

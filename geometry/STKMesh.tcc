@@ -10,6 +10,7 @@
  */
 
 #include "STKMesh.hh"
+#include "io/VTUWriter.hh"
 
 #include <stk_io/IossBridge.hpp>
 #include <stk_mesh/base/MeshBuilder.hpp>
@@ -17,13 +18,11 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
-#include <iomanip>
-#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace SimpleFluid
@@ -103,20 +102,6 @@ inline auto face_type_from_node_count(std::size_t node_count) -> typename STKMes
 
     throw std::runtime_error("Unsupported face node count: "
                            + std::to_string(node_count));
-}
-
-/**
- * @brief Convert mesh cell type to VTU cell type identifier.
- *
- * @tparam Pack Tpetra type pack used by STKMesh.
- * @param type Mesh cell type.
- * @return VTU cell type code.
- * @throws std::runtime_error if the cell type cannot be exported.
- */
-template <TpetraTypePack Pack>
-inline int vtk_cell_type(typename STKMesh<Pack>::CellType type)
-{
-    return MeshUtils::vtu_cell_type_code(type);
 }
 
 } // namespace stkmesh_detail
@@ -746,12 +731,13 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
 {
     check_connectivity();
 
-    std::unordered_map<EntityId, local_ordinal_type> node_lid;
-    ArrVec3 node_coords;
-    ArrLO cell_node_offset{0};
-    ArrLO cell_node_ids;
+    std::unordered_map<EntityId, global_index_t> node_lid;
+    VTUWriter::VectorData node_coords;
+    VTUWriter::Int64Data cell_node_offsets;
+    VTUWriter::Int64Data cell_node_ids;
+    VTUWriter::UInt8Data vtu_cell_types;
 
-    auto append_node = [&](stk::mesh::Entity node) -> local_ordinal_type
+    auto append_node = [&](stk::mesh::Entity node) -> global_index_t
     {
         const auto node_id = d_stk.bulk->identifier(node);
         const auto iter = node_lid.find(node_id);
@@ -760,15 +746,15 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
             return iter->second;
         }
 
-        const auto lid = detail::checked_size_to_ordinal<local_ordinal_type>(
-            node_coords.size(), "VTU node count");
+        const auto lid = static_cast<global_index_t>(node_coords.size());
         node_lid.emplace(node_id, lid);
         node_coords.push_back(node_coord(node));
         return lid;
     };
 
-    for (const auto elem : d_stk.cell_entities)
+    for (std::size_t cell_lid = 0; cell_lid < d_stk.cell_entities.size(); ++cell_lid)
     {
+        const auto elem = d_stk.cell_entities[cell_lid];
         const auto num_nodes = d_stk.bulk->num_nodes(elem);
         const auto* nodes = d_stk.bulk->begin_nodes(elem);
 
@@ -777,119 +763,47 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
             cell_node_ids.push_back(append_node(nodes[i]));
         }
 
-        cell_node_offset.push_back(detail::checked_size_to_ordinal<local_ordinal_type>(
-            cell_node_ids.size(), "VTU cell-node connectivity"));
+        cell_node_offsets.push_back(
+            static_cast<global_index_t>(cell_node_ids.size()));
+        vtu_cell_types.push_back(static_cast<std::uint8_t>(
+            MeshUtils::vtu_cell_type_code(d_cells[cell_lid].type)));
     }
 
-    std::ofstream out(filename);
-    if (!out)
-    {
-        throw std::runtime_error("Failed to open VTU output file: " + filename);
-    }
+    VTUWriter::Int64Data cell_gids;
+    VTUWriter::IntData cell_types;
+    VTUWriter::ScalarData cell_volumes;
+    VTUWriter::VectorData cell_centroids;
+    cell_gids.reserve(d_cells.size());
+    cell_types.reserve(d_cells.size());
+    cell_volumes.reserve(d_cells.size());
+    cell_centroids.reserve(d_cells.size());
 
-    out << std::setprecision(std::numeric_limits<real_t>::max_digits10);
-    out << "<?xml version=\"1.0\"?>\n";
-    out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
-    out << "  <UnstructuredGrid>\n";
-    out << "    <Piece NumberOfPoints=\"" << node_coords.size()
-        << "\" NumberOfCells=\"" << d_cells.size() << "\">\n";
-
-    out << "      <PointData/>\n";
-    out << "      <CellData>\n";
-    out << "        <DataArray type=\"Int64\" Name=\"cell_gid\" format=\"ascii\">\n";
-    out << "          ";
     for (auto gid : d_owned_cell_global_ids)
     {
-        out << gid << " ";
+        cell_gids.push_back(static_cast<global_index_t>(gid));
     }
-    for (size_t i = 0; i < d_ghost_cell_global_ids.size(); ++i)
+    for (auto gid : d_ghost_cell_global_ids)
     {
-        out << d_ghost_cell_global_ids[i] << (i + 1 == d_ghost_cell_global_ids.size() ? "" : " ");
+        cell_gids.push_back(static_cast<global_index_t>(gid));
     }
 
-    out << "\n";
-    out << "        </DataArray>\n";
-
-    out << "        <DataArray type=\"Int32\" Name=\"cell_type\" format=\"ascii\">\n";
-    out << "          ";
     for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
     {
-        out << static_cast<int>(d_cells[lid].type)
-            << (lid + 1 == d_cells.size() ? "" : " ");
+        cell_types.push_back(static_cast<int>(d_cells[lid].type));
+        cell_volumes.push_back(d_cells[lid].volume);
+        cell_centroids.push_back(d_cells[lid].center);
     }
-    out << "\n";
-    out << "        </DataArray>\n";
 
-    out << "        <DataArray type=\"Float64\" Name=\"cell_volume\" format=\"ascii\">\n";
-    out << "          ";
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
-    {
-        out << d_cells[lid].volume << (lid + 1 == d_cells.size() ? "" : " ");
-    }
-    out << "\n";
-    out << "        </DataArray>\n";
-
-    out << "        <DataArray type=\"Float64\" Name=\"cell_centroid\" NumberOfComponents=\"3\" format=\"ascii\">\n";
-    for (const auto& cell_info : d_cells)
-    {
-        out << "          " << cell_info.center.x << " "
-            << cell_info.center.y << " " << cell_info.center.z << "\n";
-    }
-    out << "        </DataArray>\n";
-    out << "      </CellData>\n";
-
-    out << "      <Points>\n";
-    out << "        <DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n";
-    for (const auto& coord : node_coords)
-    {
-        out << "          " << coord.x << " " << coord.y << " " << coord.z << "\n";
-    }
-    out << "        </DataArray>\n";
-    out << "      </Points>\n";
-
-    out << "      <Cells>\n";
-    out << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n";
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
-    {
-        const auto begin = static_cast<std::size_t>(cell_node_offset[lid]);
-        const auto end = static_cast<std::size_t>(cell_node_offset[lid + 1]);
-
-        out << "          ";
-        for (std::size_t i = begin; i < end; ++i)
-        {
-            out << cell_node_ids[i] << (i + 1 == end ? "" : " ");
-        }
-        out << "\n";
-    }
-    out << "        </DataArray>\n";
-
-    out << "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n";
-    out << "          ";
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
-    {
-        out << cell_node_offset[lid + 1] << (lid + 1 == d_cells.size() ? "" : " ");
-    }
-    out << "\n";
-    out << "        </DataArray>\n";
-
-    out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
-    out << "          ";
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
-    {
-        out << stkmesh_detail::vtk_cell_type<Pack>(d_cells[lid].type)
-            << (lid + 1 == d_cells.size() ? "" : " ");
-    }
-    out << "\n";
-    out << "        </DataArray>\n";
-    out << "      </Cells>\n";
-    out << "    </Piece>\n";
-    out << "  </UnstructuredGrid>\n";
-    out << "</VTKFile>\n";
-
-    if (!out)
-    {
-        throw std::runtime_error("Failed while writing VTU output file: " + filename);
-    }
+    VTUWriter writer;
+    writer.set_points(std::move(node_coords));
+    writer.set_cells(std::move(cell_node_ids),
+                     std::move(cell_node_offsets),
+                     std::move(vtu_cell_types));
+    writer.add_int64_cell_data("cell_gid", std::move(cell_gids));
+    writer.add_int_cell_data("cell_type", std::move(cell_types));
+    writer.add_scalar_cell_data("cell_volume", std::move(cell_volumes));
+    writer.add_vector_cell_data("cell_centroid", std::move(cell_centroids));
+    writer.write(filename);
 }
 
 } // namespace SimpleFluid
