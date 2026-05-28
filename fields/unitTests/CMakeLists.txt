@@ -30,12 +30,16 @@ if(CMAKE_CONFIGURATION_TYPES)
        "else()\n"
        "  set(_ghost_sync_config \"Debug\")\n"
        "endif()\n"
-       "add_test(GhostSyncMultiRank \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\")\n"
-       "set_tests_properties(GhostSyncMultiRank PROPERTIES PROCESSORS 2)\n")
+       "add_test(GhostSyncMultiRank_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\")\n"
+       "set_tests_properties(GhostSyncMultiRank_2procs PROPERTIES PROCESSORS 2)\n"
+       "add_test(GhostSyncMultiRank_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\" --gtest_filter=\"*LargeMesh*\")\n"
+       "set_tests_properties(GhostSyncMultiRank_4procs PROPERTIES PROCESSORS 4)\n")
 else()
   file(WRITE "${GHOST_SYNC_MULTI_RANK_CTEST_FILE}"
-       "add_test(GhostSyncMultiRank \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\")\n"
-       "set_tests_properties(GhostSyncMultiRank PROPERTIES PROCESSORS 2)\n")
+       "add_test(GhostSyncMultiRank_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\")\n"
+       "set_tests_properties(GhostSyncMultiRank_2procs PROPERTIES PROCESSORS 2)\n"
+       "add_test(GhostSyncMultiRank_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\" --gtest_filter=\"*LargeMesh*\")\n"
+       "set_tests_properties(GhostSyncMultiRank_4procs PROPERTIES PROCESSORS 4)\n")
 endif()
 set_property(DIRECTORY APPEND PROPERTY
              TEST_INCLUDE_FILES "${GHOST_SYNC_MULTI_RANK_CTEST_FILE}")
