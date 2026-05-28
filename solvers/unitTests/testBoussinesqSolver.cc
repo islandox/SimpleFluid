@@ -114,9 +114,10 @@ void expect_finite_solution(const MeshType& mesh,
          ++lid)
     {
         EXPECT_TRUE(std::isfinite(solver.temperature().value(lid)));
-        EXPECT_TRUE(std::isfinite(solver.velocity_x().value(lid)));
-        EXPECT_TRUE(std::isfinite(solver.velocity_y().value(lid)));
-        EXPECT_TRUE(std::isfinite(solver.velocity_z().value(lid)));
+        const auto velocity = solver.velocity().value(lid);
+        EXPECT_TRUE(std::isfinite(velocity.x));
+        EXPECT_TRUE(std::isfinite(velocity.y));
+        EXPECT_TRUE(std::isfinite(velocity.z));
     }
 }
 
@@ -161,7 +162,8 @@ TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
                                std::istreambuf_iterator<char>());
     EXPECT_NE(contents.find("Name=\"temperature\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"pressure\""), std::string::npos);
-    EXPECT_NE(contents.find("Name=\"velocity_z\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"velocity\""), std::string::npos);
+    EXPECT_NE(contents.find("NumberOfComponents=\"3\""), std::string::npos);
 
     std::filesystem::remove(output_file);
 }

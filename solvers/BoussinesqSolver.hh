@@ -16,6 +16,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
+#include "fields/VectorCellField.hh"
 #include "operators/FvmOperators.hh"
 
 #include <algorithm>
@@ -42,6 +43,7 @@ class BoussinesqSolver
 public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
+    using velocity_field_type = VectorCellField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -75,15 +77,11 @@ public:
 
     const field_type& temperature() const noexcept { return d_temperature; }
     const field_type& pressure() const noexcept { return d_pressure; }
-    const field_type& velocity_x() const noexcept { return d_velocity_x; }
-    const field_type& velocity_y() const noexcept { return d_velocity_y; }
-    const field_type& velocity_z() const noexcept { return d_velocity_z; }
+    const velocity_field_type& velocity() const noexcept { return d_velocity; }
 
     field_type& temperature() noexcept { return d_temperature; }
     field_type& pressure() noexcept { return d_pressure; }
-    field_type& velocity_x() noexcept { return d_velocity_x; }
-    field_type& velocity_y() noexcept { return d_velocity_y; }
-    field_type& velocity_z() noexcept { return d_velocity_z; }
+    velocity_field_type& velocity() noexcept { return d_velocity; }
 
     void write_vtu(const std::string& filename) const { d_mesh->export_vtu(filename); }
     void write_solution_vtu(const std::string& filename) const;
@@ -103,14 +101,10 @@ private:
 
     field_type d_temperature;
     field_type d_pressure;
-    field_type d_velocity_x;
-    field_type d_velocity_y;
-    field_type d_velocity_z;
+    velocity_field_type d_velocity;
 
     std::vector<scalar_type> d_old_temperature;
-    std::vector<scalar_type> d_old_velocity_x;
-    std::vector<scalar_type> d_old_velocity_y;
-    std::vector<scalar_type> d_old_velocity_z;
+    std::vector<vec_type> d_old_velocity;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
@@ -161,9 +155,7 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_pressure_projection(d_mesh, d_linear_options),
       d_temperature(d_mesh, "temperature"),
       d_pressure(d_mesh, "pressure"),
-      d_velocity_x(d_mesh, "velocity_x"),
-      d_velocity_y(d_mesh, "velocity_y"),
-      d_velocity_z(d_mesh, "velocity_z")
+      d_velocity(d_mesh, "velocity")
 {
     if (d_time_options.time_step <= 0.0)
     {
@@ -171,9 +163,7 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     }
 
     d_old_temperature.resize(d_mesh->num_local_cells());
-    d_old_velocity_x.resize(d_mesh->num_local_cells());
-    d_old_velocity_y.resize(d_mesh->num_local_cells());
-    d_old_velocity_z.resize(d_mesh->num_local_cells());
+    d_old_velocity.resize(d_mesh->num_local_cells());
 }
 
 /**
@@ -223,16 +213,12 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
                                 hot_at_min * (1.0 - blend)
                               + cold_at_max * blend);
         d_pressure.set_value(cell_lid, initial_pressure);
-        d_velocity_x.set_value(cell_lid, 0.0);
-        d_velocity_y.set_value(cell_lid, 0.0);
-        d_velocity_z.set_value(cell_lid, 0.0);
+        d_velocity.set_value(cell_lid, {});
     }
 
     d_temperature.sync_ghosts();
     d_pressure.sync_ghosts();
-    d_velocity_x.sync_ghosts();
-    d_velocity_y.sync_ghosts();
-    d_velocity_z.sync_ghosts();
+    d_velocity.sync_ghosts();
 }
 
 /**
@@ -278,8 +264,8 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
 /**
  * @brief Advance the solution by one time step.
  *
- * Performs explicit thermal diffusion, buoyancy-driven velocity update,
- * and a pressure projection solve.
+ * Performs semi-implicit velocity transport, pressure projection, and
+ * semi-implicit temperature convection-diffusion.
  *
  * @tparam Pack Tpetra type pack.
  */
@@ -289,43 +275,31 @@ void BoussinesqSolver<Pack>::step()
     if (d_step_index == 0)
     {
         d_temperature.sync_ghosts();
-        d_velocity_x.sync_ghosts();
-        d_velocity_y.sync_ghosts();
-        d_velocity_z.sync_ghosts();
+        d_velocity.sync_ghosts();
     }
 
     for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
         d_old_temperature[cell] = d_temperature.local_value(cell_lid);
-        d_old_velocity_x[cell] = d_velocity_x.local_value(cell_lid);
-        d_old_velocity_y[cell] = d_velocity_y.local_value(cell_lid);
-        d_old_velocity_z[cell] = d_velocity_z.local_value(cell_lid);
+        d_old_velocity[cell] = d_velocity.local_value(cell_lid);
     }
 
     const auto old_face_fluxes =
-        FvmOperators::face_fluxes(*d_mesh, d_velocity_x, d_velocity_y,
-                                  d_velocity_z, &d_boundary_conditions);
-    d_momentum_equation.advance_velocity(d_old_velocity_x,
-                                         d_old_velocity_y,
-                                         d_old_velocity_z,
+        FvmOperators::face_fluxes(*d_mesh, d_velocity, &d_boundary_conditions);
+    d_momentum_equation.advance_velocity(d_old_velocity,
                                          old_face_fluxes,
                                          d_temperature,
                                          d_boundary_conditions,
                                          d_time_options,
-                                         d_velocity_x,
-                                         d_velocity_y,
-                                         d_velocity_z,
+                                         d_velocity,
                                          d_linear_options);
     d_pressure_projection.project(d_pressure,
                                   d_time_options.time_step,
                                   d_boundary_conditions,
-                                  d_velocity_x,
-                                  d_velocity_y,
-                                  d_velocity_z);
+                                  d_velocity);
     const auto projected_face_fluxes =
-        FvmOperators::face_fluxes(*d_mesh, d_velocity_x, d_velocity_y,
-                                  d_velocity_z, &d_boundary_conditions);
+        FvmOperators::face_fluxes(*d_mesh, d_velocity, &d_boundary_conditions);
     d_temperature_equation.advance_semi_implicit(d_old_temperature,
                                                  projected_face_fluxes,
                                                  d_time_options.time_step,
@@ -334,9 +308,7 @@ void BoussinesqSolver<Pack>::step()
                                                  d_linear_options);
 
     d_temperature.sync_ghosts();
-    d_velocity_x.sync_ghosts();
-    d_velocity_y.sync_ghosts();
-    d_velocity_z.sync_ghosts();
+    d_velocity.sync_ghosts();
 
     d_time += d_time_options.time_step;
     ++d_step_index;
@@ -444,6 +416,21 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
         out << "\n        </DataArray>\n";
     };
 
+    auto write_vector_field =
+        [&](const std::string& name, const velocity_field_type& field)
+    {
+        out << "        <DataArray type=\"Float64\" Name=\"" << name
+            << "\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+        for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
+        {
+            const auto value =
+                field.local_value(static_cast<local_ordinal_type>(lid));
+            out << "          " << value.x << " " << value.y << " " << value.z
+                << "\n";
+        }
+        out << "        </DataArray>\n";
+    };
+
     out << std::setprecision(std::numeric_limits<real_t>::max_digits10);
     out << "<?xml version=\"1.0\"?>\n";
     out << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
@@ -455,9 +442,7 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
     out << "      <CellData>\n";
     write_scalar_field("temperature", d_temperature);
     write_scalar_field("pressure", d_pressure);
-    write_scalar_field("velocity_x", d_velocity_x);
-    write_scalar_field("velocity_y", d_velocity_y);
-    write_scalar_field("velocity_z", d_velocity_z);
+    write_vector_field("velocity", d_velocity);
     out << "      </CellData>\n";
 
     out << "      <Points>\n";

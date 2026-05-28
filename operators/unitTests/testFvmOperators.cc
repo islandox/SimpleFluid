@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "fields/CellField.hh"
+#include "fields/VectorCellField.hh"
 #include "geometry/MeshFactory.hh"
 #include "operators/FvmOperators.hh"
 #include "utils/testing_environment.hh"
@@ -25,6 +26,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
+using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -101,12 +103,10 @@ TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
 TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
 {
     auto mesh = make_mesh();
-    FieldType velocity_x(mesh, 1.0, "velocity_x");
-    FieldType velocity_y(mesh, 2.0, "velocity_y");
-    FieldType velocity_z(mesh, 3.0, "velocity_z");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 2.0, 3.0}, "velocity");
 
     const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity_x, velocity_y, velocity_z);
+        *mesh, velocity);
 
     bool saw_x_face = false;
     bool saw_y_face = false;
@@ -147,9 +147,7 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
 TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
 {
     auto mesh = make_mesh();
-    FieldType velocity_x(mesh, 1.0, "velocity_x");
-    FieldType velocity_y(mesh, 2.0, "velocity_y");
-    FieldType velocity_z(mesh, 3.0, "velocity_z");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 2.0, 3.0}, "velocity");
 
     SimpleFluid::BoundaryConditionSet bcs;
     for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
@@ -158,7 +156,7 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     }
 
     const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity_x, velocity_y, velocity_z, &bcs);
+        *mesh, velocity, &bcs);
 
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
@@ -174,12 +172,10 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
 TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
 {
     auto mesh = make_mesh();
-    FieldType velocity_x(mesh, 1.0, "velocity_x");
-    FieldType velocity_y(mesh, 0.0, "velocity_y");
-    FieldType velocity_z(mesh, 0.0, "velocity_z");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 0.0, 0.0}, "velocity");
 
     const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity_x, velocity_y, velocity_z);
+        *mesh, velocity);
     auto convection =
         SimpleFluid::FvmOperators::upwind_convection_matrix<Pack>(*mesh, fluxes);
     auto pressure = SimpleFluid::FvmOperators::pressure_poisson_matrix<Pack>(
