@@ -57,6 +57,9 @@ SimpleFluid::SP<MeshType> make_two_hex_mesh()
     return factory.template build<Pack>();
 }
 
+/**
+ * @brief Minimal test mesh subclass that pre-populates connectivity for face ownership tests.
+ */
 class MinimalFaceOwnershipMesh : public MeshType
 {
 public:

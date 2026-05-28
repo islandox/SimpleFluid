@@ -217,6 +217,9 @@ TEST(BoussinesqSolverTest, RunsBottomHotSphereSmokeCase)
     expect_finite_solution(*mesh, solver);
 }
 
+/**
+ * @brief Runs a boundary-layer box simulation with three-directional gravity forcing and NoSlip walls.
+ */
 TEST(BoussinesqSolverTest, RunsBoundaryLayerBoxWithThreeDirectionGravity)
 {
     auto mesh = make_boundary_layer_box_mesh();

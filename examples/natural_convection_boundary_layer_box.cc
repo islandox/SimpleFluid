@@ -1,6 +1,12 @@
 /**
  * @file natural_convection_boundary_layer_box.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Runnable boundary-layer box case with three-direction Boussinesq forcing.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/MeshFactory.hh"

@@ -239,6 +239,9 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_EQ(boundary_counts["zmax"], 9u);
 }
 
+/**
+ * @brief Verifies boundary layer refinement on a BOX mesh re-grids selected axis edges with graded spacing.
+ */
 TEST(MeshFactoryTest, BoxBoundaryLayersRegenerateSelectedAxisEdges)
 {
     auto db = make_boundary_layer_box_database();
@@ -305,6 +308,9 @@ TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
     EXPECT_EQ(boundary_counts["zmax"], 8u);
 }
 
+/**
+ * @brief Verifies boundary layer refinement on a cylinder mesh produces all wedge cells with positive volumes.
+ */
 TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
 {
     auto db = make_boundary_layer_cylinder_database();
@@ -393,6 +399,9 @@ TEST(MeshFactoryTest, SphereBuildsSplitSurfacePatches)
     EXPECT_EQ(boundary_counts["upper_surface"], 12u);
 }
 
+/**
+ * @brief Verifies boundary layer refinement on a split-surface sphere produces the expected cell count.
+ */
 TEST(MeshFactoryTest, SphereBoundaryLayersBuildPositiveSplitSurfaceMesh)
 {
     auto db = make_boundary_layer_sphere_database();

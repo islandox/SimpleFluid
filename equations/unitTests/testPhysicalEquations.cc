@@ -1,6 +1,12 @@
 /**
  * @file testPhysicalEquations.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for separated physical equation classes.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -164,6 +170,9 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
     EXPECT_NEAR(velocity_z.value(0), 3.0, 1.0e-10);
 }
 
+/**
+ * @brief Runs semi-implicit temperature advection in X, Y, and Z directions and verifies changes.
+ */
 TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
 {
     auto mesh = make_2x2x2_mesh();

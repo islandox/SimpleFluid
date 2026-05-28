@@ -1,6 +1,12 @@
 /**
  * @file TimeStepperOptions.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Time-stepping and physical parameters used by transient equations.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 

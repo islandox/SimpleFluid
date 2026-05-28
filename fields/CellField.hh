@@ -384,6 +384,12 @@ auto CellField<Pack>::local_row_for_cell(local_ordinal_type cell_lid) const
     return row;
 }
 
+/**
+ * @brief Set all entries in both owned and overlap data vectors to a uniform value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param value Scalar value to assign to all entries.
+ */
 template<TpetraTypePack Pack>
 void CellField<Pack>::put_scalar(const scalar_type& value)
 {

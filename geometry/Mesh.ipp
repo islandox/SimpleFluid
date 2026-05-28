@@ -27,6 +27,15 @@ namespace SimpleFluid
 namespace detail
 {
 
+/**
+ * @brief Safely convert a size_t to an ordinal type with overflow checking.
+ *
+ * @tparam Ordinal Target ordinal type.
+ * @param value Size value to convert.
+ * @param label Descriptive label used in error messages.
+ * @return The value cast to the ordinal type.
+ * @throws std::overflow_error if the value exceeds the ordinal type's maximum.
+ */
 template <class Ordinal>
 inline Ordinal checked_size_to_ordinal(std::size_t value, std::string_view label)
 {
@@ -198,6 +207,15 @@ inline real_t Mesh<Pack>::face_cell_center_distance(local_ordinal_type fid) cons
     return face(fid).cell_center_distance;
 }
 
+/**
+ * @brief Compute the distance from a given cell center to a face center.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param fid Face local ID.
+ * @param cell_lid Cell local ID.
+ * @return Distance from the cell center to the face center.
+ * @throws std::invalid_argument if the cell is not adjacent to the face.
+ */
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::cell_to_face_distance(local_ordinal_type fid,
                                                 local_ordinal_type cell_lid) const
@@ -229,6 +247,15 @@ inline auto Mesh<Pack>::face_centroid(local_ordinal_type fid) const -> const Vec
     return face(fid).center;
 }
 
+/**
+ * @brief Return the unit normal of a face pointing outward from a given cell.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param fid Face local ID.
+ * @param cell_lid Cell local ID.
+ * @return Const reference to the outward-pointing unit normal vector.
+ * @throws std::invalid_argument if the cell is not adjacent to the face.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_normal_outward(local_ordinal_type fid,
                                             local_ordinal_type cell_lid) const -> const Vec3&

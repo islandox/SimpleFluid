@@ -12,6 +12,14 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Read the coordinates of an STK node entity.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param node STK node entity.
+ * @return 3D coordinate vector.
+ * @throws std::runtime_error if coordinate data is unavailable.
+ */
 template<TpetraTypePack Pack>
 inline auto STKMesh<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
 {
@@ -31,6 +39,14 @@ inline auto STKMesh<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
     return Vec3{coord[0], dim > 1 ? coord[1] : 0.0, dim > 2 ? coord[2] : 0.0};
 }
 
+/**
+ * @brief Read the coordinates of an STK node by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param node_id STK node entity ID.
+ * @return 3D coordinate vector.
+ * @throws std::out_of_range if the node ID is not found.
+ */
 template<TpetraTypePack Pack>
 inline auto STKMesh<Pack>::node_coord_by_id(EntityId node_id) const -> Vec3
 {
@@ -43,6 +59,14 @@ inline auto STKMesh<Pack>::node_coord_by_id(EntityId node_id) const -> Vec3
     return node_coord(node);
 }
 
+/**
+ * @brief Collect the coordinates of all nodes belonging to an STK element.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param elem STK element entity.
+ * @return Vector of 3D node coordinates.
+ * @throws std::out_of_range if the element entity is invalid.
+ */
 template<TpetraTypePack Pack>
 inline auto STKMesh<Pack>::element_node_coords(stk::mesh::Entity elem) const -> Arr<Vec3>
 {

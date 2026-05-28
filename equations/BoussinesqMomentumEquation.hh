@@ -1,6 +1,12 @@
 /**
  * @file BoussinesqMomentumEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Boussinesq buoyancy and velocity-transport updates.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -63,6 +69,13 @@ private:
     SP<const mesh_type> d_mesh;
 };
 
+/**
+ * @brief Construct a Boussinesq momentum equation with the given mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @throws std::invalid_argument if the mesh is null.
+ */
 template<TpetraTypePack Pack>
 BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
     SP<const mesh_type> mesh)
