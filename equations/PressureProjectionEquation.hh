@@ -21,6 +21,7 @@
 
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -64,12 +65,20 @@ public:
                  const BoundaryConditionSet& boundary_conditions,
                  velocity_field_type& velocity);
 
+    void project(field_type& pressure,
+                 scalar_type time_step,
+                 const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+                 velocity_field_type& velocity);
+
 private:
     static Teuchos::RCP<const map_type> require_owned_cell_map(
         const SP<const mesh_type>& mesh);
 
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
+    mutable std::vector<scalar_type> d_cached_face_fluxes;
+    mutable std::vector<typename mesh_type::Vec3> d_cached_gradients;
+    mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
 };
 
 /**
@@ -146,6 +155,18 @@ void PressureProjectionEquation<Pack>::project(
     const BoundaryConditionSet& boundary_conditions,
     velocity_field_type& velocity)
 {
+    const auto cache = FvmOperators::cache_velocity_boundary_conditions<Pack>(
+        *d_mesh, boundary_conditions);
+    project(pressure, time_step, cache, velocity);
+}
+
+template<TpetraTypePack Pack>
+void PressureProjectionEquation<Pack>::project(
+    field_type& pressure,
+    scalar_type time_step,
+    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    velocity_field_type& velocity)
+{
     EquationValidation::require_mesh_match(*d_mesh, pressure,
                                            "PressureProjectionEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity,
@@ -159,11 +180,19 @@ void PressureProjectionEquation<Pack>::project(
         return;
     }
 
-    const auto face_fluxes = FvmOperators::face_fluxes(
-        *d_mesh, velocity, &boundary_conditions);
+    FvmOperators::face_fluxes(*d_mesh, velocity, velocity_boundary_cache,
+                              d_cached_face_fluxes);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     auto matrix = FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
-    typename Pack::vector_type rhs(d_mesh->owned_cell_map(), true);
+    if (d_cached_rhs.is_null())
+    {
+        d_cached_rhs = Teuchos::rcp(
+            new typename Pack::vector_type(d_mesh->owned_cell_map(), true));
+    }
+    else
+    {
+        d_cached_rhs->putScalar(0.0);
+    }
 
     for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -172,24 +201,24 @@ void PressureProjectionEquation<Pack>::project(
         const auto rhs_value = row_gid == gauge_gid
                              ? scalar_type{}
                              : -FvmOperators::cell_flux_balance<Pack>(
-                                   *d_mesh, face_fluxes, cell_lid) / time_step;
-        rhs.replaceLocalValue(cell_lid, rhs_value);
+                                   *d_mesh, d_cached_face_fluxes, cell_lid) / time_step;
+        d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
     pressure.owned_data().putScalar(0.0);
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix = matrix;
-    if (!solve_linear_system<Pack>(const_matrix, rhs, pressure.owned_data(),
+    if (!solve_linear_system<Pack>(const_matrix, *d_cached_rhs, pressure.owned_data(),
                                    d_linear_options))
     {
         throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
     }
     pressure.sync_ghosts();
 
-    const auto gradients = FvmOperators::cell_gradient(pressure);
+    FvmOperators::cell_gradient(pressure, d_cached_gradients);
     for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
-        const auto& gradient = gradients[owned];
+        const auto& gradient = d_cached_gradients[owned];
         const auto corrected = velocity.value(cell_lid) - gradient * time_step;
         velocity.set_owned_value(cell_lid, corrected);
     }

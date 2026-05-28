@@ -18,6 +18,8 @@
 #include "operators/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
+#include <Teuchos_RCP.hpp>
+
 #include <cmath>
 #include <cstddef>
 #include <optional>
@@ -60,6 +62,8 @@ public:
 
 private:
     SP<const mesh_type> d_mesh;
+    mutable std::vector<scalar_type> d_cached_old_component;
+    mutable Teuchos::RCP<typename Pack::vector_type> d_cached_solution;
 };
 
 /**
@@ -115,10 +119,10 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
          component < velocity_field_type::num_components;
          ++component)
     {
-        std::vector<scalar_type> old_component(d_mesh->num_local_cells(), 0.0);
+        d_cached_old_component.assign(d_mesh->num_local_cells(), scalar_type{});
         for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
         {
-            old_component[cell] =
+            d_cached_old_component[cell] =
                 FvmOperators::detail::component_value(old_velocity[cell], component);
         }
 
@@ -151,7 +155,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         };
 
         auto system = FvmOperators::transport_system<Pack>(
-            *d_mesh, old_component, face_fluxes, options.time_step,
+            *d_mesh, d_cached_old_component, face_fluxes, options.time_step,
             options.kinematic_viscosity, boundary_value);
 
         const auto gravity_component =
@@ -178,11 +182,19 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         }
 
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-        typename Pack::vector_type solution(d_mesh->owned_cell_map(), true);
+        if (d_cached_solution.is_null())
+        {
+            d_cached_solution = Teuchos::rcp(
+                new typename Pack::vector_type(d_mesh->owned_cell_map(), true));
+        }
+        else
+        {
+            d_cached_solution->putScalar(0.0);
+        }
         const auto converged =
-            solve_linear_system<Pack>(matrix, system.rhs, solution,
+            solve_linear_system<Pack>(matrix, system.rhs, *d_cached_solution,
                                       linear_options);
-        const auto solution_data = solution.getData();
+        const auto solution_data = d_cached_solution->getData();
         for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);

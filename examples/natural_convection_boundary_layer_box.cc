@@ -9,12 +9,10 @@
  *
  */
 
-#include "geometry/MeshFactory.hh"
-#include "solvers/BoussinesqSolver.hh"
+#include "examples/ExampleRunner.hh"
 
 #include <Tpetra_Core.hpp>
 
-#include <iostream>
 #include <memory>
 
 int main(int argc, char** argv)
@@ -39,9 +37,6 @@ int main(int argc, char** argv)
     db->set("boundary_layer_growth_ratios",
             SimpleFluid::ArrReal{1.0, 1.0, 1.0, 1.0, 1.0, 1.0});
 
-    SimpleFluid::MeshFactory factory(db);
-    auto mesh = factory.build<>();
-
     SimpleFluid::BoundaryConditionSet bcs;
     bcs.temperature["xmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
     bcs.temperature["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
@@ -60,16 +55,12 @@ int main(int argc, char** argv)
     time_options.gravity_z = -9.81;
     time_options.reference_temperature = 0.5;
 
-    SimpleFluid::BoussinesqSolver<> solver(mesh, bcs, time_options);
-    solver.initialize_heated_box(1.0, 0.0);
-    solver.run();
-    solver.write_solution_vtu("natural_convection_boundary_layer_box.vtu");
+    SimpleFluid::LinearSolverOptions linear_options;
 
-    if (Tpetra::getDefaultComm()->getRank() == 0)
-    {
-        std::cout << "Wrote natural_convection_boundary_layer_box.vtu at t="
-                  << solver.time() << "\n";
-    }
+    SimpleFluid::run_boussinesq_example<>(
+        db, bcs, time_options, linear_options,
+        [](auto& solver) { solver.initialize_heated_box(1.0, 0.0); },
+        "natural_convection_boundary_layer_box.vtu");
 
     return 0;
 }
