@@ -116,17 +116,7 @@ inline auto face_type_from_node_count(std::size_t node_count) -> typename STKMes
 template <TpetraTypePack Pack>
 inline int vtk_cell_type(typename STKMesh<Pack>::CellType type)
 {
-    switch (type)
-    {
-        case STKMesh<Pack>::CellType::HEXAHEDRON:
-            return 12;
-        case STKMesh<Pack>::CellType::TRIPRISM:
-            return 13;
-        default:
-            break;
-    }
-
-    throw std::runtime_error("VTU export encountered an unsupported cell type.");
+    return MeshUtils::vtu_cell_type_code(type);
 }
 
 } // namespace stkmesh_detail

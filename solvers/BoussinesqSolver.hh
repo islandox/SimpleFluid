@@ -17,6 +17,7 @@
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
+#include "geometry/MeshUtils.hh"
 #include "operators/FvmOperators.hh"
 
 #include <algorithm>
@@ -94,6 +95,7 @@ private:
     BoundaryConditionSet d_boundary_conditions;
     TimeStepperOptions d_time_options;
     LinearSolverOptions d_linear_options;
+    FvmOperators::VelocityBoundaryCache<Pack> d_velocity_boundary_cache;
 
     TemperatureDiffusionEquation<Pack> d_temperature_equation;
     BoussinesqMomentumEquation<Pack> d_momentum_equation;
@@ -105,6 +107,8 @@ private:
 
     std::vector<scalar_type> d_old_temperature;
     std::vector<vec_type> d_old_velocity;
+    std::vector<scalar_type> d_old_face_fluxes;
+    std::vector<scalar_type> d_projected_face_fluxes;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
@@ -150,6 +154,9 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_boundary_conditions(std::move(boundary_conditions)),
       d_time_options(time_options),
       d_linear_options(linear_options),
+      d_velocity_boundary_cache(
+          FvmOperators::cache_velocity_boundary_conditions<Pack>(
+              *d_mesh, d_boundary_conditions)),
       d_temperature_equation(d_mesh, d_boundary_conditions),
       d_momentum_equation(d_mesh),
       d_pressure_projection(d_mesh, d_linear_options),
@@ -285,10 +292,10 @@ void BoussinesqSolver<Pack>::step()
         d_old_velocity[cell] = d_velocity.local_value(cell_lid);
     }
 
-    const auto old_face_fluxes =
-        FvmOperators::face_fluxes(*d_mesh, d_velocity, &d_boundary_conditions);
+    FvmOperators::face_fluxes(*d_mesh, d_velocity, d_velocity_boundary_cache,
+                              d_old_face_fluxes);
     d_momentum_equation.advance_velocity(d_old_velocity,
-                                         old_face_fluxes,
+                                         d_old_face_fluxes,
                                          d_temperature,
                                          d_boundary_conditions,
                                          d_time_options,
@@ -296,12 +303,12 @@ void BoussinesqSolver<Pack>::step()
                                          d_linear_options);
     d_pressure_projection.project(d_pressure,
                                   d_time_options.time_step,
-                                  d_boundary_conditions,
+                                  d_velocity_boundary_cache,
                                   d_velocity);
-    const auto projected_face_fluxes =
-        FvmOperators::face_fluxes(*d_mesh, d_velocity, &d_boundary_conditions);
+    FvmOperators::face_fluxes(*d_mesh, d_velocity, d_velocity_boundary_cache,
+                              d_projected_face_fluxes);
     d_temperature_equation.advance_semi_implicit(d_old_temperature,
-                                                 projected_face_fluxes,
+                                                 d_projected_face_fluxes,
                                                  d_time_options.time_step,
                                                  d_time_options.thermal_diffusivity,
                                                  d_temperature,
@@ -345,17 +352,7 @@ void BoussinesqSolver<Pack>::run(int steps)
 template<TpetraTypePack Pack>
 int BoussinesqSolver<Pack>::vtu_cell_type(cell_type type)
 {
-    switch (type)
-    {
-        case cell_type::HEXAHEDRON:
-            return 12;
-        case cell_type::TRIPRISM:
-            return 13;
-        default:
-            break;
-    }
-
-    throw std::runtime_error("Solution VTU export encountered an unsupported cell type.");
+    return MeshUtils::vtu_cell_type_code(type);
 }
 
 /**

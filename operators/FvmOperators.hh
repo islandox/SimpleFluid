@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -117,14 +118,14 @@ inline real_t component_value(const MeshUtils::Vec3& vector, std::size_t index)
  * @return Vector of gradients, one per owned cell.
  */
 template<TpetraTypePack Pack>
-std::vector<typename Mesh<Pack>::Vec3>
-cell_gradient(const CellField<Pack>& field)
+void cell_gradient(const CellField<Pack>& field,
+                   std::vector<typename Mesh<Pack>::Vec3>& gradients)
 {
     using mesh_type = Mesh<Pack>;
     using local_ordinal_type = typename mesh_type::local_ordinal_type;
 
     const auto& mesh = field.mesh();
-    std::vector<typename mesh_type::Vec3> gradients(mesh.num_owned_cells());
+    gradients.assign(mesh.num_owned_cells(), typename mesh_type::Vec3{});
 
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -163,6 +164,14 @@ cell_gradient(const CellField<Pack>& field)
 
         gradients[owned] = detail::solve_3x3(normal, rhs);
     }
+}
+
+template<TpetraTypePack Pack>
+std::vector<typename Mesh<Pack>::Vec3>
+cell_gradient(const CellField<Pack>& field)
+{
+    std::vector<typename Mesh<Pack>::Vec3> gradients;
+    cell_gradient(field, gradients);
 
     return gradients;
 }
@@ -301,6 +310,135 @@ struct TransportSystem
 };
 
 /**
+ * @brief Per-face cached velocity boundary values for face-flux assembly.
+ */
+template<TpetraTypePack Pack>
+struct VelocityBoundaryCache
+{
+    using vec_type = typename Mesh<Pack>::Vec3;
+
+    std::vector<vec_type> value;
+    std::vector<std::uint8_t> has_value;
+};
+
+template<TpetraTypePack Pack>
+VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
+    const Mesh<Pack>& mesh,
+    const BoundaryConditionSet& boundary_conditions)
+{
+    VelocityBoundaryCache<Pack> cache;
+    cache.value.assign(mesh.num_faces(), {});
+    cache.has_value.assign(mesh.num_faces(), 0);
+
+    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<typename Pack::local_ordinal_type>(face);
+        if (!mesh.is_boundary_face(face_lid))
+        {
+            continue;
+        }
+
+        const auto iter =
+            boundary_conditions.velocity.find(mesh.boundary_name(face_lid));
+        if (iter == boundary_conditions.velocity.end())
+        {
+            continue;
+        }
+
+        if (iter->second.type == BoundaryConditionType::NoSlip)
+        {
+            cache.value[face] = {};
+            cache.has_value[face] = 1;
+        }
+        else if (iter->second.type == BoundaryConditionType::Dirichlet)
+        {
+            cache.value[face] = iter->second.value;
+            cache.has_value[face] = 1;
+        }
+    }
+
+    return cache;
+}
+
+template<TpetraTypePack Pack>
+void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 const VelocityBoundaryCache<Pack>* boundary_cache,
+                 std::vector<typename Pack::scalar_type>& fluxes)
+{
+    if (&velocity.mesh() != &mesh)
+    {
+        throw std::invalid_argument("face_fluxes requires a velocity field on the input mesh.");
+    }
+    if (boundary_cache != nullptr
+        && (boundary_cache->has_value.size() != mesh.num_faces()
+            || boundary_cache->value.size() != mesh.num_faces()))
+    {
+        throw std::invalid_argument("face_fluxes received the wrong boundary-cache size.");
+    }
+
+    fluxes.assign(mesh.num_faces(), typename Pack::scalar_type{});
+    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<typename Pack::local_ordinal_type>(face);
+        const auto owner = mesh.owner_cell(face_lid);
+        auto face_velocity = velocity.local_value(owner);
+
+        if (mesh.is_interior_face(face_lid))
+        {
+            const auto neighbor = mesh.neighbor_cell(face_lid);
+            face_velocity = (face_velocity + velocity.local_value(neighbor)) / 2.0;
+        }
+        else if (boundary_cache != nullptr && mesh.is_boundary_face(face_lid))
+        {
+            if (!boundary_cache->has_value[face])
+            {
+                continue;
+            }
+
+            face_velocity = boundary_cache->value[face];
+        }
+        else
+        {
+            continue;
+        }
+
+        fluxes[face] = face_velocity.dot(mesh.face_normal(face_lid))
+                     * mesh.face_area(face_lid);
+    }
+}
+
+template<TpetraTypePack Pack>
+void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 const VelocityBoundaryCache<Pack>& boundary_cache,
+                 std::vector<typename Pack::scalar_type>& fluxes)
+{
+    face_fluxes(mesh, velocity, &boundary_cache, fluxes);
+}
+
+template<TpetraTypePack Pack>
+void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 const BoundaryConditionSet* boundary_conditions,
+                 std::vector<typename Pack::scalar_type>& fluxes)
+{
+    if (boundary_conditions == nullptr)
+    {
+        face_fluxes(mesh, velocity,
+                    static_cast<const VelocityBoundaryCache<Pack>*>(nullptr),
+                    fluxes);
+        return;
+    }
+
+    const auto cache =
+        cache_velocity_boundary_conditions<Pack>(mesh, *boundary_conditions);
+    face_fluxes(mesh, velocity, cache, fluxes);
+}
+
+/**
  * @brief Compute owner-oriented integrated face fluxes from cell velocities.
  *
  * Interior fluxes use arithmetic face interpolation. Exterior faces default to
@@ -318,59 +456,20 @@ face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const BoundaryConditionSet* boundary_conditions = nullptr)
 {
-    using scalar_type = typename Pack::scalar_type;
+    std::vector<typename Pack::scalar_type> fluxes;
+    face_fluxes(mesh, velocity, boundary_conditions, fluxes);
 
-    if (&velocity.mesh() != &mesh)
-    {
-        throw std::invalid_argument("face_fluxes requires a velocity field on the input mesh.");
-    }
+    return fluxes;
+}
 
-    std::vector<scalar_type> fluxes(mesh.num_faces(), 0.0);
-    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
-    {
-        const auto face_lid =
-            static_cast<typename Pack::local_ordinal_type>(face);
-        const auto owner = mesh.owner_cell(face_lid);
-        auto face_velocity = velocity.local_value(owner);
-
-        if (mesh.is_interior_face(face_lid))
-        {
-            const auto neighbor = mesh.neighbor_cell(face_lid);
-            face_velocity = (face_velocity + velocity.local_value(neighbor)) / 2.0;
-        }
-        else if (boundary_conditions != nullptr && mesh.is_boundary_face(face_lid))
-        {
-            const auto iter =
-                boundary_conditions->velocity.find(mesh.boundary_name(face_lid));
-            if (iter == boundary_conditions->velocity.end())
-            {
-                fluxes[face] = 0.0;
-                continue;
-            }
-
-            if (iter->second.type == BoundaryConditionType::NoSlip)
-            {
-                face_velocity = {};
-            }
-            else if (iter->second.type == BoundaryConditionType::Dirichlet)
-            {
-                face_velocity = iter->second.value;
-            }
-            else
-            {
-                fluxes[face] = 0.0;
-                continue;
-            }
-        }
-        else if (!mesh.is_interior_face(face_lid))
-        {
-            fluxes[face] = 0.0;
-            continue;
-        }
-
-        fluxes[face] = face_velocity.dot(mesh.face_normal(face_lid))
-                     * mesh.face_area(face_lid);
-    }
+template<TpetraTypePack Pack>
+std::vector<typename Pack::scalar_type>
+face_fluxes(const Mesh<Pack>& mesh,
+            const VectorCellField<Pack>& velocity,
+            const VelocityBoundaryCache<Pack>& boundary_cache)
+{
+    std::vector<typename Pack::scalar_type> fluxes;
+    face_fluxes(mesh, velocity, boundary_cache, fluxes);
 
     return fluxes;
 }
@@ -556,11 +655,23 @@ transport_system(const Mesh<Pack>& mesh,
         Teuchos::Array<global_ordinal_type> cols;
         Teuchos::Array<scalar_type> vals;
         scalar_type diagonal = mesh.cell_volume(cell_lid) / time_step;
-        scalar_type rhs_value =
-            diagonal * old_values[static_cast<std::size_t>(cell_lid)];
+        const auto old_value = old_values[static_cast<std::size_t>(cell_lid)];
+        scalar_type rhs_value = diagonal * old_value;
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
+            std::optional<scalar_type> cached_boundary_value;
+            bool boundary_value_cached = false;
+            auto face_boundary_value = [&]() -> const std::optional<scalar_type>&
+            {
+                if (!boundary_value_cached)
+                {
+                    cached_boundary_value = boundary_value(face_lid, old_value);
+                    boundary_value_cached = true;
+                }
+                return cached_boundary_value;
+            };
+
             const auto owner_oriented_flux =
                 face_fluxes[static_cast<std::size_t>(face_lid)];
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
@@ -579,10 +690,8 @@ transport_system(const Mesh<Pack>& mesh,
             }
             else
             {
-                const auto value = boundary_value(
-                    face_lid, old_values[static_cast<std::size_t>(cell_lid)]);
-                rhs_value -= out_flux * value.value_or(
-                    old_values[static_cast<std::size_t>(cell_lid)]);
+                const auto& value = face_boundary_value();
+                rhs_value -= out_flux * value.value_or(old_value);
             }
 
             if (diffusivity <= 0.0)
@@ -609,8 +718,7 @@ transport_system(const Mesh<Pack>& mesh,
             {
                 const auto distance =
                     mesh.cell_to_face_distance(face_lid, cell_lid);
-                const auto value = boundary_value(
-                    face_lid, old_values[static_cast<std::size_t>(cell_lid)]);
+                const auto& value = face_boundary_value();
                 if (distance > 0.0 && value.has_value())
                 {
                     const auto coeff =

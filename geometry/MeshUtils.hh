@@ -14,6 +14,9 @@
 #include "dataclass/typedefs.hh"
 #include "dataclass/vec3.hh"
 
+#include <stdexcept>
+#include <vector>
+
 namespace SimpleFluid
 {
 
@@ -42,6 +45,29 @@ enum class FaceType : uint8_t
 
 using Vec3 = vec3<real_t>;
 
+/**
+ * @brief Map a mesh cell type to its VTU cell type identifier.
+ *
+ * VTU convention: 12 = hexahedron, 13 = wedge/triangular prism.
+ *
+ * @param type Mesh cell type.
+ * @return VTU cell type code.
+ * @throws std::runtime_error if the cell type cannot be exported.
+ */
+inline int vtu_cell_type_code(CellType type)
+{
+    switch (type)
+    {
+        case CellType::HEXAHEDRON:
+            return 12;
+        case CellType::TRIPRISM:
+            return 13;
+        default:
+            break;
+    }
+
+    throw std::runtime_error("VTU export encountered an unsupported cell type.");
+}
 
 /**
  * @brief Compute the arithmetic average of a list of points.
