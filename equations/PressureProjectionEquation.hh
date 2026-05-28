@@ -4,8 +4,10 @@
  */
 #pragma once
 
+#include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
+#include "operators/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <Teuchos_RCP.hpp>
@@ -17,10 +19,10 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Pressure-projection solve used to keep the transient flow update bounded.
+ * @brief Pressure-projection solve used to correct transient velocity fields.
  *
- * The current implementation preserves the solver's identity projection
- * behavior while separating the equation from solver orchestration.
+ * The class keeps the legacy pressure reset and the pressure-correction
+ * projection used by the Boussinesq solver separated from orchestration.
  *
  * @tparam Pack Tpetra type pack used for matrix/vector storage.
  */
@@ -31,6 +33,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using map_type = typename Pack::map_type;
+    using scalar_type = typename Pack::scalar_type;
 
     explicit PressureProjectionEquation(
         SP<const mesh_type> mesh,
@@ -47,6 +50,13 @@ public:
     }
 
     void solve(field_type& pressure);
+
+    void project(field_type& pressure,
+                 scalar_type time_step,
+                 const BoundaryConditionSet& boundary_conditions,
+                 field_type& velocity_x,
+                 field_type& velocity_y,
+                 field_type& velocity_z);
 
 private:
     static Teuchos::RCP<const map_type> require_owned_cell_map(
@@ -82,7 +92,7 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
 }
 
 /**
- * @brief Apply the current identity pressure projection.
+ * @brief Apply the legacy identity pressure reset.
  *
  * @tparam Pack Tpetra type pack.
  * @param pressure Pressure field updated by the projection solve.
@@ -95,6 +105,90 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
 
     pressure.owned_data().putScalar(0.0);
     pressure.sync_ghosts();
+}
+
+/**
+ * @brief Solve pressure correction and project all velocity components.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param pressure Pressure-correction field.
+ * @param time_step Time-step size.
+ * @param boundary_conditions Velocity boundary conditions for face fluxes.
+ * @param velocity_x X velocity predictor, overwritten with projected velocity.
+ * @param velocity_y Y velocity predictor, overwritten with projected velocity.
+ * @param velocity_z Z velocity predictor, overwritten with projected velocity.
+ */
+template<TpetraTypePack Pack>
+void PressureProjectionEquation<Pack>::project(
+    field_type& pressure,
+    scalar_type time_step,
+    const BoundaryConditionSet& boundary_conditions,
+    field_type& velocity_x,
+    field_type& velocity_y,
+    field_type& velocity_z)
+{
+    EquationValidation::require_mesh_match(*d_mesh, pressure,
+                                           "PressureProjectionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, velocity_x,
+                                           "PressureProjectionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, velocity_y,
+                                           "PressureProjectionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, velocity_z,
+                                           "PressureProjectionEquation");
+    if (time_step <= 0.0)
+    {
+        throw std::invalid_argument("PressureProjectionEquation requires a positive time step.");
+    }
+    if (d_mesh->num_owned_cells() == 0)
+    {
+        return;
+    }
+
+    const auto face_fluxes = FvmOperators::face_fluxes(
+        *d_mesh, velocity_x, velocity_y, velocity_z, &boundary_conditions);
+    const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
+    auto matrix = FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
+    typename Pack::vector_type rhs(d_mesh->owned_cell_map(), true);
+
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
+        const auto row_gid = d_mesh->cell_global_id(cell_lid);
+        const auto rhs_value = row_gid == gauge_gid
+                             ? scalar_type{}
+                             : -FvmOperators::cell_flux_balance<Pack>(
+                                   *d_mesh, face_fluxes, cell_lid) / time_step;
+        rhs.replaceLocalValue(cell_lid, rhs_value);
+    }
+
+    pressure.owned_data().putScalar(0.0);
+    Teuchos::RCP<const typename Pack::matrix_type> const_matrix = matrix;
+    if (!solve_linear_system<Pack>(const_matrix, rhs, pressure.owned_data(),
+                                   d_linear_options))
+    {
+        throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
+    }
+    pressure.sync_ghosts();
+
+    const auto gradients = FvmOperators::cell_gradient(pressure);
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
+        const auto& gradient = gradients[owned];
+        velocity_x.set_owned_value(cell_lid,
+                                   velocity_x.value(cell_lid)
+                                 - time_step * gradient.x);
+        velocity_y.set_owned_value(cell_lid,
+                                   velocity_y.value(cell_lid)
+                                 - time_step * gradient.y);
+        velocity_z.set_owned_value(cell_lid,
+                                   velocity_z.value(cell_lid)
+                                 - time_step * gradient.z);
+    }
+
+    velocity_x.sync_ghosts();
+    velocity_y.sync_ghosts();
+    velocity_z.sync_ghosts();
 }
 
 } // namespace SimpleFluid

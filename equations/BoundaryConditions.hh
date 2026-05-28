@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "dataclass/vec3.hh"
 #include "dataclass/typedefs.hh"
 
 #include <cstdint>
@@ -33,12 +34,21 @@ struct BoundaryCondition
 };
 
 /**
+ * @brief Stores a vector boundary condition for velocity fields.
+ */
+struct VectorBoundaryCondition
+{
+    BoundaryConditionType type = BoundaryConditionType::Neumann;
+    vec3<real_t> value{};
+};
+
+/**
  * @brief Collection of boundary conditions for temperature, velocity, and pressure.
  */
 struct BoundaryConditionSet
 {
     std::unordered_map<std::string, BoundaryCondition> temperature;
-    std::unordered_map<std::string, BoundaryCondition> velocity;
+    std::unordered_map<std::string, VectorBoundaryCondition> velocity;
     std::unordered_map<std::string, BoundaryCondition> pressure;
 };
 

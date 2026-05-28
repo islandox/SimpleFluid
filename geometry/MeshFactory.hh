@@ -14,6 +14,8 @@
 #include "STKMesh.hh"
 #include "dataclass/Database.hh"
 
+#include <optional>
+
 namespace SimpleFluid
 {
 /**
@@ -43,6 +45,14 @@ public:
     SP<Mesh<Pack>> build();
 
 private:
+    struct BoundaryLayerSpec
+    {
+        std::string boundary_name;
+        int count = 0;
+        real_t first_cell_height = 0.0;
+        real_t growth_ratio = 1.0;
+    };
+
     template <TpetraTypePack Pack>
     void build_box_mesh(SP<STKMesh<Pack>>& mesh);
 
@@ -51,6 +61,11 @@ private:
 
     template <TpetraTypePack Pack>
     void build_sphere_mesh(SP<STKMesh<Pack>>& mesh);
+
+    const BoundaryLayerSpec* boundary_layer_spec(
+        const std::string& boundary_name) const;
+
+    void validate_boundary_layer_names() const;
 
 private:
     DomainType d_domain_type;
@@ -65,5 +80,6 @@ private:
     // Face orders are: - BOX: {X-, X+, Y-, Y+, Z-, Z+}
     //                   - CYLINDER: {radial, top, bottom}
     Arr<std::string> d_domain_exterior_face_types;
+    Arr<BoundaryLayerSpec> d_boundary_layer_specs;
 };
 }

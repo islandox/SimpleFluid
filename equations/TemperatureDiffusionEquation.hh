@@ -1,15 +1,19 @@
 /**
  * @file TemperatureDiffusionEquation.hh
- * @brief Explicit finite-volume temperature diffusion equation.
+ * @brief Finite-volume temperature diffusion and convection equation.
  */
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
+#include "operators/FvmOperators.hh"
+#include "solvers/BelosLinearSolver.hh"
 
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -18,7 +22,7 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Explicit finite-volume heat equation for cell-centered temperature.
+ * @brief Finite-volume heat equation for cell-centered temperature.
  *
  * The class owns the boundary-condition lookup needed by the equation while
  * the caller owns field storage and time integration order.
@@ -43,6 +47,14 @@ public:
                           scalar_type time_step,
                           scalar_type thermal_diffusivity,
                           field_type& temperature) const;
+
+    void advance_semi_implicit(
+        const std::vector<scalar_type>& old_temperature,
+        const std::vector<scalar_type>& face_fluxes,
+        scalar_type time_step,
+        scalar_type thermal_diffusivity,
+        field_type& temperature,
+        const LinearSolverOptions& linear_options = {}) const;
 
 private:
     struct BoundaryTemperature
@@ -187,6 +199,71 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                                     temp_p
                                   + time_step * thermal_diffusivity * laplacian);
     }
+}
+
+/**
+ * @brief Advance temperature with semi-implicit upwind convection and diffusion.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_temperature Local-cell temperature values from the previous time level.
+ * @param face_fluxes Owner-oriented integrated mass fluxes.
+ * @param time_step Time-step size.
+ * @param thermal_diffusivity Constant thermal diffusivity.
+ * @param temperature Output temperature field over owned cells.
+ * @param linear_options Belos solver options for the transport solve.
+ */
+template<TpetraTypePack Pack>
+void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
+    const std::vector<scalar_type>& old_temperature,
+    const std::vector<scalar_type>& face_fluxes,
+    scalar_type time_step,
+    scalar_type thermal_diffusivity,
+    field_type& temperature,
+    const LinearSolverOptions& linear_options) const
+{
+    EquationValidation::require_mesh_match(*d_mesh, temperature,
+                                           "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(time_step, "time step",
+                                             "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
+                                             "TemperatureDiffusionEquation");
+    EquationValidation::assert_sufficient_cache_size(old_temperature.size(),
+                                                     d_mesh->num_local_cells());
+
+    auto boundary_value =
+        [&](local_ordinal_type face_lid,
+            scalar_type /*fallback*/) -> std::optional<scalar_type>
+    {
+        const auto& boundary =
+            d_face_boundary_temperature[static_cast<std::size_t>(face_lid)];
+        if (!boundary.has_dirichlet)
+        {
+            return std::nullopt;
+        }
+        return boundary.value;
+    };
+
+    auto system = FvmOperators::transport_system<Pack>(
+        *d_mesh, old_temperature, face_fluxes, time_step,
+        thermal_diffusivity, boundary_value);
+
+    Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
+    const auto converged =
+        solve_linear_system<Pack>(matrix, system.rhs,
+                                  temperature.owned_data(), linear_options);
+    if (!converged)
+    {
+        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            if (!std::isfinite(temperature.value(cell_lid)))
+            {
+                throw std::runtime_error(
+                    "TemperatureDiffusionEquation transport solve produced a non-finite value.");
+            }
+        }
+    }
+    temperature.sync_ghosts();
 }
 
 } // namespace SimpleFluid
