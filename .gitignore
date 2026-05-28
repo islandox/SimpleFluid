@@ -68,6 +68,9 @@ vcpkg_installed/
 Testing/
 .cache/
 
+# MacOS junk files
+.DS_Store
+
 # Machine-specific files
 .vscode
 CMakePresets.json
