@@ -45,6 +45,9 @@ public:
     SP<Mesh<Pack>> build();
 
 private:
+    /**
+     * @brief Specification for a boundary layer mesh refinement region.
+     */
     struct BoundaryLayerSpec
     {
         std::string boundary_name;

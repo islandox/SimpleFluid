@@ -392,6 +392,12 @@ face_fluxes(const Mesh<Pack>& mesh,
  * @brief Integrated flux balance for one cell.
  *
  * Positive values indicate net outflow from the cell.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh The finite-volume mesh.
+ * @param face_fluxes Owner-oriented integrated fluxes for all faces.
+ * @param cell_lid Local index of the cell.
+ * @return Net flux balance for the cell.
  */
 template<TpetraTypePack Pack>
 typename Pack::scalar_type cell_flux_balance(
@@ -416,6 +422,11 @@ typename Pack::scalar_type cell_flux_balance(
 
 /**
  * @brief Compute cell-centered divergence from owner-oriented integrated fluxes.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh The finite-volume mesh.
+ * @param face_fluxes Owner-oriented integrated fluxes for all faces.
+ * @return Vector of divergence values, one per owned cell.
  */
 template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
@@ -437,6 +448,12 @@ cell_divergence_from_fluxes(
 
 /**
  * @brief Assemble the integrated first-order upwind convection operator.
+ * 
+ * @tparam Pack Tpetra type pack.
+ * @param mesh The finite-volume mesh.
+ * @param face_fluxes Owner-oriented integrated fluxes for all faces.
+ * @return RCP to the filled upwind convection matrix.
+ *  return divergence;
  */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
@@ -498,6 +515,17 @@ upwind_convection_matrix(
  *
  * BoundaryValueProvider must return std::optional<scalar> for a boundary face.
  * A missing value means zero-gradient diffusion and fallback inflow value.
+ * @tparam Pack Tpetra type pack.
+ * @tparam BoundaryValueProvider Callable returning std::optional<scalar_type>
+ *         for a boundary face local ID and fallback value.
+ * @param mesh The finite-volume mesh.
+ * @param old_values Previous-time solution values for all local cells.
+ * @param face_fluxes Owner-oriented integrated fluxes for all faces.
+ * @param time_step Time-step size.
+ * @param diffusivity Constant diffusion coefficient.
+ * @param boundary_value Boundary value provider callable.
+ * @return TransportSystem containing the assembled matrix and RHS vector.
+ *
  */
 template<TpetraTypePack Pack, class BoundaryValueProvider>
 TransportSystem<Pack>
@@ -618,6 +646,11 @@ transport_system(const Mesh<Pack>& mesh,
 
 /**
  * @brief Assemble a finite-volume pressure Poisson matrix with one gauge row.
+ * 
+ * @tparam Pack Tpetra type pack.
+ * @param mesh The finite-volume mesh.
+ * @param gauge_cell_gid Global ID of the cell used as the pressure gauge.
+ * @return RCP to the filled pressure Poisson matrix.
  */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>

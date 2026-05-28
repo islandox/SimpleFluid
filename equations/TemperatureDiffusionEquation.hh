@@ -1,6 +1,12 @@
 /**
  * @file TemperatureDiffusionEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Finite-volume temperature diffusion and convection equation.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -57,6 +63,9 @@ public:
         const LinearSolverOptions& linear_options = {}) const;
 
 private:
+    /**
+     * @brief Cached Dirichlet boundary temperature value for a face.
+     */
     struct BoundaryTemperature
     {
         scalar_type value = scalar_type{};
@@ -70,6 +79,14 @@ private:
     std::vector<BoundaryTemperature> d_face_boundary_temperature;
 };
 
+/**
+ * @brief Construct a temperature diffusion equation with mesh and boundary conditions.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param boundary_conditions Boundary condition set for temperature field.
+ * @throws std::invalid_argument if the mesh is null.
+ */
 template<TpetraTypePack Pack>
 TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
     SP<const mesh_type> mesh,

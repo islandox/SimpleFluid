@@ -1,6 +1,12 @@
 /**
  * @file PressureProjectionEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Pressure projection equation for the Boussinesq solver.
+ * @version 0.1
+ * @date 2026-05-28
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -66,6 +72,15 @@ private:
     LinearSolverOptions d_linear_options;
 };
 
+/**
+ * @brief Construct a pressure projection equation with mesh and solver options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param linear_options Belos linear solver configuration.
+ * @throws std::invalid_argument if the mesh is null.
+ * @throws std::runtime_error if the mesh has no owned-cell map.
+ */
 template<TpetraTypePack Pack>
 PressureProjectionEquation<Pack>::PressureProjectionEquation(
     SP<const mesh_type> mesh,
@@ -77,6 +92,14 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
     require_owned_cell_map(d_mesh);
 }
 
+/**
+ * @brief Retrieve and validate the owned-cell map from the mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the mesh.
+ * @return RCP to the owned-cell Tpetra map.
+ * @throws std::runtime_error if the mesh has no owned-cell map.
+ */
 template<TpetraTypePack Pack>
 auto PressureProjectionEquation<Pack>::require_owned_cell_map(
     const SP<const mesh_type>& mesh) -> Teuchos::RCP<const map_type>

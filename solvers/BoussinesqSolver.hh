@@ -116,6 +116,14 @@ private:
     int d_step_index = 0;
 };
 
+/**
+ * @brief Validate and return the mesh pointer, throwing if null.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the mesh.
+ * @return The validated mesh pointer.
+ * @throws std::invalid_argument if the mesh is null.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
     -> SP<const mesh_type>
@@ -355,6 +363,13 @@ void BoussinesqSolver<Pack>::run(int steps)
     }
 }
 
+/**
+ * @brief Map a mesh cell type to its VTU cell type identifier.
+ *
+ * @param type Mesh cell type.
+ * @return VTU cell type code.
+ * @throws std::runtime_error for unsupported cell types.
+ */
 template<TpetraTypePack Pack>
 int BoussinesqSolver<Pack>::vtu_cell_type(cell_type type)
 {
