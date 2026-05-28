@@ -13,6 +13,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/VectorCellField.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
@@ -307,26 +308,21 @@ struct TransportSystem
  *
  * @tparam Pack Tpetra type pack.
  * @param mesh Finite-volume mesh.
- * @param velocity_x Cell-centered x velocity.
- * @param velocity_y Cell-centered y velocity.
- * @param velocity_z Cell-centered z velocity.
+ * @param velocity Cell-centered velocity field.
  * @param boundary_conditions Optional velocity boundary-condition set.
  * @return Integrated flux u dot n_owner times face area for each face.
  */
 template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
 face_fluxes(const Mesh<Pack>& mesh,
-            const CellField<Pack>& velocity_x,
-            const CellField<Pack>& velocity_y,
-            const CellField<Pack>& velocity_z,
+            const VectorCellField<Pack>& velocity,
             const BoundaryConditionSet* boundary_conditions = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
 
-    if (&velocity_x.mesh() != &mesh || &velocity_y.mesh() != &mesh
-        || &velocity_z.mesh() != &mesh)
+    if (&velocity.mesh() != &mesh)
     {
-        throw std::invalid_argument("face_fluxes requires velocity fields on the input mesh.");
+        throw std::invalid_argument("face_fluxes requires a velocity field on the input mesh.");
     }
 
     std::vector<scalar_type> fluxes(mesh.num_faces(), 0.0);
@@ -335,21 +331,12 @@ face_fluxes(const Mesh<Pack>& mesh,
         const auto face_lid =
             static_cast<typename Pack::local_ordinal_type>(face);
         const auto owner = mesh.owner_cell(face_lid);
-        typename Mesh<Pack>::Vec3 velocity{
-            velocity_x.local_value(owner),
-            velocity_y.local_value(owner),
-            velocity_z.local_value(owner)
-        };
+        auto face_velocity = velocity.local_value(owner);
 
         if (mesh.is_interior_face(face_lid))
         {
             const auto neighbor = mesh.neighbor_cell(face_lid);
-            velocity = (velocity
-                      + typename Mesh<Pack>::Vec3{
-                            velocity_x.local_value(neighbor),
-                            velocity_y.local_value(neighbor),
-                            velocity_z.local_value(neighbor)})
-                     / 2.0;
+            face_velocity = (face_velocity + velocity.local_value(neighbor)) / 2.0;
         }
         else if (boundary_conditions != nullptr && mesh.is_boundary_face(face_lid))
         {
@@ -363,11 +350,11 @@ face_fluxes(const Mesh<Pack>& mesh,
 
             if (iter->second.type == BoundaryConditionType::NoSlip)
             {
-                velocity = {};
+                face_velocity = {};
             }
             else if (iter->second.type == BoundaryConditionType::Dirichlet)
             {
-                velocity = iter->second.value;
+                face_velocity = iter->second.value;
             }
             else
             {
@@ -381,7 +368,7 @@ face_fluxes(const Mesh<Pack>& mesh,
             continue;
         }
 
-        fluxes[face] = velocity.dot(mesh.face_normal(face_lid))
+        fluxes[face] = face_velocity.dot(mesh.face_normal(face_lid))
                      * mesh.face_area(face_lid);
     }
 

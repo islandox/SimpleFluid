@@ -14,6 +14,7 @@
 #include "equations/BoussinesqMomentumEquation.hh"
 #include "equations/PressureProjectionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
+#include "fields/VectorCellField.hh"
 #include "geometry/MeshFactory.hh"
 #include "operators/FvmOperators.hh"
 #include "utils/testing_environment.hh"
@@ -28,6 +29,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
+using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -81,6 +83,19 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
     return values;
 }
 
+std::vector<MeshType::Vec3> local_vector_values(const VectorFieldType& field)
+{
+    std::vector<MeshType::Vec3> values(field.num_local_cells());
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
+         ++lid)
+    {
+        values[static_cast<std::size_t>(lid)] = field.local_value(lid);
+    }
+
+    return values;
+}
+
 } // namespace
 
 TEST(PhysicalEquationsTest, TemperatureDiffusionAppliesDirichletBoundary)
@@ -99,49 +114,16 @@ TEST(PhysicalEquationsTest, TemperatureDiffusionAppliesDirichletBoundary)
     EXPECT_NEAR(temperature.value(0), 0.2, 1.0e-12);
 }
 
-TEST(PhysicalEquationsTest, BoussinesqMomentumUsesUpdatedTemperature)
-{
-    auto mesh = make_single_hex_mesh();
-    FieldType temperature(mesh, "temperature");
-    FieldType velocity_z(mesh, "velocity_z");
-
-    temperature.set_value(0, 1.0);
-    velocity_z.set_value(0, 0.0);
-    temperature.sync_ghosts();
-    velocity_z.sync_ghosts();
-
-    SimpleFluid::TimeStepperOptions options;
-    options.time_step = 0.1;
-    options.kinematic_viscosity = 1.0;
-    options.thermal_expansion = 2.0;
-    options.gravity_z = -10.0;
-    options.reference_temperature = 0.5;
-
-    SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
-    equation.advance_vertical_velocity(local_values(velocity_z),
-                                       temperature,
-                                       options,
-                                       velocity_z);
-
-    EXPECT_NEAR(velocity_z.value(0), 1.0 / 1.1, 1.0e-12);
-}
-
 TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
 {
     auto mesh = make_single_hex_mesh();
     FieldType temperature(mesh, "temperature");
-    FieldType velocity_x(mesh, "velocity_x");
-    FieldType velocity_y(mesh, "velocity_y");
-    FieldType velocity_z(mesh, "velocity_z");
+    VectorFieldType velocity(mesh, "velocity");
 
     temperature.set_value(0, 1.0);
-    velocity_x.set_value(0, 0.0);
-    velocity_y.set_value(0, 0.0);
-    velocity_z.set_value(0, 0.0);
+    velocity.set_value(0, {});
     temperature.sync_ghosts();
-    velocity_x.sync_ghosts();
-    velocity_y.sync_ghosts();
-    velocity_z.sync_ghosts();
+    velocity.sync_ghosts();
 
     SimpleFluid::TimeStepperOptions options;
     options.time_step = 0.1;
@@ -154,20 +136,16 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
 
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
-    equation.advance_velocity(local_values(velocity_x),
-                              local_values(velocity_y),
-                              local_values(velocity_z),
+    equation.advance_velocity(local_vector_values(velocity),
                               std::vector<Pack::scalar_type>(mesh->num_faces(), 0.0),
                               temperature,
                               bcs,
                               options,
-                              velocity_x,
-                              velocity_y,
-                              velocity_z);
+                              velocity);
 
-    EXPECT_NEAR(velocity_x.value(0), 1.0, 1.0e-10);
-    EXPECT_NEAR(velocity_y.value(0), 2.0, 1.0e-10);
-    EXPECT_NEAR(velocity_z.value(0), 3.0, 1.0e-10);
+    EXPECT_NEAR(velocity.value(0).x, 1.0, 1.0e-10);
+    EXPECT_NEAR(velocity.value(0).y, 2.0, 1.0e-10);
+    EXPECT_NEAR(velocity.value(0).z, 3.0, 1.0e-10);
 }
 
 /**
@@ -180,9 +158,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
     for (std::size_t component = 0; component < 3; ++component)
     {
         FieldType temperature(mesh, "temperature");
-        FieldType velocity_x(mesh, "velocity_x");
-        FieldType velocity_y(mesh, "velocity_y");
-        FieldType velocity_z(mesh, "velocity_z");
+        VectorFieldType velocity(mesh, "velocity");
 
         for (MeshType::local_ordinal_type lid = 0;
              lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
@@ -192,18 +168,17 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
             const auto value = component == 0 ? center.x
                              : (component == 1 ? center.y : center.z);
             temperature.set_value(lid, value);
-            velocity_x.set_value(lid, component == 0 ? 1.0 : 0.0);
-            velocity_y.set_value(lid, component == 1 ? 1.0 : 0.0);
-            velocity_z.set_value(lid, component == 2 ? 1.0 : 0.0);
+            velocity.set_value(lid,
+                               {component == 0 ? 1.0 : 0.0,
+                                component == 1 ? 1.0 : 0.0,
+                                component == 2 ? 1.0 : 0.0});
         }
         temperature.sync_ghosts();
-        velocity_x.sync_ghosts();
-        velocity_y.sync_ghosts();
-        velocity_z.sync_ghosts();
+        velocity.sync_ghosts();
 
         const auto old_temperature = local_values(temperature);
         const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-            *mesh, velocity_x, velocity_y, velocity_z);
+            *mesh, velocity);
 
         SimpleFluid::BoundaryConditionSet bcs;
         SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
@@ -245,15 +220,13 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
 {
     auto mesh = make_2x2x2_mesh();
     FieldType pressure(mesh, "pressure");
-    FieldType velocity_x(mesh, 1.0, "velocity_x");
-    FieldType velocity_y(mesh, 0.0, "velocity_y");
-    FieldType velocity_z(mesh, 0.0, "velocity_z");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 0.0, 0.0}, "velocity");
 
     SimpleFluid::BoundaryConditionSet bcs;
     auto divergence_norm = [&]()
     {
         const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-            *mesh, velocity_x, velocity_y, velocity_z, &bcs);
+            *mesh, velocity, &bcs);
         const auto divergence =
             SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
                 *mesh, fluxes);
@@ -272,7 +245,7 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
     options.tolerance = 1.0e-12;
 
     SimpleFluid::PressureProjectionEquation<Pack> equation(mesh, options);
-    equation.project(pressure, 0.1, bcs, velocity_x, velocity_y, velocity_z);
+    equation.project(pressure, 0.1, bcs, velocity);
 
     const auto after = divergence_norm();
     EXPECT_LT(after, before);

@@ -13,6 +13,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
+#include "fields/VectorCellField.hh"
 #include "operators/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -38,6 +39,7 @@ class PressureProjectionEquation
 public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
+    using velocity_field_type = VectorCellField<Pack>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
 
@@ -60,9 +62,7 @@ public:
     void project(field_type& pressure,
                  scalar_type time_step,
                  const BoundaryConditionSet& boundary_conditions,
-                 field_type& velocity_x,
-                 field_type& velocity_y,
-                 field_type& velocity_z);
+                 velocity_field_type& velocity);
 
 private:
     static Teuchos::RCP<const map_type> require_owned_cell_map(
@@ -137,26 +137,18 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
  * @param pressure Pressure-correction field.
  * @param time_step Time-step size.
  * @param boundary_conditions Velocity boundary conditions for face fluxes.
- * @param velocity_x X velocity predictor, overwritten with projected velocity.
- * @param velocity_y Y velocity predictor, overwritten with projected velocity.
- * @param velocity_z Z velocity predictor, overwritten with projected velocity.
+ * @param velocity Velocity predictor, overwritten with projected velocity.
  */
 template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
     const BoundaryConditionSet& boundary_conditions,
-    field_type& velocity_x,
-    field_type& velocity_y,
-    field_type& velocity_z)
+    velocity_field_type& velocity)
 {
     EquationValidation::require_mesh_match(*d_mesh, pressure,
                                            "PressureProjectionEquation");
-    EquationValidation::require_mesh_match(*d_mesh, velocity_x,
-                                           "PressureProjectionEquation");
-    EquationValidation::require_mesh_match(*d_mesh, velocity_y,
-                                           "PressureProjectionEquation");
-    EquationValidation::require_mesh_match(*d_mesh, velocity_z,
+    EquationValidation::require_mesh_match(*d_mesh, velocity,
                                            "PressureProjectionEquation");
     if (time_step <= 0.0)
     {
@@ -168,7 +160,7 @@ void PressureProjectionEquation<Pack>::project(
     }
 
     const auto face_fluxes = FvmOperators::face_fluxes(
-        *d_mesh, velocity_x, velocity_y, velocity_z, &boundary_conditions);
+        *d_mesh, velocity, &boundary_conditions);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     auto matrix = FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
     typename Pack::vector_type rhs(d_mesh->owned_cell_map(), true);
@@ -198,20 +190,11 @@ void PressureProjectionEquation<Pack>::project(
     {
         const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
         const auto& gradient = gradients[owned];
-        velocity_x.set_owned_value(cell_lid,
-                                   velocity_x.value(cell_lid)
-                                 - time_step * gradient.x);
-        velocity_y.set_owned_value(cell_lid,
-                                   velocity_y.value(cell_lid)
-                                 - time_step * gradient.y);
-        velocity_z.set_owned_value(cell_lid,
-                                   velocity_z.value(cell_lid)
-                                 - time_step * gradient.z);
+        const auto corrected = velocity.value(cell_lid) - gradient * time_step;
+        velocity.set_owned_value(cell_lid, corrected);
     }
 
-    velocity_x.sync_ghosts();
-    velocity_y.sync_ghosts();
-    velocity_z.sync_ghosts();
+    velocity.sync_ghosts();
 }
 
 } // namespace SimpleFluid
