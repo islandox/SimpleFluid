@@ -16,6 +16,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
+#include "operators/FvmOperators.hh"
 
 #include <algorithm>
 #include <fstream>
@@ -107,6 +108,8 @@ private:
     field_type d_velocity_z;
 
     std::vector<scalar_type> d_old_temperature;
+    std::vector<scalar_type> d_old_velocity_x;
+    std::vector<scalar_type> d_old_velocity_y;
     std::vector<scalar_type> d_old_velocity_z;
 
     scalar_type d_time = 0.0;
@@ -160,6 +163,8 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     }
 
     d_old_temperature.resize(d_mesh->num_local_cells());
+    d_old_velocity_x.resize(d_mesh->num_local_cells());
+    d_old_velocity_y.resize(d_mesh->num_local_cells());
     d_old_velocity_z.resize(d_mesh->num_local_cells());
 }
 
@@ -217,6 +222,8 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
 
     d_temperature.sync_ghosts();
     d_pressure.sync_ghosts();
+    d_velocity_x.sync_ghosts();
+    d_velocity_y.sync_ghosts();
     d_velocity_z.sync_ghosts();
 }
 
@@ -274,6 +281,8 @@ void BoussinesqSolver<Pack>::step()
     if (d_step_index == 0)
     {
         d_temperature.sync_ghosts();
+        d_velocity_x.sync_ghosts();
+        d_velocity_y.sync_ghosts();
         d_velocity_z.sync_ghosts();
     }
 
@@ -281,20 +290,44 @@ void BoussinesqSolver<Pack>::step()
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
         d_old_temperature[cell] = d_temperature.local_value(cell_lid);
+        d_old_velocity_x[cell] = d_velocity_x.local_value(cell_lid);
+        d_old_velocity_y[cell] = d_velocity_y.local_value(cell_lid);
         d_old_velocity_z[cell] = d_velocity_z.local_value(cell_lid);
     }
 
-    d_temperature_equation.advance_explicit(d_old_temperature,
-                                            d_time_options.time_step,
-                                            d_time_options.thermal_diffusivity,
-                                            d_temperature);
-    d_momentum_equation.advance_vertical_velocity(d_old_velocity_z,
-                                                  d_temperature,
-                                                  d_time_options,
-                                                  d_velocity_z);
-    d_pressure_projection.solve(d_pressure);
+    const auto old_face_fluxes =
+        FvmOperators::face_fluxes(*d_mesh, d_velocity_x, d_velocity_y,
+                                  d_velocity_z, &d_boundary_conditions);
+    d_momentum_equation.advance_velocity(d_old_velocity_x,
+                                         d_old_velocity_y,
+                                         d_old_velocity_z,
+                                         old_face_fluxes,
+                                         d_temperature,
+                                         d_boundary_conditions,
+                                         d_time_options,
+                                         d_velocity_x,
+                                         d_velocity_y,
+                                         d_velocity_z,
+                                         d_linear_options);
+    d_pressure_projection.project(d_pressure,
+                                  d_time_options.time_step,
+                                  d_boundary_conditions,
+                                  d_velocity_x,
+                                  d_velocity_y,
+                                  d_velocity_z);
+    const auto projected_face_fluxes =
+        FvmOperators::face_fluxes(*d_mesh, d_velocity_x, d_velocity_y,
+                                  d_velocity_z, &d_boundary_conditions);
+    d_temperature_equation.advance_semi_implicit(d_old_temperature,
+                                                 projected_face_fluxes,
+                                                 d_time_options.time_step,
+                                                 d_time_options.thermal_diffusivity,
+                                                 d_temperature,
+                                                 d_linear_options);
 
     d_temperature.sync_ghosts();
+    d_velocity_x.sync_ghosts();
+    d_velocity_y.sync_ghosts();
     d_velocity_z.sync_ghosts();
 
     d_time += d_time_options.time_step;

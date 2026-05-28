@@ -97,3 +97,96 @@ TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
     EXPECT_EQ(diffusion->getGlobalNumRows(),
               mesh->owned_cell_map()->getGlobalNumElements());
 }
+
+TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
+{
+    auto mesh = make_mesh();
+    FieldType velocity_x(mesh, 1.0, "velocity_x");
+    FieldType velocity_y(mesh, 2.0, "velocity_y");
+    FieldType velocity_z(mesh, 3.0, "velocity_z");
+
+    const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
+        *mesh, velocity_x, velocity_y, velocity_z);
+
+    bool saw_x_face = false;
+    bool saw_y_face = false;
+    bool saw_z_face = false;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (!mesh->is_interior_face(fid))
+        {
+            continue;
+        }
+
+        const auto& normal = mesh->face_normal(fid);
+        const auto magnitude = std::abs(fluxes[static_cast<std::size_t>(fid)]);
+        if (std::abs(normal.x) > 0.5)
+        {
+            saw_x_face = true;
+            EXPECT_NEAR(magnitude, 1.0, 1.0e-12);
+        }
+        if (std::abs(normal.y) > 0.5)
+        {
+            saw_y_face = true;
+            EXPECT_NEAR(magnitude, 2.0, 1.0e-12);
+        }
+        if (std::abs(normal.z) > 0.5)
+        {
+            saw_z_face = true;
+            EXPECT_NEAR(magnitude, 3.0, 1.0e-12);
+        }
+    }
+
+    EXPECT_TRUE(saw_x_face);
+    EXPECT_TRUE(saw_y_face);
+    EXPECT_TRUE(saw_z_face);
+}
+
+TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
+{
+    auto mesh = make_mesh();
+    FieldType velocity_x(mesh, 1.0, "velocity_x");
+    FieldType velocity_y(mesh, 2.0, "velocity_y");
+    FieldType velocity_z(mesh, 3.0, "velocity_z");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
+        *mesh, velocity_x, velocity_y, velocity_z, &bcs);
+
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+        {
+            EXPECT_DOUBLE_EQ(fluxes[static_cast<std::size_t>(fid)], 0.0);
+        }
+    }
+}
+
+TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
+{
+    auto mesh = make_mesh();
+    FieldType velocity_x(mesh, 1.0, "velocity_x");
+    FieldType velocity_y(mesh, 0.0, "velocity_y");
+    FieldType velocity_z(mesh, 0.0, "velocity_z");
+
+    const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
+        *mesh, velocity_x, velocity_y, velocity_z);
+    auto convection =
+        SimpleFluid::FvmOperators::upwind_convection_matrix<Pack>(*mesh, fluxes);
+    auto pressure = SimpleFluid::FvmOperators::pressure_poisson_matrix<Pack>(
+        *mesh, mesh->owned_cell_global_ids().front());
+
+    EXPECT_EQ(convection->getGlobalNumRows(),
+              mesh->owned_cell_map()->getGlobalNumElements());
+    EXPECT_EQ(pressure->getGlobalNumRows(),
+              mesh->owned_cell_map()->getGlobalNumElements());
+}

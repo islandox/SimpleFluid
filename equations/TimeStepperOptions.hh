@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "dataclass/vec3.hh"
 #include "dataclass/typedefs.hh"
 
 namespace SimpleFluid
@@ -19,8 +20,15 @@ struct TimeStepperOptions
     real_t thermal_diffusivity = 1.0e-3;
     real_t kinematic_viscosity = 1.0e-3;
     real_t thermal_expansion = 3.0e-3;
+    real_t gravity_x = 0.0;
+    real_t gravity_y = 0.0;
     real_t gravity_z = -9.81;
     real_t reference_temperature = 0.5;
+
+    vec3<real_t> gravity_vector() const noexcept
+    {
+        return {gravity_x, gravity_y, gravity_z};
+    }
 };
 
 } // namespace SimpleFluid

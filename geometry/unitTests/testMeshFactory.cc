@@ -50,6 +50,75 @@ SimpleFluid::SP<const SimpleFluid::Database> make_27_hex_box_database()
     return db;
 }
 
+SimpleFluid::SP<const SimpleFluid::Database> make_boundary_layer_box_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{0.25});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
+    db->set("X", SimpleFluid::ArrReal{0.0, 0.25, 0.5, 0.75, 1.0});
+    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+    db->set("boundary_layer_boundary_names",
+            SimpleFluid::ArrString{"xmin", "xmax"});
+    db->set("boundary_layer_counts", SimpleFluid::ArrInt{1, 1});
+    db->set("boundary_layer_first_cell_heights",
+            SimpleFluid::ArrReal{0.1, 0.2});
+    db->set("boundary_layer_growth_ratios",
+            SimpleFluid::ArrReal{1.0, 1.0});
+
+    return db;
+}
+
+SimpleFluid::SP<const SimpleFluid::Database> make_boundary_layer_cylinder_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{0.5});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::CYLINDER));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("height", SimpleFluid::real_t{2.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"radial", "zmin", "zmax"});
+    db->set("boundary_layer_boundary_names",
+            SimpleFluid::ArrString{"radial", "zmin", "zmax"});
+    db->set("boundary_layer_counts", SimpleFluid::ArrInt{1, 1, 1});
+    db->set("boundary_layer_first_cell_heights",
+            SimpleFluid::ArrReal{0.1, 0.2, 0.2});
+    db->set("boundary_layer_growth_ratios",
+            SimpleFluid::ArrReal{1.0, 1.0, 1.0});
+
+    return db;
+}
+
+SimpleFluid::SP<const SimpleFluid::Database> make_boundary_layer_sphere_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{0.5});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::SPHERE));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"lower_surface", "upper_surface"});
+    db->set("boundary_layer_boundary_names",
+            SimpleFluid::ArrString{"lower_surface", "upper_surface"});
+    db->set("boundary_layer_counts", SimpleFluid::ArrInt{1, 1});
+    db->set("boundary_layer_first_cell_heights",
+            SimpleFluid::ArrReal{0.1, 0.1});
+    db->set("boundary_layer_growth_ratios",
+            SimpleFluid::ArrReal{1.0, 1.0});
+
+    return db;
+}
+
 SimpleFluid::SP<const SimpleFluid::Database> make_cylinder_database()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -170,6 +239,33 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_EQ(boundary_counts["zmax"], 9u);
 }
 
+TEST(MeshFactoryTest, BoxBoundaryLayersRegenerateSelectedAxisEdges)
+{
+    auto db = make_boundary_layer_box_database();
+    SimpleFluid::MeshFactory factory(db);
+
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_EQ(mesh->num_local_cells(), 4u);
+    EXPECT_EQ(mesh->cell_centroid(0), (SimpleFluid::vec3{0.05, 0.5, 0.5}));
+    EXPECT_NEAR(mesh->cell_centroid(3).x, 0.9, 1.0e-12);
+    EXPECT_DOUBLE_EQ(mesh->cell_centroid(3).y, 0.5);
+    EXPECT_DOUBLE_EQ(mesh->cell_centroid(3).z, 0.5);
+    EXPECT_DOUBLE_EQ(mesh->cell_volume(0), 0.1);
+    EXPECT_DOUBLE_EQ(mesh->cell_volume(3), 0.2);
+}
+
+TEST(MeshFactoryTest, BoundaryLayersRejectOverlappingOppositeSides)
+{
+    auto db = std::const_pointer_cast<SimpleFluid::Database>(
+        make_boundary_layer_box_database());
+    db->set("boundary_layer_counts", SimpleFluid::ArrInt{2, 2});
+
+    SimpleFluid::MeshFactory factory(db);
+    EXPECT_THROW(factory.template build<>(), std::runtime_error);
+}
+
 /**
  * @brief Verifies a wedge-mesh cylinder has correct cell counts, all cells are TRIPRISM, and boundary parts are properly assigned.
  */
@@ -207,6 +303,24 @@ TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
     EXPECT_EQ(boundary_counts["radial"], 16u);
     EXPECT_EQ(boundary_counts["zmin"], 8u);
     EXPECT_EQ(boundary_counts["zmax"], 8u);
+}
+
+TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
+{
+    auto db = make_boundary_layer_cylinder_database();
+    SimpleFluid::MeshFactory factory(db);
+
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_GT(mesh->num_local_cells(), 0u);
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::TRIPRISM);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+    }
 }
 
 /**
@@ -277,4 +391,22 @@ TEST(MeshFactoryTest, SphereBuildsSplitSurfacePatches)
     EXPECT_EQ(boundary_faces, 24u);
     EXPECT_EQ(boundary_counts["lower_surface"], 12u);
     EXPECT_EQ(boundary_counts["upper_surface"], 12u);
+}
+
+TEST(MeshFactoryTest, SphereBoundaryLayersBuildPositiveSplitSurfaceMesh)
+{
+    auto db = make_boundary_layer_sphere_database();
+    SimpleFluid::MeshFactory factory(db);
+
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_EQ(mesh->num_local_cells(), 64u);
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::HEXAHEDRON);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+    }
 }

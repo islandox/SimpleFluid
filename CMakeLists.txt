@@ -53,3 +53,6 @@ target_link_libraries(natural_convection_cylinder PRIVATE SimpleFluid)
 
 add_executable(natural_convection_sphere examples/natural_convection_sphere.cc)
 target_link_libraries(natural_convection_sphere PRIVATE SimpleFluid)
+
+add_executable(natural_convection_boundary_layer_box examples/natural_convection_boundary_layer_box.cc)
+target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
