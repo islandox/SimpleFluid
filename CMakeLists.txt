@@ -38,43 +38,4 @@ function(simplefluid_reuse_precompiled_header target_name)
     target_precompile_headers(${target_name} REUSE_FROM SimpleFluid)
 endfunction()
 
-# Optional: Add executable if main.cpp exists
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cc")
-    add_executable(SimpleFluid_app ${SOURCES})
-    target_include_directories(SimpleFluid_app PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(SimpleFluid_app PRIVATE Trilinos::all_selected_libs MPI::MPI_CXX)
-    simplefluid_reuse_precompiled_header(SimpleFluid_app)
-endif()
-
-find_package(GTest)
-
-enable_testing()
-include(GoogleTest)
-
-add_subdirectory(src/dataclass/unitTests)
-add_subdirectory(src/geometry/unitTests)
-add_subdirectory(src/parallel/unitTests)
-add_subdirectory(src/fields/unitTests)
-add_subdirectory(src/FVM/unitTests)
-add_subdirectory(src/equations/unitTests)
-add_subdirectory(src/solvers/unitTests)
-add_subdirectory(src/io/unitTests)
-
-add_executable(natural_convection_box src/examples/natural_convection_box.cc)
-target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_box)
-
-add_executable(natural_convection_cylinder src/examples/natural_convection_cylinder.cc)
-target_link_libraries(natural_convection_cylinder PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_cylinder)
-
-add_executable(natural_convection_sphere src/examples/natural_convection_sphere.cc)
-target_link_libraries(natural_convection_sphere PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_sphere)
-
-add_executable(natural_convection_boundary_layer_box src/examples/natural_convection_boundary_layer_box.cc)
-target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_boundary_layer_box)
+add_subdirectory(src)
