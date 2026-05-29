@@ -114,7 +114,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 {
     const auto cache =
         FvmOperators::cache_velocity_boundary_conditions<Pack>(
-            *d_mesh, boundary_conditions);
+            d_mesh, boundary_conditions);
     advance_velocity(old_velocity, face_fluxes, temperature, cache, options,
                      velocity, linear_options);
 }
@@ -152,7 +152,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     EquationValidation::assert_sufficient_cache_size(old_velocity.size(),
                                                      d_mesh->num_local_cells());
     if (velocity_boundary_cache.has_value.size() != d_mesh->num_faces()
-        || velocity_boundary_cache.value.size() != d_mesh->num_faces())
+        || &velocity_boundary_cache.value.mesh() != d_mesh.get())
     {
         throw std::invalid_argument(
             "BoussinesqMomentumEquation received the wrong boundary-cache size.");
@@ -184,7 +184,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
             }
 
             return FvmOperators::detail::component_value(
-                velocity_boundary_cache.value[face], component);
+                velocity_boundary_cache.value.value(face_lid), component);
         };
 
         auto system = FvmOperators::transport_system<Pack>(

@@ -156,7 +156,7 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     }
 
     const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity, &bcs);
+        *mesh, velocity, bcs);
 
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());

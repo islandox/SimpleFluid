@@ -178,7 +178,7 @@ void PressureProjectionEquation<Pack>::project(
     velocity_field_type& velocity)
 {
     const auto cache = FvmOperators::cache_velocity_boundary_conditions<Pack>(
-        *d_mesh, boundary_conditions);
+        d_mesh, boundary_conditions);
     project(pressure, time_step, cache, velocity);
 }
 

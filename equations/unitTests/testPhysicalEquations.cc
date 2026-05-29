@@ -226,7 +226,7 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
     auto divergence_norm = [&]()
     {
         const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-            *mesh, velocity, &bcs);
+            *mesh, velocity, bcs);
         const auto divergence =
             SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
                 *mesh, fluxes);

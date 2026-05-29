@@ -151,7 +151,7 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_linear_options(linear_options),
       d_velocity_boundary_cache(
           FvmOperators::cache_velocity_boundary_conditions<Pack>(
-              *d_mesh, d_boundary_conditions)),
+              d_mesh, d_boundary_conditions)),
       d_temperature_equation(d_mesh, d_boundary_conditions),
       d_momentum_equation(d_mesh),
       d_pressure_projection(d_mesh, d_linear_options),
