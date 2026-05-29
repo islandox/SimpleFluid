@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
+#include <Tpetra_Core.hpp>
 #include <mpi.h>
 
 namespace utils_test
@@ -40,6 +41,12 @@ public:
             Kokkos::initialize();
             d_initialized_kokkos = true;
         }
+
+        if (!Tpetra::isInitialized())
+        {
+            Tpetra::initialize(nullptr, nullptr);
+            d_initialized_tpetra = true;
+        }
     }
 
     void TearDown() override
@@ -47,6 +54,11 @@ public:
         if (d_initialized_kokkos && Kokkos::is_initialized())
         {
             Kokkos::finalize();
+        }
+
+        if (d_initialized_tpetra && Tpetra::isInitialized())
+        {
+            Tpetra::finalize();
         }
 
         int mpi_finalized = 0;
@@ -60,6 +72,7 @@ public:
 private:
     bool d_initialized_mpi = false;
     bool d_initialized_kokkos = false;
+    bool d_initialized_tpetra = false;
 };
 
 }

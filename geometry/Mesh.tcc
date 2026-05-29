@@ -273,7 +273,7 @@ void Mesh<Pack>::check_connectivity() const
 
     for (const auto lid : d_owned_cell_ids)
     {
-        auto gid = d_owned_cell_global_ids[static_cast<std::size_t>(lid)];
+        const auto gid = cell_global_id(lid);
         CHECK(d_cell_gid_to_lid.find(gid) != d_cell_gid_to_lid.end());
         CHECK(lid == d_cell_gid_to_lid.at(gid));
         CHECK(static_cast<std::size_t>(lid) < d_cells.size());

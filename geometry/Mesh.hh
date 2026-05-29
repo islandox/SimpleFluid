@@ -64,6 +64,10 @@ constexpr ID invalid_id() noexcept
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class Mesh
 {
+    /** @brief Grants MeshPartitioner access to internal mesh arrays for parallel redistribution. */
+    template<TpetraTypePack>
+    friend class MeshPartitioner;
+
 public:
     using map_type = typename Pack::map_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
