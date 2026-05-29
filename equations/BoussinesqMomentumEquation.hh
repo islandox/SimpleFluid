@@ -60,6 +60,15 @@ public:
         velocity_field_type& velocity,
         const LinearSolverOptions& linear_options = {}) const;
 
+    void advance_velocity(
+        const std::vector<vec_type>& old_velocity,
+        const std::vector<scalar_type>& face_fluxes,
+        const field_type& temperature,
+        const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        velocity_field_type& velocity,
+        const LinearSolverOptions& linear_options = {}) const;
+
 private:
     SP<const mesh_type> d_mesh;
     mutable std::vector<scalar_type> d_cached_old_component;
@@ -103,6 +112,35 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const
 {
+    const auto cache =
+        FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            *d_mesh, boundary_conditions);
+    advance_velocity(old_velocity, face_fluxes, temperature, cache, options,
+                     velocity, linear_options);
+}
+
+/**
+ * @brief Advance all velocity components with cached velocity boundary values.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_velocity Previous local velocity values.
+ * @param face_fluxes Owner-oriented integrated fluxes from the previous velocity.
+ * @param temperature Temperature field used for Boussinesq buoyancy.
+ * @param velocity_boundary_cache Per-face resolved velocity boundary values.
+ * @param options Time and physical coefficients.
+ * @param velocity Output velocity field.
+ * @param linear_options Belos solver options for component transport solves.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqMomentumEquation<Pack>::advance_velocity(
+    const std::vector<vec_type>& old_velocity,
+    const std::vector<scalar_type>& face_fluxes,
+    const field_type& temperature,
+    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    velocity_field_type& velocity,
+    const LinearSolverOptions& linear_options) const
+{
     EquationValidation::require_mesh_match(*d_mesh, temperature,
                                            "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity,
@@ -113,13 +151,22 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                                              "BoussinesqMomentumEquation");
     EquationValidation::assert_sufficient_cache_size(old_velocity.size(),
                                                      d_mesh->num_local_cells());
+    if (velocity_boundary_cache.has_value.size() != d_mesh->num_faces()
+        || velocity_boundary_cache.value.size() != d_mesh->num_faces())
+    {
+        throw std::invalid_argument(
+            "BoussinesqMomentumEquation received the wrong boundary-cache size.");
+    }
     const auto gravity = options.gravity_vector();
 
     for (std::size_t component = 0;
          component < velocity_field_type::num_components;
          ++component)
     {
-        d_cached_old_component.assign(d_mesh->num_local_cells(), scalar_type{});
+        if (d_cached_old_component.size() != d_mesh->num_local_cells())
+        {
+            d_cached_old_component.resize(d_mesh->num_local_cells());
+        }
         for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
         {
             d_cached_old_component[cell] =
@@ -130,28 +177,14 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
             [&](local_ordinal_type face_lid,
                 scalar_type /*fallback*/) -> std::optional<scalar_type>
         {
-            if (!d_mesh->is_boundary_face(face_lid))
+            const auto face = static_cast<std::size_t>(face_lid);
+            if (!velocity_boundary_cache.has_value[face])
             {
                 return std::nullopt;
             }
 
-            const auto iter = boundary_conditions.velocity.find(
-                d_mesh->boundary_name(face_lid));
-            if (iter == boundary_conditions.velocity.end())
-            {
-                return std::nullopt;
-            }
-
-            if (iter->second.type == BoundaryConditionType::NoSlip)
-            {
-                return scalar_type{};
-            }
-            if (iter->second.type == BoundaryConditionType::Dirichlet)
-            {
-                return FvmOperators::detail::component_value(iter->second.value,
-                                                             component);
-            }
-            return std::nullopt;
+            return FvmOperators::detail::component_value(
+                velocity_boundary_cache.value[face], component);
         };
 
         auto system = FvmOperators::transport_system<Pack>(

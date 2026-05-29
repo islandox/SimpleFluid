@@ -41,7 +41,7 @@ namespace detail
  */
 inline real_t& component(MeshUtils::Vec3& vector, std::size_t index)
 {
-    return index == 0 ? vector.x : (index == 1 ? vector.y : vector.z);
+    return vector.component(index);
 }
 
 /**
@@ -105,7 +105,7 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
 
 inline real_t component_value(const MeshUtils::Vec3& vector, std::size_t index)
 {
-    return index == 0 ? vector.x : (index == 1 ? vector.y : vector.z);
+    return vector.component(index);
 }
 
 } // namespace detail
@@ -150,11 +150,8 @@ void cell_gradient(const CellField<Pack>& field,
             normal[0][0] += d.x * d.x;
             normal[0][1] += d.x * d.y;
             normal[0][2] += d.x * d.z;
-            normal[1][0] += d.y * d.x;
             normal[1][1] += d.y * d.y;
             normal[1][2] += d.y * d.z;
-            normal[2][0] += d.z * d.x;
-            normal[2][1] += d.z * d.y;
             normal[2][2] += d.z * d.z;
 
             rhs.x += d.x * phi_delta;
@@ -162,6 +159,9 @@ void cell_gradient(const CellField<Pack>& field,
             rhs.z += d.z * phi_delta;
         }
 
+        normal[1][0] = normal[0][1];
+        normal[2][0] = normal[0][2];
+        normal[2][1] = normal[1][2];
         gradients[owned] = detail::solve_3x3(normal, rhs);
     }
 }
@@ -261,13 +261,17 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 8));
+    Teuchos::Array<global_ordinal_type> cols;
+    Teuchos::Array<scalar_type> vals;
+    cols.reserve(32);
+    vals.reserve(32);
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = mesh.cell_global_id(cell_lid);
 
-        Teuchos::Array<global_ordinal_type> cols;
-        Teuchos::Array<scalar_type> vals;
+        cols.clear();
+        vals.clear();
         scalar_type diagonal = 0.0;
 
         for (const auto face_lid : mesh.faces(cell_lid))
@@ -558,13 +562,17 @@ upwind_convection_matrix(
     }
 
     auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 8));
+    Teuchos::Array<global_ordinal_type> cols;
+    Teuchos::Array<scalar_type> vals;
+    cols.reserve(32);
+    vals.reserve(32);
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = mesh.cell_global_id(cell_lid);
 
-        Teuchos::Array<global_ordinal_type> cols;
-        Teuchos::Array<scalar_type> vals;
+        cols.clear();
+        vals.clear();
         scalar_type diagonal = 0.0;
 
         for (const auto face_lid : mesh.faces(cell_lid))
@@ -646,14 +654,18 @@ transport_system(const Mesh<Pack>& mesh,
 
     auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 12));
     typename Pack::vector_type rhs(mesh.owned_cell_map(), true);
+    Teuchos::Array<global_ordinal_type> cols;
+    Teuchos::Array<scalar_type> vals;
+    cols.reserve(32);
+    vals.reserve(32);
 
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = mesh.cell_global_id(cell_lid);
 
-        Teuchos::Array<global_ordinal_type> cols;
-        Teuchos::Array<scalar_type> vals;
+        cols.clear();
+        vals.clear();
         scalar_type diagonal = mesh.cell_volume(cell_lid) / time_step;
         const auto old_value = old_values[static_cast<std::size_t>(cell_lid)];
         scalar_type rhs_value = diagonal * old_value;
@@ -759,13 +771,17 @@ pressure_poisson_matrix(
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 8));
+    Teuchos::Array<global_ordinal_type> cols;
+    Teuchos::Array<scalar_type> vals;
+    cols.reserve(32);
+    vals.reserve(32);
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = mesh.cell_global_id(cell_lid);
 
-        Teuchos::Array<global_ordinal_type> cols;
-        Teuchos::Array<scalar_type> vals;
+        cols.clear();
+        vals.clear();
 
         if (row_gid == gauge_cell_gid)
         {

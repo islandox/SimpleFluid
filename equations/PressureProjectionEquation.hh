@@ -58,6 +58,8 @@ public:
         return d_linear_options;
     }
 
+    void rebuild_matrix() const;
+
     void solve(field_type& pressure);
 
     void project(field_type& pressure,
@@ -78,6 +80,7 @@ private:
     LinearSolverOptions d_linear_options;
     mutable std::vector<scalar_type> d_cached_face_fluxes;
     mutable std::vector<typename mesh_type::Vec3> d_cached_gradients;
+    mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
 };
 
@@ -121,6 +124,25 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
     }
 
     return map;
+}
+
+/**
+ * @brief Rebuild the cached pressure Poisson matrix.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
+template<TpetraTypePack Pack>
+void PressureProjectionEquation<Pack>::rebuild_matrix() const
+{
+    if (d_mesh->num_owned_cells() == 0)
+    {
+        d_cached_pressure_matrix = Teuchos::null;
+        return;
+    }
+
+    const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
+    d_cached_pressure_matrix =
+        FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
 }
 
 /**
@@ -183,7 +205,10 @@ void PressureProjectionEquation<Pack>::project(
     FvmOperators::face_fluxes(*d_mesh, velocity, velocity_boundary_cache,
                               d_cached_face_fluxes);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
-    auto matrix = FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
+    if (d_cached_pressure_matrix.is_null())
+    {
+        rebuild_matrix();
+    }
     if (d_cached_rhs.is_null())
     {
         d_cached_rhs = Teuchos::rcp(
@@ -206,7 +231,8 @@ void PressureProjectionEquation<Pack>::project(
     }
 
     pressure.owned_data().putScalar(0.0);
-    Teuchos::RCP<const typename Pack::matrix_type> const_matrix = matrix;
+    Teuchos::RCP<const typename Pack::matrix_type> const_matrix =
+        d_cached_pressure_matrix;
     if (!solve_linear_system<Pack>(const_matrix, *d_cached_rhs, pressure.owned_data(),
                                    d_linear_options))
     {

@@ -39,6 +39,19 @@ TEST(Vec3Test, ArrayConstructorStoresValues)
     EXPECT_DOUBLE_EQ(v.z, 6.0);
 }
 
+TEST(Vec3Test, ComponentAccessReadsAndWrites)
+{
+    Vec3 v(1.0, 2.0, 3.0);
+    const Vec3& cv = v;
+
+    EXPECT_DOUBLE_EQ(cv.component(0), 1.0);
+    EXPECT_DOUBLE_EQ(cv.component(1), 2.0);
+    EXPECT_DOUBLE_EQ(cv.component(2), 3.0);
+
+    v.component(1) = 5.0;
+    EXPECT_DOUBLE_EQ(v.y, 5.0);
+}
+
 TEST(Vec3Test, ArithmeticOperators)
 {
     const Vec3 a(1.0, 2.0, 3.0);

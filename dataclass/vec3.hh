@@ -12,9 +12,10 @@
 
 #include "typedefs.hh"
 
-#include <limits>
 #include <array>
+#include <cstddef>
 #include <cmath>
+#include <limits>
 
 namespace SimpleFluid
 {
@@ -38,6 +39,14 @@ struct vec3
 
     constexpr vec3(const std::array<scalar_t, 3>& arr)
         : x(arr[0]), y(arr[1]), z(arr[2]) {}
+
+    constexpr scalar_t& component(std::size_t index) {
+        return index == 0 ? x : (index == 1 ? y : z);
+    }
+
+    constexpr scalar_t component(std::size_t index) const {
+        return index == 0 ? x : (index == 1 ? y : z);
+    }
 
     // Arithmetic operators
     constexpr vec3 operator+(const vec3& v) const {

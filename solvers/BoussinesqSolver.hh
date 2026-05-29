@@ -12,6 +12,7 @@
 
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
+#include "equations/EquationValidation.hh"
 #include "equations/PressureProjectionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
@@ -124,12 +125,8 @@ template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
     -> SP<const mesh_type>
 {
-    if (!mesh)
-    {
-        throw std::invalid_argument("BoussinesqSolver requires a non-null mesh.");
-    }
-
-    return mesh;
+    return EquationValidation::require_non_null_mesh(
+        std::move(mesh), "BoussinesqSolver");
 }
 
 /**
@@ -295,7 +292,7 @@ void BoussinesqSolver<Pack>::step()
     d_momentum_equation.advance_velocity(d_old_velocity,
                                          d_old_face_fluxes,
                                          d_temperature,
-                                         d_boundary_conditions,
+                                         d_velocity_boundary_cache,
                                          d_time_options,
                                          d_velocity,
                                          d_linear_options);

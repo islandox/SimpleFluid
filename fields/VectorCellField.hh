@@ -97,7 +97,7 @@ template<TpetraTypePack Pack>
 auto VectorCellField<Pack>::component(const vec_type& value,
                                       std::size_t index) -> scalar_type
 {
-    return index == 0 ? value.x : (index == 1 ? value.y : value.z);
+    return value.component(index);
 }
 
 template<TpetraTypePack Pack>
