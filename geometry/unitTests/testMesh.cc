@@ -504,5 +504,5 @@ TEST(MeshUtilsTest, FaceAreaVectorThrowsForWrongSize)
     using Vec3 = SimpleFluid::MeshUtils::Vec3;
     std::vector<Vec3> bad = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}};
     EXPECT_THROW(SimpleFluid::MeshUtils::face_area_vector(bad),
-                 std::overflow_error); // from CHECK macro
+                 std::runtime_error); // from CHECK macro (default exception type)
 }
