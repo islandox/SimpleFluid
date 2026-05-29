@@ -58,6 +58,7 @@ add_subdirectory(fields/unitTests)
 add_subdirectory(operators/unitTests)
 add_subdirectory(equations/unitTests)
 add_subdirectory(solvers/unitTests)
+add_subdirectory(io/unitTests)
 
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
