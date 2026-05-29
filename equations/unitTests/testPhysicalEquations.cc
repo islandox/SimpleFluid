@@ -16,7 +16,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "fields/VectorCellField.hh"
 #include "geometry/MeshFactory.hh"
-#include "operators/FvmOperators.hh"
+#include "FVM/FvmOperators.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>

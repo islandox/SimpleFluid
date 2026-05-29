@@ -6,7 +6,7 @@
 
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
-#include "operators/FvmOperatorDetails.hh"
+#include "FVM/FvmOperatorDetails.hh"
 
 #include <array>
 #include <cstddef>

@@ -13,7 +13,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
-#include "operators/FvmOperators.hh"
+#include "FVM/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <cstddef>

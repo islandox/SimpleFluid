@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "operators/FvmOperators.hh"
+#include "FVM/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 

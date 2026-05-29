@@ -1,4 +1,4 @@
-# Unit tests for operators
+# Unit tests for FVM
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
