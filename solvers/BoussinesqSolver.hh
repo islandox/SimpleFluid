@@ -20,7 +20,7 @@
 #include "fields/VectorCellField.hh"
 #include "geometry/MeshUtils.hh"
 #include "io/VTUWriter.hh"
-#include "operators/FvmOperators.hh"
+#include "FVM/FvmOperators.hh"
 
 #include <algorithm>
 #include <cstdint>

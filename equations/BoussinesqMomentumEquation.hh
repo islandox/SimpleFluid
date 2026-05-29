@@ -15,7 +15,7 @@
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
-#include "operators/FvmOperators.hh"
+#include "FVM/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <Teuchos_RCP.hpp>
