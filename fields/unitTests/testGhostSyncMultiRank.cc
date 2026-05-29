@@ -9,6 +9,8 @@
 #include "geometry/MeshFactory.hh"
 #include "utils/testing_environment.hh"
 
+#include <mpi.h>
+
 #include <cstddef>
 #include <memory>
 
@@ -24,16 +26,21 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_two_hex_mesh()
+SimpleFluid::SP<MeshType> make_4x4x4_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
     db->set("mesh_size", SimpleFluid::real_t{1.0});
     db->set("domain_type",
             static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-    db->set("X", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
-    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
+
+    SimpleFluid::ArrReal edges(5);
+    for (std::size_t i = 0; i <= 4; ++i)
+        edges[i] = static_cast<SimpleFluid::real_t>(i);
+
+    db->set("X", edges);
+    db->set("Y", edges);
+    db->set("Z", edges);
     db->set("domain_exterior_face_types",
             SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
 
@@ -63,16 +70,42 @@ SimpleFluid::SP<MeshType> make_10x10x10_mesh()
     return factory.template build<Pack>();
 }
 
+void expect_partitioned_mesh(const MeshType& mesh,
+                             std::size_t expected_global_cells)
+{
+    const auto comm = mesh.owned_cell_map()->getComm();
+    const int local_owned = static_cast<int>(mesh.num_owned_cells());
+    const int local_ghosts = static_cast<int>(
+        mesh.num_local_cells() - mesh.num_owned_cells());
+
+    int global_owned = 0;
+    int global_ghosts = 0;
+    MPI_Allreduce(&local_owned, &global_owned, 1, MPI_INT, MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(&local_ghosts, &global_ghosts, 1, MPI_INT, MPI_SUM,
+                  MPI_COMM_WORLD);
+
+    EXPECT_GT(comm->getSize(), 1);
+    EXPECT_GT(mesh.num_owned_cells(), 0u)
+        << "Rank " << comm->getRank() << " owns no cells.";
+    EXPECT_GT(mesh.num_local_cells(), mesh.num_owned_cells())
+        << "Rank " << comm->getRank()
+        << " has no ghost cells, so ghost sync is not exercised.";
+    EXPECT_EQ(static_cast<std::size_t>(global_owned), expected_global_cells);
+    EXPECT_GT(global_ghosts, 0);
+}
+
 } // namespace
 
 TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesToAllLocalCells)
 {
-    auto mesh = make_two_hex_mesh();
+    auto mesh = make_4x4x4_mesh();
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
     {
         GTEST_SKIP() << "This test requires at least two MPI ranks.";
     }
+    expect_partitioned_mesh(*mesh, 64u);
 
     FieldType field(mesh, "global_id_field");
     for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -104,6 +137,7 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesOnLargeMesh)
     {
         GTEST_SKIP() << "This test requires at least four MPI ranks.";
     }
+    expect_partitioned_mesh(*mesh, 1000u);
 
     FieldType field(mesh, "global_id_field_large");
     for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)

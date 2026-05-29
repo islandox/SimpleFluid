@@ -11,6 +11,11 @@
 
 #include "MeshPartitioner.hh"
 
+
+#include <Zoltan2_PartitioningProblem.hpp>
+#include <Zoltan2_PartitioningSolution.hpp>
+#include <Zoltan2_TpetraRowGraphAdapter.hpp>
+
 using namespace SimpleFluid;
 
 
