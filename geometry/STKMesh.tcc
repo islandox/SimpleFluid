@@ -10,6 +10,7 @@
  */
 
 #include "STKMesh.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "io/VTUWriter.hh"
 
 #include <stk_io/IossBridge.hpp>
@@ -148,6 +149,35 @@ STKMesh<Pack>::STKMesh(const std::string& mesh_filename, const Options& options)
 
 /**
  * @brief Assemble the mesh geometry and connectivity into host and device views.
+ *
+ * Assembly order:
+ * 1. `initialize_boundary_id_maps()` — read STK side-set / part metadata.
+ * 2. `build_cell_list()` — traverse STK element buckets, populate cell
+ *    records, node IDs, and ownership maps.
+ * 3. `compute_cell_geometry()` — compute cell centroids and volumes.
+ * 4. `build_face_table()` — build the internal face table from element
+ *    side connectivity, deduplicating via sorted-node-GID keys.
+ * 5. **Parallel partition** — `MetisPartitioner::partition()` is called.
+ *    On multi-rank runs this redistributes cells, rebuilds the mesh, and
+ *    already computes face geometry on the receiving rank.  It returns
+ *    `true` when partitioning occurred.
+ * 6. **Conditional face geometry** — `compute_face_geometry()` is called
+ *    *only* when partitioning did **not** occur (single-rank or
+ *    already-partitioned mesh), because the partition step computes face
+ *    geometry internally.
+ * 7. `prefer_owned_face_owners()` — ensure face owners point to locally
+ *    owned cells where possible.
+ * 8. `assign_boundary_ids_from_stk_side_parts()` — tag exterior faces
+ *    with STK side-set boundary IDs.
+ * 9. `create_cell_face_distances()` — compute cell-centroid-to-face-
+ *    centroid distances for each cell–face pair.
+ * 10. `check_connectivity()` — validate the assembled mesh.
+ * 11. `create_maps()` — build Tpetra owned and overlap maps.
+ * 12. `create_device_views()` — mirror host data to Kokkos device views.
+ *
+ * @pre The STK mesh database has been populated (bulk data, coordinates).
+ * @post d_cells, d_faces, d_device_views, and all CRS-like adjacency
+ *       arrays are fully populated and consistent.
  */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::assemble()
@@ -156,8 +186,17 @@ void STKMesh<Pack>::assemble()
     build_cell_list();
     compute_cell_geometry();
     build_face_table();
+
+    // Partition replicated programmatic meshes for parallel runs.
+    // Returns true if partitioning occurred (face geometry already computed).
+    const bool was_partitioned =
+        MeshPartitioner<Pack>::partition(*this, Tpetra::getDefaultComm());
+
+    if (!was_partitioned)
+    {
+        compute_face_geometry();
+    }
     prefer_owned_face_owners();
-    compute_face_geometry();
     assign_boundary_ids_from_stk_side_parts();
     create_cell_face_distances();
 
@@ -731,6 +770,23 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
 {
     check_connectivity();
 
+    const int nranks = Tpetra::getDefaultComm()->getSize();
+    const int myrank = Tpetra::getDefaultComm()->getRank();
+
+    // Per-rank file names for parallel runs
+    const std::string output_filename = [&]() -> std::string
+    {
+        if (nranks <= 1) return filename;
+        const auto dot_pos = filename.rfind('.');
+        if (dot_pos != std::string::npos)
+        {
+            return filename.substr(0, dot_pos)
+                 + "_rank" + std::to_string(myrank)
+                 + filename.substr(dot_pos);
+        }
+        return filename + "_rank" + std::to_string(myrank);
+    }();
+
     std::unordered_map<EntityId, global_index_t> node_lid;
     VTUWriter::VectorData node_coords;
     VTUWriter::Int64Data cell_node_offsets;
@@ -752,8 +808,11 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
         return lid;
     };
 
+    // Export only owned cells in parallel; all cells in serial
+    const bool export_all = (nranks <= 1);
     for (std::size_t cell_lid = 0; cell_lid < d_stk.cell_entities.size(); ++cell_lid)
     {
+        if (!export_all && !d_cells[cell_lid].owned) continue;
         const auto elem = d_stk.cell_entities[cell_lid];
         const auto num_nodes = d_stk.bulk->num_nodes(elem);
         const auto* nodes = d_stk.bulk->begin_nodes(elem);
@@ -778,17 +837,22 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
     cell_volumes.reserve(d_cells.size());
     cell_centroids.reserve(d_cells.size());
 
-    for (auto gid : d_owned_cell_global_ids)
+    if (export_all)
     {
-        cell_gids.push_back(static_cast<global_index_t>(gid));
+        for (auto gid : d_owned_cell_global_ids)
+            cell_gids.push_back(static_cast<global_index_t>(gid));
+        for (auto gid : d_ghost_cell_global_ids)
+            cell_gids.push_back(static_cast<global_index_t>(gid));
     }
-    for (auto gid : d_ghost_cell_global_ids)
+    else
     {
-        cell_gids.push_back(static_cast<global_index_t>(gid));
+        for (auto gid : d_owned_cell_global_ids)
+            cell_gids.push_back(static_cast<global_index_t>(gid));
     }
 
     for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
     {
+        if (!export_all && !d_cells[lid].owned) continue;
         cell_types.push_back(static_cast<int>(d_cells[lid].type));
         cell_volumes.push_back(d_cells[lid].volume);
         cell_centroids.push_back(d_cells[lid].center);
@@ -803,7 +867,7 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
     writer.add_int_cell_data("cell_type", std::move(cell_types));
     writer.add_scalar_cell_data("cell_volume", std::move(cell_volumes));
     writer.add_vector_cell_data("cell_centroid", std::move(cell_centroids));
-    writer.write(filename);
+    writer.write(output_filename);
 }
 
 } // namespace SimpleFluid

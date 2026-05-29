@@ -8,14 +8,15 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Trilinos REQUIRED COMPONENTS Kokkos Teuchos Tpetra STKIO STKMesh STKTopology STKUtil Belos)
+find_package(Trilinos REQUIRED COMPONENTS Kokkos Teuchos Tpetra STKIO STKMesh STKTopology STKUtil Belos Zoltan2)
 find_package(MPI REQUIRED COMPONENTS CXX)
 
 # Add source files
 set(SOURCES "geometry/Mesh.cc"
             "geometry/STKMesh.cc"
             "geometry/MeshFactory.cc"
-            "io/VTUWriter.cc")
+            "io/VTUWriter.cc"
+            "parallel/MeshPartitioner.cc")
 
 # Create library or executable
 add_library(SimpleFluid STATIC ${SOURCES})
@@ -24,7 +25,7 @@ target_include_directories(SimpleFluid PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(SimpleFluid PUBLIC Trilinos::all_selected_libs MPI::MPI_CXX)
+target_link_libraries(SimpleFluid PUBLIC Trilinos::all_selected_libs MPI::MPI_CXX Zoltan2Core::all_libs)
 
 set(SIMPLEFLUID_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrecompiledHeaders.hh")
 target_precompile_headers(SimpleFluid PRIVATE
@@ -52,6 +53,7 @@ include(GoogleTest)
 
 add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)
+add_subdirectory(parallel/unitTests)
 add_subdirectory(fields/unitTests)
 add_subdirectory(operators/unitTests)
 add_subdirectory(equations/unitTests)
