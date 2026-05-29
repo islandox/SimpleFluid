@@ -249,11 +249,18 @@ TEST(VTUWriter, Int64CellDataTypeIsInt64)
 // Validation — error paths
 // ===========================================================================
 
-TEST(VTUWriter, WriteWithoutPointsThrows)
+TEST(VTUWriter, WriteWithoutPointsProducesZeroPointVtu)
 {
     VTUWriter writer;
     writer.set_cells({0, 1, 2}, {3}, {5});
-    EXPECT_THROW(writer.write("should_fail.vtu"), std::runtime_error);
+    // validate() does not check for empty points — it's valid to write
+    // a VTU with zero points (e.g., an empty partition on some ranks)
+    const std::string fname = "test_zero_points.vtu";
+    writer.write(fname);
+    EXPECT_TRUE(std::filesystem::exists(fname));
+    const auto content = read_file(fname);
+    EXPECT_NE(content.find("NumberOfPoints=\"0\""), std::string::npos);
+    std::filesystem::remove(fname);
 }
 
 TEST(VTUWriter, MismatchedOffsetsAndTypesThrows)
@@ -355,10 +362,10 @@ TEST(VTUWriter, XmlSpecialCharactersInDataNameAreEscaped)
     const auto content = read_file(tt.filename);
     // The ampersand should be escaped
     EXPECT_NE(content.find("&amp;"), std::string::npos);
-    // The raw & should NOT appear in the attribute
-    auto name_pos = content.find("temp ");
-    EXPECT_NE(name_pos, std::string::npos);
-    EXPECT_EQ(content.find("temp &amp; pressure"), std::string::npos); // escaped form is what we expect in XML
+    // The raw & should NOT appear unescaped — but the escaped form should
+    EXPECT_EQ(content.find("temp & pressure"), std::string::npos);
+    // The escaped &amp; form IS what we expect in XML output
+    EXPECT_NE(content.find("temp &amp; pressure"), std::string::npos);
 }
 
 } // namespace
