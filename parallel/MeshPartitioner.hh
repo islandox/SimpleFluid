@@ -13,17 +13,11 @@
 #include "geometry/Mesh.hh"
 #include "parallel/MPI_interface.hh"
 
-#include <Tpetra_CrsGraph.hpp>
-#include <Zoltan2_PartitioningProblem.hpp>
-#include <Zoltan2_PartitioningSolution.hpp>
-#include <Zoltan2_TpetraRowGraphAdapter.hpp>
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
-#include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 namespace SimpleFluid {
 
