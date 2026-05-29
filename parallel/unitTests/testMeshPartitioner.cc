@@ -16,6 +16,7 @@
 #include "geometry/MeshFactory.hh"
 #include "geometry/Mesh.hh"
 #include "fields/CellField.hh"
+#include "parallel/MPI_interface.hh"
 #include "utils/testing_environment.hh"
 
 #include <cstddef>
@@ -153,8 +154,7 @@ TEST(MeshPartitionerTest, ProducesValidDistribution)
     {
         int my_count = static_cast<int>(mesh->num_owned_cells());
         int global_total = 0;
-        MPI_Reduce(&my_count, &global_total, 1, MPI_INT, MPI_SUM, 0,
-                   MPI_COMM_WORLD);
+        my_mpi::reduce(&my_count, &global_total, 1, MPI_SUM, 0);
         if (comm->getRank() == 0)
             EXPECT_EQ(static_cast<std::size_t>(global_total), 64u);
     }

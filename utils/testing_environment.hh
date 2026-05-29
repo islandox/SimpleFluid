@@ -14,11 +14,12 @@
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 #include <Tpetra_Core.hpp>
-#include <mpi.h>
+#include "parallel/MPI_interface.hh"
 
 namespace utils_test
 {
 
+my_mpi::ErrorCode error_code;
 
 /**
  * @brief Global Google Test environment to initialize MPI and Kokkos.
@@ -28,11 +29,9 @@ class KokkosEnvironment : public testing::Environment
 public:
     void SetUp() override
     {
-        int mpi_initialized = 0;
-        MPI_Initialized(&mpi_initialized);
-        if (!mpi_initialized)
+        if (!my_mpi::initialized(error_code))
         {
-            MPI_Init(nullptr, nullptr);
+            my_mpi::init(nullptr, nullptr);
             d_initialized_mpi = true;
         }
 
@@ -61,11 +60,9 @@ public:
             Tpetra::finalize();
         }
 
-        int mpi_finalized = 0;
-        MPI_Finalized(&mpi_finalized);
-        if (d_initialized_mpi && !mpi_finalized)
+        if (d_initialized_mpi && !my_mpi::finalized(error_code))
         {
-            MPI_Finalize();
+            my_mpi::finalize();
         }
     }
 

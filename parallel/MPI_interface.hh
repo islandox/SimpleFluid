@@ -29,6 +29,8 @@
 #include <cstdint>
 #include <complex>
 
+#include "utils/TMP_helpers.hh"
+
 namespace my_mpi
 {
 
@@ -73,6 +75,12 @@ template<> inline MPI_Datatype type_trait<std::complex<double>>() { return MPI_C
 // boolean
 template<> inline MPI_Datatype type_trait<bool>() { return MPI_CXX_BOOL; }
 
+// unsupported types will cause a compile-time error due to missing specialization
+template<typename T>
+MPI_Datatype type_trait() {
+    static_assert(utils::always_false_v<T>, "MPI datatype not defined for this type:");
+}
+
 // -- lifecycle ------------------------------------------------------------
 
 /// Wraps MPI_Init.  Pass nullptr for both args to let MPI handle them.
@@ -82,10 +90,20 @@ inline ErrorCode init(int* argc, char*** argv) { return MPI_Init(argc, argv); }
 inline ErrorCode finalize() { return MPI_Finalize(); }
 
 /// Wraps MPI_Initialized.
-inline ErrorCode initialized(int& flag) { return MPI_Initialized(&flag); }
+inline bool initialized(ErrorCode& errorcode)
+{
+    int flag;
+    errorcode = MPI_Initialized(&flag);
+    return flag;
+}
 
 /// Wraps MPI_Finalized.
-inline ErrorCode finalized(int& flag) { return MPI_Finalized(&flag); }
+inline bool finalized(ErrorCode& errorcode)
+{
+    int flag;
+    errorcode = MPI_Finalized(&flag);
+    return flag;
+}
 
 /// Wraps MPI_Abort on the active communicator.
 inline ErrorCode abort(int errorcode) { return MPI_Abort(comm, errorcode); }
@@ -117,24 +135,24 @@ inline ErrorCode comm_free(Comm& comm_to_free) { return MPI_Comm_free(&comm_to_f
 // -- point-to-point (blocking) --------------------------------------------
 
 template<typename T>
-ErrorCode send(const T* data, int count, int dest, int tag) {
+inline ErrorCode send(const T* data, int count, int dest, int tag) {
     return MPI_Send(data, count, type_trait<T>(), dest, tag, comm);
 }
 
 template<typename T>
-ErrorCode recv(T* data, int count, int source, int tag, Status& status) {
+inline ErrorCode recv(T* data, int count, int source, int tag, Status& status) {
     return MPI_Recv(data, count, type_trait<T>(), source, tag, comm, &status);
 }
 
 // -- point-to-point (non-blocking) ----------------------------------------
 
 template<typename T>
-ErrorCode isend(const T* data, int count, int dest, int tag, Request& request) {
+inline ErrorCode isend(const T* data, int count, int dest, int tag, Request& request) {
     return MPI_Isend(data, count, type_trait<T>(), dest, tag, comm, &request);
 }
 
 template<typename T>
-ErrorCode irecv(T* data, int count, int source, int tag, Request& request) {
+inline ErrorCode irecv(T* data, int count, int source, int tag, Request& request) {
     return MPI_Irecv(data, count, type_trait<T>(), source, tag, comm, &request);
 }
 
@@ -157,35 +175,35 @@ inline ErrorCode test(Request& request, int& flag, Status& status) {
 
 /// Wraps MPI_Bcast.
 template<typename T>
-ErrorCode broadcast(T* data, int count, int root) {
+inline ErrorCode broadcast(T* data, int count, int root) {
     return MPI_Bcast(data, count, type_trait<T>(), root, comm);
 }
 
 /// Wraps MPI_Gather.
 template<typename T>
-ErrorCode gather(const T* sendbuf, int sendcount, T* recvbuf, int recvcount, int root) {
+inline ErrorCode gather(const T* sendbuf, int sendcount, T* recvbuf, int recvcount, int root) {
     return MPI_Gather(sendbuf, sendcount, type_trait<T>(),
                       recvbuf, recvcount, type_trait<T>(), root, comm);
 }
 
 /// Wraps MPI_Gatherv.
 template<typename T>
-ErrorCode gatherv(const T* sendbuf, int sendcount, T* recvbuf,
-                  const int* recvcounts, const int* displs, int root) {
+inline ErrorCode gatherv(const T* sendbuf, int sendcount, T* recvbuf,
+                         const int* recvcounts, const int* displs, int root) {
     return MPI_Gatherv(sendbuf, sendcount, type_trait<T>(),
                        recvbuf, recvcounts, displs, type_trait<T>(), root, comm);
 }
 
 /// Wraps MPI_Scatter.
 template<typename T>
-ErrorCode scatter(const T* sendbuf, int sendcount, T* recvbuf, int recvcount, int root) {
+inline ErrorCode scatter(const T* sendbuf, int sendcount, T* recvbuf, int recvcount, int root) {
     return MPI_Scatter(sendbuf, sendcount, type_trait<T>(),
                        recvbuf, recvcount, type_trait<T>(), root, comm);
 }
 
 /// Wraps MPI_Scatterv.
 template<typename T>
-ErrorCode scatterv(const T* sendbuf, const int* sendcounts, const int* displs,
+inline ErrorCode scatterv(const T* sendbuf, const int* sendcounts, const int* displs,
                    T* recvbuf, int recvcount, int root) {
     return MPI_Scatterv(sendbuf, sendcounts, displs, type_trait<T>(),
                         recvbuf, recvcount, type_trait<T>(), root, comm);
@@ -193,29 +211,29 @@ ErrorCode scatterv(const T* sendbuf, const int* sendcounts, const int* displs,
 
 /// Wraps MPI_Allgather.
 template<typename T>
-ErrorCode allgather(const T* sendbuf, int sendcount, T* recvbuf, int recvcount) {
+inline ErrorCode allgather(const T* sendbuf, int sendcount, T* recvbuf, int recvcount) {
     return MPI_Allgather(sendbuf, sendcount, type_trait<T>(),
                          recvbuf, recvcount, type_trait<T>(), comm);
 }
 
 /// Wraps MPI_Allgatherv.
 template<typename T>
-ErrorCode allgatherv(const T* sendbuf, int sendcount, T* recvbuf,
-                     const int* recvcounts, const int* displs) {
+inline ErrorCode allgatherv(const T* sendbuf, int sendcount, T* recvbuf,
+                            const int* recvcounts, const int* displs) {
     return MPI_Allgatherv(sendbuf, sendcount, type_trait<T>(),
                           recvbuf, recvcounts, displs, type_trait<T>(), comm);
 }
 
 /// Wraps MPI_Alltoall.
 template<typename T>
-ErrorCode alltoall(const T* sendbuf, int sendcount, T* recvbuf, int recvcount) {
+inline ErrorCode alltoall(const T* sendbuf, int sendcount, T* recvbuf, int recvcount) {
     return MPI_Alltoall(sendbuf, sendcount, type_trait<T>(),
                         recvbuf, recvcount, type_trait<T>(), comm);
 }
 
 /// Wraps MPI_Alltoallv.
 template<typename T>
-ErrorCode alltoallv(const T* sendbuf, const int* sendcounts, const int* sdispls,
+inline ErrorCode alltoallv(const T* sendbuf, const int* sendcounts, const int* sdispls,
                     T* recvbuf, const int* recvcounts, const int* rdispls) {
     return MPI_Alltoallv(sendbuf, sendcounts, sdispls, type_trait<T>(),
                          recvbuf, recvcounts, rdispls, type_trait<T>(), comm);
@@ -223,14 +241,47 @@ ErrorCode alltoallv(const T* sendbuf, const int* sendcounts, const int* sdispls,
 
 /// Wraps MPI_Reduce.
 template<typename T>
-ErrorCode reduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op, int root) {
+inline ErrorCode reduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op, int root) {
     return MPI_Reduce(sendbuf, recvbuf, count, type_trait<T>(), op, root, comm);
 }
 
 /// Wraps MPI_Allreduce.
 template<typename T>
-ErrorCode allreduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op) {
+inline ErrorCode allreduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op) {
     return MPI_Allreduce(sendbuf, recvbuf, count, type_trait<T>(), op, comm);
+}
+
+/// Global sum reduction wrappers.
+template<typename T>
+inline ErrorCode global_sum(const T* sendbuf, T* recvbuf, int count) {
+    return allreduce(sendbuf, recvbuf, count, MPI_SUM);
+}
+
+template<typename T>
+inline ErrorCode global_sum(const T& value, T& result) {
+    return global_sum(&value, &result, 1);
+}
+
+/// Global max reduction wrappers.
+template<typename T>
+inline ErrorCode global_max(const T* sendbuf, T* recvbuf, int count) {
+    return allreduce(sendbuf, recvbuf, count, MPI_MAX);
+}
+
+template<typename T>
+inline ErrorCode global_max(const T& value, T& result) {
+    return global_max(&value, &result, 1);
+}
+
+/// Global min reduction wrappers.
+template<typename T>
+inline ErrorCode global_min(const T* sendbuf, T* recvbuf, int count) {
+    return allreduce(sendbuf, recvbuf, count, MPI_MIN);
+}
+
+template<typename T>
+inline ErrorCode global_min(const T& value, T& result) {
+    return global_min(&value, &result, 1);
 }
 
 // -- synchronization ------------------------------------------------------

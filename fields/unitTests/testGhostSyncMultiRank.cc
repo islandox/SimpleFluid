@@ -7,9 +7,8 @@
 
 #include "fields/CellField.hh"
 #include "geometry/MeshFactory.hh"
+#include "parallel/MPI_interface.hh"
 #include "utils/testing_environment.hh"
-
-#include <mpi.h>
 
 #include <cstddef>
 #include <memory>
@@ -80,10 +79,8 @@ void expect_partitioned_mesh(const MeshType& mesh,
 
     int global_owned = 0;
     int global_ghosts = 0;
-    MPI_Allreduce(&local_owned, &global_owned, 1, MPI_INT, MPI_SUM,
-                  MPI_COMM_WORLD);
-    MPI_Allreduce(&local_ghosts, &global_ghosts, 1, MPI_INT, MPI_SUM,
-                  MPI_COMM_WORLD);
+    my_mpi::global_sum(local_owned, global_owned);
+    my_mpi::global_sum(local_ghosts, global_ghosts);
 
     EXPECT_GT(comm->getSize(), 1);
     EXPECT_GT(mesh.num_owned_cells(), 0u)
