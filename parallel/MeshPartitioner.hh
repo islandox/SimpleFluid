@@ -195,16 +195,16 @@ private:
      * @param tc Teuchos communicator (must wrap an MpiComm<int>).
      * @return Raw MPI_Comm, or MPI_COMM_NULL if the cast fails.
      */
-    static MPI_Comm get_mpi_comm(const comm_type& tc) {
+    static my_mpi::Comm get_mpi_comm(const comm_type& tc) {
         auto* mpi = dynamic_cast<const Teuchos::MpiComm<int>*>(&tc);
         if (mpi) return *(mpi->getRawMpiComm()); return MPI_COMM_NULL;
     }
     /**
      * @brief Return the MPI datatype corresponding to the global ordinal type.
      *
-     * @return MPI_INT64_T if GO is 8 bytes, MPI_INT32_T otherwise.
+     * @return Type-deduced MPI datatype via my_mpi::type_trait.
      */
-    static MPI_Datatype mpi_go_type() { return sizeof(GO) == 8 ? MPI_INT64_T : MPI_INT32_T; }
+    static MPI_Datatype mpi_go_type() { return my_mpi::type_trait<GO>(); }
 };
 
 } // namespace SimpleFluid
