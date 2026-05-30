@@ -45,6 +45,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
+    using face_velocity_field_type = VectorFaceField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using vec_type = typename mesh_type::Vec3;
@@ -63,6 +64,24 @@ public:
     void advance_velocity(
         const std::vector<vec_type>& old_velocity,
         const std::vector<scalar_type>& face_fluxes,
+        const field_type& temperature,
+        const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        velocity_field_type& velocity,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    void advance_velocity(
+        const std::vector<vec_type>& old_velocity,
+        const face_velocity_field_type& face_velocity,
+        const field_type& temperature,
+        const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& options,
+        velocity_field_type& velocity,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    void advance_velocity(
+        const std::vector<vec_type>& old_velocity,
+        const face_velocity_field_type& face_velocity,
         const field_type& temperature,
         const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,
@@ -242,6 +261,39 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     }
 
     velocity.sync_ghosts();
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqMomentumEquation<Pack>::advance_velocity(
+    const std::vector<vec_type>& old_velocity,
+    const face_velocity_field_type& face_velocity,
+    const field_type& temperature,
+    const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& options,
+    velocity_field_type& velocity,
+    const LinearSolverOptions& linear_options) const
+{
+    const auto cache =
+        FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            d_mesh, boundary_conditions);
+    advance_velocity(old_velocity, face_velocity, temperature, cache, options,
+                     velocity, linear_options);
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqMomentumEquation<Pack>::advance_velocity(
+    const std::vector<vec_type>& old_velocity,
+    const face_velocity_field_type& face_velocity,
+    const field_type& temperature,
+    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    velocity_field_type& velocity,
+    const LinearSolverOptions& linear_options) const
+{
+    const auto face_fluxes =
+        FvmOperators::normal_face_fluxes<Pack>(*d_mesh, face_velocity);
+    advance_velocity(old_velocity, face_fluxes, temperature,
+                     velocity_boundary_cache, options, velocity, linear_options);
 }
 
 } // namespace SimpleFluid

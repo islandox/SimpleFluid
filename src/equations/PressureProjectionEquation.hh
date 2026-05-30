@@ -41,6 +41,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
+    using face_velocity_field_type = VectorFaceField<Pack>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
 
@@ -78,7 +79,7 @@ private:
 
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
-    mutable std::vector<scalar_type> d_cached_face_fluxes;
+    mutable face_velocity_field_type d_cached_face_velocity;
     mutable std::vector<typename mesh_type::Vec3> d_cached_gradients;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
@@ -99,7 +100,8 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
     LinearSolverOptions linear_options)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "PressureProjectionEquation")),
-      d_linear_options(linear_options)
+      d_linear_options(linear_options),
+      d_cached_face_velocity(d_mesh, "pressure_projection_face_velocity")
 {
     require_owned_cell_map(d_mesh);
 }
@@ -202,8 +204,8 @@ void PressureProjectionEquation<Pack>::project(
         return;
     }
 
-    FvmOperators::face_fluxes(*d_mesh, velocity, velocity_boundary_cache,
-                              d_cached_face_fluxes);
+    FvmOperators::face_velocities(*d_mesh, velocity, velocity_boundary_cache,
+                                  d_cached_face_velocity);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     if (d_cached_pressure_matrix.is_null())
     {
@@ -226,7 +228,8 @@ void PressureProjectionEquation<Pack>::project(
         const auto rhs_value = row_gid == gauge_gid
                              ? scalar_type{}
                              : -FvmOperators::cell_flux_balance<Pack>(
-                                   *d_mesh, d_cached_face_fluxes, cell_lid) / time_step;
+                                   *d_mesh, d_cached_face_velocity, cell_lid)
+                               / time_step;
         d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 

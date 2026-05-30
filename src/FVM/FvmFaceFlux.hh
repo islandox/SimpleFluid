@@ -115,6 +115,30 @@ void validate_face_flux_inputs(
 }
 
 template<TpetraTypePack Pack>
+void validate_face_velocity_output(
+    const Mesh<Pack>& mesh,
+    const VectorFaceField<Pack>& face_velocity)
+{
+    if (&face_velocity.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "face_velocities requires an output field on the input mesh.");
+    }
+}
+
+template<TpetraTypePack Pack>
+void validate_normal_flux_inputs(
+    const Mesh<Pack>& mesh,
+    const VectorFaceField<Pack>& face_velocity)
+{
+    if (&face_velocity.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "normal_face_fluxes requires a face-velocity field on the input mesh.");
+    }
+}
+
+template<TpetraTypePack Pack>
 bool boundary_face_velocity(
     const Mesh<Pack>& mesh,
     typename Pack::local_ordinal_type face_lid,
@@ -137,45 +161,180 @@ bool boundary_face_velocity(
 }
 
 template<TpetraTypePack Pack>
-void assemble_face_fluxes(const Mesh<Pack>& mesh,
-                          const VectorCellField<Pack>& velocity,
-                          const VelocityBoundaryCache<Pack>* boundary_cache,
-                          std::vector<typename Pack::scalar_type>& fluxes)
+void assemble_face_velocities(const Mesh<Pack>& mesh,
+                              const VectorCellField<Pack>& velocity,
+                              const VelocityBoundaryCache<Pack>* boundary_cache,
+                              VectorFaceField<Pack>& face_velocity)
 {
     validate_face_flux_inputs(mesh, velocity, boundary_cache);
-    fluxes.assign(mesh.num_faces(), typename Pack::scalar_type{});
+    validate_face_velocity_output(mesh, face_velocity);
+    face_velocity.put_scalar(typename Mesh<Pack>::Vec3{});
 
     for (std::size_t face = 0; face < mesh.num_faces(); ++face)
     {
         const auto face_lid =
             static_cast<typename Pack::local_ordinal_type>(face);
-        const auto owner = mesh.owner_cell(face_lid);
-        auto face_velocity = velocity.local_value(owner);
-
-        if (mesh.is_interior_face(face_lid))
-        {
-            const auto neighbor = mesh.neighbor_cell(face_lid);
-            face_velocity = (face_velocity + velocity.local_value(neighbor)) / 2.0;
-        }
-        else if (!boundary_face_velocity(mesh, face_lid, boundary_cache,
-                                         face_velocity))
+        if (!face_velocity.is_owned_face(face_lid))
         {
             continue;
         }
 
-        fluxes[face] = face_velocity.dot(mesh.face_normal(face_lid))
-                     * mesh.face_area(face_lid);
+        const auto owner = mesh.owner_cell(face_lid);
+        auto value = velocity.local_value(owner);
+
+        if (mesh.is_interior_face(face_lid))
+        {
+            const auto neighbor = mesh.neighbor_cell(face_lid);
+            value = (value + velocity.local_value(neighbor)) / 2.0;
+        }
+        else if (!boundary_face_velocity(mesh, face_lid, boundary_cache, value))
+        {
+            continue;
+        }
+
+        face_velocity.set_value(face_lid, value);
     }
 }
 
 } // namespace detail
 
 template<TpetraTypePack Pack>
+void face_velocities(const Mesh<Pack>& mesh,
+                     const VectorCellField<Pack>& velocity,
+                     VectorFaceField<Pack>& face_velocity)
+{
+    detail::assemble_face_velocities<Pack>(mesh, velocity, nullptr,
+                                           face_velocity);
+}
+
+template<TpetraTypePack Pack>
+void face_velocities(const Mesh<Pack>& mesh,
+                     const VectorCellField<Pack>& velocity,
+                     const VelocityBoundaryCache<Pack>& boundary_cache,
+                     VectorFaceField<Pack>& face_velocity)
+{
+    detail::assemble_face_velocities(mesh, velocity, &boundary_cache,
+                                     face_velocity);
+}
+
+template<TpetraTypePack Pack>
+void face_velocities(const Mesh<Pack>& mesh,
+                     const VectorCellField<Pack>& velocity,
+                     const BoundaryConditionSet& boundary_conditions,
+                     VectorFaceField<Pack>& face_velocity)
+{
+    const auto cache =
+        cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+    face_velocities(mesh, velocity, cache, face_velocity);
+}
+
+template<TpetraTypePack Pack>
+void face_velocities(const Mesh<Pack>& mesh,
+                     const VectorCellField<Pack>& velocity,
+                     const BoundaryConditionSet* boundary_conditions,
+                     VectorFaceField<Pack>& face_velocity)
+{
+    if (boundary_conditions == nullptr)
+    {
+        face_velocities(mesh, velocity, face_velocity);
+        return;
+    }
+
+    face_velocities(mesh, velocity, *boundary_conditions, face_velocity);
+}
+
+template<TpetraTypePack Pack>
+VectorFaceField<Pack>
+face_velocities(const Mesh<Pack>& mesh,
+                const VectorCellField<Pack>& velocity)
+{
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    face_velocities(mesh, velocity, face_velocity);
+
+    return face_velocity;
+}
+
+template<TpetraTypePack Pack>
+VectorFaceField<Pack>
+face_velocities(const Mesh<Pack>& mesh,
+                const VectorCellField<Pack>& velocity,
+                const BoundaryConditionSet& boundary_conditions)
+{
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    face_velocities(mesh, velocity, boundary_conditions, face_velocity);
+
+    return face_velocity;
+}
+
+template<TpetraTypePack Pack>
+VectorFaceField<Pack>
+face_velocities(const Mesh<Pack>& mesh,
+                const VectorCellField<Pack>& velocity,
+                const BoundaryConditionSet* boundary_conditions)
+{
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    face_velocities(mesh, velocity, boundary_conditions, face_velocity);
+
+    return face_velocity;
+}
+
+template<TpetraTypePack Pack>
+VectorFaceField<Pack>
+face_velocities(const Mesh<Pack>& mesh,
+                const VectorCellField<Pack>& velocity,
+                const VelocityBoundaryCache<Pack>& boundary_cache)
+{
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    face_velocities(mesh, velocity, boundary_cache, face_velocity);
+
+    return face_velocity;
+}
+
+template<TpetraTypePack Pack>
+void normal_face_fluxes(
+    const Mesh<Pack>& mesh,
+    const VectorFaceField<Pack>& face_velocity,
+    std::vector<typename Pack::scalar_type>& fluxes)
+{
+    detail::validate_normal_flux_inputs(mesh, face_velocity);
+    fluxes.assign(mesh.num_faces(), typename Pack::scalar_type{});
+
+    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<typename Pack::local_ordinal_type>(face);
+        if (!face_velocity.is_owned_face(face_lid))
+        {
+            continue;
+        }
+
+        fluxes[face] = face_velocity.value(face_lid).dot(mesh.face_normal(face_lid))
+                     * mesh.face_area(face_lid);
+    }
+}
+
+template<TpetraTypePack Pack>
+std::vector<typename Pack::scalar_type>
+normal_face_fluxes(const Mesh<Pack>& mesh,
+                   const VectorFaceField<Pack>& face_velocity)
+{
+    std::vector<typename Pack::scalar_type> fluxes;
+    normal_face_fluxes(mesh, face_velocity, fluxes);
+
+    return fluxes;
+}
+
+template<TpetraTypePack Pack>
 void face_fluxes(const Mesh<Pack>& mesh,
                  const VectorCellField<Pack>& velocity,
                  std::vector<typename Pack::scalar_type>& fluxes)
 {
-    detail::assemble_face_fluxes<Pack>(mesh, velocity, nullptr, fluxes);
+    const auto face_velocity = face_velocities(mesh, velocity);
+    normal_face_fluxes(mesh, face_velocity, fluxes);
 }
 
 template<TpetraTypePack Pack>
@@ -184,7 +343,8 @@ void face_fluxes(const Mesh<Pack>& mesh,
                  const VelocityBoundaryCache<Pack>& boundary_cache,
                  std::vector<typename Pack::scalar_type>& fluxes)
 {
-    detail::assemble_face_fluxes(mesh, velocity, &boundary_cache, fluxes);
+    const auto face_velocity = face_velocities(mesh, velocity, boundary_cache);
+    normal_face_fluxes(mesh, face_velocity, fluxes);
 }
 
 template<TpetraTypePack Pack>

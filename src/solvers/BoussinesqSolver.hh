@@ -45,6 +45,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
+    using face_velocity_field_type = VectorFaceField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -103,11 +104,11 @@ private:
     field_type d_temperature;
     field_type d_pressure;
     velocity_field_type d_velocity;
+    face_velocity_field_type d_old_face_velocities;
+    face_velocity_field_type d_projected_face_velocities;
 
     std::vector<scalar_type> d_old_temperature;
     std::vector<vec_type> d_old_velocity;
-    std::vector<scalar_type> d_old_face_fluxes;
-    std::vector<scalar_type> d_projected_face_fluxes;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
@@ -157,7 +158,9 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_pressure_projection(d_mesh, d_linear_options),
       d_temperature(d_mesh, "temperature"),
       d_pressure(d_mesh, "pressure"),
-      d_velocity(d_mesh, "velocity")
+      d_velocity(d_mesh, "velocity"),
+      d_old_face_velocities(d_mesh, "old_face_velocity"),
+      d_projected_face_velocities(d_mesh, "projected_face_velocity")
 {
     if (d_time_options.time_step <= 0.0)
     {
@@ -287,10 +290,10 @@ void BoussinesqSolver<Pack>::step()
         d_old_velocity[cell] = d_velocity.local_value(cell_lid);
     }
 
-    FvmOperators::face_fluxes(*d_mesh, d_velocity, d_velocity_boundary_cache,
-                              d_old_face_fluxes);
+    FvmOperators::face_velocities(*d_mesh, d_velocity, d_velocity_boundary_cache,
+                                  d_old_face_velocities);
     d_momentum_equation.advance_velocity(d_old_velocity,
-                                         d_old_face_fluxes,
+                                         d_old_face_velocities,
                                          d_temperature,
                                          d_velocity_boundary_cache,
                                          d_time_options,
@@ -300,10 +303,10 @@ void BoussinesqSolver<Pack>::step()
                                   d_time_options.time_step,
                                   d_velocity_boundary_cache,
                                   d_velocity);
-    FvmOperators::face_fluxes(*d_mesh, d_velocity, d_velocity_boundary_cache,
-                              d_projected_face_fluxes);
+    FvmOperators::face_velocities(*d_mesh, d_velocity, d_velocity_boundary_cache,
+                                  d_projected_face_velocities);
     d_temperature_equation.advance_semi_implicit(d_old_temperature,
-                                                 d_projected_face_fluxes,
+                                                 d_projected_face_velocities,
                                                  d_time_options.time_step,
                                                  d_time_options.thermal_diffusivity,
                                                  d_temperature,
