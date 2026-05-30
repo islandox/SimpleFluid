@@ -1,6 +1,12 @@
 /**
  * @file FvmMatrixOperators.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Finite-volume matrix assembly operators.
+ * @version 0.1
+ * @date 2026-05-30
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -16,6 +22,15 @@
 namespace SimpleFluid::FvmOperators
 {
 
+/**
+ * @brief Build an identity (or scaled-identity) square matrix over the
+ *        given map.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param map Row/column map for the matrix.
+ * @param diagonal Value to place on the diagonal (default 1.0).
+ * @return Fill-complete sparse matrix with @p diagonal on the diagonal.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
@@ -37,6 +52,16 @@ identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
     return matrix;
 }
 
+/**
+ * @brief Assemble the finite-volume diffusion matrix (negative Laplacian).
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param diffusivity Constant scalar diffusivity coefficient.
+ * @return Fill-complete sparse matrix representing the diffusion operator.
+ * @throws std::runtime_error if any interior face connects coincident
+ *         cell centers.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
@@ -89,6 +114,19 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
     return matrix;
 }
 
+/**
+ * @brief Assemble the first-order upwind convection matrix from
+ *        pre-computed face fluxes.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_fluxes Vector of scalar face fluxes indexed by face local
+ *        ID.
+ * @return Fill-complete sparse matrix representing the upwind convection
+ *         operator.
+ * @throws std::invalid_argument if @p face_fluxes size does not match the
+ *         mesh.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 upwind_convection_matrix(
@@ -148,6 +186,18 @@ upwind_convection_matrix(
     return matrix;
 }
 
+/**
+ * @brief Assemble the pressure Poisson matrix with a gauge-cell
+ *        constraint (sets the gauge row to identity).
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param gauge_cell_gid Global ID of the cell used to fix the pressure
+ *        level.
+ * @return Fill-complete sparse matrix representing the Poisson operator.
+ * @throws std::runtime_error if any interior face connects coincident
+ *         cell centers.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 pressure_poisson_matrix(

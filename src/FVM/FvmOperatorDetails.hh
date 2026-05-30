@@ -1,6 +1,12 @@
 /**
  * @file FvmOperatorDetails.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Internal finite-volume helper utilities.
+ * @version 0.1
+ * @date 2026-05-30
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -14,11 +20,28 @@
 namespace SimpleFluid::FvmOperators::detail
 {
 
+/**
+ * @brief Return a mutable reference to a component of a 3-D vector.
+ *
+ * @param vector The vector to index.
+ * @param index Component index (0, 1, or 2).
+ * @return Mutable reference to the requested component.
+ */
 inline real_t& component(MeshUtils::Vec3& vector, std::size_t index)
 {
     return vector.component(index);
 }
 
+/**
+ * @brief Solve a 3×3 linear system Ax = b using Gaussian elimination with
+ *        partial pivoting.
+ *
+ * @param[in,out] a The 3×3 coefficient matrix, modified in place.
+ * @param[in,out] b The right-hand-side vector; on output contains the
+ *        solution x.
+ * @return The solution vector (same as @p b on return, or zero if
+ *         singular).
+ */
 inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
                                  MeshUtils::Vec3& b)
 {
@@ -71,6 +94,13 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
     return b;
 }
 
+/**
+ * @brief Return a const value of a component of a 3-D vector.
+ *
+ * @param vector The vector to index.
+ * @param index Component index (0, 1, or 2).
+ * @return Value of the requested component.
+ */
 inline real_t component_value(const MeshUtils::Vec3& vector, std::size_t index)
 {
     return vector.component(index);
