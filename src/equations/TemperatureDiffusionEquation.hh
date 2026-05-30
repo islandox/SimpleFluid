@@ -41,6 +41,7 @@ class TemperatureDiffusionEquation
 public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
+    using face_velocity_field_type = VectorFaceField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -57,6 +58,14 @@ public:
     void advance_semi_implicit(
         const std::vector<scalar_type>& old_temperature,
         const std::vector<scalar_type>& face_fluxes,
+        scalar_type time_step,
+        scalar_type thermal_diffusivity,
+        field_type& temperature,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    void advance_semi_implicit(
+        const std::vector<scalar_type>& old_temperature,
+        const face_velocity_field_type& face_velocity,
         scalar_type time_step,
         scalar_type thermal_diffusivity,
         field_type& temperature,
@@ -281,6 +290,21 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
         }
     }
     temperature.sync_ghosts();
+}
+
+template<TpetraTypePack Pack>
+void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
+    const std::vector<scalar_type>& old_temperature,
+    const face_velocity_field_type& face_velocity,
+    scalar_type time_step,
+    scalar_type thermal_diffusivity,
+    field_type& temperature,
+    const LinearSolverOptions& linear_options) const
+{
+    const auto face_fluxes =
+        FvmOperators::normal_face_fluxes<Pack>(*d_mesh, face_velocity);
+    advance_semi_implicit(old_temperature, face_fluxes, time_step,
+                          thermal_diffusivity, temperature, linear_options);
 }
 
 } // namespace SimpleFluid

@@ -144,6 +144,76 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     EXPECT_TRUE(saw_z_face);
 }
 
+TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto& center = mesh->cell_centroid(lid);
+        velocity.set_value(lid,
+                           {center.x + 1.0,
+                            2.0 * center.y + 3.0,
+                            3.0 * center.z + 5.0});
+    }
+    velocity.sync_ghosts();
+
+    const auto face_velocity = SimpleFluid::FvmOperators::face_velocities(
+        *mesh, velocity);
+
+    bool saw_interior_face = false;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (!mesh->is_interior_face(fid))
+        {
+            continue;
+        }
+
+        saw_interior_face = true;
+        const auto owner = mesh->owner_cell(fid);
+        const auto neighbor = mesh->neighbor_cell(fid);
+        const auto expected =
+            (velocity.local_value(owner) + velocity.local_value(neighbor)) / 2.0;
+        const auto actual = face_velocity.value(fid);
+
+        EXPECT_NEAR(actual.x, expected.x, 1.0e-12);
+        EXPECT_NEAR(actual.y, expected.y, 1.0e-12);
+        EXPECT_NEAR(actual.z, expected.z, 1.0e-12);
+    }
+
+    EXPECT_TRUE(saw_interior_face);
+}
+
+TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroFaceVelocity)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 2.0, 3.0}, "velocity");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    const auto face_velocity = SimpleFluid::FvmOperators::face_velocities(
+        *mesh, velocity, bcs);
+
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+        {
+            EXPECT_EQ(face_velocity.value(fid), (SimpleFluid::vec3{}));
+        }
+    }
+}
+
 TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
 {
     auto mesh = make_mesh();

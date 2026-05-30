@@ -6,6 +6,7 @@
 
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/VectorFaceField.hh"
 #include "FVM/FvmOperatorDetails.hh"
 
 #include <array>
@@ -125,6 +126,35 @@ typename Pack::scalar_type cell_flux_balance(
 }
 
 template<TpetraTypePack Pack>
+typename Pack::scalar_type cell_flux_balance(
+    const Mesh<Pack>& mesh,
+    const VectorFaceField<Pack>& face_velocity,
+    typename Pack::local_ordinal_type cell_lid)
+{
+    if (&face_velocity.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_flux_balance requires a face-velocity field on the input mesh.");
+    }
+
+    typename Pack::scalar_type balance = 0.0;
+    for (const auto face_lid : mesh.faces(cell_lid))
+    {
+        if (!face_velocity.is_owned_face(face_lid))
+        {
+            continue;
+        }
+
+        const auto sign = mesh.owner_cell(face_lid) == cell_lid ? 1.0 : -1.0;
+        balance += sign
+                 * face_velocity.value(face_lid).dot(mesh.face_normal(face_lid))
+                 * mesh.face_area(face_lid);
+    }
+
+    return balance;
+}
+
+template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
 cell_divergence_from_fluxes(
     const Mesh<Pack>& mesh,
@@ -136,6 +166,24 @@ cell_divergence_from_fluxes(
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(owned);
         divergence[owned] = cell_flux_balance(mesh, face_fluxes, cell_lid)
+                          / mesh.cell_volume(cell_lid);
+    }
+
+    return divergence;
+}
+
+template<TpetraTypePack Pack>
+std::vector<typename Pack::scalar_type>
+cell_divergence_from_fluxes(
+    const Mesh<Pack>& mesh,
+    const VectorFaceField<Pack>& face_velocity)
+{
+    std::vector<typename Pack::scalar_type> divergence(mesh.num_owned_cells(), 0.0);
+    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<typename Pack::local_ordinal_type>(owned);
+        divergence[owned] = cell_flux_balance(mesh, face_velocity, cell_lid)
                           / mesh.cell_volume(cell_lid);
     }
 
