@@ -1,6 +1,12 @@
 /**
  * @file FvmCellOperators.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Cell-centered finite-volume gradient and divergence operators.
+ * @version 0.1
+ * @date 2026-05-30
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -16,6 +22,15 @@
 namespace SimpleFluid::FvmOperators
 {
 
+/**
+ * @brief Compute a least-squares cell-centered gradient for every owned
+ *        cell.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param field Scalar cell field whose gradient is computed.
+ * @param[out] gradients Pre-allocated vector to receive the gradient at
+ *        each owned cell.
+ */
 template<TpetraTypePack Pack>
 void cell_gradient(const CellField<Pack>& field,
                    std::vector<typename Mesh<Pack>::Vec3>& gradients)
@@ -65,8 +80,16 @@ void cell_gradient(const CellField<Pack>& field,
     }
 }
 
+/**
+ * @brief Compute and return a least-squares cell-centered gradient for
+ *        every owned cell.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param field Scalar cell field whose gradient is computed.
+ * @return Vector of gradient vectors indexed by owned-cell local ID.
+ */
 template<TpetraTypePack Pack>
-std::vector<typename Mesh<Pack>::Vec3>
+inline std::vector<typename Mesh<Pack>::Vec3>
 cell_gradient(const CellField<Pack>& field)
 {
     std::vector<typename Mesh<Pack>::Vec3> gradients;
@@ -75,6 +98,15 @@ cell_gradient(const CellField<Pack>& field)
     return gradients;
 }
 
+/**
+ * @brief Compute the divergence of a face flux field at every owned cell,
+ *        divided by cell volume.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param flux Face-centered scalar flux field.
+ * @return Vector of divergence values indexed by owned-cell local ID.
+ */
 template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
 cell_divergence(const Mesh<Pack>& mesh, const FaceField<Pack>& flux)
@@ -104,6 +136,18 @@ cell_divergence(const Mesh<Pack>& mesh, const FaceField<Pack>& flux)
     return divergence;
 }
 
+/**
+ * @brief Compute the net flux balance (sum of signed face fluxes) for a
+ *        single cell.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_fluxes Vector of scalar fluxes indexed by face local ID.
+ * @param cell_lid Local ID of the cell whose balance is computed.
+ * @return Sum of outward-positive fluxes around @p cell_lid.
+ * @throws std::invalid_argument if @p face_fluxes size does not match the
+ *         mesh.
+ */
 template<TpetraTypePack Pack>
 typename Pack::scalar_type cell_flux_balance(
     const Mesh<Pack>& mesh,
@@ -125,6 +169,17 @@ typename Pack::scalar_type cell_flux_balance(
     return balance;
 }
 
+/**
+ * @brief Compute the net volumetric flux balance for a single cell from a
+ *        face-velocity field.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_velocity Face-centered velocity field.
+ * @param cell_lid Local ID of the cell whose balance is computed.
+ * @return Sum of outward-positive volumetric fluxes around @p cell_lid.
+ * @throws std::invalid_argument if @p face_velocity is not on @p mesh.
+ */
 template<TpetraTypePack Pack>
 typename Pack::scalar_type cell_flux_balance(
     const Mesh<Pack>& mesh,
@@ -154,6 +209,15 @@ typename Pack::scalar_type cell_flux_balance(
     return balance;
 }
 
+/**
+ * @brief Compute the volume-normalized divergence at every owned cell
+ *        from pre-computed face fluxes.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_fluxes Vector of scalar fluxes indexed by face local ID.
+ * @return Vector of divergence values indexed by owned-cell local ID.
+ */
 template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
 cell_divergence_from_fluxes(
@@ -172,6 +236,15 @@ cell_divergence_from_fluxes(
     return divergence;
 }
 
+/**
+ * @brief Compute the volume-normalized divergence at every owned cell
+ *        from a face-velocity field.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_velocity Face-centered velocity field.
+ * @return Vector of divergence values indexed by owned-cell local ID.
+ */
 template<TpetraTypePack Pack>
 std::vector<typename Pack::scalar_type>
 cell_divergence_from_fluxes(

@@ -1,6 +1,12 @@
 /**
  * @file FvmTransportSystem.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Semi-implicit finite-volume transport-system assembly.
+ * @version 0.1
+ * @date 2026-05-30
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -17,6 +23,12 @@
 namespace SimpleFluid::FvmOperators
 {
 
+/**
+ * @brief Holds the assembled left-hand-side matrix and right-hand-side
+ *        vector for a semi-implicit transport step.
+ *
+ * @tparam Pack The Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 struct TransportSystem
 {
@@ -24,6 +36,31 @@ struct TransportSystem
     typename Pack::vector_type rhs;
 };
 
+/**
+ * @brief Assemble the semi-implicit transport system (unsteady
+ *        advection-diffusion) for a scalar field.
+ *
+ * The assembly uses first-order upwinding for advection and a two-point
+ * flux approximation for diffusion.  Boundary values are supplied lazily
+ * via the callable @p boundary_value.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @tparam BoundaryValueProvider A callable with signature
+ *         std::optional<scalar_type>(local_ordinal_type face_lid,
+ *         scalar_type old_cell_value).
+ * @param mesh The computational mesh.
+ * @param old_values Previous time-step cell values indexed by local ID.
+ * @param face_fluxes Pre-computed face volumetric fluxes.
+ * @param time_step Time-step size (must be positive).
+ * @param diffusivity Constant scalar diffusivity (non-negative).
+ * @param boundary_value Callable that returns the prescribed boundary
+ *        value for a face, or std::nullopt.
+ * @return TransportSystem containing the assembled matrix and RHS vector.
+ * @throws std::invalid_argument if @p time_step <= 0, @p diffusivity < 0,
+ *         or array sizes are inconsistent with @p mesh.
+ * @throws std::runtime_error if any interior face connects coincident
+ *         cell centers.
+ */
 template<TpetraTypePack Pack, class BoundaryValueProvider>
 TransportSystem<Pack>
 transport_system(const Mesh<Pack>& mesh,
