@@ -71,39 +71,38 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
     VelocityBoundaryCache<Pack> cache(mesh);
     cache.has_value.assign(mesh->num_faces(), 0);
 
-    for (std::size_t face = 0; face < mesh->num_faces(); ++face)
+    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
     {
-        const auto face_lid =
-            static_cast<typename Pack::local_ordinal_type>(face);
-        if (!mesh->is_boundary_face(face_lid))
-        {
-            continue;
-        }
-
         const auto iter =
-            boundary_conditions.velocity.find(mesh->boundary_name(face_lid));
+            boundary_conditions.velocity.find(mesh->boundary_patch_name(patch_id));
         if (iter == boundary_conditions.velocity.end())
         {
             continue;
         }
 
+        typename VelocityBoundaryCache<Pack>::vec_type prescribed_value{};
         if (iter->second.type == BoundaryConditionType::NoSlip)
         {
-            if (!cache.value.is_owned_face(face_lid))
-            {
-                continue;
-            }
-            cache.value.set_value(face_lid, {});
-            cache.has_value[face] = 1;
+            prescribed_value = {};
         }
         else if (iter->second.type == BoundaryConditionType::Dirichlet)
         {
+            prescribed_value = iter->second.value;
+        }
+        else
+        {
+            continue;
+        }
+
+        for (const auto face_lid : boundary_patch.face_lids)
+        {
             if (!cache.value.is_owned_face(face_lid))
             {
                 continue;
             }
-            cache.value.set_value(face_lid, iter->second.value);
-            cache.has_value[face] = 1;
+
+            cache.value.set_value(face_lid, prescribed_value);
+            cache.has_value[static_cast<std::size_t>(face_lid)] = 1;
         }
     }
 

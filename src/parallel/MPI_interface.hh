@@ -180,63 +180,63 @@ inline ErrorCode broadcast(T* data, int count, int root) {
 }
 
 /// Wraps MPI_Gather.
-template<typename T>
-inline ErrorCode gather(const T* sendbuf, int sendcount, T* recvbuf, int recvcount, int root) {
-    return MPI_Gather(sendbuf, sendcount, type_trait<T>(),
-                      recvbuf, recvcount, type_trait<T>(), root, comm);
+template<typename Ts, typename Tr>
+inline ErrorCode gather(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount, int root) {
+    return MPI_Gather(sendbuf, sendcount, type_trait<Ts>(),
+                      recvbuf, recvcount, type_trait<Tr>(), root, comm);
 }
 
 /// Wraps MPI_Gatherv.
-template<typename T>
-inline ErrorCode gatherv(const T* sendbuf, int sendcount, T* recvbuf,
+template<typename Ts, typename Tr>
+inline ErrorCode gatherv(const Ts* sendbuf, int sendcount, Tr* recvbuf,
                          const int* recvcounts, const int* displs, int root) {
-    return MPI_Gatherv(sendbuf, sendcount, type_trait<T>(),
-                       recvbuf, recvcounts, displs, type_trait<T>(), root, comm);
+    return MPI_Gatherv(sendbuf, sendcount, type_trait<Ts>(),
+                       recvbuf, recvcounts, displs, type_trait<Tr>(), root, comm);
 }
 
 /// Wraps MPI_Scatter.
-template<typename T>
-inline ErrorCode scatter(const T* sendbuf, int sendcount, T* recvbuf, int recvcount, int root) {
-    return MPI_Scatter(sendbuf, sendcount, type_trait<T>(),
-                       recvbuf, recvcount, type_trait<T>(), root, comm);
+template<typename Ts, typename Tr>
+inline ErrorCode scatter(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount, int root) {
+    return MPI_Scatter(sendbuf, sendcount, type_trait<Ts>(),
+                       recvbuf, recvcount, type_trait<Tr>(), root, comm);
 }
 
 /// Wraps MPI_Scatterv.
-template<typename T>
-inline ErrorCode scatterv(const T* sendbuf, const int* sendcounts, const int* displs,
-                   T* recvbuf, int recvcount, int root) {
-    return MPI_Scatterv(sendbuf, sendcounts, displs, type_trait<T>(),
-                        recvbuf, recvcount, type_trait<T>(), root, comm);
+template<typename Ts, typename Tr>
+inline ErrorCode scatterv(const Ts* sendbuf, const int* sendcounts, const int* displs,
+                   Tr* recvbuf, int recvcount, int root) {
+    return MPI_Scatterv(sendbuf, sendcounts, displs, type_trait<Ts>(),
+                        recvbuf, recvcount, type_trait<Tr>(), root, comm);
 }
 
 /// Wraps MPI_Allgather.
-template<typename T>
-inline ErrorCode allgather(const T* sendbuf, int sendcount, T* recvbuf, int recvcount) {
-    return MPI_Allgather(sendbuf, sendcount, type_trait<T>(),
-                         recvbuf, recvcount, type_trait<T>(), comm);
+template<typename Ts, typename Tr>
+inline ErrorCode allgather(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount) {
+    return MPI_Allgather(sendbuf, sendcount, type_trait<Ts>(),
+                         recvbuf, recvcount, type_trait<Tr>(), comm);
 }
 
 /// Wraps MPI_Allgatherv.
-template<typename T>
-inline ErrorCode allgatherv(const T* sendbuf, int sendcount, T* recvbuf,
+template<typename Ts, typename Tr>
+inline ErrorCode allgatherv(const Ts* sendbuf, int sendcount, Tr* recvbuf,
                             const int* recvcounts, const int* displs) {
-    return MPI_Allgatherv(sendbuf, sendcount, type_trait<T>(),
-                          recvbuf, recvcounts, displs, type_trait<T>(), comm);
+    return MPI_Allgatherv(sendbuf, sendcount, type_trait<Ts>(),
+                          recvbuf, recvcounts, displs, type_trait<Tr>(), comm);
 }
 
 /// Wraps MPI_Alltoall.
-template<typename T>
-inline ErrorCode alltoall(const T* sendbuf, int sendcount, T* recvbuf, int recvcount) {
-    return MPI_Alltoall(sendbuf, sendcount, type_trait<T>(),
-                        recvbuf, recvcount, type_trait<T>(), comm);
+template<typename Ts, typename Tr>
+inline ErrorCode alltoall(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount) {
+    return MPI_Alltoall(sendbuf, sendcount, type_trait<Ts>(),
+                        recvbuf, recvcount, type_trait<Tr>(), comm);
 }
 
 /// Wraps MPI_Alltoallv.
-template<typename T>
-inline ErrorCode alltoallv(const T* sendbuf, const int* sendcounts, const int* sdispls,
-                    T* recvbuf, const int* recvcounts, const int* rdispls) {
-    return MPI_Alltoallv(sendbuf, sendcounts, sdispls, type_trait<T>(),
-                         recvbuf, recvcounts, rdispls, type_trait<T>(), comm);
+template<typename Ts, typename Tr>
+inline ErrorCode alltoallv(const Ts* sendbuf, const int* sendcounts, const int* sdispls,
+                    Tr* recvbuf, const int* recvcounts, const int* rdispls) {
+    return MPI_Alltoallv(sendbuf, sendcounts, sdispls, type_trait<Ts>(),
+                         recvbuf, recvcounts, rdispls, type_trait<Tr>(), comm);
 }
 
 /// Wraps MPI_Reduce.

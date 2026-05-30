@@ -167,7 +167,7 @@ private:
     using Base::create_cell_face_distances;
     using Base::create_maps;
     using Base::create_device_views;
-    using Base::d_boundary_id_to_faces;
+    using Base::d_boundary_id_to_face_patch;
     using Base::d_boundary_id_to_name;
     using Base::d_boundary_name_to_id;
     using Base::d_cell_gid_to_lid;
@@ -185,6 +185,7 @@ private:
     using Base::d_owned_cell_global_ids;
     using Base::d_ghost_cell_global_ids;
     using Base::d_owned_cell_ids;
+    using Base::d_owned_face_global_ids;
     using Base::d_spatial_dim;
     using Base::make_face_key;
     using Base::make_vectorV3D_view;

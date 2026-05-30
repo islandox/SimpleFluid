@@ -142,6 +142,12 @@ inline bool Mesh<Pack>::is_owned_cell(local_ordinal_type lid) const
 }
 
 template<TpetraTypePack Pack>
+inline bool Mesh<Pack>::is_owned_face(local_ordinal_type fid) const
+{
+    return is_owned_cell(owner_cell(fid));
+}
+
+template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::faces(local_ordinal_type cell_lid) const -> const ViewLO&
 {
     return cell(cell_lid).faces;
@@ -308,21 +314,54 @@ inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
  * @throws std::out_of_range if the face is not a boundary face.
  */
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const -> const std::string&
+inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const
+    -> const std::string&
 {
     if (!is_boundary_face(fid))
     {
         throw std::out_of_range("Requested face is not a boundary face.");
     }
-    return d_boundary_id_to_name.at(face(fid).boundary_id);
+
+    return boundary_patch_name(boundary_id(fid));
 }
 
+/**
+ * @brief Retrieve the boundary name for a boundary patch.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param patch_id Boundary patch ID.
+ * @return Const reference to the boundary name string.
+ * @throws std::out_of_range if the boundary patch is not found.
+ */
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::face_patch(int patch_id) const -> const ArrLO&
+inline auto Mesh<Pack>::boundary_patch_name(int patch_id) const
+    -> const std::string&
 {
-    static const ArrLO empty_patch;
-    const auto iter = d_boundary_id_to_faces.find(patch_id);
-    return iter == d_boundary_id_to_faces.end() ? empty_patch : iter->second;
+    const auto iter = d_boundary_id_to_name.find(patch_id);
+    if (iter == d_boundary_id_to_name.end())
+    {
+        throw std::out_of_range("Requested boundary patch is not found.");
+    }
+    return d_boundary_id_to_name.at(patch_id);
+}
+
+/**
+ * @brief Retrieve the list of face IDs for a boundary patch.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param patch_id Boundary patch ID.
+ * @return Const reference to the list of face IDs.
+ * @throws std::out_of_range if the boundary patch is not found.
+ */
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::boundary_face_patch(int patch_id) const -> const BoundaryFacePatch&
+{
+    const auto iter = d_boundary_id_to_face_patch.find(patch_id);
+    if (iter == d_boundary_id_to_face_patch.end())
+    {
+        throw std::out_of_range("Requested boundary patch is not found.");
+    }
+    return iter->second;
 }
 
 template<TpetraTypePack Pack>

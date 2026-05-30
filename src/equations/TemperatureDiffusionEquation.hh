@@ -118,23 +118,29 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache(
 {
     d_face_boundary_temperature.assign(d_mesh->num_faces(), BoundaryTemperature{});
 
-    for (std::size_t face = 0; face < d_mesh->num_faces(); ++face)
+    for (const auto& [patch_id, boundary_patch] : d_mesh->boundary_patches())
     {
-        const auto face_lid = static_cast<local_ordinal_type>(face);
-        if (!d_mesh->is_boundary_face(face_lid))
-        {
-            continue;
-        }
-
         const auto iter =
-            boundary_conditions.temperature.find(d_mesh->boundary_name(face_lid));
+            boundary_conditions.temperature.find(
+                d_mesh->boundary_patch_name(patch_id));
         if (iter == boundary_conditions.temperature.end()
             || iter->second.type != BoundaryConditionType::Dirichlet)
         {
             continue;
         }
 
-        d_face_boundary_temperature[face] = {iter->second.value, 1};
+        for (auto face_lid : boundary_patch.face_lids)
+        {
+            if (!d_mesh->is_owned_face(face_lid))
+            {
+                continue;
+            }
+
+            // Cache only Dirichlet temperature values for now; Neumann and
+            // NoSlip conditions are handled implicitly in the diffusion solve.
+            d_face_boundary_temperature[static_cast<std::size_t>(face_lid)] =
+                {iter->second.value, 1};
+        }
     }
 }
 

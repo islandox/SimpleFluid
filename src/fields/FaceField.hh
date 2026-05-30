@@ -99,11 +99,14 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            bool zero_out)
     : base_type(std::move(name), mesh)
 {
-    this->d_data = vector_type(
-        base_type::make_owned_face_map(
-            mesh, "FaceField",
-            this->d_owned_face_ids, this->d_face_lid_to_owned_row),
-        zero_out);
+    const auto owned_face_map =
+        base_type::make_owned_face_map(mesh, "FaceField",
+                                       this->d_owned_face_ids,
+                                       this->d_face_lid_to_owned_row);
+    this->d_data = vector_type(mesh->owned_face_map() == Teuchos::null
+                             ? owned_face_map
+                             : mesh->owned_face_map(),
+                               zero_out);
 }
 
 /**

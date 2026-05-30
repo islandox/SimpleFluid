@@ -48,6 +48,24 @@ Mesh<Pack>::Mesh()
 template<TpetraTypePack Pack>
 void Mesh<Pack>::create_maps()
 {
+    if (d_boundary_id_to_face_patch.empty())
+    {
+        for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
+        {
+            const auto boundary_id = d_faces[fid].boundary_id;
+            if (boundary_id == invalid_boundary_id)
+            {
+                continue;
+            }
+
+            auto& face_patch = d_boundary_id_to_face_patch[boundary_id];
+            face_patch.id = boundary_id;
+            face_patch.face_lids.push_back(
+                detail::checked_size_to_ordinal<local_ordinal_type>(
+                    fid, "boundary face local id"));
+        }
+    }
+
     ArrGO overlap_gids = d_owned_cell_global_ids;
     overlap_gids.reserve(overlap_gids.size() + d_ghost_cell_global_ids.size());
     overlap_gids.insert(overlap_gids.end(), d_ghost_cell_global_ids.begin(), d_ghost_cell_global_ids.end());
@@ -67,6 +85,57 @@ void Mesh<Pack>::create_maps()
         invalid_global_size,
         overlap_gids.data(),
         detail::checked_size_to_ordinal<local_ordinal_type>(overlap_gids.size(), "overlap cell map"),
+        index_base,
+        comm));
+
+    ArrGO owned_face_gids;
+    owned_face_gids.reserve(d_faces.size());
+    for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
+    {
+        const auto face_lid =
+            detail::checked_size_to_ordinal<local_ordinal_type>(
+                fid, "face local id");
+        if (!is_owned_face(face_lid))
+        {
+            continue;
+        }
+
+        owned_face_gids.push_back(
+            fid < d_owned_face_global_ids.size()
+          ? d_owned_face_global_ids[fid]
+          : static_cast<global_ordinal_type>(fid));
+    }
+
+    // Owned face map: includes all faces owned by locally owned cells.
+    d_owned_face_map = Teuchos::rcp(new map_type(
+        invalid_global_size,
+        owned_face_gids.data(),
+        detail::checked_size_to_ordinal<local_ordinal_type>(owned_face_gids.size(), "owned face map"),
+        index_base,
+        comm));
+
+    ArrGO boundary_face_gids;
+    for (const auto& [patch_id, face_patch] : d_boundary_id_to_face_patch)
+    {
+        (void)patch_id;
+        for (const auto& face_lid : face_patch.face_lids)
+        {
+            if (!is_owned_face(face_lid))
+            {
+                continue;
+            }
+            const auto face_index = static_cast<std::size_t>(face_lid);
+            boundary_face_gids.push_back(
+                face_index < d_owned_face_global_ids.size()
+              ? d_owned_face_global_ids[face_index]
+              : static_cast<global_ordinal_type>(face_lid));
+        }
+    }
+    // Boundary face map: includes all faces on physical boundaries (subset of owned faces)
+    d_boundary_face_map = Teuchos::rcp(new map_type(
+        invalid_global_size,
+        boundary_face_gids.data(),
+        detail::checked_size_to_ordinal<local_ordinal_type>(boundary_face_gids.size(), "boundary face map"),
         index_base,
         comm));
 }
@@ -298,10 +367,11 @@ void Mesh<Pack>::check_connectivity() const
 
         if (face.boundary_id != invalid_boundary_id)
         {
-            const auto patch_iter = d_boundary_id_to_faces.find(face.boundary_id);
-            CHECK(patch_iter != d_boundary_id_to_faces.end());
-            CHECK(std::find(patch_iter->second.begin(), patch_iter->second.end(),
-                            static_cast<local_ordinal_type>(fid)) != patch_iter->second.end());
+            const auto patch_iter = d_boundary_id_to_face_patch.find(face.boundary_id);
+            CHECK(patch_iter != d_boundary_id_to_face_patch.end());
+            auto& face_lids = patch_iter->second.face_lids;
+            CHECK(std::find(face_lids.begin(), face_lids.end(),
+                            static_cast<local_ordinal_type>(fid)) != face_lids.end());
         }
     }
 }

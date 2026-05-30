@@ -44,6 +44,9 @@ public:
     template <TpetraTypePack Pack = DefaultTpetraTypes>
     SP<Mesh<Pack>> build();
 
+    template <TpetraTypePack Pack = DefaultTpetraTypes>
+    static SP<Mesh<Pack>> build_empty_mesh();
+
 private:
     /**
      * @brief Specification for a boundary layer mesh refinement region.
