@@ -96,12 +96,15 @@ VectorFaceField<Pack>::VectorFaceField(SP<const mesh_type> mesh,
                                        bool zero_out)
     : base_type(std::move(name), mesh)
 {
-    this->d_data = vector_type(
-        base_type::make_owned_face_map(
-            mesh, "VectorFaceField",
-            this->d_owned_face_ids, this->d_face_lid_to_owned_row),
-        num_components,
-        zero_out);
+    const auto owned_face_map =
+        base_type::make_owned_face_map(mesh, "VectorFaceField",
+                                       this->d_owned_face_ids,
+                                       this->d_face_lid_to_owned_row);
+    this->d_data = vector_type(mesh->owned_face_map() == Teuchos::null
+                             ? owned_face_map
+                             : mesh->owned_face_map(),
+                               num_components,
+                               zero_out);
 }
 
 template<TpetraTypePack Pack>

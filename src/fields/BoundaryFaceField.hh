@@ -143,6 +143,16 @@ public:
     scalar_type value(local_ordinal_type face_lid) const;
 
     /**
+     * @brief Read the value stored at a boundary face by boundary ID and in-patch ID.
+     *
+     * @param boundary_id Boundary patch ID.
+     * @param in_patch_id Local ID of the face within the boundary patch.
+     * @return Stored scalar value.
+     * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID is out of bounds for the patch.
+     */
+    scalar_type value(int boundary_id, local_ordinal_type in_patch_id) const;
+
+    /**
      * @brief Write a value to a boundary face.
      *
      * @param face_lid Local ID of the boundary face.
@@ -151,6 +161,16 @@ public:
      *         owned boundary face.
      */
     void set_value(local_ordinal_type face_lid, const scalar_type& value);
+
+    /**
+     * @brief Write a value to a boundary face by boundary ID and in-patch ID.
+     *
+     * @param boundary_id Boundary patch ID.
+     * @param in_patch_id Local ID of the face within the boundary patch.
+     * @param value Scalar value to store.
+     * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID is out of bounds for the patch.
+     */
+    void set_value(int boundary_id, local_ordinal_type in_patch_id, const scalar_type& value);
 
     // -------- queries --------
 
@@ -264,32 +284,34 @@ auto BoundaryFaceField<Pack>::make_boundary_face_map(
             "owned-cell map.");
     }
 
+    std::size_t num_boundary_faces = 0;
+    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
+    {
+        (void)patch_id;
+        num_boundary_faces += boundary_patch.face_lids.size();
+    }
+
     owned_boundary_face_ids.clear();
-    owned_boundary_face_ids.reserve(mesh->num_faces());
+    owned_boundary_face_ids.reserve(num_boundary_faces);
     face_lid_to_owned_row.assign(mesh->num_faces(), invalid_owned_row());
 
-    for (std::size_t fid = 0; fid < mesh->num_faces(); ++fid)
+    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
     {
-        const auto face_lid =
-            detail::checked_size_to_ordinal<local_ordinal_type>(
-                fid, "face local id");
-
-        if (!mesh->is_boundary_face(face_lid))
+        (void)patch_id;
+        for (auto fid : boundary_patch.face_lids)
         {
-            continue;
-        }
+            const auto owner = mesh->owner_cell(fid);
+            if (!mesh->is_owned_cell(owner))
+            {
+                continue;
+            }
 
-        const auto owner = mesh->owner_cell(face_lid);
-        if (!mesh->is_owned_cell(owner))
-        {
-            continue;
+            const auto owned_row =
+                detail::checked_size_to_ordinal<local_ordinal_type>(
+                    owned_boundary_face_ids.size(), "boundary-face owned row");
+            owned_boundary_face_ids.push_back(fid);
+            face_lid_to_owned_row[static_cast<std::size_t>(fid)] = owned_row;
         }
-
-        const auto owned_row =
-            detail::checked_size_to_ordinal<local_ordinal_type>(
-                owned_boundary_face_ids.size(), "boundary-face owned row");
-        owned_boundary_face_ids.push_back(face_lid);
-        face_lid_to_owned_row[fid] = owned_row;
     }
 
     const auto invalid_global_size =
@@ -352,10 +374,59 @@ auto BoundaryFaceField<Pack>::value(local_ordinal_type face_lid) const
 }
 
 template<TpetraTypePack Pack>
+auto BoundaryFaceField<Pack>::value(int patch_id, local_ordinal_type in_patch_id) const
+    -> scalar_type
+{
+    const auto& face_patch = d_mesh->boundary_face_patch(patch_id);
+    if constexpr (std::is_signed_v<local_ordinal_type>)
+    {
+        if (in_patch_id < 0)
+        {
+            throw std::out_of_range(
+                "In-patch ID cannot be negative: "
+                + std::to_string(in_patch_id));
+        }
+    }
+
+    const auto patch_index = static_cast<std::size_t>(in_patch_id);
+    if (patch_index >= face_patch.face_lids.size())
+    {
+        throw std::out_of_range("In-patch ID is out of bounds for the specified boundary patch.");
+    }
+
+    return value(face_patch.face_lids[patch_index]);
+}
+
+template<TpetraTypePack Pack>
 void BoundaryFaceField<Pack>::set_value(local_ordinal_type face_lid,
                                         const scalar_type& value)
 {
     d_data.replaceLocalValue(owned_row_for_face(face_lid), value);
+}
+
+template<TpetraTypePack Pack>
+void BoundaryFaceField<Pack>::set_value(int patch_id,
+                                        local_ordinal_type in_patch_id,
+                                        const scalar_type& value)
+{
+    const auto& face_patch = d_mesh->boundary_face_patch(patch_id);
+    if constexpr (std::is_signed_v<local_ordinal_type>)
+    {
+        if (in_patch_id < 0)
+        {
+            throw std::out_of_range(
+                "In-patch ID cannot be negative: "
+                + std::to_string(in_patch_id));
+        }
+    }
+
+    const auto patch_index = static_cast<std::size_t>(in_patch_id);
+    if (patch_index >= face_patch.face_lids.size())
+    {
+        throw std::out_of_range("In-patch ID is out of bounds for the specified boundary patch.");
+    }
+
+    set_value(face_patch.face_lids[patch_index], value);
 }
 
 template<TpetraTypePack Pack>

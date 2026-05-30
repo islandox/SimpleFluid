@@ -155,6 +155,11 @@ public:
         double cell_center_distance = 0.0;
     };
 
+    struct BoundaryFacePatch
+    {
+        int id = invalid_boundary_id;
+        ArrLO face_lids;
+    };
 
     struct DeviceViews;
 
@@ -195,6 +200,12 @@ public:
 
     RCP<const map_type> owned_cell_map() const { return d_owned_cell_map; }
     RCP<const map_type> overlap_cell_map() const { return d_overlap_cell_map; }
+    RCP<const map_type> owned_face_map() const { return d_owned_face_map; }
+    RCP<const map_type> boundary_face_map() const { return d_boundary_face_map; }
+    const std::unordered_map<int, BoundaryFacePatch>& boundary_patches() const noexcept
+    {
+        return d_boundary_id_to_face_patch;
+    }
 
 //------------------------------ random access -------------------------------//
     inline const CellInfo& cell(local_ordinal_type lid) const;
@@ -211,6 +222,7 @@ public:
     size_t num_faces() const noexcept { return d_faces.size(); }
 
     inline bool is_owned_cell(local_ordinal_type lid) const;
+    inline bool is_owned_face(local_ordinal_type fid) const;
 
     inline const ViewLO& faces(local_ordinal_type cell_lid) const;
     inline const ViewReal& face_distances(local_ordinal_type cell_lid) const;
@@ -235,7 +247,8 @@ public:
 
     inline int boundary_id(local_ordinal_type fid) const;
     inline const std::string& boundary_name(local_ordinal_type fid) const;
-    inline const ArrLO& face_patch(int patch_id) const;
+    inline const std::string& boundary_patch_name(int patch_id) const;
+    inline const BoundaryFacePatch& boundary_face_patch(int patch_id) const;
 
     inline local_ordinal_type global_to_local_cell(global_ordinal_type gid) const;
 
@@ -262,6 +275,8 @@ protected:
     ArrGO d_owned_cell_global_ids;
     ArrGO d_ghost_cell_global_ids;
 
+    ArrGO d_owned_face_global_ids;
+
     ArrLO d_cell_owned_face_ids;
     ArrReal d_cell_face_distances;
     ArrGO d_cell_owned_node_global_ids;
@@ -279,11 +294,13 @@ protected:
 
     std::unordered_map<int, std::string> d_boundary_id_to_name;
     std::unordered_map<std::string, int> d_boundary_name_to_id;
-    std::unordered_map<int, ArrLO> d_boundary_id_to_faces;
-    int d_next_boundary_id = 1; // Start from 1 since 0 is reserved for invalid_boundary_id
+    std::unordered_map<int, BoundaryFacePatch> d_boundary_id_to_face_patch;
+    int d_next_boundary_id = 0;
 
     RCP<const map_type> d_owned_cell_map;
     RCP<const map_type> d_overlap_cell_map;
+    RCP<const map_type> d_owned_face_map;
+    RCP<const map_type> d_boundary_face_map;
 
     DeviceViews d_device_views;
 };

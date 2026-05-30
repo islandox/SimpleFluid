@@ -80,7 +80,6 @@ inline auto topology_to_cell_type(stk::topology topo) -> typename STKMesh<Pack>:
     throw std::runtime_error("Unsupported cell topology: " + topo.name());
 }
 
-
 /**
  * @brief Determine face type from its node count.
  *
@@ -229,7 +228,7 @@ void STKMesh<Pack>::build_cell_list()
     d_cell_gid_to_lid.clear();
     d_node_gid_to_lid.clear();
     d_face_key_to_face.clear();
-    d_boundary_id_to_faces.clear();
+    d_boundary_id_to_face_patch.clear();
 
     d_stk.coord_field = nullptr;
     if (const auto* coord_base = d_stk.meta->coordinate_field(); coord_base != nullptr)
@@ -276,7 +275,9 @@ void STKMesh<Pack>::build_cell_list()
             {
                 const auto lid = detail::checked_size_to_ordinal<local_ordinal_type>(
                     d_cells.size(), "cell count");
-                const auto gid = static_cast<global_ordinal_type>(d_stk.bulk->identifier(elem));
+
+                const auto gid = static_cast<global_ordinal_type>(
+                    d_stk.bulk->identifier(elem));
 
                 if (!d_cell_gid_to_lid.emplace(gid, lid).second)
                 {
@@ -380,6 +381,7 @@ template<TpetraTypePack Pack>
 void STKMesh<Pack>::build_face_table()
 {
     d_faces.clear();
+    d_owned_face_global_ids.clear();
     d_face_key_to_face.clear();
     d_face_owned_node_global_ids.clear();
     d_cell_owned_face_ids.clear();
@@ -401,6 +403,15 @@ void STKMesh<Pack>::build_face_table()
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell_index);
         const auto elem = d_stk.cell_entities[cell_index];
+
+        // In 3D, this is usually FACE_RANK.
+        // In dimension-independent code, prefer side_rank().
+        stk::mesh::EntityRank sideRank = d_stk.bulk->mesh_meta_data().side_rank();
+
+        const unsigned num_connected_faces =
+            d_stk.bulk->num_connectivity(elem, sideRank);
+        const stk::mesh::Entity* faces = d_stk.bulk->begin(elem, sideRank);
+
         const auto topo = d_stk.bulk->bucket(elem).topology();
         const auto* elem_nodes = d_stk.bulk->begin_nodes(elem);
         const auto num_elem_nodes = d_stk.bulk->num_nodes(elem);
@@ -441,6 +452,17 @@ void STKMesh<Pack>::build_face_table()
                 d_faces.push_back(std::move(face_info));
                 d_face_key_to_face.emplace(key, fid);
                 cell_face_ids[cell_index].push_back(fid);
+
+                const bool has_connected_face =
+                    faces != nullptr && side < num_connected_faces
+                    && faces[side].is_local_offset_valid();
+                const auto gid = has_connected_face
+                               ? static_cast<global_ordinal_type>(
+                                     d_stk.bulk->identifier(faces[side]))
+                               : static_cast<global_ordinal_type>(
+                                     d_stk.bulk->identifier(elem) * topo.num_sides()
+                                     + side + 1);
+                d_owned_face_global_ids.push_back(gid);
             }
             else
             {
@@ -466,9 +488,7 @@ void STKMesh<Pack>::build_face_table()
     for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto offset = d_cell_owned_face_ids.size();
-        d_cell_owned_face_ids.insert(d_cell_owned_face_ids.end(),
-                                     cell_face_ids[lid].begin(),
-                                     cell_face_ids[lid].end());
+        d_cell_owned_face_ids.append_range(cell_face_ids[lid]);
         d_cells[lid].faces = ViewLO(d_cell_owned_face_ids.data() + offset,
                                     cell_face_ids[lid].size());
     }
@@ -487,7 +507,7 @@ void STKMesh<Pack>::compute_face_geometry()
 
         for (const auto node_id : face_info.node_gids)
         {
-            coords.push_back(node_coord_by_id(static_cast<EntityId>(node_id)));
+            coords.push_back(Base::node_coord(node_id));
         }
 
         face_info.center = MeshUtils::average(coords);
@@ -537,7 +557,7 @@ void STKMesh<Pack>::initialize_boundary_id_maps()
 {
     d_boundary_id_to_name.clear();
     d_boundary_name_to_id.clear();
-    d_boundary_id_to_faces.clear();
+    d_boundary_id_to_face_patch.clear();
     d_next_boundary_id = 1;
 
     for (const auto& [name, id] : d_stk.options.boundary_name_to_id)
@@ -597,7 +617,7 @@ int STKMesh<Pack>::get_or_create_boundary_id(const std::string& name)
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
 {
-    d_boundary_id_to_faces.clear();
+    d_boundary_id_to_face_patch.clear();
 
     const auto side_rank = d_stk.meta->side_rank();
     std::unordered_map<std::string, const stk::mesh::Part*> face_key_to_part;
@@ -654,8 +674,9 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
 
         auto boundary_name = iter->second->name();
         face_info.boundary_id = get_or_create_boundary_id(boundary_name);
-        d_boundary_id_to_faces[face_info.boundary_id].push_back(
-            static_cast<local_ordinal_type>(fid));
+        auto& face_patch = d_boundary_id_to_face_patch[face_info.boundary_id];
+        face_patch.id = face_info.boundary_id;
+        face_patch.face_lids.push_back(static_cast<local_ordinal_type>(fid));
     }
 }
 
