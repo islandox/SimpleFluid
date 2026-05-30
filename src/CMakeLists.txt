@@ -10,11 +10,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cc")
     simplefluid_reuse_precompiled_header(SimpleFluid_app)
 endif()
 
-find_package(GTest)
-
-enable_testing()
-include(GoogleTest)
-
 add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)
 add_subdirectory(parallel/unitTests)

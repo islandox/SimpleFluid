@@ -19,7 +19,7 @@
 namespace utils_test
 {
 
-my_mpi::ErrorCode error_code;
+inline my_mpi::ErrorCode error_code;
 
 /**
  * @brief Global Google Test environment to initialize MPI and Kokkos.
