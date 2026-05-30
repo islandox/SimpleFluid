@@ -38,4 +38,10 @@ function(simplefluid_reuse_precompiled_header target_name)
     target_precompile_headers(${target_name} REUSE_FROM SimpleFluid)
 endfunction()
 
+
+find_package(GTest)
+
+enable_testing()
+include(GoogleTest)
+
 add_subdirectory(src)
