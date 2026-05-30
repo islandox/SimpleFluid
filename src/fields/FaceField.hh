@@ -11,17 +11,11 @@
 
 #pragma once
 
-#include "geometry/Mesh.hh"
-
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_Core.hpp>
+#include "fields/FaceFieldBase.hh"
 
 #include <cstddef>
-#include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace SimpleFluid
 {
@@ -34,18 +28,23 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for vector storage and communication.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class FaceField
+class FaceField : public FaceFieldBase<Pack,
+                                        FaceField<Pack>,
+                                        typename Pack::vector_type>
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using vector_type = typename Pack::vector_type;
-    using map_type = typename Pack::map_type;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
+    using base_type = FaceFieldBase<Pack,
+                                     FaceField<Pack>,
+                                     typename Pack::vector_type>;
+    using mesh_type = typename base_type::mesh_type;
+    using vector_type = typename base_type::vector_type;
+    using map_type = typename base_type::map_type;
+    using scalar_type = typename base_type::scalar_type;
+    using local_ordinal_type = typename base_type::local_ordinal_type;
+    using global_ordinal_type = typename base_type::global_ordinal_type;
 
     template <class T>
-    using RCP = Teuchos::RCP<T>;
+    using RCP = typename base_type::template RCP<T>;
 
     explicit FaceField(SP<const mesh_type> mesh,
                        std::string name = std::string(),
@@ -55,33 +54,24 @@ public:
               const scalar_type& initial_value,
               std::string name = std::string());
 
-    const std::string& name() const noexcept { return d_name; }
-    void set_name(std::string name) { d_name = std::move(name); }
+    using base_type::name;
+    using base_type::set_name;
+    using base_type::mesh;
+    using base_type::mesh_ptr;
+    using base_type::map;
+    using base_type::num_owned_faces;
+    using base_type::owned_face_ids;
+    using base_type::face_global_id;
+    using base_type::is_owned_face;
+    using base_type::is_owned_global_face;
 
-    const mesh_type& mesh() const noexcept { return *d_mesh; }
-    SP<const mesh_type> mesh_ptr() const noexcept { return d_mesh; }
+    vector_type& data() noexcept { return this->d_data; }
+    const vector_type& data() const noexcept { return this->d_data; }
 
-    RCP<const map_type> map() const { return d_data.getMap(); }
+    vector_type& vector() noexcept { return this->d_data; }
+    const vector_type& vector() const noexcept { return this->d_data; }
 
-    vector_type& data() noexcept { return d_data; }
-    const vector_type& data() const noexcept { return d_data; }
-
-    vector_type& vector() noexcept { return d_data; }
-    const vector_type& vector() const noexcept { return d_data; }
-
-    std::size_t num_owned_faces() const noexcept
-    {
-        return d_owned_face_ids.size();
-    }
-
-    const std::vector<local_ordinal_type>& owned_face_ids() const noexcept
-    {
-        return d_owned_face_ids;
-    }
-
-    void put_scalar(const scalar_type& value) { d_data.putScalar(value); }
-
-    global_ordinal_type face_global_id(local_ordinal_type face_lid) const;
+    void put_scalar(const scalar_type& value) { this->d_data.putScalar(value); }
 
     scalar_type value(local_ordinal_type face_lid) const;
     scalar_type global_value(global_ordinal_type face_gid) const;
@@ -91,30 +81,6 @@ public:
 
     void sum_into_value(local_ordinal_type face_lid, const scalar_type& value);
     void sum_into_global_value(global_ordinal_type face_gid, const scalar_type& value);
-
-    bool is_owned_face(local_ordinal_type face_lid) const;
-    bool is_owned_global_face(global_ordinal_type face_gid) const;
-
-private:
-    static RCP<const map_type> make_owned_face_map(
-        const SP<const mesh_type>& mesh,
-        std::vector<local_ordinal_type>& owned_face_ids,
-        std::vector<local_ordinal_type>& face_lid_to_owned_row);
-
-    static local_ordinal_type invalid_owned_row()
-    {
-        return Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
-    }
-
-    local_ordinal_type owned_row_for_face(local_ordinal_type face_lid) const;
-    local_ordinal_type owned_row_for_global_face(global_ordinal_type face_gid) const;
-    void check_face_lid(local_ordinal_type face_lid) const;
-
-    std::string d_name;
-    SP<const mesh_type> d_mesh;
-    std::vector<local_ordinal_type> d_owned_face_ids;
-    std::vector<local_ordinal_type> d_face_lid_to_owned_row;
-    vector_type d_data;
 };
 
 /**
@@ -131,13 +97,13 @@ template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            std::string name,
                            bool zero_out)
-    : d_name(std::move(name)),
-      d_mesh(std::move(mesh)),
-      d_owned_face_ids(),
-      d_face_lid_to_owned_row(),
-      d_data(make_owned_face_map(d_mesh, d_owned_face_ids, d_face_lid_to_owned_row),
-             zero_out)
+    : base_type(std::move(name), mesh)
 {
+    this->d_data = vector_type(
+        base_type::make_owned_face_map(
+            mesh, "FaceField",
+            this->d_owned_face_ids, this->d_face_lid_to_owned_row),
+        zero_out);
 }
 
 /**
@@ -157,198 +123,46 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
-/**
- * @brief Construct the owned-face Tpetra map from mesh face ownership.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Shared pointer to the assembled mesh.
- * @param owned_face_ids Output list of locally owned face local IDs.
- * @param face_lid_to_owned_row Output mapping from face local ID to owned row index.
- * @return RCP to the owned-face Tpetra map.
- * @throws std::invalid_argument if the mesh is null.
- * @throws std::runtime_error if the mesh does not have an owned-cell map.
- */
-template<TpetraTypePack Pack>
-auto FaceField<Pack>::make_owned_face_map(
-    const SP<const mesh_type>& mesh,
-    std::vector<local_ordinal_type>& owned_face_ids,
-    std::vector<local_ordinal_type>& face_lid_to_owned_row)
-    -> RCP<const map_type>
-{
-    if (!mesh)
-    {
-        throw std::invalid_argument("FaceField requires a non-null mesh.");
-    }
-
-    if (mesh->owned_cell_map() == Teuchos::null)
-    {
-        throw std::runtime_error("FaceField requires an assembled mesh with an owned-cell map.");
-    }
-
-    owned_face_ids.clear();
-    owned_face_ids.reserve(mesh->num_faces());
-    face_lid_to_owned_row.assign(mesh->num_faces(), invalid_owned_row());
-
-    for (std::size_t fid = 0; fid < mesh->num_faces(); ++fid)
-    {
-        const auto face_lid =
-            detail::checked_size_to_ordinal<local_ordinal_type>(fid, "face local id");
-        const auto owner = mesh->owner_cell(face_lid);
-
-        if (mesh->is_owned_cell(owner))
-        {
-            const auto owned_row =
-                detail::checked_size_to_ordinal<local_ordinal_type>(
-                    owned_face_ids.size(), "owned face row");
-            owned_face_ids.push_back(face_lid);
-            face_lid_to_owned_row[fid] = owned_row;
-        }
-    }
-
-    const auto invalid_global_size =
-        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
-    const global_ordinal_type index_base = 0;
-    const auto comm = Tpetra::getDefaultComm();
-
-    return Teuchos::rcp(new map_type(invalid_global_size,
-                                     owned_face_ids.size(),
-                                     index_base,
-                                     comm));
-}
-
-/**
- * @brief Validate that a face local ID is in range.
- *
- * @tparam Pack Tpetra type pack.
- * @param face_lid Face local ID to validate.
- * @throws std::out_of_range if the ID is negative or exceeds the face count.
- */
-template<TpetraTypePack Pack>
-void FaceField<Pack>::check_face_lid(local_ordinal_type face_lid) const
-{
-    if constexpr (std::is_signed_v<local_ordinal_type>)
-    {
-        if (face_lid < 0)
-        {
-            throw std::out_of_range("Face local id cannot be negative: "
-                                  + std::to_string(face_lid));
-        }
-    }
-
-    if (static_cast<std::size_t>(face_lid) >= d_face_lid_to_owned_row.size())
-    {
-        throw std::out_of_range("Face local id is out of bounds: "
-                              + std::to_string(face_lid));
-    }
-}
-
-/**
- * @brief Look up the owned Tpetra row index for a given face local ID.
- *
- * @tparam Pack Tpetra type pack.
- * @param face_lid Face local ID.
- * @return Local row index in the owned data vector.
- * @throws std::out_of_range if the face is not owned by this rank.
- */
-template<TpetraTypePack Pack>
-auto FaceField<Pack>::owned_row_for_face(local_ordinal_type face_lid) const
-    -> local_ordinal_type
-{
-    check_face_lid(face_lid);
-
-    const auto owned_row =
-        d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)];
-    if (owned_row == invalid_owned_row())
-    {
-        throw std::out_of_range("Face local id is not owned by this rank: "
-                              + std::to_string(face_lid));
-    }
-
-    return owned_row;
-}
-
-/**
- * @brief Look up the owned Tpetra row index for a given face global ID.
- *
- * @tparam Pack Tpetra type pack.
- * @param face_gid Face global ID.
- * @return Local row index in the owned data vector.
- * @throws std::out_of_range if the face is not owned by this rank.
- */
-template<TpetraTypePack Pack>
-auto FaceField<Pack>::owned_row_for_global_face(global_ordinal_type face_gid) const
-    -> local_ordinal_type
-{
-    const auto owned_row = d_data.getMap()->getLocalElement(face_gid);
-    if (owned_row == invalid_owned_row())
-    {
-        throw std::out_of_range("Face global id is not owned by this rank: "
-                              + std::to_string(face_gid));
-    }
-
-    return owned_row;
-}
-
-template<TpetraTypePack Pack>
-auto FaceField<Pack>::face_global_id(local_ordinal_type face_lid) const
-    -> global_ordinal_type
-{
-    return d_data.getMap()->getGlobalElement(owned_row_for_face(face_lid));
-}
-
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::value(local_ordinal_type face_lid) const -> scalar_type
 {
-    return d_data.getData()[owned_row_for_face(face_lid)];
+    return this->d_data.getData()[this->owned_row_for_face(face_lid)];
 }
 
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::global_value(global_ordinal_type face_gid) const -> scalar_type
 {
-    return d_data.getData()[owned_row_for_global_face(face_gid)];
+    return this->d_data.getData()[this->owned_row_for_global_face(face_gid)];
 }
 
 template<TpetraTypePack Pack>
 void FaceField<Pack>::set_value(local_ordinal_type face_lid,
                                 const scalar_type& value)
 {
-    d_data.replaceLocalValue(owned_row_for_face(face_lid), value);
+    this->d_data.replaceLocalValue(this->owned_row_for_face(face_lid), value);
 }
 
 template<TpetraTypePack Pack>
 void FaceField<Pack>::set_global_value(global_ordinal_type face_gid,
                                        const scalar_type& value)
 {
-    d_data.replaceLocalValue(owned_row_for_global_face(face_gid), value);
+    this->d_data.replaceLocalValue(
+        this->owned_row_for_global_face(face_gid), value);
 }
 
 template<TpetraTypePack Pack>
 void FaceField<Pack>::sum_into_value(local_ordinal_type face_lid,
                                      const scalar_type& value)
 {
-    d_data.sumIntoLocalValue(owned_row_for_face(face_lid), value);
+    this->d_data.sumIntoLocalValue(this->owned_row_for_face(face_lid), value);
 }
 
 template<TpetraTypePack Pack>
 void FaceField<Pack>::sum_into_global_value(global_ordinal_type face_gid,
                                             const scalar_type& value)
 {
-    d_data.sumIntoLocalValue(owned_row_for_global_face(face_gid), value);
-}
-
-template<TpetraTypePack Pack>
-bool FaceField<Pack>::is_owned_face(local_ordinal_type face_lid) const
-{
-    check_face_lid(face_lid);
-    return d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)]
-        != invalid_owned_row();
-}
-
-template<TpetraTypePack Pack>
-bool FaceField<Pack>::is_owned_global_face(global_ordinal_type face_gid) const
-{
-    const auto row = d_data.getMap()->getLocalElement(face_gid);
-    return row != invalid_owned_row();
+    this->d_data.sumIntoLocalValue(
+        this->owned_row_for_global_face(face_gid), value);
 }
 
 } // namespace SimpleFluid
