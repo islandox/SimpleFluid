@@ -74,14 +74,6 @@ public:
     bool is_local_global_cell(global_ordinal_type cell_gid) const;
 };
 
-/**
- * @brief Construct a cell field over the owned cells of a mesh.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Shared pointer to an assembled mesh.
- * @param name Optional field name for I/O.
- * @param zero_out If true, initialize all entries to zero.
- */
 template<TpetraTypePack Pack>
 CellField<Pack>::CellField(SP<const mesh_type> mesh,
                            std::string name,
@@ -90,14 +82,6 @@ CellField<Pack>::CellField(SP<const mesh_type> mesh,
 {
 }
 
-/**
- * @brief Construct a cell field initialized with a uniform value.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Shared pointer to an assembled mesh.
- * @param initial_value Scalar value to fill all entries.
- * @param name Optional field name for I/O.
- */
 template<TpetraTypePack Pack>
 CellField<Pack>::CellField(SP<const mesh_type> mesh,
                            const scalar_type& initial_value,
@@ -107,12 +91,6 @@ CellField<Pack>::CellField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
-/**
- * @brief Set all entries in both owned and overlap data vectors to a uniform value.
- *
- * @tparam Pack Tpetra type pack.
- * @param value Scalar value to assign to all entries.
- */
 template<TpetraTypePack Pack>
 void CellField<Pack>::put_scalar(const scalar_type& value)
 {

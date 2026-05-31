@@ -93,55 +93,6 @@ private:
 };
 
 /**
- * @brief Erase a key from the appropriate typed storage node.
- *
- * @param key Key to erase.
- * @param kind Typed node kind indicating which storage to use.
- * @return true if the key existed and was erased, false otherwise.
- */
-inline bool Database::erase_from_node(const std::string& key, NodeKind kind)
-{
-    switch (kind)
-    {
-        case NodeKind::Int:
-            return int_node.erase(key);
-        case NodeKind::Real:
-            return real_node.erase(key);
-        case NodeKind::String:
-            return string_node.erase(key);
-        case NodeKind::Bool:
-            return bool_node.erase(key);
-        case NodeKind::VecInt:
-            return vec_int_node.erase(key);
-        case NodeKind::VecReal:
-            return vec_real_node.erase(key);
-        case NodeKind::VecString:
-            return vec_string_node.erase(key);
-    }
-
-    return false;
-}
-
-/**
- * @brief Erase a key and its value from the database.
- *
- * @param key Key to erase.
- * @return true if the key existed and was erased, false otherwise.
- */
-inline bool Database::erase(const std::string& key)
-{
-    const auto iter = d_key_types.find(key);
-    if (iter == d_key_types.end())
-    {
-        return false;
-    }
-
-    const auto erased = erase_from_node(key, iter->second);
-    d_key_types.erase(iter);
-    return erased;
-}
-
-/**
  * @brief Store a value under a given key, replacing any previous value.
  *
  * @tparam T Type of the value to store.

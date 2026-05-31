@@ -83,16 +83,6 @@ public:
     void sum_into_global_value(global_ordinal_type face_gid, const scalar_type& value);
 };
 
-/**
- * @brief Construct a face field over faces owned by locally owned cells.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Shared pointer to an assembled mesh.
- * @param name Optional field name for I/O.
- * @param zero_out If true, initialize all entries to zero.
- * @throws std::invalid_argument if the mesh is null.
- * @throws std::runtime_error if the mesh does not have an owned-face map.
- */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            std::string name,
@@ -105,14 +95,6 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
     this->d_data = vector_type(owned_face_map, zero_out);
 }
 
-/**
- * @brief Construct a face field initialized with a uniform value.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Shared pointer to an assembled mesh.
- * @param initial_value Scalar value to fill all owned face entries.
- * @param name Optional field name for I/O.
- */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            const scalar_type& initial_value,

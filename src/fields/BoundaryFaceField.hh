@@ -236,10 +236,6 @@ private:
     vector_type d_data;
 };
 
-// ========================================================================
-//  Out-of-line definitions
-// ========================================================================
-
 template<TpetraTypePack Pack>
 BoundaryFaceField<Pack>::BoundaryFaceField(SP<const mesh_type> mesh,
                                            std::string name,
@@ -439,3 +435,5 @@ bool BoundaryFaceField<Pack>::is_owned_boundary_face(
 }
 
 } // namespace SimpleFluid
+
+
