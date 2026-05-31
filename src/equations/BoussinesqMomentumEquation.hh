@@ -92,6 +92,7 @@ private:
     SP<const mesh_type> d_mesh;
     mutable std::vector<scalar_type> d_cached_old_component;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_solution;
+    mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
 };
 
 /**
@@ -204,7 +205,13 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
         auto system = FvmOperators::transport_system<Pack>(
             *d_mesh, d_cached_old_component, face_fluxes, options.time_step,
-            options.kinematic_viscosity, boundary_value);
+            options.kinematic_viscosity, boundary_value,
+            d_cached_transport_matrix);
+
+        if (d_cached_transport_matrix.is_null())
+        {
+            d_cached_transport_matrix = system.matrix;
+        }
 
         const auto gravity_component =
             FvmOperators::detail::component_value(gravity, component);

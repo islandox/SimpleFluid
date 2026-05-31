@@ -13,10 +13,10 @@
 
 #include "parallel/MeshPartitioner.hh"
 
-#include "geometry/MeshFactory.hh"
 #include "geometry/Mesh.hh"
 #include "fields/CellField.hh"
 #include "parallel/MPI_interface.hh"
+#include "utils/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <cstddef>
@@ -36,54 +36,16 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-/**
- * @brief Create a 4x4x4 box mesh (64 hexahedral cells).
- */
 SimpleFluid::SP<MeshType> make_4x4x4_box_mesh()
 {
-    auto db = std::make_shared<SimpleFluid::Database>();
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-
-    SimpleFluid::ArrReal edges(5);
-    for (std::size_t i = 0; i <= 4; ++i)
-        edges[i] = static_cast<SimpleFluid::real_t>(i);
-
-    db->set("X", edges);
-    db->set("Y", edges);
-    db->set("Z", edges);
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_4x4x4_database());
 }
 
-/**
- * @brief Create a 2x2x2 box mesh (8 hexahedral cells).
- */
 SimpleFluid::SP<MeshType> make_2x2x2_box_mesh()
 {
-    auto db = std::make_shared<SimpleFluid::Database>();
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-
-    SimpleFluid::ArrReal edges(3);
-    for (std::size_t i = 0; i <= 2; ++i)
-        edges[i] = static_cast<SimpleFluid::real_t>(i);
-
-    db->set("X", edges);
-    db->set("Y", edges);
-    db->set("Z", edges);
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_2x2x2_database());
 }
 
 /**

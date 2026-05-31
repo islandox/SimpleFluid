@@ -6,8 +6,8 @@
 #include <gtest/gtest.h>
 
 #include "fields/CellField.hh"
-#include "geometry/MeshFactory.hh"
 #include "parallel/MPI_interface.hh"
+#include "utils/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <cstddef>
@@ -27,46 +27,14 @@ testing::Environment* const kokkos_environment =
 
 SimpleFluid::SP<MeshType> make_4x4x4_mesh()
 {
-    auto db = std::make_shared<SimpleFluid::Database>();
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-
-    SimpleFluid::ArrReal edges(5);
-    for (std::size_t i = 0; i <= 4; ++i)
-        edges[i] = static_cast<SimpleFluid::real_t>(i);
-
-    db->set("X", edges);
-    db->set("Y", edges);
-    db->set("Z", edges);
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_4x4x4_database());
 }
 
 SimpleFluid::SP<MeshType> make_10x10x10_mesh()
 {
-    auto db = std::make_shared<SimpleFluid::Database>();
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-
-    SimpleFluid::ArrReal edges(11);
-    for (std::size_t i = 0; i <= 10; ++i)
-        edges[i] = static_cast<SimpleFluid::real_t>(i);
-
-    db->set("X", edges);
-    db->set("Y", edges);
-    db->set("Z", edges);
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_10x10x10_database());
 }
 
 void expect_partitioned_mesh(const MeshType& mesh,
