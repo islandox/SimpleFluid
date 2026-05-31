@@ -14,13 +14,12 @@
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 namespace SimpleFluid
 {
 
 /**
- * @brief Shared storage, map, row-cache, and ghost-sync logic for cell fields.
+ * @brief Shared storage, map, row lookup, and ghost-sync logic for cell fields.
  *
  * @tparam Pack Tpetra type pack.
  * @tparam Derived CRTP derived class.
@@ -87,7 +86,7 @@ protected:
           d_owned_to_overlap_import(
               Teuchos::rcp(new import_type(d_data.getMap(), d_overlap_data.getMap())))
     {
-        cache_cell_rows(class_name);
+        check_cell_row_invariant(class_name);
         if (zero_out)
         {
             sync_ghosts();
@@ -106,7 +105,7 @@ protected:
           d_owned_to_overlap_import(
               Teuchos::rcp(new import_type(d_data.getMap(), d_overlap_data.getMap())))
     {
-        cache_cell_rows(class_name);
+        check_cell_row_invariant(class_name);
         if (zero_out)
         {
             sync_ghosts();
@@ -175,40 +174,59 @@ protected:
 #endif
     }
 
-    void cache_cell_rows(const char* class_name)
+    void check_cell_row_invariant(const char* class_name) const
     {
-        d_owned_row_by_cell_lid.assign(
-            d_mesh->num_local_cells(),
-            Teuchos::OrdinalTraits<local_ordinal_type>::invalid());
-        d_local_row_by_cell_lid.assign(
-            d_mesh->num_local_cells(),
-            Teuchos::OrdinalTraits<local_ordinal_type>::invalid());
+#if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
+        if (d_data.getMap()->getLocalNumElements() != d_mesh->num_owned_cells())
+        {
+            throw std::runtime_error(std::string(class_name)
+                                   + " owned map size does not match the owned-cell count.");
+        }
+        if (d_overlap_data.getMap()->getLocalNumElements() != d_mesh->num_local_cells())
+        {
+            throw std::runtime_error(std::string(class_name)
+                                   + " overlap map size does not match the local-cell count.");
+        }
 
+        const auto invalid_row =
+            Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
         for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(cell);
             const auto cell_gid = d_mesh->cell_global_id(cell_lid);
-            d_local_row_by_cell_lid[cell] =
+
+            const auto local_row =
                 d_overlap_data.getMap()->getLocalElement(cell_gid);
-            if (d_local_row_by_cell_lid[cell]
-                == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
+            if (local_row == invalid_row)
             {
                 throw std::runtime_error(std::string(class_name)
                                        + " overlap map is missing a local cell.");
             }
+            if (local_row != cell_lid)
+            {
+                throw std::runtime_error(std::string(class_name)
+                                       + " requires local cell IDs to match overlap rows.");
+            }
 
             if (d_mesh->is_owned_cell(cell_lid))
             {
-                d_owned_row_by_cell_lid[cell] =
+                const auto owned_row =
                     d_data.getMap()->getLocalElement(cell_gid);
-                if (d_owned_row_by_cell_lid[cell]
-                    == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
+                if (owned_row == invalid_row)
                 {
                     throw std::runtime_error(std::string(class_name)
                                            + " owned map is missing an owned cell.");
                 }
+                if (owned_row != cell_lid)
+                {
+                    throw std::runtime_error(std::string(class_name)
+                                           + " requires owned cell IDs to match owned rows.");
+                }
             }
         }
+#else
+        (void)class_name;
+#endif
     }
 
     local_ordinal_type owned_row_for_cell(local_ordinal_type cell_lid) const
@@ -220,15 +238,7 @@ protected:
                                   + std::to_string(cell_lid));
         }
 
-        const auto row = d_owned_row_by_cell_lid[static_cast<std::size_t>(cell_lid)];
-#if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
-        if (row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
-        {
-            throw std::runtime_error("Cached owned row is invalid for cell: "
-                                   + std::to_string(cell_lid));
-        }
-#endif
-        return row;
+        return cell_lid;
     }
 
     local_ordinal_type owned_row_for_global_cell(global_ordinal_type cell_gid) const
@@ -246,15 +256,7 @@ protected:
     local_ordinal_type local_row_for_cell(local_ordinal_type cell_lid) const
     {
         check_cell_lid(cell_lid);
-        const auto row = d_local_row_by_cell_lid[static_cast<std::size_t>(cell_lid)];
-#if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
-        if (row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
-        {
-            throw std::out_of_range("Cell local id is not local to this rank: "
-                                  + std::to_string(cell_lid));
-        }
-#endif
-        return row;
+        return cell_lid;
     }
 
     local_ordinal_type local_row_for_global_cell(global_ordinal_type cell_gid) const
@@ -274,8 +276,6 @@ protected:
     vector_type d_data;
     vector_type d_overlap_data;
     RCP<const import_type> d_owned_to_overlap_import;
-    std::vector<local_ordinal_type> d_owned_row_by_cell_lid;
-    std::vector<local_ordinal_type> d_local_row_by_cell_lid;
 };
 
 } // namespace SimpleFluid
