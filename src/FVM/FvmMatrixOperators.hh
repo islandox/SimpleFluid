@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "fields/FaceField.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -37,16 +38,15 @@ identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
                 typename Pack::scalar_type diagonal = 1.0)
 {
     using matrix_type = typename Pack::matrix_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(map, 1));
+    auto matrix = Teuchos::rcp(new matrix_type(map, map, 1));
     for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
     {
-        const auto gid = map->getGlobalElement(
-            static_cast<typename Pack::local_ordinal_type>(row));
-        Teuchos::Array<global_ordinal_type> cols{gid};
+        const auto lid = static_cast<local_ordinal_type>(row);
+        Teuchos::Array<local_ordinal_type> cols{lid};
         Teuchos::Array<typename Pack::scalar_type> vals{diagonal};
-        matrix->insertGlobalValues(gid, cols(), vals());
+        matrix->insertLocalValues(lid, cols(), vals());
     }
     matrix->fillComplete();
     return matrix;
@@ -67,19 +67,17 @@ Teuchos::RCP<typename Pack::matrix_type>
 diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
 {
     using matrix_type = typename Pack::matrix_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 8));
-    Teuchos::Array<global_ordinal_type> cols;
+    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid = mesh.cell_global_id(cell_lid);
 
         cols.clear();
         vals.clear();
@@ -101,13 +99,13 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
 
             const auto coeff = diffusivity * mesh.face_area(face_lid) / distance;
             diagonal += coeff;
-            cols.push_back(mesh.cell_global_id(other));
+            cols.push_back(other);
             vals.push_back(-coeff);
         }
 
-        cols.push_back(row_gid);
+        cols.push_back(cell_lid);
         vals.push_back(diagonal);
-        matrix->insertGlobalValues(row_gid, cols(), vals());
+        matrix->insertLocalValues(cell_lid, cols(), vals());
     }
 
     matrix->fillComplete();
@@ -134,7 +132,6 @@ upwind_convection_matrix(
     const std::vector<typename Pack::scalar_type>& face_fluxes)
 {
     using matrix_type = typename Pack::matrix_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -143,15 +140,14 @@ upwind_convection_matrix(
         throw std::invalid_argument("upwind_convection_matrix received the wrong face-flux size.");
     }
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 8));
-    Teuchos::Array<global_ordinal_type> cols;
+    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid = mesh.cell_global_id(cell_lid);
 
         cols.clear();
         vals.clear();
@@ -172,14 +168,76 @@ upwind_convection_matrix(
             else if (mesh.is_interior_face(face_lid))
             {
                 const auto other = mesh.opposite_cell(face_lid, cell_lid);
-                cols.push_back(mesh.cell_global_id(other));
+                cols.push_back(other);
                 vals.push_back(out_flux);
             }
         }
 
-        cols.push_back(row_gid);
+        cols.push_back(cell_lid);
         vals.push_back(diagonal);
-        matrix->insertGlobalValues(row_gid, cols(), vals());
+        matrix->insertLocalValues(cell_lid, cols(), vals());
+    }
+
+    matrix->fillComplete();
+    return matrix;
+}
+
+/**
+ * @brief Assemble the first-order upwind convection matrix from
+ *        pre-computed face fluxes stored in a FaceField.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_fluxes FaceField of scalar face fluxes.
+ * @return Fill-complete sparse matrix representing the upwind convection
+ *         operator.
+ */
+template<TpetraTypePack Pack>
+Teuchos::RCP<typename Pack::matrix_type>
+upwind_convection_matrix(
+    const Mesh<Pack>& mesh,
+    const FaceField<Pack>& face_fluxes)
+{
+    using matrix_type = typename Pack::matrix_type;
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    Teuchos::Array<local_ordinal_type> cols;
+    Teuchos::Array<scalar_type> vals;
+    cols.reserve(32);
+    vals.reserve(32);
+    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+
+        cols.clear();
+        vals.clear();
+        scalar_type diagonal = 0.0;
+
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            const auto owner_oriented_flux =
+                face_fluxes.is_owned_face(face_lid) ? face_fluxes.value(face_lid) : scalar_type{};
+            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
+                                ? owner_oriented_flux
+                                : -owner_oriented_flux;
+
+            if (out_flux >= 0.0)
+            {
+                diagonal += out_flux;
+            }
+            else if (mesh.is_interior_face(face_lid))
+            {
+                const auto other = mesh.opposite_cell(face_lid, cell_lid);
+                cols.push_back(other);
+                vals.push_back(out_flux);
+            }
+        }
+
+        cols.push_back(cell_lid);
+        vals.push_back(diagonal);
+        matrix->insertLocalValues(cell_lid, cols(), vals());
     }
 
     matrix->fillComplete();
@@ -205,12 +263,11 @@ pressure_poisson_matrix(
     typename Pack::global_ordinal_type gauge_cell_gid)
 {
     using matrix_type = typename Pack::matrix_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 8));
-    Teuchos::Array<global_ordinal_type> cols;
+    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
@@ -224,9 +281,9 @@ pressure_poisson_matrix(
 
         if (row_gid == gauge_cell_gid)
         {
-            cols.push_back(row_gid);
+            cols.push_back(cell_lid);
             vals.push_back(1.0);
-            matrix->insertGlobalValues(row_gid, cols(), vals());
+            matrix->insertLocalValues(cell_lid, cols(), vals());
             continue;
         }
 
@@ -247,13 +304,13 @@ pressure_poisson_matrix(
             const auto coeff = mesh.face_area(face_lid) / distance;
             const auto other = mesh.opposite_cell(face_lid, cell_lid);
             diagonal += coeff;
-            cols.push_back(mesh.cell_global_id(other));
+            cols.push_back(other);
             vals.push_back(-coeff);
         }
 
-        cols.push_back(row_gid);
+        cols.push_back(cell_lid);
         vals.push_back(diagonal > 0.0 ? diagonal : 1.0);
-        matrix->insertGlobalValues(row_gid, cols(), vals());
+        matrix->insertLocalValues(cell_lid, cols(), vals());
     }
 
     matrix->fillComplete();

@@ -11,6 +11,7 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
+#include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 
@@ -484,20 +485,55 @@ void normal_face_fluxes(
 }
 
 /**
+ * @brief Compute the normal volumetric flux (velocity dot normal times
+ *        area) at every owned face, writing to a FaceField.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param face_velocity Face-centered velocity field.
+ * @param[out] fluxes Pre-allocated FaceField to receive the flux at each
+ *        owned face.
+ */
+template<TpetraTypePack Pack>
+void normal_face_fluxes(
+    const Mesh<Pack>& mesh,
+    const VectorFaceField<Pack>& face_velocity,
+    FaceField<Pack>& fluxes)
+{
+    detail::validate_normal_flux_inputs(mesh, face_velocity);
+    fluxes.put_scalar(typename Pack::scalar_type{});
+
+    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<typename Pack::local_ordinal_type>(face);
+        if (!fluxes.is_owned_face(face_lid))
+        {
+            continue;
+        }
+
+        fluxes.set_value(face_lid,
+            face_velocity.value(face_lid).dot(mesh.face_normal(face_lid))
+          * mesh.face_area(face_lid));
+    }
+}
+
+/**
  * @brief Compute and return the normal volumetric flux at every owned
  *        face.
  *
  * @tparam Pack The Tpetra type pack.
  * @param mesh The computational mesh.
  * @param face_velocity Face-centered velocity field.
- * @return Vector of normal fluxes indexed by face local ID.
+ * @return FaceField of normal fluxes.
  */
 template<TpetraTypePack Pack>
-inline std::vector<typename Pack::scalar_type>
+inline FaceField<Pack>
 normal_face_fluxes(const Mesh<Pack>& mesh,
                    const VectorFaceField<Pack>& face_velocity)
 {
-    std::vector<typename Pack::scalar_type> fluxes;
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
     normal_face_fluxes(mesh, face_velocity, fluxes);
 
     return fluxes;
@@ -593,20 +629,107 @@ inline void face_fluxes(const Mesh<Pack>& mesh,
 }
 
 /**
+ * @brief Compute face fluxes from cell-centered velocities without
+ *        boundary-condition treatment, writing to a FaceField.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param velocity Cell-centered velocity field.
+ * @param[out] fluxes Pre-allocated FaceField to receive fluxes.
+ */
+template<TpetraTypePack Pack>
+inline void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 FaceField<Pack>& fluxes)
+{
+    const auto face_velocity = face_velocities(mesh, velocity);
+    normal_face_fluxes(mesh, face_velocity, fluxes);
+}
+
+/**
+ * @brief Compute face fluxes from cell-centered velocities using a
+ *        pre-built velocity-boundary cache, writing to a FaceField.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param velocity Cell-centered velocity field.
+ * @param boundary_cache Pre-computed velocity-boundary cache.
+ * @param[out] fluxes Pre-allocated FaceField to receive fluxes.
+ */
+template<TpetraTypePack Pack>
+inline void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 const VelocityBoundaryCache<Pack>& boundary_cache,
+                 FaceField<Pack>& fluxes)
+{
+    const auto face_velocity = face_velocities(mesh, velocity, boundary_cache);
+    normal_face_fluxes(mesh, face_velocity, fluxes);
+}
+
+/**
+ * @brief Compute face fluxes from cell-centered velocities using a
+ *        boundary-condition set, writing to a FaceField.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param velocity Cell-centered velocity field.
+ * @param boundary_conditions The boundary-condition set to apply.
+ * @param[out] fluxes Pre-allocated FaceField to receive fluxes.
+ */
+template<TpetraTypePack Pack>
+inline void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 const BoundaryConditionSet& boundary_conditions,
+                 FaceField<Pack>& fluxes)
+{
+    const auto cache =
+        cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+    face_fluxes(mesh, velocity, cache, fluxes);
+}
+
+/**
+ * @brief Compute face fluxes from cell-centered velocities with optional
+ *        boundary conditions (nullptr means no boundary treatment),
+ *        writing to a FaceField.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param mesh The computational mesh.
+ * @param velocity Cell-centered velocity field.
+ * @param boundary_conditions Pointer to boundary-condition set, may be
+ *        nullptr.
+ * @param[out] fluxes Pre-allocated FaceField to receive fluxes.
+ */
+template<TpetraTypePack Pack>
+inline void face_fluxes(const Mesh<Pack>& mesh,
+                 const VectorCellField<Pack>& velocity,
+                 const BoundaryConditionSet* boundary_conditions,
+                 FaceField<Pack>& fluxes)
+{
+    if (boundary_conditions == nullptr)
+    {
+        face_fluxes(mesh, velocity, fluxes);
+        return;
+    }
+
+    face_fluxes(mesh, velocity, *boundary_conditions, fluxes);
+}
+
+/**
  * @brief Compute and return face fluxes from cell-centered velocities
  *        without boundary-condition treatment.
  *
  * @tparam Pack The Tpetra type pack.
  * @param mesh The computational mesh.
  * @param velocity Cell-centered velocity field.
- * @return Vector of face fluxes indexed by face local ID.
+ * @return FaceField of face fluxes.
  */
 template<TpetraTypePack Pack>
-inline std::vector<typename Pack::scalar_type>
+inline FaceField<Pack>
 face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity)
 {
-    std::vector<typename Pack::scalar_type> fluxes;
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
     face_fluxes(mesh, velocity, fluxes);
 
     return fluxes;
@@ -620,15 +743,16 @@ face_fluxes(const Mesh<Pack>& mesh,
  * @param mesh The computational mesh.
  * @param velocity Cell-centered velocity field.
  * @param boundary_conditions The boundary-condition set to apply.
- * @return Vector of face fluxes indexed by face local ID.
+ * @return FaceField of face fluxes.
  */
 template<TpetraTypePack Pack>
-inline std::vector<typename Pack::scalar_type>
+inline FaceField<Pack>
 face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const BoundaryConditionSet& boundary_conditions)
 {
-    std::vector<typename Pack::scalar_type> fluxes;
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
     face_fluxes(mesh, velocity, boundary_conditions, fluxes);
 
     return fluxes;
@@ -644,15 +768,16 @@ face_fluxes(const Mesh<Pack>& mesh,
  * @param velocity Cell-centered velocity field.
  * @param boundary_conditions Pointer to boundary-condition set, may be
  *        nullptr.
- * @return Vector of face fluxes indexed by face local ID.
+ * @return FaceField of face fluxes.
  */
 template<TpetraTypePack Pack>
-inline std::vector<typename Pack::scalar_type>
+inline FaceField<Pack>
 face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const BoundaryConditionSet* boundary_conditions)
 {
-    std::vector<typename Pack::scalar_type> fluxes;
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
     face_fluxes(mesh, velocity, boundary_conditions, fluxes);
 
     return fluxes;
@@ -666,15 +791,16 @@ face_fluxes(const Mesh<Pack>& mesh,
  * @param mesh The computational mesh.
  * @param velocity Cell-centered velocity field.
  * @param boundary_cache Pre-computed velocity-boundary cache.
- * @return Vector of face fluxes indexed by face local ID.
+ * @return FaceField of face fluxes.
  */
 template<TpetraTypePack Pack>
-inline std::vector<typename Pack::scalar_type>
+inline FaceField<Pack>
 face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const VelocityBoundaryCache<Pack>& boundary_cache)
 {
-    std::vector<typename Pack::scalar_type> fluxes;
+    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
+    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
     face_fluxes(mesh, velocity, boundary_cache, fluxes);
 
     return fluxes;

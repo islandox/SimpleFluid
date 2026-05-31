@@ -13,6 +13,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
+#include "fields/FaceField.hh"
 #include "FVM/FvmOperators.hh"
 #include "FVM/BoundaryCache.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -58,7 +59,7 @@ public:
 
     void advance_semi_implicit(
         const std::vector<scalar_type>& old_temperature,
-        const std::vector<scalar_type>& face_fluxes,
+        const FaceField<Pack>& face_fluxes,
         scalar_type time_step,
         scalar_type thermal_diffusivity,
         field_type& temperature,
@@ -274,7 +275,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     const std::vector<scalar_type>& old_temperature,
-    const std::vector<scalar_type>& face_fluxes,
+    const FaceField<Pack>& face_fluxes,
     scalar_type time_step,
     scalar_type thermal_diffusivity,
     field_type& temperature,

@@ -14,6 +14,7 @@
 #include "equations/BoussinesqMomentumEquation.hh"
 #include "equations/PressureProjectionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
+#include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/FvmOperators.hh"
 #include "utils/test_mesh_helpers.hh"
@@ -114,8 +115,9 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
 
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     equation.advance_velocity(local_vector_values(velocity),
-                              std::vector<Pack::scalar_type>(mesh->num_faces(), 0.0),
+                              zero_fluxes,
                               temperature,
                               bcs,
                               options,
