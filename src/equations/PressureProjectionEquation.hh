@@ -244,13 +244,22 @@ void PressureProjectionEquation<Pack>::project(
     pressure.sync_ghosts();
 
     FvmOperators::cell_gradient(pressure, d_cached_gradients);
+
+    // Correct velocity using Tpetra::MultiVector::update: V = V - dt * grad(p)
+    typename Pack::multi_vector_type gradient_mv(d_mesh->owned_cell_map(),
+                                                  velocity_field_type::num_components,
+                                                  true);
     for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
         const auto& gradient = d_cached_gradients[owned];
-        const auto corrected = velocity.value(cell_lid) - gradient * time_step;
-        velocity.set_owned_value(cell_lid, corrected);
+        for (std::size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
+        {
+            gradient_mv.replaceLocalValue(cell_lid, comp,
+                                           FvmOperators::detail::component_value(gradient, comp));
+        }
     }
+    velocity.owned_data().update(-time_step, gradient_mv, 1.0);
 
     velocity.sync_ghosts();
 }

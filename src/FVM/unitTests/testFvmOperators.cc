@@ -103,7 +103,7 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
         }
 
         const auto& normal = mesh->face_normal(fid);
-        const auto magnitude = std::abs(fluxes[static_cast<std::size_t>(fid)]);
+        const auto magnitude = fluxes.is_owned_face(fid) ? std::abs(fluxes.value(fid)) : 0.0;
         if (std::abs(normal.x) > 0.5)
         {
             saw_x_face = true;
@@ -216,7 +216,7 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     {
         if (mesh->is_boundary_face(fid))
         {
-            EXPECT_DOUBLE_EQ(fluxes[static_cast<std::size_t>(fid)], 0.0);
+            EXPECT_DOUBLE_EQ(fluxes.is_owned_face(fid) ? fluxes.value(fid) : 0.0, 0.0);
         }
     }
 }

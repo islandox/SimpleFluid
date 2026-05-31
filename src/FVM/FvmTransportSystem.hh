@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "fields/FaceField.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -72,7 +73,7 @@ template<TpetraTypePack Pack, class BoundaryValueProvider>
 TransportSystem<Pack>
 transport_system(const Mesh<Pack>& mesh,
                  const std::vector<typename Pack::scalar_type>& old_values,
-                 const std::vector<typename Pack::scalar_type>& face_fluxes,
+                 const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
                  BoundaryValueProvider boundary_value,
@@ -94,10 +95,6 @@ transport_system(const Mesh<Pack>& mesh,
     if (old_values.size() < mesh.num_local_cells())
     {
         throw std::invalid_argument("transport_system old-value cache is too small.");
-    }
-    if (face_fluxes.size() != mesh.num_faces())
-    {
-        throw std::invalid_argument("transport_system received the wrong face-flux size.");
     }
 
     Teuchos::RCP<matrix_type> matrix;
@@ -130,7 +127,7 @@ transport_system(const Mesh<Pack>& mesh,
         for (const auto face_lid : mesh.faces(cell_lid))
         {
             const auto owner_oriented_flux =
-                face_fluxes[static_cast<std::size_t>(face_lid)];
+                face_fluxes.is_owned_face(face_lid) ? face_fluxes.value(face_lid) : scalar_type{};
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
                                 ? owner_oriented_flux
                                 : -owner_oriented_flux;
@@ -184,7 +181,7 @@ transport_system(const Mesh<Pack>& mesh,
             {
                 const auto owner = mesh.owner_cell(face_lid);
                 const auto row_gid = mesh.cell_global_id(owner);
-                const auto out_flux = face_fluxes[static_cast<std::size_t>(face_lid)];
+                const auto out_flux = face_fluxes.is_owned_face(face_lid) ? face_fluxes.value(face_lid) : scalar_type{};
 
                 auto boundary_face_value = boundary_value(patch_id, in_patch_id);
                 if (out_flux >= 0.0)

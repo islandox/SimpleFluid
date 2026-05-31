@@ -14,6 +14,7 @@
 #include "equations/EquationValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
+#include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -54,7 +55,7 @@ public:
 
     void advance_velocity(
         const std::vector<vec_type>& old_velocity,
-        const std::vector<scalar_type>& face_fluxes,
+        const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
         const BoundaryConditionSet& boundary_conditions,
         const TimeStepperOptions& options,
@@ -63,7 +64,7 @@ public:
 
     void advance_velocity(
         const std::vector<vec_type>& old_velocity,
-        const std::vector<scalar_type>& face_fluxes,
+        const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
         const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,
@@ -125,7 +126,7 @@ BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const std::vector<vec_type>& old_velocity,
-    const std::vector<scalar_type>& face_fluxes,
+    const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
     const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& options,
@@ -154,7 +155,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const std::vector<vec_type>& old_velocity,
-    const std::vector<scalar_type>& face_fluxes,
+    const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
     const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     const TimeStepperOptions& options,
@@ -215,6 +216,9 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
         const auto gravity_component =
             FvmOperators::detail::component_value(gravity, component);
+
+        // Build buoyancy as a Tpetra vector and update RHS in one operation.
+        typename Pack::vector_type buoyancy_vec(d_mesh->owned_cell_map(), true);
         for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -222,9 +226,10 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                 options.thermal_expansion
               * (temperature.value(cell_lid) - options.reference_temperature)
               * (-gravity_component);
-            system.rhs.sumIntoLocalValue(cell_lid,
-                                         d_mesh->cell_volume(cell_lid) * buoyancy);
+            buoyancy_vec.replaceLocalValue(cell_lid,
+                                           d_mesh->cell_volume(cell_lid) * buoyancy);
         }
+        system.rhs.update(1.0, buoyancy_vec, 1.0);
 
         if (system.rhs.norm2() <= 0.0)
         {
