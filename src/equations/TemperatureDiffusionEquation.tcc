@@ -77,9 +77,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         scalar_type laplacian = 0.0;
 
         const auto& faces = d_mesh->faces(cell_lid);
-        const auto& face_distances = d_mesh->face_distances(cell_lid);
 
-        bool is_interior_only = true;
         for (std::size_t face_index = 0; face_index < faces.size(); ++face_index)
         {
             const auto face_lid = faces[face_index];
@@ -96,12 +94,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                       / distance;
                 }
             }
-            else
-            {
-                is_interior_only = false;
-            }
         }
-        if (!is_interior_only) continue;
 
         laplacian /= d_mesh->cell_volume(cell_lid);
         temperature.set_owned_value(cell_lid,
@@ -109,14 +102,15 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                                   + time_step * thermal_diffusivity * laplacian);
     }
 
-    // Apply boundary conditions.
+    // Apply Dirichlet boundary contributions on top of the interior-face
+    // laplacian already computed above.
     for (const auto& [patch_id, boundary_patch] : d_mesh->boundary_patches())
     {
-        if (d_boundary_condition->find(d_mesh->boundary_patch_name(patch_id))
-            == d_boundary_condition->end()) continue;
+        auto boundary_name = d_mesh->boundary_patch_name(patch_id);
+        if (!d_boundary_condition->contains(boundary_name)) continue;
 
-        if (d_boundary_condition->at(d_mesh->boundary_patch_name(patch_id)).type
-            == BoundaryConditionType::Dirichlet)
+        auto BC = d_boundary_condition->at(d_mesh->boundary_patch_name(patch_id));
+        if (BC.type == BoundaryConditionType::Dirichlet)
         {
             for (size_t in_patch_id = 0; in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
             {
@@ -125,47 +119,35 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                 {
                     const auto boundary_temperature = d_face_boundary_temperature.value.at(patch_id)[in_patch_id];
                     const auto owner = d_mesh->owner_cell(boundary_face_lid);
-
                     const auto temp_p = old_temperature[owner];
-                    scalar_type laplacian = 0.0;
-                    const auto& faces = d_mesh->faces(owner);
-                    for (std::size_t face_index = 0; face_index < faces.size(); ++face_index)
+                    const auto distance_to_face = d_mesh->cell_to_face_distance(boundary_face_lid, owner);
+
+                    if (distance_to_face > 0.0)
                     {
-                        const auto face_lid = faces[face_index];
-                        if (face_lid == boundary_face_lid)
-                        {
-                            const auto distance_to_face = d_mesh->cell_to_face_distance(face_lid, owner);
-                            laplacian += (boundary_temperature - temp_p)
-                                       * d_mesh->face_area(face_lid)
-                                       / distance_to_face;
-                        }
-                        else
-                        {
-                            if (!d_mesh->is_interior_face(face_lid))
-                            {
-                                continue;
-                            }
+                        const auto boundary_contrib =
+                            (boundary_temperature - temp_p)
+                          * d_mesh->face_area(boundary_face_lid)
+                          / distance_to_face;
 
-                            const auto other = d_mesh->opposite_cell(face_lid, owner);
-                            const auto distance = d_mesh->face_cell_center_distance(face_lid);
-                            if (distance > 0.0)
-                            {
-                                laplacian +=
-                                    (old_temperature[static_cast<std::size_t>(other)] - temp_p)
-                                * d_mesh->face_area(face_lid)
-                                / distance;
-                            }
-
-                        }
-                    }   
-                    temperature.set_owned_value(owner, temp_p
-                                              + time_step * thermal_diffusivity * laplacian / d_mesh->cell_volume(owner));
+                        temperature.sum_into_value(owner,
+                            time_step * thermal_diffusivity
+                                    * boundary_contrib / d_mesh->cell_volume(owner));
+                    }
                 }
             }
         }
-        else
+        else if (BC.type == BoundaryConditionType::Neumann)
         {
-
+            if (BC.value == scalar_type{0.0}) continue; // No contribution for zero Neumann flux.
+            // Nonzero Neumann Condition is to be implemented in the future; currently treated as zero flux.
+        }
+        else if (BC.type == BoundaryConditionType::NoSlip)
+        {
+            continue; // No contribution for no-slip velocity boundary.
+        }
+        else if (BC.type == BoundaryConditionType::Robin)
+        {
+            throw std::runtime_error("Robin boundary conditions are not yet implemented in TemperatureDiffusionEquation.");
         }
     }
 }
