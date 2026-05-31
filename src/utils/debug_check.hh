@@ -11,35 +11,10 @@
 
 #pragma once
 
-#include "USEFUL_MACROS.h"
+#include "DEBUG_MACROS.h"
 
 #include <stdexcept>
 
-#ifndef NDEBUG
-    #define DEBUG_CHECK_ENABLED
-#endif
-
-#ifdef DEBUG_CHECK_ENABLED
-
-#define CHECK1(condition) utils::check<>((condition), \
-    std::string("Debug check failed: ") + #condition \
-    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
-
-#define CHECK2(condition, message) utils::check<>((condition), \
-    std::string("Debug check failed: ") + (message) \
-    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
-
-#define CHECK3(condition, message, error) utils::check<error>((condition), \
-    std::string("Debug check failed: ") + (message) \
-    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
-
-#else
-#define CHECK1(condition) // do nothing
-#define CHECK2(condition, message) // do nothing
-#define CHECK3(condition, message, error) // do nothing
-#endif
-
-#define CHECK(...) DISPATCH(CHECK, __VA_ARGS__)
 
 namespace utils
 {

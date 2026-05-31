@@ -15,6 +15,16 @@
 #include <Kokkos_Core.hpp>
 #include <Tpetra_Core.hpp>
 #include "parallel/MPI_interface.hh"
+#include "DEBUG_MACROS.h"
+
+#ifndef NDEBUG
+    #define EXPECT_THROW_WHEN_DEBUG(statement, expected_exception) \
+        EXPECT_THROW(statement, expected_exception)
+#else
+    // Do nothing: statement is not expected to check and throw, it's dangerous to execute in release mode, 
+    // so we skip it entirely.
+    #define EXPECT_THROW_WHEN_DEBUG(statement, expected_exception) 
+#endif
 
 namespace utils_test
 {

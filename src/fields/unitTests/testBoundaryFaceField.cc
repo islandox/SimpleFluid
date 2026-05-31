@@ -12,7 +12,7 @@
 #include <gtest/gtest.h>
 #include "utils/testing_environment.hh"
 #include "fields/BoundaryFaceField.hh"
-#include "utils/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 
 #include <stdexcept>
 #include <string>

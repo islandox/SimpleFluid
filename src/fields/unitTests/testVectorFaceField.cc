@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "fields/VectorFaceField.hh"
-#include "utils/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <stdexcept>
