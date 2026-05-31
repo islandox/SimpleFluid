@@ -1,4 +1,35 @@
 
+# Add source files
+set(SOURCES "geometry/Mesh.cc"
+            "geometry/STKMesh.cc"
+            "geometry/MeshFactory.cc"
+            "io/VTUWriter.cc"
+            "parallel/MeshPartitioner.cc"
+            "equations/BoussinesqMomentumEquation.cc"
+            "equations/PressureProjectionEquation.cc"
+            "equations/TemperatureDiffusionEquation.cc"
+            "solvers/BoussinesqSolver.cc"
+            "dataclass/Database.cc")
+
+# Create library or executable
+add_library(SimpleFluid STATIC ${SOURCES})
+
+target_include_directories(SimpleFluid PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_link_libraries(SimpleFluid PUBLIC Trilinos::all_selected_libs MPI::MPI_CXX Zoltan2Core::all_libs)
+
+target_precompile_headers(SimpleFluid PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"
+)
+
+function(simplefluid_reuse_precompiled_header target_name)
+    target_precompile_headers(${target_name} REUSE_FROM SimpleFluid)
+endfunction()
+
+
 # Optional: Add executable if main.cpp exists
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cc")
     add_executable(SimpleFluid_app ${SOURCES})
