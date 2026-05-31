@@ -91,7 +91,7 @@ public:
  * @param name Optional field name for I/O.
  * @param zero_out If true, initialize all entries to zero.
  * @throws std::invalid_argument if the mesh is null.
- * @throws std::runtime_error if the mesh does not have an owned-cell map.
+ * @throws std::runtime_error if the mesh does not have an owned-face map.
  */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
@@ -101,12 +101,8 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
 {
     const auto owned_face_map =
         base_type::make_owned_face_map(mesh, "FaceField",
-                                       this->d_owned_face_ids,
-                                       this->d_face_lid_to_owned_row);
-    this->d_data = vector_type(mesh->owned_face_map() == Teuchos::null
-                             ? owned_face_map
-                             : mesh->owned_face_map(),
-                               zero_out);
+                                       this->d_owned_face_ids);
+    this->d_data = vector_type(owned_face_map, zero_out);
 }
 
 /**

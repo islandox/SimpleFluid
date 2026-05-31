@@ -13,7 +13,6 @@
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_Core.hpp>
 
 #include <cstddef>
 #include <stdexcept>
@@ -26,7 +25,7 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Shared storage, owned-face map construction, row-cache, and
+ * @brief Shared storage, owned-face map validation, row lookup, and
  *        ownership queries for face-centered fields.
  *
  * @tparam Pack Tpetra type pack.
@@ -107,8 +106,7 @@ public:
     bool is_owned_face(local_ordinal_type face_lid) const
     {
         check_face_lid(face_lid);
-        return d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)]
-               != invalid_owned_row();
+        return d_mesh->is_owned_face(face_lid);
     }
 
     /**
@@ -140,23 +138,20 @@ protected:
     }
 
     /**
-     * @brief Build the Tpetra map for faces whose owner cell is locally
-     *        owned.
+     * @brief Validate and return the mesh-owned Tpetra map for owned faces.
      *
      * @param mesh Shared pointer to the assembled mesh.
      * @param class_name Name of the derived class (used in error messages).
      * @param[out] owned_face_ids Ordered list of owned-face local IDs.
-     * @param[out] face_lid_to_owned_row Mapping from face local ID to
-     *             owned row index.
      * @return RCP to the owned-face Tpetra map.
      * @throws std::invalid_argument if @p mesh is null.
-     * @throws std::runtime_error if the mesh does not have an owned-cell map.
+     * @throws std::runtime_error if the mesh does not have an owned-face map
+     *         or if owned face local IDs do not match owned rows.
      */
     static RCP<const map_type> make_owned_face_map(
         const SP<const mesh_type>& mesh,
         const char* class_name,
-        std::vector<local_ordinal_type>& owned_face_ids,
-        std::vector<local_ordinal_type>& face_lid_to_owned_row);
+        std::vector<local_ordinal_type>& owned_face_ids);
 
     /** @brief Sentinel value for faces not owned by this rank. */
     static local_ordinal_type invalid_owned_row()
@@ -196,7 +191,6 @@ protected:
     std::string d_name;
     SP<const mesh_type> d_mesh;
     std::vector<local_ordinal_type> d_owned_face_ids;
-    std::vector<local_ordinal_type> d_face_lid_to_owned_row;
     vector_type d_data;
 };
 
@@ -208,8 +202,7 @@ template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
     const SP<const mesh_type>& mesh,
     const char* class_name,
-    std::vector<local_ordinal_type>& owned_face_ids,
-    std::vector<local_ordinal_type>& face_lid_to_owned_row)
+    std::vector<local_ordinal_type>& owned_face_ids)
     -> RCP<const map_type>
 {
     if (!mesh)
@@ -218,16 +211,16 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
             std::string(class_name) + " requires a non-null mesh.");
     }
 
-    if (mesh->owned_cell_map() == Teuchos::null)
+    const auto owned_face_map = mesh->owned_face_map();
+    if (owned_face_map == Teuchos::null)
     {
         throw std::runtime_error(
             std::string(class_name)
-            + " requires an assembled mesh with an owned-cell map.");
+            + " requires an assembled mesh with an owned-face map.");
     }
 
     owned_face_ids.clear();
     owned_face_ids.reserve(mesh->num_faces());
-    face_lid_to_owned_row.assign(mesh->num_faces(), invalid_owned_row());
 
     for (std::size_t fid = 0; fid < mesh->num_faces(); ++fid)
     {
@@ -241,20 +234,24 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
             const auto owned_row =
                 detail::checked_size_to_ordinal<local_ordinal_type>(
                     owned_face_ids.size(), "owned face row");
+            if (face_lid != owned_row)
+            {
+                throw std::runtime_error(
+                    std::string(class_name)
+                    + " requires owned face IDs to match owned rows.");
+            }
             owned_face_ids.push_back(face_lid);
-            face_lid_to_owned_row[fid] = owned_row;
         }
     }
 
-    const auto invalid_global_size =
-        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
-    const global_ordinal_type index_base = 0;
-    const auto comm = Tpetra::getDefaultComm();
+    if (owned_face_map->getLocalNumElements() != owned_face_ids.size())
+    {
+        throw std::runtime_error(
+            std::string(class_name)
+            + " owned-face map size does not match the owned-face count.");
+    }
 
-    return Teuchos::rcp(new map_type(invalid_global_size,
-                                     owned_face_ids.size(),
-                                     index_base,
-                                     comm));
+    return owned_face_map;
 }
 
 template<TpetraTypePack Pack, class Derived, class StorageVector>
@@ -271,8 +268,7 @@ void FaceFieldBase<Pack, Derived, StorageVector>::check_face_lid(
         }
     }
 
-    if (static_cast<std::size_t>(face_lid)
-        >= d_face_lid_to_owned_row.size())
+    if (static_cast<std::size_t>(face_lid) >= d_mesh->num_faces())
     {
         throw std::out_of_range(
             "Face local id is out of bounds: "
@@ -286,16 +282,14 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::owned_row_for_face(
 {
     check_face_lid(face_lid);
 
-    const auto owned_row =
-        d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)];
-    if (owned_row == invalid_owned_row())
+    if (!d_mesh->is_owned_face(face_lid))
     {
         throw std::out_of_range(
             "Face local id is not owned by this rank: "
             + std::to_string(face_lid));
     }
 
-    return owned_row;
+    return face_lid;
 }
 
 template<TpetraTypePack Pack, class Derived, class StorageVector>

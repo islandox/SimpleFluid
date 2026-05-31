@@ -194,7 +194,7 @@ template<TpetraTypePack Pack>
 bool CellField<Pack>::is_local_cell(local_ordinal_type cell_lid) const
 {
     this->check_cell_lid(cell_lid);
-    return is_local_global_cell(this->d_mesh->cell_global_id(cell_lid));
+    return true;
 }
 
 template<TpetraTypePack Pack>

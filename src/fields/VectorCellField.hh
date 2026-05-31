@@ -221,9 +221,7 @@ template<TpetraTypePack Pack>
 bool VectorCellField<Pack>::is_local_cell(local_ordinal_type cell_lid) const
 {
     this->check_cell_lid(cell_lid);
-    const auto row =
-        this->d_local_row_by_cell_lid[static_cast<std::size_t>(cell_lid)];
-    return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
+    return true;
 }
 
 } // namespace SimpleFluid
