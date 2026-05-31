@@ -27,7 +27,8 @@ enum class BoundaryConditionType : std::uint8_t
 {
     Dirichlet = 0,
     Neumann = 1,
-    NoSlip = 2
+    NoSlip = 2,
+    Robin = 3
 };
 
 /**
@@ -37,6 +38,7 @@ struct BoundaryCondition
 {
     BoundaryConditionType type = BoundaryConditionType::Neumann;
     real_t value = 0.0;
+    real_t robin_coefficient = 0.0; // Used only for Robin conditions
 };
 
 /**
@@ -46,16 +48,20 @@ struct VectorBoundaryCondition
 {
     BoundaryConditionType type = BoundaryConditionType::Neumann;
     vec3<real_t> value{};
+    real_t robin_coefficient = 0.0; // Used only for Robin conditions
 };
+
+using BoundaryConditionMap = std::unordered_map<std::string, BoundaryCondition>;
+using VectorBoundaryConditionMap = std::unordered_map<std::string, VectorBoundaryCondition>;
 
 /**
  * @brief Collection of boundary conditions for temperature, velocity, and pressure.
  */
 struct BoundaryConditionSet
 {
-    std::unordered_map<std::string, BoundaryCondition> temperature;
-    std::unordered_map<std::string, VectorBoundaryCondition> velocity;
-    std::unordered_map<std::string, BoundaryCondition> pressure;
+    BoundaryConditionMap temperature;
+    VectorBoundaryConditionMap velocity;
+    BoundaryConditionMap pressure;
 };
 
 } // namespace SimpleFluid

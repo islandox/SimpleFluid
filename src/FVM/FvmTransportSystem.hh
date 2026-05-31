@@ -112,18 +112,6 @@ transport_system(const Mesh<Pack>& mesh,
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            std::optional<scalar_type> cached_boundary_value;
-            bool boundary_value_cached = false;
-            auto face_boundary_value = [&]() -> const std::optional<scalar_type>&
-            {
-                if (!boundary_value_cached)
-                {
-                    cached_boundary_value = boundary_value(face_lid, old_value);
-                    boundary_value_cached = true;
-                }
-                return cached_boundary_value;
-            };
-
             const auto owner_oriented_flux =
                 face_fluxes[static_cast<std::size_t>(face_lid)];
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
@@ -139,11 +127,6 @@ transport_system(const Mesh<Pack>& mesh,
                 const auto other = mesh.opposite_cell(face_lid, cell_lid);
                 cols.push_back(mesh.cell_global_id(other));
                 vals.push_back(out_flux);
-            }
-            else
-            {
-                const auto& value = face_boundary_value();
-                rhs_value -= out_flux * value.value_or(old_value);
             }
 
             if (diffusivity <= 0.0)
@@ -166,25 +149,49 @@ transport_system(const Mesh<Pack>& mesh,
                 cols.push_back(mesh.cell_global_id(other));
                 vals.push_back(-coeff);
             }
-            else
-            {
-                const auto distance =
-                    mesh.cell_to_face_distance(face_lid, cell_lid);
-                const auto& value = face_boundary_value();
-                if (distance > 0.0 && value.has_value())
-                {
-                    const auto coeff =
-                        diffusivity * mesh.face_area(face_lid) / distance;
-                    diagonal += coeff;
-                    rhs_value += coeff * *value;
-                }
-            }
         }
 
         cols.push_back(row_gid);
         vals.push_back(diagonal);
         matrix->insertGlobalValues(row_gid, cols(), vals());
         rhs.replaceLocalValue(static_cast<local_ordinal_type>(owned), rhs_value);
+    }
+
+    // Apply boundary conditions.
+    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    {
+        for (size_t in_patch_id = 0; in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        {
+            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            if (mesh.is_owned_face(face_lid))
+            {
+                const auto owner = mesh.owner_cell(face_lid);
+                const auto row_gid = mesh.cell_global_id(owner);
+                const auto out_flux = face_fluxes[static_cast<std::size_t>(face_lid)];
+
+                auto boundary_face_value = boundary_value(patch_id, in_patch_id);
+                if (out_flux >= 0.0)
+                {
+                    matrix->sumIntoLocalValues(owner, Arr{owner}, Arr{out_flux});
+                }
+                else
+                {
+                    rhs.sumIntoLocalValue(owner, - out_flux * boundary_face_value);
+                }
+
+                if (diffusivity > 0.0)
+                {
+                    const auto distance = mesh.cell_to_face_distance(face_lid, owner);
+                    if (distance > 0.0)
+                    {
+                        const auto coeff =
+                            diffusivity * mesh.face_area(face_lid) / distance;
+                        matrix->sumIntoLocalValues(owner, Arr{owner}, Arr{coeff});
+                        rhs.sumIntoLocalValue(owner, coeff * boundary_face_value);
+                    }
+                }
+            }
+        }
     }
 
     matrix->fillComplete();

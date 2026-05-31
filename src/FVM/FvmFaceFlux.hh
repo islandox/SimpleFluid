@@ -31,7 +31,7 @@ namespace SimpleFluid::FvmOperators
 template<TpetraTypePack Pack>
 struct VelocityBoundaryCache
 {
-    using vec_type = typename Mesh<Pack>::Vec3;
+    using vec_type = vec3<typename Pack::scalar_type>;
 
     /**
      * @brief Construct a velocity-boundary cache backed by the given mesh.
@@ -39,12 +39,12 @@ struct VelocityBoundaryCache
      * @param mesh The mesh whose boundary faces will be cached.
      */
     explicit VelocityBoundaryCache(SP<const Mesh<Pack>> mesh)
-        : value(std::move(mesh), "velocity_boundary")
+        : value(), mesh(mesh)
     {
     }
 
-    VectorFaceField<Pack> value;
-    std::vector<std::uint8_t> has_value;
+    std::unordered_map<int, Arr<vec_type>> value;
+    SP<const Mesh<Pack>> mesh;
 };
 
 /**
@@ -69,7 +69,6 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
     }
 
     VelocityBoundaryCache<Pack> cache(mesh);
-    cache.has_value.assign(mesh->num_faces(), 0);
 
     for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
     {
@@ -83,7 +82,7 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
         typename VelocityBoundaryCache<Pack>::vec_type prescribed_value{};
         if (iter->second.type == BoundaryConditionType::NoSlip)
         {
-            prescribed_value = {};
+            prescribed_value = {0.0, 0.0, 0.0};
         }
         else if (iter->second.type == BoundaryConditionType::Dirichlet)
         {
@@ -94,16 +93,9 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
             continue;
         }
 
-        for (const auto face_lid : boundary_patch.face_lids)
-        {
-            if (!cache.value.is_owned_face(face_lid))
-            {
-                continue;
-            }
-
-            cache.value.set_value(face_lid, prescribed_value);
-            cache.has_value[static_cast<std::size_t>(face_lid)] = 1;
-        }
+        Arr<typename VelocityBoundaryCache<Pack>::vec_type> patch_values(
+            boundary_patch.face_lids.size(), prescribed_value);
+        cache.value[patch_id] = std::move(patch_values);
     }
 
     return cache;
@@ -150,9 +142,7 @@ void validate_face_flux_inputs(
     {
         throw std::invalid_argument("face_fluxes requires a velocity field on the input mesh.");
     }
-    if (boundary_cache != nullptr
-        && (boundary_cache->has_value.size() != mesh.num_faces()
-            || &boundary_cache->value.mesh() != &mesh))
+    if (boundary_cache != nullptr && boundary_cache->value.size() != mesh.boundary_patches().size())
     {
         throw std::invalid_argument("face_fluxes received the wrong boundary-cache size.");
     }
@@ -201,37 +191,43 @@ void validate_normal_flux_inputs(
 }
 
 /**
- * @brief Retrieve the prescribed velocity on a boundary face from the
+ * @brief Retrieve the prescribed velocity on boundary faces from the
  *        cache, if available.
  *
  * @tparam Pack The Tpetra type pack.
  * @param mesh The computational mesh.
- * @param face_lid Local index of the face to query.
  * @param boundary_cache Pointer to a velocity-boundary cache, or nullptr.
  * @param[out] face_velocity On return, the cached boundary velocity.
- * @return true if a cached value was written to @p face_velocity, false
- *         otherwise.
  */
 template<TpetraTypePack Pack>
-bool boundary_face_velocity(
+void load_boundary_face_velocity(
     const Mesh<Pack>& mesh,
-    typename Pack::local_ordinal_type face_lid,
     const VelocityBoundaryCache<Pack>* boundary_cache,
-    typename Mesh<Pack>::Vec3& face_velocity)
+    VectorFaceField<Pack>& face_velocity)
 {
-    if (boundary_cache == nullptr || !mesh.is_boundary_face(face_lid))
-    {
-        return false;
-    }
+    if (boundary_cache == nullptr) return;
 
-    const auto face = static_cast<std::size_t>(face_lid);
-    if (!boundary_cache->has_value[face])
+    for (auto [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        return false;
-    }
+        if (boundary_patch.face_lids.empty())
+        {
+            continue;
+        }
 
-    face_velocity = boundary_cache->value.value(face_lid);
-    return true;
+        const auto iter = boundary_cache->value.find(patch_id);
+        if (iter == boundary_cache->value.end())
+        {
+            continue;
+        }
+
+        for (size_t i = 0; i < boundary_patch.face_lids.size(); ++i)
+        {
+            const auto face_lid = boundary_patch.face_lids[i];
+            if (!face_velocity.is_owned_face(face_lid)) continue;
+
+            face_velocity.set_value(face_lid, iter->second[i]);
+        }
+    }
 }
 
 /**
@@ -271,14 +267,10 @@ void assemble_face_velocities(const Mesh<Pack>& mesh,
         {
             const auto neighbor = mesh.neighbor_cell(face_lid);
             value = (value + velocity.local_value(neighbor)) / 2.0;
+            face_velocity.set_value(face_lid, value);
         }
-        else if (!boundary_face_velocity(mesh, face_lid, boundary_cache, value))
-        {
-            continue;
-        }
-
-        face_velocity.set_value(face_lid, value);
     }
+    load_boundary_face_velocity(mesh, boundary_cache, face_velocity);
 }
 
 } // namespace detail
