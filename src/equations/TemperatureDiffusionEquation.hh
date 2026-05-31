@@ -223,13 +223,18 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                         const auto face_lid = faces[face_index];
                         if (face_lid == boundary_face_lid)
                         {
-                            const auto distance_to_face = d_mesh->face_cell_center_distance(face_lid);
+                            const auto distance_to_face = d_mesh->cell_to_face_distance(face_lid, owner);
                             laplacian += (boundary_temperature - temp_p)
                                        * d_mesh->face_area(face_lid)
                                        / distance_to_face;
                         }
                         else
                         {
+                            if (!d_mesh->is_interior_face(face_lid))
+                            {
+                                continue;
+                            }
+
                             const auto other = d_mesh->opposite_cell(face_lid, owner);
                             const auto distance = d_mesh->face_cell_center_distance(face_lid);
                             if (distance > 0.0)
@@ -284,11 +289,14 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
                                                      d_mesh->num_local_cells());
 
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id)
+        [&](int patch_id, size_t in_patch_id) -> typename Pack::scalar_type
     {
-        const auto& boundary =
-            d_face_boundary_temperature.value.at(patch_id)[in_patch_id];
-        return boundary;
+        const auto cache_it = d_face_boundary_temperature.value.find(patch_id);
+        if (cache_it == d_face_boundary_temperature.value.end())
+        {
+            return typename Pack::scalar_type{};
+        }
+        return cache_it->second[in_patch_id];
     };
 
     auto system = FvmOperators::transport_system<Pack>(

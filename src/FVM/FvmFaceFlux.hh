@@ -72,25 +72,20 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
 
     for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
     {
+        typename VelocityBoundaryCache<Pack>::vec_type prescribed_value{};
+
         const auto iter =
             boundary_conditions.velocity.find(mesh->boundary_patch_name(patch_id));
-        if (iter == boundary_conditions.velocity.end())
+        if (iter != boundary_conditions.velocity.end())
         {
-            continue;
-        }
-
-        typename VelocityBoundaryCache<Pack>::vec_type prescribed_value{};
-        if (iter->second.type == BoundaryConditionType::NoSlip)
-        {
-            prescribed_value = {0.0, 0.0, 0.0};
-        }
-        else if (iter->second.type == BoundaryConditionType::Dirichlet)
-        {
-            prescribed_value = iter->second.value;
-        }
-        else
-        {
-            continue;
+            if (iter->second.type == BoundaryConditionType::NoSlip)
+            {
+                prescribed_value = {0.0, 0.0, 0.0};
+            }
+            else if (iter->second.type == BoundaryConditionType::Dirichlet)
+            {
+                prescribed_value = iter->second.value;
+            }
         }
 
         Arr<typename VelocityBoundaryCache<Pack>::vec_type> patch_values(
