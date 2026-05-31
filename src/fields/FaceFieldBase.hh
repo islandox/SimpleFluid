@@ -194,10 +194,6 @@ protected:
     vector_type d_data;
 };
 
-// ========================================================================
-//  Out-of-line definitions
-// ========================================================================
-
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
     const SP<const mesh_type>& mesh,

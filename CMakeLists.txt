@@ -17,7 +17,14 @@ set(SOURCES "src/geometry/Mesh.cc"
             "src/geometry/STKMesh.cc"
             "src/geometry/MeshFactory.cc"
             "src/io/VTUWriter.cc"
-            "src/parallel/MeshPartitioner.cc")
+            "src/parallel/MeshPartitioner.cc"
+            "src/equations/BoussinesqMomentumEquation.cc"
+            "src/equations/PressureProjectionEquation.cc"
+            "src/equations/TemperatureDiffusionEquation.cc"
+            "src/solvers/BoussinesqSolver.cc"
+            "src/dataclass/Database.cc"
+            "src/FVM/FvmOperatorDetails.cc"
+            "src/geometry/MeshUtils.cc")
 
 # Create library or executable
 add_library(SimpleFluid STATIC ${SOURCES})
