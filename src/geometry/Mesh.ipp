@@ -478,4 +478,33 @@ auto Mesh<Pack>::make_vectorV3D_view(const std::string& name,
     return view;
 }
 
+// --- Contiguous Tpetra GID accessors ---
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::mesh_gid_to_tpetra_gid(global_ordinal_type mesh_gid) const
+    -> global_ordinal_type
+{
+    const auto iter = d_mesh_gid_to_tpetra_gid.find(mesh_gid);
+    if (iter == d_mesh_gid_to_tpetra_gid.end())
+    {
+        return invalid_id<global_ordinal_type>();
+    }
+    return iter->second;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::tpetra_gid_to_mesh_gid(global_ordinal_type tpetra_gid) const
+    -> global_ordinal_type
+{
+    const auto local_index = static_cast<std::size_t>(
+        tpetra_gid - d_tpetra_gid_offset);
+    if (local_index >= d_tpetra_gid_to_mesh_gid.size())
+    {
+        throw std::out_of_range(
+            "Tpetra GID " + std::to_string(tpetra_gid)
+            + " is out of the owned range for this process.");
+    }
+    return d_tpetra_gid_to_mesh_gid[local_index];
+}
+
 } // namespace SimpleFluid

@@ -13,6 +13,7 @@
 
 #include <Tpetra_Core.hpp>
 #include <Teuchos_OrdinalTraits.hpp>
+#include <Teuchos_DefaultMpiComm.hpp>
 
 #include <algorithm>
 #include <array>
@@ -41,6 +42,173 @@ Mesh<Pack>::Mesh()
 }
 
 /**
+ * @brief Assign contiguous Tpetra global IDs to owned and ghost cells.
+ *
+ * Computes a globally contiguous GID block for this process's owned cells
+ * (offset = sum of owned cells on all lower-ranked processes) and resolves
+ * the corresponding Tpetra GIDs for ghost cells by gathering the owned
+ * mesh-GID lists from all ranks.  The resulting maps are stored in:
+ * - d_owned_cell_tpetra_gids
+ * - d_ghost_cell_tpetra_gids
+ * - d_mesh_gid_to_tpetra_gid
+ * - d_tpetra_gid_to_mesh_gid
+ *
+ * Idempotent: if d_owned_cell_tpetra_gids is already populated the call is a no-op.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
+template<TpetraTypePack Pack>
+void Mesh<Pack>::assign_contiguous_tpetra_gids()
+{
+    if (!d_owned_cell_tpetra_gids.empty())
+    {
+        return; // already assigned
+    }
+
+    const auto comm = Tpetra::getDefaultComm();
+    const int myrank = comm->getRank();
+    const int nranks = comm->getSize();
+
+    const int my_owned_count = static_cast<int>(d_owned_cell_global_ids.size());
+
+    // --- Gather owned cell counts from all ranks ---
+    std::vector<int> all_owned_counts(static_cast<std::size_t>(nranks), 0);
+
+    if (nranks > 1)
+    {
+        auto* mpi_comm = dynamic_cast<const Teuchos::MpiComm<int>*>(comm.get());
+        if (mpi_comm == nullptr)
+        {
+            throw std::runtime_error("assign_contiguous_tpetra_gids requires an MPI communicator.");
+        }
+        const auto raw_comm = static_cast<MPI_Comm>(*(mpi_comm->getRawMpiComm()));
+
+        MPI_Allgather(&my_owned_count, 1, MPI_INT,
+                      all_owned_counts.data(), 1, MPI_INT, raw_comm);
+    }
+    else
+    {
+        all_owned_counts[0] = my_owned_count;
+    }
+
+    // --- Compute global offset for this process ---
+    global_ordinal_type global_offset = 0;
+    for (int r = 0; r < myrank; ++r)
+    {
+        global_offset += static_cast<global_ordinal_type>(all_owned_counts[static_cast<std::size_t>(r)]);
+    }
+    d_tpetra_gid_offset = global_offset;
+
+    const global_ordinal_type total_global_owned =
+        global_offset + static_cast<global_ordinal_type>(my_owned_count);
+    for (int r = myrank + 1; r < nranks; ++r)
+    {
+        // total_global_owned not strictly needed, computed for completeness
+        (void)r;
+    }
+
+    // --- Assign contiguous Tpetra GIDs to owned cells ---
+    d_owned_cell_tpetra_gids.resize(static_cast<std::size_t>(my_owned_count));
+    d_tpetra_gid_to_mesh_gid.resize(static_cast<std::size_t>(my_owned_count));
+    for (int i = 0; i < my_owned_count; ++i)
+    {
+        const auto tpetra_gid = global_offset + static_cast<global_ordinal_type>(i);
+        d_owned_cell_tpetra_gids[static_cast<std::size_t>(i)] = tpetra_gid;
+        d_tpetra_gid_to_mesh_gid[static_cast<std::size_t>(i)] = d_owned_cell_global_ids[static_cast<std::size_t>(i)];
+        d_mesh_gid_to_tpetra_gid[d_owned_cell_global_ids[static_cast<std::size_t>(i)]] = tpetra_gid;
+    }
+
+    // --- Resolve ghost cell Tpetra GIDs ---
+    const int my_ghost_count = static_cast<int>(d_ghost_cell_global_ids.size());
+    d_ghost_cell_tpetra_gids.resize(static_cast<std::size_t>(my_ghost_count));
+
+    if (my_ghost_count > 0 && nranks > 1)
+    {
+        auto* mpi_comm_ptr = dynamic_cast<const Teuchos::MpiComm<int>*>(comm.get());
+        const auto raw_comm = static_cast<MPI_Comm>(*(mpi_comm_ptr->getRawMpiComm()));
+
+        // --- Gather all owned mesh GIDs from all processes ---
+        std::vector<int> displs(static_cast<std::size_t>(nranks), 0);
+        for (int r = 1; r < nranks; ++r)
+        {
+            displs[static_cast<std::size_t>(r)] =
+                displs[static_cast<std::size_t>(r - 1)]
+                + all_owned_counts[static_cast<std::size_t>(r - 1)];
+        }
+        const int total_global = displs.back() + all_owned_counts.back();
+
+        // Determine MPI datatype for global_ordinal_type
+        MPI_Datatype mpi_go_type;
+        if constexpr (std::is_same_v<global_ordinal_type, long long>)
+        {
+            mpi_go_type = MPI_LONG_LONG;
+        }
+        else if constexpr (std::is_same_v<global_ordinal_type, long>)
+        {
+            mpi_go_type = MPI_LONG;
+        }
+        else if constexpr (std::is_same_v<global_ordinal_type, int>)
+        {
+            mpi_go_type = MPI_INT;
+        }
+        else
+        {
+            // Fallback: use byte size to determine type
+            if (sizeof(global_ordinal_type) == 8)
+                mpi_go_type = MPI_LONG_LONG;
+            else if (sizeof(global_ordinal_type) == 4)
+                mpi_go_type = MPI_INT;
+            else
+                throw std::runtime_error("Unsupported global_ordinal_type size for MPI.");
+        }
+
+        std::vector<global_ordinal_type> all_owned_gids(
+            static_cast<std::size_t>(std::max(total_global, 1)));
+
+        MPI_Allgatherv(
+            d_owned_cell_global_ids.data(), my_owned_count, mpi_go_type,
+            all_owned_gids.data(), all_owned_counts.data(), displs.data(),
+            mpi_go_type, raw_comm);
+
+        // --- Build global mesh_gid -> tpetra_gid lookup ---
+        std::unordered_map<global_ordinal_type, global_ordinal_type> global_mesh_to_tpetra;
+        for (int r = 0; r < nranks; ++r)
+        {
+            global_ordinal_type rank_offset = 0;
+            for (int rr = 0; rr < r; ++rr)
+            {
+                rank_offset += static_cast<global_ordinal_type>(
+                    all_owned_counts[static_cast<std::size_t>(rr)]);
+            }
+            const int count = all_owned_counts[static_cast<std::size_t>(r)];
+            const int begin = displs[static_cast<std::size_t>(r)];
+            for (int i = 0; i < count; ++i)
+            {
+                const auto mesh_gid = all_owned_gids[static_cast<std::size_t>(begin + i)];
+                const auto tpetra_gid = rank_offset + static_cast<global_ordinal_type>(i);
+                global_mesh_to_tpetra[mesh_gid] = tpetra_gid;
+            }
+        }
+
+        // --- Resolve Tpetra GIDs for ghost cells ---
+        for (int i = 0; i < my_ghost_count; ++i)
+        {
+            const auto mesh_gid = d_ghost_cell_global_ids[static_cast<std::size_t>(i)];
+            const auto iter = global_mesh_to_tpetra.find(mesh_gid);
+            if (iter == global_mesh_to_tpetra.end())
+            {
+                throw std::runtime_error(
+                    "Ghost cell mesh GID " + std::to_string(mesh_gid)
+                    + " not found in any process's owned list.");
+            }
+            const auto tpetra_gid = iter->second;
+            d_ghost_cell_tpetra_gids[static_cast<std::size_t>(i)] = tpetra_gid;
+            d_mesh_gid_to_tpetra_gid[mesh_gid] = tpetra_gid;
+        }
+    }
+}
+
+/**
  * @brief create Tpetra maps for owned and overlap cells based on the mesh connectivity information.
  * 
  * @tparam Pack 
@@ -66,9 +234,15 @@ void Mesh<Pack>::create_maps()
         }
     }
 
-    ArrGO overlap_gids = d_owned_cell_global_ids;
-    overlap_gids.reserve(overlap_gids.size() + d_ghost_cell_global_ids.size());
-    overlap_gids.insert(overlap_gids.end(), d_ghost_cell_global_ids.begin(), d_ghost_cell_global_ids.end());
+    // Ensure contiguous Tpetra GIDs are assigned before building maps.
+    assign_contiguous_tpetra_gids();
+
+    // --- Build Tpetra overlap GID list (owned + ghost, all using Tpetra GIDs) ---
+    ArrGO overlap_tpetra_gids = d_owned_cell_tpetra_gids;
+    overlap_tpetra_gids.reserve(overlap_tpetra_gids.size() + d_ghost_cell_tpetra_gids.size());
+    overlap_tpetra_gids.insert(overlap_tpetra_gids.end(),
+                               d_ghost_cell_tpetra_gids.begin(),
+                               d_ghost_cell_tpetra_gids.end());
 
     const auto invalid_global_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
     const global_ordinal_type index_base = 0;
@@ -76,15 +250,15 @@ void Mesh<Pack>::create_maps()
 
     d_owned_cell_map = Teuchos::rcp(new map_type(
         invalid_global_size,
-        d_owned_cell_global_ids.data(),
-        detail::checked_size_to_ordinal<local_ordinal_type>(d_owned_cell_global_ids.size(), "owned cell map"),
+        d_owned_cell_tpetra_gids.data(),
+        detail::checked_size_to_ordinal<local_ordinal_type>(d_owned_cell_tpetra_gids.size(), "owned cell map"),
         index_base,
         comm));
 
     d_overlap_cell_map = Teuchos::rcp(new map_type(
         invalid_global_size,
-        overlap_gids.data(),
-        detail::checked_size_to_ordinal<local_ordinal_type>(overlap_gids.size(), "overlap cell map"),
+        overlap_tpetra_gids.data(),
+        detail::checked_size_to_ordinal<local_ordinal_type>(overlap_tpetra_gids.size(), "overlap cell map"),
         index_base,
         comm));
 
@@ -193,8 +367,8 @@ void Mesh<Pack>::create_device_views()
     cell_volume_values.reserve(d_cells.size());
     cell_centroid_values.reserve(d_cells.size());
 
-    cell_gid.append_range(d_owned_cell_global_ids);
-    cell_gid.append_range(d_ghost_cell_global_ids);
+    cell_gid.append_range(d_owned_cell_tpetra_gids);
+    cell_gid.append_range(d_ghost_cell_tpetra_gids);
 
     for (const auto& cell_info : d_cells)
     {

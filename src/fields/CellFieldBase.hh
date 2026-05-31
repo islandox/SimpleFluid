@@ -190,13 +190,19 @@ protected:
 
         const auto invalid_row =
             Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
+        const auto num_owned = d_mesh->num_owned_cells();
         for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(cell);
-            const auto cell_gid = d_mesh->cell_global_id(cell_lid);
+
+            // Use the contiguous Tpetra GID to query the Tpetra map.
+            const auto tpetra_gid =
+                cell < num_owned
+                    ? d_mesh->owned_cell_tpetra_gids()[cell]
+                    : d_mesh->mesh_gid_to_tpetra_gid(d_mesh->cell_global_id(cell_lid));
 
             const auto local_row =
-                d_overlap_data.getMap()->getLocalElement(cell_gid);
+                d_overlap_data.getMap()->getLocalElement(tpetra_gid);
             if (local_row == invalid_row)
             {
                 throw std::runtime_error(std::string(class_name)
@@ -211,7 +217,7 @@ protected:
             if (d_mesh->is_owned_cell(cell_lid))
             {
                 const auto owned_row =
-                    d_data.getMap()->getLocalElement(cell_gid);
+                    d_data.getMap()->getLocalElement(tpetra_gid);
                 if (owned_row == invalid_row)
                 {
                     throw std::runtime_error(std::string(class_name)
@@ -243,7 +249,13 @@ protected:
 
     local_ordinal_type owned_row_for_global_cell(global_ordinal_type cell_gid) const
     {
-        const auto owned_row = d_data.getMap()->getLocalElement(cell_gid);
+        const auto tpetra_gid = d_mesh->mesh_gid_to_tpetra_gid(cell_gid);
+        if (tpetra_gid == invalid_id<global_ordinal_type>())
+        {
+            throw std::out_of_range("Cell global id is not owned by this rank: "
+                                  + std::to_string(cell_gid));
+        }
+        const auto owned_row = d_data.getMap()->getLocalElement(tpetra_gid);
         if (owned_row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
         {
             throw std::out_of_range("Cell global id is not owned by this rank: "
@@ -261,7 +273,13 @@ protected:
 
     local_ordinal_type local_row_for_global_cell(global_ordinal_type cell_gid) const
     {
-        const auto local_row = d_overlap_data.getMap()->getLocalElement(cell_gid);
+        const auto tpetra_gid = d_mesh->mesh_gid_to_tpetra_gid(cell_gid);
+        if (tpetra_gid == invalid_id<global_ordinal_type>())
+        {
+            throw std::out_of_range("Cell global id is not local to this rank: "
+                                  + std::to_string(cell_gid));
+        }
+        const auto local_row = d_overlap_data.getMap()->getLocalElement(tpetra_gid);
         if (local_row == Teuchos::OrdinalTraits<local_ordinal_type>::invalid())
         {
             throw std::out_of_range("Cell global id is not local to this rank: "

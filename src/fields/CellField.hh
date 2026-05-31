@@ -200,14 +200,24 @@ bool CellField<Pack>::is_local_cell(local_ordinal_type cell_lid) const
 template<TpetraTypePack Pack>
 bool CellField<Pack>::is_owned_global_cell(global_ordinal_type cell_gid) const
 {
-    const auto row = this->d_data.getMap()->getLocalElement(cell_gid);
+    const auto tpetra_gid = this->d_mesh->mesh_gid_to_tpetra_gid(cell_gid);
+    if (tpetra_gid == invalid_id<global_ordinal_type>())
+    {
+        return false;
+    }
+    const auto row = this->d_data.getMap()->getLocalElement(tpetra_gid);
     return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
 }
 
 template<TpetraTypePack Pack>
 bool CellField<Pack>::is_local_global_cell(global_ordinal_type cell_gid) const
 {
-    const auto row = this->d_overlap_data.getMap()->getLocalElement(cell_gid);
+    const auto tpetra_gid = this->d_mesh->mesh_gid_to_tpetra_gid(cell_gid);
+    if (tpetra_gid == invalid_id<global_ordinal_type>())
+    {
+        return false;
+    }
+    const auto row = this->d_overlap_data.getMap()->getLocalElement(tpetra_gid);
     return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
 }
 
