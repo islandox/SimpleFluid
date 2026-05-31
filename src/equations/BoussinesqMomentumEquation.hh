@@ -170,8 +170,8 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                                              "BoussinesqMomentumEquation");
     EquationValidation::assert_sufficient_cache_size(old_velocity.size(),
                                                      d_mesh->num_local_cells());
-    if (velocity_boundary_cache.has_value.size() != d_mesh->num_faces()
-        || &velocity_boundary_cache.value.mesh() != d_mesh.get())
+    if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
+        || velocity_boundary_cache.mesh != d_mesh)
     {
         throw std::invalid_argument(
             "BoussinesqMomentumEquation received the wrong boundary-cache size.");
@@ -193,17 +193,13 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         }
 
         auto boundary_value =
-            [&](local_ordinal_type face_lid,
-                scalar_type /*fallback*/) -> std::optional<scalar_type>
+            [&](int boundary_id,
+                local_ordinal_type boundary_face_id)
         {
-            const auto face = static_cast<std::size_t>(face_lid);
-            if (!velocity_boundary_cache.has_value[face])
-            {
-                return std::nullopt;
-            }
+            const auto face = static_cast<std::size_t>(boundary_face_id);
 
             return FvmOperators::detail::component_value(
-                velocity_boundary_cache.value.value(face_lid), component);
+                velocity_boundary_cache.value.at(boundary_id)[face], component);
         };
 
         auto system = FvmOperators::transport_system<Pack>(
