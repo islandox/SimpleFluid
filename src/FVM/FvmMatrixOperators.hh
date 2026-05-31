@@ -70,7 +70,8 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    auto matrix = Teuchos::rcp(
+        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
     Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
@@ -140,7 +141,8 @@ upwind_convection_matrix(
         throw std::invalid_argument("upwind_convection_matrix received the wrong face-flux size.");
     }
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    auto matrix = Teuchos::rcp(
+        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
     Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
@@ -202,7 +204,8 @@ upwind_convection_matrix(
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    auto matrix = Teuchos::rcp(
+        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
     Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
@@ -266,7 +269,8 @@ pressure_poisson_matrix(
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.owned_cell_map(), 8));
+    auto matrix = Teuchos::rcp(
+        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
     Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);

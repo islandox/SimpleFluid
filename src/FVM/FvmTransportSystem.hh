@@ -80,7 +80,6 @@ transport_system(const Mesh<Pack>& mesh,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
     using matrix_type = typename Pack::matrix_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -97,18 +96,14 @@ transport_system(const Mesh<Pack>& mesh,
         throw std::invalid_argument("transport_system old-value cache is too small.");
     }
 
-    Teuchos::RCP<matrix_type> matrix;
-    if (cached_matrix.is_null())
-    {
-        matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 12));
-    }
-    else
-    {
-        matrix = cached_matrix;
-        matrix->resumeFill();
-    }
+    // Row map = owned cells; domain map = owned + ghost cells
+    // so that neighbour columns on other ranks are valid.
+    auto matrix = Teuchos::rcp(
+        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 12));
+    (void)cached_matrix;
     typename Pack::vector_type rhs(mesh.owned_cell_map(), true);
-    Teuchos::Array<global_ordinal_type> cols;
+
+    Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
@@ -116,7 +111,6 @@ transport_system(const Mesh<Pack>& mesh,
     for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid = mesh.cell_global_id(cell_lid);
 
         cols.clear();
         vals.clear();
@@ -126,84 +120,110 @@ transport_system(const Mesh<Pack>& mesh,
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
+            // === advection (upwind) ===
             const auto owner_oriented_flux =
-                face_fluxes.is_owned_face(face_lid) ? face_fluxes.value(face_lid) : scalar_type{};
+                face_fluxes.is_owned_face(face_lid)
+                    ? face_fluxes.value(face_lid)
+                    : scalar_type{};
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
-                                ? owner_oriented_flux
-                                : -owner_oriented_flux;
+                                    ? owner_oriented_flux
+                                    : -owner_oriented_flux;
 
-            if (out_flux >= 0.0)
+            if (out_flux >= scalar_type{0})
             {
                 diagonal += out_flux;
             }
             else if (mesh.is_interior_face(face_lid))
             {
                 const auto other = mesh.opposite_cell(face_lid, cell_lid);
-                cols.push_back(mesh.cell_global_id(other));
+                cols.push_back(other);
                 vals.push_back(out_flux);
             }
 
-            if (diffusivity <= 0.0)
+            // === diffusion ===
+            if (diffusivity <= scalar_type{0} || !mesh.is_interior_face(face_lid))
             {
                 continue;
             }
 
-            if (mesh.is_interior_face(face_lid))
+            const auto distance = mesh.face_cell_center_distance(face_lid);
+            if (distance <= scalar_type{0})
             {
-                const auto distance = mesh.face_cell_center_distance(face_lid);
-                if (distance <= 0.0)
-                {
-                    throw std::runtime_error(
-                        "Cannot assemble diffusion across coincident cells.");
-                }
-                const auto coeff =
-                    diffusivity * mesh.face_area(face_lid) / distance;
-                const auto other = mesh.opposite_cell(face_lid, cell_lid);
-                diagonal += coeff;
-                cols.push_back(mesh.cell_global_id(other));
-                vals.push_back(-coeff);
+                throw std::runtime_error(
+                    "Cannot assemble diffusion across coincident cells.");
             }
+            const auto coeff =
+                diffusivity * mesh.face_area(face_lid) / distance;
+            const auto other = mesh.opposite_cell(face_lid, cell_lid);
+            diagonal += coeff;
+            cols.push_back(other);
+            vals.push_back(-coeff);
         }
 
-        cols.push_back(row_gid);
+        cols.push_back(cell_lid);
         vals.push_back(diagonal);
-        matrix->insertGlobalValues(row_gid, cols(), vals());
-        rhs.replaceLocalValue(static_cast<local_ordinal_type>(owned), rhs_value);
+        matrix->insertLocalValues(cell_lid, cols(), vals());
+        rhs.replaceLocalValue(cell_lid, rhs_value);
     }
 
-    // Apply boundary conditions.
+    // Apply boundary conditions using sumIntoLocalValues (works reliably).
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (size_t in_patch_id = 0; in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        for (std::size_t in_patch_id = 0;
+             in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
-            if (mesh.is_owned_face(face_lid))
+            if (!mesh.is_owned_face(face_lid))
             {
-                const auto owner = mesh.owner_cell(face_lid);
-                const auto row_gid = mesh.cell_global_id(owner);
-                const auto out_flux = face_fluxes.is_owned_face(face_lid) ? face_fluxes.value(face_lid) : scalar_type{};
+                continue;
+            }
 
-                auto boundary_face_value = boundary_value(patch_id, in_patch_id);
-                if (out_flux >= 0.0)
-                {
-                    matrix->sumIntoLocalValues(owner, Arr{owner}, Arr{out_flux});
-                }
-                else
-                {
-                    rhs.sumIntoLocalValue(owner, - out_flux * boundary_face_value);
-                }
+            const auto owner = mesh.owner_cell(face_lid);
 
-                if (diffusivity > 0.0)
-                {
-                    const auto distance = mesh.cell_to_face_distance(face_lid, owner);
-                    if (distance > 0.0)
-                    {
-                        const auto coeff =
-                            diffusivity * mesh.face_area(face_lid) / distance;
-                        matrix->sumIntoLocalValues(owner, Arr{owner}, Arr{coeff});
-                        rhs.sumIntoLocalValue(owner, coeff * boundary_face_value);
-                    }
-                }
+            // Advective boundary flux
+            const auto out_flux =
+                face_fluxes.is_owned_face(face_lid)
+                    ? face_fluxes.value(face_lid)
+                    : scalar_type{};
+
+            const auto boundary_face_value =
+                boundary_value(patch_id, in_patch_id);
+
+            if (out_flux >= scalar_type{0})
+            {
+                local_ordinal_type col = owner;
+                matrix->sumIntoLocalValues(
+                    owner,
+                    Teuchos::arrayView(&col, 1),
+                    Teuchos::arrayView(&out_flux, 1));
+            }
+            else
+            {
+                rhs.sumIntoLocalValue(owner,
+                                      -out_flux * boundary_face_value);
+            }
+
+            // Diffusive boundary flux
+            if (diffusivity <= scalar_type{0})
+            {
+                continue;
+            }
+
+            const auto distance =
+                mesh.cell_to_face_distance(face_lid, owner);
+            if (distance > scalar_type{0})
+            {
+                const auto coeff =
+                    diffusivity * mesh.face_area(face_lid) / distance;
+
+                local_ordinal_type col = owner;
+                scalar_type bval = coeff;
+                matrix->sumIntoLocalValues(
+                    owner,
+                    Teuchos::arrayView(&col, 1),
+                    Teuchos::arrayView(&bval, 1));
+                rhs.sumIntoLocalValue(owner,
+                                      coeff * boundary_face_value);
             }
         }
     }
