@@ -68,6 +68,10 @@ class Mesh
     template<TpetraTypePack>
     friend class MeshPartitioner;
 
+    /** @brief Grants MeshFactory access to internal mesh arrays for contiguous GID assignment. */
+    template<TpetraTypePack>
+    friend class MeshFactory;
+
 public:
     using map_type = typename Pack::map_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -89,6 +93,7 @@ public:
     using ArrGO = std::vector<global_ordinal_type>;
 
     using GO2LOMap = std::unordered_map<global_ordinal_type, local_ordinal_type>;
+    using GO2GOMap = std::unordered_map<global_ordinal_type, global_ordinal_type>;
 
     template <class T>
     using kokkos_1dview = Kokkos::View<T*, typename Pack::device_type>;
@@ -172,6 +177,7 @@ public:
 
 protected:
     void create_maps();
+    void assign_contiguous_tpetra_gids();
     void create_cell_face_distances();
     void create_device_views();
 
@@ -197,11 +203,32 @@ public:
 
     const ArrLO& owned_cell_ids() const noexcept { return d_owned_cell_ids; }
     const ArrGO& owned_cell_global_ids() const noexcept { return d_owned_cell_global_ids; }
+    const ArrGO& owned_cell_tpetra_gids() const noexcept { return d_owned_cell_tpetra_gids; }
 
     RCP<const map_type> owned_cell_map() const { return d_owned_cell_map; }
     RCP<const map_type> overlap_cell_map() const { return d_overlap_cell_map; }
     RCP<const map_type> owned_face_map() const { return d_owned_face_map; }
     RCP<const map_type> boundary_face_map() const { return d_boundary_face_map; }
+
+    /**
+     * @brief Convert a mesh (Exodus/STK) global ID to the corresponding contiguous Tpetra global ID.
+     * @param mesh_gid Mesh global ID.
+     * @return Contiguous Tpetra global ID, or invalid_id<global_ordinal_type>() if not found.
+     */
+    inline global_ordinal_type mesh_gid_to_tpetra_gid(global_ordinal_type mesh_gid) const;
+
+    /**
+     * @brief Convert a contiguous Tpetra global ID back to the corresponding mesh (Exodus/STK) global ID.
+     * @param tpetra_gid Tpetra global ID (must be in the owned range).
+     * @return Mesh global ID.
+     * @throws std::out_of_range if @p tpetra_gid is out of the owned Tpetra GID range.
+     */
+    inline global_ordinal_type tpetra_gid_to_mesh_gid(global_ordinal_type tpetra_gid) const;
+
+    /**
+     * @brief Return the global offset of this process's owned-cell Tpetra GID block.
+     */
+    global_ordinal_type tpetra_gid_offset() const noexcept { return d_tpetra_gid_offset; }
     const std::unordered_map<int, BoundaryFacePatch>& boundary_patches() const noexcept
     {
         return d_boundary_id_to_face_patch;
@@ -274,6 +301,15 @@ protected:
     ArrLO d_owned_cell_ids;
     ArrGO d_owned_cell_global_ids;
     ArrGO d_ghost_cell_global_ids;
+
+    // --- Contiguous Tpetra GID mapping ---
+    // Owned cells: Tpetra GIDs form a contiguous block [d_tpetra_gid_offset, d_tpetra_gid_offset + num_owned).
+    // Ghost cells: Tpetra GIDs are resolved from the owning process's assignment.
+    global_ordinal_type d_tpetra_gid_offset = 0;  // Global offset of this process's owned Tpetra GID block.
+    ArrGO d_owned_cell_tpetra_gids;                // Tpetra GIDs for owned cells (size = num_owned, contiguous).
+    ArrGO d_ghost_cell_tpetra_gids;                // Tpetra GIDs for ghost cells (size = num_ghost).
+    GO2GOMap d_mesh_gid_to_tpetra_gid;             // Mesh GID -> Tpetra GID (all local cells).
+    ArrGO d_tpetra_gid_to_mesh_gid;                // Tpetra GID -> Mesh GID (owned cells, indexed by local owned index).
 
     ArrGO d_owned_face_global_ids;
 

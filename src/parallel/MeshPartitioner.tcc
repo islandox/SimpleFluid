@@ -373,6 +373,12 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     mesh.d_cell_owned_face_ids.clear(); mesh.d_cell_face_distances.clear();
     mesh.d_cell_owned_node_global_ids.clear(); mesh.d_face_owned_node_global_ids.clear();
     mesh.d_face_key_to_face.clear();
+    // Clear contiguous Tpetra GID assignments; they will be recomputed by create_maps().
+    mesh.d_owned_cell_tpetra_gids.clear();
+    mesh.d_ghost_cell_tpetra_gids.clear();
+    mesh.d_mesh_gid_to_tpetra_gid.clear();
+    mesh.d_tpetra_gid_to_mesh_gid.clear();
+    mesh.d_tpetra_gid_offset = 0;
 
     std::unordered_set<GO> needed_nodes;
     for (auto& p : owned_pkts) { for (auto n : p.node_gids) needed_nodes.insert(n); for (auto& fn : p.face_node_keys) for (auto n : fn) needed_nodes.insert(n); }
