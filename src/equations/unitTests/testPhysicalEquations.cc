@@ -15,8 +15,8 @@
 #include "equations/PressureProjectionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "fields/VectorCellField.hh"
-#include "geometry/MeshFactory.hh"
 #include "FVM/FvmOperators.hh"
+#include "utils/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>
@@ -38,36 +38,14 @@ testing::Environment* const kokkos_environment =
 
 SimpleFluid::SP<MeshType> make_single_hex_mesh()
 {
-    auto db = std::make_shared<SimpleFluid::Database>();
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-    db->set("X", SimpleFluid::ArrReal{0.0, 1.0});
-    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
-    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
 }
 
 SimpleFluid::SP<MeshType> make_2x2x2_mesh()
 {
-    auto db = std::make_shared<SimpleFluid::Database>();
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-    db->set("X", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_2x2x2_database());
 }
 
 std::vector<Pack::scalar_type> local_values(const FieldType& field)

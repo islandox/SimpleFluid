@@ -76,6 +76,7 @@ private:
     SP<const mesh_type> d_mesh;
     BoundaryCache<Pack> d_face_boundary_temperature;
     SP<BoundaryConditionMap>  d_boundary_condition;
+    mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
 };
 
 /**
@@ -301,7 +302,12 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
 
     auto system = FvmOperators::transport_system<Pack>(
         *d_mesh, old_temperature, face_fluxes, time_step,
-        thermal_diffusivity, boundary_value);
+        thermal_diffusivity, boundary_value, d_cached_transport_matrix);
+
+    if (d_cached_transport_matrix.is_null())
+    {
+        d_cached_transport_matrix = system.matrix;
+    }
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto converged =

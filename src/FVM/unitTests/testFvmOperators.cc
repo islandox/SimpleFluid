@@ -13,8 +13,8 @@
 
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
-#include "geometry/MeshFactory.hh"
 #include "FVM/FvmOperators.hh"
+#include "utils/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>
@@ -33,28 +33,10 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<const SimpleFluid::Database> make_2x2x2_box_database()
-{
-    auto db = std::make_shared<SimpleFluid::Database>();
-
-    db->set("dimension", 3);
-    db->set("mesh_size", SimpleFluid::real_t{1.0});
-    db->set("domain_type",
-            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
-    db->set("X", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    db->set("domain_exterior_face_types",
-            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-
-    return db;
-}
-
 SimpleFluid::SP<MeshType> make_mesh()
 {
-    auto db = make_2x2x2_box_database();
-    SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_2x2x2_database());
 }
 
 } // namespace

@@ -55,6 +55,13 @@ struct TransportSystem
  * @param diffusivity Constant scalar diffusivity (non-negative).
  * @param boundary_value Callable that returns the prescribed boundary
  *        value for a face, or std::nullopt.
+ * @param[in,out] cached_matrix Optional pre-allocated matrix to reuse.
+ *        If non-null, resumeFill() is called and values are overwritten
+ *        in-place, avoiding a new allocation and graph construction.
+ *        The matrix must have been previously built by this function
+ *        with the same mesh. On first call, pass a default-constructed
+ *        (null) RCP; the returned TransportSystem will contain the new
+ *        matrix which the caller should cache for subsequent calls.
  * @return TransportSystem containing the assembled matrix and RHS vector.
  * @throws std::invalid_argument if @p time_step <= 0, @p diffusivity < 0,
  *         or array sizes are inconsistent with @p mesh.
@@ -68,7 +75,8 @@ transport_system(const Mesh<Pack>& mesh,
                  const std::vector<typename Pack::scalar_type>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
-                 BoundaryValueProvider boundary_value)
+                 BoundaryValueProvider boundary_value,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
     using matrix_type = typename Pack::matrix_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -92,7 +100,16 @@ transport_system(const Mesh<Pack>& mesh,
         throw std::invalid_argument("transport_system received the wrong face-flux size.");
     }
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 12));
+    Teuchos::RCP<matrix_type> matrix;
+    if (cached_matrix.is_null())
+    {
+        matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), 12));
+    }
+    else
+    {
+        matrix = cached_matrix;
+        matrix->resumeFill();
+    }
     typename Pack::vector_type rhs(mesh.owned_cell_map(), true);
     Teuchos::Array<global_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
