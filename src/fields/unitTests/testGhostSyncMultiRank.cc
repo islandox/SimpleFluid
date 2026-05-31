@@ -7,7 +7,7 @@
 
 #include "fields/CellField.hh"
 #include "parallel/MPI_interface.hh"
-#include "utils/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <cstddef>

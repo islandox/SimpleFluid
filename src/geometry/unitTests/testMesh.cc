@@ -14,7 +14,7 @@
 #include "geometry/Mesh.hh"
 #include "geometry/MeshFactory.hh"
 #include "geometry/MeshUtils.hh"
-#include "utils/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 
 #include "utils/testing_environment.hh"
 
@@ -102,16 +102,16 @@ TEST_F(MeshMethodTest, CellAndFaceAccess)
         EXPECT_NO_THROW(mesh_->cell(static_cast<lid_t>(i)));
 
     // Out-of-bounds / negative cell access
-    EXPECT_THROW(mesh_->cell(static_cast<lid_t>(mesh_->num_local_cells() + 100)),
+    EXPECT_THROW_WHEN_DEBUG(mesh_->cell(static_cast<lid_t>(mesh_->num_local_cells() + 100)),
                  std::out_of_range);
-    EXPECT_THROW(mesh_->cell(-1), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(mesh_->cell(-1), std::out_of_range);
 
     // Valid face access
     for (std::size_t i = 0; i < mesh_->num_faces(); ++i)
         EXPECT_NO_THROW(mesh_->face(static_cast<lid_t>(i)));
 
     // Out-of-bounds face access
-    EXPECT_THROW(mesh_->face(static_cast<lid_t>(mesh_->num_faces() + 100)),
+    EXPECT_THROW_WHEN_DEBUG(mesh_->face(static_cast<lid_t>(mesh_->num_faces() + 100)),
                  std::out_of_range);
 
     // is_owned_cell matches owned range
@@ -342,6 +342,6 @@ TEST(MeshUtilsTest, FaceAreaVectorThrowsForWrongSize)
 {
     using Vec3 = SimpleFluid::MeshUtils::Vec3;
     std::vector<Vec3> bad = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}};
-    EXPECT_THROW(SimpleFluid::MeshUtils::face_area_vector(bad),
+    EXPECT_THROW_WHEN_DEBUG(SimpleFluid::MeshUtils::face_area_vector(bad),
                  std::runtime_error); // from CHECK macro (default exception type)
 }
