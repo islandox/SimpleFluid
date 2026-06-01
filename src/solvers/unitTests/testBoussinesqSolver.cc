@@ -51,6 +51,23 @@ SimpleFluid::SP<MeshType> make_box_mesh()
     return factory.template build<Pack>();
 }
 
+SimpleFluid::SP<MeshType> make_single_cell_box_mesh()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
+    db->set("X", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+
+    SimpleFluid::MeshFactory factory(db);
+    return factory.template build<Pack>();
+}
+
 SimpleFluid::SP<MeshType> make_boundary_layer_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -122,6 +139,43 @@ void expect_finite_solution(const MeshType& mesh,
 }
 
 } // namespace
+
+TEST(BoussinesqSolverTest, OneCellBuoyancyStepMatchesAnalyticalVelocityIncrement)
+{
+    auto mesh = make_single_cell_box_mesh();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.steps = 1;
+    time_options.thermal_diffusivity = 0.0;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_expansion = 2.0;
+    time_options.gravity_x = -10.0;
+    time_options.gravity_y = -20.0;
+    time_options.gravity_z = -30.0;
+    time_options.reference_temperature = 0.5;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-13;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options,
+                                               linear_options);
+    solver.initialize_heated_box(1.5, 0.0);
+    solver.run();
+
+    ASSERT_EQ(mesh->num_owned_cells(), 1U);
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_NEAR(solver.time(), time_options.time_step, 1.0e-14);
+    EXPECT_NEAR(solver.temperature().value(0), 1.5, 1.0e-12);
+    EXPECT_NEAR(solver.pressure().value(0), 0.0, 1.0e-12);
+
+    const auto velocity = solver.velocity().value(0);
+    EXPECT_NEAR(velocity.x, 2.0, 1.0e-10);
+    EXPECT_NEAR(velocity.y, 4.0, 1.0e-10);
+    EXPECT_NEAR(velocity.z, 6.0, 1.0e-10);
+}
 
 /**
  * @brief Runs a small heated-box simulation for 2 steps and checks finite temperature and velocity values.
