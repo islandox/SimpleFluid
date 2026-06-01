@@ -87,8 +87,8 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     auto mesh = make_mesh();
     VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 2.0, 3.0}, "velocity");
 
-    const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
 
     bool saw_x_face = false;
     bool saw_y_face = false;
@@ -143,8 +143,8 @@ TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
     }
     velocity.sync_ghosts();
 
-    const auto face_velocity = SimpleFluid::FvmOperators::face_velocities(
-        *mesh, velocity);
+    SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
+    SimpleFluid::FvmOperators::face_velocities(velocity, face_velocity);
 
     bool saw_interior_face = false;
     for (MeshType::local_ordinal_type fid = 0;
@@ -182,8 +182,11 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroFaceVelocity)
         bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
     }
 
-    const auto face_velocity = SimpleFluid::FvmOperators::face_velocities(
-        *mesh, velocity, bcs);
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
+    SimpleFluid::FvmOperators::face_velocities(velocity, cache, face_velocity);
 
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
@@ -207,8 +210,11 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
         bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
     }
 
-    const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity, bcs);
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::face_fluxes(velocity, cache, fluxes);
 
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
@@ -226,8 +232,8 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
     auto mesh = make_mesh();
     VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 0.0, 0.0}, "velocity");
 
-    const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-        *mesh, velocity);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
     auto convection =
         SimpleFluid::FvmOperators::upwind_convection_matrix<Pack>(*mesh, fluxes);
     auto pressure = SimpleFluid::FvmOperators::pressure_poisson_matrix<Pack>(

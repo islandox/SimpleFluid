@@ -138,39 +138,6 @@ cell_divergence(const Mesh<Pack>& mesh, const FaceField<Pack>& flux)
 
 /**
  * @brief Compute the net flux balance (sum of signed face fluxes) for a
- *        single cell.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param face_fluxes Vector of scalar fluxes indexed by face local ID.
- * @param cell_lid Local ID of the cell whose balance is computed.
- * @return Sum of outward-positive fluxes around @p cell_lid.
- * @throws std::invalid_argument if @p face_fluxes size does not match the
- *         mesh.
- */
-template<TpetraTypePack Pack>
-typename Pack::scalar_type cell_flux_balance(
-    const Mesh<Pack>& mesh,
-    const std::vector<typename Pack::scalar_type>& face_fluxes,
-    typename Pack::local_ordinal_type cell_lid)
-{
-    if (face_fluxes.size() != mesh.num_faces())
-    {
-        throw std::invalid_argument("cell_flux_balance received the wrong face-flux size.");
-    }
-
-    typename Pack::scalar_type balance = 0.0;
-    for (const auto face_lid : mesh.faces(cell_lid))
-    {
-        const auto sign = mesh.owner_cell(face_lid) == cell_lid ? 1.0 : -1.0;
-        balance += sign * face_fluxes[static_cast<std::size_t>(face_lid)];
-    }
-
-    return balance;
-}
-
-/**
- * @brief Compute the net flux balance (sum of signed face fluxes) for a
  *        single cell from a FaceField.
  *
  * @tparam Pack The Tpetra type pack.
@@ -238,60 +205,6 @@ typename Pack::scalar_type cell_flux_balance(
     }
 
     return balance;
-}
-
-/**
- * @brief Compute the volume-normalized divergence at every owned cell
- *        from pre-computed face fluxes.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param face_fluxes Vector of scalar fluxes indexed by face local ID.
- * @return Vector of divergence values indexed by owned-cell local ID.
- */
-template<TpetraTypePack Pack>
-std::vector<typename Pack::scalar_type>
-cell_divergence_from_fluxes(
-    const Mesh<Pack>& mesh,
-    const std::vector<typename Pack::scalar_type>& face_fluxes)
-{
-    std::vector<typename Pack::scalar_type> divergence(mesh.num_owned_cells(), 0.0);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<typename Pack::local_ordinal_type>(owned);
-        divergence[owned] = cell_flux_balance(mesh, face_fluxes, cell_lid)
-                          / mesh.cell_volume(cell_lid);
-    }
-
-    return divergence;
-}
-
-/**
- * @brief Compute the volume-normalized divergence at every owned cell
- *        from a face-velocity field.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param face_velocity Face-centered velocity field.
- * @return Vector of divergence values indexed by owned-cell local ID.
- */
-template<TpetraTypePack Pack>
-std::vector<typename Pack::scalar_type>
-cell_divergence_from_fluxes(
-    const Mesh<Pack>& mesh,
-    const VectorFaceField<Pack>& face_velocity)
-{
-    std::vector<typename Pack::scalar_type> divergence(mesh.num_owned_cells(), 0.0);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<typename Pack::local_ordinal_type>(owned);
-        divergence[owned] = cell_flux_balance(mesh, face_velocity, cell_lid)
-                          / mesh.cell_volume(cell_lid);
-    }
-
-    return divergence;
 }
 
 /**
