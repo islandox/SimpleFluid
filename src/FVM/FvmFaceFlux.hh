@@ -100,15 +100,14 @@ namespace detail
 {
 
 /**
- * @brief Validate that the velocity field and optional boundary cache are
- *        consistent with the supplied mesh.
+ * @brief Validate that the optional boundary cache matches the velocity
+ *        field mesh.
  *
  * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
  * @param velocity Cell-centered velocity field.
  * @param boundary_cache Pointer to a velocity-boundary cache, or nullptr.
  * @throws std::invalid_argument if the velocity field or boundary cache
- *         is not associated with @p mesh.
+ *         is not associated with the velocity mesh.
  */
 template<TpetraTypePack Pack>
 void validate_face_flux_inputs(
@@ -128,12 +127,12 @@ void validate_face_flux_inputs(
 
 /**
  * @brief Validate that the output face-velocity field is associated with
- *        the given mesh.
+ *        the velocity mesh.
  *
  * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
+ * @param velocity Cell-centered velocity field.
  * @param face_velocity Face-centered velocity field to validate.
- * @throws std::invalid_argument if @p face_velocity is not on @p mesh.
+ * @throws std::invalid_argument if @p face_velocity is not on the velocity mesh.
  */
 template<TpetraTypePack Pack>
 void validate_face_velocity_output(
@@ -148,13 +147,12 @@ void validate_face_velocity_output(
 }
 
 /**
- * @brief Validate that the face-velocity field used for normal-flux
- *        computation is associated with the given mesh.
+ * @brief Validate that normal-flux output is on the face-velocity mesh.
  *
  * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
  * @param face_velocity Face-centered velocity field to validate.
- * @throws std::invalid_argument if @p face_velocity is not on @p mesh.
+ * @param fluxes Scalar face-flux field to validate.
+ * @throws std::invalid_argument if @p fluxes is not on the face-velocity mesh.
  */
 template<TpetraTypePack Pack>
 void validate_normal_flux_inputs(
@@ -173,7 +171,6 @@ void validate_normal_flux_inputs(
  *        cache, if available.
  *
  * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
  * @param boundary_cache Pointer to a velocity-boundary cache, or nullptr.
  * @param[out] face_velocity On return, the cached boundary velocity.
  */
@@ -214,7 +211,6 @@ void load_boundary_face_velocity(
  *        boundary faces.
  *
  * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
  * @param velocity Cell-centered velocity field.
  * @param boundary_cache Pointer to a velocity-boundary cache, or nullptr.
  * @param[in,out] face_velocity On output, the assembled face velocities.

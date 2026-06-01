@@ -19,6 +19,7 @@
 
 #include <cmath>
 #include <memory>
+#include <vector>
 
 namespace
 {
@@ -58,7 +59,8 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     }
     phi.sync_ghosts();
 
-    const auto gradients = SimpleFluid::FvmOperators::cell_gradient(phi);
+    std::vector<MeshType::Vec3> gradients;
+    SimpleFluid::FvmOperators::cell_gradient(phi, gradients);
     ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
     for (const auto& gradient : gradients)
     {
