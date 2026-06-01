@@ -13,6 +13,7 @@
 #include "utils/testing_environment.hh"
 
 #include <array>
+#include <cmath>
 #include <vector>
 
 namespace
@@ -38,6 +39,44 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
     }
 
     return values;
+}
+
+int advance_explicit_diffusion_until_converged(
+    const SimpleFluid::TemperatureDiffusionEquation<Pack>& equation,
+    FieldType& temperature,
+    Pack::scalar_type time_step,
+    Pack::scalar_type diffusivity,
+    Pack::scalar_type update_tolerance,
+    int max_steps)
+{
+    for (int step = 0; step < max_steps; ++step)
+    {
+        const auto old_temperature = local_values(temperature);
+        equation.advance_explicit(old_temperature, time_step, diffusivity,
+                                  temperature);
+
+        Pack::scalar_type max_update = 0.0;
+        for (MeshType::local_ordinal_type lid = 0;
+             lid < static_cast<MeshType::local_ordinal_type>(
+                       temperature.num_owned_cells());
+             ++lid)
+        {
+            const auto update = std::abs(
+                temperature.value(lid)
+              - old_temperature[static_cast<std::size_t>(lid)]);
+            if (update > max_update)
+            {
+                max_update = update;
+            }
+        }
+
+        if (max_update < update_tolerance)
+        {
+            return step + 1;
+        }
+    }
+
+    return max_steps;
 }
 
 SimpleFluid::BoundaryConditionSet one_dimensional_diffusion_bcs()
@@ -69,9 +108,12 @@ TEST(AnalyticalConvergenceTest, DiffusionErrorDecreasesWithMeshRefinement)
     constexpr double domain_length = 1.0;
     constexpr double diffusivity = 1.0;
     constexpr double time_step = 1.0e-3;
+    constexpr double steady_update_tolerance = 1.0e-13;
+    constexpr int max_steps = 50000;
 
     const std::array<int, 3> resolutions = {4, 8, 16};
     std::array<double, 3> l2_errors{};
+    std::array<int, 3> steps_taken{};
 
     auto exact = [domain_length](SimpleFluid::vec3<> pos)
     {
@@ -96,20 +138,18 @@ TEST(AnalyticalConvergenceTest, DiffusionErrorDecreasesWithMeshRefinement)
         const auto bcs = one_dimensional_diffusion_bcs();
         SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
 
-        const int steps = static_cast<int>(10000.0 / (h * h));
-        for (int step = 0; step < steps; ++step)
-        {
-            const auto old_temperature = local_values(temperature);
-            equation.advance_explicit(old_temperature, time_step, diffusivity,
-                                      temperature);
-            temperature.sync_ghosts();
-        }
+        steps_taken[i] = advance_explicit_diffusion_until_converged(
+            equation, temperature, time_step, diffusivity,
+            steady_update_tolerance, max_steps);
 
         l2_errors[i] = SimpleFluid::l2_error(temperature, exact);
     }
 
     for (std::size_t i = 0; i < resolutions.size(); ++i)
     {
+        EXPECT_LT(steps_taken[i], max_steps)
+            << "Resolution " << resolutions[i]
+            << " cells did not converge before the iteration limit";
         EXPECT_LT(l2_errors[i], 1.0e-10)
             << "Resolution " << resolutions[i] << " cells: L2 error too large";
     }
