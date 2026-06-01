@@ -65,93 +65,91 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         throw std::invalid_argument(
             "BoussinesqMomentumEquation received the wrong boundary-cache size.");
     }
-    const auto gravity = options.gravity_vector();
-
-    for (std::size_t component = 0;
-         component < velocity_field_type::num_components;
-         ++component)
+    auto boundary_value =
+        [&](int boundary_id,
+            local_ordinal_type boundary_face_id)
     {
-        if (d_cached_old_component.size() != d_mesh->num_local_cells())
+        const auto face = static_cast<std::size_t>(boundary_face_id);
+
+        return velocity_boundary_cache.value.at(boundary_id)[face];
+    };
+
+    auto system = FvmOperators::transport_system<Pack>(
+        *d_mesh, old_velocity, face_fluxes, options.time_step,
+        options.kinematic_viscosity, boundary_value,
+        d_cached_transport_matrix);
+
+    if (d_cached_transport_matrix.is_null())
+    {
+        d_cached_transport_matrix = system.matrix;
+    }
+
+    const auto gravity = options.gravity_vector();
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto temperature_delta =
+            temperature.value(cell_lid) - options.reference_temperature;
+        const auto volume = d_mesh->cell_volume(cell_lid);
+        for (std::size_t component = 0;
+             component < velocity_field_type::num_components;
+             ++component)
         {
-            d_cached_old_component.resize(d_mesh->num_local_cells());
-        }
-        for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
-        {
-            d_cached_old_component[cell] =
-                FvmOperators::detail::component_value(old_velocity[cell], component);
-        }
-
-        auto boundary_value =
-            [&](int boundary_id,
-                local_ordinal_type boundary_face_id)
-        {
-            const auto face = static_cast<std::size_t>(boundary_face_id);
-
-            return FvmOperators::detail::component_value(
-                velocity_boundary_cache.value.at(boundary_id)[face], component);
-        };
-
-        auto system = FvmOperators::transport_system<Pack>(
-            *d_mesh, d_cached_old_component, face_fluxes, options.time_step,
-            options.kinematic_viscosity, boundary_value,
-            d_cached_transport_matrix);
-
-        if (d_cached_transport_matrix.is_null())
-        {
-            d_cached_transport_matrix = system.matrix;
-        }
-
-        const auto gravity_component =
-            FvmOperators::detail::component_value(gravity, component);
-
-        // Build buoyancy as a Tpetra vector and update RHS in one operation.
-        typename Pack::vector_type buoyancy_vec(d_mesh->owned_cell_map(), true);
-        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto gravity_component =
+                FvmOperators::detail::component_value(gravity, component);
             const auto buoyancy =
                 options.thermal_expansion
-              * (temperature.value(cell_lid) - options.reference_temperature)
+              * temperature_delta
               * (-gravity_component);
-            buoyancy_vec.replaceLocalValue(cell_lid,
-                                           d_mesh->cell_volume(cell_lid) * buoyancy);
+            system.rhs.sumIntoLocalValue(cell_lid, component,
+                                         volume * buoyancy);
         }
-        system.rhs.update(1.0, buoyancy_vec, 1.0);
+    }
 
-        if (system.rhs.norm2() <= 0.0)
-        {
-            for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                velocity.set_owned_component_value(
-                    static_cast<local_ordinal_type>(owned), component, 0.0);
-            }
-            continue;
-        }
-
-        Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-        if (d_cached_solution.is_null())
-        {
-            d_cached_solution = Teuchos::rcp(
-                new typename Pack::vector_type(d_mesh->owned_cell_map(), true));
-        }
-        else
-        {
-            d_cached_solution->putScalar(0.0);
-        }
-        const auto converged =
-            solve_linear_system<Pack>(matrix, system.rhs, *d_cached_solution,
-                                      linear_options);
-        const auto solution_data = d_cached_solution->getData();
+    bool has_nonzero_rhs = false;
+    for (std::size_t component = 0;
+         component < velocity_field_type::num_components && !has_nonzero_rhs;
+         ++component)
+    {
+        const auto rhs_data = system.rhs.getData(component);
         for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            const auto value = solution_data[cell_lid];
-            if (!converged && !std::isfinite(value))
+            if (std::abs(rhs_data[cell_lid]) > 0.0)
             {
-                throw std::runtime_error(
-                    "BoussinesqMomentumEquation velocity transport solve produced a non-finite value.");
+                has_nonzero_rhs = true;
+                break;
             }
-            velocity.set_owned_component_value(cell_lid, component, value);
+        }
+    }
+
+    velocity.owned_data().putScalar(0.0);
+    if (!has_nonzero_rhs)
+    {
+        velocity.sync_ghosts();
+        return;
+    }
+
+    Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
+    const auto converged =
+        solve_linear_system<Pack>(matrix, system.rhs,
+                                  velocity.owned_data(), linear_options);
+    if (!converged)
+    {
+        for (std::size_t component = 0;
+             component < velocity_field_type::num_components;
+             ++component)
+        {
+            const auto solution_data = velocity.owned_data().getData(component);
+            for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                if (!std::isfinite(solution_data[cell_lid]))
+                {
+                    throw std::runtime_error(
+                        "BoussinesqMomentumEquation velocity transport solve produced a non-finite value.");
+                }
+            }
         }
     }
 

@@ -32,10 +32,10 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Boussinesq momentum update for component-wise velocity fields.
+ * @brief Boussinesq momentum update for coupled three-component velocity fields.
  *
  * The solver stores velocity as a three-column MultiVector-backed field.
- * This equation class advances all velocity components together.
+ * This equation class advances all velocity components in a single linear solve.
  *
  * @tparam Pack Tpetra type pack used for field storage.
  */
@@ -91,8 +91,6 @@ public:
 
 private:
     SP<const mesh_type> d_mesh;
-    mutable std::vector<scalar_type> d_cached_old_component;
-    mutable Teuchos::RCP<typename Pack::vector_type> d_cached_solution;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
 };
 
