@@ -372,79 +372,74 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
 }
 
 /**
- * @brief Convergence-rate study: verify that the L2 error of the steady
- *        1D diffusion solution decreases under mesh refinement.
- *
- * Three meshes (4, 8, and 16 cells along X) are solved to steady state.
- * The error must decrease monotonically with mesh refinement, confirming
- * the FVM discretisation is consistent.
+ * @brief Verifies one explicit diffusion step against the analytical
+ *        Laplacian of T(x) = x^2 on interior cells.
  */
-TEST(PhysicalEquationsTest, DiffusionErrorDecreasesWithMeshRefinement)
+TEST(PhysicalEquationsTest, ExplicitDiffusionMatchesQuadraticLaplacian)
 {
     constexpr double domain_length = 1.0;
-    constexpr double diffusivity = 1.0;
-    constexpr double time_step = 1.0e-3;
+    constexpr int n_cells = 5;
+    constexpr double cell_width = domain_length / n_cells;
+    constexpr double diffusivity = 0.25;
+    constexpr double time_step = 1.0e-2;
 
-    const std::array<int, 3> resolutions = {4, 8, 16};
-    std::array<double, 3> l2_errors{};
+    auto db = SimpleFluid::test::make_box_database(
+        n_cells, 1, 1, cell_width);
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
+    FieldType temperature(mesh, "temperature");
 
-    auto exact = [domain_length](SimpleFluid::vec3<> pos)
+    auto exact = [](SimpleFluid::vec3<> pos)
     {
-        return 1.0 - pos.x / domain_length;
+        return pos.x * pos.x;
     };
 
-    for (std::size_t i = 0; i < resolutions.size(); ++i)
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
     {
-        const auto n = resolutions[i];
-        const double h = domain_length / static_cast<double>(n);
-        auto db = SimpleFluid::test::make_box_database(n, 1, 1, h);
-        auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
-        FieldType temperature(mesh, "temperature");
+        temperature.set_value(lid, exact(mesh->cell_centroid(lid)));
+    }
+    temperature.sync_ghosts();
 
-        SimpleFluid::BoundaryConditionSet bcs;
-        bcs.temperature["xmin"] =
-            {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
-        bcs.temperature["xmax"] =
-            {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
-        bcs.temperature["ymin"] =
-            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
-        bcs.temperature["ymax"] =
-            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
-        bcs.temperature["zmin"] =
-            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
-        bcs.temperature["zmax"] =
-            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["xmin"] =
+        {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    bcs.temperature["xmax"] =
+        {SimpleFluid::BoundaryConditionType::Dirichlet,
+         domain_length * domain_length};
+    bcs.temperature["ymin"] =
+        {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    bcs.temperature["ymax"] =
+        {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    bcs.temperature["zmin"] =
+        {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    bcs.temperature["zmax"] =
+        {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
 
-        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    const auto old_temperature = local_values(temperature);
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    equation.advance_explicit(old_temperature, time_step, diffusivity,
+                              temperature);
+
+    bool checked_interior = false;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto& center = mesh->cell_centroid(lid);
+        if (center.x <= cell_width || center.x >= domain_length - cell_width)
         {
-            temperature.set_owned_value(
-                static_cast<MeshType::local_ordinal_type>(owned), 0.0);
-        }
-        temperature.sync_ghosts();
-
-        SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
-
-        // Number of steps scales with 1/h^2 to reach steady state.
-        const int steps = static_cast<int>(10000.0 / (h * h));
-        for (int step = 0; step < steps; ++step)
-        {
-            const auto old_temperature = local_values(temperature);
-            equation.advance_explicit(old_temperature, time_step, diffusivity,
-                                      temperature);
-            temperature.sync_ghosts();
+            continue;
         }
 
-        l2_errors[i] = SimpleFluid::l2_error(temperature, exact);
+        checked_interior = true;
+        const auto expected =
+            old_temperature[static_cast<std::size_t>(lid)]
+          + time_step * diffusivity * 2.0;
+        EXPECT_NEAR(temperature.value(lid), expected, 1.0e-12);
     }
 
-    // The FVM reproduces the linear steady-state profile exactly (to machine
-    // precision) because the discrete Laplacian of a linear field is zero.
-    // Verify all resolutions produce near-machine-epsilon error.
-    for (std::size_t i = 0; i < resolutions.size(); ++i)
-    {
-        EXPECT_LT(l2_errors[i], 1.0e-10)
-            << "Resolution " << resolutions[i] << " cells: L2 error too large";
-    }
+    EXPECT_TRUE(checked_interior);
 }
 
 /**
