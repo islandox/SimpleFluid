@@ -300,6 +300,32 @@ inline bool Mesh<Pack>::is_boundary_face(local_ordinal_type fid) const
 }
 
 template<TpetraTypePack Pack>
+inline bool Mesh<Pack>::is_periodic_boundary_face(local_ordinal_type fid) const
+{
+    return face(fid).paired_cell != invalid_id<local_ordinal_type>();
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::periodic_neighbor_cell(local_ordinal_type fid) const -> local_ordinal_type
+{
+    return face(fid).paired_cell;
+}
+
+template<TpetraTypePack Pack>
+inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
+                                           local_ordinal_type paired_cell_lid)
+{
+    auto& info = d_faces[static_cast<std::size_t>(face_lid)];
+    info.paired_cell = paired_cell_lid;
+
+    // Compute the cell-centre-to-cell-centre distance for the periodic pair
+    // so that diffusion operators see the correct distance.
+    const auto& owner_center = d_cells[static_cast<std::size_t>(info.owner)].center;
+    const auto& paired_center = d_cells[static_cast<std::size_t>(paired_cell_lid)].center;
+    info.cell_center_distance = (paired_center - owner_center).norm();
+}
+
+template<TpetraTypePack Pack>
 inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
 {
     return face(fid).boundary_id;

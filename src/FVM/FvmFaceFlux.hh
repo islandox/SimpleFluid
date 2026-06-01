@@ -78,6 +78,10 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
             boundary_conditions.velocity.find(mesh->boundary_patch_name(patch_id));
         if (iter != boundary_conditions.velocity.end())
         {
+            if (iter->second.type == BoundaryConditionType::Periodic)
+            {
+                continue;  // Periodic faces get their values from the paired cell, not a prescribed value.
+            }
             if (iter->second.type == BoundaryConditionType::NoSlip)
             {
                 prescribed_value = {0.0, 0.0, 0.0};
@@ -241,6 +245,12 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
         {
             const auto neighbor = mesh.neighbor_cell(face_lid);
             value = (value + velocity.local_value(neighbor)) / 2.0;
+            face_velocity.set_value(face_lid, value);
+        }
+        else if (mesh.is_periodic_boundary_face(face_lid))
+        {
+            const auto paired = mesh.periodic_neighbor_cell(face_lid);
+            value = (value + velocity.local_value(paired)) / 2.0;
             face_velocity.set_value(face_lid, value);
         }
     }

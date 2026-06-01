@@ -14,6 +14,7 @@
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/FvmOperators.hh"
+#include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
@@ -38,6 +39,18 @@ SimpleFluid::SP<MeshType> make_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
+}
+
+std::vector<Pack::scalar_type> local_values(const FieldType& field)
+{
+    std::vector<Pack::scalar_type> values(field.num_local_cells());
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
+         ++lid)
+    {
+        values[static_cast<std::size_t>(lid)] = field.local_value(lid);
+    }
+    return values;
 }
 
 } // namespace
@@ -245,4 +258,160 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
               mesh->owned_cell_map()->getGlobalNumElements());
     EXPECT_EQ(pressure->getGlobalNumRows(),
               mesh->owned_cell_map()->getGlobalNumElements());
+}
+
+// =========================================================================
+//  Periodic Boundary Condition Tests
+// =========================================================================
+
+/**
+ * @brief Create a 2×1×1 box mesh and pair the xmin face of cell 0 with
+ *        the xmax face of cell 1 as a periodic boundary.
+ *
+ * @return Shared pointer to the configured mesh with periodic pairs set.
+ */
+SimpleFluid::SP<MeshType> make_periodic_box_mesh()
+{
+    constexpr int n = 2;
+    auto db = SimpleFluid::test::make_box_database(n, 1, 1, 1.0 / n);
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
+
+    // Find xmin and xmax boundary faces.
+    SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
+    SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
+    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    {
+        const auto& name = mesh->boundary_patch_name(patch_id);
+        if (name == "xmin" && !patch.face_lids.empty()) xmin_face = patch.face_lids[0];
+        if (name == "xmax" && !patch.face_lids.empty()) xmax_face = patch.face_lids[0];
+    }
+
+    // The cell adjacent to the xmin face is cell 0; its paired cell is the
+    // cell adjacent to the xmax face (cell 1), and vice versa.
+    const auto owner0 = mesh->owner_cell(xmin_face);
+    const auto owner1 = mesh->owner_cell(xmax_face);
+    mesh->set_periodic_face(xmin_face, owner1);
+    mesh->set_periodic_face(xmax_face, owner0);
+
+    return mesh;
+}
+
+/**
+ * @brief Verifies that periodic faces are correctly identified and that
+ *        face velocities average the owner and paired-cell values.
+ */
+TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
+{
+    auto mesh = make_periodic_box_mesh();
+
+    // Set velocity: cell 0 → (1,0,0), cell 1 → (3,0,0)
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_value(0, {1.0, 0.0, 0.0});
+    velocity.set_value(1, {3.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    // Assemble face velocities without boundary-condition treatment.
+    SimpleFluid::VectorFaceField<Pack> face_vel(mesh, "face_vel");
+    SimpleFluid::FvmOperators::face_velocities(velocity, face_vel);
+
+    // Find periodic faces.
+    SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
+    SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
+    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    {
+        const auto& name = mesh->boundary_patch_name(patch_id);
+        if (name == "xmin" && !patch.face_lids.empty()) xmin_face = patch.face_lids[0];
+        if (name == "xmax" && !patch.face_lids.empty()) xmax_face = patch.face_lids[0];
+    }
+
+    ASSERT_NE(xmin_face, -1);
+    ASSERT_NE(xmax_face, -1);
+    EXPECT_TRUE(mesh->is_periodic_boundary_face(xmin_face));
+    EXPECT_TRUE(mesh->is_periodic_boundary_face(xmax_face));
+
+    // Periodic faces should get the average of the owner and paired cell.
+    const auto v_xmin = face_vel.value(xmin_face);
+    const auto v_xmax = face_vel.value(xmax_face);
+    EXPECT_NEAR(v_xmin.x, 2.0, 1.0e-12);  // (1 + 3) / 2
+    EXPECT_NEAR(v_xmax.x, 2.0, 1.0e-12);  // (3 + 1) / 2
+}
+
+/**
+ * @brief Verifies that periodic face fluxes are computed correctly,
+ *        treating the periodic boundary like an interior face.
+ *
+ * A 2×1×1 mesh with mesh_size = 0.5 gives face areas of 0.25 and
+ * cell volumes of 0.125.  Cell 0 has velocity (2,0,0), cell 1 has (0,0,0).
+ * The averaged face velocity at the periodic xmax face is (1,0,0).
+ * With face normal (+1,0,0) and area 0.25: flux = 1 × 1 × 0.25 = 0.25.
+ */
+TEST(FvmOperatorsTest, PeriodicBoundaryFluxIsComputed)
+{
+    auto mesh = make_periodic_box_mesh();
+
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_value(0, {2.0, 0.0, 0.0});
+    velocity.set_value(1, {0.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
+
+    SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
+    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    {
+        if (mesh->boundary_patch_name(patch_id) == "xmax" && !patch.face_lids.empty())
+            xmax_face = patch.face_lids[0];
+    }
+    ASSERT_NE(xmax_face, -1);
+    ASSERT_TRUE(fluxes.is_owned_face(xmax_face));
+
+    // Averaged face velocity: (2 + 0)/2 = 1.0 along +x.
+    // Face area = dy*dz = 0.5 * 0.5 = 0.25.
+    // Normal on xmax = (+1, 0, 0).
+    // Flux = v·n·A = 1.0 * 1.0 * 0.25 = 0.25.
+    EXPECT_NEAR(fluxes.value(xmax_face), 0.25, 1.0e-12);
+}
+
+/**
+ * @brief Verifies that explicit diffusion with periodic boundary
+ *        conditions correctly exchanges heat between the paired cells.
+ *
+ * A 2×1×1 mesh with mesh_size = 0.5 has face area 0.25 and cell volume
+ * 0.125.  Cell 0 (T=1) at x=0.25, cell 1 (T=0) at x=0.75.  The interior
+ * face connects them (distance 0.5).  The periodic xmin face of cell 0
+ * also connects to cell 1 (distance 0.5), doubling the laplacian.
+ *
+ * laplacian(cell 0) = -1.0,  laplacian/vol = -8.0
+ * T0_new = 1.0 + 0.1 * (-8.0) = 0.2
+ * T1_new = 0.0 + 0.1 * 8.0  = 0.8
+ */
+TEST(FvmOperatorsTest, PeriodicBoundaryExplicitDiffusionTransfersHeat)
+{
+    auto mesh = make_periodic_box_mesh();
+    FieldType temperature(mesh, "temperature");
+    temperature.set_value(0, 1.0);
+    temperature.set_value(1, 0.0);
+    temperature.sync_ghosts();
+
+    // Insulated on Y and Z faces; periodic on X faces.
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"ymin", "ymax", "zmin", "zmax"})
+        bcs.temperature[name] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    bcs.temperature["xmin"] = {SimpleFluid::BoundaryConditionType::Periodic, 0.0};
+    bcs.temperature["xmax"] = {SimpleFluid::BoundaryConditionType::Periodic, 0.0};
+
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    const auto old_t = local_values(temperature);
+    equation.advance_explicit(old_t, 0.1, 1.0, temperature);
+
+    // With doubled connectivity (interior + periodic), the heat transfer is
+    // amplified: each cell exchanges with the other through two faces.
+    // area = 0.25, dist = 0.5, vol = 0.125
+    // laplacian magnitude = 2 * (1.0 - 0.0) * 0.25 / 0.5 = 1.0
+    // laplacian/vol = 1.0 / 0.125 = 8.0
+    // T0_new = 1.0 - 0.1 * 8.0 = 0.2
+    // T1_new = 0.0 + 0.1 * 8.0 = 0.8
+    EXPECT_NEAR(temperature.value(0), 0.2, 1.0e-12);
+    EXPECT_NEAR(temperature.value(1), 0.8, 1.0e-12);
 }

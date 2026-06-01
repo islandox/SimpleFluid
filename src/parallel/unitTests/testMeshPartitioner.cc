@@ -259,3 +259,46 @@ TEST(MeshPartitionerTest, PartitioningIsDeterministic)
 
     EXPECT_EQ(gids1, gids2);
 }
+
+// ---------------------------------------------------------------------------
+//  Test 6: Partitioning handles single-rank case gracefully
+// ---------------------------------------------------------------------------
+TEST(MeshPartitionerTest, SingleRankCase)
+{
+    auto mesh = make_2x2x2_box_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() > 1)
+    {
+        GTEST_SKIP() << "This test is only for single-rank runs.";
+    }
+    // Partitioning should succeed without error and not change the mesh
+    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
+    EXPECT_EQ(mesh->num_owned_cells(), 8u);
+    for (std::size_t i = 0; i < mesh->num_owned_cells(); ++i)
+    {
+        EXPECT_TRUE(mesh->is_owned_cell(
+            static_cast<Pack::local_ordinal_type>(i)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Test 7: Repeated partitioning does not change the mesh
+// ---------------------------------------------------------------------------
+TEST(MeshPartitionerTest, RepeatedPartitioning)
+{
+    auto mesh = make_4x4x4_box_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+    // First partitioning
+    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
+    const auto owned_after_first = mesh->num_owned_cells();
+    const auto all_gids_after_first = gather_all_owned_gids(*mesh);
+    // Second partitioning should not change anything
+    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
+    EXPECT_EQ(mesh->num_owned_cells(), owned_after_first);
+    const auto all_gids_after_second = gather_all_owned_gids(*mesh);
+    EXPECT_EQ(all_gids_after_second, all_gids_after_first);
+}

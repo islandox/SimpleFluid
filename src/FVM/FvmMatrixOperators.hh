@@ -85,12 +85,17 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            if (!mesh.is_interior_face(face_lid))
+            const bool is_conducting =
+                mesh.is_interior_face(face_lid)
+             || mesh.is_periodic_boundary_face(face_lid);
+            if (!is_conducting)
             {
                 continue;
             }
 
-            const auto other = mesh.opposite_cell(face_lid, cell_lid);
+            const auto other = mesh.is_periodic_boundary_face(face_lid)
+                                 ? mesh.periodic_neighbor_cell(face_lid)
+                                 : mesh.opposite_cell(face_lid, cell_lid);
             const auto distance = mesh.face_cell_center_distance(face_lid);
             if (distance <= 0.0)
             {
@@ -222,7 +227,8 @@ pressure_poisson_matrix(
         scalar_type diagonal = 0.0;
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            if (!mesh.is_interior_face(face_lid))
+            if (!mesh.is_interior_face(face_lid)
+                && !mesh.is_periodic_boundary_face(face_lid))
             {
                 continue;
             }
@@ -234,7 +240,9 @@ pressure_poisson_matrix(
                     "Cannot assemble pressure Poisson matrix across coincident cells.");
             }
             const auto coeff = mesh.face_area(face_lid) / distance;
-            const auto other = mesh.opposite_cell(face_lid, cell_lid);
+            const auto other = mesh.is_periodic_boundary_face(face_lid)
+                                 ? mesh.periodic_neighbor_cell(face_lid)
+                                 : mesh.opposite_cell(face_lid, cell_lid);
             diagonal += coeff;
             cols.push_back(other);
             vals.push_back(-coeff);
