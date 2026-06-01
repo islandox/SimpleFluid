@@ -63,6 +63,44 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
     return values;
 }
 
+int advance_explicit_diffusion_until_converged(
+    const SimpleFluid::TemperatureDiffusionEquation<Pack>& equation,
+    FieldType& temperature,
+    Pack::scalar_type time_step,
+    Pack::scalar_type diffusivity,
+    Pack::scalar_type update_tolerance,
+    int max_steps)
+{
+    for (int step = 0; step < max_steps; ++step)
+    {
+        const auto old_temperature = local_values(temperature);
+        equation.advance_explicit(old_temperature, time_step, diffusivity,
+                                  temperature);
+
+        Pack::scalar_type max_update = 0.0;
+        for (MeshType::local_ordinal_type lid = 0;
+             lid < static_cast<MeshType::local_ordinal_type>(
+                       temperature.num_owned_cells());
+             ++lid)
+        {
+            const auto update = std::abs(
+                temperature.value(lid)
+              - old_temperature[static_cast<std::size_t>(lid)]);
+            if (update > max_update)
+            {
+                max_update = update;
+            }
+        }
+
+        if (max_update < update_tolerance)
+        {
+            return step + 1;
+        }
+    }
+
+    return max_steps;
+}
+
 std::vector<MeshType::Vec3> local_vector_values(const VectorFieldType& field)
 {
     std::vector<MeshType::Vec3> values(field.num_local_cells());
@@ -275,15 +313,12 @@ TEST(PhysicalEquationsTest, Steady1DDiffusionMatchesLinearProfile)
 
     constexpr double diffusivity = 1.0;
     constexpr double time_step = 1.0e-3;
-    constexpr int steps = 10000;
-
-    for (int step = 0; step < steps; ++step)
-    {
-        const auto old_temperature = local_values(temperature);
-        equation.advance_explicit(old_temperature, time_step, diffusivity,
-                                  temperature);
-        temperature.sync_ghosts();
-    }
+    constexpr double steady_update_tolerance = 1.0e-12;
+    constexpr int max_steps = 10000;
+    const auto steps_taken = advance_explicit_diffusion_until_converged(
+        equation, temperature, time_step, diffusivity,
+        steady_update_tolerance, max_steps);
+    EXPECT_LT(steps_taken, max_steps);
 
     auto exact = [](SimpleFluid::vec3<> pos)
     {
