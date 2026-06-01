@@ -247,7 +247,7 @@ void CellFieldBase<Pack, Derived, StorageVector>::check_cell_row_invariant(
 
         const auto tpetra_gid =
             cell < num_owned
-                ? d_mesh->owned_cell_tpetra_gids()[cell]
+                ? d_mesh->tpetra_gid_offset() + static_cast<global_ordinal_type>(cell)
                 : d_mesh->mesh_gid_to_tpetra_gid(d_mesh->cell_global_id(cell_lid));
 
         const auto local_row =

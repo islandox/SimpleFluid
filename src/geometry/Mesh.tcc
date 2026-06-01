@@ -48,19 +48,17 @@ Mesh<Pack>::Mesh()
  * (offset = sum of owned cells on all lower-ranked processes) and resolves
  * the corresponding Tpetra GIDs for ghost cells by gathering the owned
  * mesh-GID lists from all ranks.  The resulting maps are stored in:
- * - d_owned_cell_tpetra_gids
  * - d_ghost_cell_tpetra_gids
  * - d_mesh_gid_to_tpetra_gid
  * - d_tpetra_gid_to_mesh_gid
  *
- * Idempotent: if d_owned_cell_tpetra_gids is already populated the call is a no-op.
  *
  * @tparam Pack Tpetra type pack.
  */
 template<TpetraTypePack Pack>
 void Mesh<Pack>::assign_contiguous_tpetra_gids()
 {
-    if (!d_owned_cell_tpetra_gids.empty())
+    if (!d_tpetra_gid_to_mesh_gid.empty())
     {
         return; // already assigned
     }
@@ -108,12 +106,10 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
     }
 
     // --- Assign contiguous Tpetra GIDs to owned cells ---
-    d_owned_cell_tpetra_gids.resize(static_cast<std::size_t>(my_owned_count));
     d_tpetra_gid_to_mesh_gid.resize(static_cast<std::size_t>(my_owned_count));
     for (int i = 0; i < my_owned_count; ++i)
     {
         const auto tpetra_gid = global_offset + static_cast<global_ordinal_type>(i);
-        d_owned_cell_tpetra_gids[static_cast<std::size_t>(i)] = tpetra_gid;
         d_tpetra_gid_to_mesh_gid[static_cast<std::size_t>(i)] = d_owned_cell_global_ids[static_cast<std::size_t>(i)];
         d_mesh_gid_to_tpetra_gid[d_owned_cell_global_ids[static_cast<std::size_t>(i)]] = tpetra_gid;
     }
@@ -238,20 +234,23 @@ void Mesh<Pack>::create_maps()
     assign_contiguous_tpetra_gids();
 
     // --- Build Tpetra overlap GID list (owned + ghost, all using Tpetra GIDs) ---
-    ArrGO overlap_tpetra_gids = d_owned_cell_tpetra_gids;
-    overlap_tpetra_gids.reserve(overlap_tpetra_gids.size() + d_ghost_cell_tpetra_gids.size());
-    overlap_tpetra_gids.insert(overlap_tpetra_gids.end(),
-                               d_ghost_cell_tpetra_gids.begin(),
-                               d_ghost_cell_tpetra_gids.end());
+    ArrGO overlap_tpetra_gids;
+    overlap_tpetra_gids.reserve(d_owned_cell_global_ids.size() + d_ghost_cell_tpetra_gids.size());
+    for (local_ordinal_type lid = 0; lid < static_cast<local_ordinal_type>(d_owned_cell_global_ids.size()); ++lid)
+    {
+        const auto tpetra_gid = lid + d_tpetra_gid_offset;
+        overlap_tpetra_gids.push_back(tpetra_gid);
+    }
+    overlap_tpetra_gids.append_range(d_ghost_cell_tpetra_gids);
 
     const auto invalid_global_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
     const global_ordinal_type index_base = 0;
     const auto comm = Tpetra::getDefaultComm();
 
+    // Creates a contiguous Tpetra map.
     d_owned_cell_map = Teuchos::rcp(new map_type(
         invalid_global_size,
-        d_owned_cell_tpetra_gids.data(),
-        detail::checked_size_to_ordinal<local_ordinal_type>(d_owned_cell_tpetra_gids.size(), "owned cell map"),
+        num_owned_cells(),
         index_base,
         comm));
 
@@ -367,7 +366,11 @@ void Mesh<Pack>::create_device_views()
     cell_volume_values.reserve(d_cells.size());
     cell_centroid_values.reserve(d_cells.size());
 
-    cell_gid.append_range(d_owned_cell_tpetra_gids);
+    for (size_t i = 0; i < d_owned_cell_global_ids.size(); ++i)
+    {
+        const auto tpetra_gid = d_tpetra_gid_offset + static_cast<global_ordinal_type>(i);
+        cell_gid.push_back(tpetra_gid);
+    }
     cell_gid.append_range(d_ghost_cell_tpetra_gids);
 
     for (const auto& cell_info : d_cells)
