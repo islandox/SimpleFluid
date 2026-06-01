@@ -158,6 +158,12 @@ public:
         double owner_to_face_distance = 0.0;
         double neighbor_to_face_distance = 0.0;
         double cell_center_distance = 0.0;
+
+        /// If non-negative, this face is a periodic boundary face and
+        /// @p paired_cell is the cell on the opposite side of the periodic
+        /// domain.  The face behaves like an interior face connecting owner
+        /// to paired_cell.
+        local_ordinal_type paired_cell = invalid_id<local_ordinal_type>();
     };
 
     struct BoundaryFacePatch
@@ -271,6 +277,25 @@ public:
     inline bool is_exterior_face(local_ordinal_type fid) const;
     inline bool is_interior_face(local_ordinal_type fid) const;
     inline bool is_boundary_face(local_ordinal_type fid) const;
+
+    /** @brief True if the face is a periodic boundary face (connects to a cell on the opposite domain side). */
+    inline bool is_periodic_boundary_face(local_ordinal_type fid) const;
+
+    /** @brief For a periodic boundary face, returns the paired cell on the opposite side of the domain. */
+    inline local_ordinal_type periodic_neighbor_cell(local_ordinal_type fid) const;
+
+    /**
+     * @brief Manually set a periodic face pair (used for testing or when the
+     *        mesh format does not encode periodic pairings).
+     *
+     * After calling this, @p face_lid is treated as a periodic boundary face
+     * whose counterpart cell is @p paired_cell_lid.
+     *
+     * @param face_lid Local ID of the periodic boundary face.
+     * @param paired_cell_lid Local ID of the cell on the opposite side.
+     */
+    inline void set_periodic_face(local_ordinal_type face_lid,
+                                   local_ordinal_type paired_cell_lid);
 
     inline int boundary_id(local_ordinal_type fid) const;
     inline const std::string& boundary_name(local_ordinal_type fid) const;

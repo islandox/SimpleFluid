@@ -26,9 +26,10 @@ namespace SimpleFluid
 enum class BoundaryConditionType : std::uint8_t
 {
     Dirichlet = 0,
-    Neumann = 1,
-    NoSlip = 2,
-    Robin = 3
+    Neumann   = 1,
+    NoSlip    = 2,
+    Robin     = 3,
+    Periodic  = 4
 };
 
 /**

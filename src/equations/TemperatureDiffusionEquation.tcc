@@ -82,9 +82,12 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         {
             const auto face_lid = faces[face_index];
 
-            if (d_mesh->is_interior_face(face_lid))
+            if (d_mesh->is_interior_face(face_lid)
+                || d_mesh->is_periodic_boundary_face(face_lid))
             {
-                const auto other = d_mesh->opposite_cell(face_lid, cell_lid);
+                const auto other = d_mesh->is_periodic_boundary_face(face_lid)
+                                     ? d_mesh->periodic_neighbor_cell(face_lid)
+                                     : d_mesh->opposite_cell(face_lid, cell_lid);
                 const auto distance = d_mesh->face_cell_center_distance(face_lid);
                 if (distance > 0.0)
                 {
