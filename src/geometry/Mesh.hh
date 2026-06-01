@@ -208,7 +208,6 @@ public:
 
     const ArrLO& owned_cell_ids() const noexcept { return d_owned_cell_ids; }
     const ArrGO& owned_cell_global_ids() const noexcept { return d_owned_cell_global_ids; }
-    const ArrGO& owned_cell_tpetra_gids() const noexcept { return d_owned_cell_tpetra_gids; }
 
     RCP<const map_type> owned_cell_map() const { return d_owned_cell_map; }
     RCP<const map_type> overlap_cell_map() const { return d_overlap_cell_map; }
@@ -322,7 +321,7 @@ protected:
     Arr<CellInfo> d_cells;
     Arr<FaceInfo> d_faces;   //!< Face information stored on host for easy random access.
 
-    ArrLO d_owned_cell_ids;
+    ArrLO d_owned_cell_ids; // Local IDs of owned cells (0 to num_owned_cells-1). To be deleted.
     ArrGO d_owned_cell_global_ids;
     ArrGO d_ghost_cell_global_ids;
 
@@ -330,7 +329,6 @@ protected:
     // Owned cells: Tpetra GIDs form a contiguous block [d_tpetra_gid_offset, d_tpetra_gid_offset + num_owned).
     // Ghost cells: Tpetra GIDs are resolved from the owning process's assignment.
     global_ordinal_type d_tpetra_gid_offset = 0;  // Global offset of this process's owned Tpetra GID block.
-    ArrGO d_owned_cell_tpetra_gids;                // Tpetra GIDs for owned cells (size = num_owned, contiguous).
     ArrGO d_ghost_cell_tpetra_gids;                // Tpetra GIDs for ghost cells (size = num_ghost).
     GO2GOMap d_mesh_gid_to_tpetra_gid;             // Mesh GID -> Tpetra GID (all local cells).
     ArrGO d_tpetra_gid_to_mesh_gid;                // Tpetra GID -> Mesh GID (owned cells, indexed by local owned index).
