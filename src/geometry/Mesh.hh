@@ -159,11 +159,10 @@ public:
         double neighbor_to_face_distance = 0.0;
         double cell_center_distance = 0.0;
 
-        /// If non-negative, this face is a periodic boundary face and
-        /// @p paired_cell is the cell on the opposite side of the periodic
-        /// domain.  The face behaves like an interior face connecting owner
-        /// to paired_cell.
-        local_ordinal_type paired_cell = invalid_id<local_ordinal_type>();
+        /// If valid (not invalid_id), this face is a periodic boundary face.
+        /// The paired cell local/ghost ID is stored here so it survives MPI
+        /// repartitioning..
+        global_ordinal_type periodic_paired_lid = invalid_id<local_ordinal_type>();
     };
 
     struct BoundaryFacePatch
@@ -281,7 +280,7 @@ public:
     /** @brief True if the face is a periodic boundary face (connects to a cell on the opposite domain side). */
     inline bool is_periodic_boundary_face(local_ordinal_type fid) const;
 
-    /** @brief For a periodic boundary face, returns the paired cell on the opposite side of the domain. */
+    /** @brief For a periodic boundary face, returns the local cell LID of the paired cell (resolved from its GID). */
     inline local_ordinal_type periodic_neighbor_cell(local_ordinal_type fid) const;
 
     /**
@@ -290,8 +289,8 @@ public:
      *
      * After calling this, @p face_lid is treated as a periodic boundary face
      * whose counterpart cell is @p paired_cell_lid.
-     *
-     * @param face_lid Local ID of the periodic boundary face.
+     * 
+     * @param face_lid   Local ID of the periodic boundary face.
      * @param paired_cell_lid Local ID of the cell on the opposite side.
      */
     inline void set_periodic_face(local_ordinal_type face_lid,

@@ -181,12 +181,14 @@ private:
      * @param ghost_pkts Cell packets describing off-rank neighbours.
      * @param orig_coords Original node coordinates before partitioning.
      * @param orig_ng2l Original node GID-to-local-index map.
+     * @param periodic_pairs Face-key → paired-GID map for periodic boundary faces.
      */
     static void rebuild(Mesh<Pack>& mesh, 
                         const std::vector<Packet>& owned_pkts,
                         const std::vector<Packet>& ghost_pkts,
                         const std::vector<Vec3>& orig_coords,
-                        const std::unordered_map<GO, LO>& orig_ng2l);
+                        const std::unordered_map<GO, LO>& orig_ng2l,
+                        const std::unordered_map<std::string, GO>& periodic_pairs);
 
 
     /**
