@@ -21,7 +21,8 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "PressureProjectionEquation")),
       d_linear_options(linear_options),
-      d_cached_face_velocity(d_mesh, "pressure_projection_face_velocity")
+      d_cached_face_velocity(d_mesh, "pressure_projection_face_velocity"),
+      d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux")
 {
     require_owned_cell_map(d_mesh);
 }
@@ -68,18 +69,6 @@ template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
-    const BoundaryConditionSet& boundary_conditions,
-    velocity_field_type& velocity)
-{
-    const auto cache = FvmOperators::cache_velocity_boundary_conditions<Pack>(
-        d_mesh, boundary_conditions);
-    project(pressure, time_step, cache, velocity);
-}
-
-template<TpetraTypePack Pack>
-void PressureProjectionEquation<Pack>::project(
-    field_type& pressure,
-    scalar_type time_step,
     const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity)
 {
@@ -98,6 +87,8 @@ void PressureProjectionEquation<Pack>::project(
 
     FvmOperators::face_velocities(velocity, velocity_boundary_cache,
                                   d_cached_face_velocity);
+    FvmOperators::normal_face_fluxes(d_cached_face_velocity,
+                                     d_cached_face_fluxes);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     if (d_cached_pressure_matrix.is_null())
     {
@@ -120,7 +111,7 @@ void PressureProjectionEquation<Pack>::project(
         const auto rhs_value = row_gid == gauge_gid
                              ? scalar_type{}
                              : -FvmOperators::cell_flux_balance<Pack>(
-                                   *d_mesh, d_cached_face_velocity, cell_lid)
+                                   *d_mesh, d_cached_face_fluxes, cell_lid)
                                / time_step;
         d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
     }

@@ -10,9 +10,9 @@
  */
 #pragma once
 
-#include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
+#include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/FvmOperators.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -41,6 +41,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
+    using face_flux_field_type = FaceField<Pack>;
     using face_velocity_field_type = VectorFaceField<Pack>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
@@ -65,11 +66,6 @@ public:
 
     void project(field_type& pressure,
                  scalar_type time_step,
-                 const BoundaryConditionSet& boundary_conditions,
-                 velocity_field_type& velocity);
-
-    void project(field_type& pressure,
-                 scalar_type time_step,
                  const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
                  velocity_field_type& velocity);
 
@@ -80,6 +76,7 @@ private:
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
     mutable face_velocity_field_type d_cached_face_velocity;
+    mutable face_flux_field_type d_cached_face_fluxes;
     mutable std::vector<typename mesh_type::Vec3> d_cached_gradients;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;

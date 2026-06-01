@@ -18,7 +18,6 @@
 
 #include <cstddef>
 #include <stdexcept>
-#include <vector>
 
 namespace SimpleFluid::FvmOperators
 {

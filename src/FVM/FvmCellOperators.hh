@@ -12,7 +12,6 @@
 
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
-#include "fields/VectorFaceField.hh"
 #include "FVM/FvmOperatorDetails.hh"
 
 #include <array>
@@ -81,62 +80,6 @@ void cell_gradient(const CellField<Pack>& field,
 }
 
 /**
- * @brief Compute and return a least-squares cell-centered gradient for
- *        every owned cell.
- *
- * @tparam Pack The Tpetra type pack.
- * @param field Scalar cell field whose gradient is computed.
- * @return Vector of gradient vectors indexed by owned-cell local ID.
- */
-template<TpetraTypePack Pack>
-inline std::vector<typename Mesh<Pack>::Vec3>
-cell_gradient(const CellField<Pack>& field)
-{
-    std::vector<typename Mesh<Pack>::Vec3> gradients;
-    cell_gradient(field, gradients);
-
-    return gradients;
-}
-
-/**
- * @brief Compute the divergence of a face flux field at every owned cell,
- *        divided by cell volume.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param flux Face-centered scalar flux field.
- * @return Vector of divergence values indexed by owned-cell local ID.
- */
-template<TpetraTypePack Pack>
-std::vector<typename Pack::scalar_type>
-cell_divergence(const Mesh<Pack>& mesh, const FaceField<Pack>& flux)
-{
-    using local_ordinal_type = typename Mesh<Pack>::local_ordinal_type;
-
-    std::vector<typename Pack::scalar_type> divergence(mesh.num_owned_cells(), 0.0);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        auto balance = typename Pack::scalar_type{};
-
-        for (const auto face_lid : mesh.faces(cell_lid))
-        {
-            if (!flux.is_owned_face(face_lid))
-            {
-                continue;
-            }
-
-            const auto sign = mesh.owner_cell(face_lid) == cell_lid ? 1.0 : -1.0;
-            balance += sign * flux.value(face_lid) * mesh.face_area(face_lid);
-        }
-
-        divergence[owned] = balance / mesh.cell_volume(cell_lid);
-    }
-
-    return divergence;
-}
-
-/**
  * @brief Compute the net flux balance (sum of signed face fluxes) for a
  *        single cell from a FaceField.
  *
@@ -162,46 +105,6 @@ typename Pack::scalar_type cell_flux_balance(
 
         const auto sign = mesh.owner_cell(face_lid) == cell_lid ? 1.0 : -1.0;
         balance += sign * face_fluxes.value(face_lid);
-    }
-
-    return balance;
-}
-
-/**
- * @brief Compute the net volumetric flux balance for a single cell from a
- *        face-velocity field.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param face_velocity Face-centered velocity field.
- * @param cell_lid Local ID of the cell whose balance is computed.
- * @return Sum of outward-positive volumetric fluxes around @p cell_lid.
- * @throws std::invalid_argument if @p face_velocity is not on @p mesh.
- */
-template<TpetraTypePack Pack>
-typename Pack::scalar_type cell_flux_balance(
-    const Mesh<Pack>& mesh,
-    const VectorFaceField<Pack>& face_velocity,
-    typename Pack::local_ordinal_type cell_lid)
-{
-    if (&face_velocity.mesh() != &mesh)
-    {
-        throw std::invalid_argument(
-            "cell_flux_balance requires a face-velocity field on the input mesh.");
-    }
-
-    typename Pack::scalar_type balance = 0.0;
-    for (const auto face_lid : mesh.faces(cell_lid))
-    {
-        if (!face_velocity.is_owned_face(face_lid))
-        {
-            continue;
-        }
-
-        const auto sign = mesh.owner_cell(face_lid) == cell_lid ? 1.0 : -1.0;
-        balance += sign
-                 * face_velocity.value(face_lid).dot(mesh.face_normal(face_lid))
-                 * mesh.face_area(face_lid);
     }
 
     return balance;

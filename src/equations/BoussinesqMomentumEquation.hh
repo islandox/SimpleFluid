@@ -10,7 +10,6 @@
  */
 #pragma once
 
-#include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
@@ -46,7 +45,6 @@ public:
     using velocity_field_type = VectorCellField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using vec_type = typename mesh_type::Vec3;
 
     explicit BoussinesqMomentumEquation(SP<const mesh_type> mesh);
 

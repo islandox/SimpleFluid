@@ -257,7 +257,10 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
     options.tolerance = 1.0e-12;
 
     SimpleFluid::PressureProjectionEquation<Pack> equation(mesh, options);
-    equation.project(pressure, 0.1, bcs, velocity);
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    equation.project(pressure, 0.1, cache, velocity);
 
     const auto after = divergence_norm();
     EXPECT_LT(after, before);
