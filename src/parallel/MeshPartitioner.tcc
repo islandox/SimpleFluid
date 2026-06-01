@@ -178,6 +178,28 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
         }
     }
 
+    // ---- periodic face ghost collection ----
+    // Periodic boundary faces connect to a paired cell that may not be a
+    // topological neighbour.  Collect those paired GIDs and add them to
+    // the ghost set so the paired cell data is available after rebuild.
+    // Also save the face-key → paired-GID mapping for restoration.
+    std::unordered_map<std::string, GO> original_periodic_pairs;
+    for (std::size_t fid = 0; fid < mesh.d_faces.size(); ++fid)
+    {
+        auto& face = mesh.d_faces[fid];
+        const auto pid = face.periodic_paired_lid;
+        if (pid == invalid_id<LO>()) continue;
+        auto pgid = mesh.cell_global_id(pid);
+        if (owned_set.find(pgid) != owned_set.end()) continue; // already owned
+
+        std::vector<GO> fns(face.node_gids.begin(), face.node_gids.end());
+        std::sort(fns.begin(), fns.end());
+        auto key = mesh.make_face_key(
+            typename Mesh<Pack>::ViewGO(const_cast<GO*>(fns.data()), fns.size()));
+        original_periodic_pairs[key] = pgid;
+        ghost_set.insert(pgid);
+    }
+
     // Request ghosts
     std::vector<std::vector<GO>> greq(nranks);
     for (GO g : ghost_set) greq[static_cast<std::size_t>(gid_to_rank.at(g))].push_back(g);
@@ -251,7 +273,8 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
             ghost_pkts.end());
     }
 
-    rebuild(mesh, owned_pkts, ghost_pkts, orig_node_coords, orig_node_gid_to_lid);
+    rebuild(mesh, owned_pkts, ghost_pkts, orig_node_coords,
+            orig_node_gid_to_lid, original_periodic_pairs);
     return true;
 }
 
@@ -363,10 +386,12 @@ auto MeshPartitioner<Pack>::compute_gid_to_rank_map(
  * @param ghost_pkts Cell packets describing off-rank neighbours.
  * @param orig_coords Original node coordinates before partitioning.
  * @param orig_ng2l Original node GID-to-local-index map.
+ * @param periodic_pairs Face-key → paired-GID map for periodic boundary faces.
  */
 template<TpetraTypePack Pack>
 void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>& owned_pkts, const std::vector<Packet>& ghost_pkts,
-                    const std::vector<Vec3>& orig_coords, const std::unordered_map<GO, LO>& orig_ng2l) {
+                    const std::vector<Vec3>& orig_coords, const std::unordered_map<GO, LO>& orig_ng2l,
+                    const std::unordered_map<std::string, GO>& periodic_pairs) {
     mesh.d_cells.clear(); mesh.d_faces.clear(); mesh.d_owned_cell_ids.clear();
     mesh.d_owned_cell_global_ids.clear(); mesh.d_ghost_cell_global_ids.clear();
     mesh.d_cell_gid_to_lid.clear(); mesh.d_node_gid_to_lid.clear(); mesh.d_node_coords.clear();
@@ -468,6 +493,26 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
 
     // Set cell face views
     std::size_t tcf = 0; for (auto& cf : cfl) tcf += cf.size();
+
+    // Restore periodic boundary face pairs from the original mesh.
+    for (auto& [key, pgid] : periodic_pairs)
+    {
+        auto it = mesh.d_face_key_to_face.find(key);
+        if (it == mesh.d_face_key_to_face.end()) continue;
+        auto& fi = mesh.d_faces[static_cast<std::size_t>(it->second)];
+
+        // Recompute cell-centre distance for the periodic pair if the
+        // paired cell is available locally.
+        auto plid = mesh.d_cell_gid_to_lid.find(pgid);
+        if (plid != mesh.d_cell_gid_to_lid.end())
+        {
+            fi.periodic_paired_lid = plid->second;
+            auto& oc = mesh.d_cells[static_cast<std::size_t>(fi.owner)];
+            auto& pc = mesh.d_cells[static_cast<std::size_t>(plid->second)];
+            fi.cell_center_distance = (pc.center - oc.center).norm();
+        }
+    }
+
     // DEBUG: verify GID consistency
     for (std::size_t i = 0; i < mesh.d_owned_cell_global_ids.size(); ++i) {
         GO g = mesh.d_owned_cell_global_ids[i];
