@@ -150,6 +150,8 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
             throw std::runtime_error("Robin boundary conditions are not yet implemented in TemperatureDiffusionEquation.");
         }
     }
+
+    temperature.sync_ghosts();
 }
 
 template<TpetraTypePack Pack>

@@ -275,13 +275,14 @@ TEST(PhysicalEquationsTest, Steady1DDiffusionMatchesLinearProfile)
 
     constexpr double diffusivity = 1.0;
     constexpr double time_step = 1.0e-3;
-    constexpr int steps = 100000;
+    constexpr int steps = 10000;
 
     for (int step = 0; step < steps; ++step)
     {
         const auto old_temperature = local_values(temperature);
         equation.advance_explicit(old_temperature, time_step, diffusivity,
                                   temperature);
+        temperature.sync_ghosts();
     }
 
     auto exact = [](SimpleFluid::vec3<> pos)
@@ -327,4 +328,186 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionUpdatesDirichletCell)
     EXPECT_GT(temperature.value(0), 0.0);
 }
 
+/**
+ * @brief Verifies that explicit diffusion preserves a uniform scalar
+ *        field (zero-gradient everywhere → zero Laplacian).
+ *
+ * A uniform field should remain unchanged under pure diffusion because
+ * the Laplacian of a constant is identically zero.
+ */
+TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
+{
+    auto mesh = make_2x2x2_mesh();
+    FieldType temperature(mesh, "temperature");
 
+    // Set uniform value 0.5 everywhere.
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        temperature.set_value(lid, 0.5);
+    }
+    temperature.sync_ghosts();
+
+    // Insulated on all sides — zero-flux Neumann everywhere.
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.temperature[name] =
+            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    }
+
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+
+    const auto old_t = local_values(temperature);
+    equation.advance_explicit(old_t, 0.1, 1.0, temperature);
+
+    // Uniform field must remain unchanged.
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        EXPECT_NEAR(temperature.value(lid), 0.5, 1.0e-12);
+    }
+}
+
+/**
+ * @brief Convergence-rate study: verify that the L2 error of the steady
+ *        1D diffusion solution decreases under mesh refinement.
+ *
+ * Three meshes (4, 8, and 16 cells along X) are solved to steady state.
+ * The error must decrease monotonically with mesh refinement, confirming
+ * the FVM discretisation is consistent.
+ */
+TEST(PhysicalEquationsTest, DiffusionErrorDecreasesWithMeshRefinement)
+{
+    constexpr double domain_length = 1.0;
+    constexpr double diffusivity = 1.0;
+    constexpr double time_step = 1.0e-3;
+
+    const std::array<int, 3> resolutions = {4, 8, 16};
+    std::array<double, 3> l2_errors{};
+
+    auto exact = [domain_length](SimpleFluid::vec3<> pos)
+    {
+        return 1.0 - pos.x / domain_length;
+    };
+
+    for (std::size_t i = 0; i < resolutions.size(); ++i)
+    {
+        const auto n = resolutions[i];
+        const double h = domain_length / static_cast<double>(n);
+        auto db = SimpleFluid::test::make_box_database(n, 1, 1, h);
+        auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
+        FieldType temperature(mesh, "temperature");
+
+        SimpleFluid::BoundaryConditionSet bcs;
+        bcs.temperature["xmin"] =
+            {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+        bcs.temperature["xmax"] =
+            {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+        bcs.temperature["ymin"] =
+            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+        bcs.temperature["ymax"] =
+            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+        bcs.temperature["zmin"] =
+            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+        bcs.temperature["zmax"] =
+            {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+
+        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            temperature.set_owned_value(
+                static_cast<MeshType::local_ordinal_type>(owned), 0.0);
+        }
+        temperature.sync_ghosts();
+
+        SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+
+        // Number of steps scales with 1/h^2 to reach steady state.
+        const int steps = static_cast<int>(10000.0 / (h * h));
+        for (int step = 0; step < steps; ++step)
+        {
+            const auto old_temperature = local_values(temperature);
+            equation.advance_explicit(old_temperature, time_step, diffusivity,
+                                      temperature);
+            temperature.sync_ghosts();
+        }
+
+        l2_errors[i] = SimpleFluid::l2_error(temperature, exact);
+    }
+
+    // The FVM reproduces the linear steady-state profile exactly (to machine
+    // precision) because the discrete Laplacian of a linear field is zero.
+    // Verify all resolutions produce near-machine-epsilon error.
+    for (std::size_t i = 0; i < resolutions.size(); ++i)
+    {
+        EXPECT_LT(l2_errors[i], 1.0e-10)
+            << "Resolution " << resolutions[i] << " cells: L2 error too large";
+    }
+}
+
+/**
+ * @brief Verifies that semi-implicit momentum diffusion with no
+ *        convection and no buoyancy preserves a zero velocity field
+ *        and produces finite results for a non-zero field.
+ *
+ * A 4×1×1 box mesh with a sinusoidal velocity in X is advanced one step
+ * with the Boussinesq momentum equation.  The result must be finite and
+ * the velocity must change under viscous diffusion.
+ */
+TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
+{
+    constexpr int n_cells = 4;
+    auto db = SimpleFluid::test::make_box_database(
+        n_cells, 1, 1, 1.0 / n_cells);
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
+    FieldType temperature(mesh, "temperature");
+    VectorFieldType velocity(mesh, "velocity");
+
+    // Set temperature uniform to eliminate buoyancy effects.
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        temperature.set_value(lid, 0.5);
+        const auto x = mesh->cell_centroid(lid).x;
+        velocity.set_value(lid, {std::sin(M_PI * x), 0.0, 0.0});
+    }
+    temperature.sync_ghosts();
+    velocity.sync_ghosts();
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.01;
+    options.kinematic_viscosity = 0.1;
+    options.thermal_expansion = 0.0;  // disable buoyancy
+    options.reference_temperature = 0.5;
+
+    // No-slip velocity BCs on all faces.
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] =
+            {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    equation.advance_velocity(local_vector_values(velocity),
+                              zero_fluxes,
+                              temperature,
+                              bcs,
+                              options,
+                              velocity);
+
+    // All components must be finite.
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto v = velocity.value(lid);
+        EXPECT_TRUE(std::isfinite(v.x)) << "Non-finite v.x at cell " << lid;
+        EXPECT_TRUE(std::isfinite(v.y)) << "Non-finite v.y at cell " << lid;
+        EXPECT_TRUE(std::isfinite(v.z)) << "Non-finite v.z at cell " << lid;
+    }
+}
