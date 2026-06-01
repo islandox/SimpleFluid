@@ -107,9 +107,6 @@ private:
     face_velocity_field_type d_old_face_velocities;
     face_velocity_field_type d_projected_face_velocities;
 
-    std::vector<scalar_type> d_old_temperature;
-    std::vector<vec_type> d_old_velocity;
-
     scalar_type d_time = 0.0;
     int d_step_index = 0;
 };

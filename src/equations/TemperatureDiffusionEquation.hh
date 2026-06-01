@@ -58,7 +58,7 @@ public:
                           field_type& temperature) const;
 
     void advance_semi_implicit(
-        const std::vector<scalar_type>& old_temperature,
+        const field_type& old_temperature,
         const FaceField<Pack>& face_fluxes,
         scalar_type time_step,
         scalar_type thermal_diffusivity,
@@ -66,7 +66,7 @@ public:
         const LinearSolverOptions& linear_options = {}) const;
 
     void advance_semi_implicit(
-        const std::vector<scalar_type>& old_temperature,
+        const field_type& old_temperature,
         const face_velocity_field_type& face_velocity,
         scalar_type time_step,
         scalar_type thermal_diffusivity,

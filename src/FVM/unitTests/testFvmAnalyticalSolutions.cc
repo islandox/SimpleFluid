@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorFaceField.hh"
 #include "FVM/FvmOperators.hh"
@@ -71,15 +72,15 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
 TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
 {
     auto mesh = make_unit_box_mesh();
-    std::vector<Pack::scalar_type> old_values(mesh->num_local_cells(), 0.0);
+    SimpleFluid::CellField<Pack> old_values(mesh, "old_values");
 
     for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
-        old_values[static_cast<std::size_t>(lid)] =
-            affine_scalar(mesh->cell_centroid(lid));
+        old_values.set_value(lid, affine_scalar(mesh->cell_centroid(lid)));
     }
+    old_values.sync_ghosts();
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     auto boundary_value =
@@ -91,14 +92,14 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
     };
 
     auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
-        *mesh, old_values, zero_fluxes, 0.25, 0.7, boundary_value);
+        old_values, zero_fluxes, 0.25, 0.7, boundary_value);
 
     Pack::vector_type solution(mesh->owned_cell_map(), true);
     SimpleFluid::LinearSolverOptions options;
     options.tolerance = 1.0e-13;
     ASSERT_TRUE(SimpleFluid::solve_linear_system<Pack>(
         Teuchos::rcp_implicit_cast<const Pack::matrix_type>(system.matrix),
-        system.rhs,
+        *system.rhs,
         solution,
         options));
 

@@ -54,7 +54,7 @@ public:
     explicit BoussinesqMomentumEquation(SP<const mesh_type> mesh);
 
     void advance_velocity(
-        const std::vector<vec_type>& old_velocity,
+        const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
         const BoundaryConditionSet& boundary_conditions,
@@ -63,7 +63,7 @@ public:
         const LinearSolverOptions& linear_options = {}) const;
 
     void advance_velocity(
-        const std::vector<vec_type>& old_velocity,
+        const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
         const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
@@ -72,7 +72,7 @@ public:
         const LinearSolverOptions& linear_options = {}) const;
 
     void advance_velocity(
-        const std::vector<vec_type>& old_velocity,
+        const velocity_field_type& old_velocity,
         const face_velocity_field_type& face_velocity,
         const field_type& temperature,
         const BoundaryConditionSet& boundary_conditions,
@@ -81,7 +81,7 @@ public:
         const LinearSolverOptions& linear_options = {}) const;
 
     void advance_velocity(
-        const std::vector<vec_type>& old_velocity,
+        const velocity_field_type& old_velocity,
         const face_velocity_field_type& face_velocity,
         const field_type& temperature,
         const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,

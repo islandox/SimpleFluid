@@ -48,9 +48,6 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     {
         throw std::invalid_argument("BoussinesqSolver requires a positive time step.");
     }
-
-    d_old_temperature.resize(d_mesh->num_local_cells());
-    d_old_velocity.resize(d_mesh->num_local_cells());
 }
 
 template<TpetraTypePack Pack>
@@ -132,16 +129,9 @@ void BoussinesqSolver<Pack>::step()
         d_velocity.sync_ghosts();
     }
 
-    for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(cell);
-        d_old_temperature[cell] = d_temperature.local_value(cell_lid);
-        d_old_velocity[cell] = d_velocity.local_value(cell_lid);
-    }
-
     FvmOperators::face_velocities(*d_mesh, d_velocity, d_velocity_boundary_cache,
                                   d_old_face_velocities);
-    d_momentum_equation.advance_velocity(d_old_velocity,
+    d_momentum_equation.advance_velocity(d_velocity,
                                          d_old_face_velocities,
                                          d_temperature,
                                          d_velocity_boundary_cache,
@@ -154,7 +144,7 @@ void BoussinesqSolver<Pack>::step()
                                   d_velocity);
     FvmOperators::face_velocities(*d_mesh, d_velocity, d_velocity_boundary_cache,
                                   d_projected_face_velocities);
-    d_temperature_equation.advance_semi_implicit(d_old_temperature,
+    d_temperature_equation.advance_semi_implicit(d_temperature,
                                                  d_projected_face_velocities,
                                                  d_time_options.time_step,
                                                  d_time_options.thermal_diffusivity,

@@ -101,19 +101,6 @@ int advance_explicit_diffusion_until_converged(
     return max_steps;
 }
 
-std::vector<MeshType::Vec3> local_vector_values(const VectorFieldType& field)
-{
-    std::vector<MeshType::Vec3> values(field.num_local_cells());
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
-         ++lid)
-    {
-        values[static_cast<std::size_t>(lid)] = field.local_value(lid);
-    }
-
-    return values;
-}
-
 } // namespace
 
 TEST(PhysicalEquationsTest, TemperatureDiffusionAppliesDirichletBoundary)
@@ -155,7 +142,7 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
-    equation.advance_velocity(local_vector_values(velocity),
+    equation.advance_velocity(velocity,
                               zero_fluxes,
                               temperature,
                               bcs,
@@ -201,7 +188,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
 
         SimpleFluid::BoundaryConditionSet bcs;
         SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
-        equation.advance_semi_implicit(old_temperature, fluxes, 0.1, 0.0,
+        equation.advance_semi_implicit(temperature, fluxes, 0.1, 0.0,
                                        temperature);
 
         bool changed = false;
@@ -523,7 +510,7 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
 
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
-    equation.advance_velocity(local_vector_values(velocity),
+    equation.advance_velocity(velocity,
                               zero_fluxes,
                               temperature,
                               bcs,
