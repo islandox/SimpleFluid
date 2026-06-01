@@ -19,9 +19,7 @@
 #include "solvers/BelosLinearSolver.hh"
 
 #include <cstddef>
-#include <cstdint>
 #include <cmath>
-#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -43,7 +41,6 @@ class TemperatureDiffusionEquation
 public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
-    using face_velocity_field_type = VectorFaceField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -60,14 +57,6 @@ public:
     void advance_semi_implicit(
         const field_type& old_temperature,
         const FaceField<Pack>& face_fluxes,
-        scalar_type time_step,
-        scalar_type thermal_diffusivity,
-        field_type& temperature,
-        const LinearSolverOptions& linear_options = {}) const;
-
-    void advance_semi_implicit(
-        const field_type& old_temperature,
-        const face_velocity_field_type& face_velocity,
         scalar_type time_step,
         scalar_type thermal_diffusivity,
         field_type& temperature,

@@ -41,8 +41,8 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_temperature(d_mesh, "temperature"),
       d_pressure(d_mesh, "pressure"),
       d_velocity(d_mesh, "velocity"),
-      d_old_face_velocities(d_mesh, "old_face_velocity"),
-      d_projected_face_velocities(d_mesh, "projected_face_velocity")
+      d_old_face_fluxes(d_mesh, "old_face_flux"),
+      d_projected_face_fluxes(d_mesh, "projected_face_flux")
 {
     if (d_time_options.time_step <= 0.0)
     {
@@ -129,10 +129,10 @@ void BoussinesqSolver<Pack>::step()
         d_velocity.sync_ghosts();
     }
 
-    FvmOperators::face_velocities(*d_mesh, d_velocity, d_velocity_boundary_cache,
-                                  d_old_face_velocities);
+    FvmOperators::face_fluxes(d_velocity, d_velocity_boundary_cache,
+                              d_old_face_fluxes);
     d_momentum_equation.advance_velocity(d_velocity,
-                                         d_old_face_velocities,
+                                         d_old_face_fluxes,
                                          d_temperature,
                                          d_velocity_boundary_cache,
                                          d_time_options,
@@ -142,10 +142,10 @@ void BoussinesqSolver<Pack>::step()
                                   d_time_options.time_step,
                                   d_velocity_boundary_cache,
                                   d_velocity);
-    FvmOperators::face_velocities(*d_mesh, d_velocity, d_velocity_boundary_cache,
-                                  d_projected_face_velocities);
+    FvmOperators::face_fluxes(d_velocity, d_velocity_boundary_cache,
+                              d_projected_face_fluxes);
     d_temperature_equation.advance_semi_implicit(d_temperature,
-                                                 d_projected_face_velocities,
+                                                 d_projected_face_fluxes,
                                                  d_time_options.time_step,
                                                  d_time_options.thermal_diffusivity,
                                                  d_temperature,

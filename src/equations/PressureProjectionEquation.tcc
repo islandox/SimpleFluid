@@ -96,7 +96,7 @@ void PressureProjectionEquation<Pack>::project(
         return;
     }
 
-    FvmOperators::face_velocities(*d_mesh, velocity, velocity_boundary_cache,
+    FvmOperators::face_velocities(velocity, velocity_boundary_cache,
                                   d_cached_face_velocity);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     if (d_cached_pressure_matrix.is_null())

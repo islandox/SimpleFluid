@@ -211,19 +211,4 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     temperature.sync_ghosts();
 }
 
-template<TpetraTypePack Pack>
-void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
-    const field_type& old_temperature,
-    const face_velocity_field_type& face_velocity,
-    scalar_type time_step,
-    scalar_type thermal_diffusivity,
-    field_type& temperature,
-    const LinearSolverOptions& linear_options) const
-{
-    const auto face_fluxes =
-        FvmOperators::normal_face_fluxes<Pack>(*d_mesh, face_velocity);
-    advance_semi_implicit(old_temperature, face_fluxes, time_step,
-                          thermal_diffusivity, temperature, linear_options);
-}
-
 } // namespace SimpleFluid

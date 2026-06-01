@@ -23,10 +23,8 @@
 
 #include <cmath>
 #include <cstddef>
-#include <optional>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 namespace SimpleFluid
 {
@@ -46,7 +44,6 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
-    using face_velocity_field_type = VectorFaceField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using vec_type = typename mesh_type::Vec3;
@@ -56,33 +53,6 @@ public:
     void advance_velocity(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
-        const field_type& temperature,
-        const BoundaryConditionSet& boundary_conditions,
-        const TimeStepperOptions& options,
-        velocity_field_type& velocity,
-        const LinearSolverOptions& linear_options = {}) const;
-
-    void advance_velocity(
-        const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const field_type& temperature,
-        const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
-        const TimeStepperOptions& options,
-        velocity_field_type& velocity,
-        const LinearSolverOptions& linear_options = {}) const;
-
-    void advance_velocity(
-        const velocity_field_type& old_velocity,
-        const face_velocity_field_type& face_velocity,
-        const field_type& temperature,
-        const BoundaryConditionSet& boundary_conditions,
-        const TimeStepperOptions& options,
-        velocity_field_type& velocity,
-        const LinearSolverOptions& linear_options = {}) const;
-
-    void advance_velocity(
-        const velocity_field_type& old_velocity,
-        const face_velocity_field_type& face_velocity,
         const field_type& temperature,
         const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,

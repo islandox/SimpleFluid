@@ -58,9 +58,11 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
         face_velocity.set_value(fid, {center.x, 2.0 * center.y, 3.0 * center.z});
     }
 
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
     const auto divergence =
         SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
-            *mesh, face_velocity);
+            *mesh, face_fluxes);
 
     ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
     for (const auto value : divergence)

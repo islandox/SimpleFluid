@@ -142,10 +142,13 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
     equation.advance_velocity(velocity,
                               zero_fluxes,
                               temperature,
-                              bcs,
+                              cache,
                               options,
                               velocity);
 
@@ -183,8 +186,8 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
         velocity.sync_ghosts();
 
         const auto old_temperature = local_values(temperature);
-        const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-            *mesh, velocity);
+        SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+        SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
 
         SimpleFluid::BoundaryConditionSet bcs;
         SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
@@ -231,8 +234,11 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
     SimpleFluid::BoundaryConditionSet bcs;
     auto divergence_norm = [&]()
     {
-        const auto fluxes = SimpleFluid::FvmOperators::face_fluxes(
-            *mesh, velocity, bcs);
+        const auto cache =
+            SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+                mesh, bcs);
+        SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+        SimpleFluid::FvmOperators::face_fluxes(velocity, cache, fluxes);
         const auto divergence =
             SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
                 *mesh, fluxes);
@@ -510,10 +516,13 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
 
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
     equation.advance_velocity(velocity,
                               zero_fluxes,
                               temperature,
-                              bcs,
+                              cache,
                               options,
                               velocity);
 

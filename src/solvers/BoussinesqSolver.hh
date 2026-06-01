@@ -17,6 +17,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
+#include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "geometry/MeshUtils.hh"
 #include "io/VTUWriter.hh"
@@ -45,7 +46,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
-    using face_velocity_field_type = VectorFaceField<Pack>;
+    using face_flux_field_type = FaceField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -104,8 +105,8 @@ private:
     field_type d_temperature;
     field_type d_pressure;
     velocity_field_type d_velocity;
-    face_velocity_field_type d_old_face_velocities;
-    face_velocity_field_type d_projected_face_velocities;
+    face_flux_field_type d_old_face_fluxes;
+    face_flux_field_type d_projected_face_fluxes;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
