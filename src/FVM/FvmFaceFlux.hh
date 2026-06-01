@@ -371,8 +371,7 @@ inline VectorFaceField<Pack>
 face_velocities(const Mesh<Pack>& mesh,
                 const VectorCellField<Pack>& velocity)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
     face_velocities(mesh, velocity, face_velocity);
 
     return face_velocity;
@@ -395,8 +394,7 @@ face_velocities(const Mesh<Pack>& mesh,
                 const VectorCellField<Pack>& velocity,
                 const BoundaryConditionSet& boundary_conditions)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
     face_velocities(mesh, velocity, boundary_conditions, face_velocity);
 
     return face_velocity;
@@ -420,8 +418,7 @@ face_velocities(const Mesh<Pack>& mesh,
                 const VectorCellField<Pack>& velocity,
                 const BoundaryConditionSet* boundary_conditions)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
     face_velocities(mesh, velocity, boundary_conditions, face_velocity);
 
     return face_velocity;
@@ -444,8 +441,7 @@ face_velocities(const Mesh<Pack>& mesh,
                 const VectorCellField<Pack>& velocity,
                 const VelocityBoundaryCache<Pack>& boundary_cache)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    VectorFaceField<Pack> face_velocity(mesh_ptr, "face_velocity");
+    VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
     face_velocities(mesh, velocity, boundary_cache, face_velocity);
 
     return face_velocity;
@@ -532,8 +528,7 @@ inline FaceField<Pack>
 normal_face_fluxes(const Mesh<Pack>& mesh,
                    const VectorFaceField<Pack>& face_velocity)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
+    FaceField<Pack> fluxes(face_velocity.mesh_ptr(), "face_flux");
     normal_face_fluxes(mesh, face_velocity, fluxes);
 
     return fluxes;
@@ -728,8 +723,7 @@ inline FaceField<Pack>
 face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
+    FaceField<Pack> fluxes(velocity.mesh_ptr(), "face_flux");
     face_fluxes(mesh, velocity, fluxes);
 
     return fluxes;
@@ -751,8 +745,7 @@ face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const BoundaryConditionSet& boundary_conditions)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
+    FaceField<Pack> fluxes(velocity.mesh_ptr(), "face_flux");
     face_fluxes(mesh, velocity, boundary_conditions, fluxes);
 
     return fluxes;
@@ -776,8 +769,7 @@ face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const BoundaryConditionSet* boundary_conditions)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
+    FaceField<Pack> fluxes(velocity.mesh_ptr(), "face_flux");
     face_fluxes(mesh, velocity, boundary_conditions, fluxes);
 
     return fluxes;
@@ -799,8 +791,7 @@ face_fluxes(const Mesh<Pack>& mesh,
             const VectorCellField<Pack>& velocity,
             const VelocityBoundaryCache<Pack>& boundary_cache)
 {
-    SP<const Mesh<Pack>> mesh_ptr(&mesh, [](const Mesh<Pack>*) {});
-    FaceField<Pack> fluxes(mesh_ptr, "face_flux");
+    FaceField<Pack> fluxes(velocity.mesh_ptr(), "face_flux");
     face_fluxes(mesh, velocity, boundary_cache, fluxes);
 
     return fluxes;

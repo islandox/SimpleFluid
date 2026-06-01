@@ -156,21 +156,21 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
 
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
-    const std::vector<scalar_type>& old_temperature,
+    const field_type& old_temperature,
     const FaceField<Pack>& face_fluxes,
     scalar_type time_step,
     scalar_type thermal_diffusivity,
     field_type& temperature,
     const LinearSolverOptions& linear_options) const
 {
+    EquationValidation::require_mesh_match(*d_mesh, old_temperature,
+                                           "TemperatureDiffusionEquation");
     EquationValidation::require_mesh_match(*d_mesh, temperature,
                                            "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(time_step, "time step",
                                              "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
                                              "TemperatureDiffusionEquation");
-    EquationValidation::assert_sufficient_cache_size(old_temperature.size(),
-                                                     d_mesh->num_local_cells());
 
     auto boundary_value =
         [&](int patch_id, size_t in_patch_id) -> typename Pack::scalar_type
@@ -184,7 +184,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     };
 
     auto system = FvmOperators::transport_system<Pack>(
-        *d_mesh, old_temperature, face_fluxes, time_step,
+        old_temperature, face_fluxes, time_step,
         thermal_diffusivity, boundary_value, d_cached_transport_matrix);
 
     if (d_cached_transport_matrix.is_null())
@@ -194,7 +194,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto converged =
-        solve_linear_system<Pack>(matrix, system.rhs,
+        solve_linear_system<Pack>(matrix, *system.rhs,
                                   temperature.owned_data(), linear_options);
     if (!converged)
     {
@@ -213,7 +213,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
 
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
-    const std::vector<scalar_type>& old_temperature,
+    const field_type& old_temperature,
     const face_velocity_field_type& face_velocity,
     scalar_type time_step,
     scalar_type thermal_diffusivity,

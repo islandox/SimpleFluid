@@ -24,7 +24,7 @@ BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
 
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
-    const std::vector<vec_type>& old_velocity,
+    const velocity_field_type& old_velocity,
     const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
     const BoundaryConditionSet& boundary_conditions,
@@ -41,7 +41,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
-    const std::vector<vec_type>& old_velocity,
+    const velocity_field_type& old_velocity,
     const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
     const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
@@ -49,6 +49,8 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const
 {
+    EquationValidation::require_mesh_match(*d_mesh, old_velocity,
+                                           "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(*d_mesh, temperature,
                                            "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity,
@@ -57,8 +59,6 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                                              "BoussinesqMomentumEquation");
     EquationValidation::require_non_negative(options.kinematic_viscosity, "viscosity",
                                              "BoussinesqMomentumEquation");
-    EquationValidation::assert_sufficient_cache_size(old_velocity.size(),
-                                                     d_mesh->num_local_cells());
     if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
         || velocity_boundary_cache.mesh != d_mesh)
     {
@@ -75,7 +75,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     };
 
     auto system = FvmOperators::transport_system<Pack>(
-        *d_mesh, old_velocity, face_fluxes, options.time_step,
+        old_velocity, face_fluxes, options.time_step,
         options.kinematic_viscosity, boundary_value,
         d_cached_transport_matrix);
 
@@ -101,8 +101,8 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                 options.thermal_expansion
               * temperature_delta
               * (-gravity_component);
-            system.rhs.sumIntoLocalValue(cell_lid, component,
-                                         volume * buoyancy);
+            system.rhs->sumIntoLocalValue(cell_lid, component,
+                                          volume * buoyancy);
         }
     }
 
@@ -111,7 +111,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
          component < velocity_field_type::num_components && !has_nonzero_rhs;
          ++component)
     {
-        const auto rhs_data = system.rhs.getData(component);
+        const auto rhs_data = system.rhs->getData(component);
         for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -132,7 +132,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto converged =
-        solve_linear_system<Pack>(matrix, system.rhs,
+        solve_linear_system<Pack>(matrix, *system.rhs,
                                   velocity.owned_data(), linear_options);
     if (!converged)
     {
@@ -158,7 +158,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
-    const std::vector<vec_type>& old_velocity,
+    const velocity_field_type& old_velocity,
     const face_velocity_field_type& face_velocity,
     const field_type& temperature,
     const BoundaryConditionSet& boundary_conditions,
@@ -175,7 +175,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
-    const std::vector<vec_type>& old_velocity,
+    const velocity_field_type& old_velocity,
     const face_velocity_field_type& face_velocity,
     const field_type& temperature,
     const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,

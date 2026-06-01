@@ -10,16 +10,16 @@
  */
 #pragma once
 
+#include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/VectorCellField.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
 
 #include <cstddef>
-#include <optional>
 #include <stdexcept>
-#include <vector>
 
 namespace SimpleFluid::FvmOperators
 {
@@ -34,7 +34,7 @@ template<TpetraTypePack Pack>
 struct TransportSystem
 {
     Teuchos::RCP<typename Pack::matrix_type> matrix;
-    typename Pack::vector_type rhs;
+    Teuchos::RCP<typename Pack::vector_type> rhs;
 };
 
 /**
@@ -47,7 +47,7 @@ template<TpetraTypePack Pack>
 struct VectorTransportSystem
 {
     Teuchos::RCP<typename Pack::matrix_type> matrix;
-    typename Pack::multi_vector_type rhs;
+    Teuchos::RCP<typename Pack::multi_vector_type> rhs;
 };
 
 /**
@@ -60,32 +60,25 @@ struct VectorTransportSystem
  *
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryValueProvider A callable with signature
- *         std::optional<scalar_type>(local_ordinal_type face_lid,
- *         scalar_type old_cell_value).
- * @param mesh The computational mesh.
- * @param old_values Previous time-step cell values indexed by local ID.
+ *         scalar_type(int patch_id, local_ordinal_type boundary_face_id).
+ * @param old_values Previous time-step scalar field. Its overlap values
+ *        must be synchronized before assembly.
  * @param face_fluxes Pre-computed face volumetric fluxes.
  * @param time_step Time-step size (must be positive).
  * @param diffusivity Constant scalar diffusivity (non-negative).
  * @param boundary_value Callable that returns the prescribed boundary
- *        value for a face, or std::nullopt.
- * @param[in,out] cached_matrix Optional pre-allocated matrix to reuse.
- *        If non-null, resumeFill() is called and values are overwritten
- *        in-place, avoiding a new allocation and graph construction.
- *        The matrix must have been previously built by this function
- *        with the same mesh. On first call, pass a default-constructed
- *        (null) RCP; the returned TransportSystem will contain the new
- *        matrix which the caller should cache for subsequent calls.
+ *        value for a face.
+ * @param[in,out] cached_matrix Optional matrix cache; currently accepted
+ *        for API symmetry with vector transport assembly.
  * @return TransportSystem containing the assembled matrix and RHS vector.
- * @throws std::invalid_argument if @p time_step <= 0, @p diffusivity < 0,
- *         or array sizes are inconsistent with @p mesh.
+ * @throws std::invalid_argument if @p face_fluxes is on a different mesh,
+ *         @p time_step <= 0, or @p diffusivity < 0.
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
  */
 template<TpetraTypePack Pack, class BoundaryValueProvider>
 TransportSystem<Pack>
-transport_system(const Mesh<Pack>& mesh,
-                 const std::vector<typename Pack::scalar_type>& old_values,
+transport_system(const CellField<Pack>& old_values,
                  const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
@@ -96,6 +89,12 @@ transport_system(const Mesh<Pack>& mesh,
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
+    const auto& mesh = old_values.mesh();
+    if (&face_fluxes.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "transport_system requires face fluxes on the old-value mesh.");
+    }
     if (time_step <= 0.0)
     {
         throw std::invalid_argument("transport_system requires a positive time step.");
@@ -104,17 +103,14 @@ transport_system(const Mesh<Pack>& mesh,
     {
         throw std::invalid_argument("transport_system requires non-negative diffusivity.");
     }
-    if (old_values.size() < mesh.num_local_cells())
-    {
-        throw std::invalid_argument("transport_system old-value cache is too small.");
-    }
 
     // Row map = owned cells; domain map = owned + ghost cells
     // so that neighbour columns on other ranks are valid.
     auto matrix = Teuchos::rcp(
         new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 12));
     (void)cached_matrix;
-    typename Pack::vector_type rhs(mesh.owned_cell_map(), true);
+    auto rhs = Teuchos::rcp(
+        new typename Pack::vector_type(mesh.owned_cell_map(), true));
 
     Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
@@ -128,7 +124,7 @@ transport_system(const Mesh<Pack>& mesh,
         cols.clear();
         vals.clear();
         scalar_type diagonal = mesh.cell_volume(cell_lid) / time_step;
-        const auto old_value = old_values[static_cast<std::size_t>(cell_lid)];
+        const auto old_value = old_values.value(cell_lid);
         scalar_type rhs_value = diagonal * old_value;
 
         for (const auto face_lid : mesh.faces(cell_lid))
@@ -176,7 +172,7 @@ transport_system(const Mesh<Pack>& mesh,
         cols.push_back(cell_lid);
         vals.push_back(diagonal);
         matrix->insertLocalValues(cell_lid, cols(), vals());
-        rhs.replaceLocalValue(cell_lid, rhs_value);
+        rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
     // Apply boundary conditions using sumIntoLocalValues (works reliably).
@@ -212,8 +208,8 @@ transport_system(const Mesh<Pack>& mesh,
             }
             else
             {
-                rhs.sumIntoLocalValue(owner,
-                                      -out_flux * boundary_face_value);
+                rhs->sumIntoLocalValue(owner,
+                                       -out_flux * boundary_face_value);
             }
 
             // Diffusive boundary flux
@@ -235,8 +231,8 @@ transport_system(const Mesh<Pack>& mesh,
                     owner,
                     Teuchos::arrayView(&col, 1),
                     Teuchos::arrayView(&bval, 1));
-                rhs.sumIntoLocalValue(owner,
-                                      coeff * boundary_face_value);
+                rhs->sumIntoLocalValue(owner,
+                                       coeff * boundary_face_value);
             }
         }
     }
@@ -255,8 +251,8 @@ transport_system(const Mesh<Pack>& mesh,
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryValueProvider A callable with signature
  *         vec_type(int patch_id, local_ordinal_type boundary_face_id).
- * @param mesh The computational mesh.
- * @param old_values Previous time-step vector values indexed by local ID.
+ * @param old_values Previous time-step vector field. Its overlap values
+ *        must be synchronized before assembly.
  * @param face_fluxes Pre-computed face volumetric fluxes.
  * @param time_step Time-step size (must be positive).
  * @param diffusivity Constant scalar diffusivity (non-negative).
@@ -266,15 +262,14 @@ transport_system(const Mesh<Pack>& mesh,
  *        for API symmetry with scalar transport assembly.
  * @return VectorTransportSystem containing the assembled matrix and
  *         three-column RHS.
- * @throws std::invalid_argument if @p time_step <= 0, @p diffusivity < 0,
- *         or array sizes are inconsistent with @p mesh.
+ * @throws std::invalid_argument if @p face_fluxes is on a different mesh,
+ *         @p time_step <= 0, or @p diffusivity < 0.
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
  */
 template<TpetraTypePack Pack, class BoundaryValueProvider>
 VectorTransportSystem<Pack>
-transport_system(const Mesh<Pack>& mesh,
-                 const std::vector<typename Mesh<Pack>::Vec3>& old_values,
+transport_system(const VectorCellField<Pack>& old_values,
                  const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
@@ -287,6 +282,12 @@ transport_system(const Mesh<Pack>& mesh,
 
     constexpr std::size_t num_components = 3;
 
+    const auto& mesh = old_values.mesh();
+    if (&face_fluxes.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "transport_system requires face fluxes on the old-value mesh.");
+    }
     if (time_step <= 0.0)
     {
         throw std::invalid_argument("transport_system requires a positive time step.");
@@ -295,15 +296,13 @@ transport_system(const Mesh<Pack>& mesh,
     {
         throw std::invalid_argument("transport_system requires non-negative diffusivity.");
     }
-    if (old_values.size() < mesh.num_local_cells())
-    {
-        throw std::invalid_argument("transport_system old-value cache is too small.");
-    }
 
     auto matrix = Teuchos::rcp(
         new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 12));
     (void)cached_matrix;
-    typename Pack::multi_vector_type rhs(mesh.owned_cell_map(), num_components, true);
+    auto rhs = Teuchos::rcp(
+        new typename Pack::multi_vector_type(
+            mesh.owned_cell_map(), num_components, true));
 
     Teuchos::Array<local_ordinal_type> cols;
     Teuchos::Array<scalar_type> vals;
@@ -318,7 +317,7 @@ transport_system(const Mesh<Pack>& mesh,
         vals.clear();
         const auto transient = mesh.cell_volume(cell_lid) / time_step;
         scalar_type diagonal = transient;
-        const auto old_value = old_values[static_cast<std::size_t>(cell_lid)];
+        const auto old_value = old_values.value(cell_lid);
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
@@ -365,8 +364,8 @@ transport_system(const Mesh<Pack>& mesh,
         matrix->insertLocalValues(cell_lid, cols(), vals());
         for (std::size_t comp = 0; comp < num_components; ++comp)
         {
-            rhs.replaceLocalValue(cell_lid, comp,
-                                  transient * old_value.component(comp));
+            rhs->replaceLocalValue(cell_lid, comp,
+                                   transient * old_value.component(comp));
         }
     }
 
@@ -402,7 +401,7 @@ transport_system(const Mesh<Pack>& mesh,
             {
                 for (std::size_t comp = 0; comp < num_components; ++comp)
                 {
-                    rhs.sumIntoLocalValue(
+                    rhs->sumIntoLocalValue(
                         owner, comp,
                         -out_flux * boundary_face_value.component(comp));
                 }
@@ -428,7 +427,7 @@ transport_system(const Mesh<Pack>& mesh,
                     Teuchos::arrayView(&bval, 1));
                 for (std::size_t comp = 0; comp < num_components; ++comp)
                 {
-                    rhs.sumIntoLocalValue(
+                    rhs->sumIntoLocalValue(
                         owner, comp,
                         coeff * boundary_face_value.component(comp));
                 }
