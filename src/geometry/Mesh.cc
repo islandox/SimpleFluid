@@ -11,6 +11,8 @@
 
 #include "Mesh.hh"
 #include "Mesh.tcc"
+#include "fields/CellField.hh"
+#include "fields/VectorCellField.hh"
 
 namespace SimpleFluid
 {

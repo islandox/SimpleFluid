@@ -60,6 +60,20 @@ TEST(VectorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
     EXPECT_EQ(velocity.local_value(1), (SimpleFluid::vec3{4.0, 5.0, 6.0}));
 }
 
+TEST(VectorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+
+    velocity.set_owned_value(0, {1.0, 2.0, 3.0});
+    velocity.set_owned_value(1, {4.0, 5.0, 6.0});
+
+    mesh->sync_periodic_boundaries(velocity);
+
+    EXPECT_EQ(velocity.local_value(0), (SimpleFluid::vec3{1.0, 2.0, 3.0}));
+    EXPECT_EQ(velocity.local_value(1), (SimpleFluid::vec3{4.0, 5.0, 6.0}));
+}
+
 TEST(VectorCellFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh =

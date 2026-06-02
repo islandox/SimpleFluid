@@ -153,7 +153,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         }
     }
 
-    temperature.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(temperature);
 }
 
 template<TpetraTypePack Pack>
@@ -210,7 +210,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
             }
         }
     }
-    temperature.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(temperature);
 }
 
 } // namespace SimpleFluid

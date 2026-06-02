@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include "FVM/FvmOperators.hh"
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
@@ -108,6 +109,29 @@ SimpleFluid::SP<MeshType> make_cylinder_mesh()
     return factory.template build<Pack>();
 }
 
+SimpleFluid::SP<MeshType> make_boundaried_cylinder_mesh()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{0.75});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::CYLINDER));
+    db->set("radius", SimpleFluid::real_t{1.0});
+    db->set("height", SimpleFluid::real_t{2.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{"radial", "zmin", "zmax"});
+    db->set("boundary_layer_boundary_names",
+            SimpleFluid::ArrString{"radial", "zmin", "zmax"});
+    db->set("boundary_layer_counts", SimpleFluid::ArrInt{1, 1, 1});
+    db->set("boundary_layer_first_cell_heights",
+            SimpleFluid::ArrReal{0.1, 0.1, 0.1});
+    db->set("boundary_layer_growth_ratios",
+            SimpleFluid::ArrReal{1.0, 1.0, 1.0});
+
+    SimpleFluid::MeshFactory factory(db);
+    return factory.template build<Pack>();
+}
+
 SimpleFluid::SP<MeshType> make_split_sphere_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -131,11 +155,45 @@ void expect_finite_solution(const MeshType& mesh,
          ++lid)
     {
         EXPECT_TRUE(std::isfinite(solver.temperature().value(lid)));
+        EXPECT_TRUE(std::isfinite(solver.pressure().value(lid)));
         const auto velocity = solver.velocity().value(lid);
         EXPECT_TRUE(std::isfinite(velocity.x));
         EXPECT_TRUE(std::isfinite(velocity.y));
         EXPECT_TRUE(std::isfinite(velocity.z));
     }
+}
+
+void expect_zero_boundary_velocity(
+    const MeshType& mesh,
+    const SimpleFluid::VectorFaceField<Pack>& face_velocity,
+    const SimpleFluid::FaceField<Pack>& face_fluxes,
+    const char* boundary_name)
+{
+    bool saw_boundary = false;
+    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    {
+        if (mesh.boundary_patch_name(patch_id) != boundary_name)
+        {
+            continue;
+        }
+
+        saw_boundary = true;
+        for (const auto face_lid : patch.face_lids)
+        {
+            if (!face_velocity.is_owned_face(face_lid))
+            {
+                continue;
+            }
+
+            const auto value = face_velocity.value(face_lid);
+            EXPECT_NEAR(value.x, 0.0, 1.0e-12);
+            EXPECT_NEAR(value.y, 0.0, 1.0e-12);
+            EXPECT_NEAR(value.z, 0.0, 1.0e-12);
+            EXPECT_NEAR(face_fluxes.value(face_lid), 0.0, 1.0e-12);
+        }
+    }
+
+    EXPECT_TRUE(saw_boundary);
 }
 
 } // namespace
@@ -246,6 +304,56 @@ TEST(BoussinesqSolverTest, RunsBottomHotCylinderSmokeCase)
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GT(solver.time(), 0.0);
     expect_finite_solution(*mesh, solver);
+}
+
+/**
+ * @brief Runs a bottom-hot cylinder vessel with boundary layers and no-slip walls.
+ */
+TEST(BoussinesqSolverTest, RunsBoundariedCylinderSmokeCase)
+{
+    auto mesh = make_boundaried_cylinder_mesh();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["zmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    bcs.temperature["zmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    bcs.temperature["radial"] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    for (const auto* name : {"radial", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 2;
+    time_options.thermal_diffusivity = 1.0e-2;
+    time_options.kinematic_viscosity = 1.0e-2;
+    time_options.reference_temperature = 0.5;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 100;
+    linear_options.tolerance = 1.0e-12;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options,
+                                               linear_options);
+    solver.initialize_bottom_hot_top_cold(1.0, 0.0);
+    solver.run();
+
+    EXPECT_EQ(solver.step_index(), 2);
+    EXPECT_GT(solver.time(), 0.0);
+    expect_finite_solution(*mesh, solver);
+
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::face_velocities(solver.velocity(), cache,
+                                               face_velocity);
+    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+
+    expect_zero_boundary_velocity(*mesh, face_velocity, face_fluxes, "radial");
+    expect_zero_boundary_velocity(*mesh, face_velocity, face_fluxes, "zmin");
+    expect_zero_boundary_velocity(*mesh, face_velocity, face_fluxes, "zmax");
 }
 
 /**

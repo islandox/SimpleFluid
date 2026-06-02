@@ -109,7 +109,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     velocity.owned_data().putScalar(0.0);
     if (!has_nonzero_rhs)
     {
-        velocity.sync_ghosts();
+        d_mesh->sync_periodic_boundaries(velocity);
         return;
     }
 
@@ -136,7 +136,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         }
     }
 
-    velocity.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(velocity);
 }
 
 } // namespace SimpleFluid

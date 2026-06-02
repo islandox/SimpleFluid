@@ -525,6 +525,26 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 0), -1.0, 1.0e-12);
 }
 
+TEST(FvmOperatorsTest, PeriodicBoundaryUpwindMatrixUsesPairedCell)
+{
+    auto mesh = make_periodic_box_mesh();
+    const auto xmin_face = boundary_face_lid(*mesh, "xmin");
+    const auto xmax_face = boundary_face_lid(*mesh, "xmax");
+
+    SimpleFluid::FaceField<Pack> fluxes(mesh, 0.0, "face_flux");
+    fluxes.set_value(xmin_face, -0.25);
+    fluxes.set_value(xmax_face, -0.5);
+
+    const auto matrix =
+        SimpleFluid::FvmOperators::upwind_convection_matrix<Pack>(
+            *mesh, fluxes);
+
+    EXPECT_NEAR(local_matrix_entry(*matrix, 0, 0), 0.0, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 1, 1), 0.0, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 0, 1), -0.25, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 1, 0), -0.5, 1.0e-12);
+}
+
 TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
 {
     auto mesh = make_periodic_box_mesh();

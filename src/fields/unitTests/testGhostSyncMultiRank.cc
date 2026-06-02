@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "fields/CellField.hh"
+#include "fields/VectorCellField.hh"
 #include "parallel/MPI_interface.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -19,6 +20,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
+using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -91,6 +93,46 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesToAllLocalCells)
         EXPECT_DOUBLE_EQ(
             field.local_value(cell_lid),
             static_cast<Pack::scalar_type>(mesh->cell_global_id(cell_lid)));
+    }
+}
+
+TEST(GhostSyncMultiRankTest, SyncPeriodicBoundariesUpdatesScalarAndVectorGhosts)
+{
+    auto mesh = make_4x4x4_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+    expect_partitioned_mesh(*mesh, 64u);
+
+    FieldType scalar(mesh, "periodic_scalar", false);
+    VectorFieldType vector(mesh, "periodic_vector", false);
+    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<typename Pack::local_ordinal_type>(owned);
+        const auto gid =
+            static_cast<Pack::scalar_type>(mesh->cell_global_id(cell_lid));
+        scalar.set_owned_value(cell_lid, gid + 0.25);
+        vector.set_owned_value(cell_lid, {gid, 2.0 * gid, -gid});
+    }
+
+    mesh->sync_periodic_boundaries(scalar);
+    mesh->sync_periodic_boundaries(vector);
+
+    for (std::size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
+    {
+        const auto cell_lid =
+            static_cast<typename Pack::local_ordinal_type>(cell);
+        const auto gid =
+            static_cast<Pack::scalar_type>(mesh->cell_global_id(cell_lid));
+        EXPECT_DOUBLE_EQ(scalar.local_value(cell_lid), gid + 0.25);
+
+        const auto value = vector.local_value(cell_lid);
+        EXPECT_DOUBLE_EQ(value.x, gid);
+        EXPECT_DOUBLE_EQ(value.y, 2.0 * gid);
+        EXPECT_DOUBLE_EQ(value.z, -gid);
     }
 }
 

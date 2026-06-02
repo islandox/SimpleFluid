@@ -103,6 +103,20 @@ TEST(CellFieldTest, SynchronizesOwnedValuesIntoOverlapStorage)
     EXPECT_DOUBLE_EQ(temperature.local_value(1), 20.0);
 }
 
+TEST(CellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType temperature(mesh, 0.0, "temperature");
+    temperature.set_owned_value(0, 11.0);
+    temperature.set_owned_value(1, 22.0);
+
+    mesh->sync_periodic_boundaries(temperature);
+
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), 11.0);
+    EXPECT_DOUBLE_EQ(temperature.local_value(1), 22.0);
+}
+
 #include "geometry/STKMesh.hh"
 
 TEST(CellFieldTest, RequiresAssembledMesh)
