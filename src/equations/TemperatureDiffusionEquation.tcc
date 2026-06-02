@@ -61,6 +61,24 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
     scalar_type thermal_diffusivity,
     field_type& temperature) const
 {
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    advance_explicit(old_temperature, time_step, thermal_diffusivity,
+                     temperature, zero_source);
+}
+
+template<TpetraTypePack Pack>
+void TemperatureDiffusionEquation<Pack>::advance_explicit(
+    const std::vector<scalar_type>& old_temperature,
+    scalar_type time_step,
+    scalar_type thermal_diffusivity,
+    field_type& temperature,
+    const source_type& right_hand_source) const
+{
     EquationValidation::require_mesh_match(*d_mesh, temperature,
                                            "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(time_step, "time step",
@@ -101,7 +119,9 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         laplacian /= d_mesh->cell_volume(cell_lid);
         temperature.set_owned_value(cell_lid,
                                     temp_p
-                                  + time_step * thermal_diffusivity * laplacian);
+                                  + time_step
+                                  * (thermal_diffusivity * laplacian
+                                     + right_hand_source(cell_lid)));
     }
 
     // Apply Dirichlet boundary contributions on top of the interior-face
@@ -165,6 +185,27 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     field_type& temperature,
     const LinearSolverOptions& linear_options) const
 {
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    advance_semi_implicit(old_temperature, face_fluxes, time_step,
+                          thermal_diffusivity, temperature, zero_source,
+                          linear_options);
+}
+
+template<TpetraTypePack Pack>
+void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
+    const field_type& old_temperature,
+    const FaceField<Pack>& face_fluxes,
+    scalar_type time_step,
+    scalar_type thermal_diffusivity,
+    field_type& temperature,
+    const source_type& right_hand_source,
+    const LinearSolverOptions& linear_options) const
+{
     EquationValidation::require_mesh_match(*d_mesh, old_temperature,
                                            "TemperatureDiffusionEquation");
     EquationValidation::require_mesh_match(*d_mesh, temperature,
@@ -187,7 +228,8 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
 
     auto system = FvmOperators::transport_system<Pack>(
         old_temperature, face_fluxes, time_step,
-        thermal_diffusivity, boundary_value, d_cached_transport_matrix);
+        thermal_diffusivity, boundary_value, right_hand_source,
+        d_cached_transport_matrix);
 
     if (d_cached_transport_matrix.is_null())
     {

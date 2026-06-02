@@ -72,6 +72,24 @@ void PressureProjectionEquation<Pack>::project(
     const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity)
 {
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    project(pressure, time_step, velocity_boundary_cache, velocity,
+            zero_source);
+}
+
+template<TpetraTypePack Pack>
+void PressureProjectionEquation<Pack>::project(
+    field_type& pressure,
+    scalar_type time_step,
+    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    velocity_field_type& velocity,
+    const source_type& right_hand_source)
+{
     EquationValidation::require_mesh_match(*d_mesh, pressure,
                                            "PressureProjectionEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity,
@@ -106,13 +124,15 @@ void PressureProjectionEquation<Pack>::project(
 
     for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = d_mesh->cell_global_id(cell_lid);
         const auto rhs_value = row_gid == gauge_gid
                              ? scalar_type{}
                              : -FvmOperators::cell_flux_balance<Pack>(
                                    *d_mesh, d_cached_face_fluxes, cell_lid)
-                               / time_step;
+                               / time_step
+                               + d_mesh->cell_volume(cell_lid)
+                               * right_hand_source(cell_lid);
         d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
@@ -134,7 +154,7 @@ void PressureProjectionEquation<Pack>::project(
                                                   true);
     for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<typename Pack::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto& gradient = d_cached_gradients[owned];
         for (std::size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
         {

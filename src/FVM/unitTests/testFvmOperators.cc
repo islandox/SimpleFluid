@@ -359,6 +359,99 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
               mesh->owned_cell_map()->getGlobalNumElements());
 }
 
+TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
+{
+    auto mesh = make_mesh();
+    FieldType old_values(mesh, "old_values");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        old_values.set_value(lid, 3.0 + static_cast<double>(lid));
+    }
+    old_values.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+    auto boundary_value =
+        [](int, MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto source =
+        [&](MeshType::local_ordinal_type cell_lid) -> Pack::scalar_type
+    {
+        return 2.0 + mesh->cell_centroid(cell_lid).x;
+    };
+
+    constexpr double time_step = 0.25;
+    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+        old_values, zero_fluxes, time_step, 0.0, boundary_value, source);
+
+    const auto rhs_data = system.rhs->getData();
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto volume = mesh->cell_volume(lid);
+        const auto expected =
+            volume / time_step * old_values.value(lid) + volume * source(lid);
+        EXPECT_NEAR(rhs_data[lid], expected, 1.0e-12);
+    }
+}
+
+TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
+{
+    auto mesh = make_mesh();
+    VectorFieldType old_values(mesh, "old_values");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        old_values.set_value(
+            lid,
+            {1.0 + static_cast<double>(lid),
+             2.0 + static_cast<double>(lid),
+             3.0 + static_cast<double>(lid)});
+    }
+    old_values.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+    auto boundary_value =
+        [](int, MeshType::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
+    {
+        return {};
+    };
+    auto source =
+        [&](MeshType::local_ordinal_type cell_lid)
+            -> SimpleFluid::vec3<Pack::scalar_type>
+    {
+        const auto& center = mesh->cell_centroid(cell_lid);
+        return {2.0 + center.x, 3.0 + center.y, 4.0 + center.z};
+    };
+
+    constexpr double time_step = 0.25;
+    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+        old_values, zero_fluxes, time_step, 0.0, boundary_value, source);
+
+    for (std::size_t component = 0;
+         component < VectorFieldType::num_components;
+         ++component)
+    {
+        const auto rhs_data = system.rhs->getData(component);
+        for (MeshType::local_ordinal_type lid = 0;
+             lid < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_owned_cells());
+             ++lid)
+        {
+            const auto volume = mesh->cell_volume(lid);
+            const auto expected =
+                volume / time_step * old_values.value(lid).component(component)
+              + volume * source(lid).component(component);
+            EXPECT_NEAR(rhs_data[lid], expected, 1.0e-12);
+        }
+    }
+}
+
 // =========================================================================
 //  Periodic Boundary Condition Tests
 // =========================================================================

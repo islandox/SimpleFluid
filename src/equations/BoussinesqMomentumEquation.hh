@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 
@@ -45,6 +46,8 @@ public:
     using velocity_field_type = VectorCellField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
+    using source_type =
+        std::function<typename velocity_field_type::vec_type(local_ordinal_type)>;
 
     explicit BoussinesqMomentumEquation(SP<const mesh_type> mesh);
 
@@ -55,6 +58,16 @@ public:
         const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,
         velocity_field_type& velocity,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    void advance_velocity(
+        const velocity_field_type& old_velocity,
+        const FaceField<Pack>& face_fluxes,
+        const field_type& temperature,
+        const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        velocity_field_type& velocity,
+        const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {}) const;
 
 private:

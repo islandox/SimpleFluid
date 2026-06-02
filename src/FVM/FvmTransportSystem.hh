@@ -18,6 +18,7 @@
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <concepts>
 #include <cstddef>
 #include <stdexcept>
 
@@ -55,12 +56,15 @@ struct VectorTransportSystem
  *        advection-diffusion) for a scalar field.
  *
  * The assembly uses first-order upwinding for advection and a two-point
- * flux approximation for diffusion.  Boundary values are supplied lazily
- * via the callable @p boundary_value.
+ * flux approximation for diffusion.  Boundary values and right-hand source
+ * values are supplied lazily via callables.  The source term is interpreted
+ * as a per-unit-volume quantity and contributes @f$V_i s_i@f$ to the RHS.
  *
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryValueProvider A callable with signature
  *         scalar_type(int patch_id, local_ordinal_type boundary_face_id).
+ * @tparam SourceProvider A callable with signature
+ *         scalar_type(local_ordinal_type cell_lid).
  * @param old_values Previous time-step scalar field. Its overlap values
  *        must be synchronized before assembly.
  * @param face_fluxes Pre-computed face volumetric fluxes.
@@ -68,6 +72,8 @@ struct VectorTransportSystem
  * @param diffusivity Constant scalar diffusivity (non-negative).
  * @param boundary_value Callable that returns the prescribed boundary
  *        value for a face.
+ * @param right_hand_source Callable that returns the per-unit-volume source
+ *        term for an owned cell.
  * @param[in,out] cached_matrix Optional matrix cache; currently accepted
  *        for API symmetry with vector transport assembly.
  * @return TransportSystem containing the assembled matrix and RHS vector.
@@ -76,13 +82,15 @@ struct VectorTransportSystem
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
  */
-template<TpetraTypePack Pack, class BoundaryValueProvider>
+template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+    requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
 TransportSystem<Pack>
 transport_system(const CellField<Pack>& old_values,
                  const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
                  BoundaryValueProvider boundary_value,
+                 SourceProvider right_hand_source,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
     using matrix_type = typename Pack::matrix_type;
@@ -123,9 +131,12 @@ transport_system(const CellField<Pack>& old_values,
 
         cols.clear();
         vals.clear();
-        scalar_type diagonal = mesh.cell_volume(cell_lid) / time_step;
+        const auto volume = mesh.cell_volume(cell_lid);
+        const auto transient = volume / time_step;
+        scalar_type diagonal = transient;
         const auto old_value = old_values.value(cell_lid);
-        scalar_type rhs_value = diagonal * old_value;
+        scalar_type rhs_value =
+            transient * old_value + volume * right_hand_source(cell_lid);
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
@@ -249,15 +260,49 @@ transport_system(const CellField<Pack>& old_values,
 }
 
 /**
+ * @brief Assemble the scalar semi-implicit transport system with no
+ *        explicit right-hand source term.
+ *
+ * This overload preserves the existing call pattern and delegates to the
+ * source-aware transport assembly with a zero source.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+TransportSystem<Pack>
+transport_system(const CellField<Pack>& old_values,
+                 const FaceField<Pack>& face_fluxes,
+                 typename Pack::scalar_type time_step,
+                 typename Pack::scalar_type diffusivity,
+                 BoundaryValueProvider boundary_value,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    return transport_system<Pack>(
+        old_values, face_fluxes, time_step, diffusivity, boundary_value,
+        zero_source, cached_matrix);
+}
+
+/**
  * @brief Assemble the semi-implicit transport system for a 3-component
  *        vector field using one shared transport matrix.
  *
- * The transport operator is identical for all velocity components, while
- * the transient, boundary, and body-force terms live in separate RHS columns.
+ * The transport operator is identical for all components, while transient,
+ * boundary, and source terms live in separate RHS columns.  The source term
+ * is interpreted as a per-unit-volume vector and contributes
+ * @f$V_i \mathbf{s}_i@f$ to the RHS.
  *
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryValueProvider A callable with signature
  *         vec_type(int patch_id, local_ordinal_type boundary_face_id).
+ * @tparam SourceProvider A callable with signature
+ *         vec_type(local_ordinal_type cell_lid).
  * @param old_values Previous time-step vector field. Its overlap values
  *        must be synchronized before assembly.
  * @param face_fluxes Pre-computed face volumetric fluxes.
@@ -265,6 +310,8 @@ transport_system(const CellField<Pack>& old_values,
  * @param diffusivity Constant scalar diffusivity (non-negative).
  * @param boundary_value Callable that returns the prescribed boundary
  *        vector value for a face.
+ * @param right_hand_source Callable that returns the per-unit-volume source
+ *        vector for an owned cell.
  * @param[in,out] cached_matrix Optional matrix cache; currently accepted
  *        for API symmetry with scalar transport assembly.
  * @return VectorTransportSystem containing the assembled matrix and
@@ -274,13 +321,15 @@ transport_system(const CellField<Pack>& old_values,
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
  */
-template<TpetraTypePack Pack, class BoundaryValueProvider>
+template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+    requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
 VectorTransportSystem<Pack>
 transport_system(const VectorCellField<Pack>& old_values,
                  const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
                  BoundaryValueProvider boundary_value,
+                 SourceProvider right_hand_source,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
     using matrix_type = typename Pack::matrix_type;
@@ -322,9 +371,11 @@ transport_system(const VectorCellField<Pack>& old_values,
 
         cols.clear();
         vals.clear();
-        const auto transient = mesh.cell_volume(cell_lid) / time_step;
+        const auto volume = mesh.cell_volume(cell_lid);
+        const auto transient = volume / time_step;
         scalar_type diagonal = transient;
         const auto old_value = old_values.value(cell_lid);
+        const auto source_value = right_hand_source(cell_lid);
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
@@ -375,7 +426,8 @@ transport_system(const VectorCellField<Pack>& old_values,
         for (std::size_t comp = 0; comp < num_components; ++comp)
         {
             rhs->replaceLocalValue(cell_lid, comp,
-                                   transient * old_value.component(comp));
+                                   transient * old_value.component(comp)
+                                 + volume * source_value.component(comp));
         }
     }
 
@@ -451,6 +503,36 @@ transport_system(const VectorCellField<Pack>& old_values,
 
     matrix->fillComplete();
     return {matrix, rhs};
+}
+
+/**
+ * @brief Assemble the vector semi-implicit transport system with no
+ *        explicit right-hand source term.
+ *
+ * This overload preserves the existing call pattern and delegates to the
+ * source-aware transport assembly with a zero vector source.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+VectorTransportSystem<Pack>
+transport_system(const VectorCellField<Pack>& old_values,
+                 const FaceField<Pack>& face_fluxes,
+                 typename Pack::scalar_type time_step,
+                 typename Pack::scalar_type diffusivity,
+                 BoundaryValueProvider boundary_value,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using vec_type = typename VectorCellField<Pack>::vec_type;
+
+    auto zero_source =
+        [](local_ordinal_type) -> vec_type
+    {
+        return vec_type{};
+    };
+
+    return transport_system<Pack>(
+        old_values, face_fluxes, time_step, diffusivity, boundary_value,
+        zero_source, cached_matrix);
 }
 
 } // namespace SimpleFluid::FvmOperators
