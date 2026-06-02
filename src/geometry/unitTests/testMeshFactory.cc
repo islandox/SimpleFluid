@@ -270,9 +270,9 @@ TEST(MeshFactoryTest, BoundaryLayersRejectOverlappingOppositeSides)
 }
 
 /**
- * @brief Verifies a wedge-mesh cylinder has correct cell counts, all cells are TRIPRISM, and boundary parts are properly assigned.
+ * @brief Verifies a variable-ring cylinder mesh has correct cell counts, wedge cells, and boundary parts.
  */
-TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
+TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
 {
     auto db = make_cylinder_database();
     SimpleFluid::MeshFactory factory(db);
@@ -281,8 +281,8 @@ TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->spatial_dimension(), 3u);
-    EXPECT_EQ(mesh->num_local_cells(), 16u);
-    EXPECT_EQ(mesh->num_owned_cells(), 16u);
+    EXPECT_EQ(mesh->num_local_cells(), 14u);
+    EXPECT_EQ(mesh->num_owned_cells(), 14u);
 
     for (MeshType::local_ordinal_type lid = 0;
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
@@ -303,9 +303,9 @@ TEST(MeshFactoryTest, CylinderBuildsWedgeMeshWithBoundaryParts)
         }
     }
 
-    EXPECT_EQ(boundary_counts["radial"], 16u);
-    EXPECT_EQ(boundary_counts["zmin"], 8u);
-    EXPECT_EQ(boundary_counts["zmax"], 8u);
+    EXPECT_EQ(boundary_counts["radial"], 14u);
+    EXPECT_EQ(boundary_counts["zmin"], 7u);
+    EXPECT_EQ(boundary_counts["zmax"], 7u);
 }
 
 /**
@@ -319,7 +319,7 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
     auto mesh = factory.template build<>();
 
     ASSERT_TRUE(mesh != nullptr);
-    EXPECT_GT(mesh->num_local_cells(), 0u);
+    EXPECT_EQ(mesh->num_local_cells(), 108u);
     for (MeshType::local_ordinal_type lid = 0;
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
