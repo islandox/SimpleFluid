@@ -32,6 +32,28 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const
 {
+    auto zero_source =
+        [](local_ordinal_type) -> typename velocity_field_type::vec_type
+    {
+        return {};
+    };
+
+    advance_velocity(old_velocity, face_fluxes, temperature,
+                     velocity_boundary_cache, options, velocity,
+                     zero_source, linear_options);
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqMomentumEquation<Pack>::advance_velocity(
+    const velocity_field_type& old_velocity,
+    const FaceField<Pack>& face_fluxes,
+    const field_type& temperature,
+    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    velocity_field_type& velocity,
+    const source_type& right_hand_source,
+    const LinearSolverOptions& linear_options) const
+{
     EquationValidation::require_mesh_match(*d_mesh, old_velocity,
                                            "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(*d_mesh, temperature,
@@ -67,36 +89,31 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
 
+    const auto gravity = options.gravity_vector();
+    auto combined_source =
+        [&](local_ordinal_type cell_lid) -> typename velocity_field_type::vec_type
+    {
+        const auto temperature_delta =
+            temperature.value(cell_lid) - options.reference_temperature;
+        const auto source_scale =
+            options.thermal_expansion * temperature_delta;
+        const auto external_source = right_hand_source(cell_lid);
+        return {
+            source_scale * (-gravity.x) + external_source.x,
+            source_scale * (-gravity.y) + external_source.y,
+            source_scale * (-gravity.z) + external_source.z
+        };
+    };
+
     auto system = FvmOperators::transport_system<Pack>(
         old_velocity, face_fluxes, options.time_step,
         options.kinematic_viscosity, boundary_value,
+        combined_source,
         d_cached_transport_matrix);
 
     if (d_cached_transport_matrix.is_null())
     {
         d_cached_transport_matrix = system.matrix;
-    }
-
-    const auto gravity = options.gravity_vector();
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto temperature_delta =
-            temperature.value(cell_lid) - options.reference_temperature;
-        const auto volume = d_mesh->cell_volume(cell_lid);
-        for (std::size_t component = 0;
-             component < velocity_field_type::num_components;
-             ++component)
-        {
-            const auto gravity_component =
-                FvmOperators::detail::component_value(gravity, component);
-            const auto buoyancy =
-                options.thermal_expansion
-              * temperature_delta
-              * (-gravity_component);
-            system.rhs->sumIntoLocalValue(cell_lid, component,
-                                          volume * buoyancy);
-        }
     }
 
     bool has_nonzero_rhs = false;

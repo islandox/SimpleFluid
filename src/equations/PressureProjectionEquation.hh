@@ -19,6 +19,7 @@
 
 #include <Teuchos_RCP.hpp>
 
+#include <functional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -45,6 +46,8 @@ public:
     using face_velocity_field_type = VectorFaceField<Pack>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using source_type = std::function<scalar_type(local_ordinal_type)>;
 
     explicit PressureProjectionEquation(
         SP<const mesh_type> mesh,
@@ -68,6 +71,12 @@ public:
                  scalar_type time_step,
                  const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
                  velocity_field_type& velocity);
+
+    void project(field_type& pressure,
+                 scalar_type time_step,
+                 const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+                 velocity_field_type& velocity,
+                 const source_type& right_hand_source);
 
 private:
     static Teuchos::RCP<const map_type> require_owned_cell_map(

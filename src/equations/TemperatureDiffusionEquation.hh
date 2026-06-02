@@ -20,6 +20,7 @@
 
 #include <cstddef>
 #include <cmath>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -43,6 +44,7 @@ public:
     using field_type = CellField<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
+    using source_type = std::function<scalar_type(local_ordinal_type)>;
 
     TemperatureDiffusionEquation(SP<const mesh_type> mesh,
                                  const BoundaryConditionSet& boundary_conditions);
@@ -54,12 +56,27 @@ public:
                           scalar_type thermal_diffusivity,
                           field_type& temperature) const;
 
+    void advance_explicit(const std::vector<scalar_type>& old_temperature,
+                          scalar_type time_step,
+                          scalar_type thermal_diffusivity,
+                          field_type& temperature,
+                          const source_type& right_hand_source) const;
+
     void advance_semi_implicit(
         const field_type& old_temperature,
         const FaceField<Pack>& face_fluxes,
         scalar_type time_step,
         scalar_type thermal_diffusivity,
         field_type& temperature,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    void advance_semi_implicit(
+        const field_type& old_temperature,
+        const FaceField<Pack>& face_fluxes,
+        scalar_type time_step,
+        scalar_type thermal_diffusivity,
+        field_type& temperature,
+        const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {}) const;
 
 private:
