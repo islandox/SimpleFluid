@@ -31,6 +31,12 @@
 namespace SimpleFluid
 {
 
+template<TpetraTypePack Pack>
+class CellField;
+
+template<TpetraTypePack Pack>
+class VectorCellField;
+
 template <typename ID>
 constexpr ID invalid_id() noexcept
 {
@@ -273,6 +279,22 @@ public:
 
     /** @brief Return the local cell LID of the opposite cell or periodic neighbor. */
     inline local_ordinal_type opposite_or_periodic_neighbor_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+
+    /**
+     * @brief Synchronize overlap values used by periodic paired-cell stencils.
+     *
+     * Periodic neighbors are represented as local overlap cells, so the
+     * existing Tpetra ghost import is the synchronization path.
+     */
+    inline void sync_periodic_boundaries(CellField<Pack>& field) const;
+
+    /**
+     * @brief Synchronize vector overlap values used by periodic paired-cell stencils.
+     *
+     * Periodic neighbors are represented as local overlap cells, so the
+     * existing Tpetra ghost import is the synchronization path.
+     */
+    inline void sync_periodic_boundaries(VectorCellField<Pack>& field) const;
 
     /**
      * @brief Manually set a periodic face pair (used for testing or when the

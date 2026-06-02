@@ -161,7 +161,8 @@ upwind_convection_matrix(
             }
             else if (mesh.is_interior_face(face_lid))
             {
-                const auto other = mesh.opposite_cell(face_lid, cell_lid);
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
                 cols.push_back(other);
                 vals.push_back(out_flux);
             }

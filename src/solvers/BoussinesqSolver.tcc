@@ -91,9 +91,9 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
         d_velocity.set_value(cell_lid, {});
     }
 
-    d_temperature.sync_ghosts();
-    d_pressure.sync_ghosts();
-    d_velocity.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(d_temperature);
+    d_mesh->sync_periodic_boundaries(d_pressure);
+    d_mesh->sync_periodic_boundaries(d_velocity);
 }
 
 template<TpetraTypePack Pack>
@@ -125,8 +125,8 @@ void BoussinesqSolver<Pack>::step()
 {
     if (d_step_index == 0)
     {
-        d_temperature.sync_ghosts();
-        d_velocity.sync_ghosts();
+        d_mesh->sync_periodic_boundaries(d_temperature);
+        d_mesh->sync_periodic_boundaries(d_velocity);
     }
 
     FvmOperators::face_fluxes(d_velocity, d_velocity_boundary_cache,
@@ -151,8 +151,8 @@ void BoussinesqSolver<Pack>::step()
                                                  d_temperature,
                                                  d_linear_options);
 
-    d_temperature.sync_ghosts();
-    d_velocity.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(d_temperature);
+    d_mesh->sync_periodic_boundaries(d_velocity);
 
     d_time += d_time_options.time_step;
     ++d_step_index;

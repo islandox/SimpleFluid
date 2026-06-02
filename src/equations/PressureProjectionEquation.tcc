@@ -62,7 +62,7 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
                                            "PressureProjectionEquation");
 
     pressure.owned_data().putScalar(0.0);
-    pressure.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(pressure);
 }
 
 template<TpetraTypePack Pack>
@@ -124,7 +124,7 @@ void PressureProjectionEquation<Pack>::project(
     {
         throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
     }
-    pressure.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(pressure);
 
     FvmOperators::cell_gradient(pressure, d_cached_gradients);
 
@@ -144,7 +144,7 @@ void PressureProjectionEquation<Pack>::project(
     }
     velocity.owned_data().update(-time_step, gradient_mv, 1.0);
 
-    velocity.sync_ghosts();
+    d_mesh->sync_periodic_boundaries(velocity);
 }
 
 } // namespace SimpleFluid
