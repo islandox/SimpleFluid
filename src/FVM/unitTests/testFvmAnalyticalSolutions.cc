@@ -40,6 +40,14 @@ SimpleFluid::SP<MeshType> make_unit_box_mesh()
         SimpleFluid::test::make_box_database(2, 2, 2, 0.5));
 }
 
+SimpleFluid::SP<MeshType> make_taylor_green_mesh()
+{
+    constexpr int n_cells = 8;
+    const auto mesh_size = 2.0 * pi / static_cast<double>(n_cells);
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(n_cells, n_cells, 1, mesh_size));
+}
+
 MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
                                                const char* boundary_name)
 {
@@ -76,6 +84,15 @@ double affine_scalar(const SimpleFluid::vec3<>& point)
     return 1.0 + 2.0 * point.x - 3.0 * point.y + 4.0 * point.z;
 }
 
+SimpleFluid::vec3<> taylor_green_velocity(const SimpleFluid::vec3<>& point)
+{
+    return {
+        std::sin(point.x) * std::cos(point.y),
+       -std::cos(point.x) * std::sin(point.y),
+        0.0
+    };
+}
+
 double burgers_initial(double x)
 {
     return burgers_background + burgers_amplitude * std::sin(2.0 * pi * x);
@@ -96,6 +113,54 @@ double burgers_exact(double x, double time)
     }
 
     return burgers_initial(foot);
+}
+
+FieldType make_burgers_initial_solution(SimpleFluid::SP<MeshType> mesh)
+{
+    FieldType solution(mesh, "burgers");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        solution.set_value(lid, burgers_initial(mesh->cell_centroid(lid).x));
+    }
+    mesh->sync_periodic_boundaries(solution);
+
+    return solution;
+}
+
+void overwrite_owned_values(FieldType& target, const FieldType& source)
+{
+    if (target.mesh_ptr().get() != source.mesh_ptr().get())
+    {
+        throw std::invalid_argument(
+            "Cannot overwrite Burgers solution values across different meshes.");
+    }
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+             target.mesh().num_owned_cells());
+         ++lid)
+    {
+        target.set_value(lid, source.value(lid));
+    }
+    target.mesh().sync_periodic_boundaries(target);
+}
+
+void expect_burgers_near_exact(const FieldType& numerical,
+                               double time,
+                               double l2_tolerance,
+                               double linf_tolerance)
+{
+    auto exact = [time](SimpleFluid::vec3<> position)
+    {
+        return burgers_exact(position.x, time);
+    };
+
+    EXPECT_LT(SimpleFluid::l2_error(numerical, exact), l2_tolerance)
+        << "at time " << time;
+    EXPECT_LT(SimpleFluid::linf_error(numerical, exact), linf_tolerance)
+        << "at time " << time;
 }
 
 SimpleFluid::FaceField<Pack> burgers_fluxes(const FieldType& solution)
@@ -186,7 +251,7 @@ FieldType advance_burgers_explicit(const FieldType& old_solution,
                                old_solution.value(lid)
                              - time_step * balance / mesh.cell_volume(lid));
     }
-    new_solution.sync_ghosts();
+    mesh.sync_periodic_boundaries(new_solution);
 
     return new_solution;
 }
@@ -214,7 +279,7 @@ FieldType solve_burgers_semi_implicit(const FieldType& old_solution,
         *system.rhs,
         new_solution.owned_data(),
         options);
-    new_solution.sync_ghosts();
+    mesh.sync_periodic_boundaries(new_solution);
 
     return new_solution;
 }
@@ -249,6 +314,37 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
     for (const auto value : divergence)
     {
         EXPECT_NEAR(value, 6.0, 1.0e-12);
+    }
+}
+
+TEST(FvmAnalyticalSolutionsTest, TaylorGreenVortexIsDiscreteDivergenceFree)
+{
+    auto mesh = make_taylor_green_mesh();
+    SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "taylor_green");
+
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (!mesh->is_owned_face(fid))
+        {
+            continue;
+        }
+
+        face_velocity.set_value(
+            fid, taylor_green_velocity(mesh->face_centroid(fid)));
+    }
+
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "taylor_green_flux");
+    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+    const auto divergence =
+        SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
+            *mesh, face_fluxes);
+
+    ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
+    for (const auto value : divergence)
+    {
+        EXPECT_NEAR(value, 0.0, 1.0e-12);
     }
 }
 
@@ -301,51 +397,53 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalBurgersTracksPreShockSineWave)
 {
     constexpr int n_cells = 64;
     constexpr double time_step = 2.0e-3;
+    const std::vector<int> checkpoints{1, 5, 10, 20};
     auto mesh = make_periodic_line_mesh(n_cells);
-    FieldType solution(mesh, "burgers");
+    auto solution = make_burgers_initial_solution(mesh);
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
-         ++lid)
+    int step = 0;
+    for (const auto checkpoint : checkpoints)
     {
-        solution.set_value(lid, burgers_initial(mesh->cell_centroid(lid).x));
+        ASSERT_GT(checkpoint, step);
+        while (step < checkpoint)
+        {
+            const auto next = advance_burgers_explicit(solution, time_step);
+            overwrite_owned_values(solution, next);
+            ++step;
+        }
+
+        expect_burgers_near_exact(solution,
+                                  time_step * static_cast<double>(step),
+                                  8.0e-3,
+                                  1.6e-2);
     }
-    solution.sync_ghosts();
-
-    const auto numerical = advance_burgers_explicit(solution, time_step);
-    auto exact = [](SimpleFluid::vec3<> position)
-    {
-        return burgers_exact(position.x, time_step);
-    };
-
-    EXPECT_LT(SimpleFluid::l2_error(numerical, exact), 2.5e-3);
-    EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 5.0e-3);
 }
 
 TEST(FvmAnalyticalSolutionsTest, SemiImplicitBurgersTracksPreShockSineWave)
 {
     constexpr int n_cells = 64;
     constexpr double time_step = 2.0e-3;
+    const std::vector<int> checkpoints{1, 5, 10, 20};
     auto mesh = make_periodic_line_mesh(n_cells);
-    FieldType solution(mesh, "burgers");
+    auto solution = make_burgers_initial_solution(mesh);
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
-         ++lid)
+    int step = 0;
+    for (const auto checkpoint : checkpoints)
     {
-        solution.set_value(lid, burgers_initial(mesh->cell_centroid(lid).x));
+        ASSERT_GT(checkpoint, step);
+        while (step < checkpoint)
+        {
+            bool converged = false;
+            const auto next =
+                solve_burgers_semi_implicit(solution, time_step, converged);
+            ASSERT_TRUE(converged) << "at step " << step + 1;
+            overwrite_owned_values(solution, next);
+            ++step;
+        }
+
+        expect_burgers_near_exact(solution,
+                                  time_step * static_cast<double>(step),
+                                  8.0e-3,
+                                  1.6e-2);
     }
-    solution.sync_ghosts();
-
-    bool converged = false;
-    const auto numerical =
-        solve_burgers_semi_implicit(solution, time_step, converged);
-    ASSERT_TRUE(converged);
-    auto exact = [](SimpleFluid::vec3<> position)
-    {
-        return burgers_exact(position.x, time_step);
-    };
-
-    EXPECT_LT(SimpleFluid::l2_error(numerical, exact), 2.5e-3);
-    EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 5.0e-3);
 }
