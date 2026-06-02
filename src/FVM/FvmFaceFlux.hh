@@ -54,7 +54,9 @@ struct VelocityBoundaryCache
  * @tparam Pack The Tpetra type pack.
  * @param mesh Shared pointer to the computational mesh.
  * @param boundary_conditions The boundary-condition set to evaluate.
- * @return VelocityBoundaryCache populated with Dirichlet and no-slip values.
+ * @return VelocityBoundaryCache populated with prescribed non-periodic
+ *         boundary values. Periodic faces are left to the paired-cell
+ *         interpolation path.
  * @throws std::invalid_argument if @p mesh is null.
  */
 template<TpetraTypePack Pack>
@@ -80,9 +82,9 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
         {
             if (iter->second.type == BoundaryConditionType::Periodic)
             {
-                continue;  // Periodic faces get their values from the paired cell, not a prescribed value.
+                prescribed_value = {};
             }
-            if (iter->second.type == BoundaryConditionType::NoSlip)
+            else if (iter->second.type == BoundaryConditionType::NoSlip)
             {
                 prescribed_value = {0.0, 0.0, 0.0};
             }
@@ -203,6 +205,7 @@ void load_boundary_face_velocity(
         {
             const auto face_lid = boundary_patch.face_lids[i];
             if (!face_velocity.is_owned_face(face_lid)) continue;
+            if (mesh.is_periodic_boundary_face(face_lid)) continue;
 
             face_velocity.set_value(face_lid, iter->second[i]);
         }

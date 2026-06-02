@@ -197,6 +197,10 @@ transport_system(const CellField<Pack>& old_values,
             {
                 continue;
             }
+            if (mesh.is_periodic_boundary_face(face_lid))
+            {
+                continue;
+            }
 
             const auto owner = mesh.owner_cell(face_lid);
 
@@ -350,8 +354,17 @@ transport_system(const VectorCellField<Pack>& old_values,
                 cols.push_back(other);
                 vals.push_back(out_flux);
             }
+            else if (mesh.is_periodic_boundary_face(face_lid))
+            {
+                const auto other = mesh.periodic_neighbor_cell(face_lid);
+                cols.push_back(other);
+                vals.push_back(out_flux);
+            }
 
-            if (diffusivity <= scalar_type{0} || !mesh.is_interior_face(face_lid))
+            const bool is_conducting_face =
+                mesh.is_interior_face(face_lid)
+             || mesh.is_periodic_boundary_face(face_lid);
+            if (diffusivity <= scalar_type{0} || !is_conducting_face)
             {
                 continue;
             }
@@ -364,7 +377,9 @@ transport_system(const VectorCellField<Pack>& old_values,
             }
             const auto coeff =
                 diffusivity * mesh.face_area(face_lid) / distance;
-            const auto other = mesh.opposite_cell(face_lid, cell_lid);
+            const auto other = mesh.is_periodic_boundary_face(face_lid)
+                                 ? mesh.periodic_neighbor_cell(face_lid)
+                                 : mesh.opposite_cell(face_lid, cell_lid);
             diagonal += coeff;
             cols.push_back(other);
             vals.push_back(-coeff);
@@ -387,6 +402,10 @@ transport_system(const VectorCellField<Pack>& old_values,
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
             if (!mesh.is_owned_face(face_lid))
+            {
+                continue;
+            }
+            if (mesh.is_periodic_boundary_face(face_lid))
             {
                 continue;
             }

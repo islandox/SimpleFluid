@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace
@@ -51,6 +52,46 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
         values[static_cast<std::size_t>(lid)] = field.local_value(lid);
     }
     return values;
+}
+
+MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
+                                               const char* boundary_name)
+{
+    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    {
+        if (mesh.boundary_patch_name(patch_id) == boundary_name
+            && !patch.face_lids.empty())
+        {
+            return patch.face_lids.front();
+        }
+    }
+
+    throw std::runtime_error("Requested boundary face was not found.");
+}
+
+Pack::scalar_type local_matrix_entry(
+    const Pack::matrix_type& matrix,
+    MeshType::local_ordinal_type row,
+    MeshType::local_ordinal_type column)
+{
+    const auto row_entries = matrix.getNumEntriesInLocalRow(row);
+    typename Pack::matrix_type::nonconst_local_inds_host_view_type columns(
+        "columns", row_entries);
+    typename Pack::matrix_type::nonconst_values_host_view_type values(
+        "values", row_entries);
+    std::size_t num_entries = 0;
+    matrix.getLocalRowCopy(row, columns, values, num_entries);
+
+    Pack::scalar_type entry = 0.0;
+    for (std::size_t i = 0; i < num_entries; ++i)
+    {
+        if (columns(i) == column)
+        {
+            entry += values(i);
+        }
+    }
+
+    return entry;
 }
 
 } // namespace
@@ -336,6 +377,38 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
     EXPECT_NEAR(v_xmax.x, 2.0, 1.0e-12);  // (3 + 1) / 2
 }
 
+TEST(FvmOperatorsTest, PeriodicVelocityCacheDoesNotOverwritePairedFaceVelocity)
+{
+    auto mesh = make_periodic_box_mesh();
+
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_value(0, {1.0, 0.0, 0.0});
+    velocity.set_value(1, {3.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.velocity["xmin"] = {SimpleFluid::BoundaryConditionType::Periodic, {}};
+    bcs.velocity["xmax"] = {SimpleFluid::BoundaryConditionType::Periodic, {}};
+    for (const auto* name : {"ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    EXPECT_EQ(cache.value.size(), mesh->boundary_patches().size());
+
+    SimpleFluid::VectorFaceField<Pack> face_vel(mesh, "face_vel");
+    EXPECT_NO_THROW(SimpleFluid::FvmOperators::face_velocities(
+        velocity, cache, face_vel));
+
+    const auto xmin_face = boundary_face_lid(*mesh, "xmin");
+    const auto xmax_face = boundary_face_lid(*mesh, "xmax");
+    EXPECT_NEAR(face_vel.value(xmin_face).x, 2.0, 1.0e-12);
+    EXPECT_NEAR(face_vel.value(xmax_face).x, 2.0, 1.0e-12);
+}
+
 /**
  * @brief Verifies that periodic face fluxes are computed correctly,
  *        treating the periodic boundary like an interior face.
@@ -414,4 +487,60 @@ TEST(FvmOperatorsTest, PeriodicBoundaryExplicitDiffusionTransfersHeat)
     // T1_new = 0.0 + 0.1 * 8.0 = 0.8
     EXPECT_NEAR(temperature.value(0), 0.2, 1.0e-12);
     EXPECT_NEAR(temperature.value(1), 0.8, 1.0e-12);
+}
+
+TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
+{
+    auto mesh = make_periodic_box_mesh();
+    FieldType temperature(mesh, "temperature");
+    temperature.set_value(0, 1.0);
+    temperature.set_value(1, 0.0);
+    temperature.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+    auto boundary_value =
+        [&](int patch_id, MeshType::local_ordinal_type in_patch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_patch(patch_id).face_lids[
+                static_cast<std::size_t>(in_patch_id)];
+        EXPECT_FALSE(mesh->is_periodic_boundary_face(face_lid));
+        return 0.0;
+    };
+
+    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+        temperature, zero_fluxes, 1.0, 1.0, boundary_value);
+
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 0), 5.125, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 1), 5.125, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 1), -1.0, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 0), -1.0, 1.0e-12);
+}
+
+TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
+{
+    auto mesh = make_periodic_box_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_value(0, {1.0, 2.0, 3.0});
+    velocity.set_value(1, {0.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+    auto boundary_value =
+        [&](int patch_id, MeshType::local_ordinal_type in_patch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_patch(patch_id).face_lids[
+                static_cast<std::size_t>(in_patch_id)];
+        EXPECT_FALSE(mesh->is_periodic_boundary_face(face_lid));
+        return SimpleFluid::vec3<Pack::scalar_type>{};
+    };
+
+    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+        velocity, zero_fluxes, 1.0, 1.0, boundary_value);
+
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 0), 5.125, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 1), 5.125, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 1), -1.0, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 0), -1.0, 1.0e-12);
 }
