@@ -29,7 +29,8 @@ enum class BoundaryConditionType : std::uint8_t
     Neumann   = 1,
     NoSlip    = 2,
     Robin     = 3,
-    Periodic  = 4
+    Periodic  = 4,
+    Slip      = 5
 };
 
 /**

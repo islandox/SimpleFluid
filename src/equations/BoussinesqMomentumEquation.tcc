@@ -43,6 +43,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     EquationValidation::require_non_negative(options.kinematic_viscosity, "viscosity",
                                              "BoussinesqMomentumEquation");
     if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
+        || velocity_boundary_cache.type.size() != d_mesh->boundary_patches().size()
         || velocity_boundary_cache.mesh != d_mesh)
     {
         throw std::invalid_argument(
@@ -53,6 +54,15 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
             local_ordinal_type boundary_face_id)
     {
         const auto face = static_cast<std::size_t>(boundary_face_id);
+        const auto boundary_type =
+            velocity_boundary_cache.type.at(boundary_id);
+        if (boundary_type == BoundaryConditionType::Slip)
+        {
+            const auto face_lid =
+                d_mesh->boundary_face_patch(boundary_id).face_lids[face];
+            return FvmOperators::detail::slip_face_velocity(
+                old_velocity, face_lid);
+        }
 
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };

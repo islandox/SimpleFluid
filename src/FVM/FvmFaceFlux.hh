@@ -44,6 +44,7 @@ struct VelocityBoundaryCache
     }
 
     std::unordered_map<int, Arr<vec_type>> value;
+    std::unordered_map<int, BoundaryConditionType> type;
     SP<const Mesh<Pack>> mesh;
 };
 
@@ -75,20 +76,22 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
     for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
     {
         typename VelocityBoundaryCache<Pack>::vec_type prescribed_value{};
+        auto boundary_type = BoundaryConditionType::Neumann;
 
         const auto iter =
             boundary_conditions.velocity.find(mesh->boundary_patch_name(patch_id));
         if (iter != boundary_conditions.velocity.end())
         {
-            if (iter->second.type == BoundaryConditionType::Periodic)
+            boundary_type = iter->second.type;
+            if (boundary_type == BoundaryConditionType::Periodic)
             {
                 prescribed_value = {};
             }
-            else if (iter->second.type == BoundaryConditionType::NoSlip)
+            else if (boundary_type == BoundaryConditionType::NoSlip)
             {
                 prescribed_value = {0.0, 0.0, 0.0};
             }
-            else if (iter->second.type == BoundaryConditionType::Dirichlet)
+            else if (boundary_type == BoundaryConditionType::Dirichlet)
             {
                 prescribed_value = iter->second.value;
             }
@@ -97,6 +100,7 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
         Arr<typename VelocityBoundaryCache<Pack>::vec_type> patch_values(
             boundary_patch.face_lids.size(), prescribed_value);
         cache.value[patch_id] = std::move(patch_values);
+        cache.type[patch_id] = boundary_type;
     }
 
     return cache;
@@ -124,6 +128,10 @@ void validate_face_flux_inputs(
     if (boundary_cache != nullptr && boundary_cache->value.size() != mesh.boundary_patches().size())
     {
         throw std::invalid_argument("face_fluxes received the wrong boundary-cache size.");
+    }
+    if (boundary_cache != nullptr && boundary_cache->type.size() != mesh.boundary_patches().size())
+    {
+        throw std::invalid_argument("face_fluxes received the wrong boundary-cache type size.");
     }
     if (boundary_cache != nullptr && boundary_cache->mesh != velocity.mesh_ptr())
     {
@@ -173,6 +181,22 @@ void validate_normal_flux_inputs(
 }
 
 /**
+ * @brief Project owner-cell velocity onto the tangent plane of a boundary face.
+ */
+template<TpetraTypePack Pack>
+auto slip_face_velocity(const VectorCellField<Pack>& velocity,
+                        typename Pack::local_ordinal_type face_lid)
+    -> typename VectorCellField<Pack>::vec_type
+{
+    const auto& mesh = velocity.mesh();
+    const auto owner = mesh.owner_cell(face_lid);
+    const auto cell_velocity = velocity.local_value(owner);
+    const auto& normal = mesh.face_normal_outward(face_lid, owner);
+
+    return cell_velocity - normal * cell_velocity.dot(normal);
+}
+
+/**
  * @brief Retrieve the prescribed velocity on boundary faces from the
  *        cache, if available.
  *
@@ -183,6 +207,7 @@ void validate_normal_flux_inputs(
 template<TpetraTypePack Pack>
 void load_boundary_face_velocity(
     const VelocityBoundaryCache<Pack>* boundary_cache,
+    const VectorCellField<Pack>& velocity,
     VectorFaceField<Pack>& face_velocity)
 {
     if (boundary_cache == nullptr) return;
@@ -200,6 +225,11 @@ void load_boundary_face_velocity(
         {
             continue;
         }
+        const auto type_iter = boundary_cache->type.find(patch_id);
+        const auto boundary_type =
+            type_iter == boundary_cache->type.end()
+          ? BoundaryConditionType::Neumann
+          : type_iter->second;
 
         for (size_t i = 0; i < boundary_patch.face_lids.size(); ++i)
         {
@@ -207,7 +237,15 @@ void load_boundary_face_velocity(
             if (!face_velocity.is_owned_face(face_lid)) continue;
             if (!mesh.is_boundary_face(face_lid)) continue;
 
-            face_velocity.set_value(face_lid, iter->second[i]);
+            if (boundary_type == BoundaryConditionType::Slip)
+            {
+                face_velocity.set_value(face_lid,
+                    slip_face_velocity(velocity, face_lid));
+            }
+            else
+            {
+                face_velocity.set_value(face_lid, iter->second[i]);
+            }
         }
     }
 }
@@ -252,7 +290,7 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
             face_velocity.set_value(face_lid, value);
         }
     }
-    load_boundary_face_velocity(boundary_cache, face_velocity);
+    load_boundary_face_velocity(boundary_cache, velocity, face_velocity);
 }
 
 } // namespace detail
