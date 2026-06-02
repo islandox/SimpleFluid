@@ -565,7 +565,7 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
 }
 
 /**
- * @brief Build a wedge mesh for a cylindrical domain.
+ * @brief Build a triangular-prism mesh for a cylindrical domain.
  *
  * Boundary part order is {radial, zmin, zmax}.
  */
@@ -622,9 +622,95 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
 
     const auto radial_count = radial_edges.size() - 1;
     const auto height_count = z_edges.size() - 1;
-    const auto angular_count = std::max<std::size_t>(
-        8, static_cast<std::size_t>(std::ceil(2.0 * pi * d_radius / d_mesh_size)));
-    const auto nodes_per_layer = 1 + radial_count * angular_count;
+
+    // Increase sector count by ring so circumferential and radial edge lengths
+    // stay comparable without forcing tiny sectors near the cylinder center.
+    auto ring_node_count = [=](std::size_t ring) -> std::size_t
+    {
+        if (ring == 0)
+        {
+            return 1;
+        }
+
+        return std::max<std::size_t>(
+            6, static_cast<std::size_t>(
+                std::ceil(2.0 * pi * static_cast<real_t>(ring))));
+    };
+
+    std::vector<std::size_t> ring_offsets(radial_count + 1, 0);
+    std::size_t nodes_per_layer = 0;
+    for (std::size_t ring = 0; ring <= radial_count; ++ring)
+    {
+        ring_offsets[ring] = nodes_per_layer;
+        nodes_per_layer += ring_node_count(ring);
+    }
+
+    auto layer_node_index = [&](std::size_t ring,
+                                std::size_t sector) -> std::size_t
+    {
+        if (ring == 0)
+        {
+            return ring_offsets[ring];
+        }
+
+        return ring_offsets[ring] + sector % ring_node_count(ring);
+    };
+
+    std::vector<std::array<std::size_t, 3>> disk_triangles;
+    if (radial_count > 0)
+    {
+        const auto first_ring_count = ring_node_count(1);
+        disk_triangles.reserve(6 * radial_count * radial_count);
+        for (std::size_t sector = 0; sector < first_ring_count; ++sector)
+        {
+            disk_triangles.push_back(
+                {layer_node_index(0, 0),
+                 layer_node_index(1, sector),
+                 layer_node_index(1, sector + 1)});
+        }
+    }
+
+    for (std::size_t ring = 2; ring <= radial_count; ++ring)
+    {
+        // Zip adjacent rings by angle; each step consumes one inner or outer
+        // edge, giving a non-crossing triangular annulus for unequal counts.
+        const auto inner_ring = ring - 1;
+        const auto inner_count = ring_node_count(inner_ring);
+        const auto outer_count = ring_node_count(ring);
+        std::size_t inner = 0;
+        std::size_t outer = 0;
+
+        while (inner < inner_count || outer < outer_count)
+        {
+            const auto next_inner_angle =
+                inner < inner_count
+              ? 2.0 * pi * static_cast<real_t>(inner + 1)
+                    / static_cast<real_t>(inner_count)
+              : 4.0 * pi;
+            const auto next_outer_angle =
+                outer < outer_count
+              ? 2.0 * pi * static_cast<real_t>(outer + 1)
+                    / static_cast<real_t>(outer_count)
+              : 4.0 * pi;
+
+            if (next_inner_angle <= next_outer_angle)
+            {
+                disk_triangles.push_back(
+                    {layer_node_index(inner_ring, inner),
+                     layer_node_index(ring, outer),
+                     layer_node_index(inner_ring, inner + 1)});
+                ++inner;
+            }
+            else
+            {
+                disk_triangles.push_back(
+                    {layer_node_index(inner_ring, inner),
+                     layer_node_index(ring, outer),
+                     layer_node_index(ring, outer + 1)});
+                ++outer;
+            }
+        }
+    }
 
     auto meta = mesh->meta();
     auto bulk = mesh->bulk();
@@ -645,19 +731,19 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     auto* zmax_part = declare_io_part(*meta, d_domain_exterior_face_types[2],
                                       meta->side_rank());
 
+    auto node_id_from_layer_index = [=](std::size_t layer,
+                                        std::size_t node_index)
+        -> stk::mesh::EntityId
+    {
+        return static_cast<stk::mesh::EntityId>(
+            1 + layer * nodes_per_layer + node_index);
+    };
+
     auto node_id = [=](std::size_t layer,
                        std::size_t ring,
                        std::size_t sector) -> stk::mesh::EntityId
     {
-        const auto layer_offset = layer * nodes_per_layer;
-        if (ring == 0)
-        {
-            return static_cast<stk::mesh::EntityId>(1 + layer_offset);
-        }
-
-        return static_cast<stk::mesh::EntityId>(
-            1 + layer_offset + 1 + (ring - 1) * angular_count
-            + (sector % angular_count));
+        return node_id_from_layer_index(layer, layer_node_index(ring, sector));
     };
 
     std::unordered_map<stk::mesh::EntityId, FactoryNodeTag> node_tags;
@@ -667,13 +753,15 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
 
     stk::mesh::EntityId next_element_id = 1;
     auto declare_wedge = [&](std::size_t layer,
-                             const std::array<stk::mesh::EntityId, 3>& bottom_nodes)
+                             const std::array<std::size_t, 3>& bottom_nodes)
     {
         const stk::mesh::EntityIdVector wedge_nodes{
-            bottom_nodes[0], bottom_nodes[1], bottom_nodes[2],
-            bottom_nodes[0] + static_cast<stk::mesh::EntityId>(nodes_per_layer),
-            bottom_nodes[1] + static_cast<stk::mesh::EntityId>(nodes_per_layer),
-            bottom_nodes[2] + static_cast<stk::mesh::EntityId>(nodes_per_layer)
+            node_id_from_layer_index(layer, bottom_nodes[0]),
+            node_id_from_layer_index(layer, bottom_nodes[1]),
+            node_id_from_layer_index(layer, bottom_nodes[2]),
+            node_id_from_layer_index(layer + 1, bottom_nodes[0]),
+            node_id_from_layer_index(layer + 1, bottom_nodes[1]),
+            node_id_from_layer_index(layer + 1, bottom_nodes[2])
         };
 
         const auto elem =
@@ -708,7 +796,8 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         node_tags.emplace(node_id(layer, 0, 0), FactoryNodeTag{0, layer, false});
         for (std::size_t ring = 1; ring <= radial_count; ++ring)
         {
-            for (std::size_t sector = 0; sector < angular_count; ++sector)
+            const auto sector_count = ring_node_count(ring);
+            for (std::size_t sector = 0; sector < sector_count; ++sector)
             {
                 node_tags.emplace(node_id(layer, ring, sector),
                                   FactoryNodeTag{ring, layer,
@@ -719,23 +808,9 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
 
     for (std::size_t layer = 0; layer < height_count; ++layer)
     {
-        for (std::size_t sector = 0; sector < angular_count; ++sector)
+        for (const auto& triangle : disk_triangles)
         {
-            const auto next_sector = (sector + 1) % angular_count;
-
-            declare_wedge(layer, {node_id(layer, 0, 0),
-                                  node_id(layer, 1, sector),
-                                  node_id(layer, 1, next_sector)});
-
-            for (std::size_t ring = 1; ring < radial_count; ++ring)
-            {
-                declare_wedge(layer, {node_id(layer, ring, sector),
-                                      node_id(layer, ring + 1, sector),
-                                      node_id(layer, ring + 1, next_sector)});
-                declare_wedge(layer, {node_id(layer, ring, sector),
-                                      node_id(layer, ring + 1, next_sector),
-                                      node_id(layer, ring, next_sector)});
-            }
+            declare_wedge(layer, triangle);
         }
     }
 
@@ -745,12 +820,12 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         for (std::size_t ring = 0; ring <= radial_count; ++ring)
         {
             const auto radius = radial_edges[ring];
-            const auto sector_count = ring == 0 ? 1 : angular_count;
+            const auto sector_count = ring_node_count(ring);
             for (std::size_t sector = 0; sector < sector_count; ++sector)
             {
                 const auto theta = 2.0 * pi
                                  * static_cast<real_t>(sector)
-                                 / static_cast<real_t>(angular_count);
+                                 / static_cast<real_t>(sector_count);
                 const auto node = bulk->get_entity(stk::topology::NODE_RANK,
                                                    node_id(layer, ring, sector));
                 double* coord = stk::mesh::field_data(coord_field, node);
