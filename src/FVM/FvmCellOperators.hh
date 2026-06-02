@@ -51,19 +51,13 @@ void cell_gradient(const CellField<Pack>& field,
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            local_ordinal_type other = invalid_id<local_ordinal_type>();
-            if (mesh.is_interior_face(face_lid))
-            {
-                other = mesh.opposite_cell(face_lid, cell_lid);
-            }
-            else if (mesh.is_periodic_boundary_face(face_lid))
-            {
-                other = mesh.periodic_neighbor_cell(face_lid);
-            }
-            else
+            if (!mesh.is_interior_face(face_lid))
             {
                 continue;
             }
+
+            const auto other =
+                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
             const auto d = mesh.cell_centroid(other) - center_p;
             const auto phi_delta = field.local_value(other) - phi_p;
 

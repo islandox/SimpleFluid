@@ -367,8 +367,16 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
 
     ASSERT_NE(xmin_face, -1);
     ASSERT_NE(xmax_face, -1);
-    EXPECT_TRUE(mesh->is_periodic_boundary_face(xmin_face));
-    EXPECT_TRUE(mesh->is_periodic_boundary_face(xmax_face));
+    EXPECT_TRUE(mesh->is_interior_face(xmin_face));
+    EXPECT_TRUE(mesh->is_interior_face(xmax_face));
+    EXPECT_FALSE(mesh->is_boundary_face(xmin_face));
+    EXPECT_FALSE(mesh->is_boundary_face(xmax_face));
+    EXPECT_EQ(mesh->opposite_or_periodic_neighbor_cell(
+                  xmin_face, mesh->owner_cell(xmin_face)),
+              mesh->owner_cell(xmax_face));
+    EXPECT_EQ(mesh->opposite_or_periodic_neighbor_cell(
+                  xmax_face, mesh->owner_cell(xmax_face)),
+              mesh->owner_cell(xmin_face));
 
     // Periodic faces should get the average of the owner and paired cell.
     const auto v_xmin = face_vel.value(xmin_face);
@@ -504,7 +512,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[
                 static_cast<std::size_t>(in_patch_id)];
-        EXPECT_FALSE(mesh->is_periodic_boundary_face(face_lid));
+        EXPECT_TRUE(mesh->is_boundary_face(face_lid));
         return 0.0;
     };
 
@@ -532,7 +540,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[
                 static_cast<std::size_t>(in_patch_id)];
-        EXPECT_FALSE(mesh->is_periodic_boundary_face(face_lid));
+        EXPECT_TRUE(mesh->is_boundary_face(face_lid));
         return SimpleFluid::vec3<Pack::scalar_type>{};
     };
 

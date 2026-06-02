@@ -178,26 +178,28 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
         }
     }
 
-    // ---- periodic face ghost collection ----
-    // Periodic boundary faces connect to a paired cell that may not be a
-    // topological neighbour.  Collect those paired GIDs and add them to
-    // the ghost set so the paired cell data is available after rebuild.
-    // Also save the face-key → paired-GID mapping for restoration.
+    // Periodic faces are represented as boundary-marked faces with a valid
+    // neighbour.  They still need a face-key -> paired-cell-GID map because
+    // the paired cell does not share the same topological face nodes.
     std::unordered_map<std::string, GO> original_periodic_pairs;
     for (std::size_t fid = 0; fid < mesh.d_faces.size(); ++fid)
     {
         auto& face = mesh.d_faces[fid];
-        const auto pid = face.periodic_paired_lid;
-        if (pid == invalid_id<LO>()) continue;
-        auto pgid = mesh.cell_global_id(pid);
-        if (owned_set.find(pgid) != owned_set.end()) continue; // already owned
+        if (face.boundary_id == Mesh<Pack>::invalid_boundary_id) continue;
+        const auto pid = face.neighbor;
+        if (pid == invalid_lid) continue;
 
+        auto pgid = mesh.cell_global_id(pid);
         std::vector<GO> fns(face.node_gids.begin(), face.node_gids.end());
         std::sort(fns.begin(), fns.end());
         auto key = mesh.make_face_key(
             typename Mesh<Pack>::ViewGO(const_cast<GO*>(fns.data()), fns.size()));
         original_periodic_pairs[key] = pgid;
-        ghost_set.insert(pgid);
+
+        if (owned_set.find(pgid) == owned_set.end())
+        {
+            ghost_set.insert(pgid);
+        }
     }
 
     // Request ghosts
@@ -505,7 +507,7 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
         auto plid = mesh.d_cell_gid_to_lid.find(pgid);
         if (plid != mesh.d_cell_gid_to_lid.end())
         {
-            fi.periodic_paired_lid = plid->second;
+            fi.neighbor = plid->second;
             auto& oc = mesh.d_cells[static_cast<std::size_t>(fi.owner)];
             auto& pc = mesh.d_cells[static_cast<std::size_t>(plid->second)];
             fi.cell_center_distance = (pc.center - oc.center).norm();
