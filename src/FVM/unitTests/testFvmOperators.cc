@@ -283,6 +283,64 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     }
 }
 
+TEST(FvmOperatorsTest, SlipBoundaryRemovesNormalVelocityAndFlux)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto& center = mesh->cell_centroid(lid);
+        velocity.set_value(lid,
+                           {center.x + 1.0,
+                            2.0 * center.y + 3.0,
+                            3.0 * center.z + 5.0});
+    }
+    velocity.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {SimpleFluid::BoundaryConditionType::Slip, {}};
+    }
+
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::face_velocities(velocity, cache, face_velocity);
+    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, fluxes);
+
+    bool saw_boundary_face = false;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (!mesh->is_boundary_face(fid))
+        {
+            continue;
+        }
+
+        saw_boundary_face = true;
+        const auto owner = mesh->owner_cell(fid);
+        const auto& normal = mesh->face_normal_outward(fid, owner);
+        const auto owner_velocity = velocity.local_value(owner);
+        const auto expected =
+            owner_velocity - normal * owner_velocity.dot(normal);
+        const auto actual = face_velocity.value(fid);
+
+        EXPECT_NEAR(actual.x, expected.x, 1.0e-12);
+        EXPECT_NEAR(actual.y, expected.y, 1.0e-12);
+        EXPECT_NEAR(actual.z, expected.z, 1.0e-12);
+        EXPECT_NEAR(actual.dot(normal), 0.0, 1.0e-12);
+        EXPECT_NEAR(fluxes.value(fid), 0.0, 1.0e-12);
+    }
+
+    EXPECT_TRUE(saw_boundary_face);
+}
+
 TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
 {
     auto mesh = make_mesh();

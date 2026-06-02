@@ -29,6 +29,10 @@ TEST(BoundaryConditionTest, VectorConditionStoresTypeAndValue)
     EXPECT_EQ(no_slip.type, BoundaryConditionType::NoSlip);
     EXPECT_EQ(no_slip.value, (vec3<real_t>{0.0, 0.0, 0.0}));
 
+    const VectorBoundaryCondition slip{BoundaryConditionType::Slip};
+    EXPECT_EQ(slip.type, BoundaryConditionType::Slip);
+    EXPECT_EQ(slip.value, (vec3<real_t>{0.0, 0.0, 0.0}));
+
     const VectorBoundaryCondition moving{
         BoundaryConditionType::Dirichlet, vec3<real_t>{1.0, 2.0, 3.0}};
     EXPECT_EQ(moving.type, BoundaryConditionType::Dirichlet);
