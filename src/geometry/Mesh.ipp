@@ -347,13 +347,45 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
                                            local_ordinal_type paired_cell_lid)
 {
     auto& info = d_faces[static_cast<std::size_t>(face_lid)];
-    info.neighbor = paired_cell_lid;
-
-    // Compute the cell-centre-to-cell-centre distance for the periodic pair
-    // so that diffusion operators see the correct distance.
     const auto& owner_center = d_cells[static_cast<std::size_t>(info.owner)].center;
     const auto& paired_center = d_cells[static_cast<std::size_t>(paired_cell_lid)].center;
-    info.cell_center_distance = (paired_center - owner_center).norm();
+    auto periodic_distance = (paired_center - owner_center).norm();
+
+    // Prefer the wrapped distance through the paired exterior face.  The
+    // Euclidean fallback preserves the previous behavior for ad hoc pairings.
+    const auto& owner_normal = info.unit_normal_from_owner;
+    for (const auto candidate_face_lid : d_cells[static_cast<std::size_t>(paired_cell_lid)].faces)
+    {
+        if (candidate_face_lid == face_lid)
+        {
+            continue;
+        }
+
+        const auto& candidate =
+            d_faces[static_cast<std::size_t>(candidate_face_lid)];
+        if (candidate.boundary_id == invalid_boundary_id)
+        {
+            continue;
+        }
+
+        const auto& candidate_normal =
+            candidate.owner == paired_cell_lid
+                ? candidate.unit_normal_from_owner
+                : candidate.unit_normal_from_neighbor;
+        if (owner_normal.dot(candidate_normal) < -0.5)
+        {
+            const auto paired_face_distance =
+                candidate.owner == paired_cell_lid
+                    ? candidate.owner_to_face_distance
+                    : candidate.neighbor_to_face_distance;
+            periodic_distance =
+                info.owner_to_face_distance + paired_face_distance;
+            break;
+        }
+    }
+
+    info.neighbor = paired_cell_lid;
+    info.cell_center_distance = periodic_distance;
 }
 
 template<TpetraTypePack Pack>
