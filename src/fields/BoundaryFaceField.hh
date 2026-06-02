@@ -296,6 +296,11 @@ auto BoundaryFaceField<Pack>::make_boundary_face_map(
         (void)patch_id;
         for (auto fid : boundary_patch.face_lids)
         {
+            if (!mesh->is_boundary_face(fid))
+            {
+                continue;
+            }
+
             const auto owner = mesh->owner_cell(fid);
             if (!mesh->is_owned_cell(owner))
             {
@@ -435,5 +440,4 @@ bool BoundaryFaceField<Pack>::is_owned_boundary_face(
 }
 
 } // namespace SimpleFluid
-
 

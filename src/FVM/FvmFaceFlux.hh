@@ -205,7 +205,7 @@ void load_boundary_face_velocity(
         {
             const auto face_lid = boundary_patch.face_lids[i];
             if (!face_velocity.is_owned_face(face_lid)) continue;
-            if (mesh.is_periodic_boundary_face(face_lid)) continue;
+            if (!mesh.is_boundary_face(face_lid)) continue;
 
             face_velocity.set_value(face_lid, iter->second[i]);
         }
@@ -246,14 +246,9 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
 
         if (mesh.is_interior_face(face_lid))
         {
-            const auto neighbor = mesh.neighbor_cell(face_lid);
+            const auto neighbor =
+                mesh.opposite_or_periodic_neighbor_cell(face_lid, owner);
             value = (value + velocity.local_value(neighbor)) / 2.0;
-            face_velocity.set_value(face_lid, value);
-        }
-        else if (mesh.is_periodic_boundary_face(face_lid))
-        {
-            const auto paired = mesh.periodic_neighbor_cell(face_lid);
-            value = (value + velocity.local_value(paired)) / 2.0;
             face_velocity.set_value(face_lid, value);
         }
     }
