@@ -1,5 +1,5 @@
 /**
- * @file FvmNonOrthogonalCorrection.hh
+ * @file FVM/NonOrthogonalCorrection.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Non-orthogonal diffusion correction: explicit, implicit, hybrid treatments,
  *        residual evaluation, and solver wrappers.
@@ -12,9 +12,9 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
-#include "FVM/FvmCellOperators.hh"
-#include "FVM/FvmDiffusionSystem.hh"
-#include "FVM/FvmOperatorDetails.hh"
+#include "FVM/CellOperators.hh"
+#include "FVM/DiffusionSystem.hh"
+#include "FVM/OperatorDetails.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <stdexcept>
@@ -22,7 +22,7 @@
 #include <string_view>
 #include <vector>
 
-namespace SimpleFluid::FvmOperators
+namespace SimpleFluid::FVM
 {
 
 /**
@@ -844,4 +844,4 @@ bool solve_non_orthogonal_diffusion(
         treatment, nNonOrthogonalCorrectors, linear_options);
 }
 
-} // namespace SimpleFluid::FvmOperators
+} // namespace SimpleFluid::FVM

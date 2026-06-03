@@ -1,5 +1,5 @@
 /**
- * @file FvmOperatorDetails.hh
+ * @file FVM/OperatorDetails.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Internal finite-volume helper utilities.
  * @version 0.1
@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace SimpleFluid::FvmOperators::detail
+namespace SimpleFluid::FVM::detail
 {
 
 /**
@@ -418,4 +418,4 @@ void add_matrix_entry(std::unordered_map<LocalOrdinal, Scalar>& row_values,
     row_values[column] += value;
 }
 
-} // namespace SimpleFluid::FvmOperators::detail
+} // namespace SimpleFluid::FVM::detail

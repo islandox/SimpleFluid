@@ -15,7 +15,7 @@
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 #include "geometry/STKMesh.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
@@ -493,7 +493,7 @@ FieldType advance_burgers_explicit(const FieldType& old_solution,
          ++lid)
     {
         const auto balance =
-            SimpleFluid::FvmOperators::cell_flux_balance(mesh, fluxes, lid);
+            SimpleFluid::FVM::cell_flux_balance(mesh, fluxes, lid);
         new_solution.set_value(lid,
                                old_solution.value(lid)
                              - time_step * balance / mesh.cell_volume(lid));
@@ -515,7 +515,7 @@ FieldType solve_burgers_semi_implicit(const FieldType& old_solution,
         return 0.0;
     };
 
-    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_solution, fluxes, time_step, 0.0, boundary_value);
 
     FieldType new_solution(old_solution.mesh_ptr(), "burgers_semi_implicit");
@@ -552,7 +552,7 @@ FieldType solve_viscous_burgers_semi_implicit(
                                      viscosity);
     };
 
-    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_solution, fluxes, time_step, viscosity, boundary_value);
 
     FieldType new_solution(old_solution.mesh_ptr(), "viscous_burgers_next");
@@ -603,9 +603,9 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
     }
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+    SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
     const auto divergence =
-        SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
+        SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
             *mesh, face_fluxes);
 
     ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
@@ -661,9 +661,9 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
     EXPECT_GT(interior_cells, 0u);
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "skewed_face_flux");
-    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+    SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
     const auto divergence =
-        SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
+        SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
             *mesh, face_fluxes);
 
     ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
@@ -692,9 +692,9 @@ TEST(FvmAnalyticalSolutionsTest, TaylorGreenVortexIsDiscreteDivergenceFree)
     }
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "taylor_green_flux");
-    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+    SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
     const auto divergence =
-        SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
+        SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
             *mesh, face_fluxes);
 
     ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
@@ -729,7 +729,7 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
         return affine_scalar(mesh->face_centroid(face_lid));
     };
 
-    auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, 0.25, 0.7, boundary_value);
 
     Pack::vector_type solution(mesh->owned_cell_map(), true);
@@ -785,7 +785,7 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
         return scalar_source(mesh->cell_centroid(cell_lid));
     };
 
-    auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, time_step, diffusivity,
         boundary_value, source);
 
@@ -856,7 +856,7 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
         return source_value;
     };
 
-    auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, time_step, diffusivity,
         boundary_value, source);
 
@@ -903,7 +903,7 @@ TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
         return source_value;
     };
 
-    const auto system = SimpleFluid::FvmOperators::diffusion_system<Pack>(
+    const auto system = SimpleFluid::FVM::diffusion_system<Pack>(
         *mesh, diffusivity, boundary_condition, source);
 
     FieldType numerical(mesh, "poisson_solution");
@@ -956,7 +956,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadr
     };
 
     const auto system =
-        SimpleFluid::FvmOperators::vector_diffusion_system<Pack>(
+        SimpleFluid::FVM::vector_diffusion_system<Pack>(
             *mesh, diffusivity, boundary_condition, source);
 
     VectorFieldType numerical(mesh, "vector_poisson_solution");
@@ -1018,7 +1018,7 @@ TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnSheare
 
         FieldType candidate(mesh, "corrected_sheared_solution");
         const auto converged =
-            SimpleFluid::FvmOperators::solve_explicit_non_orthogonal_diffusion<Pack>(
+            SimpleFluid::FVM::solve_explicit_non_orthogonal_diffusion<Pack>(
                 *mesh, diffusivity, boundary_condition, source, candidate,
                 4, options);
         EXPECT_TRUE(converged);
@@ -1064,17 +1064,17 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
 
     struct TreatmentCase
     {
-        SimpleFluid::FvmOperators::NonOrthogonalTreatment treatment;
+        SimpleFluid::FVM::NonOrthogonalTreatment treatment;
         int correctors;
     };
     const std::array<TreatmentCase, 3> cases{{
-        {SimpleFluid::FvmOperators::NonOrthogonalTreatment::Explicit, 4},
-        {SimpleFluid::FvmOperators::NonOrthogonalTreatment::Implicit, 0},
-        {SimpleFluid::FvmOperators::NonOrthogonalTreatment::Hybrid, 4}
+        {SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, 4},
+        {SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, 0},
+        {SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, 4}
     }};
 
     auto solve_error =
-        [&](SimpleFluid::FvmOperators::NonOrthogonalTreatment treatment,
+        [&](SimpleFluid::FVM::NonOrthogonalTreatment treatment,
             int correctors,
             std::size_t n_cells)
     {
@@ -1091,11 +1091,11 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
 
         FieldType candidate(mesh, "non_orthogonal_solution");
         const auto converged =
-            SimpleFluid::FvmOperators::solve_non_orthogonal_diffusion<Pack>(
+            SimpleFluid::FVM::solve_non_orthogonal_diffusion<Pack>(
                 *mesh, diffusivity, boundary_condition, source, candidate,
                 treatment, correctors, options);
         EXPECT_TRUE(converged)
-            << SimpleFluid::FvmOperators::to_string(treatment);
+            << SimpleFluid::FVM::to_string(treatment);
         if (!converged)
         {
             return std::pair{std::numeric_limits<double>::infinity(),
@@ -1114,9 +1114,9 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
             test_case.treatment, test_case.correctors, 5);
 
         EXPECT_LT(fine.first, coarse.first)
-            << SimpleFluid::FvmOperators::to_string(test_case.treatment);
+            << SimpleFluid::FVM::to_string(test_case.treatment);
         EXPECT_LT(fine.second, coarse.second)
-            << SimpleFluid::FvmOperators::to_string(test_case.treatment);
+            << SimpleFluid::FVM::to_string(test_case.treatment);
     }
 }
 
@@ -1155,7 +1155,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
         return vector_source(mesh->cell_centroid(cell_lid));
     };
 
-    auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, time_step, diffusivity,
         boundary_value, source);
 

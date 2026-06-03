@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 
@@ -41,7 +41,7 @@ TEST(BelosLinearSolverTest, SolvesIdentitySystem)
                                                3,
                                                0,
                                                Tpetra::getDefaultComm()));
-    auto matrix = SimpleFluid::FvmOperators::identity_matrix<Pack>(map);
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
 
     Pack::vector_type rhs(map, true);
     Pack::vector_type solution(map, true);
@@ -75,7 +75,7 @@ TEST(BelosLinearSolverTest, SolvesMultiVectorIdentitySystem)
                                                3,
                                                0,
                                                Tpetra::getDefaultComm()));
-    auto matrix = SimpleFluid::FvmOperators::identity_matrix<Pack>(map);
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
 
     Pack::multi_vector_type rhs(map, 3, true);
     Pack::multi_vector_type solution(map, 3, true);
