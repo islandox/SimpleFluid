@@ -18,6 +18,7 @@
 #include "FVM/FvmOperators.hh"
 #include "geometry/STKMesh.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
@@ -567,6 +568,20 @@ FieldType solve_viscous_burgers_semi_implicit(
     return new_solution;
 }
 
+bool cell_has_exterior_face(const MeshType& mesh,
+                            MeshType::local_ordinal_type cell_lid)
+{
+    for (const auto face_lid : mesh.faces(cell_lid))
+    {
+        if (mesh.is_exterior_face(face_lid))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 } // namespace
 
 TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
@@ -588,6 +603,64 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
     }
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_flux");
+    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+    const auto divergence =
+        SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
+            *mesh, face_fluxes);
+
+    ASSERT_EQ(divergence.size(), mesh->num_owned_cells());
+    for (const auto value : divergence)
+    {
+        EXPECT_NEAR(value, 6.0, 1.0e-12);
+    }
+}
+
+TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSkewedPrisms)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    ASSERT_GE(mesh->num_owned_cells(), 3u * 3u * 3u);
+    EXPECT_EQ(mesh->boundary_patches().size(), 6u);
+
+    bool saw_triangular_face = false;
+    std::size_t boundary_cells = 0;
+    std::size_t interior_cells = 0;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, SimpleFluid::MeshUtils::CellType::TRIPRISM);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+        if (cell_has_exterior_face(*mesh, lid))
+        {
+            ++boundary_cells;
+        }
+        else
+        {
+            ++interior_cells;
+        }
+    }
+
+    SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "skewed_face_velocity");
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        saw_triangular_face =
+            saw_triangular_face
+         || mesh->face(fid).type == SimpleFluid::MeshUtils::FaceType::TRIANGLE;
+        if (!mesh->is_owned_face(fid))
+        {
+            continue;
+        }
+
+        const auto center = mesh->face_centroid(fid);
+        face_velocity.set_value(fid, {center.x, 2.0 * center.y, 3.0 * center.z});
+    }
+    EXPECT_TRUE(saw_triangular_face);
+    EXPECT_GT(boundary_cells, 0u);
+    EXPECT_GT(interior_cells, 0u);
+
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "skewed_face_flux");
     SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
     const auto divergence =
         SimpleFluid::FvmOperators::cell_divergence_from_fluxes<Pack>(
@@ -959,9 +1032,9 @@ TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnSheare
             SimpleFluid::linf_error(candidate, exact)};
     };
 
-    const auto coarse = solve_error(2);
-    const auto medium = solve_error(3);
-    const auto fine = solve_error(4);
+    const auto coarse = solve_error(3);
+    const auto medium = solve_error(4);
+    const auto fine = solve_error(5);
 
     EXPECT_LT(medium.first, coarse.first);
     EXPECT_LT(fine.first, medium.first);
