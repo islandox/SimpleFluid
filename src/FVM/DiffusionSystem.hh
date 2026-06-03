@@ -11,7 +11,7 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
-#include "FVM/FvmOperatorDetails.hh"
+#include "FVM/OperatorDetails.hh"
 #include "fields/CellField.hh"
 #include "geometry/Mesh.hh"
 
@@ -21,7 +21,7 @@
 #include <cstddef>
 #include <stdexcept>
 
-namespace SimpleFluid::FvmOperators
+namespace SimpleFluid::FVM
 {
 
 /**
@@ -374,4 +374,4 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
         mesh, diffusivity, boundary_condition, zero_source);
 }
 
-} // namespace SimpleFluid::FvmOperators
+} // namespace SimpleFluid::FVM

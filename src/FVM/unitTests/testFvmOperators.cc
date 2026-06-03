@@ -13,7 +13,7 @@
 
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
@@ -148,7 +148,7 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     phi.sync_ghosts();
 
     std::vector<MeshType::Vec3> gradients;
-    SimpleFluid::FvmOperators::cell_gradient(phi, gradients);
+    SimpleFluid::FVM::cell_gradient(phi, gradients);
     ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
     for (const auto& gradient : gradients)
     {
@@ -178,8 +178,8 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
     }
     velocity.sync_ghosts();
 
-    std::vector<SimpleFluid::FvmOperators::VectorCellGradient<Pack>> gradients;
-    SimpleFluid::FvmOperators::cell_gradient(velocity, gradients);
+    std::vector<SimpleFluid::FVM::VectorCellGradient<Pack>> gradients;
+    SimpleFluid::FVM::cell_gradient(velocity, gradients);
     ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
     for (const auto& gradient : gradients)
     {
@@ -203,10 +203,10 @@ TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
     const SimpleFluid::vec3<> cell_center_vector{4.0, 1.0, 2.0};
 
     const auto orthogonal =
-        SimpleFluid::FvmOperators::detail::orthogonal_area_vector(
+        SimpleFluid::FVM::detail::orthogonal_area_vector(
             area_vector, cell_center_vector);
     const auto tangential =
-        SimpleFluid::FvmOperators::detail::non_orthogonal_area_vector(
+        SimpleFluid::FVM::detail::non_orthogonal_area_vector(
             area_vector, cell_center_vector);
 
     const auto reconstructed = orthogonal + tangential;
@@ -219,21 +219,21 @@ TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
 TEST(FvmOperatorsTest, ParsesNonOrthogonalTreatmentSwitch)
 {
     EXPECT_EQ(
-        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("explicit"),
-        SimpleFluid::FvmOperators::NonOrthogonalTreatment::Explicit);
+        SimpleFluid::FVM::non_orthogonal_treatment_from_string("explicit"),
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
     EXPECT_EQ(
-        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("implicit"),
-        SimpleFluid::FvmOperators::NonOrthogonalTreatment::Implicit);
+        SimpleFluid::FVM::non_orthogonal_treatment_from_string("implicit"),
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
     EXPECT_EQ(
-        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("hybrid"),
-        SimpleFluid::FvmOperators::NonOrthogonalTreatment::Hybrid);
+        SimpleFluid::FVM::non_orthogonal_treatment_from_string("hybrid"),
+        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid);
 
     EXPECT_EQ(
-        SimpleFluid::FvmOperators::to_string(
-            SimpleFluid::FvmOperators::NonOrthogonalTreatment::Implicit),
+        SimpleFluid::FVM::to_string(
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit),
         "implicit");
     EXPECT_THROW(
-        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("sideways"),
+        SimpleFluid::FVM::non_orthogonal_treatment_from_string("sideways"),
         std::invalid_argument);
 }
 
@@ -250,9 +250,9 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
     phi.sync_ghosts();
 
     std::vector<MeshType::Vec3> gradients;
-    SimpleFluid::FvmOperators::cell_gradient(phi, gradients);
+    SimpleFluid::FVM::cell_gradient(phi, gradients);
     const auto stencils =
-        SimpleFluid::FvmOperators::detail::least_squares_gradient_stencils(*mesh);
+        SimpleFluid::FVM::detail::least_squares_gradient_stencils(*mesh);
 
     ASSERT_EQ(stencils.size(), gradients.size());
     for (std::size_t row = 0; row < stencils.size(); ++row)
@@ -284,10 +284,10 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
         return 0.0;
     };
 
-    const auto orthogonal = SimpleFluid::FvmOperators::diffusion_system<Pack>(
+    const auto orthogonal = SimpleFluid::FVM::diffusion_system<Pack>(
         *mesh, 0.5, boundary_condition, source);
     const auto implicit =
-        SimpleFluid::FvmOperators::fully_implicit_non_orthogonal_diffusion_system<Pack>(
+        SimpleFluid::FVM::fully_implicit_non_orthogonal_diffusion_system<Pack>(
             *mesh, 0.5, boundary_condition, source);
 
     bool saw_expanded_row = false;
@@ -335,10 +335,10 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     };
 
     const auto system =
-        SimpleFluid::FvmOperators::fully_implicit_non_orthogonal_diffusion_system<Pack>(
+        SimpleFluid::FVM::fully_implicit_non_orthogonal_diffusion_system<Pack>(
             *mesh, diffusivity, boundary_condition, source);
     const auto residual =
-        SimpleFluid::FvmOperators::full_diffusion_residual<Pack>(
+        SimpleFluid::FVM::full_diffusion_residual<Pack>(
             phi, diffusivity, boundary_condition);
     const auto applied = local_matrix_action(*system.matrix, phi);
     const auto rhs_view = system.rhs->getData();
@@ -354,9 +354,9 @@ TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
 {
     auto mesh = make_mesh();
 
-    auto identity = SimpleFluid::FvmOperators::identity_matrix<Pack>(
+    auto identity = SimpleFluid::FVM::identity_matrix<Pack>(
         mesh->owned_cell_map());
-    auto diffusion = SimpleFluid::FvmOperators::diffusion_matrix<Pack>(*mesh, 1.0);
+    auto diffusion = SimpleFluid::FVM::diffusion_matrix<Pack>(*mesh, 1.0);
 
     EXPECT_EQ(identity->getGlobalNumRows(),
               mesh->owned_cell_map()->getGlobalNumElements());
@@ -373,7 +373,7 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 2.0, 3.0}, "velocity");
 
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
+    SimpleFluid::FVM::face_fluxes(velocity, fluxes);
 
     bool saw_x_face = false;
     bool saw_y_face = false;
@@ -432,7 +432,7 @@ TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
     velocity.sync_ghosts();
 
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
-    SimpleFluid::FvmOperators::face_velocities(velocity, face_velocity);
+    SimpleFluid::FVM::face_velocities(velocity, face_velocity);
 
     bool saw_interior_face = false;
     for (MeshType::local_ordinal_type fid = 0;
@@ -471,10 +471,10 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroFaceVelocity)
     }
 
     const auto cache =
-        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
-    SimpleFluid::FvmOperators::face_velocities(velocity, cache, face_velocity);
+    SimpleFluid::FVM::face_velocities(velocity, cache, face_velocity);
 
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
@@ -499,10 +499,10 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     }
 
     const auto cache =
-        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::face_fluxes(velocity, cache, fluxes);
+    SimpleFluid::FVM::face_fluxes(velocity, cache, fluxes);
 
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
@@ -541,12 +541,12 @@ TEST(FvmOperatorsTest, SlipBoundaryRemovesNormalVelocityAndFlux)
     }
 
     const auto cache =
-        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::face_velocities(velocity, cache, face_velocity);
-    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, fluxes);
+    SimpleFluid::FVM::face_velocities(velocity, cache, face_velocity);
+    SimpleFluid::FVM::normal_face_fluxes(face_velocity, fluxes);
 
     bool saw_boundary_face = false;
     for (MeshType::local_ordinal_type fid = 0;
@@ -582,10 +582,10 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
     VectorFieldType velocity(mesh, SimpleFluid::vec3{1.0, 0.0, 0.0}, "velocity");
 
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
+    SimpleFluid::FVM::face_fluxes(velocity, fluxes);
     auto convection =
-        SimpleFluid::FvmOperators::upwind_convection_matrix<Pack>(*mesh, fluxes);
-    auto pressure = SimpleFluid::FvmOperators::pressure_poisson_matrix<Pack>(
+        SimpleFluid::FVM::upwind_convection_matrix<Pack>(*mesh, fluxes);
+    auto pressure = SimpleFluid::FVM::pressure_poisson_matrix<Pack>(
         *mesh, mesh->owned_cell_global_ids().front());
 
     EXPECT_EQ(convection->getGlobalNumRows(),
@@ -622,7 +622,7 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
     };
 
     constexpr double time_step = 0.25;
-    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, time_step, 0.0, boundary_value, source);
 
     const auto rhs_data = system.rhs->getData();
@@ -671,7 +671,7 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
     };
 
     constexpr double time_step = 0.25;
-    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, time_step, 0.0, boundary_value, source);
 
     for (std::size_t component = 0;
@@ -745,7 +745,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
 
     // Assemble face velocities without boundary-condition treatment.
     SimpleFluid::VectorFaceField<Pack> face_vel(mesh, "face_vel");
-    SimpleFluid::FvmOperators::face_velocities(velocity, face_vel);
+    SimpleFluid::FVM::face_velocities(velocity, face_vel);
 
     // Find periodic faces.
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
@@ -795,12 +795,12 @@ TEST(FvmOperatorsTest, PeriodicVelocityCacheDoesNotOverwritePairedFaceVelocity)
     }
 
     const auto cache =
-        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
     EXPECT_EQ(cache.value.size(), mesh->boundary_patches().size());
 
     SimpleFluid::VectorFaceField<Pack> face_vel(mesh, "face_vel");
-    EXPECT_NO_THROW(SimpleFluid::FvmOperators::face_velocities(
+    EXPECT_NO_THROW(SimpleFluid::FVM::face_velocities(
         velocity, cache, face_vel));
 
     const auto xmin_face = boundary_face_lid(*mesh, "xmin");
@@ -828,7 +828,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFluxIsComputed)
     velocity.sync_ghosts();
 
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::face_fluxes(velocity, fluxes);
+    SimpleFluid::FVM::face_fluxes(velocity, fluxes);
 
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
     for (const auto& [patch_id, patch] : mesh->boundary_patches())
@@ -908,7 +908,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
         return 0.0;
     };
 
-    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
         temperature, zero_fluxes, 1.0, 1.0, boundary_value);
 
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 0), 5.125, 1.0e-12);
@@ -928,7 +928,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryUpwindMatrixUsesPairedCell)
     fluxes.set_value(xmax_face, -0.5);
 
     const auto matrix =
-        SimpleFluid::FvmOperators::upwind_convection_matrix<Pack>(
+        SimpleFluid::FVM::upwind_convection_matrix<Pack>(
             *mesh, fluxes);
 
     EXPECT_NEAR(local_matrix_entry(*matrix, 0, 0), 0.0, 1.0e-12);
@@ -956,7 +956,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
         return SimpleFluid::vec3<Pack::scalar_type>{};
     };
 
-    const auto system = SimpleFluid::FvmOperators::transport_system<Pack>(
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
         velocity, zero_fluxes, 1.0, 1.0, boundary_value);
 
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 0), 5.125, 1.0e-12);

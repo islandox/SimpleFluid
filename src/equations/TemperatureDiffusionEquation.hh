@@ -14,7 +14,7 @@
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 #include "FVM/BoundaryCache.hh"
 #include "solvers/BelosLinearSolver.hh"
 
