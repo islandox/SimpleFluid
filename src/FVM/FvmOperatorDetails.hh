@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 
 namespace SimpleFluid::FvmOperators::detail
 {
@@ -104,6 +105,71 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
 inline real_t component_value(const MeshUtils::Vec3& vector, std::size_t index)
 {
     return vector.component(index);
+}
+
+template<class MeshType>
+inline auto interior_diffusion_coefficient(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::local_ordinal_type other_lid,
+    typename MeshType::scalar_type diffusivity)
+    -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+
+    const auto d = mesh.cell_centroid(other_lid) - mesh.cell_centroid(cell_lid);
+    const auto d2 = d.dot(d);
+    if (d2 <= scalar_type{0})
+    {
+        throw std::runtime_error(
+            "Cannot assemble diffusion across coincident cells.");
+    }
+
+    const auto& normal = mesh.face_normal_outward(face_lid, cell_lid);
+    const auto projected = mesh.face_area(face_lid) * normal.dot(d) / d2;
+    if (projected > scalar_type{0})
+    {
+        return diffusivity * projected;
+    }
+
+    const auto distance = mesh.face_cell_center_distance(face_lid);
+    if (distance <= scalar_type{0})
+    {
+        throw std::runtime_error(
+            "Cannot assemble diffusion across coincident cells.");
+    }
+    return diffusivity * mesh.face_area(face_lid) / distance;
+}
+
+template<class MeshType>
+inline auto boundary_diffusion_coefficient(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::scalar_type diffusivity)
+    -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+
+    const auto d = mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
+    const auto d2 = d.dot(d);
+    if (d2 <= scalar_type{0})
+    {
+        return scalar_type{};
+    }
+
+    const auto& normal = mesh.face_normal_outward(face_lid, cell_lid);
+    const auto projected = mesh.face_area(face_lid) * normal.dot(d) / d2;
+    if (projected > scalar_type{0})
+    {
+        return diffusivity * projected;
+    }
+
+    const auto distance = mesh.cell_to_face_distance(face_lid, cell_lid);
+    return distance > scalar_type{0}
+         ? diffusivity * mesh.face_area(face_lid) / distance
+         : scalar_type{};
 }
 
 } // namespace SimpleFluid::FvmOperators::detail

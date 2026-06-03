@@ -13,6 +13,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/FvmOperatorDetails.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -168,16 +169,11 @@ transport_system(const CellField<Pack>& old_values,
                 continue;
             }
 
-            const auto distance = mesh.face_cell_center_distance(face_lid);
-            if (distance <= scalar_type{0})
-            {
-                throw std::runtime_error(
-                    "Cannot assemble diffusion across coincident cells.");
-            }
-            const auto coeff =
-                diffusivity * mesh.face_area(face_lid) / distance;
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            const auto coeff =
+                detail::interior_diffusion_coefficient(
+                    mesh, face_lid, cell_lid, other, diffusivity);
             diagonal += coeff;
             cols.push_back(other);
             vals.push_back(-coeff);
@@ -236,13 +232,11 @@ transport_system(const CellField<Pack>& old_values,
                 continue;
             }
 
-            const auto distance =
-                mesh.cell_to_face_distance(face_lid, owner);
-            if (distance > scalar_type{0})
+            const auto coeff =
+                detail::boundary_diffusion_coefficient(
+                    mesh, face_lid, owner, diffusivity);
+            if (coeff > scalar_type{0})
             {
-                const auto coeff =
-                    diffusivity * mesh.face_area(face_lid) / distance;
-
                 local_ordinal_type col = owner;
                 scalar_type bval = coeff;
                 matrix->sumIntoLocalValues(
@@ -405,16 +399,11 @@ transport_system(const VectorCellField<Pack>& old_values,
                 continue;
             }
 
-            const auto distance = mesh.face_cell_center_distance(face_lid);
-            if (distance <= scalar_type{0})
-            {
-                throw std::runtime_error(
-                    "Cannot assemble diffusion across coincident cells.");
-            }
-            const auto coeff =
-                diffusivity * mesh.face_area(face_lid) / distance;
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            const auto coeff =
+                detail::interior_diffusion_coefficient(
+                    mesh, face_lid, cell_lid, other, diffusivity);
             diagonal += coeff;
             cols.push_back(other);
             vals.push_back(-coeff);
@@ -478,13 +467,11 @@ transport_system(const VectorCellField<Pack>& old_values,
                 continue;
             }
 
-            const auto distance =
-                mesh.cell_to_face_distance(face_lid, owner);
-            if (distance > scalar_type{0})
+            const auto coeff =
+                detail::boundary_diffusion_coefficient(
+                    mesh, face_lid, owner, diffusivity);
+            if (coeff > scalar_type{0})
             {
-                const auto coeff =
-                    diffusivity * mesh.face_area(face_lid) / distance;
-
                 local_ordinal_type col = owner;
                 scalar_type bval = coeff;
                 matrix->sumIntoLocalValues(
