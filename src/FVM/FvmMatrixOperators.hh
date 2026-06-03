@@ -11,6 +11,7 @@
 #pragma once
 
 #include "fields/FaceField.hh"
+#include "FVM/FvmOperatorDetails.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -92,13 +93,9 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
 
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-            const auto distance = mesh.face_cell_center_distance(face_lid);
-            if (distance <= 0.0)
-            {
-                throw std::runtime_error("Cannot assemble diffusion across coincident cells.");
-            }
-
-            const auto coeff = diffusivity * mesh.face_area(face_lid) / distance;
+            const auto coeff =
+                detail::interior_diffusion_coefficient(
+                    mesh, face_lid, cell_lid, other, diffusivity);
             diagonal += coeff;
             cols.push_back(other);
             vals.push_back(-coeff);
@@ -229,15 +226,11 @@ pressure_poisson_matrix(
                 continue;
             }
 
-            const auto distance = mesh.face_cell_center_distance(face_lid);
-            if (distance <= 0.0)
-            {
-                throw std::runtime_error(
-                    "Cannot assemble pressure Poisson matrix across coincident cells.");
-            }
-            const auto coeff = mesh.face_area(face_lid) / distance;
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            const auto coeff =
+                detail::interior_diffusion_coefficient(
+                    mesh, face_lid, cell_lid, other, scalar_type{1});
             diagonal += coeff;
             cols.push_back(other);
             vals.push_back(-coeff);
