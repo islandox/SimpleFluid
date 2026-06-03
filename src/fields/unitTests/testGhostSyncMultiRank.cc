@@ -1,6 +1,12 @@
 /**
  * @file testGhostSyncMultiRank.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Multi-rank ghost synchronization tests for cell fields.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -64,6 +70,9 @@ void expect_partitioned_mesh(const MeshType& mesh,
 
 } // namespace
 
+/**
+ * @brief Sets each owned cell to its global ID and verifies ghost sync propagates values to all local cells.
+ */
 TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesToAllLocalCells)
 {
     auto mesh = make_4x4x4_mesh();
@@ -96,6 +105,9 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesToAllLocalCells)
     }
 }
 
+/**
+ * @brief Verifies sync_periodic_boundaries propagates scalar and vector values across periodic pairs.
+ */
 TEST(GhostSyncMultiRankTest, SyncPeriodicBoundariesUpdatesScalarAndVectorGhosts)
 {
     auto mesh = make_4x4x4_mesh();
@@ -136,6 +148,9 @@ TEST(GhostSyncMultiRankTest, SyncPeriodicBoundariesUpdatesScalarAndVectorGhosts)
     }
 }
 
+/**
+ * @brief Verifies ghost sync on a larger 10×10×10 mesh requiring at least four MPI ranks.
+ */
 TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesOnLargeMesh)
 {
     auto mesh = make_10x10x10_mesh();

@@ -14,6 +14,14 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Construct a TemperatureDiffusionEquation on the given mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the computational mesh.
+ * @param boundary_conditions Boundary-condition set for temperature.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<TpetraTypePack Pack>
 TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
     SP<const mesh_type> mesh,
@@ -25,6 +33,15 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
     refresh_boundary_cache();
 }
 
+/**
+ * @brief Refresh the cached Dirichlet boundary temperature values.
+ *
+ * Scans all boundary patches and stores the prescribed Dirichlet
+ * temperature for each owned boundary face. Neumann and NoSlip conditions
+ * are handled implicitly in the diffusion solve and are not cached here.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
 {
@@ -54,6 +71,15 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
     }
 }
 
+/**
+ * @brief Advance the temperature field explicitly with a zero source term.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_temperature Temperature values from the previous time step.
+ * @param time_step Time-step size.
+ * @param thermal_diffusivity Thermal diffusivity coefficient.
+ * @param[out] temperature Updated temperature field on return.
+ */
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_explicit(
     const std::vector<scalar_type>& old_temperature,
@@ -71,6 +97,24 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                      temperature, zero_source);
 }
 
+/**
+ * @brief Advance the temperature field explicitly with a right-hand source
+ *        term.
+ *
+ * Uses a forward-Euler update with a two-point flux approximation for
+ * diffusion and handles Dirichlet, Neumann, and NoSlip boundary
+ * conditions. Periodic boundaries are synchronised after the update.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_temperature Temperature values from the previous time step.
+ * @param time_step Time-step size.
+ * @param thermal_diffusivity Thermal diffusivity coefficient.
+ * @param[out] temperature Updated temperature field on return.
+ * @param right_hand_source Per-cell scalar source provider.
+ * @throws std::invalid_argument on mesh mismatch, negative time step, or
+ *         negative diffusivity.
+ * @throws std::runtime_error if a Robin boundary condition is encountered.
+ */
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_explicit(
     const std::vector<scalar_type>& old_temperature,
@@ -176,6 +220,18 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
     d_mesh->sync_periodic_boundaries(temperature);
 }
 
+/**
+ * @brief Advance the temperature field semi-implicitly with a zero source
+ *        term.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_temperature Temperature field from the previous time step.
+ * @param face_fluxes Pre-computed volumetric face fluxes.
+ * @param time_step Time-step size.
+ * @param thermal_diffusivity Thermal diffusivity coefficient.
+ * @param[out] temperature Updated temperature field on return.
+ * @param linear_options Linear solver configuration.
+ */
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     const field_type& old_temperature,
@@ -196,6 +252,24 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
                           linear_options);
 }
 
+/**
+ * @brief Advance the temperature field semi-implicitly with a right-hand
+ *        source term.
+ *
+ * Assembles and solves an advection-diffusion transport system for
+ * temperature using the pre-computed face fluxes.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_temperature Temperature field from the previous time step.
+ * @param face_fluxes Pre-computed volumetric face fluxes.
+ * @param time_step Time-step size.
+ * @param thermal_diffusivity Thermal diffusivity coefficient.
+ * @param[out] temperature Updated temperature field on return.
+ * @param right_hand_source Per-cell scalar source provider.
+ * @param linear_options Linear solver configuration.
+ * @throws std::invalid_argument on mesh mismatch, negative time step, or
+ *         negative diffusivity.
+ */
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     const field_type& old_temperature,

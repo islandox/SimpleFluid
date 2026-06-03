@@ -1,5 +1,6 @@
 /**
  * @file ErrorNorms.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Error-norm utilities for comparing numerical solutions against
  *        analytical/exact solutions.
  * @version 0.1

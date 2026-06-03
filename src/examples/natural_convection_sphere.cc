@@ -15,6 +15,17 @@
 
 #include <memory>
 
+/**
+ * @brief Entry point for the natural-convection sphere example.
+ *
+ * Configures a 3D spherified-cube mesh, sets Dirichlet temperature on
+ * lower_surface (hot) and upper_surface (cold), and runs a short Boussinesq
+ * simulation.
+ *
+ * @param argc Argument count (passed to Tpetra for MPI init).
+ * @param argv Argument vector (passed to Tpetra for MPI init).
+ * @return Exit code (always 0).
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

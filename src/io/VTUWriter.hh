@@ -1,6 +1,12 @@
 /**
  * @file VTUWriter.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Concrete VTU writer for ASCII unstructured-grid output.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 

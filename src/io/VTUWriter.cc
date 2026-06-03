@@ -1,6 +1,12 @@
 /**
  * @file VTUWriter.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Concrete VTU writer implementation.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "io/VTUWriter.hh"
@@ -20,6 +26,14 @@ namespace SimpleFluid
 namespace
 {
 
+/**
+ * @brief Escape special XML characters in an attribute value.
+ *
+ * Replaces &, <, >, ", and ' with their XML entity equivalents.
+ *
+ * @param value Raw string to escape.
+ * @return Escaped string safe for XML attribute insertion.
+ */
 std::string escape_xml_attribute(const std::string& value)
 {
     std::string escaped;
@@ -52,6 +66,13 @@ std::string escape_xml_attribute(const std::string& value)
     return escaped;
 }
 
+/**
+ * @brief Write space-separated scalar values to a stream.
+ *
+ * @param out Output stream.
+ * @param values Scalar data to write.
+ * @param indent Indentation string prepended to each line.
+ */
 void write_scalar_values(std::ostream& out,
                          const VTUWriter::ScalarData& values,
                          const std::string& indent)
@@ -64,6 +85,13 @@ void write_scalar_values(std::ostream& out,
     out << "\n";
 }
 
+/**
+ * @brief Write space-separated 32-bit integer values to a stream.
+ *
+ * @param out Output stream.
+ * @param values Integer data to write.
+ * @param indent Indentation string prepended to each line.
+ */
 void write_int_values(std::ostream& out,
                       const VTUWriter::IntData& values,
                       const std::string& indent)
@@ -76,6 +104,13 @@ void write_int_values(std::ostream& out,
     out << "\n";
 }
 
+/**
+ * @brief Write space-separated 64-bit integer values to a stream.
+ *
+ * @param out Output stream.
+ * @param values Integer data to write.
+ * @param indent Indentation string prepended to each line.
+ */
 void write_int64_values(std::ostream& out,
                         const VTUWriter::Int64Data& values,
                         const std::string& indent)
@@ -88,6 +123,13 @@ void write_int64_values(std::ostream& out,
     out << "\n";
 }
 
+/**
+ * @brief Write 3-component vector values (one per line) to a stream.
+ *
+ * @param out Output stream.
+ * @param values Vector data to write.
+ * @param indent Indentation string prepended to each line.
+ */
 void write_vector_values(std::ostream& out,
                          const VTUWriter::VectorData& values,
                          const std::string& indent)
@@ -101,6 +143,12 @@ void write_vector_values(std::ostream& out,
 
 } // namespace
 
+/**
+ * @brief Get the number of entries in a data array (via variant visitation).
+ *
+ * @param data_array The data array to query.
+ * @return Number of entries in the contained values variant.
+ */
 std::size_t VTUWriter::data_array_size(const DataArray& data_array)
 {
     return std::visit(
@@ -108,6 +156,13 @@ std::size_t VTUWriter::data_array_size(const DataArray& data_array)
         data_array.values);
 }
 
+/**
+ * @brief Write a single VTU DataArray element (cell data) to the output stream.
+ *
+ * @param out Output stream.
+ * @param data_array Data array descriptor containing type, name, and values.
+ * @param indent Indentation string for the XML elements.
+ */
 void VTUWriter::write_cell_data_array(std::ostream& out,
                                       const DataArray& data_array,
                                       const std::string& indent)
@@ -147,11 +202,23 @@ void VTUWriter::write_cell_data_array(std::ostream& out,
     out << indent << "</DataArray>\n";
 }
 
+/**
+ * @brief Set the mesh point coordinates for the VTU output.
+ *
+ * @param points Vector of 3D point coordinates.
+ */
 void VTUWriter::set_points(VectorData points)
 {
     d_points = std::move(points);
 }
 
+/**
+ * @brief Set the cell connectivity, offset, and type arrays for the VTU output.
+ *
+ * @param connectivity Flat array of node indices for all cells.
+ * @param offsets Cumulative end-of-cell offsets into the connectivity array.
+ * @param cell_types VTK cell type for each cell (e.g., 12 for HEXAHEDRON).
+ */
 void VTUWriter::set_cells(Int64Data connectivity,
                           Int64Data offsets,
                           UInt8Data cell_types)
@@ -161,6 +228,12 @@ void VTUWriter::set_cells(Int64Data connectivity,
     d_cell_types = std::move(cell_types);
 }
 
+/**
+ * @brief Add a scalar (Float64) cell-data array to the VTU output.
+ *
+ * @param name Name of the data array.
+ * @param values Per-cell scalar values.
+ */
 void VTUWriter::add_scalar_cell_data(std::string name, ScalarData values)
 {
     add_cell_data_array({
@@ -171,6 +244,12 @@ void VTUWriter::add_scalar_cell_data(std::string name, ScalarData values)
     });
 }
 
+/**
+ * @brief Add a vector (Float64, 3-component) cell-data array to the VTU output.
+ *
+ * @param name Name of the data array.
+ * @param values Per-cell vector values.
+ */
 void VTUWriter::add_vector_cell_data(std::string name, VectorData values)
 {
     add_cell_data_array({
@@ -181,6 +260,12 @@ void VTUWriter::add_vector_cell_data(std::string name, VectorData values)
     });
 }
 
+/**
+ * @brief Add a 32-bit integer cell-data array to the VTU output.
+ *
+ * @param name Name of the data array.
+ * @param values Per-cell integer values.
+ */
 void VTUWriter::add_int_cell_data(std::string name, IntData values)
 {
     add_cell_data_array({
@@ -191,6 +276,12 @@ void VTUWriter::add_int_cell_data(std::string name, IntData values)
     });
 }
 
+/**
+ * @brief Add a 64-bit integer cell-data array to the VTU output.
+ *
+ * @param name Name of the data array.
+ * @param values Per-cell 64-bit integer values.
+ */
 void VTUWriter::add_int64_cell_data(std::string name, Int64Data values)
 {
     add_cell_data_array({
@@ -201,11 +292,25 @@ void VTUWriter::add_int64_cell_data(std::string name, Int64Data values)
     });
 }
 
+/**
+ * @brief Append a generic data array descriptor to the cell-data list.
+ *
+ * @param data_array Data array descriptor to add.
+ */
 void VTUWriter::add_cell_data_array(DataArray data_array)
 {
     d_cell_data.push_back(std::move(data_array));
 }
 
+/**
+ * @brief Validate the VTU data for internal consistency before writing.
+ *
+ * Checks that cell offsets and types match, offsets are monotonically
+ * increasing, the final offset matches connectivity size, and cell data
+ * arrays have the correct number of entries.
+ *
+ * @throws std::runtime_error If any consistency check fails.
+ */
 void VTUWriter::validate() const
 {
     if (d_cell_offsets.size() != d_cell_types.size())
@@ -244,6 +349,15 @@ void VTUWriter::validate() const
     }
 }
 
+/**
+ * @brief Write the complete VTU XML file to disk.
+ *
+ * Validates the data, then writes the XML header, point coordinates,
+ * connectivity, cell types, offsets, and cell-data arrays.
+ *
+ * @param filename Path of the output .vtu file.
+ * @throws std::runtime_error If the file cannot be opened or validation fails.
+ */
 void VTUWriter::write(const std::string& filename) const
 {
     validate();

@@ -15,6 +15,17 @@
 
 #include <memory>
 
+/**
+ * @brief Entry point for the natural-convection box example.
+ *
+ * Configures a 3D box mesh (2×2×2 cells), sets Dirichlet temperature
+ * boundary conditions on xmin (hot) and xmax (cold) with Neumann elsewhere,
+ * and runs a short Boussinesq simulation.
+ *
+ * @param argc Argument count (passed to Tpetra for MPI init).
+ * @param argv Argument vector (passed to Tpetra for MPI init).
+ * @return Exit code (always 0).
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

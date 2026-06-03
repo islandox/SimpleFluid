@@ -1,6 +1,12 @@
 /**
  * @file testVec3.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for the vec3 3D vector class.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -15,6 +21,9 @@ namespace
 
 using Vec3 = SimpleFluid::vec3<double>;
 
+/**
+ * @brief Validates default, component, and array constructors, plus indexed component access.
+ */
 TEST(Vec3Test, ConstructionAndAccess)
 {
     // Default zero-initialization
@@ -50,6 +59,9 @@ TEST(Vec3Test, ConstructionAndAccess)
     }
 }
 
+/**
+ * @brief Verifies addition, subtraction, scalar multiplication/division, equality, and norm of large/small values.
+ */
 TEST(Vec3Test, ArithmeticAndComparison)
 {
     const Vec3 a(1.0, 2.0, 3.0);
@@ -71,6 +83,9 @@ TEST(Vec3Test, ArithmeticAndComparison)
     EXPECT_NEAR(small.norm(), std::sqrt(3.0) * 1.0e-10, 1.0e-15);
 }
 
+/**
+ * @brief Checks dot product, cross product, and Euclidean norm computations.
+ */
 TEST(Vec3Test, GeometricOperations)
 {
     // Dot product

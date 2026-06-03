@@ -1,6 +1,12 @@
 /**
  * @file VectorFaceField.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Three-component face-centered vector field backed by Tpetra::MultiVector.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -90,6 +96,14 @@ private:
     static void check_component(std::size_t component);
 };
 
+/**
+ * @brief Construct a vector face field with three components.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Optional field name for I/O.
+ * @param zero_out If true, initialize all entries to zero.
+ */
 template<TpetraTypePack Pack>
 VectorFaceField<Pack>::VectorFaceField(SP<const mesh_type> mesh,
                                        std::string name,
@@ -102,6 +116,14 @@ VectorFaceField<Pack>::VectorFaceField(SP<const mesh_type> mesh,
     this->d_data = vector_type(owned_face_map, num_components, zero_out);
 }
 
+/**
+ * @brief Construct a vector face field initialized with a uniform vector value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param initial_value Vector value to fill all owned face entries.
+ * @param name Optional field name for I/O.
+ */
 template<TpetraTypePack Pack>
 VectorFaceField<Pack>::VectorFaceField(SP<const mesh_type> mesh,
                                        const vec_type& initial_value,
@@ -111,6 +133,13 @@ VectorFaceField<Pack>::VectorFaceField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
+/**
+ * @brief Validate that a component index is in range [0, num_components).
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param component Component index to validate.
+ * @throws std::out_of_range if @p component is out of bounds.
+ */
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::check_component(std::size_t component)
 {
@@ -121,6 +150,14 @@ void VectorFaceField<Pack>::check_component(std::size_t component)
     }
 }
 
+/**
+ * @brief Read the vector value stored at an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @return 3D vector stored at the face.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not owned.
+ */
 template<TpetraTypePack Pack>
 auto VectorFaceField<Pack>::value(local_ordinal_type face_lid) const -> vec_type
 {
@@ -131,6 +168,14 @@ auto VectorFaceField<Pack>::value(local_ordinal_type face_lid) const -> vec_type
     };
 }
 
+/**
+ * @brief Read the vector value stored at a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @return 3D vector stored at the face.
+ * @throws std::out_of_range if @p face_gid is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 auto VectorFaceField<Pack>::global_value(global_ordinal_type face_gid) const
     -> vec_type
@@ -142,6 +187,15 @@ auto VectorFaceField<Pack>::global_value(global_ordinal_type face_gid) const
     };
 }
 
+/**
+ * @brief Read a single component value from an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @param component Component index (0, 1, or 2).
+ * @return Scalar component value.
+ * @throws std::out_of_range if @p face_lid is out of bounds/not owned, or @p component is invalid.
+ */
 template<TpetraTypePack Pack>
 auto VectorFaceField<Pack>::component_value(
     local_ordinal_type face_lid,
@@ -151,6 +205,15 @@ auto VectorFaceField<Pack>::component_value(
     return this->d_data.getData(component)[this->owned_row_for_face(face_lid)];
 }
 
+/**
+ * @brief Read a single component value from a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @param component Component index (0, 1, or 2).
+ * @return Scalar component value.
+ * @throws std::out_of_range if @p face_gid is not owned or @p component is invalid.
+ */
 template<TpetraTypePack Pack>
 auto VectorFaceField<Pack>::global_component_value(
     global_ordinal_type face_gid,
@@ -161,6 +224,12 @@ auto VectorFaceField<Pack>::global_component_value(
         this->owned_row_for_global_face(face_gid)];
 }
 
+/**
+ * @brief Set all owned face entries to a uniform vector value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param value Vector value to assign to every owned face (per component).
+ */
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::put_scalar(const vec_type& value)
 {
@@ -170,6 +239,14 @@ void VectorFaceField<Pack>::put_scalar(const vec_type& value)
     }
 }
 
+/**
+ * @brief Write a 3D vector to an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @param value Vector value to store.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not owned.
+ */
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_value(local_ordinal_type face_lid,
                                       const vec_type& value)
@@ -178,6 +255,14 @@ void VectorFaceField<Pack>::set_value(local_ordinal_type face_lid,
         set_component_value(face_lid, c, value.component(c));
 }
 
+/**
+ * @brief Write a 3D vector to a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @param value Vector value to store.
+ * @throws std::out_of_range if @p face_gid is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_global_value(global_ordinal_type face_gid,
                                              const vec_type& value)
@@ -186,6 +271,15 @@ void VectorFaceField<Pack>::set_global_value(global_ordinal_type face_gid,
         set_global_component_value(face_gid, c, value.component(c));
 }
 
+/**
+ * @brief Write a single component value to an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @param component Component index (0, 1, or 2).
+ * @param value Scalar value to store for the given component.
+ * @throws std::out_of_range if @p face_lid is out of bounds/not owned, or @p component is invalid.
+ */
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_component_value(
     local_ordinal_type face_lid,
@@ -197,6 +291,15 @@ void VectorFaceField<Pack>::set_component_value(
         this->owned_row_for_face(face_lid), component, value);
 }
 
+/**
+ * @brief Write a single component value to a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @param component Component index (0, 1, or 2).
+ * @param value Scalar value to store for the given component.
+ * @throws std::out_of_range if @p face_gid is not owned or @p component is invalid.
+ */
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_global_component_value(
     global_ordinal_type face_gid,

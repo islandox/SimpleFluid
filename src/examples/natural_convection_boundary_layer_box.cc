@@ -15,6 +15,18 @@
 
 #include <memory>
 
+/**
+ * @brief Entry point for the natural-convection boundary-layer box example.
+ *
+ * Configures a 3D box mesh (4×4×4 cells) with boundary-layer refinement on
+ * all six faces, applies Dirichlet temperature BCs on xmin (hot)/xmax (cold),
+ * no-slip velocity on all walls, and runs a short Boussinesq simulation with
+ * gravity in all three directions.
+ *
+ * @param argc Argument count (passed to Tpetra for MPI init).
+ * @param argv Argument vector (passed to Tpetra for MPI init).
+ * @return Exit code (always 0).
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

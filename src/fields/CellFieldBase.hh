@@ -1,6 +1,12 @@
 /**
  * @file CellFieldBase.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Shared CRTP infrastructure for cell-centered field classes.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -113,6 +119,17 @@ protected:
     RCP<const import_type> d_owned_to_overlap_import;
 };
 
+/**
+ * @brief Construct a scalar cell-field base with owned and overlap storage.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Field name for I/O.
+ * @param zero_out If true, initialize all entries to zero and sync ghosts.
+ * @param class_name Class name used in error messages.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 CellFieldBase<Pack, Derived, StorageVector>::CellFieldBase(
     SP<const mesh_type> mesh,
@@ -133,6 +150,18 @@ CellFieldBase<Pack, Derived, StorageVector>::CellFieldBase(
     }
 }
 
+/**
+ * @brief Construct a multi-component cell-field base with owned and overlap storage.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Field name for I/O.
+ * @param num_components Number of components (columns in MultiVector).
+ * @param zero_out If true, initialize all entries to zero and sync ghosts.
+ * @param class_name Class name used in error messages.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 CellFieldBase<Pack, Derived, StorageVector>::CellFieldBase(
     SP<const mesh_type> mesh,
@@ -154,6 +183,18 @@ CellFieldBase<Pack, Derived, StorageVector>::CellFieldBase(
     }
 }
 
+/**
+ * @brief Validate and return the mesh's owned-cell map.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param class_name Class name used in error messages.
+ * @return RCP to the owned-cell Tpetra map.
+ * @throws std::invalid_argument if @p mesh is null.
+ * @throws std::runtime_error if the mesh does not have an owned-cell map.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto CellFieldBase<Pack, Derived, StorageVector>::require_owned_map(
     const SP<const mesh_type>& mesh,
@@ -176,6 +217,18 @@ auto CellFieldBase<Pack, Derived, StorageVector>::require_owned_map(
     return map;
 }
 
+/**
+ * @brief Validate and return the mesh's overlap-cell map.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param class_name Class name used in error messages.
+ * @return RCP to the overlap-cell Tpetra map.
+ * @throws std::invalid_argument if @p mesh is null.
+ * @throws std::runtime_error if the mesh does not have an overlap-cell map.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto CellFieldBase<Pack, Derived, StorageVector>::require_overlap_map(
     const SP<const mesh_type>& mesh,
@@ -198,6 +251,18 @@ auto CellFieldBase<Pack, Derived, StorageVector>::require_overlap_map(
     return map;
 }
 
+/**
+ * @brief Validate that a cell local ID is in range.
+ *
+ * Checks are only active in debug builds or when
+ * SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS is defined.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param cell_lid Cell local ID to validate.
+ * @throws std::out_of_range if the ID is negative or exceeds the local cell count.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 void CellFieldBase<Pack, Derived, StorageVector>::check_cell_lid(
     local_ordinal_type cell_lid) const
@@ -222,6 +287,19 @@ void CellFieldBase<Pack, Derived, StorageVector>::check_cell_lid(
 #endif
 }
 
+/**
+ * @brief Verify that the owned and overlap map sizes match the mesh and that
+ *        local cell IDs correspond to the overlap rows.
+ *
+ * Only active in debug builds or when SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS
+ * is defined.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param class_name Class name used in error messages.
+ * @throws std::runtime_error if any invariant is violated.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 void CellFieldBase<Pack, Derived, StorageVector>::check_cell_row_invariant(
     const char* class_name) const
@@ -284,6 +362,16 @@ void CellFieldBase<Pack, Derived, StorageVector>::check_cell_row_invariant(
 #endif
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a cell local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param cell_lid Cell local ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if @p cell_lid is out of bounds or not locally owned.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto CellFieldBase<Pack, Derived, StorageVector>::owned_row_for_cell(
     local_ordinal_type cell_lid) const -> local_ordinal_type
@@ -298,6 +386,16 @@ auto CellFieldBase<Pack, Derived, StorageVector>::owned_row_for_cell(
     return cell_lid;
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a cell global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param cell_gid Cell global ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if @p cell_gid is not a valid mesh GID or not owned.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto CellFieldBase<Pack, Derived, StorageVector>::owned_row_for_global_cell(
     global_ordinal_type cell_gid) const -> local_ordinal_type
@@ -318,6 +416,16 @@ auto CellFieldBase<Pack, Derived, StorageVector>::owned_row_for_global_cell(
     return owned_row;
 }
 
+/**
+ * @brief Look up the overlap (local) Tpetra row index for a cell local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param cell_lid Cell local ID.
+ * @return Local row index in the overlap data vector.
+ * @throws std::out_of_range if @p cell_lid is out of bounds.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto CellFieldBase<Pack, Derived, StorageVector>::local_row_for_cell(
     local_ordinal_type cell_lid) const -> local_ordinal_type
@@ -326,6 +434,16 @@ auto CellFieldBase<Pack, Derived, StorageVector>::local_row_for_cell(
     return cell_lid;
 }
 
+/**
+ * @brief Look up the overlap (local) Tpetra row index for a cell global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param cell_gid Cell global ID.
+ * @return Local row index in the overlap data vector.
+ * @throws std::out_of_range if @p cell_gid is not a valid mesh GID or not a local cell.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto CellFieldBase<Pack, Derived, StorageVector>::local_row_for_global_cell(
     global_ordinal_type cell_gid) const -> local_ordinal_type

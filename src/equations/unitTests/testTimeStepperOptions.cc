@@ -1,6 +1,12 @@
 /**
  * @file testTimeStepperOptions.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for transient time-stepper options.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -10,6 +16,9 @@
 namespace
 {
 
+/**
+ * @brief Verifies default time-stepper options match expected physical smoke values.
+ */
 TEST(TimeStepperOptionsTest, DefaultsArePhysicalSmokeValues)
 {
     const SimpleFluid::TimeStepperOptions options;

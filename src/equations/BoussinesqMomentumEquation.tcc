@@ -14,6 +14,13 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Construct a BoussinesqMomentumEquation on the given mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the computational mesh.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<TpetraTypePack Pack>
 BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
     SP<const mesh_type> mesh)
@@ -22,6 +29,19 @@ BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
 {
 }
 
+/**
+ * @brief Advance the velocity field by one time step with a zero source
+ *        term.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_velocity Velocity from the previous time step.
+ * @param face_fluxes Pre-computed volumetric face fluxes.
+ * @param temperature Scalar temperature field (Boussinesq coupling).
+ * @param velocity_boundary_cache Cached velocity boundary conditions.
+ * @param options Time-stepping and physical parameters.
+ * @param[out] velocity Updated velocity on return.
+ * @param linear_options Linear solver configuration.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
@@ -43,6 +63,25 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                      zero_source, linear_options);
 }
 
+/**
+ * @brief Advance the velocity field by one time step with an explicit
+ *        right-hand source term.
+ *
+ * Validates mesh consistency and parameter bounds, then assembles and
+ * solves the momentum transport system including Boussinesq buoyancy.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param old_velocity Velocity from the previous time step.
+ * @param face_fluxes Pre-computed volumetric face fluxes.
+ * @param temperature Scalar temperature field (Boussinesq coupling).
+ * @param velocity_boundary_cache Cached velocity boundary conditions.
+ * @param options Time-stepping and physical parameters.
+ * @param[out] velocity Updated velocity on return.
+ * @param right_hand_source Per-cell source vector provider.
+ * @param linear_options Linear solver configuration.
+ * @throws std::invalid_argument on mesh mismatch, negative time step,
+ *         negative viscosity, or wrong boundary-cache size.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,

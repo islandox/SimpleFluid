@@ -31,6 +31,12 @@ namespace SimpleFluid
 namespace
 {
 
+/**
+ * @brief Internal tag used during structured mesh construction.
+ *
+ * Records the topological ring, layer, and surface flag for mesh nodes
+ * during the hexahedral element generation loop.
+ */
 struct FactoryNodeTag
 {
     std::size_t ring = 0;
@@ -38,6 +44,14 @@ struct FactoryNodeTag
     bool surface = false;
 };
 
+/**
+ * @brief Compute the minimum positive cell count for a given length and mesh size.
+ *
+ * @param length Physical extent of the domain axis.
+ * @param mesh_size Desired mesh element size.
+ * @return Minimum number of cells (at least 1).
+ * @throws std::runtime_error If length or mesh_size is non-positive.
+ */
 std::size_t positive_count_from_size(real_t length, real_t mesh_size)
 {
     if (length <= 0.0)
@@ -53,6 +67,15 @@ std::size_t positive_count_from_size(real_t length, real_t mesh_size)
         1, static_cast<std::size_t>(std::ceil(length / mesh_size)));
 }
 
+/**
+ * @brief Declare an STK mesh part with I/O attributes.
+ *
+ * @param meta STK metadata to declare the part on.
+ * @param name Name of the part (must be non-empty).
+ * @param rank Entity rank of the part.
+ * @return Pointer to the declared STK part.
+ * @throws std::runtime_error If name is empty.
+ */
 stk::mesh::Part* declare_io_part(stk::mesh::MetaData& meta,
                                   const std::string& name,
                                   stk::mesh::EntityRank rank)
@@ -67,6 +90,17 @@ stk::mesh::Part* declare_io_part(stk::mesh::MetaData& meta,
     return &part;
 }
 
+/**
+ * @brief Declare boundary-element sides for a structured-mesh element based on node tags.
+ *
+ * @tparam Classifier Callable type that receives side node tags and returns a Part*.
+ * @param bulk STK bulk data.
+ * @param elem STK entity handle of the element.
+ * @param topo Element topology.
+ * @param elem_node_ids Node IDs of the element.
+ * @param node_tags Map from node ID to factory node tag.
+ * @param classifier Callable that selects a boundary part from side node tags.
+ */
 template <class Classifier>
 void declare_tagged_boundary_sides(
     stk::mesh::BulkData& bulk,
@@ -96,6 +130,13 @@ void declare_tagged_boundary_sides(
     }
 }
 
+/**
+ * @brief Compute the total thickness of a geometric boundary-layer stack.
+ *
+ * @tparam Spec Type exposing count, first_cell_height, and growth_ratio.
+ * @param spec Pointer to the boundary-layer specification (may be null).
+ * @return Total thickness of the layer stack, or zero if spec is null or count is zero.
+ */
 template <class Spec>
 real_t geometric_layer_thickness(const Spec* spec)
 {
@@ -115,6 +156,22 @@ real_t geometric_layer_thickness(const Spec* spec)
     return thickness;
 }
 
+/**
+ * @brief Generate graded cell edges with optional boundary-layer refinement.
+ *
+ * Builds a non-uniform edge distribution for a mesh axis, inserting
+ * geometrically graded layers at the lower and/or upper boundaries.
+ *
+ * @tparam Spec Type exposing count, first_cell_height, and growth_ratio.
+ * @param lower Coordinate of the lower bound.
+ * @param upper Coordinate of the upper bound.
+ * @param base_cell_count Number of cells in the base (uniform) mesh.
+ * @param lower_spec Boundary-layer specification at the lower end (may be null).
+ * @param upper_spec Boundary-layer specification at the upper end (may be null).
+ * @param axis_name Human-readable axis name for error messages.
+ * @return Vector of edge coordinates (size = base_cell_count + layers + 1).
+ * @throws std::runtime_error If layer counts overlap or thickness exceeds domain.
+ */
 template <class Spec>
 ArrReal graded_edges(real_t lower,
                      real_t upper,
@@ -190,6 +247,18 @@ ArrReal graded_edges(real_t lower,
     return edges;
 }
 
+/**
+ * @brief Generate graded edges for a parametric sphere axis with boundary layers.
+ *
+ * Normalises the boundary-layer spec by radius and delegates to graded_edges
+ * over the parametric range [-1, 1].
+ *
+ * @tparam Spec Type exposing count, first_cell_height, and growth_ratio.
+ * @param base_cell_count Number of cells in the base (uniform) mesh.
+ * @param radius Sphere radius.
+ * @param spec Boundary-layer specification (may be null).
+ * @return Vector of parametric edge coordinates, or empty if spec is null.
+ */
 template <class Spec>
 ArrReal symmetric_sphere_edges(std::size_t base_cell_count,
                                real_t radius,
@@ -315,6 +384,12 @@ MeshFactory::MeshFactory(SP<const Database> db)
     }
 }
 
+/**
+ * @brief Look up the boundary-layer specification for a given boundary name.
+ *
+ * @param boundary_name Name of the mesh boundary.
+ * @return Pointer to the matching BoundaryLayerSpec, or nullptr if not found.
+ */
 const MeshFactory::BoundaryLayerSpec* MeshFactory::boundary_layer_spec(
     const std::string& boundary_name) const
 {
@@ -325,6 +400,11 @@ const MeshFactory::BoundaryLayerSpec* MeshFactory::boundary_layer_spec(
     return iter == d_boundary_layer_specs.end() ? nullptr : &*iter;
 }
 
+/**
+ * @brief Validate that all boundary-layer names correspond to domain exterior face types.
+ *
+ * @throws std::runtime_error If a boundary-layer name is not found in the domain exterior face types.
+ */
 void MeshFactory::validate_boundary_layer_names() const
 {
     for (const auto& spec : d_boundary_layer_specs)

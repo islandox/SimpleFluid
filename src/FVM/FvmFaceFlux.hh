@@ -182,6 +182,11 @@ void validate_normal_flux_inputs(
 
 /**
  * @brief Project owner-cell velocity onto the tangent plane of a boundary face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param velocity Cell-centered velocity field.
+ * @param face_lid Local ID of the boundary face.
+ * @return Velocity component tangential to the boundary face.
  */
 template<TpetraTypePack Pack>
 auto slip_face_velocity(const VectorCellField<Pack>& velocity,
@@ -200,8 +205,10 @@ auto slip_face_velocity(const VectorCellField<Pack>& velocity,
  * @brief Retrieve the prescribed velocity on boundary faces from the
  *        cache, if available.
  *
- * @tparam Pack The Tpetra type pack.
+ * @tparam Pack Tpetra type pack.
  * @param boundary_cache Pointer to a velocity-boundary cache, or nullptr.
+ * @param velocity Cell-centered velocity field (used for slip condition
+ *        computation).
  * @param[out] face_velocity On return, the cached boundary velocity.
  */
 template<TpetraTypePack Pack>
