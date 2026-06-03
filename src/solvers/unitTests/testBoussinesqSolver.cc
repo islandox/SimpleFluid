@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
@@ -346,13 +346,13 @@ TEST(BoussinesqSolverTest, RunsBoundariedCylinderSmokeCase)
     expect_finite_solution(*mesh, solver);
 
     const auto cache =
-        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_flux");
-    SimpleFluid::FvmOperators::face_velocities(solver.velocity(), cache,
+    SimpleFluid::FVM::face_velocities(solver.velocity(), cache,
                                                face_velocity);
-    SimpleFluid::FvmOperators::normal_face_fluxes(face_velocity, face_fluxes);
+    SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
 
     expect_zero_boundary_velocity(*mesh, face_velocity, face_fluxes, "radial");
     expect_zero_boundary_velocity(*mesh, face_velocity, face_fluxes, "zmin");

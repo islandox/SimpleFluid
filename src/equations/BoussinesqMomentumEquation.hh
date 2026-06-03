@@ -15,7 +15,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <Teuchos_RCP.hpp>
@@ -55,7 +55,7 @@ public:
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
-        const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,
         velocity_field_type& velocity,
         const LinearSolverOptions& linear_options = {}) const;
@@ -64,7 +64,7 @@ public:
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
-        const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,
         velocity_field_type& velocity,
         const source_type& right_hand_source,

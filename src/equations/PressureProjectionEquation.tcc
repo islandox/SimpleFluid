@@ -76,7 +76,7 @@ void PressureProjectionEquation<Pack>::rebuild_matrix() const
 
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     d_cached_pressure_matrix =
-        FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
+        FVM::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
 }
 
 /**
@@ -111,7 +111,7 @@ template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
-    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity)
 {
     auto zero_source =
@@ -143,7 +143,7 @@ template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
-    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity,
     const source_type& right_hand_source)
 {
@@ -160,9 +160,9 @@ void PressureProjectionEquation<Pack>::project(
         return;
     }
 
-    FvmOperators::face_velocities(velocity, velocity_boundary_cache,
+    FVM::face_velocities(velocity, velocity_boundary_cache,
                                   d_cached_face_velocity);
-    FvmOperators::normal_face_fluxes(d_cached_face_velocity,
+    FVM::normal_face_fluxes(d_cached_face_velocity,
                                      d_cached_face_fluxes);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     if (d_cached_pressure_matrix.is_null())
@@ -185,7 +185,7 @@ void PressureProjectionEquation<Pack>::project(
         const auto row_gid = d_mesh->cell_global_id(cell_lid);
         const auto rhs_value = row_gid == gauge_gid
                              ? scalar_type{}
-                             : -FvmOperators::cell_flux_balance<Pack>(
+                             : -FVM::cell_flux_balance<Pack>(
                                    *d_mesh, d_cached_face_fluxes, cell_lid)
                                / time_step
                                + d_mesh->cell_volume(cell_lid)
@@ -203,7 +203,7 @@ void PressureProjectionEquation<Pack>::project(
     }
     d_mesh->sync_periodic_boundaries(pressure);
 
-    FvmOperators::cell_gradient(pressure, d_cached_gradients);
+    FVM::cell_gradient(pressure, d_cached_gradients);
 
     // Correct velocity using Tpetra::MultiVector::update: V = V - dt * grad(p)
     typename Pack::multi_vector_type gradient_mv(d_mesh->owned_cell_map(),
@@ -216,7 +216,7 @@ void PressureProjectionEquation<Pack>::project(
         for (std::size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
         {
             gradient_mv.replaceLocalValue(cell_lid, comp,
-                                           FvmOperators::detail::component_value(gradient, comp));
+                                           FVM::detail::component_value(gradient, comp));
         }
     }
     velocity.owned_data().update(-time_step, gradient_mv, 1.0);

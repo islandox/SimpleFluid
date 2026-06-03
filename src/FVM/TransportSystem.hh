@@ -1,5 +1,5 @@
 /**
- * @file FvmTransportSystem.hh
+ * @file FVM/TransportSystem.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Semi-implicit finite-volume transport-system assembly.
  * @version 0.1
@@ -13,7 +13,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
-#include "FVM/FvmOperatorDetails.hh"
+#include "FVM/OperatorDetails.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -23,7 +23,7 @@
 #include <cstddef>
 #include <stdexcept>
 
-namespace SimpleFluid::FvmOperators
+namespace SimpleFluid::FVM
 {
 
 /**
@@ -534,4 +534,4 @@ transport_system(const VectorCellField<Pack>& old_values,
         zero_source, cached_matrix);
 }
 
-} // namespace SimpleFluid::FvmOperators
+} // namespace SimpleFluid::FVM

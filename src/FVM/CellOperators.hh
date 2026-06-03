@@ -13,13 +13,13 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
-#include "FVM/FvmOperatorDetails.hh"
+#include "FVM/OperatorDetails.hh"
 
 #include <array>
 #include <cstddef>
 #include <vector>
 
-namespace SimpleFluid::FvmOperators
+namespace SimpleFluid::FVM
 {
 
 template<TpetraTypePack Pack>
@@ -218,4 +218,4 @@ cell_divergence_from_fluxes(
     return divergence;
 }
 
-} // namespace SimpleFluid::FvmOperators
+} // namespace SimpleFluid::FVM

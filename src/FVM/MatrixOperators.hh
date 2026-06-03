@@ -1,5 +1,5 @@
 /**
- * @file FvmMatrixOperators.hh
+ * @file FVM/MatrixOperators.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Finite-volume matrix assembly operators (identity, diffusion, convection,
  *        pressure Poisson).
@@ -11,7 +11,7 @@
  */
 #pragma once
 
-#include "FVM/FvmOperatorDetails.hh"
+#include "FVM/OperatorDetails.hh"
 #include "fields/FaceField.hh"
 #include "geometry/Mesh.hh"
 
@@ -20,7 +20,7 @@
 
 #include <cstddef>
 
-namespace SimpleFluid::FvmOperators
+namespace SimpleFluid::FVM
 {
 
 /**
@@ -245,4 +245,4 @@ pressure_poisson_matrix(
     return matrix;
 }
 
-} // namespace SimpleFluid::FvmOperators
+} // namespace SimpleFluid::FVM

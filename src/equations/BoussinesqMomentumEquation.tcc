@@ -47,7 +47,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
     const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
-    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     const TimeStepperOptions& options,
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const
@@ -87,7 +87,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
     const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
-    const FvmOperators::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     const TimeStepperOptions& options,
     velocity_field_type& velocity,
     const source_type& right_hand_source,
@@ -121,7 +121,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         {
             const auto face_lid =
                 d_mesh->boundary_face_patch(boundary_id).face_lids[face];
-            return FvmOperators::detail::slip_face_velocity(
+            return FVM::detail::slip_face_velocity(
                 old_velocity, face_lid);
         }
 
@@ -144,7 +144,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         };
     };
 
-    auto system = FvmOperators::transport_system<Pack>(
+    auto system = FVM::transport_system<Pack>(
         old_velocity, face_fluxes, options.time_step,
         options.kinematic_viscosity, boundary_value,
         combined_source,

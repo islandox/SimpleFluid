@@ -20,7 +20,7 @@
 #include <unordered_map>
 #include <utility>
 
-namespace SimpleFluid::FvmOperators
+namespace SimpleFluid::FVM
 {
 
 /**
@@ -404,4 +404,4 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
     normal_face_fluxes(face_velocity, fluxes);
 }
 
-} // namespace SimpleFluid::FvmOperators
+} // namespace SimpleFluid::FVM

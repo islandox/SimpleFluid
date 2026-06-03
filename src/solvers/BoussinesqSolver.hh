@@ -21,7 +21,7 @@
 #include "fields/VectorCellField.hh"
 #include "geometry/MeshUtils.hh"
 #include "io/VTUWriter.hh"
-#include "FVM/FvmOperators.hh"
+#include "FVM/Operators.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -96,7 +96,7 @@ private:
     BoundaryConditionSet d_boundary_conditions;
     TimeStepperOptions d_time_options;
     LinearSolverOptions d_linear_options;
-    FvmOperators::VelocityBoundaryCache<Pack> d_velocity_boundary_cache;
+    FVM::VelocityBoundaryCache<Pack> d_velocity_boundary_cache;
 
     TemperatureDiffusionEquation<Pack> d_temperature_equation;
     BoussinesqMomentumEquation<Pack> d_momentum_equation;

@@ -300,7 +300,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
         return cache_it->second[in_patch_id];
     };
 
-    auto system = FvmOperators::transport_system<Pack>(
+    auto system = FVM::transport_system<Pack>(
         old_temperature, face_fluxes, time_step,
         thermal_diffusivity, boundary_value, right_hand_source,
         d_cached_transport_matrix);

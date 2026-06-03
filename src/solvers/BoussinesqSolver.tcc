@@ -52,7 +52,7 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_time_options(time_options),
       d_linear_options(linear_options),
       d_velocity_boundary_cache(
-          FvmOperators::cache_velocity_boundary_conditions<Pack>(
+          FVM::cache_velocity_boundary_conditions<Pack>(
               d_mesh, d_boundary_conditions)),
       d_temperature_equation(d_mesh, d_boundary_conditions),
       d_momentum_equation(d_mesh),
@@ -192,7 +192,7 @@ void BoussinesqSolver<Pack>::step()
         d_mesh->sync_periodic_boundaries(d_velocity);
     }
 
-    FvmOperators::face_fluxes(d_velocity, d_velocity_boundary_cache,
+    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
                               d_old_face_fluxes);
     d_momentum_equation.advance_velocity(d_velocity,
                                          d_old_face_fluxes,
@@ -205,7 +205,7 @@ void BoussinesqSolver<Pack>::step()
                                   d_time_options.time_step,
                                   d_velocity_boundary_cache,
                                   d_velocity);
-    FvmOperators::face_fluxes(d_velocity, d_velocity_boundary_cache,
+    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
                               d_projected_face_fluxes);
     d_temperature_equation.advance_semi_implicit(d_temperature,
                                                  d_projected_face_fluxes,
