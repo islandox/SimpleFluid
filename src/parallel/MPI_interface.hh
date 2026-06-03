@@ -63,6 +63,13 @@ template<> inline MPI_Datatype type_trait<std::uint16_t>()      { return MPI_UIN
 template<> inline MPI_Datatype type_trait<std::uint32_t>()      { return MPI_UINT32_T; }
 template<> inline MPI_Datatype type_trait<std::uint64_t>()      { return MPI_UINT64_T; }
 
+// explicit 64‑bit signed (long long is distinct from int64_t ≡ long on Linux)
+#ifdef __linux__
+template<> inline MPI_Datatype type_trait<long long>()          { return MPI_INT64_T; }
+template<> inline MPI_Datatype type_trait<unsigned long long>() { return MPI_UINT64_T; }
+static_assert(sizeof(long long) == 8 && sizeof(unsigned long long) == 8, "global_index_t must be 64-bit");
+#endif
+
 // floating point
 template<> inline MPI_Datatype type_trait<float>()              { return MPI_FLOAT; }
 template<> inline MPI_Datatype type_trait<double>()             { return MPI_DOUBLE; }
@@ -79,6 +86,7 @@ template<> inline MPI_Datatype type_trait<bool>() { return MPI_CXX_BOOL; }
 template<typename T>
 MPI_Datatype type_trait() {
     static_assert(utils::always_false_v<T>, "MPI datatype not defined for this type:");
+    return MPI_DATATYPE_NULL;
 }
 
 // -- lifecycle ------------------------------------------------------------
