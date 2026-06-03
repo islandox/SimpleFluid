@@ -15,6 +15,17 @@
 
 #include <memory>
 
+/**
+ * @brief Entry point for the natural-convection cylinder example.
+ *
+ * Configures a 3D cylindrical mesh (triangular prisms), sets Dirichlet
+ * temperature on zmin (hot) and zmax (cold) with Neumann on radial,
+ * and runs a short Boussinesq simulation.
+ *
+ * @param argc Argument count (passed to Tpetra for MPI init).
+ * @param argv Argument vector (passed to Tpetra for MPI init).
+ * @return Exit code (always 0).
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

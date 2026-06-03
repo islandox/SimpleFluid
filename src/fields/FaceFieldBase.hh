@@ -194,6 +194,24 @@ protected:
     vector_type d_data;
 };
 
+/**
+ * @brief Validate and return the mesh's owned-face Tpetra map.
+ *
+ * Iterates over all mesh faces and populates @p owned_face_ids with faces
+ * whose owner cell is locally owned, verifying that owned face IDs match
+ * owned rows.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param class_name Name of the derived class (used in error messages).
+ * @param[out] owned_face_ids Ordered list of owned-face local IDs.
+ * @return RCP to the owned-face Tpetra map.
+ * @throws std::invalid_argument if @p mesh is null.
+ * @throws std::runtime_error if the mesh does not have an owned-face map or if
+ *         owned face local IDs do not match owned rows.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
     const SP<const mesh_type>& mesh,
@@ -250,6 +268,15 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
     return owned_face_map;
 }
 
+/**
+ * @brief Validate that a face local ID is in range.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param face_lid Face local ID to validate.
+ * @throws std::out_of_range if the ID is negative or exceeds the face count.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 void FaceFieldBase<Pack, Derived, StorageVector>::check_face_lid(
     local_ordinal_type face_lid) const
@@ -272,6 +299,16 @@ void FaceFieldBase<Pack, Derived, StorageVector>::check_face_lid(
     }
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a face local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param face_lid Face local ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not owned.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto FaceFieldBase<Pack, Derived, StorageVector>::owned_row_for_face(
     local_ordinal_type face_lid) const -> local_ordinal_type
@@ -288,6 +325,16 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::owned_row_for_face(
     return face_lid;
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a face global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam Derived CRTP derived class.
+ * @tparam StorageVector Tpetra Vector or MultiVector storage type.
+ * @param face_gid Face global ID.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if @p face_gid is not owned by this rank.
+ */
 template<TpetraTypePack Pack, class Derived, class StorageVector>
 auto FaceFieldBase<Pack, Derived, StorageVector>::owned_row_for_global_face(
     global_ordinal_type face_gid) const -> local_ordinal_type

@@ -198,6 +198,9 @@ void expect_zero_boundary_velocity(
 
 } // namespace
 
+/**
+ * @brief Verifies a single buoyancy step produces the analytical velocity increment in all three components.
+ */
 TEST(BoussinesqSolverTest, OneCellBuoyancyStepMatchesAnalyticalVelocityIncrement)
 {
     auto mesh = make_single_cell_box_mesh();

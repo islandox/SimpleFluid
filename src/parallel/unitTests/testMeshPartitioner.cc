@@ -1,5 +1,6 @@
 /**
  * @file testMetisPartitioner.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Multi-rank unit tests for MetisPartitioner domain decomposition.
  * @version 0.1
  * @date 2026-05-28
@@ -86,6 +87,9 @@ gather_all_owned_gids(const MeshType& mesh)
 // ---------------------------------------------------------------------------
 //  Test 1: Partition produces a valid distribution
 // ---------------------------------------------------------------------------
+/**
+ * @brief Verifies mesh partitioning produces a valid distribution with each rank owning at least one cell.
+ */
 TEST(MeshPartitionerTest, ProducesValidDistribution)
 {
     auto mesh = make_4x4x4_box_mesh();
@@ -125,6 +129,9 @@ TEST(MeshPartitionerTest, ProducesValidDistribution)
 // ---------------------------------------------------------------------------
 //  Test 2: Ghost cells are correctly identified
 // ---------------------------------------------------------------------------
+/**
+ * @brief Ensures ghost cell GIDs do not appear in the owned cell GIDs on the same rank.
+ */
 TEST(MeshPartitionerTest, GhostCellsAreCorrect)
 {
     auto mesh = make_2x2x2_box_mesh();
@@ -161,6 +168,9 @@ TEST(MeshPartitionerTest, GhostCellsAreCorrect)
 // ---------------------------------------------------------------------------
 //  Test 3: Face connectivity is preserved
 // ---------------------------------------------------------------------------
+/**
+ * @brief Checks that interior face owner/neighbor connectivity is preserved after partitioning.
+ */
 TEST(MeshPartitionerTest, FaceConnectivityPreserved)
 {
     auto mesh = make_4x4x4_box_mesh();
@@ -195,6 +205,9 @@ TEST(MeshPartitionerTest, FaceConnectivityPreserved)
 // ---------------------------------------------------------------------------
 //  Test 4: Field sync works after partitioning
 // ---------------------------------------------------------------------------
+/**
+ * @brief Verifies ghost cell values are correctly synchronized after partitioning via sync_ghosts.
+ */
 TEST(MeshPartitionerTest, FieldSyncAfterPartitioning)
 {
     auto mesh = make_2x2x2_box_mesh();
@@ -234,6 +247,9 @@ TEST(MeshPartitionerTest, FieldSyncAfterPartitioning)
 // ---------------------------------------------------------------------------
 //  Test 5: Partitioning is deterministic
 // ---------------------------------------------------------------------------
+/**
+ * @brief Confirms two identical meshes produce the same owned-cell partition.
+ */
 TEST(MeshPartitionerTest, PartitioningIsDeterministic)
 {
     // Build two identical meshes and verify same owned-cell counts

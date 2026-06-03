@@ -14,6 +14,13 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Erase a key from the node map corresponding to the given kind.
+ *
+ * @param key Key to erase from the typed node.
+ * @param kind Type tag identifying which node map to target.
+ * @return true if the key was found and erased, false otherwise.
+ */
 bool Database::erase_from_node(const std::string& key, NodeKind kind)
 {
     switch (kind)
@@ -37,6 +44,15 @@ bool Database::erase_from_node(const std::string& key, NodeKind kind)
     return false;
 }
 
+/**
+ * @brief Erase a key-value pair from the database regardless of type.
+ *
+ * Looks up the key in the type registry, erases from the appropriate
+ * typed node, and removes the type entry.
+ *
+ * @param key Key to erase from the database.
+ * @return true if the key was found and erased, false otherwise.
+ */
 bool Database::erase(const std::string& key)
 {
     const auto iter = d_key_types.find(key);

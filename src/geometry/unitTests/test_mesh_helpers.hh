@@ -1,6 +1,11 @@
 /**
  * @file test_mesh_helpers.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Shared test utilities for building meshes via MeshFactory.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
  *
  * Include this header in unit test files to avoid duplicating mesh setup.
  */

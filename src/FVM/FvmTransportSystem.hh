@@ -259,6 +259,18 @@ transport_system(const CellField<Pack>& old_values,
  *
  * This overload preserves the existing call pattern and delegates to the
  * source-aware transport assembly with a zero source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam BoundaryValueProvider Callable returning scalar boundary value
+ *         for (patch id, boundary face id).
+ * @param old_values Previous time-step scalar field.
+ * @param face_fluxes Pre-computed face volumetric fluxes.
+ * @param time_step Time-step size (must be positive).
+ * @param diffusivity Constant scalar diffusivity (non-negative).
+ * @param boundary_value Callable that returns the prescribed boundary
+ *        value for a face.
+ * @param cached_matrix Optional matrix cache (reserved for future use).
+ * @return TransportSystem containing the assembled matrix and RHS vector.
  */
 template<TpetraTypePack Pack, class BoundaryValueProvider>
 TransportSystem<Pack>

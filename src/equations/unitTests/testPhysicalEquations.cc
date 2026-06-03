@@ -140,6 +140,9 @@ TEST(PhysicalEquationsTest, TemperatureExplicitStepAddsSourceTerm)
     EXPECT_NEAR(temperature.value(0), 2.3, 1.0e-12);
 }
 
+/**
+ * @brief Verifies all three velocity components advance under Boussinesq buoyancy with gravity.
+ */
 TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
 {
     auto mesh = make_single_hex_mesh();
@@ -178,6 +181,9 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
     EXPECT_NEAR(velocity.value(0).z, 3.0, 1.0e-10);
 }
 
+/**
+ * @brief Confirms the Boussinesq momentum equation accepts a caller-provided source term.
+ */
 TEST(PhysicalEquationsTest, BoussinesqMomentumAddsCallerSourceTerm)
 {
     auto mesh = make_single_hex_mesh();
@@ -310,6 +316,9 @@ TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)
     EXPECT_NEAR(pressure.value(0), 0.0, 1.0e-12);
 }
 
+/**
+ * @brief Verifies an external source term is incorporated into the Poisson RHS during pressure projection.
+ */
 TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
 {
     auto db = SimpleFluid::test::make_box_database(2, 1, 1, 0.5);
@@ -334,6 +343,9 @@ TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
     EXPECT_NEAR(pressure.value(1), 1.0, 1.0e-10);
 }
 
+/**
+ * @brief Ensures pressure projection reduces the divergence of the velocity flux field.
+ */
 TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
 {
     auto mesh = make_2x2x2_mesh();

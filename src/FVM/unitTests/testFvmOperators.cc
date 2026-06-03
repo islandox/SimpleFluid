@@ -124,6 +124,9 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     }
 }
 
+/**
+ * @brief Verifies the vector cell gradient operator recovers the exact gradient of a linear velocity field.
+ */
 TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
 {
     auto mesh = make_mesh();
@@ -160,6 +163,25 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
     }
 }
 
+TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
+{
+    const SimpleFluid::vec3<> area_vector{2.0, 3.0, -1.0};
+    const SimpleFluid::vec3<> cell_center_vector{4.0, 1.0, 2.0};
+
+    const auto orthogonal =
+        SimpleFluid::FvmOperators::detail::orthogonal_area_vector(
+            area_vector, cell_center_vector);
+    const auto tangential =
+        SimpleFluid::FvmOperators::detail::non_orthogonal_area_vector(
+            area_vector, cell_center_vector);
+
+    const auto reconstructed = orthogonal + tangential;
+    EXPECT_NEAR(reconstructed.x, area_vector.x, 1.0e-12);
+    EXPECT_NEAR(reconstructed.y, area_vector.y, 1.0e-12);
+    EXPECT_NEAR(reconstructed.z, area_vector.z, 1.0e-12);
+    EXPECT_NEAR(tangential.dot(cell_center_vector), 0.0, 1.0e-12);
+}
+
 TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
 {
     auto mesh = make_mesh();
@@ -174,6 +196,9 @@ TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
               mesh->owned_cell_map()->getGlobalNumElements());
 }
 
+/**
+ * @brief Confirms face_fluxes uses all three velocity components to compute volumetric fluxes on interior faces.
+ */
 TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
 {
     auto mesh = make_mesh();
@@ -218,6 +243,9 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     EXPECT_TRUE(saw_z_face);
 }
 
+/**
+ * @brief Verifies interior face velocities are the arithmetic average of owner and neighbor cell values.
+ */
 TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
 {
     auto mesh = make_mesh();
@@ -319,6 +347,9 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     }
 }
 
+/**
+ * @brief Checks slip boundary removes the normal component of face velocity and produces zero normal flux.
+ */
 TEST(FvmOperatorsTest, SlipBoundaryRemovesNormalVelocityAndFlux)
 {
     auto mesh = make_mesh();
@@ -395,6 +426,9 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
               mesh->owned_cell_map()->getGlobalNumElements());
 }
 
+/**
+ * @brief Verifies the scalar transport RHS includes the volume-scaled source term.
+ */
 TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
 {
     auto mesh = make_mesh();
@@ -435,6 +469,9 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
     }
 }
 
+/**
+ * @brief Verifies the vector transport RHS includes the volume-scaled source term for each component.
+ */
 TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
 {
     auto mesh = make_mesh();
