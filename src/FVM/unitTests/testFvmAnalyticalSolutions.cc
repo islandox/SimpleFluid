@@ -1042,6 +1042,85 @@ TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnSheare
 }
 
 /**
+ * @brief Compares explicit, implicit, and hybrid non-orthogonal diffusion treatments on a sheared manufactured mesh.
+ */
+TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadraticMesh)
+{
+    constexpr double diffusivity = 1.0;
+    constexpr double source_value = -2.0 * diffusivity;
+    auto source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return source_value;
+    };
+    auto exact = [](SimpleFluid::vec3<> point)
+    {
+        return skewed_quadratic_scalar(point);
+    };
+
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.max_iterations = 500;
+
+    struct TreatmentCase
+    {
+        SimpleFluid::FvmOperators::NonOrthogonalTreatment treatment;
+        int correctors;
+    };
+    const std::array<TreatmentCase, 3> cases{{
+        {SimpleFluid::FvmOperators::NonOrthogonalTreatment::Explicit, 4},
+        {SimpleFluid::FvmOperators::NonOrthogonalTreatment::Implicit, 0},
+        {SimpleFluid::FvmOperators::NonOrthogonalTreatment::Hybrid, 4}
+    }};
+
+    auto solve_error =
+        [&](SimpleFluid::FvmOperators::NonOrthogonalTreatment treatment,
+            int correctors,
+            std::size_t n_cells)
+    {
+        auto mesh = make_sheared_box_mesh(n_cells, 0.45);
+        auto boundary_condition =
+            [&](int patch_id, std::size_t in_patch_id)
+                -> SimpleFluid::BoundaryCondition
+        {
+            const auto face_lid =
+                mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            return {SimpleFluid::BoundaryConditionType::Dirichlet,
+                    skewed_quadratic_scalar(mesh->face_centroid(face_lid))};
+        };
+
+        FieldType candidate(mesh, "non_orthogonal_solution");
+        const auto converged =
+            SimpleFluid::FvmOperators::solve_non_orthogonal_diffusion<Pack>(
+                *mesh, diffusivity, boundary_condition, source, candidate,
+                treatment, correctors, options);
+        EXPECT_TRUE(converged)
+            << SimpleFluid::FvmOperators::to_string(treatment);
+        if (!converged)
+        {
+            return std::pair{std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::infinity()};
+        }
+        return std::pair{
+            SimpleFluid::l2_error(candidate, exact),
+            SimpleFluid::linf_error(candidate, exact)};
+    };
+
+    for (const auto& test_case : cases)
+    {
+        const auto coarse = solve_error(
+            test_case.treatment, test_case.correctors, 3);
+        const auto fine = solve_error(
+            test_case.treatment, test_case.correctors, 5);
+
+        EXPECT_LT(fine.first, coarse.first)
+            << SimpleFluid::FvmOperators::to_string(test_case.treatment);
+        EXPECT_LT(fine.second, coarse.second)
+            << SimpleFluid::FvmOperators::to_string(test_case.treatment);
+    }
+}
+
+/**
  * @brief Verifies vector-valued transport with a source term reproduces the exact transient solution.
  */
 TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)

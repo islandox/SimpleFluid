@@ -17,6 +17,8 @@
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
+#include <unordered_map>
+#include <vector>
 
 namespace SimpleFluid::FvmOperators::detail
 {
@@ -235,6 +237,185 @@ inline auto boundary_diffusion_coefficient(
     return distance > scalar_type{0}
          ? diffusivity * mesh.face_area(face_lid) / distance
          : scalar_type{};
+}
+
+/**
+ * @brief Entry in a least-squares gradient reconstruction stencil.
+ *
+ * @tparam MeshType The mesh type.
+ */
+template<class MeshType>
+struct LeastSquaresGradientStencilEntry
+{
+    typename MeshType::local_ordinal_type cell_lid{};
+    typename MeshType::Vec3 coefficient{};
+};
+
+/**
+ * @brief Stencil type for least-squares gradient reconstruction.
+ *
+ * @tparam MeshType The mesh type.
+ */
+template<class MeshType>
+using LeastSquaresGradientStencil =
+    std::vector<LeastSquaresGradientStencilEntry<MeshType>>;
+
+/**
+ * @brief Accumulate a weighted direction contribution into a
+ *        gradient-coefficient map.
+ *
+ * @tparam MeshType The mesh type.
+ * @param[in,out] coefficients Map from cell LID to coefficient vector.
+ * @param cell_lid Target cell LID.
+ * @param coefficient Contribution to add.
+ */
+template<class MeshType>
+void add_gradient_coefficient(
+    std::unordered_map<typename MeshType::local_ordinal_type,
+                       typename MeshType::Vec3>& coefficients,
+    typename MeshType::local_ordinal_type cell_lid,
+    const typename MeshType::Vec3& coefficient)
+{
+    auto& value = coefficients[cell_lid];
+    value = {value.x + coefficient.x,
+             value.y + coefficient.y,
+             value.z + coefficient.z};
+}
+
+/**
+ * @brief Compute least-squares gradient reconstruction stencils for all
+ *        owned cells.
+ *
+ * @tparam MeshType The mesh type.
+ * @param mesh The computational mesh.
+ * @return Per-cell list of stencil entries (neighbor LID + coefficient).
+ */
+template<class MeshType>
+std::vector<LeastSquaresGradientStencil<MeshType>>
+least_squares_gradient_stencils(const MeshType& mesh)
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+
+    std::vector<LeastSquaresGradientStencil<MeshType>> stencils(
+        mesh.num_owned_cells());
+
+    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        std::array<std::array<real_t, 3>, 3> normal{};
+        std::vector<typename MeshType::Vec3> directions;
+
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            if (!mesh.is_interior_face(face_lid))
+            {
+                continue;
+            }
+
+            const auto d = mesh.cell_center_vector(face_lid, cell_lid);
+            directions.push_back(d);
+
+            normal[0][0] += d.x * d.x;
+            normal[0][1] += d.x * d.y;
+            normal[0][2] += d.x * d.z;
+            normal[1][1] += d.y * d.y;
+            normal[1][2] += d.y * d.z;
+            normal[2][2] += d.z * d.z;
+        }
+
+        normal[1][0] = normal[0][1];
+        normal[2][0] = normal[0][2];
+        normal[2][1] = normal[1][2];
+
+        std::unordered_map<local_ordinal_type, typename MeshType::Vec3>
+            coefficients;
+        coefficients.reserve(directions.size() + 1);
+
+        std::size_t direction_id = 0;
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            if (!mesh.is_interior_face(face_lid))
+            {
+                continue;
+            }
+
+            auto rhs = directions[direction_id++];
+            auto local_normal = normal;
+            const auto basis = solve_3x3(local_normal, rhs);
+            const auto other =
+                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+
+            add_gradient_coefficient<MeshType>(
+                coefficients, other, basis);
+            add_gradient_coefficient<MeshType>(
+                coefficients, cell_lid,
+                {-basis.x, -basis.y, -basis.z});
+        }
+
+        stencils[owned].reserve(coefficients.size());
+        for (const auto& [entry_lid, coefficient] : coefficients)
+        {
+            stencils[owned].push_back({entry_lid, coefficient});
+        }
+    }
+
+    return stencils;
+}
+
+/**
+ * @brief Location descriptor for a boundary face.
+ *
+ * @tparam MeshType The mesh type.
+ */
+template<class MeshType>
+struct BoundaryFaceLocation
+{
+    bool active = false;
+    int patch_id = MeshType::invalid_boundary_id;
+    std::size_t in_patch_id = 0;
+};
+
+/**
+ * @brief Compute a per-face lookup of boundary-face locations.
+ *
+ * @tparam MeshType The mesh type.
+ * @param mesh The computational mesh.
+ * @return Per-face boundary location (index by face LID).
+ */
+template<class MeshType>
+std::vector<BoundaryFaceLocation<MeshType>>
+boundary_face_locations(const MeshType& mesh)
+{
+    std::vector<BoundaryFaceLocation<MeshType>> locations(mesh.num_faces());
+    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    {
+        for (std::size_t in_patch_id = 0;
+             in_patch_id < boundary_patch.face_lids.size();
+             ++in_patch_id)
+        {
+            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            locations[static_cast<std::size_t>(face_lid)] =
+                {true, patch_id, in_patch_id};
+        }
+    }
+    return locations;
+}
+
+/**
+ * @brief Accumulate a matrix entry into a sparse row map.
+ *
+ * @tparam LocalOrdinal Local ordinal type.
+ * @tparam Scalar Scalar type.
+ * @param[in,out] row_values Map from column LID to accumulated value.
+ * @param column Column LID.
+ * @param value Value to add.
+ */
+template<class LocalOrdinal, class Scalar>
+void add_matrix_entry(std::unordered_map<LocalOrdinal, Scalar>& row_values,
+                      LocalOrdinal column,
+                      Scalar value)
+{
+    row_values[column] += value;
 }
 
 } // namespace SimpleFluid::FvmOperators::detail

@@ -16,6 +16,7 @@
 #include "FVM/FvmOperators.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>
@@ -92,6 +93,39 @@ Pack::scalar_type local_matrix_entry(
     }
 
     return entry;
+}
+
+std::vector<Pack::scalar_type> local_matrix_action(
+    const Pack::matrix_type& matrix,
+    const FieldType& field)
+{
+    std::vector<Pack::scalar_type> result(field.num_owned_cells(), 0.0);
+    for (MeshType::local_ordinal_type row = 0;
+         row < static_cast<MeshType::local_ordinal_type>(field.num_owned_cells());
+         ++row)
+    {
+        const auto row_entries = matrix.getNumEntriesInLocalRow(row);
+        typename Pack::matrix_type::nonconst_local_inds_host_view_type columns(
+            "columns", row_entries);
+        typename Pack::matrix_type::nonconst_values_host_view_type values(
+            "values", row_entries);
+        std::size_t num_entries = 0;
+        matrix.getLocalRowCopy(row, columns, values, num_entries);
+
+        auto value = Pack::scalar_type{};
+        for (std::size_t i = 0; i < num_entries; ++i)
+        {
+            value += values(i) * field.local_value(columns(i));
+        }
+        result[static_cast<std::size_t>(row)] = value;
+    }
+    return result;
+}
+
+double nonlinear_scalar(const SimpleFluid::vec3<>& point)
+{
+    return 0.25 + 0.5 * point.x - 0.2 * point.y + 0.125 * point.z
+         + 0.3 * point.x * point.y - 0.15 * point.z * point.z;
 }
 
 } // namespace
@@ -180,6 +214,140 @@ TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
     EXPECT_NEAR(reconstructed.y, area_vector.y, 1.0e-12);
     EXPECT_NEAR(reconstructed.z, area_vector.z, 1.0e-12);
     EXPECT_NEAR(tangential.dot(cell_center_vector), 0.0, 1.0e-12);
+}
+
+TEST(FvmOperatorsTest, ParsesNonOrthogonalTreatmentSwitch)
+{
+    EXPECT_EQ(
+        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("explicit"),
+        SimpleFluid::FvmOperators::NonOrthogonalTreatment::Explicit);
+    EXPECT_EQ(
+        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("implicit"),
+        SimpleFluid::FvmOperators::NonOrthogonalTreatment::Implicit);
+    EXPECT_EQ(
+        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("hybrid"),
+        SimpleFluid::FvmOperators::NonOrthogonalTreatment::Hybrid);
+
+    EXPECT_EQ(
+        SimpleFluid::FvmOperators::to_string(
+            SimpleFluid::FvmOperators::NonOrthogonalTreatment::Implicit),
+        "implicit");
+    EXPECT_THROW(
+        SimpleFluid::FvmOperators::non_orthogonal_treatment_from_string("sideways"),
+        std::invalid_argument);
+}
+
+TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType phi(mesh, "phi");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        phi.set_value(lid, nonlinear_scalar(mesh->cell_centroid(lid)));
+    }
+    phi.sync_ghosts();
+
+    std::vector<MeshType::Vec3> gradients;
+    SimpleFluid::FvmOperators::cell_gradient(phi, gradients);
+    const auto stencils =
+        SimpleFluid::FvmOperators::detail::least_squares_gradient_stencils(*mesh);
+
+    ASSERT_EQ(stencils.size(), gradients.size());
+    for (std::size_t row = 0; row < stencils.size(); ++row)
+    {
+        MeshType::Vec3 reconstructed{};
+        for (const auto& entry : stencils[row])
+        {
+            const auto value = phi.local_value(entry.cell_lid);
+            reconstructed = reconstructed + entry.coefficient * value;
+        }
+
+        EXPECT_NEAR(reconstructed.x, gradients[row].x, 1.0e-12);
+        EXPECT_NEAR(reconstructed.y, gradients[row].y, 1.0e-12);
+        EXPECT_NEAR(reconstructed.z, gradients[row].z, 1.0e-12);
+    }
+}
+
+TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    auto boundary_condition =
+        [](int, std::size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    };
+    auto source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    const auto orthogonal = SimpleFluid::FvmOperators::diffusion_system<Pack>(
+        *mesh, 0.5, boundary_condition, source);
+    const auto implicit =
+        SimpleFluid::FvmOperators::fully_implicit_non_orthogonal_diffusion_system<Pack>(
+            *mesh, 0.5, boundary_condition, source);
+
+    bool saw_expanded_row = false;
+    for (MeshType::local_ordinal_type row = 0;
+         row < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++row)
+    {
+        if (implicit.matrix->getNumEntriesInLocalRow(row)
+            > orthogonal.matrix->getNumEntriesInLocalRow(row))
+        {
+            saw_expanded_row = true;
+            break;
+        }
+    }
+
+    EXPECT_TRUE(saw_expanded_row);
+}
+
+TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
+{
+    constexpr double diffusivity = 0.7;
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType phi(mesh, "phi");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        phi.set_value(lid, nonlinear_scalar(mesh->cell_centroid(lid)));
+    }
+    phi.sync_ghosts();
+
+    auto boundary_condition =
+        [&](int patch_id, std::size_t in_patch_id)
+            -> SimpleFluid::BoundaryCondition
+    {
+        const auto face_lid =
+            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+        return {SimpleFluid::BoundaryConditionType::Dirichlet,
+                nonlinear_scalar(mesh->face_centroid(face_lid))};
+    };
+    auto source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    const auto system =
+        SimpleFluid::FvmOperators::fully_implicit_non_orthogonal_diffusion_system<Pack>(
+            *mesh, diffusivity, boundary_condition, source);
+    const auto residual =
+        SimpleFluid::FvmOperators::full_diffusion_residual<Pack>(
+            phi, diffusivity, boundary_condition);
+    const auto applied = local_matrix_action(*system.matrix, phi);
+    const auto rhs_view = system.rhs->getData();
+    const auto residual_view = residual->getData();
+
+    for (std::size_t row = 0; row < applied.size(); ++row)
+    {
+        EXPECT_NEAR(applied[row] - rhs_view[row], residual_view[row], 1.0e-10);
+    }
 }
 
 TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
