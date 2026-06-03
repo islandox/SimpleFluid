@@ -392,7 +392,7 @@ void Mesh<Pack>::create_device_views()
     ArrInt face_type;
     ArrInt face_patch_values;
     ArrReal face_area_values;
-    ArrVec3 face_normal_values;
+    ArrVec3 face_area_vector_values;
     ArrVec3 face_centroid_values;
 
     face_owner.reserve(d_faces.size());
@@ -400,7 +400,7 @@ void Mesh<Pack>::create_device_views()
     face_type.reserve(d_faces.size());
     face_patch_values.reserve(d_faces.size());
     face_area_values.reserve(d_faces.size());
-    face_normal_values.reserve(d_faces.size());
+    face_area_vector_values.reserve(d_faces.size());
     face_centroid_values.reserve(d_faces.size());
 
     for (const auto& face_info : d_faces)
@@ -410,7 +410,8 @@ void Mesh<Pack>::create_device_views()
         face_type.push_back(static_cast<int>(face_info.type));
         face_patch_values.push_back(face_info.boundary_id);
         face_area_values.push_back(face_info.area);
-        face_normal_values.push_back(face_info.unit_normal_from_owner);
+        face_area_vector_values.push_back(
+            face_info.unit_normal_from_owner * face_info.area);
         face_centroid_values.push_back(face_info.center);
     }
 
@@ -459,7 +460,7 @@ void Mesh<Pack>::create_device_views()
     d_device_views.face_patch = make_vector_view("face_patch", face_patch_values);
 
     d_device_views.face_area = make_vector_view("face_area", face_area_values);
-    d_device_views.face_area_vector = make_vectorV3D_view("face_area_vector", face_normal_values);
+    d_device_views.face_area_vector = make_vectorV3D_view("face_area_vector", face_area_vector_values);
     d_device_views.face_centroid = make_vectorV3D_view("face_centroid", face_centroid_values);
 
     d_device_views.node_coord = make_vectorV3D_view("node_coord", node_coord_values);

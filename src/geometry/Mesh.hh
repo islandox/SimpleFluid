@@ -266,7 +266,10 @@ public:
     inline local_ordinal_type opposite_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const;
 
     inline real_t             face_area(local_ordinal_type fid) const;
+    inline Vec3               face_area_vector(local_ordinal_type fid) const;
+    inline Vec3               face_area_vector_outward(local_ordinal_type fid, local_ordinal_type cell_lid) const;
     inline real_t             face_cell_center_distance(local_ordinal_type fid) const;
+    inline Vec3               cell_center_vector(local_ordinal_type fid, local_ordinal_type cell_lid) const;
     inline real_t             cell_to_face_distance(local_ordinal_type fid, local_ordinal_type cell_lid) const;
     inline const Vec3&        face_normal(local_ordinal_type fid) const;
     inline const Vec3&        face_centroid(local_ordinal_type fid) const;

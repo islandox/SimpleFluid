@@ -147,6 +147,11 @@ TEST_F(MeshMethodTest, GeometryProperties)
 
         const auto& n = mesh_->face_normal(fid);
         EXPECT_NEAR(std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z), 1.0, 1e-12);
+
+        const auto area_vector = mesh_->face_area_vector(fid);
+        EXPECT_NEAR(area_vector.x, n.x * mesh_->face_area(fid), 1.0e-12);
+        EXPECT_NEAR(area_vector.y, n.y * mesh_->face_area(fid), 1.0e-12);
+        EXPECT_NEAR(area_vector.z, n.z * mesh_->face_area(fid), 1.0e-12);
     }
 }
 
@@ -181,6 +186,20 @@ TEST_F(MeshMethodTest, FaceTopology)
             // opposite_cell correctness
             EXPECT_EQ(mesh_->opposite_cell(fid, owner), neighbor);
             EXPECT_EQ(mesh_->opposite_cell(fid, neighbor), owner);
+
+            const auto d_owner = mesh_->cell_center_vector(fid, owner);
+            const auto expected_owner =
+                mesh_->cell_centroid(neighbor) - mesh_->cell_centroid(owner);
+            EXPECT_EQ(d_owner, expected_owner);
+
+            const auto d_neighbor = mesh_->cell_center_vector(fid, neighbor);
+            const auto expected_neighbor =
+                mesh_->cell_centroid(owner) - mesh_->cell_centroid(neighbor);
+            EXPECT_EQ(d_neighbor, expected_neighbor);
+
+            const auto owner_area_vector =
+                mesh_->face_area_vector_outward(fid, owner);
+            EXPECT_EQ(owner_area_vector, mesh_->face_area_vector(fid));
         }
 
         if (mesh_->is_boundary_face(fid))

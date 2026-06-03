@@ -251,9 +251,30 @@ inline real_t Mesh<Pack>::face_area(local_ordinal_type fid) const
 }
 
 template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::face_area_vector(local_ordinal_type fid) const -> Vec3
+{
+    return face_normal(fid) * face_area(fid);
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::face_area_vector_outward(local_ordinal_type fid,
+                                                 local_ordinal_type cell_lid) const -> Vec3
+{
+    return face_normal_outward(fid, cell_lid) * face_area(fid);
+}
+
+template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::face_cell_center_distance(local_ordinal_type fid) const
 {
     return face(fid).cell_center_distance;
+}
+
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::cell_center_vector(local_ordinal_type fid,
+                                           local_ordinal_type cell_lid) const -> Vec3
+{
+    const auto other = opposite_or_periodic_neighbor_cell(fid, cell_lid);
+    return cell_centroid(other) - cell_centroid(cell_lid);
 }
 
 /**
