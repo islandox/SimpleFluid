@@ -1,7 +1,7 @@
 /**
  * @file BoundaryCache.hh
- * @author your name (you@domain.com)
- * @brief 
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Pre-computed boundary condition values cached per patch for FVM operator assembly.
  * @version 0.1
  * @date 2026-05-31
  * 
@@ -27,6 +27,19 @@ struct BoundaryCache
     SP<const Mesh<Pack>> mesh;
 };
 
+/**
+ * @brief Build a boundary-condition value cache from a shared mesh pointer
+ *        and a boundary-condition map.
+ *
+ * Caches Dirichlet boundary values per patch; other condition types are
+ * ignored.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the computational mesh.
+ * @param boundary_conditions Map from patch name to boundary condition.
+ * @return BoundaryCache populated with the Dirichlet values of owned
+ *         boundary faces.
+ */
 template<TpetraTypePack Pack>
 BoundaryCache<Pack> cache_boundary_conditions(
     SP<const Mesh<Pack>> mesh,

@@ -14,6 +14,13 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Validate and store a non-null mesh pointer.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the mesh.
+ * @return The validated mesh shared pointer.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
     -> SP<const mesh_type>
@@ -22,6 +29,18 @@ auto BoussinesqSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
         std::move(mesh), "BoussinesqSolver");
 }
 
+/**
+ * @brief Construct a Boussinesq solver with mesh, boundary conditions, and solver options.
+ *
+ * Initialises all field and equation objects.  Validates that the time step is positive.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Computational mesh.
+ * @param boundary_conditions Boundary condition set for velocity and temperature.
+ * @param time_options Time-stepping parameters.
+ * @param linear_options Linear solver parameters.
+ * @throws std::invalid_argument If the time step is non-positive.
+ */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(
     SP<const mesh_type> mesh,
@@ -50,6 +69,20 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     }
 }
 
+/**
+ * @brief Initialise the temperature field as a linear ramp along a given direction.
+ *
+ * Sets temperature to hot_at_min at the minimum projection onto direction and
+ * cold_at_max at the maximum.  Also zeroes velocity and sets a uniform initial
+ * pressure.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param direction Unit direction vector for the temperature gradient.
+ * @param hot_at_min Temperature at the minimum projection point.
+ * @param cold_at_max Temperature at the maximum projection point.
+ * @param initial_pressure Uniform initial pressure value.
+ * @throws std::invalid_argument If direction has zero norm.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_linear_temperature(
     const vec_type& direction,
@@ -96,6 +129,16 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
     d_mesh->sync_periodic_boundaries(d_velocity);
 }
 
+/**
+ * @brief Initialise fields for a heated-box problem with temperature gradient along X.
+ *
+ * Delegates to initialize_linear_temperature with direction (1, 0, 0).
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param hot_temperature Temperature at the hot (xmin) boundary.
+ * @param cold_temperature Temperature at the cold (xmax) boundary.
+ * @param initial_pressure Uniform initial pressure value.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_heated_box(
     scalar_type hot_temperature,
@@ -108,6 +151,16 @@ void BoussinesqSolver<Pack>::initialize_heated_box(
                                   initial_pressure);
 }
 
+/**
+ * @brief Initialise fields for a bottom-hot, top-cold problem with temperature gradient along Z.
+ *
+ * Delegates to initialize_linear_temperature with direction (0, 0, 1).
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param hot_temperature Temperature at the bottom (zmin) boundary.
+ * @param cold_temperature Temperature at the top (zmax) boundary.
+ * @param initial_pressure Uniform initial pressure value.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
     scalar_type hot_temperature,
@@ -120,6 +173,16 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
                                   initial_pressure);
 }
 
+/**
+ * @brief Advance the solution by one time step.
+ *
+ * Performs: face-flux computation, momentum advance, pressure projection,
+ * corrected face fluxes, and semi-implicit temperature advance.  Periodic
+ * boundary synchronisation is applied at the start of the first step and
+ * after the updates.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::step()
 {
@@ -158,6 +221,14 @@ void BoussinesqSolver<Pack>::step()
     ++d_step_index;
 }
 
+/**
+ * @brief Run the solver for a specified number of time steps.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param steps Number of time steps to execute (defaults to the value configured
+ *              in TimeStepperOptions).
+ * @throws std::invalid_argument If steps is negative.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::run(int steps)
 {
@@ -172,6 +243,15 @@ void BoussinesqSolver<Pack>::run(int steps)
     }
 }
 
+/**
+ * @brief Write the current solution fields to a VTU file.
+ *
+ * Converts the internal mesh and cell fields (temperature, pressure, velocity)
+ * into VTU format and writes to the specified path.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param filename Output .vtu file path.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) const
 {

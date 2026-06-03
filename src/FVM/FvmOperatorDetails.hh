@@ -107,6 +107,59 @@ inline real_t component_value(const MeshUtils::Vec3& vector, std::size_t index)
     return vector.component(index);
 }
 
+/**
+ * @brief Decompose the face area vector into the component orthogonal to
+ *        the cell-center connecting vector.
+ *
+ * @param area_vector The face area vector.
+ * @param cell_center_vector Vector between adjacent cell centers.
+ * @return The orthogonal (implicit) component of the area vector.
+ * @throws std::runtime_error if the cell centers are coincident.
+ */
+inline MeshUtils::Vec3 orthogonal_area_vector(
+    const MeshUtils::Vec3& area_vector,
+    const MeshUtils::Vec3& cell_center_vector)
+{
+    const auto d2 = cell_center_vector.dot(cell_center_vector);
+    if (d2 <= 0.0)
+    {
+        throw std::runtime_error(
+            "Cannot decompose face area vector across coincident points.");
+    }
+
+    return cell_center_vector
+         * (area_vector.dot(cell_center_vector) / d2);
+}
+
+/**
+ * @brief Compute the non-orthogonal (tangential) component of the face
+ *        area vector.
+ *
+ * @param area_vector The face area vector.
+ * @param cell_center_vector Vector between adjacent cell centers.
+ * @return The tangential (explicit) component of the area vector.
+ */
+inline MeshUtils::Vec3 non_orthogonal_area_vector(
+    const MeshUtils::Vec3& area_vector,
+    const MeshUtils::Vec3& cell_center_vector)
+{
+    return area_vector
+         - orthogonal_area_vector(area_vector, cell_center_vector);
+}
+
+/**
+ * @brief Compute the diffusion coefficient at an interior face for a
+ *        two-point flux approximation.
+ *
+ * @tparam MeshType The mesh type.
+ * @param mesh The computational mesh.
+ * @param face_lid Local ID of the interior face.
+ * @param cell_lid Local ID of the cell on one side.
+ * @param other_lid Local ID of the cell on the opposite side.
+ * @param diffusivity Constant scalar diffusivity.
+ * @return The diffusion flux coefficient for the face.
+ * @throws std::runtime_error if the two cell centers are coincident.
+ */
 template<class MeshType>
 inline auto interior_diffusion_coefficient(
     const MeshType& mesh,
@@ -142,6 +195,18 @@ inline auto interior_diffusion_coefficient(
     return diffusivity * mesh.face_area(face_lid) / distance;
 }
 
+/**
+ * @brief Compute the diffusion coefficient at a boundary face for a
+ *        two-point flux approximation.
+ *
+ * @tparam MeshType The mesh type.
+ * @param mesh The computational mesh.
+ * @param face_lid Local ID of the boundary face.
+ * @param cell_lid Local ID of the adjacent owned cell.
+ * @param diffusivity Constant scalar diffusivity.
+ * @return The diffusion flux coefficient, or zero if the cell and face
+ *         centroids coincide.
+ */
 template<class MeshType>
 inline auto boundary_diffusion_coefficient(
     const MeshType& mesh,

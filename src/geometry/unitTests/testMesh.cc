@@ -123,6 +123,9 @@ TEST_F(MeshMethodTest, CellAndFaceAccess)
     }
 }
 
+/**
+ * @brief Validates cell volumes/centroids and face areas/centroids/normals on a structured hex mesh.
+ */
 TEST_F(MeshMethodTest, GeometryProperties)
 {
     using lid_t = SimpleFluid::local_index_t;
@@ -155,6 +158,9 @@ TEST_F(MeshMethodTest, GeometryProperties)
     }
 }
 
+/**
+ * @brief Exercises exterior/interior/boundary face classification, owner/neighbor mapping, and opposite_cell correctness.
+ */
 TEST_F(MeshMethodTest, FaceTopology)
 {
     using lid_t = SimpleFluid::local_index_t;
@@ -288,6 +294,9 @@ TEST_F(MeshMethodTest, DistanceComputations)
 // MeshUtils function tests
 // ===========================================================================
 
+/**
+ * @brief Verifies tetrahedron, hexahedron, and wedge volume computations and point averaging.
+ */
 TEST(MeshUtilsTest, VolumeComputations)
 {
     using Vec3 = SimpleFluid::MeshUtils::Vec3;

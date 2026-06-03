@@ -165,6 +165,12 @@ public:
         double cell_center_distance = 0.0;
     };
 
+    /**
+     * @brief Logical grouping of faces belonging to one boundary patch.
+     *
+     * Each patch has a unique integer identifier and a list of face local
+     * ordinals that form the patch.
+     */
     struct BoundaryFacePatch
     {
         int id = invalid_boundary_id;

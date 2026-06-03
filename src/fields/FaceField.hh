@@ -83,6 +83,14 @@ public:
     void sum_into_global_value(global_ordinal_type face_gid, const scalar_type& value);
 };
 
+/**
+ * @brief Construct a face field over owned faces.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Optional field name for I/O.
+ * @param zero_out If true, initialize all entries to zero.
+ */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            std::string name,
@@ -95,6 +103,14 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
     this->d_data = vector_type(owned_face_map, zero_out);
 }
 
+/**
+ * @brief Construct a face field initialized with a uniform scalar value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param initial_value Scalar value to fill all owned face entries.
+ * @param name Optional field name for I/O.
+ */
 template<TpetraTypePack Pack>
 FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
                            const scalar_type& initial_value,
@@ -104,18 +120,42 @@ FaceField<Pack>::FaceField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
+/**
+ * @brief Read the value stored at an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @return Stored scalar value.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not owned.
+ */
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::value(local_ordinal_type face_lid) const -> scalar_type
 {
     return this->d_data.getData()[this->owned_row_for_face(face_lid)];
 }
 
+/**
+ * @brief Read the value stored at a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @return Stored scalar value.
+ * @throws std::out_of_range if @p face_gid is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 auto FaceField<Pack>::global_value(global_ordinal_type face_gid) const -> scalar_type
 {
     return this->d_data.getData()[this->owned_row_for_global_face(face_gid)];
 }
 
+/**
+ * @brief Write a value to an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @param value Scalar value to store.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not owned.
+ */
 template<TpetraTypePack Pack>
 void FaceField<Pack>::set_value(local_ordinal_type face_lid,
                                 const scalar_type& value)
@@ -123,6 +163,14 @@ void FaceField<Pack>::set_value(local_ordinal_type face_lid,
     this->d_data.replaceLocalValue(this->owned_row_for_face(face_lid), value);
 }
 
+/**
+ * @brief Write a value to a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @param value Scalar value to store.
+ * @throws std::out_of_range if @p face_gid is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 void FaceField<Pack>::set_global_value(global_ordinal_type face_gid,
                                        const scalar_type& value)
@@ -131,6 +179,14 @@ void FaceField<Pack>::set_global_value(global_ordinal_type face_gid,
         this->owned_row_for_global_face(face_gid), value);
 }
 
+/**
+ * @brief Accumulate (sum) a value into an owned face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face.
+ * @param value Scalar value to add.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not owned.
+ */
 template<TpetraTypePack Pack>
 void FaceField<Pack>::sum_into_value(local_ordinal_type face_lid,
                                      const scalar_type& value)
@@ -138,6 +194,14 @@ void FaceField<Pack>::sum_into_value(local_ordinal_type face_lid,
     this->d_data.sumIntoLocalValue(this->owned_row_for_face(face_lid), value);
 }
 
+/**
+ * @brief Accumulate (sum) a value into a face identified by its global ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_gid Global ID of the face.
+ * @param value Scalar value to add.
+ * @throws std::out_of_range if @p face_gid is not owned by this rank.
+ */
 template<TpetraTypePack Pack>
 void FaceField<Pack>::sum_into_global_value(global_ordinal_type face_gid,
                                             const scalar_type& value)

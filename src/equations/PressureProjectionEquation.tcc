@@ -14,6 +14,15 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Construct a PressureProjectionEquation on the given mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the computational mesh.
+ * @param linear_options Linear solver configuration.
+ * @throws std::invalid_argument if @p mesh is null.
+ * @throws std::runtime_error if the mesh has no owned-cell map.
+ */
 template<TpetraTypePack Pack>
 PressureProjectionEquation<Pack>::PressureProjectionEquation(
     SP<const mesh_type> mesh,
@@ -27,6 +36,14 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
     require_owned_cell_map(d_mesh);
 }
 
+/**
+ * @brief Require and return the mesh owned-cell map.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the computational mesh.
+ * @return The mesh's owned-cell map.
+ * @throws std::runtime_error if the mesh has no owned-cell map.
+ */
 template<TpetraTypePack Pack>
 auto PressureProjectionEquation<Pack>::require_owned_cell_map(
     const SP<const mesh_type>& mesh) -> Teuchos::RCP<const map_type>
@@ -41,6 +58,13 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
     return map;
 }
 
+/**
+ * @brief (Re)build the cached pressure-Poisson matrix.
+ *
+ * Uses the first owned-cell global ID as the gauge-fixing row.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::rebuild_matrix() const
 {
@@ -55,6 +79,14 @@ void PressureProjectionEquation<Pack>::rebuild_matrix() const
         FvmOperators::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
 }
 
+/**
+ * @brief Solve for the pressure field (initialise with zero and sync
+ *        periodic boundaries).
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param[out] pressure Pressure field to initialise.
+ * @throws std::invalid_argument if the pressure field mesh does not match.
+ */
 template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::solve(field_type& pressure)
 {
@@ -65,6 +97,16 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
     d_mesh->sync_periodic_boundaries(pressure);
 }
 
+/**
+ * @brief Perform the pressure projection step with a zero source term.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param[in,out] pressure Pressure field (updated on output).
+ * @param time_step Time-step size.
+ * @param velocity_boundary_cache Cached velocity boundary conditions.
+ * @param[in,out] velocity Velocity field corrected by the pressure
+ *        gradient on output.
+ */
 template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::project(
     field_type& pressure,
@@ -82,6 +124,21 @@ void PressureProjectionEquation<Pack>::project(
             zero_source);
 }
 
+/**
+ * @brief Perform the pressure projection step: compute face velocities,
+ *        assemble the pressure-Poisson RHS, solve for pressure, and
+ *        correct the velocity field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param[in,out] pressure Pressure field (solved on output).
+ * @param time_step Time-step size (must be positive).
+ * @param velocity_boundary_cache Cached velocity boundary conditions.
+ * @param[in,out] velocity Velocity field corrected by the pressure
+ *        gradient on output.
+ * @param right_hand_source Per-cell scalar source provider.
+ * @throws std::invalid_argument on mesh mismatch or non-positive time
+ *         step.
+ */
 template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::project(
     field_type& pressure,

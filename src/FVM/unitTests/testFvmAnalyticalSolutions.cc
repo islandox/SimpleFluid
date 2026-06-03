@@ -1,6 +1,12 @@
 /**
  * @file testFvmAnalyticalSolutions.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Analytical and manufactured-solution tests for FVM operators.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -10,13 +16,21 @@
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 #include "FVM/FvmOperators.hh"
+#include "geometry/STKMesh.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 
+#include <stk_io/IossBridge.hpp>
+#include <stk_mesh/base/FEMHelpers.hpp>
+#include <stk_mesh/base/FieldBase.hpp>
+
+#include <array>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace
@@ -24,6 +38,7 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
+using STKMeshType = SimpleFluid::STKMesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -81,9 +96,135 @@ SimpleFluid::SP<MeshType> make_periodic_line_mesh(int n_cells)
     return mesh;
 }
 
+stk::mesh::Field<double>& declare_coordinate_field(STKMeshType& mesh)
+{
+    auto meta = mesh.meta();
+    auto& coord_field =
+        meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
+    stk::mesh::put_field_on_mesh(coord_field, meta->universal_part(), 3, nullptr);
+    meta->set_coordinate_field(&coord_field);
+    return coord_field;
+}
+
+void set_node_coord(stk::mesh::Field<double>& coord_field,
+                    stk::mesh::Entity node,
+                    const SimpleFluid::vec3<>& coord)
+{
+    auto* data = stk::mesh::field_data(coord_field, node);
+    data[0] = coord.x;
+    data[1] = coord.y;
+    data[2] = coord.z;
+}
+
+SimpleFluid::SP<MeshType> make_sheared_box_mesh(std::size_t n_cells,
+                                                double shear)
+{
+    auto mesh = std::make_shared<STKMeshType>();
+    auto& coord_field = declare_coordinate_field(*mesh);
+    auto meta = mesh->meta();
+    auto bulk = mesh->bulk();
+
+    auto& hex_part =
+        meta->declare_part_with_topology("sheared_hexes", stk::topology::HEX_8);
+    stk::io::put_io_part_attribute(hex_part);
+
+    std::array<stk::mesh::Part*, 6> boundary_parts{};
+    const std::array<const char*, 6> boundary_names{
+        "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
+    for (std::size_t i = 0; i < boundary_parts.size(); ++i)
+    {
+        auto& part = meta->declare_part(boundary_names[i], meta->side_rank());
+        stk::io::put_io_part_attribute(part);
+        boundary_parts[i] = &part;
+    }
+
+    auto node_id = [=](std::size_t i, std::size_t j, std::size_t k)
+        -> stk::mesh::EntityId
+    {
+        return static_cast<stk::mesh::EntityId>(
+            1 + i + (n_cells + 1) * (j + (n_cells + 1) * k));
+    };
+
+    auto element_id = [=](std::size_t i, std::size_t j, std::size_t k)
+        -> stk::mesh::EntityId
+    {
+        return static_cast<stk::mesh::EntityId>(
+            1 + i + n_cells * (j + n_cells * k));
+    };
+
+    auto declare_boundary_side =
+        [&](stk::mesh::Entity elem,
+            unsigned side_ordinal,
+            stk::mesh::Part* part)
+    {
+        stk::mesh::PartVector parts{part};
+        bulk->declare_element_side(elem, side_ordinal, parts);
+    };
+
+    bulk->modification_begin();
+
+    for (std::size_t k = 0; k < n_cells; ++k)
+    {
+        for (std::size_t j = 0; j < n_cells; ++j)
+        {
+            for (std::size_t i = 0; i < n_cells; ++i)
+            {
+                const stk::mesh::EntityIdVector hex_nodes{
+                    node_id(i,     j,     k),
+                    node_id(i + 1, j,     k),
+                    node_id(i + 1, j + 1, k),
+                    node_id(i,     j + 1, k),
+                    node_id(i,     j,     k + 1),
+                    node_id(i + 1, j,     k + 1),
+                    node_id(i + 1, j + 1, k + 1),
+                    node_id(i,     j + 1, k + 1)
+                };
+
+                const auto elem = stk::mesh::declare_element(
+                    *bulk, hex_part, element_id(i, j, k), hex_nodes);
+
+                if (i == 0)               declare_boundary_side(elem, 3, boundary_parts[0]);
+                if (i + 1 == n_cells)     declare_boundary_side(elem, 1, boundary_parts[1]);
+                if (j == 0)               declare_boundary_side(elem, 0, boundary_parts[2]);
+                if (j + 1 == n_cells)     declare_boundary_side(elem, 2, boundary_parts[3]);
+                if (k == 0)               declare_boundary_side(elem, 4, boundary_parts[4]);
+                if (k + 1 == n_cells)     declare_boundary_side(elem, 5, boundary_parts[5]);
+            }
+        }
+    }
+
+    const auto h = 1.0 / static_cast<double>(n_cells);
+    for (std::size_t k = 0; k <= n_cells; ++k)
+    {
+        for (std::size_t j = 0; j <= n_cells; ++j)
+        {
+            for (std::size_t i = 0; i <= n_cells; ++i)
+            {
+                const auto x = static_cast<double>(i) * h;
+                const auto y = static_cast<double>(j) * h;
+                const auto z = static_cast<double>(k) * h;
+                const auto node =
+                    bulk->get_entity(stk::topology::NODE_RANK,
+                                     node_id(i, j, k));
+                set_node_coord(coord_field, node,
+                               {x + shear * y, y, z});
+            }
+        }
+    }
+
+    bulk->modification_end();
+    mesh->assemble();
+    return mesh;
+}
+
 double affine_scalar(const SimpleFluid::vec3<>& point)
 {
     return 1.0 + 2.0 * point.x - 3.0 * point.y + 4.0 * point.z;
+}
+
+double skewed_quadratic_scalar(const SimpleFluid::vec3<>& point)
+{
+    return 0.1 + point.x * point.x + 0.25 * point.y - 0.125 * point.z;
 }
 
 double scalar_source(const SimpleFluid::vec3<>& point)
@@ -490,6 +631,9 @@ TEST(FvmAnalyticalSolutionsTest, TaylorGreenVortexIsDiscreteDivergenceFree)
     }
 }
 
+/**
+ * @brief Verifies semi-implicit diffusion preserves an affine scalar field (zero Laplacian).
+ */
 TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
 {
     auto mesh = make_unit_box_mesh();
@@ -535,6 +679,9 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
     }
 }
 
+/**
+ * @brief Verifies scalar transport with a source term reproduces the exact transient solution.
+ */
 TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
 {
     auto mesh = make_unit_box_mesh();
@@ -588,6 +735,9 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
     EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-12);
 }
 
+/**
+ * @brief Verifies 1-D diffusion with constant source converges to the exact quadratic steady-state profile.
+ */
 TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatchesQuadratic)
 {
     constexpr int n_cells = 16;
@@ -651,6 +801,9 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
     EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-11);
 }
 
+/**
+ * @brief Solves an orthogonal Poisson equation with constant source and compares to the manufactured quadratic solution.
+ */
 TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
 {
     constexpr int n_cells = 16;
@@ -700,6 +853,9 @@ TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
     EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-11);
 }
 
+/**
+ * @brief Solves a vector-valued Poisson equation and compares each component to manufactured quadratic.
+ */
 TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadratic)
 {
     constexpr int n_cells = 16;
@@ -755,6 +911,66 @@ TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadr
     EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-11);
 }
 
+/**
+ * @brief Checks that explicit non-orthogonal correction for diffusion converges with mesh refinement on a sheared mesh.
+ */
+TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnShearedQuadraticMesh)
+{
+    constexpr double diffusivity = 1.0;
+    constexpr double source_value = -2.0 * diffusivity;
+    auto source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return source_value;
+    };
+    auto exact = [](SimpleFluid::vec3<> point)
+    {
+        return skewed_quadratic_scalar(point);
+    };
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-13;
+
+    auto solve_error = [&](std::size_t n_cells)
+    {
+        auto mesh = make_sheared_box_mesh(n_cells, 0.45);
+        auto boundary_condition =
+            [&](int patch_id, std::size_t in_patch_id)
+                -> SimpleFluid::BoundaryCondition
+        {
+            const auto face_lid =
+                mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            return {SimpleFluid::BoundaryConditionType::Dirichlet,
+                    skewed_quadratic_scalar(mesh->face_centroid(face_lid))};
+        };
+
+        FieldType candidate(mesh, "corrected_sheared_solution");
+        const auto converged =
+            SimpleFluid::FvmOperators::solve_explicit_non_orthogonal_diffusion<Pack>(
+                *mesh, diffusivity, boundary_condition, source, candidate,
+                4, options);
+        EXPECT_TRUE(converged);
+        if (!converged)
+        {
+            return std::pair{std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::infinity()};
+        }
+        return std::pair{
+            SimpleFluid::l2_error(candidate, exact),
+            SimpleFluid::linf_error(candidate, exact)};
+    };
+
+    const auto coarse = solve_error(2);
+    const auto medium = solve_error(3);
+    const auto fine = solve_error(4);
+
+    EXPECT_LT(medium.first, coarse.first);
+    EXPECT_LT(fine.first, medium.first);
+    EXPECT_LT(fine.second, medium.second);
+}
+
+/**
+ * @brief Verifies vector-valued transport with a source term reproduces the exact transient solution.
+ */
 TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
 {
     auto mesh = make_unit_box_mesh();
@@ -810,6 +1026,9 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
     EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-12);
 }
 
+/**
+ * @brief Advances inviscid Burgers equation explicitly and checks the solution tracks the pre-shock sine wave.
+ */
 TEST(FvmAnalyticalSolutionsTest, OneDimensionalBurgersTracksPreShockSineWave)
 {
     constexpr int n_cells = 64;
@@ -836,6 +1055,9 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalBurgersTracksPreShockSineWave)
     }
 }
 
+/**
+ * @brief Advances inviscid Burgers equation semi-implicitly and checks tracking of the pre-shock sine wave.
+ */
 TEST(FvmAnalyticalSolutionsTest, SemiImplicitBurgersTracksPreShockSineWave)
 {
     constexpr int n_cells = 64;
@@ -865,6 +1087,9 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitBurgersTracksPreShockSineWave)
     }
 }
 
+/**
+ * @brief Advances viscous Burgers equation semi-implicitly and checks against the exact analytical solution.
+ */
 TEST(FvmAnalyticalSolutionsTest, SemiImplicitBurgersWithImplicitViscosityTracksExactSolution)
 {
     constexpr int n_cells = 128;

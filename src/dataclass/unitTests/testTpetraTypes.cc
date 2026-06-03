@@ -1,6 +1,12 @@
 /**
  * @file testTpetraTypes.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Compile-time and smoke tests for Tpetra type packs.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>

@@ -27,7 +27,7 @@
 
 ## Phase 2 — Explicit non-orthogonal correction
 
-- [ ] Decompose face area:
+- [x] Decompose face area:
   \[
   S_f = E_f + T_f
   \]
@@ -35,12 +35,12 @@
   \[
   E_f = \frac{S_f\cdot d_{PN}}{d_{PN}\cdot d_{PN}} d_{PN}
   \]
-- [ ] Add explicit correction:
+- [x] Add explicit correction:
   \[
   \Gamma_f (\nabla \phi)_f\cdot T_f
   \]
-- [ ] Add `nNonOrthogonalCorrectors` loop.
-- [ ] Verify convergence on skewed manufactured meshes.
+- [x] Add `nNonOrthogonalCorrectors` loop.
+- [x] Verify convergence on skewed manufactured meshes.
 
 ## Phase 3 — Fully implicit non-orthogonal operator
 

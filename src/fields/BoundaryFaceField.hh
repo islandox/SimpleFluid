@@ -236,6 +236,14 @@ private:
     vector_type d_data;
 };
 
+/**
+ * @brief Construct a boundary-face field over owned boundary faces.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param name Optional field name for I/O.
+ * @param zero_out If true, initialize all entries to zero.
+ */
 template<TpetraTypePack Pack>
 BoundaryFaceField<Pack>::BoundaryFaceField(SP<const mesh_type> mesh,
                                            std::string name,
@@ -251,6 +259,14 @@ BoundaryFaceField<Pack>::BoundaryFaceField(SP<const mesh_type> mesh,
 {
 }
 
+/**
+ * @brief Construct a boundary-face field initialized with a uniform scalar value.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to an assembled mesh.
+ * @param initial_value Scalar value to fill all owned boundary-face entries.
+ * @param name Optional field name for I/O.
+ */
 template<TpetraTypePack Pack>
 BoundaryFaceField<Pack>::BoundaryFaceField(SP<const mesh_type> mesh,
                                            const scalar_type& initial_value,
@@ -260,6 +276,21 @@ BoundaryFaceField<Pack>::BoundaryFaceField(SP<const mesh_type> mesh,
     put_scalar(initial_value);
 }
 
+/**
+ * @brief Build the Tpetra map for owned boundary faces.
+ *
+ * Iterates over all mesh faces and includes only those for which
+ * Mesh::is_boundary_face() is true and the owner cell is locally owned.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Shared pointer to the assembled mesh.
+ * @param[out] owned_boundary_face_ids Ordered list of boundary-face local IDs.
+ * @param[out] face_lid_to_owned_row Mapping from face local ID to owned row
+ *             index (or invalid_owned_row() if not an owned boundary face).
+ * @return RCP to the owned-boundary-face Tpetra map.
+ * @throws std::invalid_argument if @p mesh is null.
+ * @throws std::runtime_error if the mesh does not have an owned-cell map.
+ */
 template<TpetraTypePack Pack>
 auto BoundaryFaceField<Pack>::make_boundary_face_map(
     const SP<const mesh_type>& mesh,
@@ -326,6 +357,13 @@ auto BoundaryFaceField<Pack>::make_boundary_face_map(
                                      comm));
 }
 
+/**
+ * @brief Validate that a face local ID is in range.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Face local ID to validate.
+ * @throws std::out_of_range if the ID is negative or exceeds the face count.
+ */
 template<TpetraTypePack Pack>
 void BoundaryFaceField<Pack>::check_face_lid(
     local_ordinal_type face_lid) const
@@ -349,6 +387,14 @@ void BoundaryFaceField<Pack>::check_face_lid(
     }
 }
 
+/**
+ * @brief Look up the owned Tpetra row index for a boundary face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the boundary face.
+ * @return Local row index in the owned data vector.
+ * @throws std::out_of_range if @p face_lid is not an owned boundary face.
+ */
 template<TpetraTypePack Pack>
 auto BoundaryFaceField<Pack>::owned_row_for_face(
     local_ordinal_type face_lid) const -> local_ordinal_type
@@ -367,6 +413,14 @@ auto BoundaryFaceField<Pack>::owned_row_for_face(
     return owned_row;
 }
 
+/**
+ * @brief Read the value stored at a boundary face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the boundary face.
+ * @return Stored scalar value.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not an owned boundary face.
+ */
 template<TpetraTypePack Pack>
 auto BoundaryFaceField<Pack>::value(local_ordinal_type face_lid) const
     -> scalar_type
@@ -374,6 +428,16 @@ auto BoundaryFaceField<Pack>::value(local_ordinal_type face_lid) const
     return d_data.getData()[owned_row_for_face(face_lid)];
 }
 
+/**
+ * @brief Read the value stored at a boundary face by boundary ID and in-patch ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param patch_id Boundary patch ID.
+ * @param in_patch_id Local ID of the face within the boundary patch.
+ * @return Stored scalar value.
+ * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID
+ *         is out of bounds for the patch.
+ */
 template<TpetraTypePack Pack>
 auto BoundaryFaceField<Pack>::value(int patch_id, local_ordinal_type in_patch_id) const
     -> scalar_type
@@ -398,6 +462,14 @@ auto BoundaryFaceField<Pack>::value(int patch_id, local_ordinal_type in_patch_id
     return value(face_patch.face_lids[patch_index]);
 }
 
+/**
+ * @brief Write a value to a boundary face by face local ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the boundary face.
+ * @param value Scalar value to store.
+ * @throws std::out_of_range if @p face_lid is out of bounds or not an owned boundary face.
+ */
 template<TpetraTypePack Pack>
 void BoundaryFaceField<Pack>::set_value(local_ordinal_type face_lid,
                                         const scalar_type& value)
@@ -405,6 +477,16 @@ void BoundaryFaceField<Pack>::set_value(local_ordinal_type face_lid,
     d_data.replaceLocalValue(owned_row_for_face(face_lid), value);
 }
 
+/**
+ * @brief Write a value to a boundary face by boundary ID and in-patch ID.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param patch_id Boundary patch ID.
+ * @param in_patch_id Local ID of the face within the boundary patch.
+ * @param value Scalar value to store.
+ * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID
+ *         is out of bounds for the patch.
+ */
 template<TpetraTypePack Pack>
 void BoundaryFaceField<Pack>::set_value(int patch_id,
                                         local_ordinal_type in_patch_id,
@@ -430,6 +512,14 @@ void BoundaryFaceField<Pack>::set_value(int patch_id,
     set_value(face_patch.face_lids[patch_index], value);
 }
 
+/**
+ * @brief Check whether a face is an owned boundary face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param face_lid Local ID of the face to check.
+ * @return true if @p face_lid refers to a boundary face owned by this rank.
+ * @throws std::out_of_range if @p face_lid is out of bounds.
+ */
 template<TpetraTypePack Pack>
 bool BoundaryFaceField<Pack>::is_owned_boundary_face(
     local_ordinal_type face_lid) const

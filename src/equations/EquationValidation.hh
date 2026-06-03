@@ -18,6 +18,15 @@
 namespace SimpleFluid::EquationValidation
 {
 
+/**
+ * @brief Assert that a mesh pointer is non-null and return it.
+ *
+ * @tparam MeshPtr Type of the mesh pointer.
+ * @param mesh The mesh pointer to validate.
+ * @param class_name Name of the calling class for error messages.
+ * @return The validated non-null @p mesh pointer.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<class MeshPtr>
 MeshPtr require_non_null_mesh(MeshPtr mesh, const char* class_name)
 {
@@ -30,6 +39,16 @@ MeshPtr require_non_null_mesh(MeshPtr mesh, const char* class_name)
     return mesh;
 }
 
+/**
+ * @brief Verify that a field is associated with the expected mesh.
+ *
+ * @tparam Mesh Type of the mesh.
+ * @tparam Field Type of the field to check.
+ * @param expected The expected mesh reference.
+ * @param field The field whose mesh association is checked.
+ * @param class_name Name of the calling class for error messages.
+ * @throws std::invalid_argument if the field's mesh does not match @p expected.
+ */
 template<class Mesh, class Field>
 void require_mesh_match(const Mesh& expected,
                         const Field& field,
@@ -42,6 +61,15 @@ void require_mesh_match(const Mesh& expected,
     }
 }
 
+/**
+ * @brief Assert that a scalar value is non-negative.
+ *
+ * @tparam Scalar The scalar type.
+ * @param value The value to check.
+ * @param parameter_name Name of the parameter for error messages.
+ * @param class_name Name of the calling class for error messages.
+ * @throws std::invalid_argument if @p value is negative.
+ */
 template<class Scalar>
 void require_non_negative(Scalar value,
                           const char* parameter_name,
@@ -55,6 +83,13 @@ void require_non_negative(Scalar value,
     }
 }
 
+/**
+ * @brief Assert that a cache container holds at least the required number
+ *        of elements.
+ *
+ * @param cache_size Current size of the cache.
+ * @param required_size Minimum required size.
+ */
 inline void assert_sufficient_cache_size(std::size_t cache_size,
                                          std::size_t required_size)
 {
