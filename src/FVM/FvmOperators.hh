@@ -11,6 +11,8 @@
 #pragma once
 
 #include "FVM/FvmCellOperators.hh"
+#include "FVM/FvmDiffusionSystem.hh"
 #include "FVM/FvmFaceFlux.hh"
 #include "FVM/FvmMatrixOperators.hh"
+#include "FVM/FvmNonOrthogonalCorrection.hh"
 #include "FVM/FvmTransportSystem.hh"
