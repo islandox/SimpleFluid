@@ -18,6 +18,7 @@
 #include "fields/VectorCellField.hh"
 #include "FVM/FvmOperators.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 
@@ -99,6 +100,34 @@ int advance_explicit_diffusion_until_converged(
     }
 
     return max_steps;
+}
+
+double weighted_sum(const FieldType& field)
+{
+    const auto& mesh = field.mesh();
+    double sum = 0.0;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh.num_owned_cells());
+         ++lid)
+    {
+        sum += field.value(lid) * mesh.cell_volume(lid);
+    }
+
+    return sum;
+}
+
+bool cell_has_exterior_face(const MeshType& mesh,
+                            MeshType::local_ordinal_type cell_lid)
+{
+    for (const auto face_lid : mesh.faces(cell_lid))
+    {
+        if (mesh.is_exterior_face(face_lid))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 } // namespace
@@ -521,6 +550,125 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
     {
         EXPECT_NEAR(temperature.value(lid), 0.5, 1.0e-12);
     }
+}
+
+TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    ASSERT_GE(mesh->num_owned_cells(), 3u * 3u * 3u);
+    EXPECT_EQ(mesh->boundary_patches().size(), 6u);
+
+    bool saw_triangular_face = false;
+    std::size_t boundary_cells = 0;
+    std::size_t interior_cells = 0;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, SimpleFluid::MeshUtils::CellType::TRIPRISM);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+        if (cell_has_exterior_face(*mesh, lid))
+        {
+            ++boundary_cells;
+        }
+        else
+        {
+            ++interior_cells;
+        }
+    }
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        EXPECT_TRUE(std::isfinite(mesh->face_area(fid)));
+        EXPECT_GT(mesh->face_area(fid), 0.0);
+        saw_triangular_face =
+            saw_triangular_face
+         || mesh->face(fid).type == SimpleFluid::MeshUtils::FaceType::TRIANGLE;
+    }
+    EXPECT_TRUE(saw_triangular_face);
+    EXPECT_GT(boundary_cells, 0u);
+    EXPECT_GT(interior_cells, 0u);
+
+    FieldType temperature(mesh, "temperature");
+    VectorFieldType velocity(mesh, "velocity");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto center = mesh->cell_centroid(lid);
+        temperature.set_value(lid, 1.0 + center.x - 0.25 * center.y);
+        velocity.set_value(lid, {center.x, -0.5 * center.y, 0.25 * center.z});
+    }
+    temperature.sync_ghosts();
+    velocity.sync_ghosts();
+
+    const auto old_temperature = local_values(temperature);
+    const auto old_temperature_integral = weighted_sum(temperature);
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> temperature_equation(
+        mesh, bcs);
+    temperature_equation.advance_explicit(old_temperature, 0.01, 0.2,
+                                          temperature);
+
+    EXPECT_NEAR(weighted_sum(temperature), old_temperature_integral, 1.0e-10);
+    bool temperature_changed = false;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        EXPECT_TRUE(std::isfinite(temperature.value(lid)));
+        temperature_changed =
+            temperature_changed
+         || std::abs(temperature.value(lid)
+                   - old_temperature[static_cast<std::size_t>(lid)]) > 1.0e-14;
+    }
+    EXPECT_TRUE(temperature_changed);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.02;
+    options.kinematic_viscosity = 0.1;
+    options.thermal_expansion = 0.0;
+    options.reference_temperature = 0.5;
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    const auto cache =
+        SimpleFluid::FvmOperators::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    std::vector<VectorFieldType::vec_type> old_velocity(mesh->num_owned_cells());
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        old_velocity[static_cast<std::size_t>(lid)] = velocity.value(lid);
+    }
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> momentum_equation(mesh);
+    momentum_equation.advance_velocity(velocity,
+                                       zero_fluxes,
+                                       temperature,
+                                       cache,
+                                       options,
+                                       velocity);
+
+    bool velocity_changed = false;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto v = velocity.value(lid);
+        EXPECT_TRUE(std::isfinite(v.x));
+        EXPECT_TRUE(std::isfinite(v.y));
+        EXPECT_TRUE(std::isfinite(v.z));
+        const auto old_v = old_velocity[static_cast<std::size_t>(lid)];
+        velocity_changed =
+            velocity_changed
+         || std::abs(v.x - old_v.x) > 1.0e-14
+         || std::abs(v.y - old_v.y) > 1.0e-14
+         || std::abs(v.z - old_v.z) > 1.0e-14;
+    }
+    EXPECT_TRUE(velocity_changed);
 }
 
 /**
