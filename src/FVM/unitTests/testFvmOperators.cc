@@ -124,6 +124,42 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     }
 }
 
+TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto& c = mesh->cell_centroid(lid);
+        velocity.set_value(lid,
+                           {1.0 + 2.0 * c.x - 3.0 * c.y + 4.0 * c.z,
+                            -2.0 + c.x + 0.5 * c.y - 1.5 * c.z,
+                            3.0 - 4.0 * c.x + 2.0 * c.y + c.z});
+    }
+    velocity.sync_ghosts();
+
+    std::vector<SimpleFluid::FvmOperators::VectorCellGradient<Pack>> gradients;
+    SimpleFluid::FvmOperators::cell_gradient(velocity, gradients);
+    ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
+    for (const auto& gradient : gradients)
+    {
+        EXPECT_NEAR(gradient[0].x, 2.0, 1.0e-12);
+        EXPECT_NEAR(gradient[0].y, -3.0, 1.0e-12);
+        EXPECT_NEAR(gradient[0].z, 4.0, 1.0e-12);
+
+        EXPECT_NEAR(gradient[1].x, 1.0, 1.0e-12);
+        EXPECT_NEAR(gradient[1].y, 0.5, 1.0e-12);
+        EXPECT_NEAR(gradient[1].z, -1.5, 1.0e-12);
+
+        EXPECT_NEAR(gradient[2].x, -4.0, 1.0e-12);
+        EXPECT_NEAR(gradient[2].y, 2.0, 1.0e-12);
+        EXPECT_NEAR(gradient[2].z, 1.0, 1.0e-12);
+    }
+}
+
 TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
 {
     auto mesh = make_mesh();

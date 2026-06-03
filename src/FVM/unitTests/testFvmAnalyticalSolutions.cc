@@ -628,7 +628,7 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
         return exact(mesh->face_centroid(face_lid));
     };
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [=](MeshType::local_ordinal_type) -> Pack::scalar_type
     {
         return source_value;
     };
@@ -646,6 +646,110 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
         numerical.owned_data(),
         options));
     mesh->sync_periodic_boundaries(numerical);
+
+    EXPECT_LT(SimpleFluid::l2_error(numerical, exact), 1.0e-11);
+    EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-11);
+}
+
+TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
+{
+    constexpr int n_cells = 16;
+    constexpr double mesh_size = 1.0 / static_cast<double>(n_cells);
+    constexpr double diffusivity = 0.25;
+    constexpr double source_value = 0.5;
+
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(n_cells, 1, 1, mesh_size));
+
+    auto boundary_condition =
+        [&](int patch_id, std::size_t) -> SimpleFluid::BoundaryCondition
+    {
+        const auto& name = mesh->boundary_patch_name(patch_id);
+        if (name == "xmin" || name == "xmax")
+        {
+            return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+        }
+        return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    };
+    auto source =
+        [=](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return source_value;
+    };
+
+    const auto system = SimpleFluid::FvmOperators::diffusion_system<Pack>(
+        *mesh, diffusivity, boundary_condition, source);
+
+    FieldType numerical(mesh, "poisson_solution");
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-13;
+    ASSERT_TRUE(SimpleFluid::solve_linear_system<Pack>(
+        Teuchos::rcp_implicit_cast<const Pack::matrix_type>(system.matrix),
+        *system.rhs,
+        numerical.owned_data(),
+        options));
+    mesh->sync_periodic_boundaries(numerical);
+
+    auto exact = [=](SimpleFluid::vec3<> point)
+    {
+        return constant_source_diffusion_exact(point.x, mesh_size,
+                                               source_value, diffusivity);
+    };
+
+    EXPECT_LT(SimpleFluid::l2_error(numerical, exact), 1.0e-11);
+    EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-11);
+}
+
+TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadratic)
+{
+    constexpr int n_cells = 16;
+    constexpr double mesh_size = 1.0 / static_cast<double>(n_cells);
+    constexpr double diffusivity = 0.25;
+    const SimpleFluid::vec3<> source_value{0.5, 1.0, -0.25};
+
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(n_cells, 1, 1, mesh_size));
+
+    auto boundary_condition =
+        [&](int patch_id, std::size_t) -> SimpleFluid::VectorBoundaryCondition
+    {
+        const auto& name = mesh->boundary_patch_name(patch_id);
+        if (name == "xmin" || name == "xmax")
+        {
+            return {SimpleFluid::BoundaryConditionType::Dirichlet, {}};
+        }
+        return {SimpleFluid::BoundaryConditionType::Neumann, {}};
+    };
+    auto source =
+        [&](MeshType::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
+    {
+        return source_value;
+    };
+
+    const auto system =
+        SimpleFluid::FvmOperators::vector_diffusion_system<Pack>(
+            *mesh, diffusivity, boundary_condition, source);
+
+    VectorFieldType numerical(mesh, "vector_poisson_solution");
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-13;
+    ASSERT_TRUE(SimpleFluid::solve_linear_system<Pack>(
+        Teuchos::rcp_implicit_cast<const Pack::matrix_type>(system.matrix),
+        *system.rhs,
+        numerical.owned_data(),
+        options));
+    mesh->sync_periodic_boundaries(numerical);
+
+    auto exact = [&](SimpleFluid::vec3<> point)
+    {
+        return SimpleFluid::vec3<>{
+            constant_source_diffusion_exact(point.x, mesh_size,
+                                           source_value.x, diffusivity),
+            constant_source_diffusion_exact(point.x, mesh_size,
+                                           source_value.y, diffusivity),
+            constant_source_diffusion_exact(point.x, mesh_size,
+                                           source_value.z, diffusivity)};
+    };
 
     EXPECT_LT(SimpleFluid::l2_error(numerical, exact), 1.0e-11);
     EXPECT_LT(SimpleFluid::linf_error(numerical, exact), 1.0e-11);
