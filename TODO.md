@@ -44,19 +44,19 @@
 
 ## Phase 3 — Fully implicit non-orthogonal operator
 
-- [ ] Implement full diffusion residual:
+- [x] Implement full diffusion residual:
   \[
   R = \nabla\cdot(\Gamma\nabla\phi)
   \]
-- [ ] Assemble full Jacobian approximately:
+- [x] Assemble full Jacobian approximately:
   - orthogonal two-point stencil implicit
   - least-squares non-orthogonal stencil implicit
-- [ ] Store expanded sparse graph including gradient neighbours.
-- [ ] Compare:
+- [x] Store expanded sparse graph including gradient neighbours.
+- [x] Compare:
   - explicit correction loop
   - fully implicit non-orthogonal matrix
   - hybrid implicit/explicit option
-- [ ] Add runtime switch:
+- [x] Add runtime switch:
 
     ```yaml
     nonOrthogonalTreatment: explicit | implicit | hybrid
@@ -188,7 +188,7 @@ Tpetra is the Trilinos package for distributed sparse matrices/vectors, Belos pr
 ## Acceptance criteria
 
 - [ ] Orthogonal Poisson test shows expected convergence.
-- [ ] Skewed mesh test converges with both explicit and implicit non-orthogonal treatment.
+- [x] Skewed mesh test converges with both explicit and implicit non-orthogonal treatment.
 - [ ] SIMPLE/PISO/PIMPLE produce mass-conservative velocity fields.
 - [ ] Coupled Krylov solver reaches lower continuity residual than segregated SIMPLE for same tolerance.
 - [ ] Natural-convection benchmark remains stable with temperature-dependent density.
