@@ -20,7 +20,15 @@
 namespace SimpleFluid
 {
     using real_t = double;
+    // The installed Tpetra library (Trilinos 17) was built with
+    // HAVE_TPETRA_INST_INT_LONG_LONG=ON / HAVE_TPETRA_INST_INT_LONG=OFF,
+    // so it only has explicit template instantiations for `long long`.
+    //
+    // int64_t  ≡ long long  on macOS and Windows → matches the library.
+    // int64_t  ≡ long       on Linux             → does NOT match.
+    // long long is always 64‑bit on all three platforms → always matches.
     using global_index_t = long long;
+
     using local_index_t = int;
 
     using ArrReal = std::vector<real_t>;

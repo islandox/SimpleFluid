@@ -75,7 +75,6 @@ class Mesh
     friend class MeshPartitioner;
 
     /** @brief Grants MeshFactory access to internal mesh arrays for contiguous GID assignment. */
-    template<TpetraTypePack>
     friend class MeshFactory;
 
 public:
