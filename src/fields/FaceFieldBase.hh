@@ -281,22 +281,7 @@ template<TpetraTypePack Pack, class Derived, class StorageVector>
 void FaceFieldBase<Pack, Derived, StorageVector>::check_face_lid(
     local_ordinal_type face_lid) const
 {
-    if constexpr (std::is_signed_v<local_ordinal_type>)
-    {
-        if (face_lid < 0)
-        {
-            throw std::out_of_range(
-                "Face local id cannot be negative: "
-                + std::to_string(face_lid));
-        }
-    }
-
-    if (static_cast<std::size_t>(face_lid) >= d_mesh->num_faces())
-    {
-        throw std::out_of_range(
-            "Face local id is out of bounds: "
-            + std::to_string(face_lid));
-    }
+    CHECK_BOUNDS(face_lid, 0, d_mesh->num_faces());
 }
 
 /**

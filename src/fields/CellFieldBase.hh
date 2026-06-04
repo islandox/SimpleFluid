@@ -77,7 +77,7 @@ public:
 
     void sync_ghosts()
     {
-        d_overlap_data.doImport(d_data, *d_owned_to_overlap_import, Tpetra::INSERT);
+        d_overlap_data.doImport(d_data, *d_owned_to_overlap_import, Tpetra::REPLACE);
     }
 
 protected:
@@ -267,24 +267,7 @@ template<TpetraTypePack Pack, class Derived, class StorageVector>
 void CellFieldBase<Pack, Derived, StorageVector>::check_cell_lid(
     local_ordinal_type cell_lid) const
 {
-#if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
-    if constexpr (std::is_signed_v<local_ordinal_type>)
-    {
-        if (cell_lid < 0)
-        {
-            throw std::out_of_range("Cell local id cannot be negative: "
-                                  + std::to_string(cell_lid));
-        }
-    }
-
-    if (static_cast<std::size_t>(cell_lid) >= d_mesh->num_local_cells())
-    {
-        throw std::out_of_range("Cell local id is out of bounds: "
-                              + std::to_string(cell_lid));
-    }
-#else
-    (void)cell_lid;
-#endif
+    CHECK_BOUNDS(cell_lid, 0, d_mesh->num_local_cells());
 }
 
 /**
@@ -304,17 +287,9 @@ template<TpetraTypePack Pack, class Derived, class StorageVector>
 void CellFieldBase<Pack, Derived, StorageVector>::check_cell_row_invariant(
     const char* class_name) const
 {
+    CHECK(d_data.getMap()->getLocalNumElements() == d_mesh->num_owned_cells());
+    CHECK(d_overlap_data.getMap()->getLocalNumElements() == d_mesh->num_local_cells());
 #if !defined(NDEBUG) || defined(SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS)
-    if (d_data.getMap()->getLocalNumElements() != d_mesh->num_owned_cells())
-    {
-        throw std::runtime_error(std::string(class_name)
-                               + " owned map size does not match the owned-cell count.");
-    }
-    if (d_overlap_data.getMap()->getLocalNumElements() != d_mesh->num_local_cells())
-    {
-        throw std::runtime_error(std::string(class_name)
-                               + " overlap map size does not match the local-cell count.");
-    }
 
     const auto invalid_row =
         Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
@@ -357,8 +332,6 @@ void CellFieldBase<Pack, Derived, StorageVector>::check_cell_row_invariant(
             }
         }
     }
-#else
-    (void)class_name;
 #endif
 }
 
