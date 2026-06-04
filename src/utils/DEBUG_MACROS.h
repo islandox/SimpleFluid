@@ -22,27 +22,38 @@
 
 #ifndef NDEBUG
     #define DEBUG_CHECK_ENABLED
-    #define SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS
+    #define CHECK_BOUNDS_ENABLED
+#endif
+
+#ifdef SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS
+    #ifndef CHECK_BOUNDS_ENABLED
+        #define CHECK_BOUNDS_ENABLED
+    #endif
 #endif
 
 #ifdef DEBUG_CHECK_ENABLED
+    #define CHECK1(condition) utils::check<>((condition), \
+        std::string("Debug check failed: ") + #condition \
+        + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
 
-#define CHECK1(condition) utils::check<>((condition), \
-    std::string("Debug check failed: ") + #condition \
-    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
+    #define CHECK2(condition, message) utils::check<>((condition), \
+        std::string("Debug check failed: ") + (message) \
+        + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
 
-#define CHECK2(condition, message) utils::check<>((condition), \
-    std::string("Debug check failed: ") + (message) \
-    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
-
-#define CHECK3(condition, message, error) utils::check<error>((condition), \
-    std::string("Debug check failed: ") + (message) \
-    + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
-
+    #define CHECK3(condition, message, error) utils::check<error>((condition), \
+        std::string("Debug check failed: ") + (message) \
+        + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
 #else
-#define CHECK1(condition) // do nothing
-#define CHECK2(condition, message) // do nothing
-#define CHECK3(condition, message, error) // do nothing
+    #define CHECK1(condition) // do nothing
+    #define CHECK2(condition, message) // do nothing
+    #define CHECK3(condition, message, error) // do nothing
+#endif
+
+#ifdef CHECK_BOUNDS_ENABLED
+    #define CHECK_BOUNDS(value, lower, upper) \
+        utils::check<std::out_of_range>(((value) >= (lower)) && ((value) < (upper)))
+#else
+    #define CHECK_BOUNDS(value, lower, upper) // do nothing
 #endif
 
 #define CHECK(...) DISPATCH(CHECK, __VA_ARGS__)
