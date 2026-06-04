@@ -11,6 +11,8 @@
 
 #include "PressureProjectionEquation.hh"
 
+#include <cmath>
+
 namespace SimpleFluid
 {
 
@@ -108,11 +110,11 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
  *        gradient on output.
  */
 template<TpetraTypePack Pack>
-void PressureProjectionEquation<Pack>::project(
+auto PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
     const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
-    velocity_field_type& velocity)
+    velocity_field_type& velocity) -> ProjectionResult
 {
     auto zero_source =
         [](local_ordinal_type) -> scalar_type
@@ -120,8 +122,8 @@ void PressureProjectionEquation<Pack>::project(
         return scalar_type{};
     };
 
-    project(pressure, time_step, velocity_boundary_cache, velocity,
-            zero_source);
+    return project(pressure, time_step, velocity_boundary_cache, velocity,
+                   zero_source);
 }
 
 /**
@@ -140,12 +142,12 @@ void PressureProjectionEquation<Pack>::project(
  *         step.
  */
 template<TpetraTypePack Pack>
-void PressureProjectionEquation<Pack>::project(
+auto PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
     const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity,
-    const source_type& right_hand_source)
+    const source_type& right_hand_source) -> ProjectionResult
 {
     EquationValidation::require_mesh_match(*d_mesh, pressure,
                                            "PressureProjectionEquation");
@@ -157,7 +159,7 @@ void PressureProjectionEquation<Pack>::project(
     }
     if (d_mesh->num_owned_cells() == 0)
     {
-        return;
+        return {};
     }
 
     FVM::face_velocities(velocity, velocity_boundary_cache,
@@ -203,6 +205,15 @@ void PressureProjectionEquation<Pack>::project(
     }
     d_mesh->sync_periodic_boundaries(pressure);
 
+    scalar_type pressure_norm_squared = {};
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto correction = pressure.value(cell_lid);
+        pressure_norm_squared += correction * correction
+                               * d_mesh->cell_volume(cell_lid);
+    }
+
     FVM::cell_gradient(pressure, d_cached_gradients);
 
     // Correct velocity using Tpetra::MultiVector::update: V = V - dt * grad(p)
@@ -222,6 +233,23 @@ void PressureProjectionEquation<Pack>::project(
     velocity.owned_data().update(-time_step, gradient_mv, 1.0);
 
     d_mesh->sync_periodic_boundaries(velocity);
+
+    FVM::face_velocities(velocity, velocity_boundary_cache,
+                                  d_cached_face_velocity);
+    FVM::normal_face_fluxes(d_cached_face_velocity,
+                                     d_cached_face_fluxes);
+
+    scalar_type continuity_norm_squared = {};
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto balance =
+            FVM::cell_flux_balance<Pack>(*d_mesh, d_cached_face_fluxes, cell_lid);
+        continuity_norm_squared += balance * balance;
+    }
+
+    using std::sqrt;
+    return {sqrt(pressure_norm_squared), sqrt(continuity_norm_squared)};
 }
 
 } // namespace SimpleFluid

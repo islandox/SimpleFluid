@@ -78,22 +78,22 @@
 
 ## Phase 5 — Pressure–velocity coupling baseline
 
-- [ ] Implement SIMPLE:
+- [x] Implement SIMPLE:
 
   - solve momentum predictor
   - build pressure correction equation
   - correct pressure
   - correct velocity
   - correct face flux
-- [ ] Implement PISO:
+- [x] Implement PISO:
 
   - one momentum predictor
   - multiple pressure corrections
-- [ ] Implement PIMPLE driver:
+- [x] Implement PIMPLE driver:
 
   - outer nonlinear loop
   - inner PISO pressure corrections
-- [ ] Add residual reporting for:
+- [x] Add residual reporting for:
 
   - momentum
   - pressure

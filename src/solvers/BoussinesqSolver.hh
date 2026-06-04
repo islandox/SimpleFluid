@@ -52,6 +52,7 @@ public:
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using vec_type = typename mesh_type::Vec3;
     using cell_type = typename mesh_type::CellType;
+    using residual_type = PressureVelocityResiduals<scalar_type>;
 
     BoussinesqSolver(SP<const mesh_type> mesh,
                      BoundaryConditionSet boundary_conditions,
@@ -81,6 +82,10 @@ public:
     const field_type& temperature() const noexcept { return d_temperature; }
     const field_type& pressure() const noexcept { return d_pressure; }
     const velocity_field_type& velocity() const noexcept { return d_velocity; }
+    const residual_type& last_pressure_velocity_residuals() const noexcept
+    {
+        return d_last_pressure_velocity_residuals;
+    }
 
     field_type& temperature() noexcept { return d_temperature; }
     field_type& pressure() noexcept { return d_pressure; }
@@ -91,6 +96,13 @@ public:
 
 private:
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
+
+    void solve_pressure_velocity_coupling();
+    void run_momentum_predictor();
+    typename PressureProjectionEquation<Pack>::ProjectionResult
+    run_pressure_correction();
+    scalar_type velocity_update_norm(const velocity_field_type& before,
+                                     const velocity_field_type& after) const;
 
     SP<const mesh_type> d_mesh;
     BoundaryConditionSet d_boundary_conditions;
@@ -104,9 +116,12 @@ private:
 
     field_type d_temperature;
     field_type d_pressure;
+    field_type d_pressure_correction;
     velocity_field_type d_velocity;
+    velocity_field_type d_predictor_velocity;
     face_flux_field_type d_old_face_fluxes;
     face_flux_field_type d_projected_face_fluxes;
+    residual_type d_last_pressure_velocity_residuals;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
