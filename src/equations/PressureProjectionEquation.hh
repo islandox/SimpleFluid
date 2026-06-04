@@ -48,6 +48,11 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using source_type = std::function<scalar_type(local_ordinal_type)>;
+    struct ProjectionResult
+    {
+        scalar_type pressure_correction = {};
+        scalar_type continuity = {};
+    };
 
     explicit PressureProjectionEquation(
         SP<const mesh_type> mesh,
@@ -67,16 +72,18 @@ public:
 
     void solve(field_type& pressure);
 
-    void project(field_type& pressure,
-                 scalar_type time_step,
-                 const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
-                 velocity_field_type& velocity);
+    ProjectionResult project(
+        field_type& pressure,
+        scalar_type time_step,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        velocity_field_type& velocity);
 
-    void project(field_type& pressure,
-                 scalar_type time_step,
-                 const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
-                 velocity_field_type& velocity,
-                 const source_type& right_hand_source);
+    ProjectionResult project(
+        field_type& pressure,
+        scalar_type time_step,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        velocity_field_type& velocity,
+        const source_type& right_hand_source);
 
 private:
     static Teuchos::RCP<const map_type> require_owned_cell_map(

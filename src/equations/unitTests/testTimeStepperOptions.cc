@@ -32,6 +32,24 @@ TEST(TimeStepperOptionsTest, DefaultsArePhysicalSmokeValues)
     EXPECT_EQ(options.non_orthogonal_treatment,
               SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
     EXPECT_EQ(options.n_non_orthogonal_correctors, 0);
+    EXPECT_EQ(options.pressure_velocity_coupling,
+              SimpleFluid::PressureVelocityCoupling::PISO);
+    EXPECT_EQ(options.n_pressure_correctors, 1);
+    EXPECT_EQ(options.n_outer_correctors, 1);
+}
+
+TEST(TimeStepperOptionsTest, ParsesPressureVelocityCouplingSwitch)
+{
+    EXPECT_EQ(SimpleFluid::pressure_velocity_coupling_from_string("SIMPLE"),
+              SimpleFluid::PressureVelocityCoupling::SIMPLE);
+    EXPECT_EQ(SimpleFluid::pressure_velocity_coupling_from_string("piso"),
+              SimpleFluid::PressureVelocityCoupling::PISO);
+    EXPECT_EQ(SimpleFluid::pressure_velocity_coupling_from_string("PIMPLE"),
+              SimpleFluid::PressureVelocityCoupling::PIMPLE);
+    EXPECT_EQ(SimpleFluid::to_string(SimpleFluid::PressureVelocityCoupling::SIMPLE),
+              "SIMPLE");
+    EXPECT_THROW(SimpleFluid::pressure_velocity_coupling_from_string("coupled"),
+                 std::invalid_argument);
 }
 
 TEST(TimeStepperOptionsTest, GravityVectorReflectsComponents)

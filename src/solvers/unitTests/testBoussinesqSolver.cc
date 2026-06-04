@@ -23,6 +23,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -194,6 +195,28 @@ void expect_zero_boundary_velocity(
     }
 
     EXPECT_TRUE(saw_boundary);
+}
+
+Pack::scalar_type continuity_imbalance_norm(
+    const SimpleFluid::VectorCellField<Pack>& velocity,
+    const SimpleFluid::FVM::VelocityBoundaryCache<Pack>& cache)
+{
+    SimpleFluid::FaceField<Pack> face_fluxes(velocity.mesh_ptr(), "face_flux");
+    SimpleFluid::FVM::face_fluxes(velocity, cache, face_fluxes);
+
+    Pack::scalar_type norm_squared = 0.0;
+    for (std::size_t owned = 0; owned < velocity.mesh().num_owned_cells();
+         ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto value =
+            SimpleFluid::FVM::cell_flux_balance<Pack>(
+                velocity.mesh(), face_fluxes, cell_lid);
+        norm_squared += value * value;
+    }
+
+    return std::sqrt(norm_squared);
 }
 
 } // namespace
@@ -415,4 +438,78 @@ TEST(BoussinesqSolverTest, RunsBoundaryLayerBoxWithThreeDirectionGravity)
 
     EXPECT_EQ(solver.step_index(), 1);
     expect_finite_solution(*mesh, solver);
+}
+
+TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
+{
+    const std::vector<SimpleFluid::PressureVelocityCoupling> modes{
+        SimpleFluid::PressureVelocityCoupling::SIMPLE,
+        SimpleFluid::PressureVelocityCoupling::PISO,
+        SimpleFluid::PressureVelocityCoupling::PIMPLE
+    };
+
+    for (const auto mode : modes)
+    {
+        auto mesh = make_box_mesh();
+
+        SimpleFluid::BoundaryConditionSet bcs;
+        bcs.temperature["xmin"] =
+            {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+        bcs.temperature["xmax"] =
+            {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+
+        SimpleFluid::TimeStepperOptions time_options;
+        time_options.time_step = 1.0e-2;
+        time_options.steps = 1;
+        time_options.thermal_diffusivity = 0.0;
+        time_options.kinematic_viscosity = 1.0e-2;
+        time_options.thermal_expansion = 1.0;
+        time_options.gravity_x = -1.0;
+        time_options.gravity_y = -0.5;
+        time_options.gravity_z = -0.25;
+        time_options.reference_temperature = 0.5;
+        time_options.pressure_velocity_coupling = mode;
+        time_options.n_pressure_correctors = 2;
+        time_options.n_outer_correctors = 2;
+
+        SimpleFluid::LinearSolverOptions linear_options;
+        linear_options.tolerance = 1.0e-12;
+        linear_options.max_iterations = 200;
+
+        SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options,
+                                                   linear_options);
+        solver.initialize_heated_box(1.0, 0.0);
+
+        const auto cache =
+            SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+                mesh, bcs);
+        solver.step();
+
+        const auto after = continuity_imbalance_norm(solver.velocity(), cache);
+        const auto residuals = solver.last_pressure_velocity_residuals();
+
+        EXPECT_EQ(solver.step_index(), 1);
+        expect_finite_solution(*mesh, solver);
+        EXPECT_NEAR(after, residuals.continuity, 1.0e-10);
+        EXPECT_TRUE(std::isfinite(residuals.momentum));
+        EXPECT_TRUE(std::isfinite(residuals.pressure));
+        EXPECT_TRUE(std::isfinite(residuals.continuity));
+        EXPECT_GE(residuals.momentum, 0.0);
+        EXPECT_GE(residuals.pressure, 0.0);
+        EXPECT_GE(residuals.continuity, 0.0);
+    }
+}
+
+TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
+{
+    auto mesh = make_box_mesh();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.n_pressure_correctors = 0;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
+    solver.initialize_heated_box(1.0, 0.0);
+
+    EXPECT_THROW(solver.step(), std::invalid_argument);
 }

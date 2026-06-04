@@ -13,6 +13,7 @@
 #include "dataclass/vec3.hh"
 #include "dataclass/typedefs.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
+#include "equations/PressureVelocityCoupling.hh"
 
 namespace SimpleFluid
 {
@@ -34,6 +35,10 @@ struct TimeStepperOptions
     FVM::NonOrthogonalTreatment non_orthogonal_treatment =
         FVM::NonOrthogonalTreatment::Implicit;
     int n_non_orthogonal_correctors = 0;
+    PressureVelocityCoupling pressure_velocity_coupling =
+        PressureVelocityCoupling::PISO;
+    int n_pressure_correctors = 1;
+    int n_outer_correctors = 1;
 
     vec3<real_t> gravity_vector() const noexcept
     {
