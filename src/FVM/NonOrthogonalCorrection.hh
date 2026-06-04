@@ -14,68 +14,15 @@
 #include "equations/BoundaryConditions.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/DiffusionSystem.hh"
+#include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/OperatorDetails.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <stdexcept>
-#include <string>
-#include <string_view>
 #include <vector>
 
 namespace SimpleFluid::FVM
 {
-
-/**
- * @brief Available treatments for non-orthogonal diffusion terms.
- */
-enum class NonOrthogonalTreatment
-{
-    Explicit,
-    Implicit,
-    Hybrid
-};
-
-/**
- * @brief Parse the runtime non-orthogonal treatment switch.
- *
- * Accepted values match the input-file spelling:
- * `explicit`, `implicit`, and `hybrid`.
- */
-inline NonOrthogonalTreatment
-non_orthogonal_treatment_from_string(std::string_view value)
-{
-    if (value == "explicit")
-    {
-        return NonOrthogonalTreatment::Explicit;
-    }
-    if (value == "implicit")
-    {
-        return NonOrthogonalTreatment::Implicit;
-    }
-    if (value == "hybrid")
-    {
-        return NonOrthogonalTreatment::Hybrid;
-    }
-
-    throw std::invalid_argument(
-        "Unknown nonOrthogonalTreatment value: " + std::string(value));
-}
-
-/**
- * @brief Return the input-file spelling for a non-orthogonal treatment.
- */
-inline std::string_view
-to_string(NonOrthogonalTreatment treatment)
-{
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit: return "explicit";
-        case NonOrthogonalTreatment::Implicit: return "implicit";
-        case NonOrthogonalTreatment::Hybrid:   return "hybrid";
-    }
-
-    throw std::invalid_argument("Unknown NonOrthogonalTreatment value.");
-}
 
 /**
  * @brief Add the explicit non-orthogonal diffusion correction to an RHS.
@@ -191,6 +138,130 @@ void add_explicit_non_orthogonal_correction(
                 owner,
                 correction_weight * diffusivity
               * gradient.dot(tangential_area));
+        }
+    }
+}
+
+/**
+ * @brief Add the explicit non-orthogonal diffusion correction for a
+ *        vector field to a three-column RHS.
+ *
+ * The correction is applied component-wise using the vector least-squares
+ * gradient reconstruction. Boundary faces are treated as prescribed-value
+ * diffusion faces, matching vector transport-system assembly.
+ */
+template<TpetraTypePack Pack>
+void add_explicit_non_orthogonal_correction(
+    const VectorCellField<Pack>& correction_field,
+    typename Pack::scalar_type diffusivity,
+    typename Pack::multi_vector_type& rhs,
+    typename Pack::scalar_type correction_weight = 1.0)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    constexpr std::size_t num_components = VectorCellField<Pack>::num_components;
+
+    const auto& mesh = correction_field.mesh();
+    if (diffusivity <= scalar_type{0}
+        || correction_weight == scalar_type{0})
+    {
+        return;
+    }
+    if (rhs.getMap().get() != mesh.owned_cell_map().get())
+    {
+        throw std::invalid_argument(
+            "add_explicit_non_orthogonal_correction requires an owned-cell RHS.");
+    }
+    if (rhs.getNumVectors() != num_components)
+    {
+        throw std::invalid_argument(
+            "add_explicit_non_orthogonal_correction requires a three-component RHS.");
+    }
+
+    std::vector<VectorCellGradient<Pack>> gradients;
+    cell_gradient(correction_field, gradients);
+
+    auto gradient_for_face =
+        [&](local_ordinal_type cell_lid,
+            local_ordinal_type other_lid) -> VectorCellGradient<Pack>
+    {
+        auto gradient = gradients[static_cast<std::size_t>(cell_lid)];
+        if (mesh.is_owned_cell(other_lid)
+            && static_cast<std::size_t>(other_lid) < gradients.size())
+        {
+            const auto& other_gradient =
+                gradients[static_cast<std::size_t>(other_lid)];
+            for (std::size_t component = 0;
+                 component < num_components;
+                 ++component)
+            {
+                gradient[component] =
+                    (gradient[component] + other_gradient[component]) / 2.0;
+            }
+        }
+        return gradient;
+    };
+
+    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            if (!mesh.is_interior_face(face_lid))
+            {
+                continue;
+            }
+
+            const auto other =
+                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            const auto area_vector =
+                mesh.face_area_vector_outward(face_lid, cell_lid);
+            const auto d = mesh.cell_center_vector(face_lid, cell_lid);
+            const auto tangential_area =
+                detail::non_orthogonal_area_vector(area_vector, d);
+            const auto gradient = gradient_for_face(cell_lid, other);
+
+            for (std::size_t component = 0;
+                 component < num_components;
+                 ++component)
+            {
+                rhs.sumIntoLocalValue(
+                    cell_lid, component,
+                    correction_weight * diffusivity
+                  * gradient[component].dot(tangential_area));
+            }
+        }
+    }
+
+    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    {
+        (void)patch_id;
+        for (const auto face_lid : boundary_patch.face_lids)
+        {
+            if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
+            {
+                continue;
+            }
+
+            const auto owner = mesh.owner_cell(face_lid);
+            const auto area_vector =
+                mesh.face_area_vector_outward(face_lid, owner);
+            const auto d =
+                mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
+            const auto tangential_area =
+                detail::non_orthogonal_area_vector(area_vector, d);
+            const auto& gradient = gradients[static_cast<std::size_t>(owner)];
+
+            for (std::size_t component = 0;
+                 component < num_components;
+                 ++component)
+            {
+                rhs.sumIntoLocalValue(
+                    owner, component,
+                    correction_weight * diffusivity
+                  * gradient[component].dot(tangential_area));
+            }
         }
     }
 }

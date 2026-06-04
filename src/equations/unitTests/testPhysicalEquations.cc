@@ -22,6 +22,7 @@
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -808,4 +809,100 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
         EXPECT_TRUE(std::isfinite(v.y)) << "Non-finite v.y at cell " << lid;
         EXPECT_TRUE(std::isfinite(v.z)) << "Non-finite v.z at cell " << lid;
     }
+}
+
+TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewedMesh)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType temperature(mesh, "temperature");
+    VectorFieldType orthogonal_velocity(mesh, "orthogonal_velocity");
+    VectorFieldType implicit_velocity(mesh, "implicit_velocity");
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto center = mesh->cell_centroid(lid);
+        const SimpleFluid::vec3<> value{
+            0.2 + center.x * center.y,
+            -0.1 + center.y * center.z,
+            0.3 + center.x * center.z};
+        temperature.set_value(lid, 0.5);
+        orthogonal_velocity.set_value(lid, value);
+        implicit_velocity.set_value(lid, value);
+    }
+    temperature.sync_ghosts();
+    orthogonal_velocity.sync_ghosts();
+    implicit_velocity.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] =
+            {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+
+    SimpleFluid::TimeStepperOptions orthogonal_options;
+    orthogonal_options.time_step = 0.05;
+    orthogonal_options.kinematic_viscosity = 0.25;
+    orthogonal_options.thermal_expansion = 0.0;
+    orthogonal_options.reference_temperature = 0.5;
+    orthogonal_options.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit;
+    orthogonal_options.n_non_orthogonal_correctors = 0;
+
+    auto implicit_options = orthogonal_options;
+    implicit_options.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-12;
+    linear_options.max_iterations = 500;
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
+    equation.advance_velocity(orthogonal_velocity,
+                              zero_fluxes,
+                              temperature,
+                              cache,
+                              orthogonal_options,
+                              orthogonal_velocity,
+                              linear_options);
+    equation.advance_velocity(implicit_velocity,
+                              zero_fluxes,
+                              temperature,
+                              cache,
+                              implicit_options,
+                              implicit_velocity,
+                              linear_options);
+
+    double max_difference = 0.0;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto orthogonal_value = orthogonal_velocity.value(lid);
+        const auto implicit_value = implicit_velocity.value(lid);
+        EXPECT_TRUE(std::isfinite(orthogonal_value.x));
+        EXPECT_TRUE(std::isfinite(orthogonal_value.y));
+        EXPECT_TRUE(std::isfinite(orthogonal_value.z));
+        EXPECT_TRUE(std::isfinite(implicit_value.x));
+        EXPECT_TRUE(std::isfinite(implicit_value.y));
+        EXPECT_TRUE(std::isfinite(implicit_value.z));
+
+        max_difference = std::max(
+            max_difference,
+            std::abs(orthogonal_value.x - implicit_value.x));
+        max_difference = std::max(
+            max_difference,
+            std::abs(orthogonal_value.y - implicit_value.y));
+        max_difference = std::max(
+            max_difference,
+            std::abs(orthogonal_value.z - implicit_value.z));
+    }
+
+    EXPECT_GT(max_difference, 1.0e-10);
 }

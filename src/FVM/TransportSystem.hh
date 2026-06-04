@@ -13,6 +13,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/OperatorDetails.hh"
 #include "geometry/Mesh.hh"
 
@@ -22,6 +23,7 @@
 #include <concepts>
 #include <cstddef>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace SimpleFluid::FVM
 {
@@ -498,6 +500,270 @@ transport_system(const VectorCellField<Pack>& old_values,
                 }
             }
         }
+    }
+
+    matrix->fillComplete();
+    return {matrix, rhs};
+}
+
+/**
+ * @brief Assemble vector transport with selectable non-orthogonal viscous
+ *        diffusion treatment.
+ *
+ * The transient and first-order upwind advection terms are assembled as in
+ * transport_system(). Viscous diffusion uses the Phase 1 orthogonal
+ * two-point stencil plus Phase 2/3 non-orthogonal treatment selected by
+ * @p treatment.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+    requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
+VectorTransportSystem<Pack>
+non_orthogonal_transport_system(
+    const VectorCellField<Pack>& old_values,
+    const FaceField<Pack>& face_fluxes,
+    typename Pack::scalar_type time_step,
+    typename Pack::scalar_type diffusivity,
+    BoundaryValueProvider boundary_value,
+    SourceProvider right_hand_source,
+    NonOrthogonalTreatment treatment,
+    const VectorCellField<Pack>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    using matrix_type = typename Pack::matrix_type;
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    constexpr std::size_t num_components = VectorCellField<Pack>::num_components;
+
+    const auto& mesh = old_values.mesh();
+    if (&face_fluxes.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires face fluxes on the old-value mesh.");
+    }
+    if (correction_field != nullptr
+        && &correction_field->mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires correction field on the old-value mesh.");
+    }
+    if (time_step <= scalar_type{0})
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires a positive time step.");
+    }
+    if (diffusivity < scalar_type{0})
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires non-negative diffusivity.");
+    }
+
+    scalar_type implicit_weight = 0.0;
+    scalar_type explicit_weight = 0.0;
+    switch (treatment)
+    {
+        case NonOrthogonalTreatment::Explicit:
+            explicit_weight = 1.0;
+            break;
+        case NonOrthogonalTreatment::Implicit:
+            implicit_weight = 1.0;
+            break;
+        case NonOrthogonalTreatment::Hybrid:
+            implicit_weight = 0.5;
+            explicit_weight = 0.5;
+            break;
+    }
+
+    const auto gradient_stencils =
+        implicit_weight > scalar_type{0}
+      ? detail::least_squares_gradient_stencils(mesh)
+      : std::vector<detail::LeastSquaresGradientStencil<Mesh<Pack>>>{};
+    const auto boundary_locations = detail::boundary_face_locations(mesh);
+
+    auto matrix = Teuchos::rcp(
+        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 32));
+    (void)cached_matrix;
+    auto rhs = Teuchos::rcp(
+        new typename Pack::multi_vector_type(
+            mesh.owned_cell_map(), num_components, true));
+
+    Teuchos::Array<local_ordinal_type> cols;
+    Teuchos::Array<scalar_type> vals;
+    cols.reserve(64);
+    vals.reserve(64);
+
+    std::unordered_map<local_ordinal_type, scalar_type> row_values;
+    row_values.reserve(64);
+
+    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto volume = mesh.cell_volume(cell_lid);
+        const auto transient = volume / time_step;
+        const auto old_value = old_values.value(cell_lid);
+        const auto source_value = right_hand_source(cell_lid);
+
+        row_values.clear();
+        detail::add_matrix_entry(row_values, cell_lid, transient);
+
+        for (std::size_t comp = 0; comp < num_components; ++comp)
+        {
+            rhs->replaceLocalValue(cell_lid, comp,
+                                   transient * old_value.component(comp)
+                                 + volume * source_value.component(comp));
+        }
+
+        auto add_non_orthogonal_stencil =
+            [&](local_ordinal_type gradient_cell_lid,
+                scalar_type face_gradient_weight,
+                const typename Mesh<Pack>::Vec3& tangential_area)
+        {
+            if (implicit_weight == scalar_type{0}
+                || face_gradient_weight == scalar_type{0}
+                || !mesh.is_owned_cell(gradient_cell_lid)
+                || static_cast<std::size_t>(gradient_cell_lid)
+                   >= gradient_stencils.size())
+            {
+                return;
+            }
+
+            const auto scale =
+                -implicit_weight * diffusivity * face_gradient_weight;
+            for (const auto& entry :
+                 gradient_stencils[static_cast<std::size_t>(gradient_cell_lid)])
+            {
+                detail::add_matrix_entry(
+                    row_values, entry.cell_lid,
+                    scale * entry.coefficient.dot(tangential_area));
+            }
+        };
+
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            const auto owner_oriented_flux =
+                face_fluxes.is_owned_face(face_lid)
+                    ? face_fluxes.value(face_lid)
+                    : scalar_type{};
+            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
+                                    ? owner_oriented_flux
+                                    : -owner_oriented_flux;
+
+            if (out_flux >= scalar_type{0})
+            {
+                detail::add_matrix_entry(row_values, cell_lid, out_flux);
+            }
+            else if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                detail::add_matrix_entry(row_values, other, out_flux);
+            }
+            else if (mesh.is_boundary_face(face_lid)
+                     && static_cast<std::size_t>(face_lid)
+                        < boundary_locations.size()
+                     && boundary_locations[static_cast<std::size_t>(face_lid)].active)
+            {
+                const auto location =
+                    boundary_locations[static_cast<std::size_t>(face_lid)];
+                const auto boundary_face_value =
+                    boundary_value(location.patch_id, location.in_patch_id);
+                for (std::size_t comp = 0; comp < num_components; ++comp)
+                {
+                    rhs->sumIntoLocalValue(
+                        cell_lid, comp,
+                        -out_flux * boundary_face_value.component(comp));
+                }
+            }
+
+            if (diffusivity <= scalar_type{0})
+            {
+                continue;
+            }
+
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto coeff =
+                    detail::interior_diffusion_coefficient(
+                        mesh, face_lid, cell_lid, other, diffusivity);
+                detail::add_matrix_entry(row_values, cell_lid, coeff);
+                detail::add_matrix_entry(row_values, other, -coeff);
+
+                const auto area_vector =
+                    mesh.face_area_vector_outward(face_lid, cell_lid);
+                const auto d = mesh.cell_center_vector(face_lid, cell_lid);
+                const auto tangential_area =
+                    detail::non_orthogonal_area_vector(area_vector, d);
+
+                if (mesh.is_owned_cell(other)
+                    && static_cast<std::size_t>(other)
+                       < gradient_stencils.size())
+                {
+                    add_non_orthogonal_stencil(
+                        cell_lid, scalar_type{0.5}, tangential_area);
+                    add_non_orthogonal_stencil(
+                        other, scalar_type{0.5}, tangential_area);
+                }
+                else
+                {
+                    add_non_orthogonal_stencil(
+                        cell_lid, scalar_type{1}, tangential_area);
+                }
+                continue;
+            }
+
+            if (!mesh.is_boundary_face(face_lid)
+                || static_cast<std::size_t>(face_lid) >= boundary_locations.size()
+                || !boundary_locations[static_cast<std::size_t>(face_lid)].active)
+            {
+                continue;
+            }
+
+            const auto location =
+                boundary_locations[static_cast<std::size_t>(face_lid)];
+            const auto boundary_face_value =
+                boundary_value(location.patch_id, location.in_patch_id);
+            const auto coeff =
+                detail::boundary_diffusion_coefficient(
+                    mesh, face_lid, cell_lid, diffusivity);
+            if (coeff > scalar_type{0})
+            {
+                detail::add_matrix_entry(row_values, cell_lid, coeff);
+                for (std::size_t comp = 0; comp < num_components; ++comp)
+                {
+                    rhs->sumIntoLocalValue(
+                        cell_lid, comp,
+                        coeff * boundary_face_value.component(comp));
+                }
+            }
+
+            const auto area_vector =
+                mesh.face_area_vector_outward(face_lid, cell_lid);
+            const auto d =
+                mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
+            const auto tangential_area =
+                detail::non_orthogonal_area_vector(area_vector, d);
+            add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
+        }
+
+        cols.clear();
+        vals.clear();
+        cols.reserve(row_values.size());
+        vals.reserve(row_values.size());
+        for (const auto& [column, value] : row_values)
+        {
+            cols.push_back(column);
+            vals.push_back(value);
+        }
+
+        matrix->insertLocalValues(cell_lid, cols(), vals());
+    }
+
+    if (correction_field != nullptr && explicit_weight > scalar_type{0})
+    {
+        add_explicit_non_orthogonal_correction<Pack>(
+            *correction_field, diffusivity, *rhs, explicit_weight);
     }
 
     matrix->fillComplete();
