@@ -103,6 +103,9 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                                              "BoussinesqMomentumEquation");
     EquationValidation::require_non_negative(options.kinematic_viscosity, "viscosity",
                                              "BoussinesqMomentumEquation");
+    EquationValidation::require_non_negative(options.n_non_orthogonal_correctors,
+                                             "non-orthogonal correctors",
+                                             "BoussinesqMomentumEquation");
     if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
         || velocity_boundary_cache.type.size() != d_mesh->boundary_patches().size()
         || velocity_boundary_cache.mesh != d_mesh)
@@ -110,6 +113,23 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         throw std::invalid_argument(
             "BoussinesqMomentumEquation received the wrong boundary-cache size.");
     }
+
+    velocity_field_type old_velocity_snapshot(
+        old_velocity.mesh_ptr(), "momentum_old_velocity_snapshot", false);
+    const velocity_field_type* transport_old_velocity = &old_velocity;
+    if (&old_velocity == &velocity
+        && options.n_non_orthogonal_correctors > 0)
+    {
+        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            old_velocity_snapshot.set_value(cell_lid,
+                                            old_velocity.value(cell_lid));
+        }
+        old_velocity_snapshot.sync_ghosts();
+        transport_old_velocity = &old_velocity_snapshot;
+    }
+
     auto boundary_value =
         [&](int boundary_id,
             local_ordinal_type boundary_face_id)
@@ -122,7 +142,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
             const auto face_lid =
                 d_mesh->boundary_face_patch(boundary_id).face_lids[face];
             return FVM::detail::slip_face_velocity(
-                old_velocity, face_lid);
+                *transport_old_velocity, face_lid);
         }
 
         return velocity_boundary_cache.value.at(boundary_id)[face];
@@ -144,47 +164,48 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         };
     };
 
-    auto system = FVM::transport_system<Pack>(
-        old_velocity, face_fluxes, options.time_step,
-        options.kinematic_viscosity, boundary_value,
-        combined_source,
-        d_cached_transport_matrix);
-
-    if (d_cached_transport_matrix.is_null())
+    auto solve_system =
+        [&](const auto& system)
     {
-        d_cached_transport_matrix = system.matrix;
-    }
-
-    bool has_nonzero_rhs = false;
-    for (std::size_t component = 0;
-         component < velocity_field_type::num_components && !has_nonzero_rhs;
-         ++component)
-    {
-        const auto rhs_data = system.rhs->getData(component);
-        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        if (d_cached_transport_matrix.is_null())
         {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            if (std::abs(rhs_data[cell_lid]) > 0.0)
+            d_cached_transport_matrix = system.matrix;
+        }
+
+        bool has_nonzero_rhs = false;
+        for (std::size_t component = 0;
+             component < velocity_field_type::num_components && !has_nonzero_rhs;
+             ++component)
+        {
+            const auto rhs_data = system.rhs->getData(component);
+            for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                has_nonzero_rhs = true;
-                break;
+                const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                if (std::abs(rhs_data[cell_lid]) > 0.0)
+                {
+                    has_nonzero_rhs = true;
+                    break;
+                }
             }
         }
-    }
 
-    velocity.owned_data().putScalar(0.0);
-    if (!has_nonzero_rhs)
-    {
-        d_mesh->sync_periodic_boundaries(velocity);
-        return;
-    }
+        velocity.owned_data().putScalar(0.0);
+        if (!has_nonzero_rhs)
+        {
+            d_mesh->sync_periodic_boundaries(velocity);
+            return;
+        }
 
-    Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-    const auto converged =
-        solve_linear_system<Pack>(matrix, *system.rhs,
-                                  velocity.owned_data(), linear_options);
-    if (!converged)
-    {
+        Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
+        const auto converged =
+            solve_linear_system<Pack>(matrix, *system.rhs,
+                                      velocity.owned_data(), linear_options);
+        if (!converged)
+        {
+            throw std::runtime_error(
+                "BoussinesqMomentumEquation velocity transport solve did not converge.");
+        }
+
         for (std::size_t component = 0;
              component < velocity_field_type::num_components;
              ++component)
@@ -200,9 +221,31 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                 }
             }
         }
-    }
 
-    d_mesh->sync_periodic_boundaries(velocity);
+        d_mesh->sync_periodic_boundaries(velocity);
+    };
+
+    for (int corrector = 0;
+         corrector <= options.n_non_orthogonal_correctors;
+         ++corrector)
+    {
+        const auto* correction_field =
+            corrector == 0 ? nullptr : &velocity;
+        auto system = FVM::non_orthogonal_transport_system<Pack>(
+            *transport_old_velocity, face_fluxes, options.time_step,
+            options.kinematic_viscosity, boundary_value,
+            combined_source,
+            options.non_orthogonal_treatment,
+            correction_field,
+            d_cached_transport_matrix);
+        solve_system(system);
+
+        if (options.non_orthogonal_treatment
+            == FVM::NonOrthogonalTreatment::Implicit)
+        {
+            break;
+        }
+    }
 }
 
 } // namespace SimpleFluid

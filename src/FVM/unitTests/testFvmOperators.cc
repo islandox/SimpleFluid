@@ -306,6 +306,46 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
     EXPECT_TRUE(saw_expanded_row);
 }
 
+TEST(FvmOperatorsTest, VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+    auto boundary_value =
+        [](int, MeshType::local_ordinal_type)
+    {
+        return SimpleFluid::vec3<Pack::scalar_type>{};
+    };
+    auto source =
+        [](MeshType::local_ordinal_type)
+    {
+        return SimpleFluid::vec3<Pack::scalar_type>{};
+    };
+
+    const auto orthogonal = SimpleFluid::FVM::transport_system<Pack>(
+        velocity, zero_fluxes, 0.25, 0.5, boundary_value, source);
+    const auto implicit = SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(
+        velocity, zero_fluxes, 0.25, 0.5, boundary_value, source,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+
+    bool saw_expanded_row = false;
+    for (MeshType::local_ordinal_type row = 0;
+         row < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+         ++row)
+    {
+        if (implicit.matrix->getNumEntriesInLocalRow(row)
+            > orthogonal.matrix->getNumEntriesInLocalRow(row))
+        {
+            saw_expanded_row = true;
+            break;
+        }
+    }
+
+    EXPECT_TRUE(saw_expanded_row);
+}
+
 TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
 {
     constexpr double diffusivity = 0.7;

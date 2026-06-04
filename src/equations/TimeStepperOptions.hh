@@ -12,6 +12,7 @@
 
 #include "dataclass/vec3.hh"
 #include "dataclass/typedefs.hh"
+#include "FVM/NonOrthogonalTreatment.hh"
 
 namespace SimpleFluid
 {
@@ -30,6 +31,9 @@ struct TimeStepperOptions
     real_t gravity_y = 0.0;
     real_t gravity_z = -9.81;
     real_t reference_temperature = 0.5;
+    FVM::NonOrthogonalTreatment non_orthogonal_treatment =
+        FVM::NonOrthogonalTreatment::Implicit;
+    int n_non_orthogonal_correctors = 0;
 
     vec3<real_t> gravity_vector() const noexcept
     {
