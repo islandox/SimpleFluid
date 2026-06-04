@@ -29,6 +29,9 @@ TEST(TimeStepperOptionsTest, DefaultsArePhysicalSmokeValues)
     EXPECT_DOUBLE_EQ(options.kinematic_viscosity, 1.0e-3);
     EXPECT_DOUBLE_EQ(options.thermal_expansion, 3.0e-3);
     EXPECT_DOUBLE_EQ(options.reference_temperature, 0.5);
+    EXPECT_EQ(options.non_orthogonal_treatment,
+              SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+    EXPECT_EQ(options.n_non_orthogonal_correctors, 0);
 }
 
 TEST(TimeStepperOptionsTest, GravityVectorReflectsComponents)
