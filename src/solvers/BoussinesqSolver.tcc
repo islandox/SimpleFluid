@@ -59,7 +59,9 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
       d_pressure_projection(d_mesh, d_linear_options),
       d_temperature(d_mesh, "temperature"),
       d_pressure(d_mesh, "pressure"),
+      d_pressure_correction(d_mesh, "pressure_correction"),
       d_velocity(d_mesh, "velocity"),
+      d_predictor_velocity(d_mesh, "pressure_velocity_predictor"),
       d_old_face_fluxes(d_mesh, "old_face_flux"),
       d_projected_face_fluxes(d_mesh, "projected_face_flux")
 {
@@ -67,6 +69,120 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     {
         throw std::invalid_argument("BoussinesqSolver requires a positive time step.");
     }
+}
+
+/**
+ * @brief Compute the volume-weighted L2 norm of a velocity-field update.
+ */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::velocity_update_norm(
+    const velocity_field_type& before,
+    const velocity_field_type& after) const -> scalar_type
+{
+    EquationValidation::require_mesh_match(*d_mesh, before, "BoussinesqSolver");
+    EquationValidation::require_mesh_match(*d_mesh, after, "BoussinesqSolver");
+
+    scalar_type norm_squared = {};
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto delta = after.value(cell_lid) - before.value(cell_lid);
+        norm_squared += delta.dot(delta) * d_mesh->cell_volume(cell_lid);
+    }
+
+    using std::sqrt;
+    return sqrt(norm_squared);
+}
+
+/**
+ * @brief Solve the semi-implicit momentum predictor and report its update norm.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::run_momentum_predictor()
+{
+    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        d_predictor_velocity.set_value(cell_lid, d_velocity.value(cell_lid));
+    }
+    d_mesh->sync_periodic_boundaries(d_predictor_velocity);
+
+    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
+                              d_old_face_fluxes);
+    d_momentum_equation.advance_velocity(d_velocity,
+                                         d_old_face_fluxes,
+                                         d_temperature,
+                                         d_velocity_boundary_cache,
+                                         d_time_options,
+                                         d_velocity,
+                                         d_linear_options);
+    d_last_pressure_velocity_residuals.momentum =
+        velocity_update_norm(d_predictor_velocity, d_velocity);
+}
+
+/**
+ * @brief Run one pressure-correction solve and accumulate pressure.
+ */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::run_pressure_correction()
+    -> typename PressureProjectionEquation<Pack>::ProjectionResult
+{
+    const auto result =
+        d_pressure_projection.project(d_pressure_correction,
+                                      d_time_options.time_step,
+                                      d_velocity_boundary_cache,
+                                      d_velocity);
+    d_pressure.owned_data().update(1.0, d_pressure_correction.owned_data(), 1.0);
+    d_mesh->sync_periodic_boundaries(d_pressure);
+    return result;
+}
+
+/**
+ * @brief Dispatch SIMPLE, PISO, or PIMPLE pressure-velocity coupling loops.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
+{
+    if (d_time_options.n_pressure_correctors < 1)
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver requires at least one pressure corrector.");
+    }
+    if (d_time_options.n_outer_correctors < 1)
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver requires at least one outer corrector.");
+    }
+
+    d_last_pressure_velocity_residuals = {};
+
+    const auto pressure_corrections =
+        d_time_options.pressure_velocity_coupling == PressureVelocityCoupling::SIMPLE
+      ? 1
+      : d_time_options.n_pressure_correctors;
+    const auto outer_corrections =
+        d_time_options.pressure_velocity_coupling == PressureVelocityCoupling::PIMPLE
+      ? d_time_options.n_outer_correctors
+      : 1;
+
+    for (int outer = 0; outer < outer_corrections; ++outer)
+    {
+        run_momentum_predictor();
+
+        typename PressureProjectionEquation<Pack>::ProjectionResult result;
+        for (int corrector = 0; corrector < pressure_corrections; ++corrector)
+        {
+            result = run_pressure_correction();
+        }
+
+        d_last_pressure_velocity_residuals.pressure =
+            result.pressure_correction;
+        d_last_pressure_velocity_residuals.continuity =
+            result.continuity;
+    }
+
+    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
+                              d_projected_face_fluxes);
 }
 
 /**
@@ -192,21 +308,7 @@ void BoussinesqSolver<Pack>::step()
         d_mesh->sync_periodic_boundaries(d_velocity);
     }
 
-    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
-                              d_old_face_fluxes);
-    d_momentum_equation.advance_velocity(d_velocity,
-                                         d_old_face_fluxes,
-                                         d_temperature,
-                                         d_velocity_boundary_cache,
-                                         d_time_options,
-                                         d_velocity,
-                                         d_linear_options);
-    d_pressure_projection.project(d_pressure,
-                                  d_time_options.time_step,
-                                  d_velocity_boundary_cache,
-                                  d_velocity);
-    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
-                              d_projected_face_fluxes);
+    solve_pressure_velocity_coupling();
     d_temperature_equation.advance_semi_implicit(d_temperature,
                                                  d_projected_face_fluxes,
                                                  d_time_options.time_step,
