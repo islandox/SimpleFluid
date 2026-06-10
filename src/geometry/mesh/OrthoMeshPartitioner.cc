@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 OrthoMeshPartitioner::OrthoMeshPartitioner(
@@ -315,4 +315,4 @@ void OrthoMeshPartitioner::check_face_id(FaceID face_id) const
     }
 }
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

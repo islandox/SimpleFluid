@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 /**
@@ -101,4 +101,4 @@ private:
     Ordinal d_ghost_layers;
 };
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

@@ -7,7 +7,7 @@
 
 #include "utils/debug_check.hh"
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 inline void SemiStructuredXY_Z::check_cell_id(cell_id_t id) const
@@ -120,10 +120,22 @@ SemiStructuredXY_Z::boundary_patch_name_impl(int patch_id) const
     return d_topology.boundary_patch_name(patch_id);
 }
 
-inline const SemiStructuredXY_Z::BoundaryFacePatch&
+inline auto
 SemiStructuredXY_Z::boundary_face_patch_impl(int patch_id) const
 {
     return d_topology.boundary_face_patch(patch_id);
 }
 
-} // namespace SimpleFluid::Mesh
+inline auto
+SemiStructuredXY_Z::boundary_patch_ids_impl() const
+{
+    return d_topology.boundary_patch_ids();
+}
+
+inline int
+SemiStructuredXY_Z::num_boundary_patches_impl() const noexcept
+{
+    return d_topology.num_boundary_patches();
+}
+
+} // namespace SimpleFluid::Meshes

@@ -10,23 +10,28 @@
  */
 #pragma once
 
-#include "dataclass/TpetraTypes.hh"
-#include "dataclass/typedefs.hh"
-#include "dataclass/vec3.hh"
-
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <compare>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -60,4 +65,3 @@
 #include <stk_mesh/base/MetaData.hpp>
 #include <stk_mesh/base/Types.hpp>
 #include <stk_topology/topology.hpp>
-
