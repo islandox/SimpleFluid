@@ -70,7 +70,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
     const int my_owned_count = static_cast<int>(d_owned_cell_global_ids.size());
 
     // --- Gather owned cell counts from all ranks ---
-    std::vector<int> all_owned_counts(static_cast<std::size_t>(nranks), 0);
+    std::vector<int> all_owned_counts(static_cast<size_t>(nranks), 0);
 
     if (nranks > 1)
     {
@@ -93,7 +93,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
     global_ordinal_type global_offset = 0;
     for (int r = 0; r < myrank; ++r)
     {
-        global_offset += static_cast<global_ordinal_type>(all_owned_counts[static_cast<std::size_t>(r)]);
+        global_offset += static_cast<global_ordinal_type>(all_owned_counts[static_cast<size_t>(r)]);
     }
     d_tpetra_gid_offset = global_offset;
 
@@ -106,17 +106,17 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
     }
 
     // --- Assign contiguous Tpetra GIDs to owned cells ---
-    d_tpetra_gid_to_mesh_gid.resize(static_cast<std::size_t>(my_owned_count));
+    d_tpetra_gid_to_mesh_gid.resize(static_cast<size_t>(my_owned_count));
     for (int i = 0; i < my_owned_count; ++i)
     {
         const auto tpetra_gid = global_offset + static_cast<global_ordinal_type>(i);
-        d_tpetra_gid_to_mesh_gid[static_cast<std::size_t>(i)] = d_owned_cell_global_ids[static_cast<std::size_t>(i)];
-        d_mesh_gid_to_tpetra_gid[d_owned_cell_global_ids[static_cast<std::size_t>(i)]] = tpetra_gid;
+        d_tpetra_gid_to_mesh_gid[static_cast<size_t>(i)] = d_owned_cell_global_ids[static_cast<size_t>(i)];
+        d_mesh_gid_to_tpetra_gid[d_owned_cell_global_ids[static_cast<size_t>(i)]] = tpetra_gid;
     }
 
     // --- Resolve ghost cell Tpetra GIDs ---
     const int my_ghost_count = static_cast<int>(d_ghost_cell_global_ids.size());
-    d_ghost_cell_tpetra_gids.resize(static_cast<std::size_t>(my_ghost_count));
+    d_ghost_cell_tpetra_gids.resize(static_cast<size_t>(my_ghost_count));
 
     if (my_ghost_count > 0 && nranks > 1)
     {
@@ -124,12 +124,12 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
         const auto raw_comm = static_cast<MPI_Comm>(*(mpi_comm_ptr->getRawMpiComm()));
 
         // --- Gather all owned mesh GIDs from all processes ---
-        std::vector<int> displs(static_cast<std::size_t>(nranks), 0);
+        std::vector<int> displs(static_cast<size_t>(nranks), 0);
         for (int r = 1; r < nranks; ++r)
         {
-            displs[static_cast<std::size_t>(r)] =
-                displs[static_cast<std::size_t>(r - 1)]
-                + all_owned_counts[static_cast<std::size_t>(r - 1)];
+            displs[static_cast<size_t>(r)] =
+                displs[static_cast<size_t>(r - 1)]
+                + all_owned_counts[static_cast<size_t>(r - 1)];
         }
         const int total_global = displs.back() + all_owned_counts.back();
 
@@ -159,7 +159,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
         }
 
         std::vector<global_ordinal_type> all_owned_gids(
-            static_cast<std::size_t>(std::max(total_global, 1)));
+            static_cast<size_t>(std::max(total_global, 1)));
 
         MPI_Allgatherv(
             d_owned_cell_global_ids.data(), my_owned_count, mpi_go_type,
@@ -174,13 +174,13 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
             for (int rr = 0; rr < r; ++rr)
             {
                 rank_offset += static_cast<global_ordinal_type>(
-                    all_owned_counts[static_cast<std::size_t>(rr)]);
+                    all_owned_counts[static_cast<size_t>(rr)]);
             }
-            const int count = all_owned_counts[static_cast<std::size_t>(r)];
-            const int begin = displs[static_cast<std::size_t>(r)];
+            const int count = all_owned_counts[static_cast<size_t>(r)];
+            const int begin = displs[static_cast<size_t>(r)];
             for (int i = 0; i < count; ++i)
             {
-                const auto mesh_gid = all_owned_gids[static_cast<std::size_t>(begin + i)];
+                const auto mesh_gid = all_owned_gids[static_cast<size_t>(begin + i)];
                 const auto tpetra_gid = rank_offset + static_cast<global_ordinal_type>(i);
                 global_mesh_to_tpetra[mesh_gid] = tpetra_gid;
             }
@@ -189,7 +189,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
         // --- Resolve Tpetra GIDs for ghost cells ---
         for (int i = 0; i < my_ghost_count; ++i)
         {
-            const auto mesh_gid = d_ghost_cell_global_ids[static_cast<std::size_t>(i)];
+            const auto mesh_gid = d_ghost_cell_global_ids[static_cast<size_t>(i)];
             const auto iter = global_mesh_to_tpetra.find(mesh_gid);
             if (iter == global_mesh_to_tpetra.end())
             {
@@ -198,7 +198,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
                     + " not found in any process's owned list.");
             }
             const auto tpetra_gid = iter->second;
-            d_ghost_cell_tpetra_gids[static_cast<std::size_t>(i)] = tpetra_gid;
+            d_ghost_cell_tpetra_gids[static_cast<size_t>(i)] = tpetra_gid;
             d_mesh_gid_to_tpetra_gid[mesh_gid] = tpetra_gid;
         }
     }
@@ -214,7 +214,7 @@ void Mesh<Pack>::create_maps()
 {
     if (d_boundary_id_to_face_patch.empty())
     {
-        for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
+        for (size_t fid = 0; fid < d_faces.size(); ++fid)
         {
             const auto boundary_id = d_faces[fid].boundary_id;
             if (boundary_id == invalid_boundary_id)
@@ -263,7 +263,7 @@ void Mesh<Pack>::create_maps()
 
     ArrGO owned_face_gids;
     owned_face_gids.reserve(d_faces.size());
-    for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
+    for (size_t fid = 0; fid < d_faces.size(); ++fid)
     {
         const auto face_lid =
             detail::checked_size_to_ordinal<local_ordinal_type>(
@@ -297,7 +297,7 @@ void Mesh<Pack>::create_maps()
             {
                 continue;
             }
-            const auto face_index = static_cast<std::size_t>(face_lid);
+            const auto face_index = static_cast<size_t>(face_lid);
             boundary_face_gids.push_back(
                 face_index < d_owned_face_global_ids.size()
               ? d_owned_face_global_ids[face_index]
@@ -321,14 +321,14 @@ void Mesh<Pack>::create_cell_face_distances()
 {
     d_cell_face_distances.clear();
 
-    std::size_t total_cell_faces = 0;
+    size_t total_cell_faces = 0;
     for (const auto& cell_info : d_cells)
     {
         total_cell_faces += cell_info.faces.size();
     }
     d_cell_face_distances.reserve(total_cell_faces);
 
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto cell_lid =
             detail::checked_size_to_ordinal<local_ordinal_type>(lid, "cell local id");
@@ -486,8 +486,8 @@ void Mesh<Pack>::prefer_owned_face_owners()
 
         const auto owner = face_info.owner;
         const auto neighbor = face_info.neighbor;
-        if (!d_cells[static_cast<std::size_t>(owner)].owned
-            && d_cells[static_cast<std::size_t>(neighbor)].owned)
+        if (!d_cells[static_cast<size_t>(owner)].owned
+            && d_cells[static_cast<size_t>(neighbor)].owned)
         {
             face_info.owner = neighbor;
             face_info.neighbor = owner;
@@ -507,14 +507,14 @@ void Mesh<Pack>::check_connectivity() const
     CHECK(d_owned_cell_ids.size() == d_owned_cell_global_ids.size());
     CHECK(d_owned_cell_ids.size() <= d_cells.size());
 
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto& cell = d_cells[lid];
         CHECK(cell.type != CellType::INVALID);
 
         for (const auto fid : cell.faces)
         {
-            CHECK(static_cast<std::size_t>(fid) < d_faces.size());
+            CHECK(static_cast<size_t>(fid) < d_faces.size());
         }
     }
 
@@ -523,8 +523,8 @@ void Mesh<Pack>::check_connectivity() const
         const auto gid = cell_global_id(lid);
         CHECK(d_cell_gid_to_lid.find(gid) != d_cell_gid_to_lid.end());
         CHECK(lid == d_cell_gid_to_lid.at(gid));
-        CHECK(static_cast<std::size_t>(lid) < d_cells.size());
-        CHECK(d_cells[static_cast<std::size_t>(lid)].owned);
+        CHECK(static_cast<size_t>(lid) < d_cells.size());
+        CHECK(d_cells[static_cast<size_t>(lid)].owned);
     }
     for (auto gid : d_ghost_cell_global_ids)
     {
@@ -533,12 +533,12 @@ void Mesh<Pack>::check_connectivity() const
         CHECK(lid == d_cell_gid_to_lid.at(gid));
     }
 
-    for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
+    for (size_t fid = 0; fid < d_faces.size(); ++fid)
     {
         const auto& face = d_faces[fid];
-        CHECK(static_cast<std::size_t>(face.owner) < d_cells.size());
+        CHECK(static_cast<size_t>(face.owner) < d_cells.size());
         CHECK(face.neighbor == invalid_id<local_ordinal_type>()
-              || static_cast<std::size_t>(face.neighbor) < d_cells.size());
+              || static_cast<size_t>(face.neighbor) < d_cells.size());
         CHECK((face.type == FaceType::TRIANGLE && face.node_gids.size() == 3)
          || (face.type == FaceType::QUAD && face.node_gids.size() == 4));
         CHECK(face.area >= 0.0);

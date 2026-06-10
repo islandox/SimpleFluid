@@ -90,8 +90,8 @@ void require_non_negative(Scalar value,
  * @param cache_size Current size of the cache.
  * @param required_size Minimum required size.
  */
-inline void assert_sufficient_cache_size(std::size_t cache_size,
-                                         std::size_t required_size)
+inline void assert_sufficient_cache_size(size_t cache_size,
+                                         size_t required_size)
 {
     assert(cache_size >= required_size);
     (void)cache_size;

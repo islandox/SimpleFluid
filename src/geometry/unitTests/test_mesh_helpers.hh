@@ -29,9 +29,9 @@ namespace SimpleFluid::test
  * @param mesh_size Size of the domain in each dimension.
  * @return Shared pointer to the configured Database.
  */
-inline SP<const Database> make_box_database(std::size_t n_x,
-                                             std::size_t n_y,
-                                             std::size_t n_z,
+inline SP<const Database> make_box_database(size_t n_x,
+                                             size_t n_y,
+                                             size_t n_z,
                                              real_t mesh_size = 1.0)
 {
     auto db = std::make_shared<Database>();
@@ -41,15 +41,15 @@ inline SP<const Database> make_box_database(std::size_t n_x,
             static_cast<int>(MeshFactory::DomainType::BOX));
 
     ArrReal x_edges(n_x + 1);
-    for (std::size_t i = 0; i <= n_x; ++i)
+    for (size_t i = 0; i <= n_x; ++i)
         x_edges[i] = static_cast<real_t>(i) * mesh_size;
 
     ArrReal y_edges(n_y + 1);
-    for (std::size_t i = 0; i <= n_y; ++i)
+    for (size_t i = 0; i <= n_y; ++i)
         y_edges[i] = static_cast<real_t>(i) * mesh_size;
 
     ArrReal z_edges(n_z + 1);
-    for (std::size_t i = 0; i <= n_z; ++i)
+    for (size_t i = 0; i <= n_z; ++i)
         z_edges[i] = static_cast<real_t>(i) * mesh_size;
 
     db->set("X", std::move(x_edges));

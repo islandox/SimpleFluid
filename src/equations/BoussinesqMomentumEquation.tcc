@@ -120,7 +120,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     if (&old_velocity == &velocity
         && options.n_non_orthogonal_correctors > 0)
     {
-        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             old_velocity_snapshot.set_value(cell_lid,
@@ -134,7 +134,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         [&](int boundary_id,
             local_ordinal_type boundary_face_id)
     {
-        const auto face = static_cast<std::size_t>(boundary_face_id);
+        const auto face = static_cast<size_t>(boundary_face_id);
         const auto boundary_type =
             velocity_boundary_cache.type.at(boundary_id);
         if (boundary_type == BoundaryConditionType::Slip)
@@ -173,12 +173,12 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         }
 
         bool has_nonzero_rhs = false;
-        for (std::size_t component = 0;
+        for (size_t component = 0;
              component < velocity_field_type::num_components && !has_nonzero_rhs;
              ++component)
         {
             const auto rhs_data = system.rhs->getData(component);
-            for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
                 const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 if (std::abs(rhs_data[cell_lid]) > 0.0)
@@ -206,12 +206,12 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                 "BoussinesqMomentumEquation velocity transport solve did not converge.");
         }
 
-        for (std::size_t component = 0;
+        for (size_t component = 0;
              component < velocity_field_type::num_components;
              ++component)
         {
             const auto solution_data = velocity.owned_data().getData(component);
-            for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
                 const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 if (!std::isfinite(solution_data[cell_lid]))

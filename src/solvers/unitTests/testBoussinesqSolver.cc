@@ -205,7 +205,7 @@ Pack::scalar_type continuity_imbalance_norm(
     SimpleFluid::FVM::face_fluxes(velocity, cache, face_fluxes);
 
     Pack::scalar_type norm_squared = 0.0;
-    for (std::size_t owned = 0; owned < velocity.mesh().num_owned_cells();
+    for (size_t owned = 0; owned < velocity.mesh().num_owned_cells();
          ++owned)
     {
         const auto cell_lid =

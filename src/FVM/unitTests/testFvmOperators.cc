@@ -50,7 +50,7 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
          lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
          ++lid)
     {
-        values[static_cast<std::size_t>(lid)] = field.local_value(lid);
+        values[static_cast<size_t>(lid)] = field.local_value(lid);
     }
     return values;
 }
@@ -80,11 +80,11 @@ Pack::scalar_type local_matrix_entry(
         "columns", row_entries);
     typename Pack::matrix_type::nonconst_values_host_view_type values(
         "values", row_entries);
-    std::size_t num_entries = 0;
+    size_t num_entries = 0;
     matrix.getLocalRowCopy(row, columns, values, num_entries);
 
     Pack::scalar_type entry = 0.0;
-    for (std::size_t i = 0; i < num_entries; ++i)
+    for (size_t i = 0; i < num_entries; ++i)
     {
         if (columns(i) == column)
         {
@@ -109,15 +109,15 @@ std::vector<Pack::scalar_type> local_matrix_action(
             "columns", row_entries);
         typename Pack::matrix_type::nonconst_values_host_view_type values(
             "values", row_entries);
-        std::size_t num_entries = 0;
+        size_t num_entries = 0;
         matrix.getLocalRowCopy(row, columns, values, num_entries);
 
         auto value = Pack::scalar_type{};
-        for (std::size_t i = 0; i < num_entries; ++i)
+        for (size_t i = 0; i < num_entries; ++i)
         {
             value += values(i) * field.local_value(columns(i));
         }
-        result[static_cast<std::size_t>(row)] = value;
+        result[static_cast<size_t>(row)] = value;
     }
     return result;
 }
@@ -255,7 +255,7 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
         SimpleFluid::FVM::detail::least_squares_gradient_stencils(*mesh);
 
     ASSERT_EQ(stencils.size(), gradients.size());
-    for (std::size_t row = 0; row < stencils.size(); ++row)
+    for (size_t row = 0; row < stencils.size(); ++row)
     {
         MeshType::Vec3 reconstructed{};
         for (const auto& entry : stencils[row])
@@ -274,7 +274,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     auto boundary_condition =
-        [](int, std::size_t) -> SimpleFluid::BoundaryCondition
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
     {
         return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
     };
@@ -360,7 +360,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     phi.sync_ghosts();
 
     auto boundary_condition =
-        [&](int patch_id, std::size_t in_patch_id)
+        [&](int patch_id, size_t in_patch_id)
             -> SimpleFluid::BoundaryCondition
     {
         const auto face_lid =
@@ -384,7 +384,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     const auto rhs_view = system.rhs->getData();
     const auto residual_view = residual->getData();
 
-    for (std::size_t row = 0; row < applied.size(); ++row)
+    for (size_t row = 0; row < applied.size(); ++row)
     {
         EXPECT_NEAR(applied[row] - rhs_view[row], residual_view[row], 1.0e-10);
     }
@@ -714,7 +714,7 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
     const auto system = SimpleFluid::FVM::transport_system<Pack>(
         old_values, zero_fluxes, time_step, 0.0, boundary_value, source);
 
-    for (std::size_t component = 0;
+    for (size_t component = 0;
          component < VectorFieldType::num_components;
          ++component)
     {
@@ -943,7 +943,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
     {
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[
-                static_cast<std::size_t>(in_patch_id)];
+                static_cast<size_t>(in_patch_id)];
         EXPECT_TRUE(mesh->is_boundary_face(face_lid));
         return 0.0;
     };
@@ -991,7 +991,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
     {
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[
-                static_cast<std::size_t>(in_patch_id)];
+                static_cast<size_t>(in_patch_id)];
         EXPECT_TRUE(mesh->is_boundary_face(face_lid));
         return SimpleFluid::vec3<Pack::scalar_type>{};
     };

@@ -45,7 +45,7 @@ TEST(BelosLinearSolverTest, SolvesIdentitySystem)
 
     Pack::vector_type rhs(map, true);
     Pack::vector_type solution(map, true);
-    for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+    for (size_t row = 0; row < map->getLocalNumElements(); ++row)
     {
         const auto gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(row));
         rhs.replaceLocalValue(static_cast<Pack::local_ordinal_type>(row),
@@ -57,7 +57,7 @@ TEST(BelosLinearSolverTest, SolvesIdentitySystem)
     options.tolerance = 1.0e-14;
     ASSERT_TRUE(SimpleFluid::solve_linear_system<Pack>(op, rhs, solution, options));
 
-    for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+    for (size_t row = 0; row < map->getLocalNumElements(); ++row)
     {
         const auto gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(row));
         EXPECT_DOUBLE_EQ(solution.getData()[row], static_cast<double>(gid + 1));
@@ -79,11 +79,11 @@ TEST(BelosLinearSolverTest, SolvesMultiVectorIdentitySystem)
 
     Pack::multi_vector_type rhs(map, 3, true);
     Pack::multi_vector_type solution(map, 3, true);
-    for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+    for (size_t row = 0; row < map->getLocalNumElements(); ++row)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(row);
         const auto gid = map->getGlobalElement(lid);
-        for (std::size_t component = 0; component < 3; ++component)
+        for (size_t component = 0; component < 3; ++component)
         {
             rhs.replaceLocalValue(
                 lid, component,
@@ -96,11 +96,11 @@ TEST(BelosLinearSolverTest, SolvesMultiVectorIdentitySystem)
     options.tolerance = 1.0e-14;
     ASSERT_TRUE(SimpleFluid::solve_linear_system<Pack>(op, rhs, solution, options));
 
-    for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+    for (size_t row = 0; row < map->getLocalNumElements(); ++row)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(row);
         const auto gid = map->getGlobalElement(lid);
-        for (std::size_t component = 0; component < 3; ++component)
+        for (size_t component = 0; component < 3; ++component)
         {
             EXPECT_DOUBLE_EQ(
                 solution.getData(component)[row],

@@ -1,5 +1,19 @@
 # TODO: Coupled FVM Momentum–Pressure Solver with Implicit Non-Orthogonal Terms
 
+## Phase -1 — Framework refactoring
+
+- [ ] CRTP Mesh:
+  - Cartesian 3D
+  - Orthogonal cylinder 3D
+  - XY*Z prisms
+  - Arbitary polygonals
+  - std::variant holder for Fields, FVM Operators and Problems.
+- [ ] Field classes and mesh-aware FieldStored classes.
+- [ ] Equation class from field and operators.
+- [ ] AssembledEquation classes holding fields with solve interface, supporting Equation and coupled equations.
+- [ ] Problem class holding all the needed data for solving a problem like meshes, fields, equations, boundary conditions, coupled equations, etc.
+
+
 ## Phase 0 — Baseline infrastructure
 
 - [x] Add `VectorField`, `ScalarField`, `FaceField` abstractions if missing.

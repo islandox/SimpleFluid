@@ -128,7 +128,7 @@ transport_system(const CellField<Pack>& old_values,
     cols.reserve(32);
     vals.reserve(32);
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -190,7 +190,7 @@ transport_system(const CellField<Pack>& old_values,
     // Apply boundary conditions using sumIntoLocalValues (works reliably).
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (std::size_t in_patch_id = 0;
+        for (size_t in_patch_id = 0;
              in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
@@ -344,7 +344,7 @@ transport_system(const VectorCellField<Pack>& old_values,
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    constexpr std::size_t num_components = 3;
+    constexpr size_t num_components = 3;
 
     const auto& mesh = old_values.mesh();
     if (&face_fluxes.mesh() != &mesh)
@@ -373,7 +373,7 @@ transport_system(const VectorCellField<Pack>& old_values,
     cols.reserve(32);
     vals.reserve(32);
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -426,7 +426,7 @@ transport_system(const VectorCellField<Pack>& old_values,
         cols.push_back(cell_lid);
         vals.push_back(diagonal);
         matrix->insertLocalValues(cell_lid, cols(), vals());
-        for (std::size_t comp = 0; comp < num_components; ++comp)
+        for (size_t comp = 0; comp < num_components; ++comp)
         {
             rhs->replaceLocalValue(cell_lid, comp,
                                    transient * old_value.component(comp)
@@ -436,7 +436,7 @@ transport_system(const VectorCellField<Pack>& old_values,
 
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (std::size_t in_patch_id = 0;
+        for (size_t in_patch_id = 0;
              in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
@@ -468,7 +468,7 @@ transport_system(const VectorCellField<Pack>& old_values,
             }
             else
             {
-                for (std::size_t comp = 0; comp < num_components; ++comp)
+                for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
                         owner, comp,
@@ -492,7 +492,7 @@ transport_system(const VectorCellField<Pack>& old_values,
                     owner,
                     Teuchos::arrayView(&col, 1),
                     Teuchos::arrayView(&bval, 1));
-                for (std::size_t comp = 0; comp < num_components; ++comp)
+                for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
                         owner, comp,
@@ -533,7 +533,7 @@ non_orthogonal_transport_system(
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    constexpr std::size_t num_components = VectorCellField<Pack>::num_components;
+    constexpr size_t num_components = VectorCellField<Pack>::num_components;
 
     const auto& mesh = old_values.mesh();
     if (&face_fluxes.mesh() != &mesh)
@@ -595,7 +595,7 @@ non_orthogonal_transport_system(
     std::unordered_map<local_ordinal_type, scalar_type> row_values;
     row_values.reserve(64);
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto volume = mesh.cell_volume(cell_lid);
@@ -606,7 +606,7 @@ non_orthogonal_transport_system(
         row_values.clear();
         detail::add_matrix_entry(row_values, cell_lid, transient);
 
-        for (std::size_t comp = 0; comp < num_components; ++comp)
+        for (size_t comp = 0; comp < num_components; ++comp)
         {
             rhs->replaceLocalValue(cell_lid, comp,
                                    transient * old_value.component(comp)
@@ -621,7 +621,7 @@ non_orthogonal_transport_system(
             if (implicit_weight == scalar_type{0}
                 || face_gradient_weight == scalar_type{0}
                 || !mesh.is_owned_cell(gradient_cell_lid)
-                || static_cast<std::size_t>(gradient_cell_lid)
+                || static_cast<size_t>(gradient_cell_lid)
                    >= gradient_stencils.size())
             {
                 return;
@@ -630,7 +630,7 @@ non_orthogonal_transport_system(
             const auto scale =
                 -implicit_weight * diffusivity * face_gradient_weight;
             for (const auto& entry :
-                 gradient_stencils[static_cast<std::size_t>(gradient_cell_lid)])
+                 gradient_stencils[static_cast<size_t>(gradient_cell_lid)])
             {
                 detail::add_matrix_entry(
                     row_values, entry.cell_lid,
@@ -659,15 +659,15 @@ non_orthogonal_transport_system(
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
             else if (mesh.is_boundary_face(face_lid)
-                     && static_cast<std::size_t>(face_lid)
+                     && static_cast<size_t>(face_lid)
                         < boundary_locations.size()
-                     && boundary_locations[static_cast<std::size_t>(face_lid)].active)
+                     && boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 const auto location =
-                    boundary_locations[static_cast<std::size_t>(face_lid)];
+                    boundary_locations[static_cast<size_t>(face_lid)];
                 const auto boundary_face_value =
                     boundary_value(location.patch_id, location.in_patch_id);
-                for (std::size_t comp = 0; comp < num_components; ++comp)
+                for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
                         cell_lid, comp,
@@ -697,7 +697,7 @@ non_orthogonal_transport_system(
                     detail::non_orthogonal_area_vector(area_vector, d);
 
                 if (mesh.is_owned_cell(other)
-                    && static_cast<std::size_t>(other)
+                    && static_cast<size_t>(other)
                        < gradient_stencils.size())
                 {
                     add_non_orthogonal_stencil(
@@ -714,14 +714,14 @@ non_orthogonal_transport_system(
             }
 
             if (!mesh.is_boundary_face(face_lid)
-                || static_cast<std::size_t>(face_lid) >= boundary_locations.size()
-                || !boundary_locations[static_cast<std::size_t>(face_lid)].active)
+                || static_cast<size_t>(face_lid) >= boundary_locations.size()
+                || !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 continue;
             }
 
             const auto location =
-                boundary_locations[static_cast<std::size_t>(face_lid)];
+                boundary_locations[static_cast<size_t>(face_lid)];
             const auto boundary_face_value =
                 boundary_value(location.patch_id, location.in_patch_id);
             const auto coeff =
@@ -730,7 +730,7 @@ non_orthogonal_transport_system(
             if (coeff > scalar_type{0})
             {
                 detail::add_matrix_entry(row_values, cell_lid, coeff);
-                for (std::size_t comp = 0; comp < num_components; ++comp)
+                for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
                         cell_lid, comp,

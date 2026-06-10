@@ -13,6 +13,7 @@
 
 #include "dataclass/typedefs.hh"
 #include "dataclass/vec3.hh"
+#include "utils/debug_check.hh"
 
 #include <stdexcept>
 #include <vector>
@@ -164,6 +165,37 @@ inline Vec3 face_area_vector(const std::vector<Vec3>& x)
           + (x[2] - x[0]).cross(x[3] - x[0])) * 0.5;
 }
 
+template <class T>
+inline Arr<T> consec_diff(const Arr<T>& arr)
+{
+    if (arr.size() < 2)
+    {
+        return {};
+    }
+
+    Arr<T> result(arr.size() - 1);
+    for (size_t i = 0; i + 1 < arr.size(); ++i)
+    {
+        result[i] = arr[i + 1] - arr[i];
+    }
+    return result;
+}
+
+template <class T>
+inline Arr<T> consec_mid(const Arr<T>& arr)
+{
+    if (arr.size() < 2)
+    {
+        return {};
+    }
+
+    Arr<T> result(arr.size() - 1);
+    for (size_t i = 0; i + 1 < arr.size(); ++i)
+    {
+        result[i] = (arr[i] + arr[i + 1]) / static_cast<T>(2);
+    }
+    return result;
+}
 
 } // namespace MeshUtils
 

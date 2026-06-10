@@ -14,8 +14,8 @@
 #define CAT(a, b) CAT_I(a, b)
 #define CAT_I(a, b) a##b
 
-#define NARGS_I(_0, _1, _2, _3, N, ...) N
-#define NARGS(...) NARGS_I(_0 __VA_OPT__(,) __VA_ARGS__, 3, 2, 1, 0)
+#define NARGS_I(_0, _1, _2, _3, _4, N, ...) N
+#define NARGS(...) NARGS_I(_0 __VA_OPT__(,) __VA_ARGS__, 4, 3, 2, 1, 0)
 
 #define DISPATCH(name, ...) CAT(name, NARGS(__VA_ARGS__))(__VA_ARGS__)
 
@@ -49,6 +49,24 @@
     #define CHECK3(condition, message, error) // do nothing
 #endif
 
+#ifdef DEBUG_CHECK_ENABLED
+    #define CHECK_OVERFLOW3(op, v1, v2) utils::check_overflow((v1), (v2), (op), \
+        std::string("Debug check failed: overflow detected for ") + #v1 + " and " + #v2 \
+        + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
+    #define CHECK_OVERFLOW4(op, v1, v2, v3) \
+        utils::check_overflow((v1), (v2), (v3), (op), \
+        std::string("Debug check failed: overflow detected for ") + #v1 + ", " + #v2 + ", and " + #v3 \
+        + "\n\tAt " + __FILE__ + ":" + std::to_string(__LINE__))
+
+    #define CHECK_SUM_OVERFLOW(...) CHECK_OVERFLOW(std::plus<>(), __VA_ARGS__)
+    #define CHECK_PRODUCT_OVERFLOW(...) CHECK_OVERFLOW(std::multiplies<>(), __VA_ARGS__)
+#else
+    #define CHECK_OVERFLOW3(v1, v2, op) // do nothing
+    #define CHECK_OVERFLOW4(v1, v2, v3, op) // do nothing
+    #define CHECK_SUM_OVERFLOW(...) // do nothing
+    #define CHECK_PRODUCT_OVERFLOW(...) // do nothing
+#endif
+
 #ifdef CHECK_BOUNDS_ENABLED
     #define CHECK_BOUNDS(value, lower, upper) \
         utils::check<std::out_of_range>(((value) >= (lower)) && ((value) < (upper)))
@@ -57,3 +75,4 @@
 #endif
 
 #define CHECK(...) DISPATCH(CHECK, __VA_ARGS__)
+#define CHECK_OVERFLOW(...) DISPATCH(CHECK_OVERFLOW, __VA_ARGS__)

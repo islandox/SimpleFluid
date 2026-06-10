@@ -37,9 +37,9 @@ namespace detail
  * @throws std::overflow_error if the value exceeds the ordinal type's maximum.
  */
 template <class Ordinal>
-inline Ordinal checked_size_to_ordinal(std::size_t value, std::string_view label)
+inline Ordinal checked_size_to_ordinal(size_t value, std::string_view label)
 {
-    CHECK(value < static_cast<std::size_t>(std::numeric_limits<Ordinal>::max()),
+    CHECK(value < static_cast<size_t>(std::numeric_limits<Ordinal>::max()),
           "Value for " + std::string(label)
           + " exceeds maximum representable by ordinal type.",
           std::overflow_error);
@@ -62,7 +62,7 @@ inline void Mesh<Pack>::check_cell(local_ordinal_type lid) const
         }
     }
 
-    if (static_cast<std::size_t>(lid) >= num_local_cells())
+    if (static_cast<size_t>(lid) >= num_local_cells())
     {
         throw std::out_of_range("Cell local id is out of bounds: "
                               + std::to_string(lid));
@@ -85,7 +85,7 @@ inline void Mesh<Pack>::check_face(local_ordinal_type lid) const
         }
     }
 
-    if (static_cast<std::size_t>(lid) >= num_faces())
+    if (static_cast<size_t>(lid) >= num_faces())
     {
         throw std::out_of_range("Face local id is out of bounds: "
                               + std::to_string(lid));
@@ -99,21 +99,21 @@ template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell(local_ordinal_type lid) const -> const CellInfo&
 {
     check_cell(lid);
-    return d_cells[static_cast<std::size_t>(lid)];
+    return d_cells[static_cast<size_t>(lid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face(local_ordinal_type lid) const -> const FaceInfo&
 {
     check_face(lid);
-    return d_faces[static_cast<std::size_t>(lid)];
+    return d_faces[static_cast<size_t>(lid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const global_ordinal_type&
 {
     check_cell(lid);
-    const auto index = static_cast<std::size_t>(lid);
+    const auto index = static_cast<size_t>(lid);
     if (index < d_owned_cell_global_ids.size())
     {
         return d_owned_cell_global_ids[index];
@@ -132,7 +132,7 @@ inline auto Mesh<Pack>::node_coord(global_ordinal_type node_gid) const -> const 
                               + std::to_string(node_gid));
     }
 
-    return d_node_coords[static_cast<std::size_t>(iter->second)];
+    return d_node_coords[static_cast<size_t>(iter->second)];
 }
 
 template<TpetraTypePack Pack>
@@ -367,15 +367,15 @@ template<TpetraTypePack Pack>
 inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
                                            local_ordinal_type paired_cell_lid)
 {
-    auto& info = d_faces[static_cast<std::size_t>(face_lid)];
-    const auto& owner_center = d_cells[static_cast<std::size_t>(info.owner)].center;
-    const auto& paired_center = d_cells[static_cast<std::size_t>(paired_cell_lid)].center;
+    auto& info = d_faces[static_cast<size_t>(face_lid)];
+    const auto& owner_center = d_cells[static_cast<size_t>(info.owner)].center;
+    const auto& paired_center = d_cells[static_cast<size_t>(paired_cell_lid)].center;
     auto periodic_distance = (paired_center - owner_center).norm();
 
     // Prefer the wrapped distance through the paired exterior face.  The
     // Euclidean fallback preserves the previous behavior for ad hoc pairings.
     const auto& owner_normal = info.unit_normal_from_owner;
-    for (const auto candidate_face_lid : d_cells[static_cast<std::size_t>(paired_cell_lid)].faces)
+    for (const auto candidate_face_lid : d_cells[static_cast<size_t>(paired_cell_lid)].faces)
     {
         if (candidate_face_lid == face_lid)
         {
@@ -383,7 +383,7 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
         }
 
         const auto& candidate =
-            d_faces[static_cast<std::size_t>(candidate_face_lid)];
+            d_faces[static_cast<size_t>(candidate_face_lid)];
         if (candidate.boundary_id == invalid_boundary_id)
         {
             continue;
@@ -519,7 +519,7 @@ std::string Mesh<Pack>::make_face_key(ArrGO node_ids)
     std::sort(node_ids.begin(), node_ids.end());
 
     std::ostringstream key;
-    for (std::size_t i = 0; i < node_ids.size(); ++i)
+    for (size_t i = 0; i < node_ids.size(); ++i)
     {
         if (i != 0)
         {
@@ -550,7 +550,7 @@ auto Mesh<Pack>::make_vector_view(const std::string& name, const std::vector<T>&
     kokkos_1dview<T> view(name, data.size());
     auto host_view = Kokkos::create_mirror_view(view);
 
-    for (std::size_t i = 0; i < data.size(); ++i)
+    for (size_t i = 0; i < data.size(); ++i)
     {
         host_view(i) = data[i];
     }
@@ -577,7 +577,7 @@ auto Mesh<Pack>::make_vectorV3D_view(const std::string& name,
     kokkos_vec3view<real_t> view(name, data.size());
     auto host_view = Kokkos::create_mirror_view(view);
 
-    for (std::size_t i = 0; i < data.size(); ++i)
+    for (size_t i = 0; i < data.size(); ++i)
     {
         host_view(i, 0) = data[i].x;
         host_view(i, 1) = data[i].y;
@@ -606,7 +606,7 @@ template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::tpetra_gid_to_mesh_gid(global_ordinal_type tpetra_gid) const
     -> global_ordinal_type
 {
-    const auto local_index = static_cast<std::size_t>(
+    const auto local_index = static_cast<size_t>(
         tpetra_gid - d_tpetra_gid_offset);
     if (local_index >= d_tpetra_gid_to_mesh_gid.size())
     {

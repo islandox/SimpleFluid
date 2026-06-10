@@ -63,18 +63,18 @@ gather_all_owned_gids(const MeshType& mesh)
     const auto& owned = mesh.owned_cell_global_ids();
     int my_count = static_cast<int>(owned.size());
 
-    std::vector<int> all_counts(static_cast<std::size_t>(nranks));
+    std::vector<int> all_counts(static_cast<size_t>(nranks));
     my_mpi::allgather(&my_count, 1, all_counts.data(), 1);
 
-    std::vector<int> displs(static_cast<std::size_t>(nranks), 0);
+    std::vector<int> displs(static_cast<size_t>(nranks), 0);
     for (int r = 1; r < nranks; ++r)
-        displs[static_cast<std::size_t>(r)] =
-            displs[static_cast<std::size_t>(r - 1)]
-            + all_counts[static_cast<std::size_t>(r - 1)];
+        displs[static_cast<size_t>(r)] =
+            displs[static_cast<size_t>(r - 1)]
+            + all_counts[static_cast<size_t>(r - 1)];
 
     std::vector<GO> my_gids(owned.begin(), owned.end());
     std::vector<GO> all_gids(
-        static_cast<std::size_t>(displs.back() + all_counts.back()));
+        static_cast<size_t>(displs.back() + all_counts.back()));
 
     my_mpi::allgatherv(my_gids.data(), my_count,
                    all_gids.data(), all_counts.data(), displs.data());
@@ -116,13 +116,13 @@ TEST(MeshPartitionerTest, ProducesValidDistribution)
         << "Total unique owned GIDs across all ranks is not 64.";
 
     // No rank should own the same cell as another rank (GIDs unique)
-    std::size_t total_owned = 0;
+    size_t total_owned = 0;
     {
         int my_count = static_cast<int>(mesh->num_owned_cells());
         int global_total = 0;
         my_mpi::reduce(&my_count, &global_total, 1, MPI_SUM, 0);
         if (comm->getRank() == 0)
-            EXPECT_EQ(static_cast<std::size_t>(global_total), 64u);
+            EXPECT_EQ(static_cast<size_t>(global_total), 64u);
     }
 }
 
@@ -142,7 +142,7 @@ TEST(MeshPartitionerTest, GhostCellsAreCorrect)
     }
 
     // Ghost cell GIDs should not appear in owned cell GIDs
-    for (std::size_t i = 0; i < mesh->num_local_cells(); ++i)
+    for (size_t i = 0; i < mesh->num_local_cells(); ++i)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(i);
         if (mesh->is_owned_cell(lid)) continue;
@@ -150,7 +150,7 @@ TEST(MeshPartitionerTest, GhostCellsAreCorrect)
         // This is a ghost cell — its GID should NOT be in owned list
         const auto gid = mesh->cell_global_id(lid);
         bool found = false;
-        for (std::size_t o = 0; o < mesh->num_owned_cells(); ++o)
+        for (size_t o = 0; o < mesh->num_owned_cells(); ++o)
         {
             if (mesh->cell_global_id(
                     static_cast<Pack::local_ordinal_type>(o)) == gid)
@@ -181,7 +181,7 @@ TEST(MeshPartitionerTest, FaceConnectivityPreserved)
     }
 
     // Check every interior face has both owner and neighbor present locally
-    for (std::size_t fid = 0; fid < mesh->num_faces(); ++fid)
+    for (size_t fid = 0; fid < mesh->num_faces(); ++fid)
     {
         const auto face_lid =
             static_cast<Pack::local_ordinal_type>(fid);
@@ -190,13 +190,13 @@ TEST(MeshPartitionerTest, FaceConnectivityPreserved)
 
         // Owner must always be valid
         EXPECT_GE(owner, 0);
-        EXPECT_LT(static_cast<std::size_t>(owner), mesh->num_local_cells());
+        EXPECT_LT(static_cast<size_t>(owner), mesh->num_local_cells());
 
         // Interior faces must have a valid neighbor
         if (!mesh->is_exterior_face(face_lid))
         {
             EXPECT_GE(neighbor, 0);
-            EXPECT_LT(static_cast<std::size_t>(neighbor),
+            EXPECT_LT(static_cast<size_t>(neighbor),
                       mesh->num_local_cells());
         }
     }
@@ -220,7 +220,7 @@ TEST(MeshPartitionerTest, FieldSyncAfterPartitioning)
     FieldType field(mesh, "sync_test", false);
 
     // Set each owned cell's value to its global ID
-    for (std::size_t o = 0; o < mesh->num_owned_cells(); ++o)
+    for (size_t o = 0; o < mesh->num_owned_cells(); ++o)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(o);
         const auto gid = mesh->cell_global_id(lid);
@@ -232,7 +232,7 @@ TEST(MeshPartitionerTest, FieldSyncAfterPartitioning)
     field.sync_ghosts();
 
     // Verify every local cell (including ghosts) has correct GID-based value
-    for (std::size_t c = 0; c < mesh->num_local_cells(); ++c)
+    for (size_t c = 0; c < mesh->num_local_cells(); ++c)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(c);
         const auto gid = mesh->cell_global_id(lid);
@@ -266,10 +266,10 @@ TEST(MeshPartitionerTest, PartitioningIsDeterministic)
 
     // Verify owned GIDs are the same set on both meshes
     std::set<SimpleFluid::global_index_t> gids1, gids2;
-    for (std::size_t i = 0; i < mesh1->num_owned_cells(); ++i)
+    for (size_t i = 0; i < mesh1->num_owned_cells(); ++i)
         gids1.insert(mesh1->cell_global_id(
             static_cast<Pack::local_ordinal_type>(i)));
-    for (std::size_t i = 0; i < mesh2->num_owned_cells(); ++i)
+    for (size_t i = 0; i < mesh2->num_owned_cells(); ++i)
         gids2.insert(mesh2->cell_global_id(
             static_cast<Pack::local_ordinal_type>(i)));
 
@@ -290,7 +290,7 @@ TEST(MeshPartitionerTest, SingleRankCase)
     // Partitioning should succeed without error and not change the mesh
     SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
     EXPECT_EQ(mesh->num_owned_cells(), 8u);
-    for (std::size_t i = 0; i < mesh->num_owned_cells(); ++i)
+    for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
     {
         EXPECT_TRUE(mesh->is_owned_cell(
             static_cast<Pack::local_ordinal_type>(i)));
