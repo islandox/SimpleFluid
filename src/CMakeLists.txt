@@ -40,6 +40,7 @@ simplefluid_configure_library(SimpleFluidCore)
 # kept together because STKMesh and MeshHandle directly use both facilities.
 add_library(SimpleFluidMesh STATIC
     geometry/Mesh.cc
+    geometry/MeshHandle.cc
     geometry/STKMesh.cc
     geometry/MeshFactory.cc
     geometry/mesh/OrthoMeshPartitioner.cc
