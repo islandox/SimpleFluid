@@ -85,7 +85,7 @@ template<> inline MPI_Datatype type_trait<bool>() { return MPI_CXX_BOOL; }
 // unsupported types will cause a compile-time error due to missing specialization
 template<typename T>
 MPI_Datatype type_trait() {
-    static_assert(utils::always_false_v<T>, "MPI datatype not defined for this type:");
+    static_assert(utils::TMP::always_false_v<T>, "MPI datatype not defined for this type:");
     return MPI_DATATYPE_NULL;
 }
 

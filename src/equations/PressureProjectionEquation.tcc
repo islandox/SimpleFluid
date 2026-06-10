@@ -181,7 +181,7 @@ auto PressureProjectionEquation<Pack>::project(
         d_cached_rhs->putScalar(0.0);
     }
 
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = d_mesh->cell_global_id(cell_lid);
@@ -206,7 +206,7 @@ auto PressureProjectionEquation<Pack>::project(
     d_mesh->sync_periodic_boundaries(pressure);
 
     scalar_type pressure_norm_squared = {};
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto correction = pressure.value(cell_lid);
@@ -220,11 +220,11 @@ auto PressureProjectionEquation<Pack>::project(
     typename Pack::multi_vector_type gradient_mv(d_mesh->owned_cell_map(),
                                                   velocity_field_type::num_components,
                                                   true);
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto& gradient = d_cached_gradients[owned];
-        for (std::size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
+        for (size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
         {
             gradient_mv.replaceLocalValue(cell_lid, comp,
                                            FVM::detail::component_value(gradient, comp));
@@ -240,7 +240,7 @@ auto PressureProjectionEquation<Pack>::project(
                                      d_cached_face_fluxes);
 
     scalar_type continuity_norm_squared = {};
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto balance =

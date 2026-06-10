@@ -50,8 +50,8 @@ public:
     void add_int_cell_data(std::string name, IntData values);
     void add_int64_cell_data(std::string name, Int64Data values);
 
-    std::size_t num_points() const noexcept { return d_points.size(); }
-    std::size_t num_cells() const noexcept { return d_cell_offsets.size(); }
+    size_t num_points() const noexcept { return d_points.size(); }
+    size_t num_cells() const noexcept { return d_cell_offsets.size(); }
 
     void write(const std::string& filename) const;
 
@@ -60,13 +60,13 @@ private:
     {
         std::string name;
         std::string type;
-        std::size_t number_of_components = 1;
+        size_t number_of_components = 1;
         std::variant<ScalarData, VectorData, IntData, Int64Data> values;
     };
 
     void add_cell_data_array(DataArray data_array);
     void validate() const;
-    static std::size_t data_array_size(const DataArray& data_array);
+    static size_t data_array_size(const DataArray& data_array);
     static void write_cell_data_array(std::ostream& out,
                                       const DataArray& data_array,
                                       const std::string& indent);

@@ -40,11 +40,11 @@ struct vec3
     constexpr vec3(const std::array<scalar_t, 3>& arr)
         : x(arr[0]), y(arr[1]), z(arr[2]) {}
 
-    constexpr scalar_t& component(std::size_t index) {
+    constexpr scalar_t& component(size_t index) {
         return index == 0 ? x : (index == 1 ? y : z);
     }
 
-    constexpr scalar_t component(std::size_t index) const {
+    constexpr scalar_t component(size_t index) const {
         return index == 0 ? x : (index == 1 ? y : z);
     }
 

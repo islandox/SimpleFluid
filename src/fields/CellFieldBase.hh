@@ -65,12 +65,12 @@ public:
     vector_type& overlap_data() noexcept { return d_overlap_data; }
     const vector_type& overlap_data() const noexcept { return d_overlap_data; }
 
-    std::size_t num_owned_cells() const
+    size_t num_owned_cells() const
     {
         return d_data.getMap()->getLocalNumElements();
     }
 
-    std::size_t num_local_cells() const
+    size_t num_local_cells() const
     {
         return d_overlap_data.getMap()->getLocalNumElements();
     }
@@ -88,7 +88,7 @@ protected:
 
     CellFieldBase(SP<const mesh_type> mesh,
                   std::string name,
-                  std::size_t num_components,
+                  size_t num_components,
                   bool zero_out,
                   const char* class_name);
 
@@ -166,7 +166,7 @@ template<TpetraTypePack Pack, class Derived, class StorageVector>
 CellFieldBase<Pack, Derived, StorageVector>::CellFieldBase(
     SP<const mesh_type> mesh,
     std::string name,
-    std::size_t num_components,
+    size_t num_components,
     bool zero_out,
     const char* class_name)
     : d_name(std::move(name)),
@@ -294,7 +294,7 @@ void CellFieldBase<Pack, Derived, StorageVector>::check_cell_row_invariant(
     const auto invalid_row =
         Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
     const auto num_owned = d_mesh->num_owned_cells();
-    for (std::size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
+    for (size_t cell = 0; cell < d_mesh->num_local_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
 

@@ -95,7 +95,7 @@ void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
         {0.0, 1.0, 1.0},
     }};
 
-    for (std::size_t i = 0; i < node_ids.size(); ++i)
+    for (size_t i = 0; i < node_ids.size(); ++i)
     {
         const auto node = bulk->get_entity(stk::topology::NODE_RANK, node_ids[i]);
         set_node_coord(coord_field, node, coords[i]);

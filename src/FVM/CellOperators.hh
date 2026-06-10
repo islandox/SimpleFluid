@@ -45,7 +45,7 @@ void cell_gradient(const CellField<Pack>& field,
     const auto& mesh = field.mesh();
     gradients.assign(mesh.num_owned_cells(), typename mesh_type::Vec3{});
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto phi_p = field.value(cell_lid);
@@ -108,7 +108,7 @@ void cell_gradient(const VectorCellField<Pack>& field,
     const auto& mesh = field.mesh();
     gradients.assign(mesh.num_owned_cells(), VectorCellGradient<Pack>{});
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto value_p = field.value(cell_lid);
@@ -135,7 +135,7 @@ void cell_gradient(const VectorCellField<Pack>& field,
             normal[1][2] += d.y * d.z;
             normal[2][2] += d.z * d.z;
 
-            for (std::size_t component = 0;
+            for (size_t component = 0;
                  component < VectorCellField<Pack>::num_components;
                  ++component)
             {
@@ -149,7 +149,7 @@ void cell_gradient(const VectorCellField<Pack>& field,
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
-        for (std::size_t component = 0;
+        for (size_t component = 0;
              component < VectorCellField<Pack>::num_components;
              ++component)
         {
@@ -207,7 +207,7 @@ cell_divergence_from_fluxes(
     const FaceField<Pack>& face_fluxes)
 {
     std::vector<typename Pack::scalar_type> divergence(mesh.num_owned_cells(), 0.0);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(owned);

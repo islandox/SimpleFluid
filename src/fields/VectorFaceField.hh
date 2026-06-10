@@ -46,7 +46,7 @@ public:
     using global_ordinal_type = typename base_type::global_ordinal_type;
     using vec_type = typename mesh_type::Vec3;
 
-    static constexpr std::size_t num_components = 3;
+    static constexpr size_t num_components = 3;
 
     template <class T>
     using RCP = typename base_type::template RCP<T>;
@@ -79,21 +79,21 @@ public:
     vec_type global_value(global_ordinal_type face_gid) const;
 
     scalar_type component_value(local_ordinal_type face_lid,
-                                std::size_t component) const;
+                                size_t component) const;
     scalar_type global_component_value(global_ordinal_type face_gid,
-                                       std::size_t component) const;
+                                       size_t component) const;
 
     void set_value(local_ordinal_type face_lid, const vec_type& value);
     void set_global_value(global_ordinal_type face_gid, const vec_type& value);
     void set_component_value(local_ordinal_type face_lid,
-                             std::size_t component,
+                             size_t component,
                              const scalar_type& value);
     void set_global_component_value(global_ordinal_type face_gid,
-                                    std::size_t component,
+                                    size_t component,
                                     const scalar_type& value);
 
 private:
-    static void check_component(std::size_t component);
+    static void check_component(size_t component);
 };
 
 /**
@@ -141,7 +141,7 @@ VectorFaceField<Pack>::VectorFaceField(SP<const mesh_type> mesh,
  * @throws std::out_of_range if @p component is out of bounds.
  */
 template<TpetraTypePack Pack>
-void VectorFaceField<Pack>::check_component(std::size_t component)
+void VectorFaceField<Pack>::check_component(size_t component)
 {
     if (component >= num_components)
     {
@@ -199,7 +199,7 @@ auto VectorFaceField<Pack>::global_value(global_ordinal_type face_gid) const
 template<TpetraTypePack Pack>
 auto VectorFaceField<Pack>::component_value(
     local_ordinal_type face_lid,
-    std::size_t component) const -> scalar_type
+    size_t component) const -> scalar_type
 {
     check_component(component);
     return this->d_data.getData(component)[this->owned_row_for_face(face_lid)];
@@ -217,7 +217,7 @@ auto VectorFaceField<Pack>::component_value(
 template<TpetraTypePack Pack>
 auto VectorFaceField<Pack>::global_component_value(
     global_ordinal_type face_gid,
-    std::size_t component) const -> scalar_type
+    size_t component) const -> scalar_type
 {
     check_component(component);
     return this->d_data.getData(component)[
@@ -233,7 +233,7 @@ auto VectorFaceField<Pack>::global_component_value(
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::put_scalar(const vec_type& value)
 {
-    for (std::size_t c = 0; c < num_components; ++c)
+    for (size_t c = 0; c < num_components; ++c)
     {
         this->d_data.getVectorNonConst(c)->putScalar(value.component(c));
     }
@@ -251,7 +251,7 @@ template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_value(local_ordinal_type face_lid,
                                       const vec_type& value)
 {
-    for (std::size_t c = 0; c < num_components; ++c)
+    for (size_t c = 0; c < num_components; ++c)
         set_component_value(face_lid, c, value.component(c));
 }
 
@@ -267,7 +267,7 @@ template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_global_value(global_ordinal_type face_gid,
                                              const vec_type& value)
 {
-    for (std::size_t c = 0; c < num_components; ++c)
+    for (size_t c = 0; c < num_components; ++c)
         set_global_component_value(face_gid, c, value.component(c));
 }
 
@@ -283,7 +283,7 @@ void VectorFaceField<Pack>::set_global_value(global_ordinal_type face_gid,
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_component_value(
     local_ordinal_type face_lid,
-    std::size_t component,
+    size_t component,
     const scalar_type& value)
 {
     check_component(component);
@@ -303,7 +303,7 @@ void VectorFaceField<Pack>::set_component_value(
 template<TpetraTypePack Pack>
 void VectorFaceField<Pack>::set_global_component_value(
     global_ordinal_type face_gid,
-    std::size_t component,
+    size_t component,
     const scalar_type& value)
 {
     check_component(component);

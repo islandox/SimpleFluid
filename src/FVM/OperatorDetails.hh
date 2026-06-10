@@ -30,7 +30,7 @@ namespace SimpleFluid::FVM::detail
  * @param index Component index (0, 1, or 2).
  * @return Mutable reference to the requested component.
  */
-inline real_t& component(MeshUtils::Vec3& vector, std::size_t index)
+inline real_t& component(MeshUtils::Vec3& vector, size_t index)
 {
     return vector.component(index);
 }
@@ -48,10 +48,10 @@ inline real_t& component(MeshUtils::Vec3& vector, std::size_t index)
 inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
                                  MeshUtils::Vec3& b)
 {
-    for (std::size_t pivot = 0; pivot < 3; ++pivot)
+    for (size_t pivot = 0; pivot < 3; ++pivot)
     {
-        std::size_t best = pivot;
-        for (std::size_t row = pivot + 1; row < 3; ++row)
+        size_t best = pivot;
+        for (size_t row = pivot + 1; row < 3; ++row)
         {
             if (std::abs(a[row][pivot]) > std::abs(a[best][pivot]))
             {
@@ -72,13 +72,13 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
         }
 
         const auto inv = 1.0 / a[pivot][pivot];
-        for (std::size_t col = pivot; col < 3; ++col)
+        for (size_t col = pivot; col < 3; ++col)
         {
             a[pivot][col] *= inv;
         }
         component(b, pivot) *= inv;
 
-        for (std::size_t row = 0; row < 3; ++row)
+        for (size_t row = 0; row < 3; ++row)
         {
             if (row == pivot)
             {
@@ -86,7 +86,7 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
             }
 
             const auto factor = a[row][pivot];
-            for (std::size_t col = pivot; col < 3; ++col)
+            for (size_t col = pivot; col < 3; ++col)
             {
                 a[row][col] -= factor * a[pivot][col];
             }
@@ -104,7 +104,7 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
  * @param index Component index (0, 1, or 2).
  * @return Value of the requested component.
  */
-inline real_t component_value(const MeshUtils::Vec3& vector, std::size_t index)
+inline real_t component_value(const MeshUtils::Vec3& vector, size_t index)
 {
     return vector.component(index);
 }
@@ -299,7 +299,7 @@ least_squares_gradient_stencils(const MeshType& mesh)
     std::vector<LeastSquaresGradientStencil<MeshType>> stencils(
         mesh.num_owned_cells());
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         std::array<std::array<real_t, 3>, 3> normal{};
@@ -331,7 +331,7 @@ least_squares_gradient_stencils(const MeshType& mesh)
             coefficients;
         coefficients.reserve(directions.size() + 1);
 
-        std::size_t direction_id = 0;
+        size_t direction_id = 0;
         for (const auto face_lid : mesh.faces(cell_lid))
         {
             if (!mesh.is_interior_face(face_lid))
@@ -372,8 +372,21 @@ struct BoundaryFaceLocation
 {
     bool active = false;
     int patch_id = MeshType::invalid_boundary_id;
-    std::size_t in_patch_id = 0;
+    size_t in_patch_id = 0;
 };
+
+template<class MeshType, class FaceID>
+size_t packed_face_local_id(const MeshType& mesh, FaceID face_id)
+{
+    if constexpr (requires { mesh.face_local_id(face_id); })
+    {
+        return mesh.face_local_id(face_id);
+    }
+    else
+    {
+        return static_cast<size_t>(face_id);
+    }
+}
 
 /**
  * @brief Compute a per-face lookup of boundary-face locations.
@@ -389,12 +402,12 @@ boundary_face_locations(const MeshType& mesh)
     std::vector<BoundaryFaceLocation<MeshType>> locations(mesh.num_faces());
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (std::size_t in_patch_id = 0;
+        for (size_t in_patch_id = 0;
              in_patch_id < boundary_patch.face_lids.size();
              ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
-            locations[static_cast<std::size_t>(face_lid)] =
+            locations[packed_face_local_id(mesh, face_lid)] =
                 {true, patch_id, in_patch_id};
         }
     }

@@ -83,7 +83,7 @@ auto BoussinesqSolver<Pack>::velocity_update_norm(
     EquationValidation::require_mesh_match(*d_mesh, after, "BoussinesqSolver");
 
     scalar_type norm_squared = {};
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto delta = after.value(cell_lid) - before.value(cell_lid);
@@ -100,7 +100,7 @@ auto BoussinesqSolver<Pack>::velocity_update_norm(
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::run_momentum_predictor()
 {
-    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         d_predictor_velocity.set_value(cell_lid, d_velocity.value(cell_lid));
@@ -217,7 +217,7 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
 
     auto min_projected = d_mesh->cell_centroid(0).dot(direction);
     auto max_projected = min_projected;
-    for (std::size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+    for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
         const auto projected = d_mesh->cell_centroid(cell_lid).dot(direction);
@@ -228,7 +228,7 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
     const auto width = max_projected > min_projected
                      ? max_projected - min_projected
                      : 1.0;
-    for (std::size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+    for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
         const auto projected = d_mesh->cell_centroid(cell_lid).dot(direction);
@@ -377,7 +377,7 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
         return lid;
     };
 
-    for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
+    for (size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
     {
         const auto& cell_info = d_mesh->cell(static_cast<local_ordinal_type>(lid));
         for (const auto node_gid : cell_info.node_gids)
@@ -395,7 +395,7 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
     temperature_values.reserve(d_mesh->num_local_cells());
     pressure_values.reserve(d_mesh->num_local_cells());
     velocity_values.reserve(d_mesh->num_local_cells());
-    for (std::size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
+    for (size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(lid);
         temperature_values.push_back(static_cast<real_t>(

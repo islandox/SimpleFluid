@@ -89,7 +89,7 @@ inline auto topology_to_cell_type(stk::topology topo) -> typename STKMesh<Pack>:
  * @throws std::runtime_error for unsupported face node counts.
  */
 template <TpetraTypePack Pack>
-inline auto face_type_from_node_count(std::size_t node_count) -> typename STKMesh<Pack>::FaceType
+inline auto face_type_from_node_count(size_t node_count) -> typename STKMesh<Pack>::FaceType
 {
     if (node_count == 3)
     {
@@ -328,14 +328,14 @@ void STKMesh<Pack>::build_cell_list()
     append_bucket_cells(true);
     append_bucket_cells(false);
 
-    std::size_t total_cell_nodes = 0;
+    size_t total_cell_nodes = 0;
     for (const auto& node_ids : cell_node_ids)
     {
         total_cell_nodes += node_ids.size();
     }
 
     d_cell_owned_node_global_ids.reserve(total_cell_nodes);
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto offset = d_cell_owned_node_global_ids.size();
         d_cell_owned_node_global_ids.insert(d_cell_owned_node_global_ids.end(),
@@ -352,7 +352,7 @@ void STKMesh<Pack>::build_cell_list()
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::compute_cell_geometry()
 {
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto coords = element_node_coords(d_stk.cell_entities[lid]);
         auto& cell_info = d_cells[lid];
@@ -388,7 +388,7 @@ void STKMesh<Pack>::build_face_table()
 
     std::vector<ArrLO> cell_face_ids(d_cells.size());
 
-    std::size_t max_face_nodes = 0;
+    size_t max_face_nodes = 0;
     for (const auto elem : d_stk.cell_entities)
     {
         const auto topo = d_stk.bulk->bucket(elem).topology();
@@ -399,7 +399,7 @@ void STKMesh<Pack>::build_face_table()
     }
     d_face_owned_node_global_ids.reserve(max_face_nodes);
 
-    for (std::size_t cell_index = 0; cell_index < d_cells.size(); ++cell_index)
+    for (size_t cell_index = 0; cell_index < d_cells.size(); ++cell_index)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell_index);
         const auto elem = d_stk.cell_entities[cell_index];
@@ -466,7 +466,7 @@ void STKMesh<Pack>::build_face_table()
             }
             else
             {
-                auto& face_info = d_faces[static_cast<std::size_t>(iter->second)];
+                auto& face_info = d_faces[static_cast<size_t>(iter->second)];
                 if (face_info.neighbor != invalid_id<local_ordinal_type>())
                 {
                     throw std::runtime_error("Non-manifold face encountered.");
@@ -478,14 +478,14 @@ void STKMesh<Pack>::build_face_table()
         }
     }
 
-    std::size_t total_cell_faces = 0;
+    size_t total_cell_faces = 0;
     for (const auto& faces : cell_face_ids)
     {
         total_cell_faces += faces.size();
     }
 
     d_cell_owned_face_ids.reserve(total_cell_faces);
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         const auto offset = d_cell_owned_face_ids.size();
         d_cell_owned_face_ids.append_range(cell_face_ids[lid]);
@@ -521,7 +521,7 @@ void STKMesh<Pack>::compute_face_geometry()
 
         auto normal = area_vector / face_info.area;
         const auto owner_to_face = face_info.center
-                                 - d_cells[static_cast<std::size_t>(face_info.owner)].center;
+                                 - d_cells[static_cast<size_t>(face_info.owner)].center;
         if (normal.dot(owner_to_face) < 0.0)
         {
             normal = normal * -1.0;
@@ -535,11 +535,11 @@ void STKMesh<Pack>::compute_face_geometry()
         {
             const auto neighbor_to_face =
                 face_info.center
-              - d_cells[static_cast<std::size_t>(face_info.neighbor)].center;
+              - d_cells[static_cast<size_t>(face_info.neighbor)].center;
             face_info.neighbor_to_face_distance = neighbor_to_face.norm();
             face_info.cell_center_distance =
-                (d_cells[static_cast<std::size_t>(face_info.neighbor)].center
-               - d_cells[static_cast<std::size_t>(face_info.owner)].center).norm();
+                (d_cells[static_cast<size_t>(face_info.neighbor)].center
+               - d_cells[static_cast<size_t>(face_info.owner)].center).norm();
         }
         else
         {
@@ -656,7 +656,7 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
         }
     }
 
-    for (std::size_t fid = 0; fid < d_faces.size(); ++fid)
+    for (size_t fid = 0; fid < d_faces.size(); ++fid)
     {
         auto& face_info = d_faces[fid];
         face_info.boundary_id = invalid_boundary_id;
@@ -831,7 +831,7 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
 
     // Export only owned cells in parallel; all cells in serial
     const bool export_all = (nranks <= 1);
-    for (std::size_t cell_lid = 0; cell_lid < d_stk.cell_entities.size(); ++cell_lid)
+    for (size_t cell_lid = 0; cell_lid < d_stk.cell_entities.size(); ++cell_lid)
     {
         if (!export_all && !d_cells[cell_lid].owned) continue;
         const auto elem = d_stk.cell_entities[cell_lid];
@@ -871,7 +871,7 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
             cell_gids.push_back(static_cast<global_index_t>(gid));
     }
 
-    for (std::size_t lid = 0; lid < d_cells.size(); ++lid)
+    for (size_t lid = 0; lid < d_cells.size(); ++lid)
     {
         if (!export_all && !d_cells[lid].owned) continue;
         cell_types.push_back(static_cast<int>(d_cells[lid].type));

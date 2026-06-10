@@ -41,7 +41,7 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
          lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
          ++lid)
     {
-        values[static_cast<std::size_t>(lid)] = field.local_value(lid);
+        values[static_cast<size_t>(lid)] = field.local_value(lid);
     }
 
     return values;
@@ -69,7 +69,7 @@ int advance_explicit_diffusion_until_converged(
         {
             const auto update = std::abs(
                 temperature.value(lid)
-              - old_temperature[static_cast<std::size_t>(lid)]);
+              - old_temperature[static_cast<size_t>(lid)]);
             if (update > max_update)
             {
                 max_update = update;
@@ -126,7 +126,7 @@ TEST(AnalyticalConvergenceTest, DiffusionErrorDecreasesWithMeshRefinement)
         return 1.0 - pos.x / domain_length;
     };
 
-    for (std::size_t i = 0; i < resolutions.size(); ++i)
+    for (size_t i = 0; i < resolutions.size(); ++i)
     {
         const auto n = resolutions[i];
         const double h = domain_length / static_cast<double>(n);
@@ -134,7 +134,7 @@ TEST(AnalyticalConvergenceTest, DiffusionErrorDecreasesWithMeshRefinement)
         auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
         FieldType temperature(mesh, "temperature");
 
-        for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             temperature.set_owned_value(
                 static_cast<MeshType::local_ordinal_type>(owned), 0.0);
@@ -151,7 +151,7 @@ TEST(AnalyticalConvergenceTest, DiffusionErrorDecreasesWithMeshRefinement)
         l2_errors[i] = SimpleFluid::l2_error(temperature, exact);
     }
 
-    for (std::size_t i = 0; i < resolutions.size(); ++i)
+    for (size_t i = 0; i < resolutions.size(); ++i)
     {
         EXPECT_LT(steps_taken[i], max_steps)
             << "Resolution " << resolutions[i]

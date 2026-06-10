@@ -211,7 +211,7 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_TRUE(has_face_centroid(SimpleFluid::vec3{1.0, 0.5, 0.5}));
     EXPECT_TRUE(has_face_centroid(SimpleFluid::vec3{2.0, 0.5, 0.5}));
 
-    std::unordered_map<std::string, std::size_t> boundary_counts;
+    std::unordered_map<std::string, size_t> boundary_counts;
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
          ++fid)
@@ -292,7 +292,7 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 
-    std::unordered_map<std::string, std::size_t> boundary_counts;
+    std::unordered_map<std::string, size_t> boundary_counts;
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
          ++fid)
@@ -352,7 +352,7 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 
-    std::size_t surface_faces = 0;
+    size_t surface_faces = 0;
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
          ++fid)
@@ -379,8 +379,8 @@ TEST(MeshFactoryTest, SphereBuildsSplitSurfacePatches)
 
     ASSERT_TRUE(mesh != nullptr);
 
-    std::unordered_map<std::string, std::size_t> boundary_counts;
-    std::size_t boundary_faces = 0;
+    std::unordered_map<std::string, size_t> boundary_counts;
+    size_t boundary_faces = 0;
     for (MeshType::local_ordinal_type fid = 0;
          fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
          ++fid)

@@ -43,7 +43,7 @@ public:
     using local_ordinal_type = typename base_type::local_ordinal_type;
     using vec_type = typename mesh_type::Vec3;
 
-    static constexpr std::size_t num_components = 3;
+    static constexpr size_t num_components = 3;
 
     explicit VectorCellField(SP<const mesh_type> mesh,
                              std::string name = std::string(),
@@ -60,25 +60,25 @@ public:
     vec_type local_value(local_ordinal_type cell_lid) const;
 
     scalar_type component_value(local_ordinal_type cell_lid,
-                                std::size_t component) const;
+                                size_t component) const;
     scalar_type local_component_value(local_ordinal_type cell_lid,
-                                      std::size_t component) const;
+                                      size_t component) const;
 
     void set_value(local_ordinal_type cell_lid, const vec_type& value);
     void set_owned_value(local_ordinal_type cell_lid, const vec_type& value);
     void set_component_value(local_ordinal_type cell_lid,
-                             std::size_t component,
+                             size_t component,
                              const scalar_type& value);
     void set_owned_component_value(local_ordinal_type cell_lid,
-                                   std::size_t component,
+                                   size_t component,
                                    const scalar_type& value);
 
     bool is_owned_cell(local_ordinal_type cell_lid) const;
     bool is_local_cell(local_ordinal_type cell_lid) const;
 
 private:
-    static scalar_type component(const vec_type& value, std::size_t index);
-    static void check_component(std::size_t component);
+    static scalar_type component(const vec_type& value, size_t index);
+    static void check_component(size_t component);
 };
 
 /**
@@ -125,7 +125,7 @@ VectorCellField<Pack>::VectorCellField(SP<const mesh_type> mesh,
  */
 template<TpetraTypePack Pack>
 auto VectorCellField<Pack>::component(const vec_type& value,
-                                      std::size_t index) -> scalar_type
+                                      size_t index) -> scalar_type
 {
     return value.component(index);
 }
@@ -138,7 +138,7 @@ auto VectorCellField<Pack>::component(const vec_type& value,
  * @throws std::out_of_range if @p component is out of bounds.
  */
 template<TpetraTypePack Pack>
-void VectorCellField<Pack>::check_component(std::size_t component)
+void VectorCellField<Pack>::check_component(size_t component)
 {
     if (component >= num_components)
     {
@@ -155,7 +155,7 @@ void VectorCellField<Pack>::check_component(std::size_t component)
 template<TpetraTypePack Pack>
 void VectorCellField<Pack>::put_scalar(const vec_type& value)
 {
-    for (std::size_t component_id = 0; component_id < num_components; ++component_id)
+    for (size_t component_id = 0; component_id < num_components; ++component_id)
     {
         this->d_data.getVectorNonConst(component_id)->putScalar(
             component(value, component_id));
@@ -225,7 +225,7 @@ auto VectorCellField<Pack>::local_value(local_ordinal_type cell_lid) const -> ve
  */
 template<TpetraTypePack Pack>
 auto VectorCellField<Pack>::component_value(local_ordinal_type cell_lid,
-                                            std::size_t component_id) const
+                                            size_t component_id) const
     -> scalar_type
 {
     check_component(component_id);
@@ -244,7 +244,7 @@ auto VectorCellField<Pack>::component_value(local_ordinal_type cell_lid,
 template<TpetraTypePack Pack>
 auto VectorCellField<Pack>::local_component_value(
     local_ordinal_type cell_lid,
-    std::size_t component_id) const -> scalar_type
+    size_t component_id) const -> scalar_type
 {
     check_component(component_id);
     return this->d_overlap_data.getData(component_id)[this->local_row_for_cell(cell_lid)];
@@ -262,7 +262,7 @@ template<TpetraTypePack Pack>
 void VectorCellField<Pack>::set_value(local_ordinal_type cell_lid,
                                       const vec_type& value)
 {
-    for (std::size_t component_id = 0; component_id < num_components; ++component_id)
+    for (size_t component_id = 0; component_id < num_components; ++component_id)
     {
         set_component_value(cell_lid, component_id, component(value, component_id));
     }
@@ -282,7 +282,7 @@ template<TpetraTypePack Pack>
 void VectorCellField<Pack>::set_owned_value(local_ordinal_type cell_lid,
                                             const vec_type& value)
 {
-    for (std::size_t component_id = 0; component_id < num_components; ++component_id)
+    for (size_t component_id = 0; component_id < num_components; ++component_id)
     {
         set_owned_component_value(cell_lid, component_id,
                                   component(value, component_id));
@@ -301,7 +301,7 @@ void VectorCellField<Pack>::set_owned_value(local_ordinal_type cell_lid,
 template<TpetraTypePack Pack>
 void VectorCellField<Pack>::set_component_value(
     local_ordinal_type cell_lid,
-    std::size_t component_id,
+    size_t component_id,
     const scalar_type& value)
 {
     check_component(component_id);
@@ -323,7 +323,7 @@ void VectorCellField<Pack>::set_component_value(
 template<TpetraTypePack Pack>
 void VectorCellField<Pack>::set_owned_component_value(
     local_ordinal_type cell_lid,
-    std::size_t component_id,
+    size_t component_id,
     const scalar_type& value)
 {
     check_component(component_id);
