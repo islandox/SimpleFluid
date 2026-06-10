@@ -12,6 +12,7 @@
 #include "geometry/mesh/STKMeshAdapter.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "io/VTUWriter.hh"
+#include "utils/debug_check.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Tpetra_Core.hpp>
@@ -20,6 +21,7 @@
 #include <array>
 #include <limits>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -210,31 +212,15 @@ public:
             });
     }
 
-    std::vector<local_ordinal_type> faces(
+    std::span<const local_ordinal_type> faces(
         local_ordinal_type cell_lid) const
     {
         check_cell(cell_lid);
-        const auto geometry_lid = geometry_cell_lid(cell_lid);
-        return visit(
-            [&](const auto& mesh)
-            {
-                std::vector<local_ordinal_type> result;
-                const auto geometry_faces = mesh.faces(
-                    mesh.cell_id(static_cast<size_t>(geometry_lid)));
-                result.reserve(geometry_faces.size());
-                for (const auto geometry_face : geometry_faces)
-                {
-                    const auto face_geometry_lid =
-                        static_cast<size_t>(mesh.face_local_id(geometry_face));
-                    const auto iter =
-                        d_face_local_by_geometry.find(face_geometry_lid);
-                    if (iter != d_face_local_by_geometry.end())
-                    {
-                        result.push_back(iter->second);
-                    }
-                }
-                return result;
-            });
+        const auto local = static_cast<size_t>(cell_lid);
+        const auto begin = d_cell_face_offsets[local];
+        const auto end = d_cell_face_offsets[local + 1];
+        return std::span<const local_ordinal_type>(d_cell_face_lids)
+            .subspan(begin, end - begin);
     }
 
     local_ordinal_type owner_cell(local_ordinal_type face_lid) const
@@ -536,9 +522,8 @@ private:
     }
 
     template<class MeshType>
-    void export_orthogonal_vtu(
-        const MeshType& mesh,
-        const std::string& filename) const
+    VTUWriter::VectorData collect_vtu_points(
+        const MeshType& mesh) const
     {
         VTUWriter::VectorData points;
         points.reserve(mesh.num_nodes());
@@ -546,7 +531,31 @@ private:
         {
             points.push_back(mesh.node_coordinates(lid));
         }
+        return points;
+    }
 
+    void write_vtu(
+        const std::string& filename,
+        VTUWriter::VectorData points,
+        VTUWriter::Int64Data connectivity,
+        VTUWriter::Int64Data offsets,
+        VTUWriter::UInt8Data cell_types) const
+    {
+        VTUWriter writer;
+        writer.set_points(std::move(points));
+        writer.set_cells(
+            std::move(connectivity),
+            std::move(offsets),
+            std::move(cell_types));
+        add_geometry_cell_data(writer);
+        writer.write(local_output_filename(filename));
+    }
+
+    template<class MeshType>
+    void export_orthogonal_vtu(
+        const MeshType& mesh,
+        const std::string& filename) const
+    {
         VTUWriter::Int64Data connectivity;
         VTUWriter::Int64Data offsets;
         VTUWriter::UInt8Data cell_types;
@@ -589,27 +598,18 @@ private:
             cell_types.push_back(12); // VTK_HEXAHEDRON
         }
 
-        VTUWriter writer;
-        writer.set_points(std::move(points));
-        writer.set_cells(
+        write_vtu(
+            filename,
+            collect_vtu_points(mesh),
             std::move(connectivity),
             std::move(offsets),
             std::move(cell_types));
-        add_geometry_cell_data(writer);
-        writer.write(local_output_filename(filename));
     }
 
     void export_semi_structured_vtu(
         const SemiStructured& mesh,
         const std::string& filename) const
     {
-        VTUWriter::VectorData points;
-        points.reserve(mesh.num_nodes());
-        for (size_t lid = 0; lid < mesh.num_nodes(); ++lid)
-        {
-            points.push_back(mesh.node_coordinates(lid));
-        }
-
         VTUWriter::Int64Data connectivity;
         VTUWriter::Int64Data offsets;
         VTUWriter::UInt8Data cell_types;
@@ -653,14 +653,12 @@ private:
             }
         }
 
-        VTUWriter writer;
-        writer.set_points(std::move(points));
-        writer.set_cells(
+        write_vtu(
+            filename,
+            collect_vtu_points(mesh),
             std::move(connectivity),
             std::move(offsets),
             std::move(cell_types));
-        add_geometry_cell_data(writer);
-        writer.write(local_output_filename(filename));
     }
 
     local_ordinal_type geometry_cell_lid(
@@ -840,6 +838,7 @@ private:
         }
         initialize_faces(
             std::move(owned_faces), std::move(overlap_faces));
+        initialize_cell_faces();
         initialize_boundary_patches(*mesh);
         create_maps(comm);
     }
@@ -889,6 +888,7 @@ private:
         }
         initialize_faces(
             std::move(owned_faces), std::move(overlap_faces));
+        initialize_cell_faces();
         initialize_boundary_patches(*adapter);
 
         d_owned_cell_map = mesh.owned_cell_map();
@@ -922,6 +922,7 @@ private:
             faces[lid] = lid;
         }
         initialize_faces(std::move(faces), {});
+        initialize_cell_faces();
         initialize_boundary_patches(mesh);
         create_maps(Tpetra::getDefaultComm());
     }
@@ -954,35 +955,75 @@ private:
         }
     }
 
+    void initialize_cell_faces()
+    {
+        d_cell_face_offsets.clear();
+        d_cell_face_lids.clear();
+        d_cell_face_offsets.reserve(d_cell_geometry_lids.size() + 1);
+        d_cell_face_offsets.push_back(0);
+
+        visit(
+            [&](const auto& mesh)
+            {
+                for (const auto geometry_lid : d_cell_geometry_lids)
+                {
+                    const auto geometry_faces =
+                        mesh.faces(mesh.cell_id(geometry_lid));
+                    d_cell_face_lids.reserve(
+                        d_cell_face_lids.size() + geometry_faces.size());
+                    for (const auto geometry_face : geometry_faces)
+                    {
+                        const auto face_geometry_lid =
+                            static_cast<size_t>(
+                                mesh.face_local_id(geometry_face));
+                        const auto iter =
+                            d_face_local_by_geometry.find(face_geometry_lid);
+                        if (iter != d_face_local_by_geometry.end())
+                        {
+                            d_cell_face_lids.push_back(iter->second);
+                        }
+                    }
+                    d_cell_face_offsets.push_back(d_cell_face_lids.size());
+                }
+            });
+    }
+
     template<class MeshType>
     void initialize_boundary_patches(const MeshType& mesh)
     {
+        auto materialize_patch =
+            [&](int patch_id, const auto& source_faces)
+        {
+            BoundaryFacePatch patch;
+            patch.id = patch_id;
+            for (const auto face : source_faces)
+            {
+                const auto geometry_lid =
+                    static_cast<size_t>(mesh.face_local_id(face));
+                const auto iter =
+                    d_face_local_by_geometry.find(geometry_lid);
+                if (iter != d_face_local_by_geometry.end())
+                {
+                    patch.face_lids.push_back(iter->second);
+                }
+            }
+            if (!patch.face_lids.empty())
+            {
+                d_boundary_names.emplace(
+                    patch_id, mesh.boundary_patch_name(patch_id));
+                d_boundary_patches.emplace(
+                    patch_id, std::move(patch));
+            }
+        };
+
         if constexpr (std::ranges::range<
                           decltype(mesh.boundary_face_patch(0))>)
         {
             // New view-based API: boundary_face_patch() returns a view
             for (int patch_id : mesh.boundary_patch_ids())
             {
-                BoundaryFacePatch patch;
-                patch.id = patch_id;
-                for (auto face_id : mesh.boundary_face_patch(patch_id))
-                {
-                    const auto geometry_lid =
-                        static_cast<size_t>(mesh.face_local_id(face_id));
-                    const auto iter =
-                        d_face_local_by_geometry.find(geometry_lid);
-                    if (iter != d_face_local_by_geometry.end())
-                    {
-                        patch.face_lids.push_back(iter->second);
-                    }
-                }
-                if (!patch.face_lids.empty())
-                {
-                    d_boundary_names.emplace(
-                        patch_id, mesh.boundary_patch_name(patch_id));
-                    d_boundary_patches.emplace(
-                        patch_id, std::move(patch));
-                }
+                materialize_patch(
+                    patch_id, mesh.boundary_face_patch(patch_id));
             }
         }
         else
@@ -991,26 +1032,7 @@ private:
             for (const auto& [patch_id, source_patch] :
                  mesh.boundary_patches())
             {
-                BoundaryFacePatch patch;
-                patch.id = patch_id;
-                for (const auto face : source_patch.face_lids)
-                {
-                    const auto geometry_lid =
-                        static_cast<size_t>(mesh.face_local_id(face));
-                    const auto iter =
-                        d_face_local_by_geometry.find(geometry_lid);
-                    if (iter != d_face_local_by_geometry.end())
-                    {
-                        patch.face_lids.push_back(iter->second);
-                    }
-                }
-                if (!patch.face_lids.empty())
-                {
-                    d_boundary_names.emplace(
-                        patch_id, mesh.boundary_patch_name(patch_id));
-                    d_boundary_patches.emplace(
-                        patch_id, std::move(patch));
-                }
+                materialize_patch(patch_id, source_patch.face_lids);
             }
         }
     }
@@ -1071,20 +1093,12 @@ private:
 
     void check_cell(local_ordinal_type cell_lid) const
     {
-        if (cell_lid < 0
-            || static_cast<size_t>(cell_lid) >= num_local_cells())
-        {
-            throw std::out_of_range("Cell local ID is out of range.");
-        }
+        CHECK_BOUNDS(cell_lid, 0, num_local_cells());
     }
 
     void check_face(local_ordinal_type face_lid) const
     {
-        if (face_lid < 0
-            || static_cast<size_t>(face_lid) >= num_faces())
-        {
-            throw std::out_of_range("Face local ID is out of range.");
-        }
+        CHECK_BOUNDS(face_lid, 0, num_faces());
     }
 
     variant_type d_mesh;
@@ -1092,6 +1106,8 @@ private:
     size_t d_num_owned_faces = 0;
     std::vector<size_t> d_cell_geometry_lids;
     std::vector<size_t> d_face_geometry_lids;
+    std::vector<size_t> d_cell_face_offsets;
+    std::vector<local_ordinal_type> d_cell_face_lids;
     std::unordered_map<size_t, local_ordinal_type>
         d_cell_local_by_geometry;
     std::unordered_map<size_t, local_ordinal_type>

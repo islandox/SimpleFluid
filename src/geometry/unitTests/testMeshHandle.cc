@@ -9,8 +9,10 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <filesystem>
 #include <numbers>
+#include <span>
 
 namespace
 {
@@ -90,6 +92,29 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
     EXPECT_EQ(handle.num_owned_cells(), legacy->num_owned_cells());
     EXPECT_EQ(handle.cell_centroid(0), legacy->cell_centroid(0));
     EXPECT_EQ(handle.faces(0).size(), legacy->faces(0).size());
+}
+
+TEST(MeshHandleTest, ReusesMaterializedCellFaceConnectivity)
+{
+    const auto mesh = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0, 2.0},
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+    const Handle handle(mesh);
+
+    static_assert(std::is_same_v<
+        decltype(handle.faces(0)),
+        std::span<const Handle::local_ordinal_type>>);
+
+    const auto first = handle.faces(0);
+    const auto second = handle.faces(0);
+    EXPECT_EQ(first.data(), second.data());
+    EXPECT_EQ(first.size(), 6U);
+    EXPECT_TRUE(std::ranges::equal(first, second));
+#ifdef CHECK_BOUNDS_ENABLED
+    EXPECT_THROW(handle.faces(-1), std::out_of_range);
+#endif
 }
 
 TEST(MeshHandleTest, BuildsOrthogonalSlabOwnershipAndGhostMaps)

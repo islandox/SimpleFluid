@@ -78,7 +78,7 @@ public:
     bool solve()
     {
         Teuchos::RCP<const matrix_type> matrix = d_matrix;
-        const auto converged = solve_linear_system<Pack>(
+        const auto converged = d_solver.solve(
             matrix,
             *d_rhs,
             d_solution->owned_data(),
@@ -92,6 +92,7 @@ private:
     Teuchos::RCP<matrix_type> d_matrix;
     Teuchos::RCP<rhs_type> d_rhs;
     LinearSolverOptions d_options;
+    BelosLinearSolver<Pack> d_solver;
 };
 
 } // namespace SimpleFluid

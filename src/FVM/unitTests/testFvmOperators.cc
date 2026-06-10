@@ -733,6 +733,55 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
     }
 }
 
+TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
+{
+    auto mesh = make_mesh();
+    FieldType scalar(mesh, 2.0, "scalar");
+    VectorFieldType vector(
+        mesh, SimpleFluid::vec3{1.0, 2.0, 3.0}, "vector");
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "face_flux");
+
+    auto scalar_boundary = [](int, size_t) { return 0.0; };
+    auto vector_boundary = [](int, size_t)
+    {
+        return SimpleFluid::vec3<Pack::scalar_type>{};
+    };
+
+    auto scalar_first = SimpleFluid::FVM::transport_system<Pack>(
+        scalar, zero_fluxes, 1.0, 1.0, scalar_boundary);
+    auto scalar_second = SimpleFluid::FVM::transport_system<Pack>(
+        scalar, zero_fluxes, 0.5, 0.0, scalar_boundary,
+        scalar_first.matrix);
+    EXPECT_EQ(
+        scalar_second.matrix.getRawPtr(),
+        scalar_first.matrix.getRawPtr());
+
+    auto vector_first = SimpleFluid::FVM::transport_system<Pack>(
+        vector, zero_fluxes, 1.0, 1.0, vector_boundary);
+    auto vector_second = SimpleFluid::FVM::transport_system<Pack>(
+        vector, zero_fluxes, 0.25, 0.0, vector_boundary,
+        vector_first.matrix);
+    EXPECT_EQ(
+        vector_second.matrix.getRawPtr(),
+        vector_first.matrix.getRawPtr());
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++lid)
+    {
+        EXPECT_NEAR(
+            local_matrix_entry(*scalar_second.matrix, lid, lid),
+            mesh->cell_volume(lid) / 0.5,
+            1.0e-12);
+        EXPECT_NEAR(
+            local_matrix_entry(*vector_second.matrix, lid, lid),
+            mesh->cell_volume(lid) / 0.25,
+            1.0e-12);
+    }
+}
+
 // =========================================================================
 //  Periodic Boundary Condition Tests
 // =========================================================================

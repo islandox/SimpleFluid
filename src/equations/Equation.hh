@@ -473,20 +473,12 @@ private:
         const std::array<scalar_type,
                          value_traits::components>& values)
     {
-        if constexpr (value_traits::is_vector)
-        {
-            for (size_t component = 0;
-                 component < value_traits::components;
-                 ++component)
+        apply_rhs(
+            rhs, row, values,
+            [](auto& target, auto... arguments)
             {
-                rhs.replaceLocalValue(
-                    row, component, values[component]);
-            }
-        }
-        else
-        {
-            rhs.replaceLocalValue(row, values[0]);
-        }
+                target.replaceLocalValue(arguments...);
+            });
     }
 
     static void sum_rhs(
@@ -495,19 +487,35 @@ private:
         const std::array<scalar_type,
                          value_traits::components>& values)
     {
+        apply_rhs(
+            rhs, row, values,
+            [](auto& target, auto... arguments)
+            {
+                target.sumIntoLocalValue(arguments...);
+            });
+    }
+
+    template<class Operation>
+    static void apply_rhs(
+        rhs_type& rhs,
+        local_ordinal_type row,
+        const std::array<scalar_type,
+                         value_traits::components>& values,
+        Operation operation)
+    {
         if constexpr (value_traits::is_vector)
         {
             for (size_t component = 0;
                  component < value_traits::components;
                  ++component)
             {
-                rhs.sumIntoLocalValue(
-                    row, component, values[component]);
+                operation(
+                    rhs, row, component, values[component]);
             }
         }
         else
         {
-            rhs.sumIntoLocalValue(row, values[0]);
+            operation(rhs, row, values[0]);
         }
     }
 

@@ -198,8 +198,9 @@ auto PressureProjectionEquation<Pack>::project(
     pressure.owned_data().putScalar(0.0);
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix =
         d_cached_pressure_matrix;
-    if (!solve_linear_system<Pack>(const_matrix, *d_cached_rhs, pressure.owned_data(),
-                                   d_linear_options))
+    if (!d_linear_solver.solve(
+            const_matrix, *d_cached_rhs, pressure.owned_data(),
+            d_linear_options))
     {
         throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
     }
@@ -216,21 +217,27 @@ auto PressureProjectionEquation<Pack>::project(
 
     FVM::cell_gradient(pressure, d_cached_gradients);
 
-    // Correct velocity using Tpetra::MultiVector::update: V = V - dt * grad(p)
-    typename Pack::multi_vector_type gradient_mv(d_mesh->owned_cell_map(),
-                                                  velocity_field_type::num_components,
-                                                  true);
+    if (d_cached_gradient.is_null())
+    {
+        d_cached_gradient = Teuchos::rcp(
+            new typename Pack::multi_vector_type(
+                d_mesh->owned_cell_map(),
+                velocity_field_type::num_components,
+                true));
+    }
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto& gradient = d_cached_gradients[owned];
         for (size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
         {
-            gradient_mv.replaceLocalValue(cell_lid, comp,
-                                           FVM::detail::component_value(gradient, comp));
+            d_cached_gradient->replaceLocalValue(
+                cell_lid, comp,
+                FVM::detail::component_value(gradient, comp));
         }
     }
-    velocity.owned_data().update(-time_step, gradient_mv, 1.0);
+    velocity.owned_data().update(
+        -time_step, *d_cached_gradient, 1.0);
 
     d_mesh->sync_periodic_boundaries(velocity);
 

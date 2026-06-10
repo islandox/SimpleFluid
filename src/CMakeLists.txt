@@ -136,3 +136,14 @@ simplefluid_reuse_precompiled_header(natural_convection_sphere)
 add_executable(natural_convection_boundary_layer_box examples/natural_convection_boundary_layer_box.cc)
 target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
 simplefluid_reuse_precompiled_header(natural_convection_boundary_layer_box)
+
+foreach(EXAMPLE_TARGET IN ITEMS
+    natural_convection_box
+    natural_convection_cylinder
+    natural_convection_sphere
+    natural_convection_boundary_layer_box)
+  add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
+  set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
+      LABELS integration
+      WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+endforeach()

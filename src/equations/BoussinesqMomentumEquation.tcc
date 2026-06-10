@@ -198,8 +198,9 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
 
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto converged =
-            solve_linear_system<Pack>(matrix, *system.rhs,
-                                      velocity.owned_data(), linear_options);
+            d_linear_solver.solve(
+                matrix, *system.rhs,
+                velocity.owned_data(), linear_options);
         if (!converged)
         {
             throw std::runtime_error(

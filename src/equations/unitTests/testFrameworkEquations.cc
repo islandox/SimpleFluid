@@ -296,3 +296,73 @@ TEST(FrameworkEquationTest, DispatchesCustomCoupledBackend)
     EXPECT_TRUE(assembled.solve());
     EXPECT_TRUE(called);
 }
+
+TEST(FrameworkEquationTest, ValidatesOperatorConfiguration)
+{
+    auto mesh = make_cartesian_handle();
+    auto field = std::make_shared<ScalarStored>(
+        SimpleFluid::ScalarCellFieldDescriptor<Pack>("scalar"),
+        mesh);
+    ScalarEquation equation(field);
+
+    EXPECT_THROW(
+        equation.add_lhs(
+            SimpleFluid::FVM::TransientOperator<Pack>{
+                0.0, [](int, size_t) { return 0.0; }}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        equation.add_lhs(
+            SimpleFluid::FVM::ConvectionOperator<Pack>{}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        equation.add_lhs(
+            SimpleFluid::FVM::DiffusionOperator<Pack>{-1.0}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        equation.add_rhs(
+            SimpleFluid::FVM::SourceOperator<Pack>{}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        equation.add_lhs(SimpleFluid::FVM::GradientOperator{}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        equation.set_boundary_providers(
+            {}, [](int, size_t, size_t) { return 0.0; }),
+        std::invalid_argument);
+}
+
+TEST(FrameworkEquationTest, RejectsTermsOnWrongSideAndRobinBoundaries)
+{
+    auto mesh = make_cartesian_handle();
+    auto make_field = [&]
+    {
+        return std::make_shared<ScalarStored>(
+            SimpleFluid::ScalarCellFieldDescriptor<Pack>("scalar"),
+            mesh);
+    };
+
+    ScalarEquation source_on_lhs(make_field());
+    source_on_lhs.add_lhs(
+        SimpleFluid::FVM::SourceOperator<Pack>{
+            [](int, size_t) { return 1.0; }});
+    EXPECT_THROW(source_on_lhs.assemble(), std::invalid_argument);
+
+    ScalarEquation transient_on_rhs(make_field());
+    transient_on_rhs.add_rhs(
+        SimpleFluid::FVM::TransientOperator<Pack>{
+            1.0, [](int, size_t) { return 1.0; }});
+    EXPECT_THROW(transient_on_rhs.assemble(), std::invalid_argument);
+
+    ScalarEquation coupling(make_field());
+    coupling.add_lhs(
+        SimpleFluid::FVM::GradientOperator{"pressure"});
+    EXPECT_THROW(coupling.assemble(), std::logic_error);
+
+    ScalarEquation robin(make_field());
+    robin.add_lhs(
+        SimpleFluid::FVM::DiffusionOperator<Pack>{1.0});
+    robin.set_boundary_providers(
+        [](int) { return SimpleFluid::BoundaryConditionType::Robin; },
+        [](int, size_t, size_t) { return 0.0; });
+    EXPECT_THROW(robin.assemble(), std::runtime_error);
+}

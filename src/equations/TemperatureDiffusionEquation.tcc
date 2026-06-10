@@ -312,8 +312,9 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto converged =
-        solve_linear_system<Pack>(matrix, *system.rhs,
-                                  temperature.owned_data(), linear_options);
+        d_linear_solver.solve(
+            matrix, *system.rhs,
+            temperature.owned_data(), linear_options);
     if (!converged)
     {
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)

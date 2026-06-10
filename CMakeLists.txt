@@ -9,6 +9,18 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(SIMPLEFLUID_ENABLE_COVERAGE
+       "Build with compiler coverage instrumentation" OFF)
+if(SIMPLEFLUID_ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(--coverage -O0 -g)
+        add_link_options(--coverage)
+    else()
+        message(FATAL_ERROR
+            "SIMPLEFLUID_ENABLE_COVERAGE requires GCC or Clang")
+    endif()
+endif()
+
 # Profiling flags for RelWithDebInfo: preserve frame pointers for accurate
 # stack unwinding in performance profilers (Instruments, perf, etc.)
 # Also define NDEBUG to disable expensive debug-only bounds checks while

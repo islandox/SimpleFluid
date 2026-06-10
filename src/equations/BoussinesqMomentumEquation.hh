@@ -73,6 +73,7 @@ public:
 private:
     SP<const mesh_type> d_mesh;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
+    mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
 } // namespace SimpleFluid

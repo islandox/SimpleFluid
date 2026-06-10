@@ -96,6 +96,8 @@ private:
     mutable std::vector<typename mesh_type::Vec3> d_cached_gradients;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
+    mutable Teuchos::RCP<typename Pack::multi_vector_type> d_cached_gradient;
+    BelosLinearSolver<Pack> d_linear_solver;
 };
 
 } // namespace SimpleFluid
