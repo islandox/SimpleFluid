@@ -108,3 +108,35 @@ TEST(BelosLinearSolverTest, SolvesMultiVectorIdentitySystem)
         }
     }
 }
+
+TEST(BelosLinearSolverTest, ReusesSolverForChangedRightHandSide)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-14;
+
+    rhs.putScalar(2.0);
+    ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+    for (const auto value : solution.getData())
+    {
+        EXPECT_DOUBLE_EQ(value, 2.0);
+    }
+
+    rhs.putScalar(5.0);
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+    for (const auto value : solution.getData())
+    {
+        EXPECT_DOUBLE_EQ(value, 5.0);
+    }
+}

@@ -27,6 +27,70 @@
 
 namespace SimpleFluid::FVM
 {
+namespace detail
+{
+
+template<TpetraTypePack Pack>
+struct PreparedTransportMatrix
+{
+    Teuchos::RCP<typename Pack::matrix_type> matrix;
+    bool reused = false;
+};
+
+template<TpetraTypePack Pack, class MeshType>
+PreparedTransportMatrix<Pack> prepare_transport_matrix(
+    const MeshType& mesh,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    size_t entries_per_row)
+{
+    using matrix_type = typename Pack::matrix_type;
+
+    if (cached_matrix.is_null())
+    {
+        return {
+            Teuchos::rcp(new matrix_type(
+                mesh.owned_cell_map(),
+                mesh.overlap_cell_map(),
+                entries_per_row)),
+            false};
+    }
+    if (!cached_matrix->isFillComplete()
+        || !cached_matrix->getRowMap()->isSameAs(*mesh.owned_cell_map())
+        || !cached_matrix->getDomainMap()->isSameAs(*mesh.overlap_cell_map()))
+    {
+        throw std::invalid_argument(
+            "transport_system cached matrix is incompatible with the mesh.");
+    }
+
+    cached_matrix->resumeFill();
+    cached_matrix->setAllToScalar(typename Pack::scalar_type{});
+    return {cached_matrix, true};
+}
+
+template<TpetraTypePack Pack>
+void add_transport_values(
+    const PreparedTransportMatrix<Pack>& prepared,
+    typename Pack::local_ordinal_type row,
+    const Teuchos::ArrayView<const typename Pack::local_ordinal_type>& columns,
+    const Teuchos::ArrayView<const typename Pack::scalar_type>& values)
+{
+    if (!prepared.reused)
+    {
+        prepared.matrix->insertLocalValues(row, columns, values);
+        return;
+    }
+
+    const auto updated =
+        prepared.matrix->sumIntoLocalValues(row, columns, values);
+    if (updated != static_cast<typename Pack::local_ordinal_type>(
+                       columns.size()))
+    {
+        throw std::invalid_argument(
+            "transport_system cached matrix graph is incompatible with the operator.");
+    }
+}
+
+} // namespace detail
 
 /**
  * @brief Holds the assembled left-hand-side matrix and right-hand-side
@@ -77,8 +141,8 @@ struct VectorTransportSystem
  *        value for a face.
  * @param right_hand_source Callable that returns the per-unit-volume source
  *        term for an owned cell.
- * @param[in,out] cached_matrix Optional matrix cache; currently accepted
- *        for API symmetry with vector transport assembly.
+ * @param[in,out] cached_matrix Optional fill-complete matrix whose graph and
+ *        storage are reused when its maps match the mesh.
  * @return TransportSystem containing the assembled matrix and RHS vector.
  * @throws std::invalid_argument if @p face_fluxes is on a different mesh,
  *         @p time_step <= 0, or @p diffusivity < 0.
@@ -96,7 +160,6 @@ transport_system(const CellField<Pack>& old_values,
                  SourceProvider right_hand_source,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -117,9 +180,9 @@ transport_system(const CellField<Pack>& old_values,
 
     // Row map = owned cells; domain map = owned + ghost cells
     // so that neighbour columns on other ranks are valid.
-    auto matrix = Teuchos::rcp(
-        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 12));
-    (void)cached_matrix;
+    const auto prepared = detail::prepare_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 12);
+    const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(
         new typename Pack::vector_type(mesh.owned_cell_map(), true));
 
@@ -127,19 +190,20 @@ transport_system(const CellField<Pack>& old_values,
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
+    std::unordered_map<local_ordinal_type, scalar_type> row_values;
+    row_values.reserve(32);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
-        cols.clear();
-        vals.clear();
         const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
-        scalar_type diagonal = transient;
         const auto old_value = old_values.value(cell_lid);
         scalar_type rhs_value =
             transient * old_value + volume * right_hand_source(cell_lid);
+        row_values.clear();
+        detail::add_matrix_entry(row_values, cell_lid, transient);
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
@@ -154,36 +218,46 @@ transport_system(const CellField<Pack>& old_values,
 
             if (out_flux >= scalar_type{0})
             {
-                diagonal += out_flux;
+                detail::add_matrix_entry(
+                    row_values, cell_lid, out_flux);
             }
             else if (mesh.is_interior_face(face_lid))
             {
                 const auto other =
                     mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                cols.push_back(other);
-                vals.push_back(out_flux);
+                detail::add_matrix_entry(row_values, other, out_flux);
             }
 
             // === diffusion ===
-            if (diffusivity <= scalar_type{0}
-                || !mesh.is_interior_face(face_lid))
+            if (!mesh.is_interior_face(face_lid))
             {
                 continue;
             }
 
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            row_values.try_emplace(other, scalar_type{});
+            if (diffusivity <= scalar_type{0})
+            {
+                continue;
+            }
+
             const auto coeff =
                 detail::interior_diffusion_coefficient(
                     mesh, face_lid, cell_lid, other, diffusivity);
-            diagonal += coeff;
-            cols.push_back(other);
-            vals.push_back(-coeff);
+            detail::add_matrix_entry(row_values, cell_lid, coeff);
+            detail::add_matrix_entry(row_values, other, -coeff);
         }
 
-        cols.push_back(cell_lid);
-        vals.push_back(diagonal);
-        matrix->insertLocalValues(cell_lid, cols(), vals());
+        cols.clear();
+        vals.clear();
+        for (const auto& [column, value] : row_values)
+        {
+            cols.push_back(column);
+            vals.push_back(value);
+        }
+        detail::add_transport_values<Pack>(
+            prepared, cell_lid, cols(), vals());
         rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
@@ -271,7 +345,7 @@ transport_system(const CellField<Pack>& old_values,
  * @param diffusivity Constant scalar diffusivity (non-negative).
  * @param boundary_value Callable that returns the prescribed boundary
  *        value for a face.
- * @param cached_matrix Optional matrix cache (reserved for future use).
+ * @param cached_matrix Optional fill-complete matrix cache.
  * @return TransportSystem containing the assembled matrix and RHS vector.
  */
 template<TpetraTypePack Pack, class BoundaryValueProvider>
@@ -320,8 +394,8 @@ transport_system(const CellField<Pack>& old_values,
  *        vector value for a face.
  * @param right_hand_source Callable that returns the per-unit-volume source
  *        vector for an owned cell.
- * @param[in,out] cached_matrix Optional matrix cache; currently accepted
- *        for API symmetry with scalar transport assembly.
+ * @param[in,out] cached_matrix Optional fill-complete matrix whose graph and
+ *        storage are reused when its maps match the mesh.
  * @return VectorTransportSystem containing the assembled matrix and
  *         three-column RHS.
  * @throws std::invalid_argument if @p face_fluxes is on a different mesh,
@@ -340,7 +414,6 @@ transport_system(const VectorCellField<Pack>& old_values,
                  SourceProvider right_hand_source,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -361,9 +434,9 @@ transport_system(const VectorCellField<Pack>& old_values,
         throw std::invalid_argument("transport_system requires non-negative diffusivity.");
     }
 
-    auto matrix = Teuchos::rcp(
-        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 12));
-    (void)cached_matrix;
+    const auto prepared = detail::prepare_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 12);
+    const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(
         new typename Pack::multi_vector_type(
             mesh.owned_cell_map(), num_components, true));
@@ -372,18 +445,19 @@ transport_system(const VectorCellField<Pack>& old_values,
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
+    std::unordered_map<local_ordinal_type, scalar_type> row_values;
+    row_values.reserve(32);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
-        cols.clear();
-        vals.clear();
         const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
-        scalar_type diagonal = transient;
         const auto old_value = old_values.value(cell_lid);
         const auto source_value = right_hand_source(cell_lid);
+        row_values.clear();
+        detail::add_matrix_entry(row_values, cell_lid, transient);
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
@@ -397,35 +471,45 @@ transport_system(const VectorCellField<Pack>& old_values,
 
             if (out_flux >= scalar_type{0})
             {
-                diagonal += out_flux;
+                detail::add_matrix_entry(
+                    row_values, cell_lid, out_flux);
             }
             else if (mesh.is_interior_face(face_lid))
             {
                 const auto other =
                     mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                cols.push_back(other);
-                vals.push_back(out_flux);
+                detail::add_matrix_entry(row_values, other, out_flux);
             }
 
-            if (diffusivity <= scalar_type{0}
-                || !mesh.is_interior_face(face_lid))
+            if (!mesh.is_interior_face(face_lid))
             {
                 continue;
             }
 
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            row_values.try_emplace(other, scalar_type{});
+            if (diffusivity <= scalar_type{0})
+            {
+                continue;
+            }
+
             const auto coeff =
                 detail::interior_diffusion_coefficient(
                     mesh, face_lid, cell_lid, other, diffusivity);
-            diagonal += coeff;
-            cols.push_back(other);
-            vals.push_back(-coeff);
+            detail::add_matrix_entry(row_values, cell_lid, coeff);
+            detail::add_matrix_entry(row_values, other, -coeff);
         }
 
-        cols.push_back(cell_lid);
-        vals.push_back(diagonal);
-        matrix->insertLocalValues(cell_lid, cols(), vals());
+        cols.clear();
+        vals.clear();
+        for (const auto& [column, value] : row_values)
+        {
+            cols.push_back(column);
+            vals.push_back(value);
+        }
+        detail::add_transport_values<Pack>(
+            prepared, cell_lid, cols(), vals());
         for (size_t comp = 0; comp < num_components; ++comp)
         {
             rhs->replaceLocalValue(cell_lid, comp,
@@ -529,7 +613,6 @@ non_orthogonal_transport_system(
     const VectorCellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -575,14 +658,12 @@ non_orthogonal_transport_system(
     }
 
     const auto gradient_stencils =
-        implicit_weight > scalar_type{0}
-      ? detail::least_squares_gradient_stencils(mesh)
-      : std::vector<detail::LeastSquaresGradientStencil<Mesh<Pack>>>{};
+        detail::least_squares_gradient_stencils(mesh);
     const auto boundary_locations = detail::boundary_face_locations(mesh);
 
-    auto matrix = Teuchos::rcp(
-        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 32));
-    (void)cached_matrix;
+    const auto prepared = detail::prepare_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 32);
+    const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(
         new typename Pack::multi_vector_type(
             mesh.owned_cell_map(), num_components, true));
@@ -618,8 +699,7 @@ non_orthogonal_transport_system(
                 scalar_type face_gradient_weight,
                 const typename Mesh<Pack>::Vec3& tangential_area)
         {
-            if (implicit_weight == scalar_type{0}
-                || face_gradient_weight == scalar_type{0}
+            if (face_gradient_weight == scalar_type{0}
                 || !mesh.is_owned_cell(gradient_cell_lid)
                 || static_cast<size_t>(gradient_cell_lid)
                    >= gradient_stencils.size())
@@ -684,6 +764,7 @@ non_orthogonal_transport_system(
             {
                 const auto other =
                     mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                row_values.try_emplace(other, scalar_type{});
                 const auto coeff =
                     detail::interior_diffusion_coefficient(
                         mesh, face_lid, cell_lid, other, diffusivity);
@@ -757,7 +838,8 @@ non_orthogonal_transport_system(
             vals.push_back(value);
         }
 
-        matrix->insertLocalValues(cell_lid, cols(), vals());
+        detail::add_transport_values<Pack>(
+            prepared, cell_lid, cols(), vals());
     }
 
     if (correction_field != nullptr && explicit_weight > scalar_type{0})
