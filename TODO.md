@@ -2,16 +2,16 @@
 
 ## Phase -1 — Framework refactoring
 
-- [ ] CRTP Mesh:
+- [x] CRTP Mesh:
   - Cartesian 3D
   - Orthogonal cylinder 3D
   - XY*Z prisms
-  - Arbitary polygonals
-  - std::variant holder for Fields, FVM Operators and Problems.
-- [ ] Field classes and mesh-aware FieldStored classes.
-- [ ] Equation class from field and operators.
-- [ ] AssembledEquation classes holding fields with solve interface, supporting Equation and coupled equations.
-- [ ] Problem class holding all the needed data for solving a problem like meshes, fields, equations, boundary conditions, coupled equations, etc.
+  - Arbitrary polygonals through the STK adapter
+  - `std::variant` mesh handle for fields, FVM operators, and problems.
+- [x] Field classes and mesh-aware `FieldStored` classes.
+- [x] Equation class from fields and operators.
+- [x] `AssembledEquation` classes holding fields with solve interfaces, supporting scalar/vector equations and coupled equations.
+- [x] `Problem` class holding meshes, fields, equations, boundary conditions, assembled equations, coupled equations, and solver/time options.
 
 
 ## Phase 0 — Baseline infrastructure

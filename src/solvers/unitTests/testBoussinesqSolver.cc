@@ -306,6 +306,42 @@ TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
     std::filesystem::remove(output_file);
 }
 
+TEST(BoussinesqSolverTest, RunsCartesianCRTPMeshSmokeCase)
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 0.5, 1.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
+    auto mesh =
+        std::make_shared<SimpleFluid::MeshHandle<Pack>>(cartesian);
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    bcs.temperature["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 1;
+    time_options.thermal_diffusivity = 1.0e-2;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, bcs, time_options);
+    solver.initialize_heated_box(1.0, 0.0);
+    solver.run();
+
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_TRUE(std::isfinite(solver.temperature().value(0)));
+    EXPECT_TRUE(std::isfinite(solver.pressure().value(0)));
+    const auto velocity = solver.velocity().value(0);
+    EXPECT_TRUE(std::isfinite(velocity.x));
+    EXPECT_TRUE(std::isfinite(velocity.y));
+    EXPECT_TRUE(std::isfinite(velocity.z));
+}
+
 /**
  * @brief Runs a bottom-hot cylinder vessel simulation for 2 steps.
  */

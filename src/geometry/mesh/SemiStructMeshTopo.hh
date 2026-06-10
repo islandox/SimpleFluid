@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 /**
@@ -33,6 +33,8 @@ public:
     using BoundaryPatch = BoundaryFacePatch<FaceID>;
     using BoundaryPatchMap = std::unordered_map<int, BoundaryPatch>;
     using BoundaryNames = std::unordered_map<int, std::string>;
+    using CellPatch = std::vector<CellID>;
+    using NeighborCells = std::vector<CellID>;
 
     static constexpr int invalid_boundary_id = -1;
     static constexpr Ordinal invalid_ordinal =
@@ -78,6 +80,14 @@ public:
     std::vector<FaceID> cell_faces(CellID cell_id) const;
     CellID owner_cell(FaceID face_id) const noexcept;
     CellID neighbor_cell(FaceID face_id) const noexcept;
+    const CellPatch& interior_cell_patch() const noexcept
+    {
+        return d_interior_cell_patch;
+    }
+    const NeighborCells& neighbor_cells(CellID cell_id) const noexcept
+    {
+        return d_neighbor_cells[d_indexer.cell_local_id(cell_id)];
+    }
 
     bool is_boundary_face(FaceID face_id) const noexcept;
     int boundary_id(FaceID face_id) const noexcept;
@@ -87,19 +97,24 @@ public:
     {
         return d_boundary_patches;
     }
+    std::vector<int> boundary_patch_ids() const;
+    int num_boundary_patches() const noexcept;
 
 private:
     void build_base_topology(
         Ordinal nodes_per_layer,
         const Arr<Arr<Ordinal>>& cell_nodes,
         const Arr<BoundaryEdge>& boundary_edges);
+    void initialize_cell_adjacency();
     void initialize_boundary_patches();
 
     Indexer d_indexer;
     Arr<SideFace> d_side_faces;
     Arr<Arr<Ordinal>> d_cell_side_faces;
+    CellPatch d_interior_cell_patch;
+    std::vector<NeighborCells> d_neighbor_cells;
     BoundaryNames d_boundary_names;
     BoundaryPatchMap d_boundary_patches;
 };
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

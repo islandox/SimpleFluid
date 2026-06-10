@@ -13,7 +13,7 @@
 #include <cstddef>
 #include <compare>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 /**
@@ -100,12 +100,9 @@ private:
 
     int boundary_id_impl(face_id_t face_id) const;
     const std::string& boundary_patch_name_impl(int patch_id) const;
-    const BoundaryFacePatch& boundary_face_patch_impl(int patch_id) const;
-    const std::unordered_map<int, BoundaryFacePatch>&
-    boundary_patches_impl() const noexcept
-    {
-        return d_topology.boundary_patches();
-    }
+    auto boundary_face_patch_impl(int patch_id) const;
+    auto boundary_patch_ids_impl() const;
+    int num_boundary_patches_impl() const noexcept;
 
     Vec3D<Arr<real_t>> d_cell_edges;
     Vec3D<Arr<real_t>> d_cell_centroids;

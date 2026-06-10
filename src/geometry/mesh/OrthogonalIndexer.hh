@@ -13,7 +13,7 @@
 
 #include "dataclass/typedefs.hh"
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 /**
@@ -251,4 +251,4 @@ struct OrthogonalIndexer
     }
 };
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 namespace
 {
@@ -108,10 +108,4 @@ OrthogonalCartesian3D::boundary_patch_name_impl(int patch_id) const
     return d_topology.boundary_patch_name(patch_id);
 }
 
-const OrthogonalCartesian3D::BoundaryFacePatch&
-OrthogonalCartesian3D::boundary_face_patch_impl(int patch_id) const
-{
-    return d_topology.boundary_face_patch(patch_id);
-}
-
-} // namespace SimpleFluid
+} // namespace SimpleFluid::Meshes

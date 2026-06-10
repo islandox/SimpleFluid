@@ -46,7 +46,7 @@ void run_boussinesq_example(
     const std::string& vtu_filename)
 {
     MeshFactory factory(db);
-    auto mesh = factory.build<Pack>();
+    auto mesh = factory.build_handle<Pack>();
 
     BoussinesqSolver<Pack> solver(mesh, boundary_conditions,
                                   time_options, linear_options);

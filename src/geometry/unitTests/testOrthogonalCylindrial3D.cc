@@ -9,13 +9,14 @@
 
 #include <cmath>
 #include <numbers>
+#include <ranges>
 #include <stdexcept>
 #include <type_traits>
 
 namespace
 {
 
-using Mesh = SimpleFluid::Mesh::OrthogonalCylindrial3D;
+using Mesh = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using CellID = Mesh::CellID;
 using FaceID = Mesh::FaceID;
 using NodeID = Mesh::NodeID;
@@ -42,8 +43,8 @@ Mesh make_periodic_mesh()
 } // namespace
 
 static_assert(std::is_same_v<
-              SimpleFluid::Mesh::OrthogonalCylindrical3D,
-              SimpleFluid::Mesh::OrthogonalCylindrial3D>);
+              SimpleFluid::Meshes::OrthogonalCylindrical3D,
+              SimpleFluid::Meshes::OrthogonalCylindrial3D>);
 
 TEST(OrthogonalCylindrial3DTest, RejectsInvalidCoordinates)
 {
@@ -123,7 +124,7 @@ TEST(OrthogonalCylindrial3DTest, BuildsSectorBoundaryPatches)
 {
     const auto mesh = make_sector_mesh();
 
-    EXPECT_EQ(mesh.boundary_patches().size(), 6U);
+    EXPECT_EQ(mesh.num_boundary_patches(), 6);
     EXPECT_EQ(mesh.boundary_patch_name(0), "rmin");
     EXPECT_EQ(mesh.boundary_patch_name(1), "rmax");
     EXPECT_EQ(mesh.boundary_patch_name(2), "thetamin");
@@ -131,12 +132,12 @@ TEST(OrthogonalCylindrial3DTest, BuildsSectorBoundaryPatches)
     EXPECT_EQ(mesh.boundary_patch_name(4), "zmin");
     EXPECT_EQ(mesh.boundary_patch_name(5), "zmax");
 
-    EXPECT_EQ(mesh.boundary_face_patch(0).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(1).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(2).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(3).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(4).face_lids.size(), 4U);
-    EXPECT_EQ(mesh.boundary_face_patch(5).face_lids.size(), 4U);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(0)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(1)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(2)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(3)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(4)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(5)), 4);
 
     const FaceID theta_min{0, 0, 0, Mesh::THETA_FACE};
     EXPECT_EQ(mesh.boundary_name(theta_min), "thetamin");
@@ -152,7 +153,7 @@ TEST(OrthogonalCylindrial3DTest, ConnectsFullCirclePeriodically)
     EXPECT_EQ(mesh.num_cells(), 2U);
     EXPECT_EQ(mesh.num_faces(), 10U);
     EXPECT_EQ(mesh.num_nodes(), 8U);
-    EXPECT_EQ(mesh.boundary_patches().size(), 4U);
+    EXPECT_EQ(mesh.num_boundary_patches(), 4);
     EXPECT_THROW(mesh.boundary_face_patch(2), std::out_of_range);
 
     EXPECT_TRUE(mesh.is_interior_face(seam));

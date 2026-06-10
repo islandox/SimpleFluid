@@ -11,6 +11,7 @@
 #pragma once
 
 #include "Mesh.hh"
+#include "MeshHandle.hh"
 #include "STKMesh.hh"
 #include "dataclass/Database.hh"
 
@@ -43,6 +44,9 @@ public:
 
     template <TpetraTypePack Pack = DefaultTpetraTypes>
     SP<Mesh<Pack>> build();
+
+    template <TpetraTypePack Pack = DefaultTpetraTypes>
+    SP<MeshHandle<Pack>> build_handle();
 
     template <TpetraTypePack Pack = DefaultTpetraTypes>
     static SP<Mesh<Pack>> build_empty_mesh();

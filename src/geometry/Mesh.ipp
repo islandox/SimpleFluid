@@ -123,6 +123,13 @@ inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const gl
 }
 
 template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::face_global_id(local_ordinal_type lid) const -> const global_ordinal_type&
+{
+    check_face(lid);
+    return d_owned_face_global_ids[static_cast<size_t>(lid)];
+}
+
+template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::node_coord(global_ordinal_type node_gid) const -> const Vec3&
 {
     const auto iter = d_node_gid_to_lid.find(node_gid);

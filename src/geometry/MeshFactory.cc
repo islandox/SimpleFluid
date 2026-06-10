@@ -458,6 +458,12 @@ SP<Mesh<Pack>> MeshFactory::build()
     return mesh;
 }
 
+template <TpetraTypePack Pack>
+SP<MeshHandle<Pack>> MeshFactory::build_handle()
+{
+    return std::make_shared<MeshHandle<Pack>>(build<Pack>());
+}
+
 /**
  * @brief Build a structured hexahedral mesh for a BOX domain.
  *
@@ -1126,5 +1132,7 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
 }
 
 template SP<Mesh<DefaultTpetraTypes>> MeshFactory::build<DefaultTpetraTypes>();
+template SP<MeshHandle<DefaultTpetraTypes>>
+MeshFactory::build_handle<DefaultTpetraTypes>();
 
 } 

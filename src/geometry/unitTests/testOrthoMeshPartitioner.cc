@@ -12,7 +12,7 @@
 namespace
 {
 
-using Partitioner = SimpleFluid::Mesh::OrthoMeshPartitioner;
+using Partitioner = SimpleFluid::Meshes::OrthoMeshPartitioner;
 using Topology = Partitioner::Topology;
 using Indexer = Partitioner::Indexer;
 using CellID = Partitioner::CellID;

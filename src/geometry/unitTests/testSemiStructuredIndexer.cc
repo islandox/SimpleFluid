@@ -12,7 +12,7 @@
 namespace
 {
 
-using Indexer = SimpleFluid::Mesh::SemiStructuredIndexer;
+using Indexer = SimpleFluid::Meshes::SemiStructuredIndexer;
 using CellID = Indexer::CellID;
 using FaceID = Indexer::FaceID;
 using NodeID = Indexer::NodeID;

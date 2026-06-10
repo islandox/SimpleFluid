@@ -12,7 +12,7 @@
 namespace
 {
 
-using Topology = SimpleFluid::Mesh::SemiStructMeshTopo;
+using Topology = SimpleFluid::Meshes::SemiStructMeshTopo;
 using Indexer = Topology::Indexer;
 using CellID = Topology::CellID;
 using FaceID = Topology::FaceID;
@@ -29,6 +29,19 @@ Topology make_topology(bool axial_periodic = false)
             {2, 3, "ymax"},
             {3, 0, "xmin"}},
         axial_periodic);
+}
+
+Topology make_topology_with_interior_cell()
+{
+    return Topology(
+        12,
+        {
+            {0, 1, 2, 3},
+            {4, 5, 1, 0},
+            {1, 6, 7, 2},
+            {3, 2, 8, 9},
+            {10, 0, 3, 11}},
+        3);
 }
 
 } // namespace
@@ -104,6 +117,29 @@ TEST(SemiStructMeshTopoTest, BuildsBoundaryPatches)
     EXPECT_THROW(topology.boundary_face_patch(6), std::out_of_range);
 }
 
+TEST(SemiStructMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
+{
+    const auto topology = make_topology_with_interior_cell();
+
+    ASSERT_EQ(topology.interior_cell_patch().size(), 1U);
+    EXPECT_EQ(topology.interior_cell_patch()[0], (CellID{0, 1}));
+    EXPECT_EQ(
+        topology.neighbor_cells(CellID{0, 1}),
+        (Topology::NeighborCells{
+            {0, 0},
+            {0, 2},
+            {1, 1},
+            {2, 1},
+            {3, 1},
+            {4, 1}}));
+
+    EXPECT_EQ(
+        topology.neighbor_cells(CellID{1, 0}),
+        (Topology::NeighborCells{
+            {1, 1},
+            {0, 0}}));
+}
+
 TEST(SemiStructMeshTopoTest, WrapsAxialFacesPeriodically)
 {
     const Topology topology(
@@ -124,6 +160,10 @@ TEST(SemiStructMeshTopoTest, WrapsAxialFacesPeriodically)
     EXPECT_EQ(topology.boundary_patches().size(), 1U);
     EXPECT_EQ(topology.boundary_face_patch(2).face_lids.size(), 6U);
     EXPECT_THROW(topology.boundary_face_patch(0), std::out_of_range);
+    EXPECT_TRUE(topology.interior_cell_patch().empty());
+    EXPECT_EQ(
+        topology.neighbor_cells(CellID{0, 0}),
+        (Topology::NeighborCells{{0, 1}, {0, 1}}));
 }
 
 TEST(SemiStructMeshTopoTest, RejectsInvalidBaseTopology)

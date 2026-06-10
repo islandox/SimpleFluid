@@ -18,9 +18,9 @@
 namespace
 {
 
-using Cartesian = SimpleFluid::Mesh::OrthogonalCartesian3D;
-using Cylindrical = SimpleFluid::Mesh::OrthogonalCylindrial3D;
-using SemiStructured = SimpleFluid::Mesh::SemiStructuredXY_Z;
+using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
+using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
+using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 
 template<class Mesh>
 void expect_local_identifier_interface(const Mesh& mesh)
@@ -113,17 +113,39 @@ void expect_fvm_geometry_helpers(const Mesh& mesh)
     const auto locations =
         SimpleFluid::FVM::detail::boundary_face_locations(mesh);
     EXPECT_EQ(locations.size(), mesh.num_faces());
-    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+
+    if constexpr (std::ranges::range<
+                      decltype(mesh.boundary_face_patch(0))>)
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < patch.face_lids.size();
-             ++in_patch_id)
+        // View-based API
+        for (int patch_id : mesh.boundary_patch_ids())
         {
-            const auto face_lid =
-                mesh.face_local_id(patch.face_lids[in_patch_id]);
-            EXPECT_TRUE(locations[face_lid].active);
-            EXPECT_EQ(locations[face_lid].patch_id, patch_id);
-            EXPECT_EQ(locations[face_lid].in_patch_id, in_patch_id);
+            size_t in_patch_id = 0;
+            for (auto face_id : mesh.boundary_face_patch(patch_id))
+            {
+                const auto face_lid = mesh.face_local_id(face_id);
+                EXPECT_TRUE(locations[face_lid].active);
+                EXPECT_EQ(locations[face_lid].patch_id, patch_id);
+                EXPECT_EQ(locations[face_lid].in_patch_id, in_patch_id);
+                ++in_patch_id;
+            }
+        }
+    }
+    else
+    {
+        // Legacy materialized API
+        for (const auto& [patch_id, patch] : mesh.boundary_patches())
+        {
+            for (size_t in_patch_id = 0;
+                 in_patch_id < patch.face_lids.size();
+                 ++in_patch_id)
+            {
+                const auto face_lid =
+                    mesh.face_local_id(patch.face_lids[in_patch_id]);
+                EXPECT_TRUE(locations[face_lid].active);
+                EXPECT_EQ(locations[face_lid].patch_id, patch_id);
+                EXPECT_EQ(locations[face_lid].in_patch_id, in_patch_id);
+            }
         }
     }
 }

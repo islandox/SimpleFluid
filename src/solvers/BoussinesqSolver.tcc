@@ -10,6 +10,7 @@
  */
 
 #include "BoussinesqSolver.hh"
+#include "geometry/MeshFactory.hh"
 
 namespace SimpleFluid
 {
@@ -27,6 +28,53 @@ auto BoussinesqSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
 {
     return EquationValidation::require_non_null_mesh(
         std::move(mesh), "BoussinesqSolver");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::require_legacy_mesh(
+    const SP<const MeshHandle<Pack>>& mesh) -> SP<const mesh_type>
+{
+    if (!mesh)
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver requires a non-null mesh handle.");
+    }
+    auto legacy = mesh->legacy_mesh();
+    if (legacy)
+    {
+        return legacy;
+    }
+
+    const auto* cartesian =
+        std::get_if<typename MeshHandle<Pack>::CartesianPtr>(
+            &mesh->variant());
+    if (!cartesian)
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver currently supports STK and Cartesian "
+            "mesh handles.");
+    }
+    if (mesh->num_owned_cells() != (*cartesian)->num_cells())
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver Cartesian compatibility currently "
+            "requires a serial mesh.");
+    }
+
+    auto database = std::make_shared<Database>();
+    database->set("dimension", 3);
+    database->set("mesh_size", real_t{1.0});
+    database->set(
+        "domain_type",
+        static_cast<int>(MeshFactory::DomainType::BOX));
+    database->set("X", ArrReal((*cartesian)->cell_edges()[0]));
+    database->set("Y", ArrReal((*cartesian)->cell_edges()[1]));
+    database->set("Z", ArrReal((*cartesian)->cell_edges()[2]));
+    database->set(
+        "domain_exterior_face_types",
+        ArrString{
+            "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+    return MeshFactory(database).template build<Pack>();
 }
 
 /**
@@ -47,28 +95,186 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     BoundaryConditionSet boundary_conditions,
     TimeStepperOptions time_options,
     LinearSolverOptions linear_options)
-    : d_mesh(require_mesh(std::move(mesh))),
-      d_boundary_conditions(std::move(boundary_conditions)),
-      d_time_options(time_options),
-      d_linear_options(linear_options),
-      d_velocity_boundary_cache(
-          FVM::cache_velocity_boundary_conditions<Pack>(
-              d_mesh, d_boundary_conditions)),
-      d_temperature_equation(d_mesh, d_boundary_conditions),
-      d_momentum_equation(d_mesh),
-      d_pressure_projection(d_mesh, d_linear_options),
-      d_temperature(d_mesh, "temperature"),
-      d_pressure(d_mesh, "pressure"),
-      d_pressure_correction(d_mesh, "pressure_correction"),
-      d_velocity(d_mesh, "velocity"),
-      d_predictor_velocity(d_mesh, "pressure_velocity_predictor"),
-      d_old_face_fluxes(d_mesh, "old_face_flux"),
-      d_projected_face_fluxes(d_mesh, "projected_face_flux")
+    : BoussinesqSolver(
+          std::make_shared<MeshHandle<Pack>>(
+              require_mesh(std::move(mesh))),
+          std::move(boundary_conditions),
+          time_options,
+          linear_options)
 {
-    if (d_time_options.time_step <= 0.0)
+}
+
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(
+    SP<const MeshHandle<Pack>> mesh,
+    BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options,
+    LinearSolverOptions linear_options)
+    : d_mesh(require_legacy_mesh(mesh)),
+      d_problem(std::make_shared<MeshHandle<Pack>>(d_mesh),
+                std::move(boundary_conditions),
+                time_options,
+                linear_options)
+{
+    if (d_problem.time_options().time_step <= 0.0)
     {
         throw std::invalid_argument("BoussinesqSolver requires a positive time step.");
     }
+
+    d_problem.template emplace_object<FVM::VelocityBoundaryCache<Pack>>(
+        "velocity_boundary_cache",
+        FVM::cache_velocity_boundary_conditions<Pack>(
+            d_mesh, d_problem.boundary_conditions()));
+    d_problem.template emplace_object<TemperatureDiffusionEquation<Pack>>(
+        "temperature_equation",
+        d_mesh,
+        d_problem.boundary_conditions());
+    d_problem.template emplace_object<BoussinesqMomentumEquation<Pack>>(
+        "momentum_equation", d_mesh);
+    d_problem.template emplace_object<PressureProjectionEquation<Pack>>(
+        "pressure_projection", d_mesh, d_problem.linear_options());
+    d_problem.template emplace_object<field_type>(
+        "temperature", d_mesh, "temperature");
+    d_problem.template emplace_object<field_type>(
+        "pressure", d_mesh, "pressure");
+    d_problem.template emplace_object<field_type>(
+        "pressure_correction", d_mesh, "pressure_correction");
+    d_problem.template emplace_object<velocity_field_type>(
+        "velocity", d_mesh, "velocity");
+    d_problem.template emplace_object<velocity_field_type>(
+        "pressure_velocity_predictor",
+        d_mesh,
+        "pressure_velocity_predictor");
+    d_problem.template emplace_object<face_flux_field_type>(
+        "old_face_flux", d_mesh, "old_face_flux");
+    d_problem.template emplace_object<face_flux_field_type>(
+        "projected_face_flux", d_mesh, "projected_face_flux");
+    d_problem.template emplace_object<residual_type>(
+        "pressure_velocity_residuals");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::temperature() const noexcept
+    -> const field_type&
+{
+    return d_problem.template object<field_type>("temperature");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure() const noexcept
+    -> const field_type&
+{
+    return d_problem.template object<field_type>("pressure");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::velocity() const noexcept
+    -> const velocity_field_type&
+{
+    return d_problem.template object<velocity_field_type>("velocity");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::temperature() noexcept -> field_type&
+{
+    return d_problem.template object<field_type>("temperature");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure() noexcept -> field_type&
+{
+    return d_problem.template object<field_type>("pressure");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::velocity() noexcept
+    -> velocity_field_type&
+{
+    return d_problem.template object<velocity_field_type>("velocity");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::last_pressure_velocity_residuals()
+    const noexcept -> const residual_type&
+{
+    return pressure_velocity_residuals();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::temperature_equation()
+    -> TemperatureDiffusionEquation<Pack>&
+{
+    return d_problem.template object<
+        TemperatureDiffusionEquation<Pack>>("temperature_equation");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::momentum_equation()
+    -> BoussinesqMomentumEquation<Pack>&
+{
+    return d_problem.template object<
+        BoussinesqMomentumEquation<Pack>>("momentum_equation");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure_projection()
+    -> PressureProjectionEquation<Pack>&
+{
+    return d_problem.template object<
+        PressureProjectionEquation<Pack>>("pressure_projection");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::velocity_boundary_cache()
+    -> FVM::VelocityBoundaryCache<Pack>&
+{
+    return d_problem.template object<
+        FVM::VelocityBoundaryCache<Pack>>("velocity_boundary_cache");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure_correction() -> field_type&
+{
+    return d_problem.template object<field_type>("pressure_correction");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::predictor_velocity()
+    -> velocity_field_type&
+{
+    return d_problem.template object<velocity_field_type>(
+        "pressure_velocity_predictor");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::old_face_fluxes()
+    -> face_flux_field_type&
+{
+    return d_problem.template object<face_flux_field_type>("old_face_flux");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::projected_face_fluxes()
+    -> face_flux_field_type&
+{
+    return d_problem.template object<face_flux_field_type>(
+        "projected_face_flux");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure_velocity_residuals()
+    -> residual_type&
+{
+    return d_problem.template object<residual_type>(
+        "pressure_velocity_residuals");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure_velocity_residuals()
+    const -> const residual_type&
+{
+    return d_problem.template object<residual_type>(
+        "pressure_velocity_residuals");
 }
 
 /**
@@ -103,21 +309,21 @@ void BoussinesqSolver<Pack>::run_momentum_predictor()
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        d_predictor_velocity.set_value(cell_lid, d_velocity.value(cell_lid));
+        predictor_velocity().set_value(cell_lid, velocity().value(cell_lid));
     }
-    d_mesh->sync_periodic_boundaries(d_predictor_velocity);
+    d_mesh->sync_periodic_boundaries(predictor_velocity());
 
-    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
-                              d_old_face_fluxes);
-    d_momentum_equation.advance_velocity(d_velocity,
-                                         d_old_face_fluxes,
-                                         d_temperature,
-                                         d_velocity_boundary_cache,
-                                         d_time_options,
-                                         d_velocity,
-                                         d_linear_options);
-    d_last_pressure_velocity_residuals.momentum =
-        velocity_update_norm(d_predictor_velocity, d_velocity);
+    FVM::face_fluxes(velocity(), velocity_boundary_cache(),
+                              old_face_fluxes());
+    momentum_equation().advance_velocity(velocity(),
+                                         old_face_fluxes(),
+                                         temperature(),
+                                         velocity_boundary_cache(),
+                                         d_problem.time_options(),
+                                         velocity(),
+                                         d_problem.linear_options());
+    pressure_velocity_residuals().momentum =
+        velocity_update_norm(predictor_velocity(), velocity());
 }
 
 /**
@@ -128,12 +334,12 @@ auto BoussinesqSolver<Pack>::run_pressure_correction()
     -> typename PressureProjectionEquation<Pack>::ProjectionResult
 {
     const auto result =
-        d_pressure_projection.project(d_pressure_correction,
-                                      d_time_options.time_step,
-                                      d_velocity_boundary_cache,
-                                      d_velocity);
-    d_pressure.owned_data().update(1.0, d_pressure_correction.owned_data(), 1.0);
-    d_mesh->sync_periodic_boundaries(d_pressure);
+        pressure_projection().project(pressure_correction(),
+                                      d_problem.time_options().time_step,
+                                      velocity_boundary_cache(),
+                                      velocity());
+    pressure().owned_data().update(1.0, pressure_correction().owned_data(), 1.0);
+    d_mesh->sync_periodic_boundaries(pressure());
     return result;
 }
 
@@ -143,26 +349,26 @@ auto BoussinesqSolver<Pack>::run_pressure_correction()
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
 {
-    if (d_time_options.n_pressure_correctors < 1)
+    if (d_problem.time_options().n_pressure_correctors < 1)
     {
         throw std::invalid_argument(
             "BoussinesqSolver requires at least one pressure corrector.");
     }
-    if (d_time_options.n_outer_correctors < 1)
+    if (d_problem.time_options().n_outer_correctors < 1)
     {
         throw std::invalid_argument(
             "BoussinesqSolver requires at least one outer corrector.");
     }
 
-    d_last_pressure_velocity_residuals = {};
+    pressure_velocity_residuals() = {};
 
     const auto pressure_corrections =
-        d_time_options.pressure_velocity_coupling == PressureVelocityCoupling::SIMPLE
+        d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::SIMPLE
       ? 1
-      : d_time_options.n_pressure_correctors;
+      : d_problem.time_options().n_pressure_correctors;
     const auto outer_corrections =
-        d_time_options.pressure_velocity_coupling == PressureVelocityCoupling::PIMPLE
-      ? d_time_options.n_outer_correctors
+        d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::PIMPLE
+      ? d_problem.time_options().n_outer_correctors
       : 1;
 
     for (int outer = 0; outer < outer_corrections; ++outer)
@@ -175,14 +381,14 @@ void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
             result = run_pressure_correction();
         }
 
-        d_last_pressure_velocity_residuals.pressure =
+        pressure_velocity_residuals().pressure =
             result.pressure_correction;
-        d_last_pressure_velocity_residuals.continuity =
+        pressure_velocity_residuals().continuity =
             result.continuity;
     }
 
-    FVM::face_fluxes(d_velocity, d_velocity_boundary_cache,
-                              d_projected_face_fluxes);
+    FVM::face_fluxes(velocity(), velocity_boundary_cache(),
+                              projected_face_fluxes());
 }
 
 /**
@@ -233,16 +439,16 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
         const auto projected = d_mesh->cell_centroid(cell_lid).dot(direction);
         const auto blend = (projected - min_projected) / width;
-        d_temperature.set_value(cell_lid,
+        temperature().set_value(cell_lid,
                                 hot_at_min * (1.0 - blend)
                               + cold_at_max * blend);
-        d_pressure.set_value(cell_lid, initial_pressure);
-        d_velocity.set_value(cell_lid, {});
+        pressure().set_value(cell_lid, initial_pressure);
+        velocity().set_value(cell_lid, {});
     }
 
-    d_mesh->sync_periodic_boundaries(d_temperature);
-    d_mesh->sync_periodic_boundaries(d_pressure);
-    d_mesh->sync_periodic_boundaries(d_velocity);
+    d_mesh->sync_periodic_boundaries(temperature());
+    d_mesh->sync_periodic_boundaries(pressure());
+    d_mesh->sync_periodic_boundaries(velocity());
 }
 
 /**
@@ -304,22 +510,22 @@ void BoussinesqSolver<Pack>::step()
 {
     if (d_step_index == 0)
     {
-        d_mesh->sync_periodic_boundaries(d_temperature);
-        d_mesh->sync_periodic_boundaries(d_velocity);
+        d_mesh->sync_periodic_boundaries(temperature());
+        d_mesh->sync_periodic_boundaries(velocity());
     }
 
     solve_pressure_velocity_coupling();
-    d_temperature_equation.advance_semi_implicit(d_temperature,
-                                                 d_projected_face_fluxes,
-                                                 d_time_options.time_step,
-                                                 d_time_options.thermal_diffusivity,
-                                                 d_temperature,
-                                                 d_linear_options);
+    temperature_equation().advance_semi_implicit(temperature(),
+                                                 projected_face_fluxes(),
+                                                 d_problem.time_options().time_step,
+                                                 d_problem.time_options().thermal_diffusivity,
+                                                 temperature(),
+                                                 d_problem.linear_options());
 
-    d_mesh->sync_periodic_boundaries(d_temperature);
-    d_mesh->sync_periodic_boundaries(d_velocity);
+    d_mesh->sync_periodic_boundaries(temperature());
+    d_mesh->sync_periodic_boundaries(velocity());
 
-    d_time += d_time_options.time_step;
+    d_time += d_problem.time_options().time_step;
     ++d_step_index;
 }
 
@@ -399,10 +605,10 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
     {
         const auto cell_lid = static_cast<local_ordinal_type>(lid);
         temperature_values.push_back(static_cast<real_t>(
-            d_temperature.local_value(cell_lid)));
+            temperature().local_value(cell_lid)));
         pressure_values.push_back(static_cast<real_t>(
-            d_pressure.local_value(cell_lid)));
-        velocity_values.push_back(d_velocity.local_value(cell_lid));
+            pressure().local_value(cell_lid)));
+        velocity_values.push_back(velocity().local_value(cell_lid));
     }
 
     VTUWriter writer;

@@ -15,7 +15,7 @@
 namespace
 {
 
-using Mesh = SimpleFluid::Mesh::SemiStructuredXY_Z;
+using Mesh = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using CellID = Mesh::CellID;
 using FaceID = Mesh::FaceID;
 using NodeID = Mesh::NodeID;
@@ -43,7 +43,7 @@ Mesh make_mesh()
 } // namespace
 
 static_assert(SimpleFluid::MeshClass<Mesh>);
-static_assert(std::is_same_v<SimpleFluid::Mesh::SemiStructuredXYZ3D, Mesh>);
+static_assert(std::is_same_v<SimpleFluid::Meshes::SemiStructuredXYZ3D, Mesh>);
 
 TEST(SemiStructuredXY_ZTest, RejectsInvalidInput)
 {
@@ -75,7 +75,7 @@ TEST(SemiStructuredXY_ZTest, AssignsDefaultSidePatch)
         {{0, 1, 2}},
         {0.0, 1.0});
 
-    EXPECT_EQ(mesh.boundary_patches().size(), 3U);
+    EXPECT_EQ(mesh.num_boundary_patches(), 3);
     EXPECT_EQ(mesh.boundary_patch_name(2), "side");
     EXPECT_EQ(mesh.boundary_face_patch(2).face_lids.size(), 3U);
 }
@@ -150,7 +150,7 @@ TEST(SemiStructuredXY_ZTest, BuildsBoundaryPatches)
     EXPECT_EQ(mesh.face_normal(bottom), (Vec3{0.0, -1.0, 0.0}));
     EXPECT_EQ(mesh.boundary_name(bottom), "ymin");
 
-    EXPECT_EQ(mesh.boundary_patches().size(), 6U);
+    EXPECT_EQ(mesh.num_boundary_patches(), 6);
     for (int patch = 0; patch < 6; ++patch)
     {
         EXPECT_EQ(mesh.boundary_face_patch(patch).face_lids.size(), 2U);
