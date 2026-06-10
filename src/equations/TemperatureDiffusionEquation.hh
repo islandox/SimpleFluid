@@ -84,6 +84,7 @@ private:
     BoundaryCache<Pack> d_face_boundary_temperature;
     SP<BoundaryConditionMap>  d_boundary_condition;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
+    mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
 } // namespace SimpleFluid

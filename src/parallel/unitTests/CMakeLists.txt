@@ -32,3 +32,32 @@ else()
 endif()
 set_property(DIRECTORY APPEND PROPERTY
              TEST_INCLUDE_FILES "${METIS_PART_CTEST_FILE}")
+
+add_executable(testMPIInterface testMPIInterface.cc)
+target_link_libraries(testMPIInterface SimpleFluid::Fields GTest::gtest_main)
+simplefluid_reuse_precompiled_header(testMPIInterface)
+if(CMAKE_CONFIGURATION_TYPES)
+  set(MPI_INTERFACE_EXECUTABLE
+      "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/\${_mpi_interface_config}/testMPIInterface")
+else()
+  set(MPI_INTERFACE_EXECUTABLE
+      "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/testMPIInterface")
+endif()
+set(MPI_INTERFACE_CTEST_FILE
+    "${CMAKE_CURRENT_BINARY_DIR}/MPIInterfaceCTest.cmake")
+if(CMAKE_CONFIGURATION_TYPES)
+  file(WRITE "${MPI_INTERFACE_CTEST_FILE}"
+       "if(CTEST_CONFIGURATION_TYPE)\n"
+       "  set(_mpi_interface_config \"\${CTEST_CONFIGURATION_TYPE}\")\n"
+       "else()\n"
+       "  set(_mpi_interface_config \"Debug\")\n"
+       "endif()\n"
+       "add_test(MPIInterface_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${MPI_INTERFACE_EXECUTABLE}\")\n"
+       "set_tests_properties(MPIInterface_2procs PROPERTIES PROCESSORS 2)\n")
+else()
+  file(WRITE "${MPI_INTERFACE_CTEST_FILE}"
+       "add_test(MPIInterface_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${MPI_INTERFACE_EXECUTABLE}\")\n"
+       "set_tests_properties(MPIInterface_2procs PROPERTIES PROCESSORS 2)\n")
+endif()
+set_property(DIRECTORY APPEND PROPERTY
+             TEST_INCLUDE_FILES "${MPI_INTERFACE_CTEST_FILE}")

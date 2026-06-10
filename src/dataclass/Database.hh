@@ -78,6 +78,15 @@ private:
         VecString
     };
 
+    template<class T>
+    DBNode<T>& node();
+
+    template<class T>
+    const DBNode<T>& node() const;
+
+    template<class T>
+    static consteval NodeKind node_kind();
+
     bool erase_from_node(const std::string& key, NodeKind kind);
 
     DBNode<int> int_node;
@@ -105,46 +114,8 @@ void Database::set(const std::string& key, T&& value)
     using Value = std::remove_cvref_t<T>;
 
     erase(key);
-
-    if constexpr (std::same_as<Value, int>)
-    {
-        int_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::Int;
-    }
-    else if constexpr (std::same_as<Value, real_t>)
-    {
-        real_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::Real;
-    }
-    else if constexpr (std::same_as<Value, std::string>)
-    {
-        string_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::String;
-    }
-    else if constexpr (std::same_as<Value, bool>)
-    {
-        bool_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::Bool;
-    }
-    else if constexpr (std::same_as<Value, std::vector<int>>)
-    {
-        vec_int_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::VecInt;
-    }
-    else if constexpr (std::same_as<Value, std::vector<real_t>>)
-    {
-        vec_real_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::VecReal;
-    }
-    else if constexpr (std::same_as<Value, std::vector<std::string>>)
-    {
-        vec_string_node.set(key, std::forward<T>(value));
-        d_key_types[key] = NodeKind::VecString;
-    }
-    else
-    {
-        static_assert(utils::TMP::always_false_v<Value>, "Unsupported type for Database::set");
-    }
+    node<Value>().set(key, std::forward<T>(value));
+    d_key_types[key] = node_kind<Value>();
 }
 
 /**
@@ -158,38 +129,7 @@ void Database::set(const std::string& key, T&& value)
 template <class T>
 T& Database::get(const std::string& key)
 {
-    if constexpr (std::same_as<T, int>)
-    {
-        return int_node.get(key);
-    }   
-    else if constexpr (std::same_as<T, real_t>)
-    {
-        return real_node.get(key);
-    }
-    else if constexpr (std::same_as<T, std::string>)
-    {
-        return string_node.get(key);
-    }
-    else if constexpr (std::same_as<T, bool>)
-    {
-        return bool_node.get(key);
-    }
-    else if constexpr (std::same_as<T, std::vector<int>>)
-    {
-        return vec_int_node.get(key);
-    }
-    else if constexpr (std::same_as<T, std::vector<real_t>>)
-    {
-        return vec_real_node.get(key);
-    }
-    else if constexpr (std::same_as<T, std::vector<std::string>>)
-    {
-        return vec_string_node.get(key);
-    }
-    else
-    {
-        static_assert(utils::TMP::always_false_v<T>, "Unsupported type for Database::get");
-    }
+    return node<T>().get(key);
 }
 
 /**
@@ -203,38 +143,59 @@ T& Database::get(const std::string& key)
 template <class T>
 const T& Database::get(const std::string& key) const
 {
+    return node<T>().get(key);
+}
+
+template<class T>
+DBNode<T>& Database::node()
+{
     if constexpr (std::same_as<T, int>)
-    {
-        return int_node.get(key);
-    }
+        return int_node;
     else if constexpr (std::same_as<T, real_t>)
-    {
-        return real_node.get(key);
-    }
+        return real_node;
     else if constexpr (std::same_as<T, std::string>)
-    {
-        return string_node.get(key);
-    }
+        return string_node;
     else if constexpr (std::same_as<T, bool>)
-    {
-        return bool_node.get(key);
-    }
+        return bool_node;
     else if constexpr (std::same_as<T, std::vector<int>>)
-    {
-        return vec_int_node.get(key);
-    }
+        return vec_int_node;
     else if constexpr (std::same_as<T, std::vector<real_t>>)
-    {
-        return vec_real_node.get(key);
-    }
+        return vec_real_node;
     else if constexpr (std::same_as<T, std::vector<std::string>>)
-    {
-        return vec_string_node.get(key);
-    }
+        return vec_string_node;
     else
-    {
-        static_assert(utils::TMP::always_false_v<T>, "Unsupported type for Database::get");
-    }
+        static_assert(
+            utils::TMP::always_false_v<T>,
+            "Unsupported Database value type");
+}
+
+template<class T>
+const DBNode<T>& Database::node() const
+{
+    return const_cast<Database*>(this)->node<T>();
+}
+
+template<class T>
+consteval auto Database::node_kind() -> NodeKind
+{
+    if constexpr (std::same_as<T, int>)
+        return NodeKind::Int;
+    else if constexpr (std::same_as<T, real_t>)
+        return NodeKind::Real;
+    else if constexpr (std::same_as<T, std::string>)
+        return NodeKind::String;
+    else if constexpr (std::same_as<T, bool>)
+        return NodeKind::Bool;
+    else if constexpr (std::same_as<T, std::vector<int>>)
+        return NodeKind::VecInt;
+    else if constexpr (std::same_as<T, std::vector<real_t>>)
+        return NodeKind::VecReal;
+    else if constexpr (std::same_as<T, std::vector<std::string>>)
+        return NodeKind::VecString;
+    else
+        static_assert(
+            utils::TMP::always_false_v<T>,
+            "Unsupported Database value type");
 }
 
 } // namespace SimpleFluid

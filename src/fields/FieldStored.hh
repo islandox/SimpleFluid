@@ -92,8 +92,8 @@ public:
         bool zero_out = true)
         : d_descriptor(std::move(descriptor)),
           d_mesh(require_mesh(std::move(mesh))),
-          d_owned(make_storage(owned_map_for(*d_mesh), zero_out)),
-          d_overlap(make_storage(overlap_map_for(*d_mesh), false)),
+          d_owned(make_storage(map_for<false>(*d_mesh), zero_out)),
+          d_overlap(make_storage(map_for<true>(*d_mesh), false)),
           d_import(Teuchos::rcp(new import_type(
               d_owned.getMap(), d_overlap.getMap())))
     {
@@ -285,33 +285,23 @@ private:
         return mesh;
     }
 
-    static Teuchos::RCP<const map_type> owned_map_for(
+    template<bool Overlap>
+    static Teuchos::RCP<const map_type> map_for(
         const MeshHandle<Pack>& mesh)
     {
         if constexpr (std::is_same_v<location_type, CellLocation>)
         {
-            return mesh.owned_cell_map();
+            if constexpr (Overlap)
+                return mesh.overlap_cell_map();
+            else
+                return mesh.owned_cell_map();
         }
         else if constexpr (std::is_same_v<location_type, FaceLocation>)
         {
-            return mesh.owned_face_map();
-        }
-        else
-        {
-            return mesh.boundary_face_map();
-        }
-    }
-
-    static Teuchos::RCP<const map_type> overlap_map_for(
-        const MeshHandle<Pack>& mesh)
-    {
-        if constexpr (std::is_same_v<location_type, CellLocation>)
-        {
-            return mesh.overlap_cell_map();
-        }
-        else if constexpr (std::is_same_v<location_type, FaceLocation>)
-        {
-            return mesh.overlap_face_map();
+            if constexpr (Overlap)
+                return mesh.overlap_face_map();
+            else
+                return mesh.owned_face_map();
         }
         else
         {
@@ -354,13 +344,49 @@ private:
     local_ordinal_type owned_row_or_invalid(
         local_ordinal_type local_id) const
     {
+        if constexpr (std::is_same_v<location_type, CellLocation>)
+        {
+            return valid_local_id(local_id, d_mesh->num_owned_cells())
+                 ? local_id
+                 : invalid_local_ordinal();
+        }
+        else if constexpr (std::is_same_v<location_type, FaceLocation>)
+        {
+            return valid_local_id(local_id, d_mesh->num_owned_faces())
+                 ? local_id
+                 : invalid_local_ordinal();
+        }
         return d_owned.getMap()->getLocalElement(global_id(local_id));
     }
 
     local_ordinal_type overlap_row_or_invalid(
         local_ordinal_type local_id) const
     {
+        if constexpr (std::is_same_v<location_type, CellLocation>)
+        {
+            return valid_local_id(local_id, d_mesh->num_local_cells())
+                 ? local_id
+                 : invalid_local_ordinal();
+        }
+        else if constexpr (std::is_same_v<location_type, FaceLocation>)
+        {
+            return valid_local_id(local_id, d_mesh->num_faces())
+                 ? local_id
+                 : invalid_local_ordinal();
+        }
         return d_overlap.getMap()->getLocalElement(global_id(local_id));
+    }
+
+    static bool valid_local_id(local_ordinal_type local_id, size_t count)
+    {
+        if constexpr (std::is_signed_v<local_ordinal_type>)
+        {
+            if (local_id < 0)
+            {
+                return false;
+            }
+        }
+        return static_cast<size_t>(local_id) < count;
     }
 
     local_ordinal_type owned_row(local_ordinal_type local_id) const

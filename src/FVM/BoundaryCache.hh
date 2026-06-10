@@ -15,6 +15,8 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 
+#include <stdexcept>
+
 namespace SimpleFluid
 {
 
@@ -46,6 +48,11 @@ BoundaryCache<Pack> cache_boundary_conditions(
     const BoundaryConditionMap& boundary_conditions)
 {
     using value_type = typename Pack::scalar_type;
+    if (!mesh)
+    {
+        throw std::invalid_argument(
+            "cache_boundary_conditions requires a non-null mesh.");
+    }
     BoundaryCache<Pack> cache{ {}, mesh };
 
     for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
