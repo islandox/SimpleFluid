@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 namespace
 {
@@ -165,10 +165,4 @@ OrthogonalCylindrial3D::boundary_patch_name_impl(int patch_id) const
     return d_topology.boundary_patch_name(patch_id);
 }
 
-const OrthogonalCylindrial3D::BoundaryFacePatch&
-OrthogonalCylindrial3D::boundary_face_patch_impl(int patch_id) const
-{
-    return d_topology.boundary_face_patch(patch_id);
-}
-
-} // namespace SimpleFluid
+} // namespace SimpleFluid::Meshes

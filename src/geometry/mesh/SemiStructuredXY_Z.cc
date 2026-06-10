@@ -9,7 +9,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 namespace
 {
@@ -175,4 +175,4 @@ void SemiStructuredXY_Z::initialize_xy_geometry()
     }
 }
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

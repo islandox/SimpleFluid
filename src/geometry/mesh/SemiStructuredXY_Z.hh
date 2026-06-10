@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 /**
@@ -93,9 +93,10 @@ private:
 
     int boundary_id_impl(face_id_t face_id) const;
     const std::string& boundary_patch_name_impl(int patch_id) const;
-    const BoundaryFacePatch& boundary_face_patch_impl(int patch_id) const;
-    const std::unordered_map<int, BoundaryFacePatch>&
-    boundary_patches_impl() const noexcept
+    auto boundary_face_patch_impl(int patch_id) const;
+    auto boundary_patch_ids_impl() const;
+    int num_boundary_patches_impl() const noexcept;
+    auto boundary_patches_impl() const noexcept
     {
         return d_topology.boundary_patches();
     }
@@ -120,6 +121,6 @@ private:
 using SemiStructuredXYZ3D = SemiStructuredXY_Z;
 using SemiStructuredXY_Z3D = SemiStructuredXY_Z;
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes
 
 #include "geometry/mesh/SemiStructuredXY_Z.ipp"

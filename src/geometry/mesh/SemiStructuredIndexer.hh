@@ -15,7 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 /**
@@ -180,4 +180,4 @@ struct SemiStructuredIndexer
     }
 };
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

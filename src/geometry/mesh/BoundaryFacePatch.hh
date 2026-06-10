@@ -7,7 +7,7 @@
 
 #include <vector>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 template <class FaceID>
@@ -17,4 +17,4 @@ struct BoundaryFacePatch
     std::vector<FaceID> face_lids;
 };
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

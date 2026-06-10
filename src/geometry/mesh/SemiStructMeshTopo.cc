@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 namespace
 {
@@ -81,6 +81,7 @@ SemiStructMeshTopo::SemiStructMeshTopo(
         nodes_per_layer,
         layers,
         axial_periodic);
+    initialize_cell_adjacency();
     initialize_boundary_patches();
 }
 
@@ -179,6 +180,80 @@ SemiStructMeshTopo::boundary_face_patch(int patch_id) const
         throw std::out_of_range("Requested boundary patch is not found.");
     }
     return patch->second;
+}
+
+std::vector<int> SemiStructMeshTopo::boundary_patch_ids() const
+{
+    std::vector<int> ids;
+    ids.reserve(d_boundary_patches.size());
+    for (const auto& [id, patch] : d_boundary_patches)
+    {
+        (void)patch;
+        ids.push_back(id);
+    }
+    return ids;
+}
+
+int SemiStructMeshTopo::num_boundary_patches() const noexcept
+{
+    return static_cast<int>(d_boundary_patches.size());
+}
+
+void SemiStructMeshTopo::initialize_cell_adjacency()
+{
+    d_neighbor_cells.resize(d_indexer.total_cells());
+    d_interior_cell_patch.reserve(d_indexer.total_cells());
+
+    for (size_t local_id = 0;
+         local_id < d_indexer.total_cells();
+         ++local_id)
+    {
+        const auto cell = d_indexer.cell_id(local_id);
+        const auto& side_faces = d_cell_side_faces[cell.ij];
+        auto& neighbors = d_neighbor_cells[local_id];
+        neighbors.reserve(side_faces.size() + 2);
+
+        if (cell.k > 0)
+        {
+            neighbors.push_back({cell.ij, cell.k - 1});
+        }
+        else if (d_indexer.axial_periodic)
+        {
+            neighbors.push_back(
+                {cell.ij, d_indexer.num_layers - 1});
+        }
+
+        if (cell.k + 1 < d_indexer.num_layers)
+        {
+            neighbors.push_back({cell.ij, cell.k + 1});
+        }
+        else if (d_indexer.axial_periodic)
+        {
+            neighbors.push_back({cell.ij, 0});
+        }
+
+        for (const auto side_face_id : side_faces)
+        {
+            const auto& side_face = d_side_faces[side_face_id];
+            if (cell.ij == side_face.owner)
+            {
+                if (side_face.neighbor != invalid_ordinal)
+                {
+                    neighbors.push_back(
+                        {side_face.neighbor, cell.k});
+                }
+            }
+            else
+            {
+                neighbors.push_back({side_face.owner, cell.k});
+            }
+        }
+
+        if (neighbors.size() == side_faces.size() + 2)
+        {
+            d_interior_cell_patch.push_back(cell);
+        }
+    }
 }
 
 void SemiStructMeshTopo::build_base_topology(
@@ -367,4 +442,4 @@ void SemiStructMeshTopo::initialize_boundary_patches()
     }
 }
 
-} // namespace SimpleFluid::Mesh
+} // namespace SimpleFluid::Meshes

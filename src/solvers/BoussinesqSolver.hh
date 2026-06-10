@@ -22,6 +22,7 @@
 #include "geometry/MeshUtils.hh"
 #include "io/VTUWriter.hh"
 #include "FVM/Operators.hh"
+#include "problems/Problem.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -59,6 +60,11 @@ public:
                      TimeStepperOptions time_options = {},
                      LinearSolverOptions linear_options = {});
 
+    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
+                     BoundaryConditionSet boundary_conditions,
+                     TimeStepperOptions time_options = {},
+                     LinearSolverOptions linear_options = {});
+
     void initialize_linear_temperature(const vec_type& direction,
                                        scalar_type hot_at_min,
                                        scalar_type cold_at_max,
@@ -74,28 +80,27 @@ public:
 
     void step();
     void run(int steps);
-    void run() { run(d_time_options.steps); }
+    void run() { run(d_problem.time_options().steps); }
 
     scalar_type time() const noexcept { return d_time; }
     int step_index() const noexcept { return d_step_index; }
 
-    const field_type& temperature() const noexcept { return d_temperature; }
-    const field_type& pressure() const noexcept { return d_pressure; }
-    const velocity_field_type& velocity() const noexcept { return d_velocity; }
-    const residual_type& last_pressure_velocity_residuals() const noexcept
-    {
-        return d_last_pressure_velocity_residuals;
-    }
+    const field_type& temperature() const noexcept;
+    const field_type& pressure() const noexcept;
+    const velocity_field_type& velocity() const noexcept;
+    const residual_type& last_pressure_velocity_residuals() const noexcept;
 
-    field_type& temperature() noexcept { return d_temperature; }
-    field_type& pressure() noexcept { return d_pressure; }
-    velocity_field_type& velocity() noexcept { return d_velocity; }
+    field_type& temperature() noexcept;
+    field_type& pressure() noexcept;
+    velocity_field_type& velocity() noexcept;
 
     void write_vtu(const std::string& filename) const { d_mesh->export_vtu(filename); }
     void write_solution_vtu(const std::string& filename) const;
 
 private:
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
+    static SP<const mesh_type> require_legacy_mesh(
+        const SP<const MeshHandle<Pack>>& mesh);
 
     void solve_pressure_velocity_coupling();
     void run_momentum_predictor();
@@ -104,24 +109,19 @@ private:
     scalar_type velocity_update_norm(const velocity_field_type& before,
                                      const velocity_field_type& after) const;
 
+    TemperatureDiffusionEquation<Pack>& temperature_equation();
+    BoussinesqMomentumEquation<Pack>& momentum_equation();
+    PressureProjectionEquation<Pack>& pressure_projection();
+    FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache();
+    field_type& pressure_correction();
+    velocity_field_type& predictor_velocity();
+    face_flux_field_type& old_face_fluxes();
+    face_flux_field_type& projected_face_fluxes();
+    residual_type& pressure_velocity_residuals();
+    const residual_type& pressure_velocity_residuals() const;
+
     SP<const mesh_type> d_mesh;
-    BoundaryConditionSet d_boundary_conditions;
-    TimeStepperOptions d_time_options;
-    LinearSolverOptions d_linear_options;
-    FVM::VelocityBoundaryCache<Pack> d_velocity_boundary_cache;
-
-    TemperatureDiffusionEquation<Pack> d_temperature_equation;
-    BoussinesqMomentumEquation<Pack> d_momentum_equation;
-    PressureProjectionEquation<Pack> d_pressure_projection;
-
-    field_type d_temperature;
-    field_type d_pressure;
-    field_type d_pressure_correction;
-    velocity_field_type d_velocity;
-    velocity_field_type d_predictor_velocity;
-    face_flux_field_type d_old_face_fluxes;
-    face_flux_field_type d_projected_face_fluxes;
-    residual_type d_last_pressure_velocity_residuals;
+    Problem<Pack> d_problem;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;

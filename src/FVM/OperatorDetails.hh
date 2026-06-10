@@ -391,6 +391,9 @@ size_t packed_face_local_id(const MeshType& mesh, FaceID face_id)
 /**
  * @brief Compute a per-face lookup of boundary-face locations.
  *
+ * Supports both the legacy Mesh API (boundary_patches() map) and the
+ * new view-based MeshBase API (boundary_patch_ids() + boundary_face_patch()).
+ *
  * @tparam MeshType The mesh type.
  * @param mesh The computational mesh.
  * @return Per-face boundary location (index by face LID).
@@ -400,17 +403,40 @@ std::vector<BoundaryFaceLocation<MeshType>>
 boundary_face_locations(const MeshType& mesh)
 {
     std::vector<BoundaryFaceLocation<MeshType>> locations(mesh.num_faces());
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+
+    if constexpr (std::ranges::range<
+                      decltype(mesh.boundary_face_patch(0))>)
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < boundary_patch.face_lids.size();
-             ++in_patch_id)
+        // New view-based API: boundary_face_patch() is directly iterable
+        for (int patch_id : mesh.boundary_patch_ids())
         {
-            const auto face_lid = boundary_patch.face_lids[in_patch_id];
-            locations[packed_face_local_id(mesh, face_lid)] =
-                {true, patch_id, in_patch_id};
+            size_t in_patch_id = 0;
+            for (auto face_id : mesh.boundary_face_patch(patch_id))
+            {
+                locations[packed_face_local_id(mesh, face_id)] =
+                    {true, patch_id, in_patch_id};
+                ++in_patch_id;
+            }
         }
     }
+    else
+    {
+        // Legacy materialized-map API
+        for (const auto& [patch_id, boundary_patch] :
+             mesh.boundary_patches())
+        {
+            for (size_t in_patch_id = 0;
+                 in_patch_id < boundary_patch.face_lids.size();
+                 ++in_patch_id)
+            {
+                const auto face_lid =
+                    boundary_patch.face_lids[in_patch_id];
+                locations[packed_face_local_id(mesh, face_lid)] =
+                    {true, patch_id, in_patch_id};
+            }
+        }
+    }
+
     return locations;
 }
 

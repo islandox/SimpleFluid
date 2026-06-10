@@ -10,12 +10,13 @@
 
 #include <cmath>
 #include <limits>
+#include <ranges>
 #include <stdexcept>
 
 namespace
 {
 
-using Mesh = SimpleFluid::Mesh::OrthogonalCartesian3D;
+using Mesh = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using CellID = Mesh::CellID;
 using FaceID = Mesh::FaceID;
 using NodeID = Mesh::NodeID;
@@ -160,13 +161,13 @@ TEST(OrthogonalCartesian3DTest, ComputesBoundaryFacesAndPatches)
     EXPECT_EQ(mesh.boundary_id(xmin), 0);
     EXPECT_EQ(mesh.boundary_name(xmin), "xmin");
 
-    EXPECT_EQ(mesh.boundary_patches().size(), 6U);
-    EXPECT_EQ(mesh.boundary_face_patch(0).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(1).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(2).face_lids.size(), 4U);
-    EXPECT_EQ(mesh.boundary_face_patch(3).face_lids.size(), 4U);
-    EXPECT_EQ(mesh.boundary_face_patch(4).face_lids.size(), 2U);
-    EXPECT_EQ(mesh.boundary_face_patch(5).face_lids.size(), 2U);
+    EXPECT_EQ(mesh.num_boundary_patches(), 6);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(0)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(1)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(2)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(3)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(4)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(5)), 2);
     EXPECT_EQ(mesh.boundary_patch_name(5), "zmax");
 
     EXPECT_THROW(

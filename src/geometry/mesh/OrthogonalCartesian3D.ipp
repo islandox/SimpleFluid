@@ -7,7 +7,7 @@
 
 #include "utils/debug_check.hh"
 
-namespace SimpleFluid::Mesh
+namespace SimpleFluid::Meshes
 {
 
 inline void OrthogonalCartesian3D::check_cell_id(cell_id_t id) const
@@ -144,6 +144,24 @@ OrthogonalCartesian3D::node_coordinates_impl(node_id_t id) const -> Vec3
 inline int OrthogonalCartesian3D::boundary_id_impl(face_id_t id) const
 {
     return d_topology.boundary_id(id);
+}
+
+inline auto
+OrthogonalCartesian3D::boundary_face_patch_impl(int patch_id) const
+{
+    return d_topology.boundary_face_patch(patch_id);
+}
+
+inline auto
+OrthogonalCartesian3D::boundary_patch_ids_impl() const
+{
+    return d_topology.boundary_patch_ids();
+}
+
+inline int
+OrthogonalCartesian3D::num_boundary_patches_impl() const noexcept
+{
+    return d_topology.num_boundary_patches();
 }
 
 } // namespace SimpleFluid

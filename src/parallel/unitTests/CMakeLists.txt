@@ -1,7 +1,7 @@
 
 # Multi-rank MetisPartitioner tests
 add_executable(testMeshPartitioner testMeshPartitioner.cc)
-target_link_libraries(testMeshPartitioner SimpleFluid GTest::gtest_main)
+target_link_libraries(testMeshPartitioner SimpleFluid::Fields GTest::gtest_main)
 simplefluid_reuse_precompiled_header(testMeshPartitioner)
 if(CMAKE_CONFIGURATION_TYPES)
   set(METIS_PART_EXECUTABLE

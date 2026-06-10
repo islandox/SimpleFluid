@@ -35,7 +35,7 @@ public:
     using local_ordinal_type = size_t;
     using scalar_type = real_t;
     using Vec3 = MeshUtils::Vec3;
-    using BoundaryFacePatch = Mesh::BoundaryFacePatch<face_id_t>;
+    using BoundaryFacePatch = Meshes::BoundaryFacePatch<face_id_t>;
 
     static constexpr int invalid_boundary_id = -1;
     static constexpr local_ordinal_type invalid_local_id =
@@ -467,13 +467,22 @@ public:
         return derived().boundary_patch_name_impl(patch_id);
     }
 
-    const BoundaryFacePatch& boundary_face_patch(int patch_id) const
+    auto boundary_face_patch(int patch_id) const
     {
         return derived().boundary_face_patch_impl(patch_id);
     }
 
-    const std::unordered_map<int, BoundaryFacePatch>&
-    boundary_patches() const noexcept
+    auto boundary_patch_ids() const
+    {
+        return derived().boundary_patch_ids_impl();
+    }
+
+    int num_boundary_patches() const noexcept
+    {
+        return derived().num_boundary_patches_impl();
+    }
+
+    auto boundary_patches() const
     {
         return derived().boundary_patches_impl();
     }
