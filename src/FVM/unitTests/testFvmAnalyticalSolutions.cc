@@ -117,7 +117,7 @@ void set_node_coord(stk::mesh::Field<double>& coord_field,
     data[2] = coord.z;
 }
 
-SimpleFluid::SP<MeshType> make_sheared_box_mesh(std::size_t n_cells,
+SimpleFluid::SP<MeshType> make_sheared_box_mesh(size_t n_cells,
                                                 double shear)
 {
     auto mesh = std::make_shared<STKMeshType>();
@@ -132,21 +132,21 @@ SimpleFluid::SP<MeshType> make_sheared_box_mesh(std::size_t n_cells,
     std::array<stk::mesh::Part*, 6> boundary_parts{};
     const std::array<const char*, 6> boundary_names{
         "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
-    for (std::size_t i = 0; i < boundary_parts.size(); ++i)
+    for (size_t i = 0; i < boundary_parts.size(); ++i)
     {
         auto& part = meta->declare_part(boundary_names[i], meta->side_rank());
         stk::io::put_io_part_attribute(part);
         boundary_parts[i] = &part;
     }
 
-    auto node_id = [=](std::size_t i, std::size_t j, std::size_t k)
+    auto node_id = [=](size_t i, size_t j, size_t k)
         -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
             1 + i + (n_cells + 1) * (j + (n_cells + 1) * k));
     };
 
-    auto element_id = [=](std::size_t i, std::size_t j, std::size_t k)
+    auto element_id = [=](size_t i, size_t j, size_t k)
         -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
@@ -164,11 +164,11 @@ SimpleFluid::SP<MeshType> make_sheared_box_mesh(std::size_t n_cells,
 
     bulk->modification_begin();
 
-    for (std::size_t k = 0; k < n_cells; ++k)
+    for (size_t k = 0; k < n_cells; ++k)
     {
-        for (std::size_t j = 0; j < n_cells; ++j)
+        for (size_t j = 0; j < n_cells; ++j)
         {
-            for (std::size_t i = 0; i < n_cells; ++i)
+            for (size_t i = 0; i < n_cells; ++i)
             {
                 const stk::mesh::EntityIdVector hex_nodes{
                     node_id(i,     j,     k),
@@ -195,11 +195,11 @@ SimpleFluid::SP<MeshType> make_sheared_box_mesh(std::size_t n_cells,
     }
 
     const auto h = 1.0 / static_cast<double>(n_cells);
-    for (std::size_t k = 0; k <= n_cells; ++k)
+    for (size_t k = 0; k <= n_cells; ++k)
     {
-        for (std::size_t j = 0; j <= n_cells; ++j)
+        for (size_t j = 0; j <= n_cells; ++j)
         {
-            for (std::size_t i = 0; i <= n_cells; ++i)
+            for (size_t i = 0; i <= n_cells; ++i)
             {
                 const auto x = static_cast<double>(i) * h;
                 const auto y = static_cast<double>(j) * h;
@@ -510,7 +510,7 @@ FieldType solve_burgers_semi_implicit(const FieldType& old_solution,
     const auto& mesh = old_solution.mesh();
     const auto fluxes = burgers_transport_fluxes(old_solution);
     auto boundary_value =
-        [](int, std::size_t) -> Pack::scalar_type
+        [](int, size_t) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -543,7 +543,7 @@ FieldType solve_viscous_burgers_semi_implicit(
         viscous_burgers_transport_fluxes(old_solution, old_time, viscosity);
     const auto new_time = old_time + time_step;
     auto boundary_value =
-        [&](int patch_id, std::size_t in_patch_id) -> Pack::scalar_type
+        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
     {
         const auto face_lid =
             mesh.boundary_face_patch(patch_id).face_lids[in_patch_id];
@@ -622,8 +622,8 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
     EXPECT_EQ(mesh->boundary_patches().size(), 6u);
 
     bool saw_triangular_face = false;
-    std::size_t boundary_cells = 0;
-    std::size_t interior_cells = 0;
+    size_t boundary_cells = 0;
+    size_t interior_cells = 0;
     for (MeshType::local_ordinal_type lid = 0;
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
@@ -722,7 +722,7 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     auto boundary_value =
-        [&](int patch_id, std::size_t in_patch_id) -> Pack::scalar_type
+        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
     {
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
@@ -746,7 +746,7 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
-        EXPECT_NEAR(data[static_cast<std::size_t>(lid)],
+        EXPECT_NEAR(data[static_cast<size_t>(lid)],
                     affine_scalar(mesh->cell_centroid(lid)),
                     1.0e-10);
     }
@@ -772,7 +772,7 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
     constexpr double time_step = 0.125;
     constexpr double diffusivity = 0.7;
     auto boundary_value =
-        [&](int patch_id, std::size_t in_patch_id) -> Pack::scalar_type
+        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
     {
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
@@ -839,7 +839,7 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     auto boundary_value =
-        [&](int patch_id, std::size_t in_patch_id) -> Pack::scalar_type
+        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
     {
         const auto face_lid =
             mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
@@ -888,7 +888,7 @@ TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
         SimpleFluid::test::make_box_database(n_cells, 1, 1, mesh_size));
 
     auto boundary_condition =
-        [&](int patch_id, std::size_t) -> SimpleFluid::BoundaryCondition
+        [&](int patch_id, size_t) -> SimpleFluid::BoundaryCondition
     {
         const auto& name = mesh->boundary_patch_name(patch_id);
         if (name == "xmin" || name == "xmax")
@@ -940,7 +940,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadr
         SimpleFluid::test::make_box_database(n_cells, 1, 1, mesh_size));
 
     auto boundary_condition =
-        [&](int patch_id, std::size_t) -> SimpleFluid::VectorBoundaryCondition
+        [&](int patch_id, size_t) -> SimpleFluid::VectorBoundaryCondition
     {
         const auto& name = mesh->boundary_patch_name(patch_id);
         if (name == "xmin" || name == "xmax")
@@ -1003,11 +1003,11 @@ TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnSheare
     SimpleFluid::LinearSolverOptions options;
     options.tolerance = 1.0e-13;
 
-    auto solve_error = [&](std::size_t n_cells)
+    auto solve_error = [&](size_t n_cells)
     {
         auto mesh = make_sheared_box_mesh(n_cells, 0.45);
         auto boundary_condition =
-            [&](int patch_id, std::size_t in_patch_id)
+            [&](int patch_id, size_t in_patch_id)
                 -> SimpleFluid::BoundaryCondition
         {
             const auto face_lid =
@@ -1076,11 +1076,11 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
     auto solve_error =
         [&](SimpleFluid::FVM::NonOrthogonalTreatment treatment,
             int correctors,
-            std::size_t n_cells)
+            size_t n_cells)
     {
         auto mesh = make_sheared_box_mesh(n_cells, 0.45);
         auto boundary_condition =
-            [&](int patch_id, std::size_t in_patch_id)
+            [&](int patch_id, size_t in_patch_id)
                 -> SimpleFluid::BoundaryCondition
         {
             const auto face_lid =
@@ -1140,7 +1140,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
     constexpr double time_step = 0.125;
     constexpr double diffusivity = 0.7;
     auto boundary_value =
-        [&](int patch_id, std::size_t in_patch_id)
+        [&](int patch_id, size_t in_patch_id)
             -> SimpleFluid::vec3<Pack::scalar_type>
     {
         const auto face_lid =

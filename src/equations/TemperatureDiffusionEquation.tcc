@@ -132,7 +132,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
     EquationValidation::assert_sufficient_cache_size(old_temperature.size(),
                                                      d_mesh->num_local_cells());
 
-    for (std::size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+    for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell);
         const auto temp_p = old_temperature[cell];
@@ -140,7 +140,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
 
         const auto& faces = d_mesh->faces(cell_lid);
 
-        for (std::size_t face_index = 0; face_index < faces.size(); ++face_index)
+        for (size_t face_index = 0; face_index < faces.size(); ++face_index)
         {
             const auto face_lid = faces[face_index];
 
@@ -153,7 +153,7 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                 if (distance > 0.0)
                 {
                     laplacian +=
-                        (old_temperature[static_cast<std::size_t>(other)] - temp_p)
+                        (old_temperature[static_cast<size_t>(other)] - temp_p)
                       * d_mesh->face_area(face_lid)
                       / distance;
                 }
@@ -316,7 +316,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
                                   temperature.owned_data(), linear_options);
     if (!converged)
     {
-        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             if (!std::isfinite(temperature.value(cell_lid)))

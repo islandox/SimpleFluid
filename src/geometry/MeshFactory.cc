@@ -39,8 +39,8 @@ namespace
  */
 struct FactoryNodeTag
 {
-    std::size_t ring = 0;
-    std::size_t layer = 0;
+    size_t ring = 0;
+    size_t layer = 0;
     bool surface = false;
 };
 
@@ -52,7 +52,7 @@ struct FactoryNodeTag
  * @return Minimum number of cells (at least 1).
  * @throws std::runtime_error If length or mesh_size is non-positive.
  */
-std::size_t positive_count_from_size(real_t length, real_t mesh_size)
+size_t positive_count_from_size(real_t length, real_t mesh_size)
 {
     if (length <= 0.0)
     {
@@ -63,8 +63,8 @@ std::size_t positive_count_from_size(real_t length, real_t mesh_size)
         throw std::runtime_error("MeshFactory mesh_size must be positive.");
     }
 
-    return std::max<std::size_t>(
-        1, static_cast<std::size_t>(std::ceil(length / mesh_size)));
+    return std::max<size_t>(
+        1, static_cast<size_t>(std::ceil(length / mesh_size)));
 }
 
 /**
@@ -175,7 +175,7 @@ real_t geometric_layer_thickness(const Spec* spec)
 template <class Spec>
 ArrReal graded_edges(real_t lower,
                      real_t upper,
-                     std::size_t base_cell_count,
+                     size_t base_cell_count,
                      const Spec* lower_spec,
                      const Spec* upper_spec,
                      const std::string& axis_name)
@@ -187,10 +187,10 @@ ArrReal graded_edges(real_t lower,
 
     const auto lower_count = lower_spec == nullptr
                            ? 0
-                           : static_cast<std::size_t>(lower_spec->count);
+                           : static_cast<size_t>(lower_spec->count);
     const auto upper_count = upper_spec == nullptr
                            ? 0
-                           : static_cast<std::size_t>(upper_spec->count);
+                           : static_cast<size_t>(upper_spec->count);
     if (lower_count + upper_count >= base_cell_count)
     {
         throw std::runtime_error("Boundary-layer counts overlap on " + axis_name + ".");
@@ -222,7 +222,7 @@ ArrReal graded_edges(real_t lower,
 
     const auto interior_width =
         interior_length / static_cast<real_t>(interior_count);
-    for (std::size_t cell = 0; cell < interior_count; ++cell)
+    for (size_t cell = 0; cell < interior_count; ++cell)
     {
         edges.push_back(edges.back() + interior_width);
     }
@@ -230,7 +230,7 @@ ArrReal graded_edges(real_t lower,
     if (upper_spec != nullptr)
     {
         ArrReal widths;
-        widths.reserve(static_cast<std::size_t>(upper_spec->count));
+        widths.reserve(static_cast<size_t>(upper_spec->count));
         real_t width = upper_spec->first_cell_height;
         for (int layer = 0; layer < upper_spec->count; ++layer)
         {
@@ -260,7 +260,7 @@ ArrReal graded_edges(real_t lower,
  * @return Vector of parametric edge coordinates, or empty if spec is null.
  */
 template <class Spec>
-ArrReal symmetric_sphere_edges(std::size_t base_cell_count,
+ArrReal symmetric_sphere_edges(size_t base_cell_count,
                                real_t radius,
                                const Spec* spec)
 {
@@ -346,7 +346,7 @@ MeshFactory::MeshFactory(SP<const Database> db)
 
         std::unordered_set<std::string> unique_names;
         d_boundary_layer_specs.reserve(names.size());
-        for (std::size_t i = 0; i < names.size(); ++i)
+        for (size_t i = 0; i < names.size(); ++i)
         {
             if (names[i].empty())
             {
@@ -484,7 +484,7 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
             throw std::runtime_error("BOX MeshFactory axis " + axis
                                     + " must contain at least two cell edges.");
         }
-        for (std::size_t i = 1; i < edges.size(); ++i)
+        for (size_t i = 1; i < edges.size(); ++i)
         {
             if (edges[i] <= edges[i - 1])
             {
@@ -524,9 +524,9 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
     apply_axis_layers(Z, d_domain_exterior_face_types[4],
                       d_domain_exterior_face_types[5], "Z");
 
-    const std::size_t num_cells_x = box_cell_edges[X].size() - 1;
-    const std::size_t num_cells_y = box_cell_edges[Y].size() - 1;
-    const std::size_t num_cells_z = box_cell_edges[Z].size() - 1;
+    const size_t num_cells_x = box_cell_edges[X].size() - 1;
+    const size_t num_cells_y = box_cell_edges[Y].size() - 1;
+    const size_t num_cells_z = box_cell_edges[Z].size() - 1;
 
     auto meta = mesh->meta();
     auto bulk = mesh->bulk();
@@ -560,19 +560,19 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
     };
 
     std::array<stk::mesh::Part*, 6> boundary_parts{};
-    for (std::size_t i = 0; i < boundary_parts.size(); ++i)
+    for (size_t i = 0; i < boundary_parts.size(); ++i)
     {
         boundary_parts[i] = declare_boundary_part(d_domain_exterior_face_types[i]);
     }
 
-    auto node_id = [=](std::size_t i, std::size_t j, std::size_t k)
+    auto node_id = [=](size_t i, size_t j, size_t k)
         -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
             1 + i + (num_cells_x + 1) * (j + (num_cells_y + 1) * k));
     };
 
-    auto element_id = [=](std::size_t i, std::size_t j, std::size_t k)
+    auto element_id = [=](size_t i, size_t j, size_t k)
         -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
@@ -589,11 +589,11 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
 
     bulk->modification_begin();
 
-    for (std::size_t k = 0; k < num_cells_z; ++k)
+    for (size_t k = 0; k < num_cells_z; ++k)
     {
-        for (std::size_t j = 0; j < num_cells_y; ++j)
+        for (size_t j = 0; j < num_cells_y; ++j)
         {
-            for (std::size_t i = 0; i < num_cells_x; ++i)
+            for (size_t i = 0; i < num_cells_x; ++i)
             {
                 const stk::mesh::EntityIdVector hex_nodes{
                     node_id(i,     j,     k),
@@ -619,11 +619,11 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
         }
     }
 
-    for (std::size_t k = 0; k <= num_cells_z; ++k)
+    for (size_t k = 0; k <= num_cells_z; ++k)
     {
-        for (std::size_t j = 0; j <= num_cells_y; ++j)
+        for (size_t j = 0; j <= num_cells_y; ++j)
         {
-            for (std::size_t i = 0; i <= num_cells_x; ++i)
+            for (size_t i = 0; i <= num_cells_x; ++i)
             {
                 const auto node = bulk->get_entity(stk::topology::NODE_RANK,
                                                     node_id(i, j, k));
@@ -676,7 +676,7 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     if (radial_edges.empty())
     {
         radial_edges.reserve(base_radial_count + 1);
-        for (std::size_t ring = 0; ring <= base_radial_count; ++ring)
+        for (size_t ring = 0; ring <= base_radial_count; ++ring)
         {
             radial_edges.push_back(
                 d_radius * static_cast<real_t>(ring)
@@ -692,7 +692,7 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     if (z_edges.empty())
     {
         z_edges.reserve(base_height_count + 1);
-        for (std::size_t layer = 0; layer <= base_height_count; ++layer)
+        for (size_t layer = 0; layer <= base_height_count; ++layer)
         {
             z_edges.push_back(
                 d_cylinder_height * static_cast<real_t>(layer)
@@ -705,28 +705,28 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
 
     // Increase sector count by ring so circumferential and radial edge lengths
     // stay comparable without forcing tiny sectors near the cylinder center.
-    auto ring_node_count = [=](std::size_t ring) -> std::size_t
+    auto ring_node_count = [=](size_t ring) -> size_t
     {
         if (ring == 0)
         {
             return 1;
         }
 
-        return std::max<std::size_t>(
-            6, static_cast<std::size_t>(
+        return std::max<size_t>(
+            6, static_cast<size_t>(
                 std::ceil(2.0 * pi * static_cast<real_t>(ring))));
     };
 
-    std::vector<std::size_t> ring_offsets(radial_count + 1, 0);
-    std::size_t nodes_per_layer = 0;
-    for (std::size_t ring = 0; ring <= radial_count; ++ring)
+    std::vector<size_t> ring_offsets(radial_count + 1, 0);
+    size_t nodes_per_layer = 0;
+    for (size_t ring = 0; ring <= radial_count; ++ring)
     {
         ring_offsets[ring] = nodes_per_layer;
         nodes_per_layer += ring_node_count(ring);
     }
 
-    auto layer_node_index = [&](std::size_t ring,
-                                std::size_t sector) -> std::size_t
+    auto layer_node_index = [&](size_t ring,
+                                size_t sector) -> size_t
     {
         if (ring == 0)
         {
@@ -736,12 +736,12 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         return ring_offsets[ring] + sector % ring_node_count(ring);
     };
 
-    std::vector<std::array<std::size_t, 3>> disk_triangles;
+    std::vector<std::array<size_t, 3>> disk_triangles;
     if (radial_count > 0)
     {
         const auto first_ring_count = ring_node_count(1);
         disk_triangles.reserve(6 * radial_count * radial_count);
-        for (std::size_t sector = 0; sector < first_ring_count; ++sector)
+        for (size_t sector = 0; sector < first_ring_count; ++sector)
         {
             disk_triangles.push_back(
                 {layer_node_index(0, 0),
@@ -750,15 +750,15 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         }
     }
 
-    for (std::size_t ring = 2; ring <= radial_count; ++ring)
+    for (size_t ring = 2; ring <= radial_count; ++ring)
     {
         // Zip adjacent rings by angle; each step consumes one inner or outer
         // edge, giving a non-crossing triangular annulus for unequal counts.
         const auto inner_ring = ring - 1;
         const auto inner_count = ring_node_count(inner_ring);
         const auto outer_count = ring_node_count(ring);
-        std::size_t inner = 0;
-        std::size_t outer = 0;
+        size_t inner = 0;
+        size_t outer = 0;
 
         while (inner < inner_count || outer < outer_count)
         {
@@ -811,17 +811,17 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     auto* zmax_part = declare_io_part(*meta, d_domain_exterior_face_types[2],
                                       meta->side_rank());
 
-    auto node_id_from_layer_index = [=](std::size_t layer,
-                                        std::size_t node_index)
+    auto node_id_from_layer_index = [=](size_t layer,
+                                        size_t node_index)
         -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
             1 + layer * nodes_per_layer + node_index);
     };
 
-    auto node_id = [=](std::size_t layer,
-                       std::size_t ring,
-                       std::size_t sector) -> stk::mesh::EntityId
+    auto node_id = [=](size_t layer,
+                       size_t ring,
+                       size_t sector) -> stk::mesh::EntityId
     {
         return node_id_from_layer_index(layer, layer_node_index(ring, sector));
     };
@@ -832,8 +832,8 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     bulk->modification_begin();
 
     stk::mesh::EntityId next_element_id = 1;
-    auto declare_wedge = [&](std::size_t layer,
-                             const std::array<std::size_t, 3>& bottom_nodes)
+    auto declare_wedge = [&](size_t layer,
+                             const std::array<size_t, 3>& bottom_nodes)
     {
         const stk::mesh::EntityIdVector wedge_nodes{
             node_id_from_layer_index(layer, bottom_nodes[0]),
@@ -851,13 +851,13 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
             *bulk, elem, stk::topology::WEDGE_6, wedge_nodes, node_tags,
             [&](const std::vector<FactoryNodeTag>& tags) -> stk::mesh::Part*
             {
-                const auto all_layer = [&](std::size_t layer_id)
+                const auto all_layer = [&](size_t layer_id)
                 {
                     return std::all_of(tags.begin(), tags.end(),
                                        [=](const FactoryNodeTag& tag)
                                        { return tag.layer == layer_id; });
                 };
-                const auto all_ring = [&](std::size_t ring_id)
+                const auto all_ring = [&](size_t ring_id)
                 {
                     return std::all_of(tags.begin(), tags.end(),
                                        [=](const FactoryNodeTag& tag)
@@ -871,13 +871,13 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
             });
     };
 
-    for (std::size_t layer = 0; layer <= height_count; ++layer)
+    for (size_t layer = 0; layer <= height_count; ++layer)
     {
         node_tags.emplace(node_id(layer, 0, 0), FactoryNodeTag{0, layer, false});
-        for (std::size_t ring = 1; ring <= radial_count; ++ring)
+        for (size_t ring = 1; ring <= radial_count; ++ring)
         {
             const auto sector_count = ring_node_count(ring);
-            for (std::size_t sector = 0; sector < sector_count; ++sector)
+            for (size_t sector = 0; sector < sector_count; ++sector)
             {
                 node_tags.emplace(node_id(layer, ring, sector),
                                   FactoryNodeTag{ring, layer,
@@ -886,7 +886,7 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         }
     }
 
-    for (std::size_t layer = 0; layer < height_count; ++layer)
+    for (size_t layer = 0; layer < height_count; ++layer)
     {
         for (const auto& triangle : disk_triangles)
         {
@@ -894,14 +894,14 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         }
     }
 
-    for (std::size_t layer = 0; layer <= height_count; ++layer)
+    for (size_t layer = 0; layer <= height_count; ++layer)
     {
         const auto z = z_edges[layer];
-        for (std::size_t ring = 0; ring <= radial_count; ++ring)
+        for (size_t ring = 0; ring <= radial_count; ++ring)
         {
             const auto radius = radial_edges[ring];
             const auto sector_count = ring_node_count(ring);
-            for (std::size_t sector = 0; sector < sector_count; ++sector)
+            for (size_t sector = 0; sector < sector_count; ++sector)
             {
                 const auto theta = 2.0 * pi
                                  * static_cast<real_t>(sector)
@@ -989,7 +989,7 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
     if (sphere_edges.empty())
     {
         sphere_edges.reserve(cell_count + 1);
-        for (std::size_t index = 0; index <= cell_count; ++index)
+        for (size_t index = 0; index <= cell_count; ++index)
         {
             sphere_edges.push_back(
                 -1.0 + 2.0 * static_cast<real_t>(index)
@@ -1015,7 +1015,7 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
                                                meta->side_rank())
                              : nullptr;
 
-    auto node_id = [=](std::size_t i, std::size_t j, std::size_t k)
+    auto node_id = [=](size_t i, size_t j, size_t k)
         -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
@@ -1024,11 +1024,11 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
 
     std::unordered_map<stk::mesh::EntityId, FactoryNodeTag> node_tags;
     node_tags.reserve((cell_count + 1) * (cell_count + 1) * (cell_count + 1));
-    for (std::size_t k = 0; k <= cell_count; ++k)
+    for (size_t k = 0; k <= cell_count; ++k)
     {
-        for (std::size_t j = 0; j <= cell_count; ++j)
+        for (size_t j = 0; j <= cell_count; ++j)
         {
-            for (std::size_t i = 0; i <= cell_count; ++i)
+            for (size_t i = 0; i <= cell_count; ++i)
             {
                 const bool surface = i == 0 || i == cell_count
                                   || j == 0 || j == cell_count
@@ -1040,11 +1040,11 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
 
     bulk->modification_begin();
 
-    for (std::size_t k = 0; k < cell_count; ++k)
+    for (size_t k = 0; k < cell_count; ++k)
     {
-        for (std::size_t j = 0; j < cell_count; ++j)
+        for (size_t j = 0; j < cell_count; ++j)
         {
-            for (std::size_t i = 0; i < cell_count; ++i)
+            for (size_t i = 0; i < cell_count; ++i)
             {
                 const stk::mesh::EntityIdVector hex_nodes{
                     node_id(i,     j,     k),
@@ -1080,7 +1080,7 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
                             return lower_surface_part;
                         }
 
-                        std::size_t layer_sum = 0;
+                        size_t layer_sum = 0;
                         for (const auto& tag : tags)
                         {
                             layer_sum += tag.layer;
@@ -1093,11 +1093,11 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
         }
     }
 
-    for (std::size_t k = 0; k <= cell_count; ++k)
+    for (size_t k = 0; k <= cell_count; ++k)
     {
-        for (std::size_t j = 0; j <= cell_count; ++j)
+        for (size_t j = 0; j <= cell_count; ++j)
         {
-            for (std::size_t i = 0; i <= cell_count; ++i)
+            for (size_t i = 0; i <= cell_count; ++i)
             {
                 const real_t u = sphere_edges[i];
                 const real_t v = sphere_edges[j];

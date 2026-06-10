@@ -110,7 +110,7 @@ public:
      * @brief Number of boundary faces owned by this rank.
      * @return Count of boundary faces stored in the field.
      */
-    std::size_t num_owned_boundary_faces() const noexcept
+    size_t num_owned_boundary_faces() const noexcept
     {
         return d_owned_boundary_face_ids.size();
     }
@@ -311,7 +311,7 @@ auto BoundaryFaceField<Pack>::make_boundary_face_map(
             "owned-cell map.");
     }
 
-    std::size_t num_boundary_faces = 0;
+    size_t num_boundary_faces = 0;
     for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
     {
         (void)patch_id;
@@ -342,7 +342,7 @@ auto BoundaryFaceField<Pack>::make_boundary_face_map(
                 detail::checked_size_to_ordinal<local_ordinal_type>(
                     owned_boundary_face_ids.size(), "boundary-face owned row");
             owned_boundary_face_ids.push_back(fid);
-            face_lid_to_owned_row[static_cast<std::size_t>(fid)] = owned_row;
+            face_lid_to_owned_row[static_cast<size_t>(fid)] = owned_row;
         }
     }
 
@@ -378,7 +378,7 @@ void BoundaryFaceField<Pack>::check_face_lid(
         }
     }
 
-    if (static_cast<std::size_t>(face_lid)
+    if (static_cast<size_t>(face_lid)
         >= d_face_lid_to_owned_row.size())
     {
         throw std::out_of_range(
@@ -402,7 +402,7 @@ auto BoundaryFaceField<Pack>::owned_row_for_face(
     check_face_lid(face_lid);
 
     const auto owned_row =
-        d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)];
+        d_face_lid_to_owned_row[static_cast<size_t>(face_lid)];
     if (owned_row == invalid_owned_row())
     {
         throw std::out_of_range(
@@ -453,7 +453,7 @@ auto BoundaryFaceField<Pack>::value(int patch_id, local_ordinal_type in_patch_id
         }
     }
 
-    const auto patch_index = static_cast<std::size_t>(in_patch_id);
+    const auto patch_index = static_cast<size_t>(in_patch_id);
     if (patch_index >= face_patch.face_lids.size())
     {
         throw std::out_of_range("In-patch ID is out of bounds for the specified boundary patch.");
@@ -503,7 +503,7 @@ void BoundaryFaceField<Pack>::set_value(int patch_id,
         }
     }
 
-    const auto patch_index = static_cast<std::size_t>(in_patch_id);
+    const auto patch_index = static_cast<size_t>(in_patch_id);
     if (patch_index >= face_patch.face_lids.size())
     {
         throw std::out_of_range("In-patch ID is out of bounds for the specified boundary patch.");
@@ -525,7 +525,7 @@ bool BoundaryFaceField<Pack>::is_owned_boundary_face(
     local_ordinal_type face_lid) const
 {
     check_face_lid(face_lid);
-    return d_face_lid_to_owned_row[static_cast<std::size_t>(face_lid)]
+    return d_face_lid_to_owned_row[static_cast<size_t>(face_lid)]
            != invalid_owned_row();
 }
 

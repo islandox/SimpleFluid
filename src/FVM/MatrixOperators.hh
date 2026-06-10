@@ -41,7 +41,7 @@ identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     auto matrix = Teuchos::rcp(new matrix_type(map, map, 1));
-    for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+    for (size_t row = 0; row < map->getLocalNumElements(); ++row)
     {
         const auto lid = static_cast<local_ordinal_type>(row);
         Teuchos::Array<local_ordinal_type> cols{lid};
@@ -76,7 +76,7 @@ diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -136,7 +136,7 @@ upwind_convection_matrix(
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -202,7 +202,7 @@ pressure_poisson_matrix(
     Teuchos::Array<scalar_type> vals;
     cols.reserve(32);
     vals.reserve(32);
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = mesh.cell_global_id(cell_lid);

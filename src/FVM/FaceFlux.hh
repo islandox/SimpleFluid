@@ -277,7 +277,7 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
     const auto& mesh = velocity.mesh();
     face_velocity.put_scalar(typename Mesh<Pack>::Vec3{});
 
-    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
     {
         const auto face_lid =
             static_cast<typename Pack::local_ordinal_type>(face);
@@ -353,7 +353,7 @@ void normal_face_fluxes(
     const auto& mesh = face_velocity.mesh();
     fluxes.put_scalar(typename Pack::scalar_type{});
 
-    for (std::size_t face = 0; face < mesh.num_faces(); ++face)
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
     {
         const auto face_lid =
             static_cast<typename Pack::local_ordinal_type>(face);

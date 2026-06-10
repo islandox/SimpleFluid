@@ -3,6 +3,12 @@
 set(SOURCES "geometry/Mesh.cc"
             "geometry/STKMesh.cc"
             "geometry/MeshFactory.cc"
+            "geometry/mesh/OrthoMeshPartitioner.cc"
+            "geometry/mesh/OrthoMeshTopo.cc"
+            "geometry/mesh/OrthogonalCartesian3D.cc"
+            "geometry/mesh/OrthogonalCylindrial3D.cc"
+            "geometry/mesh/SemiStructMeshTopo.cc"
+            "geometry/mesh/SemiStructuredXY_Z.cc"
             "io/VTUWriter.cc"
             "parallel/MeshPartitioner.cc"
             "equations/BoussinesqMomentumEquation.cc"
@@ -17,9 +23,15 @@ add_library(SimpleFluid STATIC ${SOURCES})
 target_include_directories(SimpleFluid PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${Trilinos_TPL_INCLUDE_DIRS}
 )
 
-target_link_libraries(SimpleFluid PUBLIC Trilinos::all_selected_libs MPI::MPI_CXX Zoltan2Core::all_libs)
+target_link_libraries(SimpleFluid PUBLIC
+    Trilinos::all_selected_libs
+    MPI::MPI_CXX
+    Zoltan2Core::all_libs
+    ${Trilinos_TPL_LIBRARIES}
+)
 
 target_precompile_headers(SimpleFluid PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"

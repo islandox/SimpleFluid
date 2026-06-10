@@ -55,8 +55,8 @@ TEST(MeshTest, InvalidIdAndVtuCellType)
     EXPECT_EQ(SimpleFluid::invalid_id<long>(), -1L);
     EXPECT_EQ(SimpleFluid::invalid_id<unsigned>(),
               std::numeric_limits<unsigned>::max());
-    EXPECT_EQ(SimpleFluid::invalid_id<std::size_t>(),
-              std::numeric_limits<std::size_t>::max());
+    EXPECT_EQ(SimpleFluid::invalid_id<size_t>(),
+              std::numeric_limits<size_t>::max());
     EXPECT_EQ(MeshType::invalid_boundary_id, SimpleFluid::invalid_id<int>());
 
     // vtu_cell_type_code
@@ -98,7 +98,7 @@ TEST_F(MeshMethodTest, CellAndFaceAccess)
     using lid_t = SimpleFluid::local_index_t;
 
     // Valid cell access
-    for (std::size_t i = 0; i < mesh_->num_local_cells(); ++i)
+    for (size_t i = 0; i < mesh_->num_local_cells(); ++i)
         EXPECT_NO_THROW(mesh_->cell(static_cast<lid_t>(i)));
 
     // Out-of-bounds / negative cell access
@@ -107,7 +107,7 @@ TEST_F(MeshMethodTest, CellAndFaceAccess)
     EXPECT_THROW_WHEN_DEBUG(mesh_->cell(-1), std::out_of_range);
 
     // Valid face access
-    for (std::size_t i = 0; i < mesh_->num_faces(); ++i)
+    for (size_t i = 0; i < mesh_->num_faces(); ++i)
         EXPECT_NO_THROW(mesh_->face(static_cast<lid_t>(i)));
 
     // Out-of-bounds face access
@@ -115,7 +115,7 @@ TEST_F(MeshMethodTest, CellAndFaceAccess)
                  std::out_of_range);
 
     // is_owned_cell matches owned range
-    for (std::size_t i = 0; i < mesh_->num_local_cells(); ++i)
+    for (size_t i = 0; i < mesh_->num_local_cells(); ++i)
     {
         const auto lid = static_cast<lid_t>(i);
         if (i < mesh_->num_owned_cells())
@@ -131,7 +131,7 @@ TEST_F(MeshMethodTest, GeometryProperties)
     using lid_t = SimpleFluid::local_index_t;
 
     // Cell volumes and centroids
-    for (std::size_t i = 0; i < mesh_->num_owned_cells(); ++i)
+    for (size_t i = 0; i < mesh_->num_owned_cells(); ++i)
     {
         const auto lid = static_cast<lid_t>(i);
         EXPECT_GT(mesh_->cell_volume(lid), 0.0);
@@ -140,7 +140,7 @@ TEST_F(MeshMethodTest, GeometryProperties)
     }
 
     // Face areas, centroids, and normals
-    for (std::size_t i = 0; i < mesh_->num_faces(); ++i)
+    for (size_t i = 0; i < mesh_->num_faces(); ++i)
     {
         const auto fid = static_cast<lid_t>(i);
         EXPECT_GT(mesh_->face_area(fid), 0.0);
@@ -166,16 +166,16 @@ TEST_F(MeshMethodTest, FaceTopology)
     using lid_t = SimpleFluid::local_index_t;
     const auto invalid = SimpleFluid::invalid_id<lid_t>();
 
-    std::size_t exterior_count = 0, interior_count = 0, boundary_count = 0;
+    size_t exterior_count = 0, interior_count = 0, boundary_count = 0;
 
-    for (std::size_t i = 0; i < mesh_->num_faces(); ++i)
+    for (size_t i = 0; i < mesh_->num_faces(); ++i)
     {
         const auto fid = static_cast<lid_t>(i);
 
         // Owner cell always valid
         const auto owner = mesh_->owner_cell(fid);
         EXPECT_GE(owner, 0);
-        EXPECT_LT(static_cast<std::size_t>(owner), mesh_->num_local_cells());
+        EXPECT_LT(static_cast<size_t>(owner), mesh_->num_local_cells());
 
         if (mesh_->is_exterior_face(fid))
         {
@@ -226,14 +226,14 @@ TEST_F(MeshMethodTest, FaceTopology)
     EXPECT_GT(boundary_count, 0UL);
 
     // opposite_cell throws for non-adjacent cell (spot-check one interior face)
-    for (std::size_t i = 0; i < mesh_->num_faces(); ++i)
+    for (size_t i = 0; i < mesh_->num_faces(); ++i)
     {
         const auto fid = static_cast<lid_t>(i);
         if (mesh_->is_interior_face(fid))
         {
             const auto owner = mesh_->owner_cell(fid);
             const auto neighbor = mesh_->neighbor_cell(fid);
-            for (std::size_t c = 0; c < mesh_->num_local_cells(); ++c)
+            for (size_t c = 0; c < mesh_->num_local_cells(); ++c)
             {
                 const auto clid = static_cast<lid_t>(c);
                 if (clid != owner && clid != neighbor)
@@ -252,7 +252,7 @@ TEST_F(MeshMethodTest, IdentifierMapping)
     using lid_t = SimpleFluid::local_index_t;
 
     // Global ↔ local roundtrip
-    for (std::size_t i = 0; i < mesh_->num_owned_cells(); ++i)
+    for (size_t i = 0; i < mesh_->num_owned_cells(); ++i)
     {
         const auto lid = static_cast<lid_t>(i);
         EXPECT_EQ(mesh_->global_to_local_cell(mesh_->cell_global_id(lid)), lid);
@@ -274,7 +274,7 @@ TEST_F(MeshMethodTest, DistanceComputations)
     using lid_t = SimpleFluid::local_index_t;
 
     // Cell-to-face distances
-    for (std::size_t i = 0; i < mesh_->num_owned_cells(); ++i)
+    for (size_t i = 0; i < mesh_->num_owned_cells(); ++i)
     {
         const auto clid = static_cast<lid_t>(i);
         for (const auto fid : mesh_->faces(clid))
@@ -282,7 +282,7 @@ TEST_F(MeshMethodTest, DistanceComputations)
     }
 
     // Face-cell-center distances for interior faces
-    for (std::size_t i = 0; i < mesh_->num_faces(); ++i)
+    for (size_t i = 0; i < mesh_->num_faces(); ++i)
     {
         const auto fid = static_cast<lid_t>(i);
         if (mesh_->is_interior_face(fid))

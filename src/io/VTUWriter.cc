@@ -78,7 +78,7 @@ void write_scalar_values(std::ostream& out,
                          const std::string& indent)
 {
     out << indent << "  ";
-    for (std::size_t i = 0; i < values.size(); ++i)
+    for (size_t i = 0; i < values.size(); ++i)
     {
         out << values[i] << (i + 1 == values.size() ? "" : " ");
     }
@@ -97,7 +97,7 @@ void write_int_values(std::ostream& out,
                       const std::string& indent)
 {
     out << indent << "  ";
-    for (std::size_t i = 0; i < values.size(); ++i)
+    for (size_t i = 0; i < values.size(); ++i)
     {
         out << values[i] << (i + 1 == values.size() ? "" : " ");
     }
@@ -116,7 +116,7 @@ void write_int64_values(std::ostream& out,
                         const std::string& indent)
 {
     out << indent << "  ";
-    for (std::size_t i = 0; i < values.size(); ++i)
+    for (size_t i = 0; i < values.size(); ++i)
     {
         out << values[i] << (i + 1 == values.size() ? "" : " ");
     }
@@ -149,10 +149,10 @@ void write_vector_values(std::ostream& out,
  * @param data_array The data array to query.
  * @return Number of entries in the contained values variant.
  */
-std::size_t VTUWriter::data_array_size(const DataArray& data_array)
+size_t VTUWriter::data_array_size(const DataArray& data_array)
 {
     return std::visit(
-        [](const auto& values) -> std::size_t { return values.size(); },
+        [](const auto& values) -> size_t { return values.size(); },
         data_array.values);
 }
 
@@ -395,7 +395,7 @@ void VTUWriter::write(const std::string& filename) const
 
     out << "      <Cells>\n";
     out << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n";
-    for (std::size_t cell = 0; cell < num_cells(); ++cell)
+    for (size_t cell = 0; cell < num_cells(); ++cell)
     {
         const auto begin = cell == 0
                          ? global_index_t{0}
@@ -405,7 +405,7 @@ void VTUWriter::write(const std::string& filename) const
         out << "          ";
         for (auto i = begin; i < end; ++i)
         {
-            out << d_connectivity[static_cast<std::size_t>(i)]
+            out << d_connectivity[static_cast<size_t>(i)]
                 << (i + 1 == end ? "" : " ");
         }
         out << "\n";
@@ -414,7 +414,7 @@ void VTUWriter::write(const std::string& filename) const
 
     out << "        <DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">\n";
     out << "          ";
-    for (std::size_t cell = 0; cell < num_cells(); ++cell)
+    for (size_t cell = 0; cell < num_cells(); ++cell)
     {
         out << d_cell_offsets[cell] << (cell + 1 == num_cells() ? "" : " ");
     }
@@ -422,7 +422,7 @@ void VTUWriter::write(const std::string& filename) const
 
     out << "        <DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
     out << "          ";
-    for (std::size_t cell = 0; cell < num_cells(); ++cell)
+    for (size_t cell = 0; cell < num_cells(); ++cell)
     {
         out << static_cast<int>(d_cell_types[cell])
             << (cell + 1 == num_cells() ? "" : " ");

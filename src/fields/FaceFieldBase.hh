@@ -66,7 +66,7 @@ public:
     // -------- sizing --------
 
     /** @brief Number of faces owned by this rank. */
-    std::size_t num_owned_faces() const noexcept
+    size_t num_owned_faces() const noexcept
     {
         return d_owned_face_ids.size();
     }
@@ -236,7 +236,7 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::make_owned_face_map(
     owned_face_ids.clear();
     owned_face_ids.reserve(mesh->num_faces());
 
-    for (std::size_t fid = 0; fid < mesh->num_faces(); ++fid)
+    for (size_t fid = 0; fid < mesh->num_faces(); ++fid)
     {
         const auto face_lid =
             detail::checked_size_to_ordinal<local_ordinal_type>(

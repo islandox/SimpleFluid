@@ -59,7 +59,7 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
          lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
          ++lid)
     {
-        values[static_cast<std::size_t>(lid)] = field.local_value(lid);
+        values[static_cast<size_t>(lid)] = field.local_value(lid);
     }
 
     return values;
@@ -87,7 +87,7 @@ int advance_explicit_diffusion_until_converged(
         {
             const auto update = std::abs(
                 temperature.value(lid)
-              - old_temperature[static_cast<std::size_t>(lid)]);
+              - old_temperature[static_cast<size_t>(lid)]);
             if (update > max_update)
             {
                 max_update = update;
@@ -263,7 +263,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
 {
     auto mesh = make_2x2x2_mesh();
 
-    for (std::size_t component = 0; component < 3; ++component)
+    for (size_t component = 0; component < 3; ++component)
     {
         FieldType temperature(mesh, "temperature");
         VectorFieldType velocity(mesh, "velocity");
@@ -301,7 +301,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
             EXPECT_TRUE(std::isfinite(temperature.value(lid)));
             changed = changed
                    || std::abs(temperature.value(lid)
-                             - old_temperature[static_cast<std::size_t>(lid)])
+                             - old_temperature[static_cast<size_t>(lid)])
                       > 1.0e-12;
         }
         EXPECT_TRUE(changed);
@@ -449,7 +449,7 @@ TEST(PhysicalEquationsTest, Steady1DDiffusionMatchesLinearProfile)
     bcs.temperature["zmax"] =
         {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
 
-    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         temperature.set_owned_value(
             static_cast<MeshType::local_ordinal_type>(owned), 0.0);
@@ -495,7 +495,7 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionUpdatesDirichletCell)
     bcs.temperature["xmax"] =
         {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
 
-    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         temperature.set_owned_value(
             static_cast<MeshType::local_ordinal_type>(owned), 0.0);
@@ -560,8 +560,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
     EXPECT_EQ(mesh->boundary_patches().size(), 6u);
 
     bool saw_triangular_face = false;
-    std::size_t boundary_cells = 0;
-    std::size_t interior_cells = 0;
+    size_t boundary_cells = 0;
+    size_t interior_cells = 0;
     for (MeshType::local_ordinal_type lid = 0;
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
@@ -623,7 +623,7 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
         temperature_changed =
             temperature_changed
          || std::abs(temperature.value(lid)
-                   - old_temperature[static_cast<std::size_t>(lid)]) > 1.0e-14;
+                   - old_temperature[static_cast<size_t>(lid)]) > 1.0e-14;
     }
     EXPECT_TRUE(temperature_changed);
 
@@ -642,7 +642,7 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
-        old_velocity[static_cast<std::size_t>(lid)] = velocity.value(lid);
+        old_velocity[static_cast<size_t>(lid)] = velocity.value(lid);
     }
 
     SimpleFluid::BoussinesqMomentumEquation<Pack> momentum_equation(mesh);
@@ -662,7 +662,7 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
         EXPECT_TRUE(std::isfinite(v.x));
         EXPECT_TRUE(std::isfinite(v.y));
         EXPECT_TRUE(std::isfinite(v.z));
-        const auto old_v = old_velocity[static_cast<std::size_t>(lid)];
+        const auto old_v = old_velocity[static_cast<size_t>(lid)];
         velocity_changed =
             velocity_changed
          || std::abs(v.x - old_v.x) > 1.0e-14
@@ -735,7 +735,7 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionMatchesQuadraticLaplacian)
 
         checked_interior = true;
         const auto expected =
-            old_temperature[static_cast<std::size_t>(lid)]
+            old_temperature[static_cast<size_t>(lid)]
           + time_step * diffusivity * 2.0;
         EXPECT_NEAR(temperature.value(lid), expected, 1.0e-12);
     }

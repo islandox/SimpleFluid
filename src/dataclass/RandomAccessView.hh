@@ -30,7 +30,7 @@ class RandomAccessView
 public:
     using reference = T&;
     using const_reference = const T&;
-    using size_type = std::size_t;
+    using size_type = size_t;
 
     /**
      * @brief Mutable random-access iterator for RandomAccessView.
@@ -144,14 +144,14 @@ public:
     const_iterator begin() const { return const_iterator(d_data); }
     const_iterator end() const { return const_iterator(d_data + d_size); }
     
-    reference operator[](std::size_t index) { return d_data[index]; }
-    const_reference operator[](std::size_t index) const { return d_data[index]; }
+    reference operator[](size_t index) { return d_data[index]; }
+    const_reference operator[](size_t index) const { return d_data[index]; }
     size_type size() const { return d_size; }
     bool empty() const { return d_size == 0; }
 
 private:
     T* d_data;
-    std::size_t d_size;
+    size_t d_size;
 };
 
 }

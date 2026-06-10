@@ -79,7 +79,7 @@ struct CellPacket {
      * @param size Unused; size is encoded in the buffer header.
      * @return Reconstructed vector of cell packets.
      */
-    static std::vector<CellPacket> deserialize_packets(const char* data, std::size_t /*size*/) {
+    static std::vector<CellPacket> deserialize_packets(const char* data, size_t /*size*/) {
         std::vector<CellPacket> pkts;
         const char* p = data;
         auto rd = [&](auto& v) { std::memcpy(&v, p, sizeof(v)); p += sizeof(v); };

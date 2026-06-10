@@ -71,18 +71,18 @@ void add_explicit_non_orthogonal_correction(
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        auto gradient = gradients[static_cast<std::size_t>(cell_lid)];
+        auto gradient = gradients[static_cast<size_t>(cell_lid)];
         if (mesh.is_owned_cell(other_lid)
-            && static_cast<std::size_t>(other_lid) < gradients.size())
+            && static_cast<size_t>(other_lid) < gradients.size())
         {
             gradient = (gradient
-                      + gradients[static_cast<std::size_t>(other_lid)])
+                      + gradients[static_cast<size_t>(other_lid)])
                      / 2.0;
         }
         return gradient;
     };
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         for (const auto face_lid : mesh.faces(cell_lid))
@@ -110,7 +110,7 @@ void add_explicit_non_orthogonal_correction(
 
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (std::size_t in_patch_id = 0;
+        for (size_t in_patch_id = 0;
              in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
@@ -132,7 +132,7 @@ void add_explicit_non_orthogonal_correction(
                 mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(area_vector, d);
-            const auto& gradient = gradients[static_cast<std::size_t>(owner)];
+            const auto& gradient = gradients[static_cast<size_t>(owner)];
 
             rhs.sumIntoLocalValue(
                 owner,
@@ -160,7 +160,7 @@ void add_explicit_non_orthogonal_correction(
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    constexpr std::size_t num_components = VectorCellField<Pack>::num_components;
+    constexpr size_t num_components = VectorCellField<Pack>::num_components;
 
     const auto& mesh = correction_field.mesh();
     if (diffusivity <= scalar_type{0}
@@ -186,13 +186,13 @@ void add_explicit_non_orthogonal_correction(
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> VectorCellGradient<Pack>
     {
-        auto gradient = gradients[static_cast<std::size_t>(cell_lid)];
+        auto gradient = gradients[static_cast<size_t>(cell_lid)];
         if (mesh.is_owned_cell(other_lid)
-            && static_cast<std::size_t>(other_lid) < gradients.size())
+            && static_cast<size_t>(other_lid) < gradients.size())
         {
             const auto& other_gradient =
-                gradients[static_cast<std::size_t>(other_lid)];
-            for (std::size_t component = 0;
+                gradients[static_cast<size_t>(other_lid)];
+            for (size_t component = 0;
                  component < num_components;
                  ++component)
             {
@@ -203,7 +203,7 @@ void add_explicit_non_orthogonal_correction(
         return gradient;
     };
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         for (const auto face_lid : mesh.faces(cell_lid))
@@ -222,7 +222,7 @@ void add_explicit_non_orthogonal_correction(
                 detail::non_orthogonal_area_vector(area_vector, d);
             const auto gradient = gradient_for_face(cell_lid, other);
 
-            for (std::size_t component = 0;
+            for (size_t component = 0;
                  component < num_components;
                  ++component)
             {
@@ -251,9 +251,9 @@ void add_explicit_non_orthogonal_correction(
                 mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(area_vector, d);
-            const auto& gradient = gradients[static_cast<std::size_t>(owner)];
+            const auto& gradient = gradients[static_cast<size_t>(owner)];
 
-            for (std::size_t component = 0;
+            for (size_t component = 0;
                  component < num_components;
                  ++component)
             {
@@ -360,7 +360,7 @@ implicit_non_orthogonal_diffusion_system(
     std::unordered_map<local_ordinal_type, scalar_type> row_values;
     row_values.reserve(64);
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -376,7 +376,7 @@ implicit_non_orthogonal_diffusion_system(
             if (non_orthogonal_implicit_weight == scalar_type{0}
                 || face_gradient_weight == scalar_type{0}
                 || !mesh.is_owned_cell(gradient_cell_lid)
-                || static_cast<std::size_t>(gradient_cell_lid)
+                || static_cast<size_t>(gradient_cell_lid)
                    >= gradient_stencils.size())
             {
                 return;
@@ -387,7 +387,7 @@ implicit_non_orthogonal_diffusion_system(
               * diffusivity
               * face_gradient_weight;
             for (const auto& entry :
-                 gradient_stencils[static_cast<std::size_t>(gradient_cell_lid)])
+                 gradient_stencils[static_cast<size_t>(gradient_cell_lid)])
             {
                 detail::add_matrix_entry(
                     row_values, entry.cell_lid,
@@ -414,7 +414,7 @@ implicit_non_orthogonal_diffusion_system(
                     detail::non_orthogonal_area_vector(area_vector, d);
 
                 if (mesh.is_owned_cell(other)
-                    && static_cast<std::size_t>(other)
+                    && static_cast<size_t>(other)
                        < gradient_stencils.size())
                 {
                     add_non_orthogonal_stencil(
@@ -431,15 +431,15 @@ implicit_non_orthogonal_diffusion_system(
             }
 
             if (!mesh.is_boundary_face(face_lid)
-                || static_cast<std::size_t>(face_lid)
+                || static_cast<size_t>(face_lid)
                    >= boundary_locations.size()
-                || !boundary_locations[static_cast<std::size_t>(face_lid)].active)
+                || !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 continue;
             }
 
             const auto location =
-                boundary_locations[static_cast<std::size_t>(face_lid)];
+                boundary_locations[static_cast<size_t>(face_lid)];
             const auto bc =
                 boundary_condition(location.patch_id, location.in_patch_id);
             if (bc.type == BoundaryConditionType::Dirichlet)
@@ -608,12 +608,12 @@ full_diffusion_residual(
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        auto gradient = gradients[static_cast<std::size_t>(cell_lid)];
+        auto gradient = gradients[static_cast<size_t>(cell_lid)];
         if (mesh.is_owned_cell(other_lid)
-            && static_cast<std::size_t>(other_lid) < gradients.size())
+            && static_cast<size_t>(other_lid) < gradients.size())
         {
             const auto& other_gradient =
-                gradients[static_cast<std::size_t>(other_lid)];
+                gradients[static_cast<size_t>(other_lid)];
             gradient = {(gradient.x + other_gradient.x) / 2.0,
                         (gradient.y + other_gradient.y) / 2.0,
                         (gradient.z + other_gradient.z) / 2.0};
@@ -621,7 +621,7 @@ full_diffusion_residual(
         return gradient;
     };
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto phi_p = field.value(cell_lid);
@@ -649,15 +649,15 @@ full_diffusion_residual(
             }
 
             if (!mesh.is_boundary_face(face_lid)
-                || static_cast<std::size_t>(face_lid)
+                || static_cast<size_t>(face_lid)
                    >= boundary_locations.size()
-                || !boundary_locations[static_cast<std::size_t>(face_lid)].active)
+                || !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 continue;
             }
 
             const auto location =
-                boundary_locations[static_cast<std::size_t>(face_lid)];
+                boundary_locations[static_cast<size_t>(face_lid)];
             const auto bc =
                 boundary_condition(location.patch_id, location.in_patch_id);
             if (bc.type == BoundaryConditionType::Dirichlet)
@@ -673,7 +673,7 @@ full_diffusion_residual(
                 const auto tangential_area =
                     detail::non_orthogonal_area_vector(area_vector, d);
                 const auto& gradient =
-                    gradients[static_cast<std::size_t>(cell_lid)];
+                    gradients[static_cast<size_t>(cell_lid)];
 
                 value += coeff * (phi_p - bc.value)
                        - diffusivity * gradient.dot(tangential_area);

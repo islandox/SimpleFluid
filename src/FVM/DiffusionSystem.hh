@@ -97,7 +97,7 @@ diffusion_system(const Mesh<Pack>& mesh,
     cols.reserve(32);
     vals.reserve(32);
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -131,7 +131,7 @@ diffusion_system(const Mesh<Pack>& mesh,
 
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (std::size_t in_patch_id = 0;
+        for (size_t in_patch_id = 0;
              in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
@@ -235,7 +235,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    constexpr std::size_t num_components = 3;
+    constexpr size_t num_components = 3;
 
     if (diffusivity < scalar_type{0})
     {
@@ -254,7 +254,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
     cols.reserve(32);
     vals.reserve(32);
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
 
@@ -284,7 +284,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
         matrix->insertLocalValues(cell_lid, cols(), vals());
 
         const auto source_value = right_hand_source(cell_lid);
-        for (std::size_t component = 0; component < num_components; ++component)
+        for (size_t component = 0; component < num_components; ++component)
         {
             rhs->replaceLocalValue(
                 cell_lid, component,
@@ -294,7 +294,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
 
     for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
     {
-        for (std::size_t in_patch_id = 0;
+        for (size_t in_patch_id = 0;
              in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
         {
             const auto face_lid = boundary_patch.face_lids[in_patch_id];
@@ -318,7 +318,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
                         owner,
                         Teuchos::arrayView(&col, 1),
                         Teuchos::arrayView(&coeff, 1));
-                    for (std::size_t component = 0;
+                    for (size_t component = 0;
                          component < num_components;
                          ++component)
                     {
@@ -330,7 +330,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
             }
             else if (bc.type == BoundaryConditionType::Neumann)
             {
-                for (std::size_t component = 0;
+                for (size_t component = 0;
                      component < num_components;
                      ++component)
                 {

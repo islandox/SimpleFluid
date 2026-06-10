@@ -50,7 +50,7 @@ typename Pack::scalar_type l2_error(
     scalar_type squared_sum = 0.0;
     scalar_type total_volume = 0.0;
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto numerical = field.value(cell_lid);
@@ -97,7 +97,7 @@ typename Pack::scalar_type linf_error(
     const auto& mesh = field.mesh();
     scalar_type max_error = 0.0;
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto numerical = field.value(cell_lid);
@@ -136,7 +136,7 @@ typename Pack::scalar_type l2_error(
     scalar_type squared_sum = 0.0;
     scalar_type total_volume = 0.0;
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto numerical = field.value(cell_lid);
@@ -178,7 +178,7 @@ typename Pack::scalar_type linf_error(
     const auto& mesh = field.mesh();
     scalar_type max_error = 0.0;
 
-    for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto numerical = field.value(cell_lid);

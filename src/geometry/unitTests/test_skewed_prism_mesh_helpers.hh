@@ -43,9 +43,9 @@ inline vec3<> skewed_prism_coord(double x, double y, double z)
 
 struct LogicalNode
 {
-    std::size_t i = 0;
-    std::size_t j = 0;
-    std::size_t k = 0;
+    size_t i = 0;
+    size_t j = 0;
+    size_t k = 0;
 };
 
 } // namespace detail
@@ -58,9 +58,9 @@ struct LogicalNode
  * 27 cells and contains both fully interior and exterior-adjacent cells.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-SP<Mesh<Pack>> make_skewed_prism_mesh(std::size_t n_x = 3,
-                                      std::size_t n_y = 3,
-                                      std::size_t n_z = 3)
+SP<Mesh<Pack>> make_skewed_prism_mesh(size_t n_x = 3,
+                                      size_t n_y = 3,
+                                      size_t n_z = 3)
 {
     if (n_x < 3 || n_y < 3 || n_z < 3)
     {
@@ -81,15 +81,15 @@ SP<Mesh<Pack>> make_skewed_prism_mesh(std::size_t n_x = 3,
     std::array<stk::mesh::Part*, 6> boundary_parts{};
     const std::array<const char*, 6> boundary_names{
         "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
-    for (std::size_t i = 0; i < boundary_parts.size(); ++i)
+    for (size_t i = 0; i < boundary_parts.size(); ++i)
     {
         auto& part = meta->declare_part(boundary_names[i], meta->side_rank());
         boundary_parts[i] = &part;
     }
 
-    auto node_id = [=](std::size_t i,
-                       std::size_t j,
-                       std::size_t k) -> stk::mesh::EntityId
+    auto node_id = [=](size_t i,
+                       size_t j,
+                       size_t k) -> stk::mesh::EntityId
     {
         return static_cast<stk::mesh::EntityId>(
             1 + i + (n_x + 1) * (j + (n_y + 1) * k));
@@ -98,7 +98,7 @@ SP<Mesh<Pack>> make_skewed_prism_mesh(std::size_t n_x = 3,
     auto logical_node = [=](stk::mesh::EntityId id)
         -> detail::LogicalNode
     {
-        auto offset = static_cast<std::size_t>(id - 1);
+        auto offset = static_cast<size_t>(id - 1);
         const auto i = offset % (n_x + 1);
         offset /= (n_x + 1);
         const auto j = offset % (n_y + 1);
@@ -180,11 +180,11 @@ SP<Mesh<Pack>> make_skewed_prism_mesh(std::size_t n_x = 3,
         }
     };
 
-    for (std::size_t k = 0; k < n_z; ++k)
+    for (size_t k = 0; k < n_z; ++k)
     {
-        for (std::size_t j = 0; j < n_y; ++j)
+        for (size_t j = 0; j < n_y; ++j)
         {
-            for (std::size_t i = 0; i < n_x; ++i)
+            for (size_t i = 0; i < n_x; ++i)
             {
                 declare_prism(
                     node_id(i,     j,     k),
@@ -204,11 +204,11 @@ SP<Mesh<Pack>> make_skewed_prism_mesh(std::size_t n_x = 3,
         }
     }
 
-    for (std::size_t k = 0; k <= n_z; ++k)
+    for (size_t k = 0; k <= n_z; ++k)
     {
-        for (std::size_t j = 0; j <= n_y; ++j)
+        for (size_t j = 0; j <= n_y; ++j)
         {
-            for (std::size_t i = 0; i <= n_x; ++i)
+            for (size_t i = 0; i <= n_x; ++i)
             {
                 const auto x = static_cast<double>(i)
                              / static_cast<double>(n_x);

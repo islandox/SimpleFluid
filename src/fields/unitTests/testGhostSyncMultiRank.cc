@@ -46,7 +46,7 @@ SimpleFluid::SP<MeshType> make_10x10x10_mesh()
 }
 
 void expect_partitioned_mesh(const MeshType& mesh,
-                             std::size_t expected_global_cells)
+                             size_t expected_global_cells)
 {
     const auto comm = mesh.owned_cell_map()->getComm();
     const int local_owned = static_cast<int>(mesh.num_owned_cells());
@@ -64,7 +64,7 @@ void expect_partitioned_mesh(const MeshType& mesh,
     EXPECT_GT(mesh.num_local_cells(), mesh.num_owned_cells())
         << "Rank " << comm->getRank()
         << " has no ghost cells, so ghost sync is not exercised.";
-    EXPECT_EQ(static_cast<std::size_t>(global_owned), expected_global_cells);
+    EXPECT_EQ(static_cast<size_t>(global_owned), expected_global_cells);
     EXPECT_GT(global_ghosts, 0);
 }
 
@@ -84,7 +84,7 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesToAllLocalCells)
     expect_partitioned_mesh(*mesh, 64u);
 
     FieldType field(mesh, "global_id_field");
-    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(owned);
@@ -95,7 +95,7 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesToAllLocalCells)
 
     field.sync_ghosts();
 
-    for (std::size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
+    for (size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(cell);
@@ -120,7 +120,7 @@ TEST(GhostSyncMultiRankTest, SyncPeriodicBoundariesUpdatesScalarAndVectorGhosts)
 
     FieldType scalar(mesh, "periodic_scalar", false);
     VectorFieldType vector(mesh, "periodic_vector", false);
-    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(owned);
@@ -133,7 +133,7 @@ TEST(GhostSyncMultiRankTest, SyncPeriodicBoundariesUpdatesScalarAndVectorGhosts)
     mesh->sync_periodic_boundaries(scalar);
     mesh->sync_periodic_boundaries(vector);
 
-    for (std::size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
+    for (size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(cell);
@@ -162,7 +162,7 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesOnLargeMesh)
     expect_partitioned_mesh(*mesh, 1000u);
 
     FieldType field(mesh, "global_id_field_large");
-    for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(owned);
@@ -173,7 +173,7 @@ TEST(GhostSyncMultiRankTest, SyncsOwnedGlobalIdValuesOnLargeMesh)
 
     field.sync_ghosts();
 
-    for (std::size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
+    for (size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(cell);
