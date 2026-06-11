@@ -46,8 +46,16 @@ TEST(TimeStepperOptionsTest, ParsesPressureVelocityCouplingSwitch)
               SimpleFluid::PressureVelocityCoupling::PISO);
     EXPECT_EQ(SimpleFluid::pressure_velocity_coupling_from_string("PIMPLE"),
               SimpleFluid::PressureVelocityCoupling::PIMPLE);
+    EXPECT_EQ(
+        SimpleFluid::pressure_velocity_coupling_from_string(
+            "coupledKrylov"),
+        SimpleFluid::PressureVelocityCoupling::CoupledKrylov);
     EXPECT_EQ(SimpleFluid::to_string(SimpleFluid::PressureVelocityCoupling::SIMPLE),
               "SIMPLE");
+    EXPECT_EQ(
+        SimpleFluid::to_string(
+            SimpleFluid::PressureVelocityCoupling::CoupledKrylov),
+        "coupledKrylov");
     EXPECT_THROW(SimpleFluid::pressure_velocity_coupling_from_string("coupled"),
                  std::invalid_argument);
 }

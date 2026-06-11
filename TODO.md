@@ -115,7 +115,7 @@
 
 ## Phase 6 — Fully coupled Krylov system
 
-- [ ] Assemble block system:
+- [x] Assemble block system:
 
   ```latex
   \begin{bmatrix}
@@ -133,13 +133,13 @@
 
 - [x] Use Tpetra sparse matrix/vector backend.
 - [x] Use Belos FGMRES or GMRES as primary Krylov solver.
-- [ ] Implement block Schur preconditioner:
+- [x] Implement block Schur preconditioner:
   [
   S \approx D \operatorname{diag}(A_u)^{-1} G
   ]
-- [ ] Use Ifpack2 for simple block smoothers.
-- [ ] Use MueLu AMG for pressure/Poisson-like Schur block.
-- [ ] Add solver switch:
+- [x] Use Ifpack2 for simple block smoothers.
+- [x] Use MueLu AMG for pressure/Poisson-like Schur block.
+- [x] Add solver switch:
 
   ```yaml
   pressureVelocityCoupling: SIMPLE | PISO | PIMPLE | coupledKrylov
@@ -149,10 +149,10 @@ Tpetra is the Trilinos package for distributed sparse matrices/vectors, Belos pr
 
 ## Phase 7 — Rhie–Chow / collocated-grid stabilization
 
-- [ ] Implement pressure-weighted face flux interpolation.
-- [ ] Add checkerboard-pressure test.
-- [ ] Verify pressure field remains smooth on collocated meshes.
-- [ ] Ensure stabilization is compatible with:
+- [x] Implement pressure-weighted face flux interpolation.
+- [x] Add checkerboard-pressure test.
+- [x] Verify pressure field remains smooth on collocated meshes.
+- [x] Ensure stabilization is compatible with:
 
   - SIMPLE
   - PISO

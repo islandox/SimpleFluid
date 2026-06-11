@@ -163,9 +163,9 @@ auto PressureProjectionEquation<Pack>::project(
     }
 
     FVM::face_velocities(velocity, velocity_boundary_cache,
-                                  d_cached_face_velocity);
+                         d_cached_face_velocity);
     FVM::normal_face_fluxes(d_cached_face_velocity,
-                                     d_cached_face_fluxes);
+                            d_cached_face_fluxes);
     const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
     if (d_cached_pressure_matrix.is_null())
     {
@@ -241,10 +241,9 @@ auto PressureProjectionEquation<Pack>::project(
 
     d_mesh->sync_periodic_boundaries(velocity);
 
-    FVM::face_velocities(velocity, velocity_boundary_cache,
-                                  d_cached_face_velocity);
-    FVM::normal_face_fluxes(d_cached_face_velocity,
-                                     d_cached_face_fluxes);
+    FVM::pressure_weighted_face_fluxes(
+        velocity, pressure, time_step, velocity_boundary_cache,
+        d_cached_face_fluxes);
 
     scalar_type continuity_norm_squared = {};
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)

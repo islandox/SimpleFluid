@@ -9,6 +9,13 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+cmake_host_system_information(RESULT NCPU QUERY NUMBER_OF_LOGICAL_CORES)
+
+# parallel job pool settings, only available for ninja build.
+set_property(GLOBAL PROPERTY JOB_POOLS
+    compile_pool=${NCPU}/2
+    link_pool=${NCPU}/5)
+
 option(SIMPLEFLUID_ENABLE_COVERAGE
        "Build with compiler coverage instrumentation" OFF)
 if(SIMPLEFLUID_ENABLE_COVERAGE)
@@ -28,7 +35,19 @@ endif()
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-omit-frame-pointer -DNDEBUG")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO   "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-omit-frame-pointer")
 
-find_package(Trilinos REQUIRED COMPONENTS Kokkos Teuchos Tpetra STKIO STKMesh STKTopology STKUtil Belos Zoltan2)
+find_package(Trilinos REQUIRED COMPONENTS
+    Kokkos
+    Teuchos
+    Tpetra
+    STKIO
+    STKMesh
+    STKTopology
+    STKUtil
+    Belos
+    Ifpack2
+    MueLu
+    Zoltan2
+)
 find_package(MPI REQUIRED COMPONENTS CXX)
 
 set(SIMPLEFLUID_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrecompiledHeaders.hh")

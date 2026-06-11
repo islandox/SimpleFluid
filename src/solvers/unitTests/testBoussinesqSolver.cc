@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,6 +49,24 @@ SimpleFluid::SP<MeshType> make_box_mesh()
     db->set("Z", SimpleFluid::ArrReal{0.0, 0.5, 1.0});
     db->set("domain_exterior_face_types",
             SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+
+    SimpleFluid::MeshFactory factory(db);
+    return factory.template build<Pack>();
+}
+
+SimpleFluid::SP<MeshType> make_checkerboard_box_mesh()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{0.25});
+    db->set("domain_type",
+            static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
+    db->set("X", SimpleFluid::ArrReal{0.0, 0.25, 0.5, 0.75, 1.0});
+    db->set("Y", SimpleFluid::ArrReal{0.0, 0.25, 0.5, 0.75, 1.0});
+    db->set("Z", SimpleFluid::ArrReal{0.0, 0.25, 0.5, 0.75, 1.0});
+    db->set("domain_exterior_face_types",
+            SimpleFluid::ArrString{
+                "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
 
     SimpleFluid::MeshFactory factory(db);
     return factory.template build<Pack>();
@@ -199,10 +218,13 @@ void expect_zero_boundary_velocity(
 
 Pack::scalar_type continuity_imbalance_norm(
     const SimpleFluid::VectorCellField<Pack>& velocity,
+    const SimpleFluid::CellField<Pack>& pressure,
+    Pack::scalar_type pressure_coefficient,
     const SimpleFluid::FVM::VelocityBoundaryCache<Pack>& cache)
 {
     SimpleFluid::FaceField<Pack> face_fluxes(velocity.mesh_ptr(), "face_flux");
-    SimpleFluid::FVM::face_fluxes(velocity, cache, face_fluxes);
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity, pressure, pressure_coefficient, cache, face_fluxes);
 
     Pack::scalar_type norm_squared = 0.0;
     for (size_t owned = 0; owned < velocity.mesh().num_owned_cells();
@@ -478,10 +500,13 @@ TEST(BoussinesqSolverTest, RunsBoundaryLayerBoxWithThreeDirectionGravity)
 
 TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 {
+    double simple_continuity = std::numeric_limits<double>::infinity();
+    double coupled_continuity = std::numeric_limits<double>::infinity();
     const std::vector<SimpleFluid::PressureVelocityCoupling> modes{
         SimpleFluid::PressureVelocityCoupling::SIMPLE,
         SimpleFluid::PressureVelocityCoupling::PISO,
-        SimpleFluid::PressureVelocityCoupling::PIMPLE
+        SimpleFluid::PressureVelocityCoupling::PIMPLE,
+        SimpleFluid::PressureVelocityCoupling::CoupledKrylov
     };
 
     for (const auto mode : modes)
@@ -521,7 +546,9 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
                 mesh, bcs);
         solver.step();
 
-        const auto after = continuity_imbalance_norm(solver.velocity(), cache);
+        const auto after = continuity_imbalance_norm(
+            solver.velocity(), solver.pressure(),
+            time_options.time_step, cache);
         const auto residuals = solver.last_pressure_velocity_residuals();
 
         EXPECT_EQ(solver.step_index(), 1);
@@ -533,7 +560,96 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         EXPECT_GE(residuals.momentum, 0.0);
         EXPECT_GE(residuals.pressure, 0.0);
         EXPECT_GE(residuals.continuity, 0.0);
+        if (mode == SimpleFluid::PressureVelocityCoupling::SIMPLE)
+        {
+            simple_continuity = residuals.continuity;
+        }
+        if (mode == SimpleFluid::PressureVelocityCoupling::CoupledKrylov)
+        {
+            coupled_continuity = residuals.continuity;
+            EXPECT_GE(residuals.linear_iterations, 0);
+            EXPECT_TRUE(std::isfinite(residuals.achieved_tolerance));
+            EXPECT_GE(residuals.achieved_tolerance, 0.0);
+        }
     }
+
+    EXPECT_LT(simple_continuity, 1.0e-10);
+    EXPECT_LT(coupled_continuity, 1.0e-10);
+}
+
+TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
+{
+    auto mesh = make_checkerboard_box_mesh();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::CellField<Pack> temperature(mesh, 1.0, "temperature");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FVM::face_fluxes(
+        velocity, cache, face_fluxes);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 1.0e-2;
+    options.kinematic_viscosity = 1.0e-2;
+    options.thermal_expansion = 1.0;
+    options.gravity_x = -1.0;
+    options.reference_temperature = 0.0;
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack>
+        momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack>
+        coupled_solver(mesh);
+    const auto system = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        face_fluxes,
+        cache,
+        bcs,
+        options);
+
+    EXPECT_EQ(system.map->getLocalNumElements(),
+              4 * mesh->num_owned_cells());
+    EXPECT_EQ(system.matrix->getLocalNumRows(),
+              4 * mesh->num_owned_cells());
+    EXPECT_EQ(system.schur->getLocalNumRows(),
+              mesh->num_owned_cells());
+    EXPECT_GT(system.matrix->getGlobalNumEntries(), 0U);
+    EXPECT_GT(system.pressure_stabilization->getGlobalNumEntries(), 0U);
+    EXPECT_GT(system.schur->getGlobalNumEntries(), 0U);
+
+    typename Pack::vector_type checkerboard(
+        mesh->owned_cell_map(), true);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        const auto parity =
+            static_cast<int>(center.x * 4.0)
+          + static_cast<int>(center.y * 4.0)
+          + static_cast<int>(center.z * 4.0);
+        checkerboard.replaceLocalValue(
+            cell_lid, parity % 2 == 0 ? 1.0 : -1.0);
+    }
+    typename Pack::vector_type stabilized(
+        mesh->owned_cell_map(), true);
+    system.pressure_stabilization->apply(
+        checkerboard, stabilized);
+    EXPECT_GT(stabilized.norm2(), 1.0e-12);
+    EXPECT_GT(checkerboard.dot(stabilized), 0.0);
 }
 
 TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
