@@ -42,11 +42,6 @@ jobs:
             c_compiler: clang
             cpp_compiler: clang++
             fortran_compiler: flang
-        exclude:
-#          - os: windows-latest
-#            c_compiler: gcc
-          - os: windows-latest
-            c_compiler: clang
 
     steps:
     - uses: actions/checkout@v4
