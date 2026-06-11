@@ -23,8 +23,8 @@ jobs:
       #
       # To add more build types (Release, Debug, RelWithDebInfo, etc.) customize the build_type list.
       matrix:
-#        os: [ubuntu-latest, windows-latest]
 #        windows is skipped because trilinos is not fully tested on windows.
+#        os: [ubuntu-latest, windows-latest]
         os: [ubuntu-latest]
         build_type: [Release]
         c_compiler: [gcc, clang, cl]
@@ -51,7 +51,9 @@ jobs:
 
     - name: Install dependencies on Ubuntu
       if: runner.os == 'Linux'
-      uses: ./.github/actions/setup-trilinos
+      uses: ./.github/actions/setup-trilinos-source
+      with:
+        trilinos-version: trilinos-release-17-1-1
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
@@ -68,6 +70,7 @@ jobs:
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos-install/lib/cmake/Trilinos
         -G"Ninja Multi-Config"
         -S ${{ github.workspace }}
 

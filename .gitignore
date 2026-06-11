@@ -76,6 +76,8 @@ Testing/
 CMakePresets.json
 
 # Copilot / Codex settings
-.github
+.github/prompts
+.github/agents
+.github/reports
 .codex
 .agents
