@@ -1,0 +1,27 @@
+name: Setup Trilinos
+description: Install Trilinos dependencies on Ubuntu
+
+runs:
+  using: composite
+  steps:
+    - name: Install Trilinos packages
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          cmake \
+          ninja-build \
+          gfortran \
+          openmpi-bin \
+          libopenmpi-dev \
+          trilinos-all-dev
+
+    - name: Inspect Trilinos installation
+      shell: bash
+      run: |
+        dpkg -l | grep -Ei 'trilinos|kokkos|teuchos|tpetra|belos|ifpack|muelu' || true
+        find /usr/lib/x86_64-linux-gnu/cmake -maxdepth 2 -type f \
+          \( -name '*Config.cmake' -o -name '*Targets.cmake' \) \
+          | grep -Ei 'Trilinos|Kokkos|Teuchos|Tpetra|Belos|Ifpack2|MueLu' \
+          | sort
