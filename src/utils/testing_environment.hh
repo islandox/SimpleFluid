@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 #include <Tpetra_Core.hpp>
+#include <cstdlib>
 #include "parallel/MPI_interface.hh"
 #include "DEBUG_MACROS.h"
 
@@ -31,6 +32,14 @@ namespace utils_test
 
 inline my_mpi::ErrorCode error_code;
 
+inline void configure_openmpi_local_test_backend()
+{
+#if defined(OMPI_MAJOR_VERSION)
+    setenv("OMPI_MCA_pml", "ob1", 0);
+    setenv("OMPI_MCA_btl", "self,sm", 0);
+#endif
+}
+
 /**
  * @brief Global Google Test environment to initialize MPI and Kokkos.
  */
@@ -39,6 +48,8 @@ class KokkosEnvironment : public testing::Environment
 public:
     void SetUp() override
     {
+        configure_openmpi_local_test_backend();
+
         if (!my_mpi::initialized(error_code))
         {
             my_mpi::init(nullptr, nullptr);

@@ -1,6 +1,6 @@
 /**
  * @file equations/PressureVelocityCoupling.hh
- * @brief Runtime switches and residuals for segregated pressure-velocity coupling.
+ * @brief Runtime switches and residuals for pressure-velocity coupling.
  */
 #pragma once
 
@@ -11,13 +11,14 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Available segregated pressure-velocity coupling drivers.
+ * @brief Available pressure-velocity coupling drivers.
  */
 enum class PressureVelocityCoupling
 {
     SIMPLE,
     PISO,
-    PIMPLE
+    PIMPLE,
+    CoupledKrylov
 };
 
 /**
@@ -38,9 +39,15 @@ pressure_velocity_coupling_from_string(std::string_view value)
     {
         return PressureVelocityCoupling::PIMPLE;
     }
+    if (value == "coupledKrylov" || value == "CoupledKrylov"
+        || value == "coupledkrylov")
+    {
+        return PressureVelocityCoupling::CoupledKrylov;
+    }
 
     throw std::invalid_argument(
-        "Unknown pressure-velocity coupling; expected SIMPLE, PISO, or PIMPLE.");
+        "Unknown pressure-velocity coupling; expected SIMPLE, PISO, PIMPLE, "
+        "or coupledKrylov.");
 }
 
 /**
@@ -54,13 +61,15 @@ to_string(PressureVelocityCoupling coupling)
         case PressureVelocityCoupling::SIMPLE: return "SIMPLE";
         case PressureVelocityCoupling::PISO:   return "PISO";
         case PressureVelocityCoupling::PIMPLE: return "PIMPLE";
+        case PressureVelocityCoupling::CoupledKrylov:
+            return "coupledKrylov";
     }
 
     throw std::invalid_argument("Unknown PressureVelocityCoupling value.");
 }
 
 /**
- * @brief Last-step residual norms for segregated pressure-velocity coupling.
+ * @brief Last-step residual norms and linear statistics for pressure-velocity coupling.
  */
 template<class Scalar>
 struct PressureVelocityResiduals
@@ -68,6 +77,8 @@ struct PressureVelocityResiduals
     Scalar momentum = {};
     Scalar pressure = {};
     Scalar continuity = {};
+    Scalar achieved_tolerance = {};
+    int linear_iterations = 0;
 };
 
 } // namespace SimpleFluid

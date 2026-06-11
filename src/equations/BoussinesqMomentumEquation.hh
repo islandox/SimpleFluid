@@ -48,6 +48,7 @@ public:
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using source_type =
         std::function<typename velocity_field_type::vec_type(local_ordinal_type)>;
+    using system_type = FVM::VectorTransportSystem<Pack>;
 
     explicit BoussinesqMomentumEquation(SP<const mesh_type> mesh);
 
@@ -69,6 +70,23 @@ public:
         velocity_field_type& velocity,
         const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {}) const;
+
+    system_type assemble_system(
+        const velocity_field_type& old_velocity,
+        const FaceField<Pack>& face_fluxes,
+        const field_type& temperature,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const velocity_field_type* correction_field = nullptr) const;
+
+    system_type assemble_system(
+        const velocity_field_type& old_velocity,
+        const FaceField<Pack>& face_fluxes,
+        const field_type& temperature,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const source_type& right_hand_source,
+        const velocity_field_type* correction_field = nullptr) const;
 
 private:
     SP<const mesh_type> d_mesh;
