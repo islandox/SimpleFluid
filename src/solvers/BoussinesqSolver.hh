@@ -23,6 +23,7 @@
 #include "io/VTUWriter.hh"
 #include "FVM/Operators.hh"
 #include "problems/Problem.hh"
+#include "solvers/CoupledPressureVelocitySolver.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -103,6 +104,7 @@ private:
         const SP<const MeshHandle<Pack>>& mesh);
 
     void solve_pressure_velocity_coupling();
+    void solve_coupled_krylov();
     void run_momentum_predictor();
     typename PressureProjectionEquation<Pack>::ProjectionResult
     run_pressure_correction();
@@ -112,6 +114,7 @@ private:
     TemperatureDiffusionEquation<Pack>& temperature_equation();
     BoussinesqMomentumEquation<Pack>& momentum_equation();
     PressureProjectionEquation<Pack>& pressure_projection();
+    CoupledPressureVelocitySolver<Pack>& coupled_pressure_velocity_solver();
     FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache();
     field_type& pressure_correction();
     velocity_field_type& predictor_velocity();

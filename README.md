@@ -55,3 +55,17 @@ Simple fluid code for convection in vessels
 
 ## License
 This project is distributed in MIT License.
+
+## AI assistance
+
+Parts of this repository may be developed with assistance from AI coding tools,
+including OpenAI Codex and DeepSeek API.
+
+Codex-assisted commits may include:
+
+`Co-authored-by: Codex <noreply@openai.com>`
+
+DeepSeek-assisted commits may include custom trailers such as:
+
+`AI-assisted-by: DeepSeek API`  
+`AI-model: deepseek-v4-pro / deepseek-v4-flash`

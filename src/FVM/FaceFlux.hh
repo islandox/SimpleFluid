@@ -11,14 +11,18 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
+#include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
+#include "FVM/CellOperators.hh"
 
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace SimpleFluid::FVM
 {
@@ -402,6 +406,104 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
     VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
     face_velocities(velocity, boundary_cache, face_velocity);
     normal_face_fluxes(face_velocity, fluxes);
+}
+
+/**
+ * @brief Compute Rhie-Chow pressure-weighted face fluxes.
+ *
+ * The correction replaces the interpolated cell pressure gradient in the
+ * normal face velocity with the direct owner-neighbor pressure difference.
+ * It vanishes for a linearly reconstructed pressure field and couples
+ * alternating collocated-cell pressure modes to continuity.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param velocity Cell-centered velocity field.
+ * @param pressure Cell-centered pressure field.
+ * @param pressure_coefficient Velocity-pressure coefficient, normally the
+ *        time step for the transient momentum equation.
+ * @param boundary_cache Pre-computed velocity-boundary cache.
+ * @param[out] fluxes Pre-allocated FaceField to receive stabilized fluxes.
+ */
+template<TpetraTypePack Pack>
+void pressure_weighted_face_fluxes(
+    const VectorCellField<Pack>& velocity,
+    const CellField<Pack>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const VelocityBoundaryCache<Pack>& boundary_cache,
+    FaceField<Pack>& fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    if (&pressure.mesh() != &velocity.mesh()
+        || &fluxes.mesh() != &velocity.mesh())
+    {
+        throw std::invalid_argument(
+            "pressure_weighted_face_fluxes requires fields on one mesh.");
+    }
+    if (pressure_coefficient < scalar_type{})
+    {
+        throw std::invalid_argument(
+            "pressure_weighted_face_fluxes requires a non-negative "
+            "pressure coefficient.");
+    }
+
+    face_fluxes(velocity, boundary_cache, fluxes);
+    if (pressure_coefficient == scalar_type{})
+    {
+        return;
+    }
+
+    const auto& mesh = velocity.mesh();
+    std::vector<typename Mesh<Pack>::Vec3> owned_gradients;
+    cell_gradient(pressure, owned_gradients);
+    VectorCellField<Pack> pressure_gradient(
+        velocity.mesh_ptr(), "rhie_chow_pressure_gradient");
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        pressure_gradient.set_owned_value(
+            static_cast<local_ordinal_type>(owned),
+            owned_gradients[owned]);
+    }
+    pressure_gradient.sync_ghosts();
+
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<local_ordinal_type>(face);
+        if (!fluxes.is_owned_face(face_lid)
+            || !mesh.is_interior_face(face_lid))
+        {
+            continue;
+        }
+
+        const auto owner = mesh.owner_cell(face_lid);
+        const auto neighbor =
+            mesh.opposite_or_periodic_neighbor_cell(face_lid, owner);
+        const auto center_delta =
+            mesh.cell_center_vector(face_lid, owner);
+        const auto distance_squared = center_delta.dot(center_delta);
+        if (distance_squared <= scalar_type{})
+        {
+            continue;
+        }
+
+        const auto area_vector = mesh.face_area_vector(face_lid);
+        const auto direct_gradient_flux =
+            (pressure.local_value(neighbor)
+             - pressure.local_value(owner))
+            * area_vector.dot(center_delta) / distance_squared;
+        const auto interpolated_gradient =
+            (pressure_gradient.local_value(owner)
+             + pressure_gradient.local_value(neighbor))
+            / scalar_type{2};
+        const auto interpolated_gradient_flux =
+            interpolated_gradient.dot(area_vector);
+
+        fluxes.sum_into_value(
+            face_lid,
+            -pressure_coefficient
+            * (direct_gradient_flux - interpolated_gradient_flux));
+    }
 }
 
 } // namespace SimpleFluid::FVM

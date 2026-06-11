@@ -133,6 +133,8 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
         "momentum_equation", d_mesh);
     d_problem.template emplace_object<PressureProjectionEquation<Pack>>(
         "pressure_projection", d_mesh, d_problem.linear_options());
+    d_problem.template emplace_object<CoupledPressureVelocitySolver<Pack>>(
+        "coupled_pressure_velocity_solver", d_mesh);
     d_problem.template emplace_object<field_type>(
         "temperature", d_mesh, "temperature");
     d_problem.template emplace_object<field_type>(
@@ -225,6 +227,15 @@ auto BoussinesqSolver<Pack>::pressure_projection()
 }
 
 template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::coupled_pressure_velocity_solver()
+    -> CoupledPressureVelocitySolver<Pack>&
+{
+    return d_problem.template object<
+        CoupledPressureVelocitySolver<Pack>>(
+            "coupled_pressure_velocity_solver");
+}
+
+template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::velocity_boundary_cache()
     -> FVM::VelocityBoundaryCache<Pack>&
 {
@@ -313,8 +324,9 @@ void BoussinesqSolver<Pack>::run_momentum_predictor()
     }
     d_mesh->sync_periodic_boundaries(predictor_velocity());
 
-    FVM::face_fluxes(velocity(), velocity_boundary_cache(),
-                              old_face_fluxes());
+    FVM::pressure_weighted_face_fluxes(
+        velocity(), pressure(), d_problem.time_options().time_step,
+        velocity_boundary_cache(), old_face_fluxes());
     momentum_equation().advance_velocity(velocity(),
                                          old_face_fluxes(),
                                          temperature(),
@@ -344,11 +356,84 @@ auto BoussinesqSolver<Pack>::run_pressure_correction()
 }
 
 /**
+ * @brief Assemble and solve the monolithic velocity-pressure system.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::solve_coupled_krylov()
+{
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        predictor_velocity().set_value(
+            cell_lid, velocity().value(cell_lid));
+    }
+    d_mesh->sync_periodic_boundaries(predictor_velocity());
+
+    FVM::pressure_weighted_face_fluxes(
+        velocity(), pressure(), d_problem.time_options().time_step,
+        velocity_boundary_cache(), old_face_fluxes());
+    const auto system =
+        coupled_pressure_velocity_solver().assemble(
+            momentum_equation(),
+            velocity(),
+            pressure(),
+            temperature(),
+            old_face_fluxes(),
+            velocity_boundary_cache(),
+            d_problem.boundary_conditions(),
+            d_problem.time_options());
+    const auto result =
+        coupled_pressure_velocity_solver().solve(
+            system,
+            velocity(),
+            pressure(),
+            d_problem.linear_options());
+    if (!result.converged)
+    {
+        throw std::runtime_error(
+            "BoussinesqSolver coupled Krylov solve did not converge.");
+    }
+
+    pressure_velocity_residuals().momentum =
+        velocity_update_norm(predictor_velocity(), velocity());
+    pressure_velocity_residuals().pressure =
+        result.achieved_tolerance;
+    pressure_velocity_residuals().achieved_tolerance =
+        result.achieved_tolerance;
+    pressure_velocity_residuals().linear_iterations =
+        result.iterations;
+
+    FVM::pressure_weighted_face_fluxes(
+        velocity(), pressure(), d_problem.time_options().time_step,
+        velocity_boundary_cache(), projected_face_fluxes());
+    scalar_type continuity_norm_squared = {};
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto balance =
+            FVM::cell_flux_balance<Pack>(
+                *d_mesh, projected_face_fluxes(), cell_lid);
+        continuity_norm_squared += balance * balance;
+    }
+    using std::sqrt;
+    pressure_velocity_residuals().continuity =
+        sqrt(continuity_norm_squared);
+}
+
+/**
  * @brief Dispatch SIMPLE, PISO, or PIMPLE pressure-velocity coupling loops.
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
 {
+    pressure_velocity_residuals() = {};
+    if (d_problem.time_options().pressure_velocity_coupling
+        == PressureVelocityCoupling::CoupledKrylov)
+    {
+        solve_coupled_krylov();
+        return;
+    }
+
     if (d_problem.time_options().n_pressure_correctors < 1)
     {
         throw std::invalid_argument(
@@ -359,8 +444,6 @@ void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
         throw std::invalid_argument(
             "BoussinesqSolver requires at least one outer corrector.");
     }
-
-    pressure_velocity_residuals() = {};
 
     const auto pressure_corrections =
         d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::SIMPLE
@@ -387,8 +470,9 @@ void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
             result.continuity;
     }
 
-    FVM::face_fluxes(velocity(), velocity_boundary_cache(),
-                              projected_face_fluxes());
+    FVM::pressure_weighted_face_fluxes(
+        velocity(), pressure(), d_problem.time_options().time_step,
+        velocity_boundary_cache(), projected_face_fluxes());
 }
 
 /**

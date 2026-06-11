@@ -63,6 +63,105 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
                      zero_source, linear_options);
 }
 
+template<TpetraTypePack Pack>
+auto BoussinesqMomentumEquation<Pack>::assemble_system(
+    const velocity_field_type& old_velocity,
+    const FaceField<Pack>& face_fluxes,
+    const field_type& temperature,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const velocity_field_type* correction_field) const -> system_type
+{
+    auto zero_source =
+        [](local_ordinal_type) -> typename velocity_field_type::vec_type
+    {
+        return {};
+    };
+
+    return assemble_system(old_velocity, face_fluxes, temperature,
+                           velocity_boundary_cache, options, zero_source,
+                           correction_field);
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqMomentumEquation<Pack>::assemble_system(
+    const velocity_field_type& old_velocity,
+    const FaceField<Pack>& face_fluxes,
+    const field_type& temperature,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const source_type& right_hand_source,
+    const velocity_field_type* correction_field) const -> system_type
+{
+    EquationValidation::require_mesh_match(*d_mesh, old_velocity,
+                                           "BoussinesqMomentumEquation");
+    EquationValidation::require_mesh_match(*d_mesh, temperature,
+                                           "BoussinesqMomentumEquation");
+    EquationValidation::require_non_negative(options.time_step, "time step",
+                                             "BoussinesqMomentumEquation");
+    EquationValidation::require_non_negative(options.kinematic_viscosity, "viscosity",
+                                             "BoussinesqMomentumEquation");
+    EquationValidation::require_non_negative(options.n_non_orthogonal_correctors,
+                                             "non-orthogonal correctors",
+                                             "BoussinesqMomentumEquation");
+    if (correction_field != nullptr)
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, *correction_field, "BoussinesqMomentumEquation");
+    }
+    if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
+        || velocity_boundary_cache.type.size() != d_mesh->boundary_patches().size()
+        || velocity_boundary_cache.mesh != d_mesh)
+    {
+        throw std::invalid_argument(
+            "BoussinesqMomentumEquation received the wrong boundary-cache size.");
+    }
+
+    auto boundary_value =
+        [&](int boundary_id,
+            local_ordinal_type boundary_face_id)
+    {
+        const auto face = static_cast<size_t>(boundary_face_id);
+        const auto boundary_type =
+            velocity_boundary_cache.type.at(boundary_id);
+        if (boundary_type == BoundaryConditionType::Slip)
+        {
+            const auto face_lid =
+                d_mesh->boundary_face_patch(boundary_id).face_lids[face];
+            return FVM::detail::slip_face_velocity(
+                old_velocity, face_lid);
+        }
+
+        return velocity_boundary_cache.value.at(boundary_id)[face];
+    };
+
+    const auto gravity = options.gravity_vector();
+    auto combined_source =
+        [&](local_ordinal_type cell_lid) -> typename velocity_field_type::vec_type
+    {
+        const auto temperature_delta =
+            temperature.value(cell_lid) - options.reference_temperature;
+        const auto source_scale =
+            options.thermal_expansion * temperature_delta;
+        const auto external_source = right_hand_source(cell_lid);
+        return {
+            source_scale * (-gravity.x) + external_source.x,
+            source_scale * (-gravity.y) + external_source.y,
+            source_scale * (-gravity.z) + external_source.z
+        };
+    };
+
+    auto system = FVM::non_orthogonal_transport_system<Pack>(
+        old_velocity, face_fluxes, options.time_step,
+        options.kinematic_viscosity, boundary_value,
+        combined_source,
+        options.non_orthogonal_treatment,
+        correction_field,
+        d_cached_transport_matrix);
+    d_cached_transport_matrix = system.matrix;
+    return system;
+}
+
 /**
  * @brief Advance the velocity field by one time step with an explicit
  *        right-hand source term.
@@ -93,26 +192,8 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const source_type& right_hand_source,
     const LinearSolverOptions& linear_options) const
 {
-    EquationValidation::require_mesh_match(*d_mesh, old_velocity,
-                                           "BoussinesqMomentumEquation");
-    EquationValidation::require_mesh_match(*d_mesh, temperature,
-                                           "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity,
                                            "BoussinesqMomentumEquation");
-    EquationValidation::require_non_negative(options.time_step, "time step",
-                                             "BoussinesqMomentumEquation");
-    EquationValidation::require_non_negative(options.kinematic_viscosity, "viscosity",
-                                             "BoussinesqMomentumEquation");
-    EquationValidation::require_non_negative(options.n_non_orthogonal_correctors,
-                                             "non-orthogonal correctors",
-                                             "BoussinesqMomentumEquation");
-    if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
-        || velocity_boundary_cache.type.size() != d_mesh->boundary_patches().size()
-        || velocity_boundary_cache.mesh != d_mesh)
-    {
-        throw std::invalid_argument(
-            "BoussinesqMomentumEquation received the wrong boundary-cache size.");
-    }
 
     velocity_field_type old_velocity_snapshot(
         old_velocity.mesh_ptr(), "momentum_old_velocity_snapshot", false);
@@ -130,48 +211,9 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         transport_old_velocity = &old_velocity_snapshot;
     }
 
-    auto boundary_value =
-        [&](int boundary_id,
-            local_ordinal_type boundary_face_id)
-    {
-        const auto face = static_cast<size_t>(boundary_face_id);
-        const auto boundary_type =
-            velocity_boundary_cache.type.at(boundary_id);
-        if (boundary_type == BoundaryConditionType::Slip)
-        {
-            const auto face_lid =
-                d_mesh->boundary_face_patch(boundary_id).face_lids[face];
-            return FVM::detail::slip_face_velocity(
-                *transport_old_velocity, face_lid);
-        }
-
-        return velocity_boundary_cache.value.at(boundary_id)[face];
-    };
-
-    const auto gravity = options.gravity_vector();
-    auto combined_source =
-        [&](local_ordinal_type cell_lid) -> typename velocity_field_type::vec_type
-    {
-        const auto temperature_delta =
-            temperature.value(cell_lid) - options.reference_temperature;
-        const auto source_scale =
-            options.thermal_expansion * temperature_delta;
-        const auto external_source = right_hand_source(cell_lid);
-        return {
-            source_scale * (-gravity.x) + external_source.x,
-            source_scale * (-gravity.y) + external_source.y,
-            source_scale * (-gravity.z) + external_source.z
-        };
-    };
-
     auto solve_system =
         [&](const auto& system)
     {
-        if (d_cached_transport_matrix.is_null())
-        {
-            d_cached_transport_matrix = system.matrix;
-        }
-
         bool has_nonzero_rhs = false;
         for (size_t component = 0;
              component < velocity_field_type::num_components && !has_nonzero_rhs;
@@ -232,13 +274,10 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     {
         const auto* correction_field =
             corrector == 0 ? nullptr : &velocity;
-        auto system = FVM::non_orthogonal_transport_system<Pack>(
-            *transport_old_velocity, face_fluxes, options.time_step,
-            options.kinematic_viscosity, boundary_value,
-            combined_source,
-            options.non_orthogonal_treatment,
-            correction_field,
-            d_cached_transport_matrix);
+        auto system = assemble_system(
+            *transport_old_velocity, face_fluxes, temperature,
+            velocity_boundary_cache, options, right_hand_source,
+            correction_field);
         solve_system(system);
 
         if (options.non_orthogonal_treatment

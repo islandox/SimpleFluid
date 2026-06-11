@@ -451,6 +451,89 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     EXPECT_TRUE(saw_z_face);
 }
 
+TEST(FvmOperatorsTest, PressureWeightedFluxPreservesLinearPressure)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+                   mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto center = mesh->cell_centroid(lid);
+        pressure.set_value(
+            lid, 1.0 + 2.0 * center.x - 3.0 * center.y
+                       + 0.5 * center.z);
+    }
+    pressure.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "pressure_weighted_flux");
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity, pressure, 0.1, cache, fluxes);
+
+    for (MeshType::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_faces());
+         ++face_lid)
+    {
+        if (fluxes.is_owned_face(face_lid))
+        {
+            EXPECT_NEAR(fluxes.value(face_lid), 0.0, 1.0e-12);
+        }
+    }
+}
+
+TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_4x4x4_database());
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+                   mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto center = mesh->cell_centroid(lid);
+        const auto parity =
+            static_cast<int>(center.x)
+          + static_cast<int>(center.y)
+          + static_cast<int>(center.z);
+        pressure.set_value(
+            lid, parity % 2 == 0 ? 1.0 : -1.0);
+    }
+    pressure.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "checkerboard_flux");
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity, pressure, 0.1, cache, fluxes);
+
+    Pack::scalar_type flux_norm = 0.0;
+    Pack::scalar_type pressure_work = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto balance =
+            SimpleFluid::FVM::cell_flux_balance<Pack>(
+                *mesh, fluxes, cell_lid);
+        flux_norm += balance * balance;
+        pressure_work += pressure.value(cell_lid) * balance;
+    }
+
+    EXPECT_GT(flux_norm, 1.0e-12);
+    EXPECT_GT(pressure_work, 0.0);
+}
+
 /**
  * @brief Verifies interior face velocities are the arithmetic average of owner and neighbor cell values.
  */
