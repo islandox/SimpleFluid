@@ -12,6 +12,12 @@ inputs:
   cxx-compiler:
     required: false
     default: mpicxx
+  fortran-compiler:
+    required: false
+    default: mpifort
+  cache-suffix:
+    required: false
+    default: v1
 
 runs:
   using: composite
@@ -32,11 +38,38 @@ runs:
           libblas-dev \
           liblapack-dev \
           libboost-dev \
+          libhdf5-openmpi-dev \
+          libnetcdf-mpi-dev \
           zlib1g-dev
+
+    - name: Inspect HDF5 and NetCDF
+      shell: bash
+      run: |
+        which h5pcc || true
+        h5pcc -show || true
+
+        which nc-config || true
+        nc-config --version || true
+        nc-config --libs || true
+        nc-config --cflags || true
+
+        dpkg -l | grep -Ei 'hdf5|netcdf|pnetcdf' || true
+
+    - name: Restore Trilinos build cache
+      id: trilinos-cache
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          ${{ github.workspace }}/_deps/trilinos-build
+          ${{ github.workspace }}/_deps/trilinos-install
+        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-${{ inputs.cache-suffix }}
+        restore-keys: |
+          trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-
+          trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-core-
 
     - name: Cache Trilinos install
       id: cache-trilinos
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ${{ github.workspace }}/_deps/trilinos-install
         key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.cxx-compiler }}-mpi-core-v1
@@ -54,12 +87,17 @@ runs:
           -G Ninja \
           -D CMAKE_BUILD_TYPE=Release \
           -D CMAKE_INSTALL_PREFIX=${{ github.workspace }}/_deps/trilinos-install \
-          -D CMAKE_C_COMPILER=mpicc \
-          -D CMAKE_CXX_COMPILER=mpicxx \
-          -D CMAKE_Fortran_COMPILER=mpifort \
+          -D CMAKE_C_COMPILER=${{ inputs.c-compiler }} \
+          -D CMAKE_CXX_COMPILER=${{ inputs.cxx-compiler }} \
+          -D CMAKE_Fortran_COMPILER=${{ inputs.fortran-compiler }} \
           -D CMAKE_CXX_STANDARD=20 \
           -D CMAKE_CXX_EXTENSIONS=OFF \
           -D TPL_ENABLE_MPI=ON \
+          -D TPL_ENABLE_BLAS=ON \
+          -D TPL_ENABLE_LAPACK=ON \
+          -D TPL_ENABLE_BOOST=ON \
+          -D TPL_ENABLE_HDF5=ON \
+          -D TPL_ENABLE_Netcdf=ON \
           -D Trilinos_ENABLE_TESTS=OFF \
           -D Trilinos_ENABLE_EXAMPLES=OFF \
           -D Trilinos_ENABLE_Teuchos=ON \
@@ -69,9 +107,11 @@ runs:
           -D Trilinos_ENABLE_Belos=ON \
           -D Trilinos_ENABLE_Ifpack2=ON \
           -D Trilinos_ENABLE_MueLu=ON \
+          -D Trilinos_ENABLE_STK=ON \
+          -D Trilinos_ENABLE_SEACAS=ON \
           -D Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES=OFF
 
-        cmake --build ${{ github.workspace }}/_deps/trilinos-build --parallel 2
+        cmake --build ${{ github.workspace }}/_deps/trilinos-build --parallel 1
         cmake --install ${{ github.workspace }}/_deps/trilinos-build
 
     - name: Export Trilinos prefix

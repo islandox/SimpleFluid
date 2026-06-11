@@ -27,27 +27,49 @@ jobs:
 #        os: [ubuntu-latest, windows-latest]
         os: [ubuntu-latest]
         build_type: [Release]
-        c_compiler: [gcc, clang, cl]
+        compiler_id: [GCC, LLVM]
         include:
 #          - os: windows-latest
 #            c_compiler: cl
 #            cpp_compiler: cl
           - os: ubuntu-latest
+            compiler_id: GCC
             c_compiler: gcc
             cpp_compiler: g++
+            fortran_compiler: gfortran
           - os: ubuntu-latest
+            compiler_id: LLVM
             c_compiler: clang
             cpp_compiler: clang++
+            fortran_compiler: flang
         exclude:
 #          - os: windows-latest
 #            c_compiler: gcc
           - os: windows-latest
             c_compiler: clang
-          - os: ubuntu-latest
-            c_compiler: cl
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install LLVM compilers
+      if: matrix.compiler_id == 'LLVM'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+        clang-18 \
+        lld-18 \
+        flang-18
+
+        clang-18 --version
+        clang++-18 --version
+
+        if command -v flang-new-18 >/dev/null 2>&1; then
+          flang-new-18 --version
+          echo "LLVM_FC=flang-new-18" >> "$GITHUB_ENV"
+        else
+          flang-18 --version
+          echo "LLVM_FC=flang-18" >> "$GITHUB_ENV"
+        fi
 
     - name: Install dependencies on Ubuntu
       if: runner.os == 'Linux'
@@ -56,6 +78,7 @@ jobs:
         trilinos-version: trilinos-release-17-1-1
         c-compiler: ${{ matrix.c_compiler }}
         cxx-compiler: ${{ matrix.cpp_compiler }}
+        fortran-compiler: ${{ matrix.fortran_compiler }}
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
