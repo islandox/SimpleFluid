@@ -6,6 +6,12 @@ inputs:
     description: Trilinos git tag
     required: false
     default: trilinos-release-17-1-1
+  c-compiler:
+    required: false
+    default: mpicc
+  cxx-compiler:
+    required: false
+    default: mpicxx
 
 runs:
   using: composite
@@ -33,7 +39,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/_deps/trilinos-install
-        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-gcc-mpi-core-v1
+        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.cxx-compiler }}-mpi-core-v1
 
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
