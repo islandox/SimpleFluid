@@ -51,16 +51,7 @@ jobs:
 
     - name: Install dependencies on Ubuntu
       if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            gfortran \
-            openmpi-bin \
-            libopenmpi-dev \
-            trilinos-all-dev
+      uses: ./.github/actions/setup-trilinos
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
