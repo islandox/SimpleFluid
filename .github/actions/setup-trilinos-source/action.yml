@@ -30,7 +30,6 @@ runs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           build-essential \
-          gfortran \
           git \
           cmake \
           ninja-build \
@@ -68,24 +67,25 @@ runs:
 
         dpkg -l | grep -Ei 'hdf5|netcdf|pnetcdf' || true
 
-    - name: Restore Trilinos build cache
-      id: trilinos-cache
-      uses: actions/cache/restore@v5
-      with:
-        path: |
-          ${{ github.workspace }}/_deps/trilinos-build
-          ${{ github.workspace }}/_deps/trilinos-install
-        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-${{ inputs.cache-suffix }}
-        restore-keys: |
-          trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-
-          trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-core-
-
-    - name: Cache Trilinos install
+    - name: Restore Trilinos install cache
       id: cache-trilinos
       uses: actions/cache@v5
       with:
-        path: ${{ github.workspace }}/_deps/trilinos-install
-        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-core-v1
+        path: |
+          ${{ github.workspace }}/_deps/trilinos-install
+        key: ${{ inputs.trilinos-version }}-install-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix }}
+
+    - name: Restore Trilinos build cache
+      id: cache-trilinos-build
+      if: steps.cache-trilinos.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ github.workspace }}/_deps/trilinos_build
+        key: ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix }}
+        restore-keys: |
+          ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-
+          trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-
 
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
@@ -105,18 +105,18 @@ runs:
         fi
 
         if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
-          if command -v flang-new-18 >/dev/null 2>&1; then
-            FC_PATH="$(command -v flang-new-18)"
-          elif command -v flang-18 >/dev/null 2>&1; then
-            FC_PATH="$(command -v flang-18)"
+          if command -v flang-new >/dev/null 2>&1; then
+            FC_PATH="$(command -v flang-new)"
+          elif command -v flang >/dev/null 2>&1; then
+            FC_PATH="$(command -v flang)"
           else
             echo "No LLVM flang found"
             find /usr/bin -maxdepth 1 -name '*flang*' -print
             exit 1
           fi
 
-          export OMPI_CC="$(command -v clang-18)"
-          export OMPI_CXX="$(command -v clang++-18)"
+          export OMPI_CC="$(command -v clang)"
+          export OMPI_CXX="$(command -v clang++)"
           export OMPI_FC="$FC_PATH"
         elif [ "{{ inputs.compiler-id }}" = "GCC" ]; then
           export OMPI_CC=$(command -v gcc)
@@ -158,7 +158,7 @@ runs:
           -D Trilinos_ENABLE_SEACAS=ON \
           -D Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES=OFF
 
-        cmake --build ${{ github.workspace }}/_deps/trilinos-build --parallel 1
+        cmake --build ${{ github.workspace }}/_deps/trilinos-build --parallel 2
         cmake --install ${{ github.workspace }}/_deps/trilinos-build
 
     - name: Export Trilinos prefix
