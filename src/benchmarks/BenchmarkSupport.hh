@@ -1,3 +1,13 @@
+/**
+ * @file BenchmarkSupport.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Benchmark infrastructure: process memory sampling, CSV records, and CsvWriter.
+ * @version 0.1
+ * @date 2026-06-12
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
 #pragma once
 
 #include <filesystem>
@@ -8,6 +18,9 @@
 namespace SimpleFluid::Benchmark
 {
 
+/**
+ * @brief Snapshot of process memory usage from /proc/self/status.
+ */
 struct ProcessMemory
 {
     long long resident_kib = 0;
@@ -19,6 +32,11 @@ std::string utc_timestamp();
 std::string host_name();
 std::string csv_escape(std::string_view value);
 
+/**
+ * @brief Benchmark record containing timing, convergence, and resource metrics.
+ *
+ * All fields are populated from a solver run and written as a CSV row.
+ */
 struct Record
 {
     std::string timestamp;
@@ -67,6 +85,12 @@ struct Record
     bool converged = false;
 };
 
+/**
+ * @brief Writes benchmark records to a CSV file with schema validation.
+ *
+ * On construction, the writer validates that any existing CSV has a compatible header.
+ * Records are appended one row at a time.
+ */
 class CsvWriter
 {
 public:

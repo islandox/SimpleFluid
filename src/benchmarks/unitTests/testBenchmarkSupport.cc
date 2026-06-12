@@ -1,3 +1,13 @@
+/**
+ * @file testBenchmarkSupport.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Unit tests for benchmark support utilities: CSV, memory, and escaping.
+ * @version 0.1
+ * @date 2026-06-12
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
 #include <gtest/gtest.h>
 
 #include "benchmarks/BenchmarkSupport.hh"
@@ -14,6 +24,9 @@ TEST(BenchmarkSupportTest, EscapesCsvText)
     EXPECT_EQ(SimpleFluid::Benchmark::csv_escape("a\"b"), "\"a\"\"b\"");
 }
 
+/**
+ * @brief Verifies CsvWriter appends compatible records and the output has the correct row count and escaped values.
+ */
 TEST(BenchmarkSupportTest, WritesAndAppendsCompatibleCsv)
 {
     const auto path =
