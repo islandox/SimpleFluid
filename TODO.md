@@ -160,12 +160,12 @@ Tpetra is the Trilinos package for distributed sparse matrices/vectors, Belos pr
 
 ## Phase 8 — Verification cases
 
-- [ ] Lid-driven cavity, Re = 100 and 1000.
-- [ ] Poiseuille flow.
-- [ ] Manufactured incompressible Navier–Stokes solution.
-- [ ] Skewed-mesh diffusion test.
-- [ ] Natural convection square cavity.
-- [ ] Compare against OpenFOAM for one matching case.
+- [x] Lid-driven cavity, Re = 100 and 1000.
+- [x] Poiseuille flow.
+- [x] Manufactured incompressible Navier–Stokes solution.
+- [x] Skewed-mesh diffusion test.
+- [x] Natural convection square cavity.
+- [x] Compare against OpenFOAM for one matching case.
 
 ## Phase 9 — Performance tests
 
