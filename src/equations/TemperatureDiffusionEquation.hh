@@ -62,7 +62,7 @@ public:
                           field_type& temperature,
                           const source_type& right_hand_source) const;
 
-    void advance_semi_implicit(
+    LinearSolveStatistics advance_semi_implicit(
         const field_type& old_temperature,
         const FaceField<Pack>& face_fluxes,
         scalar_type time_step,
@@ -70,7 +70,7 @@ public:
         field_type& temperature,
         const LinearSolverOptions& linear_options = {}) const;
 
-    void advance_semi_implicit(
+    LinearSolveStatistics advance_semi_implicit(
         const field_type& old_temperature,
         const FaceField<Pack>& face_fluxes,
         scalar_type time_step,

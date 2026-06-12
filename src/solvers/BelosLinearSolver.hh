@@ -16,11 +16,57 @@
 #include <BelosPseudoBlockGmresSolMgr.hpp>
 #include <BelosTpetraAdapter.hpp>
 #include <BelosTypes.hpp>
+#include <MueLu_CreateTpetraPreconditioner.hpp>
 #include <Teuchos_ParameterList.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <algorithm>
+#include <stdexcept>
+#include <string_view>
+
 namespace SimpleFluid
 {
+
+enum class LinearPreconditioner
+{
+    None,
+    MueLu
+};
+
+inline std::string_view to_string(LinearPreconditioner preconditioner)
+{
+    switch (preconditioner)
+    {
+        case LinearPreconditioner::None:  return "none";
+        case LinearPreconditioner::MueLu: return "MueLu";
+    }
+
+    throw std::invalid_argument("Unknown LinearPreconditioner value.");
+}
+
+struct LinearSolveStatistics
+{
+    bool converged = false;
+    int iterations = 0;
+    real_t achieved_tolerance = {};
+};
+
+struct LinearSolveSummary
+{
+    bool converged = true;
+    int solves = 0;
+    int iterations = 0;
+    real_t achieved_tolerance = {};
+
+    void add(const LinearSolveStatistics& statistics)
+    {
+        converged = converged && statistics.converged;
+        ++solves;
+        iterations += statistics.iterations;
+        achieved_tolerance =
+            std::max(achieved_tolerance, statistics.achieved_tolerance);
+    }
+};
 
 /**
  * @brief Configuration options for the Belos linear solver.
@@ -30,6 +76,7 @@ struct LinearSolverOptions
     int max_iterations = 200;
     real_t tolerance = 1.0e-10;
     int verbosity = Belos::Errors + Belos::Warnings;
+    LinearPreconditioner preconditioner = LinearPreconditioner::None;
 };
 
 /**
@@ -46,6 +93,7 @@ public:
     using multi_vector_type = typename Pack::multi_vector_type;
     using vector_type = typename Pack::vector_type;
     using operator_type = typename Pack::operator_type;
+    using matrix_type = typename Pack::matrix_type;
     using problem_type =
         Belos::LinearProblem<scalar_type, multi_vector_type, operator_type>;
     using solver_type =
@@ -53,6 +101,16 @@ public:
             scalar_type, multi_vector_type, operator_type>;
 
     bool solve(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs,
+        multi_vector_type& solution,
+        const LinearSolverOptions& options = {})
+    {
+        return solve_with_statistics(
+            matrix, rhs, solution, options).converged;
+    }
+
+    LinearSolveStatistics solve_with_statistics(
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs,
         multi_vector_type& solution,
@@ -67,9 +125,10 @@ public:
                 new problem_type(matrix, x, b));
             d_parameters = Teuchos::rcp(new Teuchos::ParameterList());
             configure(options);
+            configure_preconditioner(matrix, options);
             if (!d_problem->setProblem())
             {
-                return false;
+                return {};
             }
             d_solver = Teuchos::rcp(
                 new solver_type(d_problem, d_parameters));
@@ -81,17 +140,33 @@ public:
             d_problem->setRHS(b);
             configure(options);
             d_solver->setParameters(d_parameters);
+            configure_preconditioner(matrix, options);
             if (!d_problem->setProblem())
             {
-                return false;
+                return {};
             }
             d_solver->reset(Belos::Problem);
         }
 
-        return d_solver->solve() == Belos::Converged;
+        const auto converged =
+            d_solver->solve() == Belos::Converged;
+        return {
+            converged,
+            d_solver->getNumIters(),
+            d_solver->achievedTol()};
     }
 
     bool solve(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const vector_type& rhs,
+        vector_type& solution,
+        const LinearSolverOptions& options = {})
+    {
+        return solve_with_statistics(
+            matrix, rhs, solution, options).converged;
+    }
+
+    LinearSolveStatistics solve_with_statistics(
         const Teuchos::RCP<const operator_type>& matrix,
         const vector_type& rhs,
         vector_type& solution,
@@ -101,7 +176,7 @@ public:
             Teuchos::rcpFromRef(solution));
         auto b = Teuchos::rcp_implicit_cast<const multi_vector_type>(
             Teuchos::rcpFromRef(rhs));
-        return solve(matrix, *b, *x, options);
+        return solve_with_statistics(matrix, *b, *x, options);
     }
 
 private:
@@ -129,9 +204,55 @@ private:
         d_parameters->set("Verbosity", options.verbosity);
     }
 
+    void configure_preconditioner(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const LinearSolverOptions& options)
+    {
+        if (options.preconditioner == LinearPreconditioner::None)
+        {
+            d_preconditioner = Teuchos::null;
+            d_problem->setRightPrec(Teuchos::null);
+            return;
+        }
+        if (options.preconditioner != LinearPreconditioner::MueLu)
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver received an unknown preconditioner.");
+        }
+
+        const auto crs_matrix =
+            Teuchos::rcp_dynamic_cast<const matrix_type>(matrix, false);
+        if (crs_matrix.is_null())
+        {
+            throw std::invalid_argument(
+                "MueLu preconditioning requires a Tpetra::CrsMatrix operator.");
+        }
+
+        Teuchos::ParameterList parameters;
+        parameters.set("verbosity", "none");
+        parameters.set("coarse: max size", 64);
+        parameters.set("smoother: type", "RELAXATION");
+        parameters.sublist("smoother: params").set(
+            "relaxation: type", "Jacobi");
+        parameters.set("coarse: type", "RELAXATION");
+        parameters.sublist("coarse: params").set(
+            "relaxation: type", "Jacobi");
+        parameters.sublist("coarse: params").set(
+            "relaxation: sweeps", 4);
+
+        auto mutable_matrix =
+            Teuchos::rcp_const_cast<matrix_type>(crs_matrix);
+        Teuchos::RCP<operator_type> mutable_operator = mutable_matrix;
+        d_preconditioner =
+            MueLu::CreateTpetraPreconditioner(
+                mutable_operator, parameters);
+        d_problem->setRightPrec(d_preconditioner);
+    }
+
     Teuchos::RCP<problem_type> d_problem;
     Teuchos::RCP<Teuchos::ParameterList> d_parameters;
     Teuchos::RCP<solver_type> d_solver;
+    Teuchos::RCP<const operator_type> d_preconditioner;
 };
 
 /**

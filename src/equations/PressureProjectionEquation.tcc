@@ -198,9 +198,11 @@ auto PressureProjectionEquation<Pack>::project(
     pressure.owned_data().putScalar(0.0);
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix =
         d_cached_pressure_matrix;
-    if (!d_linear_solver.solve(
+    const auto linear_statistics =
+        d_linear_solver.solve_with_statistics(
             const_matrix, *d_cached_rhs, pressure.owned_data(),
-            d_linear_options))
+            d_linear_options);
+    if (!linear_statistics.converged)
     {
         throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
     }
@@ -255,7 +257,10 @@ auto PressureProjectionEquation<Pack>::project(
     }
 
     using std::sqrt;
-    return {sqrt(pressure_norm_squared), sqrt(continuity_norm_squared)};
+    return {
+        sqrt(pressure_norm_squared),
+        sqrt(continuity_norm_squared),
+        linear_statistics};
 }
 
 } // namespace SimpleFluid

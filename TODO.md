@@ -69,27 +69,27 @@ The following capabilities are considered complete and should not be re-planned 
 
 Keep this phase independent of the new physics so solver performance changes can be diagnosed cleanly.
 
-- [ ] Add a repeatable benchmark harness.
-- [ ] Record nonlinear iteration counts.
-- [ ] Record Krylov iteration counts.
-- [ ] Record wall time.
-- [ ] Record memory usage.
-- [ ] Record continuity residuals.
-- [ ] Measure iteration count versus mesh non-orthogonality.
-- [ ] Compare diffusion/momentum treatments:
-  - [ ] explicit non-orthogonal correction + AMG
-  - [ ] implicit non-orthogonal matrix + GMRES
-  - [ ] hybrid non-orthogonal treatment
-  - [ ] coupled Krylov + Schur preconditioner
-- [ ] Add MPI scaling benchmarks.
-- [ ] Ensure benchmark output is machine-readable, for example CSV or JSON.
+- [x] Add a repeatable benchmark harness.
+- [x] Record nonlinear iteration counts.
+- [x] Record Krylov iteration counts.
+- [x] Record wall time.
+- [x] Record memory usage.
+- [x] Record continuity residuals.
+- [x] Measure iteration count versus mesh non-orthogonality.
+- [x] Compare diffusion/momentum treatments:
+  - [x] explicit non-orthogonal correction + AMG
+  - [x] implicit non-orthogonal matrix + GMRES
+  - [x] hybrid non-orthogonal treatment
+  - [x] coupled Krylov + Schur preconditioner
+- [x] Add MPI scaling benchmarks.
+- [x] Ensure benchmark output is machine-readable, for example CSV or JSON.
 
 ### Phase 9 acceptance criteria
 
-- [ ] Benchmarks can be run from CTest or a documented command.
-- [ ] At least one small benchmark is safe for local Debug builds.
-- [ ] At least one larger benchmark is suitable for Release/RelWithDebInfo profiling.
-- [ ] Results include enough metadata to compare solver configuration, mesh size, MPI size, and compiler mode.
+- [x] Benchmarks can be run from CTest or a documented command.
+- [x] At least one small benchmark is safe for local Debug builds.
+- [x] At least one larger benchmark is suitable for Release/RelWithDebInfo profiling.
+- [x] Results include enough metadata to compare solver configuration, mesh size, MPI size, and compiler mode.
 
 ---
 

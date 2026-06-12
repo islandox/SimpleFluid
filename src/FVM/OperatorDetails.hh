@@ -178,7 +178,11 @@ inline auto interior_diffusion_coefficient(
     if (d2 <= scalar_type{0})
     {
         throw std::runtime_error(
-            "Cannot assemble diffusion across coincident cells.");
+            "Cannot assemble diffusion across coincident cells "
+            + std::to_string(cell_lid)
+            + " and "
+            + std::to_string(other_lid)
+            + ".");
     }
 
     const auto& normal = mesh.face_normal_outward(face_lid, cell_lid);
@@ -188,12 +192,12 @@ inline auto interior_diffusion_coefficient(
         return diffusivity * projected;
     }
 
-    const auto distance = mesh.face_cell_center_distance(face_lid);
-    if (distance <= scalar_type{0})
-    {
-        throw std::runtime_error(
-            "Cannot assemble diffusion across coincident cells.");
-    }
+    const auto stored_distance =
+        mesh.face_cell_center_distance(face_lid);
+    const auto distance =
+        stored_distance > scalar_type{0}
+      ? stored_distance
+      : std::sqrt(d2);
     return diffusivity * mesh.face_area(face_lid) / distance;
 }
 

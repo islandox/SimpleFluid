@@ -233,13 +233,14 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
  * @param linear_options Linear solver configuration.
  */
 template<TpetraTypePack Pack>
-void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
+auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     const field_type& old_temperature,
     const FaceField<Pack>& face_fluxes,
     scalar_type time_step,
     scalar_type thermal_diffusivity,
     field_type& temperature,
     const LinearSolverOptions& linear_options) const
+    -> LinearSolveStatistics
 {
     auto zero_source =
         [](local_ordinal_type) -> scalar_type
@@ -247,9 +248,10 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
         return scalar_type{};
     };
 
-    advance_semi_implicit(old_temperature, face_fluxes, time_step,
-                          thermal_diffusivity, temperature, zero_source,
-                          linear_options);
+    return advance_semi_implicit(
+        old_temperature, face_fluxes, time_step,
+        thermal_diffusivity, temperature, zero_source,
+        linear_options);
 }
 
 /**
@@ -271,7 +273,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
  *         negative diffusivity.
  */
 template<TpetraTypePack Pack>
-void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
+auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     const field_type& old_temperature,
     const FaceField<Pack>& face_fluxes,
     scalar_type time_step,
@@ -279,6 +281,7 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     field_type& temperature,
     const source_type& right_hand_source,
     const LinearSolverOptions& linear_options) const
+    -> LinearSolveStatistics
 {
     EquationValidation::require_mesh_match(*d_mesh, old_temperature,
                                            "TemperatureDiffusionEquation");
@@ -310,12 +313,20 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
         d_cached_transport_matrix = system.matrix;
     }
 
+    if (system.rhs->norm2() == scalar_type{})
+    {
+        temperature.owned_data().putScalar(0.0);
+        d_mesh->sync_periodic_boundaries(temperature);
+        return {true, 0, 0.0};
+    }
+
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-    const auto converged =
-        d_linear_solver.solve(
+    const auto statistics =
+        d_linear_solver.solve_with_statistics(
             matrix, *system.rhs,
             temperature.owned_data(), linear_options);
-    if (!converged)
+    auto accepted_statistics = statistics;
+    if (!statistics.converged)
     {
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -326,8 +337,10 @@ void TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
                     "TemperatureDiffusionEquation transport solve produced a non-finite value.");
             }
         }
+        accepted_statistics.converged = true;
     }
     d_mesh->sync_periodic_boundaries(temperature);
+    return accepted_statistics;
 }
 
 } // namespace SimpleFluid

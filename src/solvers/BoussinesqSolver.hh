@@ -55,6 +55,7 @@ public:
     using vec_type = typename mesh_type::Vec3;
     using cell_type = typename mesh_type::CellType;
     using residual_type = PressureVelocityResiduals<scalar_type>;
+    using step_statistics_type = BoussinesqStepStatistics<scalar_type>;
 
     BoussinesqSolver(SP<const mesh_type> mesh,
                      BoundaryConditionSet boundary_conditions,
@@ -90,6 +91,10 @@ public:
     const field_type& pressure() const noexcept;
     const velocity_field_type& velocity() const noexcept;
     const residual_type& last_pressure_velocity_residuals() const noexcept;
+    const step_statistics_type& last_step_statistics() const noexcept
+    {
+        return d_last_step_statistics;
+    }
 
     field_type& temperature() noexcept;
     field_type& pressure() noexcept;
@@ -105,7 +110,7 @@ private:
 
     void solve_pressure_velocity_coupling();
     void solve_coupled_krylov();
-    void run_momentum_predictor();
+    LinearSolveSummary run_momentum_predictor();
     typename PressureProjectionEquation<Pack>::ProjectionResult
     run_pressure_correction();
     scalar_type velocity_update_norm(const velocity_field_type& before,
@@ -128,6 +133,7 @@ private:
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
+    step_statistics_type d_last_step_statistics;
 };
 
 } // namespace SimpleFluid

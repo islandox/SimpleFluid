@@ -202,6 +202,52 @@ TEST(MeshPartitionerTest, FaceConnectivityPreserved)
     }
 }
 
+TEST(MeshPartitionerTest, PreservesBoundaryAndFaceGeometry)
+{
+    auto mesh = make_4x4x4_box_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    int local_ymax_faces = 0;
+    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    {
+        if (mesh->boundary_patch_name(patch_id) != "ymax")
+        {
+            continue;
+        }
+        for (const auto face_lid : patch.face_lids)
+        {
+            if (!mesh->is_owned_face(face_lid))
+            {
+                continue;
+            }
+            ++local_ymax_faces;
+            EXPECT_GT(mesh->face_area(face_lid), 0.0);
+        }
+    }
+
+    int global_ymax_faces = 0;
+    my_mpi::allreduce(
+        &local_ymax_faces, &global_ymax_faces, 1, MPI_SUM);
+    EXPECT_GT(global_ymax_faces, 0);
+
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<Pack::local_ordinal_type>(face);
+        if (!mesh->is_owned_face(face_lid)
+            || !mesh->is_interior_face(face_lid))
+        {
+            continue;
+        }
+        EXPECT_GT(mesh->face_area(face_lid), 0.0);
+        EXPECT_GT(mesh->face_cell_center_distance(face_lid), 0.0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Test 4: Field sync works after partitioning
 // ---------------------------------------------------------------------------

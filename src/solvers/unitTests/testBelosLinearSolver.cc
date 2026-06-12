@@ -28,6 +28,39 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+class IdentityOperator final : public Pack::operator_type
+{
+public:
+    explicit IdentityOperator(Teuchos::RCP<const Pack::map_type> map)
+        : d_map(std::move(map))
+    {
+    }
+
+    Teuchos::RCP<const Pack::map_type> getDomainMap() const override
+    {
+        return d_map;
+    }
+
+    Teuchos::RCP<const Pack::map_type> getRangeMap() const override
+    {
+        return d_map;
+    }
+
+    void apply(
+        const Pack::multi_vector_type& input,
+        Pack::multi_vector_type& output,
+        Teuchos::ETransp mode = Teuchos::NO_TRANS,
+        double alpha = 1.0,
+        double beta = 0.0) const override
+    {
+        ASSERT_EQ(mode, Teuchos::NO_TRANS);
+        output.update(alpha, input, beta);
+    }
+
+private:
+    Teuchos::RCP<const Pack::map_type> d_map;
+};
+
 } // namespace
 
 /**
@@ -139,4 +172,75 @@ TEST(BelosLinearSolverTest, ReusesSolverForChangedRightHandSide)
     {
         EXPECT_DOUBLE_EQ(value, 5.0);
     }
+}
+
+TEST(BelosLinearSolverTest, ReportsIterationsAndAchievedTolerance)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(2.0);
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto statistics =
+        solver.solve_with_statistics(op, rhs, solution);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_GE(statistics.iterations, 0);
+    EXPECT_TRUE(std::isfinite(statistics.achieved_tolerance));
+    EXPECT_GE(statistics.achieved_tolerance, 0.0);
+}
+
+TEST(BelosLinearSolverTest, SupportsMueLuForCrsMatrices)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 8, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(3.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner =
+        SimpleFluid::LinearPreconditioner::MueLu;
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto statistics =
+        solver.solve_with_statistics(op, rhs, solution, options);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_GE(statistics.iterations, 0);
+}
+
+TEST(BelosLinearSolverTest, RejectsMueLuForNonCrsOperators)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    Teuchos::RCP<const Pack::operator_type> op =
+        Teuchos::rcp(new IdentityOperator(map));
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(1.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner =
+        SimpleFluid::LinearPreconditioner::MueLu;
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    EXPECT_THROW(
+        solver.solve_with_statistics(op, rhs, solution, options),
+        std::invalid_argument);
 }

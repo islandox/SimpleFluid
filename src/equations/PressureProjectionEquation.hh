@@ -52,6 +52,7 @@ public:
     {
         scalar_type pressure_correction = {};
         scalar_type continuity = {};
+        LinearSolveStatistics linear_solve;
     };
 
     explicit PressureProjectionEquation(
