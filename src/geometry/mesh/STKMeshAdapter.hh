@@ -142,19 +142,19 @@ public:
         return d_mesh->boundary_id(id);
     }
 
-    const std::string& boundary_patch_name(int patch_id) const
+    const std::string& boundary_batch_name(int batch_id) const
     {
-        return d_mesh->boundary_patch_name(patch_id);
+        return d_mesh->boundary_batch_name(batch_id);
     }
 
-    const auto& boundary_face_patch(int patch_id) const
+    const auto& boundary_face_batch(int batch_id) const
     {
-        return d_mesh->boundary_face_patch(patch_id);
+        return d_mesh->boundary_face_batch(batch_id);
     }
 
-    const auto& boundary_patches() const noexcept
+    const auto& boundary_batches() const noexcept
     {
-        return d_mesh->boundary_patches();
+        return d_mesh->boundary_batches();
     }
 
     bool is_boundary_face(face_id_t id) const

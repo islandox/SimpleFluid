@@ -34,22 +34,22 @@ TEST(BoundaryCacheTest, CachesOnlyConfiguredDirichletPatches)
         SimpleFluid::cache_boundary_conditions<Pack>(mesh, conditions);
     EXPECT_EQ(cache.mesh, mesh);
 
-    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
-        const auto& name = mesh->boundary_patch_name(patch_id);
+        const auto& name = mesh->boundary_batch_name(batch_id);
         if (name == "xmin")
         {
-            ASSERT_TRUE(cache.value.contains(patch_id));
-            EXPECT_EQ(cache.value.at(patch_id).size(),
-                      patch.face_lids.size());
-            for (const auto value : cache.value.at(patch_id))
+            ASSERT_TRUE(cache.value.contains(batch_id));
+            EXPECT_EQ(cache.value.at(batch_id).size(),
+                      batch.face_lids.size());
+            for (const auto value : cache.value.at(batch_id))
             {
                 EXPECT_DOUBLE_EQ(value, 7.5);
             }
         }
         else
         {
-            EXPECT_FALSE(cache.value.contains(patch_id));
+            EXPECT_FALSE(cache.value.contains(batch_id));
         }
     }
 }

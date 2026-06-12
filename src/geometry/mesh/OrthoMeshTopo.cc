@@ -98,31 +98,31 @@ int OrthoMeshTopo::boundary_id(FaceID id) const noexcept
 }
 
 const std::string&
-OrthoMeshTopo::boundary_patch_name(int patch_id) const
+OrthoMeshTopo::boundary_batch_name(int batch_id) const
 {
-    if (patch_id < 0
-        || static_cast<size_t>(patch_id) >= d_boundary_names.size())
+    if (batch_id < 0
+        || static_cast<size_t>(batch_id) >= d_boundary_names.size())
     {
-        throw std::out_of_range("Requested boundary patch is not found.");
+        throw std::out_of_range("Requested boundary batch is not found.");
     }
-    return d_boundary_names[static_cast<size_t>(patch_id)];
+    return d_boundary_names[static_cast<size_t>(batch_id)];
 }
 
-void OrthoMeshTopo::validate_boundary_patch(int patch_id) const
+void OrthoMeshTopo::validate_boundary_batch(int batch_id) const
 {
-    if (patch_id < 0 || patch_id >= 6)
+    if (batch_id < 0 || batch_id >= 6)
     {
-        throw std::out_of_range("Requested boundary patch is not found.");
+        throw std::out_of_range("Requested boundary batch is not found.");
     }
-    const auto dim = static_cast<size_t>(patch_id / 2);
+    const auto dim = static_cast<size_t>(batch_id / 2);
     if (d_indexer.periodic_dimensions[dim])
     {
         throw std::out_of_range(
-            "Requested boundary patch is in a periodic dimension.");
+            "Requested boundary batch is in a periodic dimension.");
     }
 }
 
-std::vector<int> OrthoMeshTopo::boundary_patch_ids() const
+std::vector<int> OrthoMeshTopo::boundary_batch_ids() const
 {
     std::vector<int> ids;
     ids.reserve(6);
@@ -137,7 +137,7 @@ std::vector<int> OrthoMeshTopo::boundary_patch_ids() const
     return ids;
 }
 
-int OrthoMeshTopo::num_boundary_patches() const noexcept
+int OrthoMeshTopo::num_boundary_batches() const noexcept
 {
     int count = 0;
     for (int dim = 0; dim < 3; ++dim)

@@ -34,7 +34,7 @@ namespace SimpleFluid::FVM
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @param correction_field Scalar field used to compute the gradient for
  *        the non-orthogonal correction.
  * @param diffusivity Constant scalar diffusivity coefficient.
@@ -108,18 +108,18 @@ void add_explicit_non_orthogonal_correction(
         }
     }
 
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        for (size_t in_batch_id = 0;
+             in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
         {
-            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            const auto face_lid = boundary_batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
             {
                 continue;
             }
 
-            const auto bc = boundary_condition(patch_id, in_patch_id);
+            const auto bc = boundary_condition(batch_id, in_batch_id);
             if (bc.type != BoundaryConditionType::Dirichlet)
             {
                 continue;
@@ -234,10 +234,10 @@ void add_explicit_non_orthogonal_correction(
         }
     }
 
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        (void)patch_id;
-        for (const auto face_lid : boundary_patch.face_lids)
+        (void)batch_id;
+        for (const auto face_lid : boundary_batch.face_lids)
         {
             if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
             {
@@ -333,16 +333,16 @@ void add_variable_explicit_non_orthogonal_correction(
         }
     }
 
-    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, batch] : mesh.boundary_batches())
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < patch.face_lids.size();
-             ++in_patch_id)
+        for (size_t in_batch_id = 0;
+             in_batch_id < batch.face_lids.size();
+             ++in_batch_id)
         {
-            const auto face_lid = patch.face_lids[in_patch_id];
+            const auto face_lid = batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid)
                 || !mesh.is_boundary_face(face_lid)
-                || boundary_condition(patch_id, in_patch_id).type
+                || boundary_condition(batch_id, in_batch_id).type
                     != BoundaryConditionType::Dirichlet)
             {
                 continue;
@@ -458,7 +458,7 @@ void add_variable_explicit_non_orthogonal_correction(
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @tparam SourceProvider Callable returning scalar source for a cell LID.
  * @param mesh The computational mesh.
  * @param diffusivity Constant scalar diffusivity coefficient.
@@ -627,7 +627,7 @@ implicit_non_orthogonal_diffusion_system(
             const auto location =
                 boundary_locations[static_cast<size_t>(face_lid)];
             const auto bc =
-                boundary_condition(location.patch_id, location.in_patch_id);
+                boundary_condition(location.batch_id, location.in_batch_id);
             if (bc.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coeff =
@@ -845,7 +845,7 @@ full_diffusion_residual(
             const auto location =
                 boundary_locations[static_cast<size_t>(face_lid)];
             const auto bc =
-                boundary_condition(location.patch_id, location.in_patch_id);
+                boundary_condition(location.batch_id, location.in_batch_id);
             if (bc.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coeff =
@@ -891,7 +891,7 @@ full_diffusion_residual(
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @tparam SourceProvider Callable returning scalar source for a cell LID.
  * @param mesh The computational mesh.
  * @param diffusivity Constant scalar diffusivity coefficient.
@@ -1040,7 +1040,7 @@ bool solve_non_orthogonal_diffusion(
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @param mesh The computational mesh.
  * @param diffusivity Constant scalar diffusivity coefficient.
  * @param boundary_condition Boundary-condition provider.

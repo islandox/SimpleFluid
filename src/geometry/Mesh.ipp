@@ -439,44 +439,44 @@ inline auto Mesh<Pack>::boundary_name(local_ordinal_type fid) const
         throw std::out_of_range("Requested face is not a boundary face.");
     }
 
-    return boundary_patch_name(boundary_id(fid));
+    return boundary_batch_name(boundary_id(fid));
 }
 
 /**
- * @brief Retrieve the boundary name for a boundary patch.
+ * @brief Retrieve the boundary name for a boundary batch.
  *
  * @tparam Pack Tpetra type pack.
- * @param patch_id Boundary patch ID.
+ * @param batch_id Boundary batch ID.
  * @return Const reference to the boundary name string.
- * @throws std::out_of_range if the boundary patch is not found.
+ * @throws std::out_of_range if the boundary batch is not found.
  */
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::boundary_patch_name(int patch_id) const
+inline auto Mesh<Pack>::boundary_batch_name(int batch_id) const
     -> const std::string&
 {
-    const auto iter = d_boundary_id_to_name.find(patch_id);
+    const auto iter = d_boundary_id_to_name.find(batch_id);
     if (iter == d_boundary_id_to_name.end())
     {
-        throw std::out_of_range("Requested boundary patch is not found.");
+        throw std::out_of_range("Requested boundary batch is not found.");
     }
-    return d_boundary_id_to_name.at(patch_id);
+    return d_boundary_id_to_name.at(batch_id);
 }
 
 /**
- * @brief Retrieve the list of face IDs for a boundary patch.
+ * @brief Retrieve the list of face IDs for a boundary batch.
  *
  * @tparam Pack Tpetra type pack.
- * @param patch_id Boundary patch ID.
+ * @param batch_id Boundary batch ID.
  * @return Const reference to the list of face IDs.
- * @throws std::out_of_range if the boundary patch is not found.
+ * @throws std::out_of_range if the boundary batch is not found.
  */
 template<TpetraTypePack Pack>
-inline auto Mesh<Pack>::boundary_face_patch(int patch_id) const -> const BoundaryFacePatch&
+inline auto Mesh<Pack>::boundary_face_batch(int batch_id) const -> const BoundaryFaceBatch&
 {
-    const auto iter = d_boundary_id_to_face_patch.find(patch_id);
-    if (iter == d_boundary_id_to_face_patch.end())
+    const auto iter = d_boundary_id_to_face_batch.find(batch_id);
+    if (iter == d_boundary_id_to_face_batch.end())
     {
-        throw std::out_of_range("Requested boundary patch is not found.");
+        throw std::out_of_range("Requested boundary batch is not found.");
     }
     return iter->second;
 }

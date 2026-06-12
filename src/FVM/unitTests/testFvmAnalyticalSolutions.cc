@@ -69,12 +69,12 @@ SimpleFluid::SP<MeshType> make_taylor_green_mesh()
 MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
                                                const char* boundary_name)
 {
-    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, batch] : mesh.boundary_batches())
     {
-        if (mesh.boundary_patch_name(patch_id) == boundary_name
-            && !patch.face_lids.empty())
+        if (mesh.boundary_batch_name(batch_id) == boundary_name
+            && !batch.face_lids.empty())
         {
-            return patch.face_lids.front();
+            return batch.face_lids.front();
         }
     }
 
@@ -543,10 +543,10 @@ FieldType solve_viscous_burgers_semi_implicit(
         viscous_burgers_transport_fluxes(old_solution, old_time, viscosity);
     const auto new_time = old_time + time_step;
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
+        [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
     {
         const auto face_lid =
-            mesh.boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh.boundary_face_batch(batch_id).face_lids[in_batch_id];
         return viscous_burgers_exact(mesh.face_centroid(face_lid).x,
                                      new_time,
                                      viscosity);
@@ -619,7 +619,7 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     ASSERT_GE(mesh->num_owned_cells(), 3u * 3u * 3u);
-    EXPECT_EQ(mesh->boundary_patches().size(), 6u);
+    EXPECT_EQ(mesh->boundary_batches().size(), 6u);
 
     bool saw_triangular_face = false;
     size_t boundary_cells = 0;
@@ -722,10 +722,10 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
+        [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         return affine_scalar(mesh->face_centroid(face_lid));
     };
 
@@ -772,10 +772,10 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
     constexpr double time_step = 0.125;
     constexpr double diffusivity = 0.7;
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
+        [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto& point = mesh->face_centroid(face_lid);
         return affine_scalar(point) + time_step * scalar_source(point);
     };
@@ -839,10 +839,10 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id) -> Pack::scalar_type
+        [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto& normal = mesh->face_normal(face_lid);
         if (std::abs(normal.x) > 0.5)
         {
@@ -888,9 +888,9 @@ TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
         SimpleFluid::test::make_box_database(n_cells, 1, 1, mesh_size));
 
     auto boundary_condition =
-        [&](int patch_id, size_t) -> SimpleFluid::BoundaryCondition
+        [&](int batch_id, size_t) -> SimpleFluid::BoundaryCondition
     {
-        const auto& name = mesh->boundary_patch_name(patch_id);
+        const auto& name = mesh->boundary_batch_name(batch_id);
         if (name == "xmin" || name == "xmax")
         {
             return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
@@ -940,9 +940,9 @@ TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadr
         SimpleFluid::test::make_box_database(n_cells, 1, 1, mesh_size));
 
     auto boundary_condition =
-        [&](int patch_id, size_t) -> SimpleFluid::VectorBoundaryCondition
+        [&](int batch_id, size_t) -> SimpleFluid::VectorBoundaryCondition
     {
-        const auto& name = mesh->boundary_patch_name(patch_id);
+        const auto& name = mesh->boundary_batch_name(batch_id);
         if (name == "xmin" || name == "xmax")
         {
             return {SimpleFluid::BoundaryConditionType::Dirichlet, {}};
@@ -1007,11 +1007,11 @@ TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnSheare
     {
         auto mesh = make_sheared_box_mesh(n_cells, 0.45);
         auto boundary_condition =
-            [&](int patch_id, size_t in_patch_id)
+            [&](int batch_id, size_t in_batch_id)
                 -> SimpleFluid::BoundaryCondition
         {
             const auto face_lid =
-                mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+                mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
             return {SimpleFluid::BoundaryConditionType::Dirichlet,
                     skewed_quadratic_scalar(mesh->face_centroid(face_lid))};
         };
@@ -1080,11 +1080,11 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
     {
         auto mesh = make_sheared_box_mesh(n_cells, 0.45);
         auto boundary_condition =
-            [&](int patch_id, size_t in_patch_id)
+            [&](int batch_id, size_t in_batch_id)
                 -> SimpleFluid::BoundaryCondition
         {
             const auto face_lid =
-                mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+                mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
             return {SimpleFluid::BoundaryConditionType::Dirichlet,
                     skewed_quadratic_scalar(mesh->face_centroid(face_lid))};
         };
@@ -1140,11 +1140,11 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
     constexpr double time_step = 0.125;
     constexpr double diffusivity = 0.7;
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id)
+        [&](int batch_id, size_t in_batch_id)
             -> SimpleFluid::vec3<Pack::scalar_type>
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto& point = mesh->face_centroid(face_lid);
         return affine_vector(point) + vector_source(point) * time_step;
     };

@@ -190,15 +190,15 @@ void expect_zero_boundary_velocity(
     const char* boundary_name)
 {
     bool saw_boundary = false;
-    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, batch] : mesh.boundary_batches())
     {
-        if (mesh.boundary_patch_name(patch_id) != boundary_name)
+        if (mesh.boundary_batch_name(batch_id) != boundary_name)
         {
             continue;
         }
 
         saw_boundary = true;
-        for (const auto face_lid : patch.face_lids)
+        for (const auto face_lid : batch.face_lids)
         {
             if (!face_velocity.is_owned_face(face_lid))
             {

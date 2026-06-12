@@ -769,11 +769,11 @@ SimpleFluid::Benchmark::Record run_diffusion(
 
     constexpr double diffusivity = 1.0;
     auto boundary_condition =
-        [&](int patch_id, size_t in_patch_id)
+        [&](int batch_id, size_t in_batch_id)
             -> SimpleFluid::BoundaryCondition
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         return {
             SimpleFluid::BoundaryConditionType::Dirichlet,
             manufactured_solution(mesh->face_centroid(face_lid))};
@@ -950,13 +950,13 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
     long long local_lid_faces = 0;
     long long local_owned_lid_faces = 0;
     double local_lid_area = 0.0;
-    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
-        if (mesh->boundary_patch_name(patch_id) == "ymax")
+        if (mesh->boundary_batch_name(batch_id) == "ymax")
         {
             local_lid_faces +=
-                static_cast<long long>(patch.face_lids.size());
-            for (const auto face_lid : patch.face_lids)
+                static_cast<long long>(batch.face_lids.size());
+            for (const auto face_lid : batch.face_lids)
             {
                 local_owned_lid_faces +=
                     mesh->is_owned_face(face_lid) ? 1 : 0;
@@ -1011,9 +1011,9 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, boundary_conditions);
     double local_lid_velocity = 0.0;
-    for (const auto& [patch_id, values] : boundary_cache.value)
+    for (const auto& [batch_id, values] : boundary_cache.value)
     {
-        if (mesh->boundary_patch_name(patch_id) != "ymax")
+        if (mesh->boundary_batch_name(batch_id) != "ymax")
         {
             continue;
         }

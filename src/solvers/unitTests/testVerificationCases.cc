@@ -168,13 +168,13 @@ void verify_lid_driven_cavity(
             kinetic_energy += velocity.dot(velocity)
                             * mesh->cell_volume(cell_lid);
         }
-        for (const auto& [patch_id, patch] : mesh->boundary_patches())
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
         {
-            if (mesh->boundary_patch_name(patch_id) != "ymax")
+            if (mesh->boundary_batch_name(batch_id) != "ymax")
             {
                 continue;
             }
-            for (const auto face_lid : patch.face_lids)
+            for (const auto face_lid : batch.face_lids)
             {
                 if (!face_velocity.is_owned_face(face_lid))
                 {
@@ -287,10 +287,10 @@ double solve_taylor_green_error(int n_cells)
         face_velocity, face_fluxes);
 
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id)
+        [&](int batch_id, size_t in_batch_id)
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         return taylor_green_velocity(mesh->face_centroid(face_lid));
     };
     auto source =
@@ -328,11 +328,11 @@ double solve_skewed_diffusion_error(size_t n_cells)
         return point.x * point.x + 0.25 * point.y - 0.125 * point.z;
     };
     auto boundary_condition =
-        [&](int patch_id, size_t in_patch_id)
+        [&](int batch_id, size_t in_batch_id)
             -> SimpleFluid::BoundaryCondition
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         return {
             SimpleFluid::BoundaryConditionType::Dirichlet,
             exact(mesh->face_centroid(face_lid))};
@@ -435,10 +435,10 @@ TEST(VerificationCasesTest, PoiseuilleFlowMatchesParabolicProfile)
             1.0 / static_cast<double>(n_cells)));
 
     auto boundary_condition =
-        [&](int patch_id, size_t)
+        [&](int batch_id, size_t)
             -> SimpleFluid::VectorBoundaryCondition
     {
-        const auto& name = mesh->boundary_patch_name(patch_id);
+        const auto& name = mesh->boundary_batch_name(batch_id);
         if (name == "ymin" || name == "ymax")
         {
             return {

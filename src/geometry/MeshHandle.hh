@@ -84,8 +84,8 @@ public:
                                       SemiStructuredPtr,
                                       STKAdapterPtr>;
 
-    /** @brief Locally visible faces belonging to one boundary patch. */
-    struct BoundaryFacePatch
+    /** @brief Locally visible faces belonging to one boundary batch. */
+    struct BoundaryFaceBatch
     {
         int id = -1;
         std::vector<local_ordinal_type> face_lids;
@@ -222,25 +222,25 @@ public:
     int boundary_id(local_ordinal_type face_lid) const;
     bool is_boundary_face(local_ordinal_type face_lid) const;
 
-    const std::string& boundary_patch_name(int patch_id) const
+    const std::string& boundary_batch_name(int batch_id) const
     {
-        const auto iter = d_boundary_names.find(patch_id);
+        const auto iter = d_boundary_names.find(batch_id);
         if (iter == d_boundary_names.end())
         {
-            throw std::out_of_range("Unknown boundary patch ID.");
+            throw std::out_of_range("Unknown boundary batch ID.");
         }
         return iter->second;
     }
 
-    const BoundaryFacePatch& boundary_face_patch(int patch_id) const
+    const BoundaryFaceBatch& boundary_face_batch(int batch_id) const
     {
-        return d_boundary_patches.at(patch_id);
+        return d_boundary_batches.at(batch_id);
     }
 
-    const std::unordered_map<int, BoundaryFacePatch>&
-    boundary_patches() const noexcept
+    const std::unordered_map<int, BoundaryFaceBatch>&
+    boundary_batches() const noexcept
     {
-        return d_boundary_patches;
+        return d_boundary_batches;
     }
 
     Teuchos::RCP<const map_type> owned_cell_map() const
@@ -435,7 +435,7 @@ private:
     void initialize_cell_faces();
 
     template<class MeshType>
-    void initialize_boundary_patches(const MeshType& mesh);
+    void initialize_boundary_batches(const MeshType& mesh);
 
     template<class CommPtr, class Id>
     Teuchos::RCP<const map_type> make_map(
@@ -470,10 +470,10 @@ private:
             d_face_geometry_lids.begin()
                 + static_cast<std::ptrdiff_t>(d_num_owned_faces));
         std::vector<size_t> boundary_faces;
-        for (const auto& [patch_id, patch] : d_boundary_patches)
+        for (const auto& [batch_id, batch] : d_boundary_batches)
         {
-            (void)patch_id;
-            for (const auto face_lid : patch.face_lids)
+            (void)batch_id;
+            for (const auto face_lid : batch.face_lids)
             {
                 if (is_owned_face(face_lid))
                 {
@@ -591,7 +591,7 @@ private:
     std::unordered_map<size_t, local_ordinal_type>
         d_face_local_by_geometry;
     std::unordered_map<int, std::string> d_boundary_names;
-    std::unordered_map<int, BoundaryFacePatch> d_boundary_patches;
+    std::unordered_map<int, BoundaryFaceBatch> d_boundary_batches;
     Teuchos::RCP<const map_type> d_owned_cell_map;
     Teuchos::RCP<const map_type> d_overlap_cell_map;
     Teuchos::RCP<const map_type> d_owned_face_map;
