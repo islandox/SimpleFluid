@@ -1,3 +1,13 @@
+/**
+ * @file simplefluid_benchmark.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief CLI-driven benchmark harness for diffusion and pressure-velocity solver configurations.
+ * @version 0.1
+ * @date 2026-06-12
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
 #include "benchmarks/BenchmarkSupport.hh"
 #include "equations/BoundaryConditions.hh"
 #include "FVM/Operators.hh"
@@ -50,6 +60,9 @@ using FieldType = SimpleFluid::CellField<Pack>;
 using STKMeshType = SimpleFluid::STKMesh<Pack>;
 using Comm = Teuchos::Comm<int>;
 
+/**
+ * @brief Mesh dimensions for a benchmark case (cells in each direction).
+ */
 struct Dimensions
 {
     int nx = 0;
@@ -57,6 +70,9 @@ struct Dimensions
     int nz = 0;
 };
 
+/**
+ * @brief Enumeration of benchmark case groups.
+ */
 enum class CaseSelection
 {
     All,
@@ -64,6 +80,9 @@ enum class CaseSelection
     PressureVelocity
 };
 
+/**
+ * @brief Benchmark run options parsed from the command line.
+ */
 struct Options
 {
     std::string preset = "debug-small";
@@ -77,6 +96,9 @@ struct Options
     std::filesystem::path output{"simplefluid_benchmark.csv"};
 };
 
+/**
+ * @brief Solver configuration for a single benchmark run.
+ */
 struct SolverConfiguration
 {
     SimpleFluid::FVM::NonOrthogonalTreatment treatment =
@@ -89,18 +111,32 @@ struct SolverConfiguration
     std::string preconditioner_name;
 };
 
+/**
+ * @brief Mesh non-orthogonality angle statistics.
+ */
 struct AngleMetrics
 {
     double mean_degrees = 0.0;
     double maximum_degrees = 0.0;
 };
 
+/**
+ * @brief Error metrics comparing a numerical solution to a manufactured solution.
+ */
 struct ErrorMetrics
 {
     double l2 = 0.0;
     double linf = 0.0;
 };
 
+/**
+ * @brief Compute the global sum of a local value across MPI ranks.
+ *
+ * @tparam T Numeric type.
+ * @param comm MPI communicator.
+ * @param local Local value on this rank.
+ * @return Global sum across all ranks.
+ */
 template<class T>
 T global_sum(const Teuchos::RCP<const Comm>& comm, T local)
 {
@@ -110,6 +146,14 @@ T global_sum(const Teuchos::RCP<const Comm>& comm, T local)
     return global;
 }
 
+/**
+ * @brief Compute the global maximum of a local value across MPI ranks.
+ *
+ * @tparam T Numeric type.
+ * @param comm MPI communicator.
+ * @param local Local value on this rank.
+ * @return Global maximum across all ranks.
+ */
 template<class T>
 T global_max(const Teuchos::RCP<const Comm>& comm, T local)
 {
@@ -119,6 +163,14 @@ T global_max(const Teuchos::RCP<const Comm>& comm, T local)
     return global;
 }
 
+/**
+ * @brief Parse a positive integer from a string option value.
+ *
+ * @param value String representation of the integer.
+ * @param option Option name for error messages.
+ * @return Parsed positive integer.
+ * @throws std::invalid_argument if the value is not a valid positive integer.
+ */
 int parse_int(std::string_view value, std::string_view option)
 {
     size_t consumed = 0;
@@ -131,6 +183,14 @@ int parse_int(std::string_view value, std::string_view option)
     return parsed;
 }
 
+/**
+ * @brief Parse a non-negative double from a string option value.
+ *
+ * @param value String representation of the number.
+ * @param option Option name for error messages.
+ * @return Parsed non-negative number.
+ * @throws std::invalid_argument if the value is negative or not a valid number.
+ */
 double parse_double(std::string_view value, std::string_view option)
 {
     size_t consumed = 0;
@@ -143,6 +203,14 @@ double parse_double(std::string_view value, std::string_view option)
     return parsed;
 }
 
+/**
+ * @brief Apply a named preset to benchmark options.
+ *
+ * @param options Options to populate.
+ * @param preset Preset name (debug-small, release-profile, mpi-strong, mpi-weak).
+ * @param mpi_ranks Number of MPI ranks (used for weak scaling).
+ * @throws std::invalid_argument if the preset name is unrecognized.
+ */
 void apply_preset(Options& options,
                   std::string_view preset,
                   int mpi_ranks)
@@ -186,6 +254,16 @@ void apply_preset(Options& options,
     throw std::invalid_argument("Unknown benchmark preset.");
 }
 
+/**
+ * @brief Consume the next command-line argument as a required value.
+ *
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @param index Current argument index (advanced by this call).
+ * @param option Option name for error messages.
+ * @return The consumed argument value.
+ * @throws std::invalid_argument if no value follows the option.
+ */
 std::string_view require_value(
     int argc, char** argv, int& index, std::string_view option)
 {
@@ -197,6 +275,17 @@ std::string_view require_value(
     return argv[++index];
 }
 
+/**
+ * @brief Parse benchmark options from command-line arguments.
+ *
+ * Applies a preset first, then overrides with explicit CLI arguments.
+ *
+ * @param argc Argument count.
+ * @param argv Argument vector.
+ * @param mpi_ranks Number of MPI ranks.
+ * @return Populated Options struct.
+ * @throws std::invalid_argument for unknown or malformed options.
+ */
 Options parse_options(int argc, char** argv, int mpi_ranks)
 {
     Options options;
@@ -338,6 +427,12 @@ Options parse_options(int argc, char** argv, int mpi_ranks)
     return options;
 }
 
+/**
+ * @brief Generate uniformly spaced cell-edge coordinates for a unit interval.
+ *
+ * @param cells Number of cells in one direction.
+ * @return Vector of cell_count + 1 edge coordinates from 0.0 to 1.0.
+ */
 SimpleFluid::ArrReal unit_edges(int cells)
 {
     SimpleFluid::ArrReal edges(static_cast<size_t>(cells) + 1);
@@ -349,6 +444,12 @@ SimpleFluid::ArrReal unit_edges(int cells)
     return edges;
 }
 
+/**
+ * @brief Create a Database configured for a structured BOX mesh.
+ *
+ * @param dimensions Mesh dimensions in cells.
+ * @return Shared pointer to a populated Database.
+ */
 std::shared_ptr<SimpleFluid::Database>
 make_box_database(const Dimensions& dimensions)
 {
@@ -368,6 +469,15 @@ make_box_database(const Dimensions& dimensions)
     return database;
 }
 
+/**
+ * @brief Build a sheared hexahedral BOX mesh directly via STK.
+ *
+ * Applies a shear displacement in the x-direction proportional to y.
+ *
+ * @param dimensions Mesh dimensions in cells.
+ * @param shear Shear factor applied to node x-coordinates.
+ * @return Shared pointer to the assembled sheared mesh.
+ */
 std::shared_ptr<MeshType>
 make_sheared_box_mesh(const Dimensions& dimensions, double shear)
 {
@@ -477,12 +587,24 @@ make_sheared_box_mesh(const Dimensions& dimensions, double shear)
     return mesh;
 }
 
+/**
+ * @brief Evaluate the manufactured solution at a spatial point.
+ *
+ * @param point 3D coordinates.
+ * @return Manufactured scalar value.
+ */
 double manufactured_solution(const SimpleFluid::vec3<>& point)
 {
     return 0.1 + point.x * point.x
          + 0.25 * point.y - 0.125 * point.z;
 }
 
+/**
+ * @brief Compute mean and maximum non-orthogonality angles across the mesh.
+ *
+ * @param mesh Assembled finite-volume mesh.
+ * @return AngleMetrics with mean and max angles in degrees.
+ */
 AngleMetrics nonorthogonality_metrics(const MeshType& mesh)
 {
     double local_sum = 0.0;
@@ -526,6 +648,12 @@ AngleMetrics nonorthogonality_metrics(const MeshType& mesh)
         global_max(comm, local_maximum)};
 }
 
+/**
+ * @brief Compute L2 and L∞ error norms against the manufactured solution.
+ *
+ * @param field Cell-centered numerical solution.
+ * @return ErrorMetrics with l2 and linf error values.
+ */
 ErrorMetrics error_metrics(const FieldType& field)
 {
     double local_squared_error = 0.0;
@@ -553,6 +681,16 @@ ErrorMetrics error_metrics(const FieldType& field)
         global_max(comm, local_maximum)};
 }
 
+/**
+ * @brief Create a base benchmark record populated with metadata.
+ *
+ * @param options Benchmark options.
+ * @param run_id Unique run identifier.
+ * @param benchmark_case Name of the benchmark case.
+ * @param dimensions Mesh dimensions.
+ * @param mpi_ranks Number of MPI ranks.
+ * @return Populated Record with timestamp and system metadata.
+ */
 SimpleFluid::Benchmark::Record base_record(
     const Options& options,
     const std::string& run_id,
@@ -577,6 +715,12 @@ SimpleFluid::Benchmark::Record base_record(
     return record;
 }
 
+/**
+ * @brief Sample memory usage and add aggregated metrics to a benchmark record.
+ *
+ * @param record Record to populate with memory fields.
+ * @param comm MPI communicator for global reduction.
+ */
 void add_memory_metrics(
     SimpleFluid::Benchmark::Record& record,
     const Teuchos::RCP<const Comm>& comm)
@@ -592,6 +736,19 @@ void add_memory_metrics(
         global_sum(comm, local.peak_resident_kib);
 }
 
+/**
+ * @brief Run the diffusion non-orthogonality benchmark case.
+ *
+ * Solves the manufactured diffusion problem on a sheared mesh with
+ * configurable non-orthogonal treatment and preconditioner.
+ *
+ * @param options Benchmark options.
+ * @param run_id Unique run identifier.
+ * @param configuration Solver configuration for this run.
+ * @param shear Mesh shear factor.
+ * @param repetition Repetition index within the run.
+ * @return Populated benchmark Record with timing and error metrics.
+ */
 SimpleFluid::Benchmark::Record run_diffusion(
     const Options& options,
     const std::string& run_id,
@@ -732,6 +889,14 @@ SimpleFluid::Benchmark::Record run_diffusion(
     return record;
 }
 
+/**
+ * @brief Create boundary conditions for a lid-driven cavity flow.
+ *
+ * All walls are no-slip except ymax (moving lid with velocity (1,0,0)),
+ * and zmin/zmax are slip walls. All temperature boundaries are adiabatic.
+ *
+ * @return Populated BoundaryConditionSet for the cavity benchmark.
+ */
 SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
 {
     SimpleFluid::BoundaryConditionSet conditions;
@@ -757,6 +922,18 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
     return conditions;
 }
 
+/**
+ * @brief Run the pressure-velocity coupling benchmark case.
+ *
+ * Solves the lid-driven cavity problem with configurable coupling,
+ * non-orthogonal treatment, and preconditioner.
+ *
+ * @param options Benchmark options.
+ * @param run_id Unique run identifier.
+ * @param configuration Solver configuration for this run.
+ * @param repetition Repetition index within the run.
+ * @return Populated benchmark Record with timing and convergence metrics.
+ */
 SimpleFluid::Benchmark::Record run_pressure_velocity(
     const Options& options,
     const std::string& run_id,
