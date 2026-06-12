@@ -7,6 +7,8 @@
 
 #include "geometry/mesh/OrthoMeshTopo.hh"
 
+#include <algorithm>
+#include <initializer_list>
 #include <ranges>
 #include <stdexcept>
 
@@ -17,6 +19,15 @@ using Topology = SimpleFluid::Meshes::OrthoMeshTopo;
 using Indexer = Topology::Indexer;
 using CellID = Topology::CellID;
 using FaceID = Topology::FaceID;
+
+Topology::NeighborCells neighbor_cells(
+    std::initializer_list<CellID> cells)
+{
+    Topology::NeighborCells result;
+    result.num = static_cast<unsigned>(cells.size());
+    std::ranges::copy(cells, result.neighbors.begin());
+    return result;
+}
 
 Topology make_topology(
     bool i_periodic = false,
@@ -92,7 +103,7 @@ TEST(OrthoMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
     EXPECT_EQ(*std::ranges::begin(interior), (CellID{1, 1, 1}));
     EXPECT_EQ(
         topology.neighbor_cells(CellID{1, 1, 1}),
-        (Topology::NeighborCells{
+        neighbor_cells({
             {0, 1, 1},
             {2, 1, 1},
             {1, 0, 1},
@@ -102,7 +113,7 @@ TEST(OrthoMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
 
     EXPECT_EQ(
         topology.neighbor_cells(CellID{0, 0, 0}),
-        (Topology::NeighborCells{
+        neighbor_cells({
             {1, 0, 0},
             {0, 1, 0},
             {0, 0, 1}}));
@@ -133,11 +144,45 @@ TEST(OrthoMeshTopoTest, WrapsPeriodicDimensions)
         topology.indexer().total_cells());
     EXPECT_EQ(
         topology.neighbor_cells(CellID{0, 0, 0}),
-        (Topology::NeighborCells{
+        neighbor_cells({
             {1, 0, 0},
             {1, 0, 0},
             {0, 2, 0},
             {0, 1, 0},
             {0, 0, 3},
             {0, 0, 1}}));
+}
+
+TEST(OrthoMeshTopoTest, HandlesSingleCellDimensions)
+{
+    const Topology non_periodic(
+        Indexer(1, 2, 1),
+        {{"imin", "imax", "jmin", "jmax", "kmin", "kmax"}});
+    const FaceID i_lower{0, 0, 0, Indexer::I_FACE};
+    const FaceID i_upper{1, 0, 0, Indexer::I_FACE};
+    EXPECT_EQ(non_periodic.owner_cell(i_lower), (CellID{0, 0, 0}));
+    EXPECT_EQ(non_periodic.owner_cell(i_upper), (CellID{0, 0, 0}));
+    EXPECT_EQ(non_periodic.neighbor_cell(i_lower), CellID{});
+    EXPECT_EQ(non_periodic.neighbor_cell(i_upper), CellID{});
+    EXPECT_EQ(
+        non_periodic.neighbor_cells(CellID{0, 0, 0}),
+        neighbor_cells({{0, 1, 0}}));
+
+    const Topology periodic(
+        Indexer(1, 1, 1, true, true, true),
+        {{"imin", "imax", "jmin", "jmax", "kmin", "kmax"}});
+    const FaceID periodic_seam{0, 0, 0, Indexer::K_FACE};
+    EXPECT_EQ(periodic.owner_cell(periodic_seam), (CellID{0, 0, 0}));
+    EXPECT_EQ(
+        periodic.neighbor_cell(periodic_seam),
+        (CellID{0, 0, 0}));
+    EXPECT_EQ(
+        periodic.neighbor_cells(CellID{0, 0, 0}),
+        neighbor_cells({
+            {0, 0, 0},
+            {0, 0, 0},
+            {0, 0, 0},
+            {0, 0, 0},
+            {0, 0, 0},
+            {0, 0, 0}}));
 }

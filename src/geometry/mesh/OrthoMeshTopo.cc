@@ -18,6 +18,7 @@ OrthoMeshTopo::OrthoMeshTopo(
     : d_indexer(indexer),
       d_boundary_names(std::move(boundary_names))
 {
+    initialize_face_adjacency();
     initialize_cell_adjacency();
 }
 
@@ -29,61 +30,37 @@ OrthoMeshTopo::OrthoMeshTopo(Ordinal ni, Ordinal nj, Ordinal nk,
     : d_indexer(ni, nj, nk, periodic_i, periodic_j, periodic_k),
       d_boundary_names(std::move(boundary_names))
 {
+    initialize_face_adjacency();
     initialize_cell_adjacency();
 }
 
 auto OrthoMeshTopo::owner_cell(FaceID id) const noexcept -> CellID
 {
-    if (id.orientation == Indexer::I_FACE)
-    {
-        auto i = id.i == 0 ? 0 : id.i - 1;
-        if (id.i == 0 && d_indexer.periodic_dimensions[Indexer::I])
-        {
-            i = d_indexer.num_cells_per_dim[Indexer::I] - 1;
-        }
-        return {i, id.j, id.k};
-    }
-    if (id.orientation == Indexer::J_FACE)
-    {
-        auto j = id.j == 0 ? 0 : id.j - 1;
-        if (id.j == 0 && d_indexer.periodic_dimensions[Indexer::J])
-        {
-            j = d_indexer.num_cells_per_dim[Indexer::J] - 1;
-        }
-        return {id.i, j, id.k};
-    }
-
-    auto k = id.k == 0 ? 0 : id.k - 1;
-    if (id.k == 0 && d_indexer.periodic_dimensions[Indexer::K])
-    {
-        k = d_indexer.num_cells_per_dim[Indexer::K] - 1;
-    }
-    return {id.i, id.j, k};
+    std::array<Ordinal, 3> coordinates{id.i, id.j, id.k};
+    const auto orientation = id.orientation;
+    const auto face_coordinate = coordinates[orientation];
+    coordinates[orientation] =
+        d_face_cells_per_dim[orientation][face_coordinate].owner;
+    return {coordinates[Indexer::I],
+            coordinates[Indexer::J],
+            coordinates[Indexer::K]};
 }
 
 auto OrthoMeshTopo::neighbor_cell(FaceID id) const noexcept -> CellID
 {
-    if (id.orientation == Indexer::I_FACE)
+    std::array<Ordinal, 3> coordinates{id.i, id.j, id.k};
+    const auto orientation = id.orientation;
+    const auto face_coordinate = coordinates[orientation];
+    const auto neighbor =
+        d_face_cells_per_dim[orientation][face_coordinate].neighbor;
+    if (neighbor == invalid_ordinal)
     {
-        return d_indexer.periodic_dimensions[Indexer::I]
-                || (id.i != 0
-                    && id.i != d_indexer.num_cells_per_dim[Indexer::I])
-             ? CellID{id.i, id.j, id.k}
-             : CellID{};
+        return {};
     }
-    if (id.orientation == Indexer::J_FACE)
-    {
-        return d_indexer.periodic_dimensions[Indexer::J]
-                || (id.j != 0
-                    && id.j != d_indexer.num_cells_per_dim[Indexer::J])
-             ? CellID{id.i, id.j, id.k}
-             : CellID{};
-    }
-    return d_indexer.periodic_dimensions[Indexer::K]
-            || (id.k != 0
-                && id.k != d_indexer.num_cells_per_dim[Indexer::K])
-         ? CellID{id.i, id.j, id.k}
-         : CellID{};
+    coordinates[orientation] = neighbor;
+    return {coordinates[Indexer::I],
+            coordinates[Indexer::J],
+            coordinates[Indexer::K]};
 }
 
 bool OrthoMeshTopo::is_boundary_face(FaceID face_id) const noexcept
@@ -173,73 +150,88 @@ int OrthoMeshTopo::num_boundary_patches() const noexcept
     return count;
 }
 
+void OrthoMeshTopo::initialize_face_adjacency()
+{
+    using enum Indexer::Dimension;
+
+    auto init_dim = [&](Indexer::Dimension dim) {
+        const auto cells = d_indexer.num_cells_per_dim[dim];
+        auto& faces = d_face_cells_per_dim[dim];
+        faces.resize(d_indexer.num_nodes_per_dim[dim]);
+
+        if (d_indexer.periodic_dimensions[dim])
+        {
+            for (Ordinal face = 0; face < cells; ++face)
+            {
+                faces[face] = {
+                    face == 0 ? cells - 1 : face - 1,
+                    face};
+            }
+            return;
+        }
+
+        faces[0] = {0, invalid_ordinal};
+        for (Ordinal face = 1; face < cells; ++face)
+        {
+            faces[face] = {face - 1, face};
+        }
+        faces[cells] = {
+            cells == 0 ? 0 : cells - 1,
+            invalid_ordinal};
+    };
+
+    init_dim(I);
+    init_dim(J);
+    init_dim(K);
+}
+
 void OrthoMeshTopo::initialize_cell_adjacency()
 {
-    d_neighbor_cells.resize(d_indexer.total_cells());
+    using enum Indexer::Dimension;
 
-    const auto ni = d_indexer.num_cells_per_dim[Indexer::I];
-    const auto nj = d_indexer.num_cells_per_dim[Indexer::J];
-    const auto nk = d_indexer.num_cells_per_dim[Indexer::K];
+    const auto ni = d_indexer.num_cells_per_dim[I];
+    const auto nj = d_indexer.num_cells_per_dim[J];
+    const auto nk = d_indexer.num_cells_per_dim[K];
 
-    for (size_t local_id = 0;
-         local_id < d_indexer.total_cells();
-         ++local_id)
-    {
-        const auto cell = d_indexer.cell_id(local_id);
-        auto& neighbors = d_neighbor_cells[local_id];
-        neighbors.reserve(6);
+    d_neighbors_per_dim[I].resize(ni);
+    d_neighbors_per_dim[J].resize(nj);
+    d_neighbors_per_dim[K].resize(nk);
 
-        if (cell.i > 0)
+    auto init_dim = [&](Indexer::Dimension dim, Ordinal n) {
+        if (n == 0)
         {
-            neighbors.push_back({cell.i - 1, cell.j, cell.k});
-        }
-        else if (d_indexer.periodic_dimensions[Indexer::I])
-        {
-            neighbors.push_back({ni - 1, cell.j, cell.k});
-        }
-        if (cell.i + 1 < ni)
-        {
-            neighbors.push_back({cell.i + 1, cell.j, cell.k});
-        }
-        else if (d_indexer.periodic_dimensions[Indexer::I])
-        {
-            neighbors.push_back({0, cell.j, cell.k});
+            return;
         }
 
-        if (cell.j > 0)
+        auto& neighbors = d_neighbors_per_dim[dim];
+        if (n == 1)
         {
-            neighbors.push_back({cell.i, cell.j - 1, cell.k});
-        }
-        else if (d_indexer.periodic_dimensions[Indexer::J])
-        {
-            neighbors.push_back({cell.i, nj - 1, cell.k});
-        }
-        if (cell.j + 1 < nj)
-        {
-            neighbors.push_back({cell.i, cell.j + 1, cell.k});
-        }
-        else if (d_indexer.periodic_dimensions[Indexer::J])
-        {
-            neighbors.push_back({cell.i, 0, cell.k});
+            if (d_indexer.periodic_dimensions[dim])
+            {
+                neighbors[0] = {2, {0, 0}};
+            }
+            return;
         }
 
-        if (cell.k > 0)
+        for (Ordinal idx = 1; idx < n - 1; ++idx)
         {
-            neighbors.push_back({cell.i, cell.j, cell.k - 1});
+            neighbors[idx] = {2, {idx - 1, idx + 1}};
         }
-        else if (d_indexer.periodic_dimensions[Indexer::K])
+        if (!d_indexer.periodic_dimensions[dim])
         {
-            neighbors.push_back({cell.i, cell.j, nk - 1});
+            neighbors[0] = {1, {1}};
+            neighbors[n - 1] = {1, {n - 2}};
         }
-        if (cell.k + 1 < nk)
+        else
         {
-            neighbors.push_back({cell.i, cell.j, cell.k + 1});
+            neighbors[0] = {2, {n - 1, 1}};
+            neighbors[n - 1] = {2, {n - 2, 0}};
         }
-        else if (d_indexer.periodic_dimensions[Indexer::K])
-        {
-            neighbors.push_back({cell.i, cell.j, 0});
-        }
-    }
+    };
+
+    init_dim(I, ni);
+    init_dim(J, nj);
+    init_dim(K, nk);
 }
 
 } // namespace SimpleFluid::Meshes

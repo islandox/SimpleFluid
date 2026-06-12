@@ -32,6 +32,27 @@
 namespace SimpleFluid
 {
 
+namespace detail
+{
+
+/**
+ * @brief Concept satisfied when a mesh type accepts a given structured cell ID.
+ */
+template<class Mesh, class ID>
+concept mesh_has_cell_local_id = requires(const Mesh& m, ID id) {
+    { m.cell_local_id(id) } -> std::convertible_to<size_t>;
+};
+
+/**
+ * @brief Concept satisfied when a mesh type accepts a given structured face ID.
+ */
+template<class Mesh, class ID>
+concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
+    { m.face_local_id(id) } -> std::convertible_to<size_t>;
+};
+
+} // namespace detail
+
 /**
  * @brief Runtime-polymorphic distributed view of supported mesh families.
  *
@@ -172,183 +193,34 @@ public:
             d_face_geometry_lids[static_cast<size_t>(face_lid)]);
     }
 
-    real_t cell_volume(local_ordinal_type cell_lid) const
-    {
-        return visit_geometry_cell(
-            cell_lid,
-            [](const auto& mesh, const auto id)
-            {
-                return mesh.cell_volume(id);
-            });
-    }
-
-    Vec3 cell_centroid(local_ordinal_type cell_lid) const
-    {
-        return visit_geometry_cell(
-            cell_lid,
-            [](const auto& mesh, const auto id)
-            {
-                return mesh.cell_centroid(id);
-            });
-    }
-
+    real_t cell_volume(local_ordinal_type cell_lid) const;
+    Vec3 cell_centroid(local_ordinal_type cell_lid) const;
     std::span<const local_ordinal_type> faces(
-        local_ordinal_type cell_lid) const
-    {
-        check_cell(cell_lid);
-        const auto local = static_cast<size_t>(cell_lid);
-        const auto begin = d_cell_face_offsets[local];
-        const auto end = d_cell_face_offsets[local + 1];
-        return std::span<const local_ordinal_type>(d_cell_face_lids)
-            .subspan(begin, end - begin);
-    }
-
-    local_ordinal_type owner_cell(local_ordinal_type face_lid) const
-    {
-        return adjacent_cell(face_lid, true);
-    }
-
-    local_ordinal_type neighbor_cell(local_ordinal_type face_lid) const
-    {
-        return adjacent_cell(face_lid, false);
-    }
-
+        local_ordinal_type cell_lid) const;
+    local_ordinal_type owner_cell(local_ordinal_type face_lid) const;
+    local_ordinal_type neighbor_cell(local_ordinal_type face_lid) const;
     local_ordinal_type opposite_cell(local_ordinal_type face_lid,
-                                     local_ordinal_type cell_lid) const
-    {
-        const auto owner = owner_cell(face_lid);
-        const auto neighbor = neighbor_cell(face_lid);
-        if (cell_lid == owner)
-        {
-            return neighbor;
-        }
-        if (neighbor != invalid_local_id() && cell_lid == neighbor)
-        {
-            return owner;
-        }
-        throw std::invalid_argument(
-            "Cell is not adjacent to requested face.");
-    }
-
+                                     local_ordinal_type cell_lid) const;
     local_ordinal_type opposite_or_periodic_neighbor_cell(
         local_ordinal_type face_lid,
-        local_ordinal_type cell_lid) const
-    {
-        return opposite_cell(face_lid, cell_lid);
-    }
-
-    real_t face_area(local_ordinal_type face_lid) const
-    {
-        return visit_geometry_face(
-            face_lid,
-            [](const auto& mesh, const auto id)
-            {
-                return mesh.face_area(id);
-            });
-    }
-
-    Vec3 face_centroid(local_ordinal_type face_lid) const
-    {
-        return visit_geometry_face(
-            face_lid,
-            [](const auto& mesh, const auto id)
-            {
-                return mesh.face_centroid(id);
-            });
-    }
-
-    Vec3 face_normal(local_ordinal_type face_lid) const
-    {
-        return visit_geometry_face(
-            face_lid,
-            [](const auto& mesh, const auto id)
-            {
-                return mesh.face_normal(id);
-            });
-    }
-
-    Vec3 face_area_vector(local_ordinal_type face_lid) const
-    {
-        return face_normal(face_lid) * face_area(face_lid);
-    }
-
+        local_ordinal_type cell_lid) const;
+    real_t face_area(local_ordinal_type face_lid) const;
+    Vec3 face_centroid(local_ordinal_type face_lid) const;
+    Vec3 face_normal(local_ordinal_type face_lid) const;
+    Vec3 face_area_vector(local_ordinal_type face_lid) const;
     Vec3 face_normal_outward(local_ordinal_type face_lid,
-                             local_ordinal_type cell_lid) const
-    {
-        const auto owner = owner_cell(face_lid);
-        if (cell_lid == owner)
-        {
-            return face_normal(face_lid);
-        }
-        if (cell_lid == neighbor_cell(face_lid))
-        {
-            return face_normal(face_lid) * -1.0;
-        }
-        throw std::invalid_argument(
-            "Cell is not adjacent to requested face.");
-    }
-
+                             local_ordinal_type cell_lid) const;
     Vec3 face_area_vector_outward(local_ordinal_type face_lid,
-                                  local_ordinal_type cell_lid) const
-    {
-        return face_normal_outward(face_lid, cell_lid)
-             * face_area(face_lid);
-    }
-
-    real_t face_cell_center_distance(local_ordinal_type face_lid) const
-    {
-        const auto neighbor = neighbor_cell(face_lid);
-        if (neighbor == invalid_local_id())
-        {
-            return 0.0;
-        }
-        return (cell_centroid(neighbor)
-              - cell_centroid(owner_cell(face_lid))).norm();
-    }
-
+                                  local_ordinal_type cell_lid) const;
+    real_t face_cell_center_distance(local_ordinal_type face_lid) const;
     Vec3 cell_center_vector(local_ordinal_type face_lid,
-                            local_ordinal_type cell_lid) const
-    {
-        const auto other = opposite_cell(face_lid, cell_lid);
-        if (other == invalid_local_id())
-        {
-            throw std::invalid_argument(
-                "Exterior face does not have an opposite cell.");
-        }
-        return cell_centroid(other) - cell_centroid(cell_lid);
-    }
-
+                            local_ordinal_type cell_lid) const;
     real_t cell_to_face_distance(local_ordinal_type face_lid,
-                                 local_ordinal_type cell_lid) const
-    {
-        return (face_centroid(face_lid) - cell_centroid(cell_lid)).norm();
-    }
-
-    bool is_exterior_face(local_ordinal_type face_lid) const
-    {
-        return neighbor_cell(face_lid) == invalid_local_id();
-    }
-
-    bool is_interior_face(local_ordinal_type face_lid) const
-    {
-        return !is_exterior_face(face_lid);
-    }
-
-    int boundary_id(local_ordinal_type face_lid) const
-    {
-        return visit_geometry_face(
-            face_lid,
-            [](const auto& mesh, const auto id)
-            {
-                return mesh.boundary_id(id);
-            });
-    }
-
-    bool is_boundary_face(local_ordinal_type face_lid) const
-    {
-        return is_exterior_face(face_lid)
-            && boundary_id(face_lid) != invalid_boundary_id;
-    }
+                                 local_ordinal_type cell_lid) const;
+    bool is_exterior_face(local_ordinal_type face_lid) const;
+    bool is_interior_face(local_ordinal_type face_lid) const;
+    int boundary_id(local_ordinal_type face_lid) const;
+    bool is_boundary_face(local_ordinal_type face_lid) const;
 
     const std::string& boundary_patch_name(int patch_id) const
     {
@@ -482,69 +354,65 @@ private:
     template<class Function>
     decltype(auto) visit_geometry_cell(
         local_ordinal_type cell_lid,
-        Function&& function) const
-    {
-        const auto geometry_lid = geometry_cell_lid(cell_lid);
-        return visit(
-            [&](const auto& mesh) -> decltype(auto)
-            {
-                return std::forward<Function>(function)(
-                    mesh,
-                    mesh.cell_id(static_cast<size_t>(geometry_lid)));
-            });
-    }
+        Function&& function) const;
 
     template<class Function>
     decltype(auto) visit_geometry_face(
         local_ordinal_type face_lid,
-        Function&& function) const
-    {
-        const auto geometry_lid = geometry_face_lid(face_lid);
-        return visit(
-            [&](const auto& mesh) -> decltype(auto)
-            {
-                return std::forward<Function>(function)(
-                    mesh,
-                    mesh.face_id(static_cast<size_t>(geometry_lid)));
-            });
-    }
+        Function&& function) const;
 
     local_ordinal_type adjacent_cell(local_ordinal_type face_lid,
-                                     bool owner) const
-    {
-        const auto geometry_lid = geometry_face_lid(face_lid);
-        const auto geometry_cell = visit(
-            [&](const auto& mesh) -> size_t
-            {
-                const auto face =
-                    mesh.face_id(static_cast<size_t>(geometry_lid));
-                const auto cell = owner
-                    ? mesh.owner_cell(face)
-                    : mesh.neighbor_cell(face);
-                if constexpr (std::is_same_v<
-                                  std::decay_t<decltype(mesh)>,
-                                  STKAdapter>)
-                {
-                    if (cell == invalid_id<local_ordinal_type>())
-                    {
-                        return std::numeric_limits<size_t>::max();
-                    }
-                }
-                else if (cell == std::decay_t<decltype(mesh)>::invalid_cell_id())
-                {
-                    return std::numeric_limits<size_t>::max();
-                }
-                return static_cast<size_t>(mesh.cell_local_id(cell));
-            });
+                                     bool owner) const;
 
-        if (geometry_cell == std::numeric_limits<size_t>::max())
-        {
-            return invalid_local_id();
-        }
-        const auto iter = d_cell_local_by_geometry.find(geometry_cell);
-        return iter == d_cell_local_by_geometry.end()
-             ? invalid_local_id()
-             : iter->second;
+    /**
+     * @brief Convert an orthogonal (i,j,k) cell ID to the field local ordinal.
+     * @throws std::invalid_argument if the mesh does not use
+     *         OrthogonalIndexer::CellID.
+     */
+    local_ordinal_type cell_local_id(
+        Meshes::OrthogonalIndexer::CellID id) const
+    {
+        return geometry_to_local_cell(
+            visit_indexed_cell(id));
+    }
+
+    /**
+     * @brief Convert an orthogonal (i,j,k,orientation) face ID to the field
+     *        local ordinal.
+     * @throws std::invalid_argument if the mesh does not use
+     *         OrthogonalIndexer::FaceID.
+     */
+    local_ordinal_type face_local_id(
+        Meshes::OrthogonalIndexer::FaceID id) const
+    {
+        return geometry_to_local_face(
+            visit_indexed_face(id));
+    }
+
+    /**
+     * @brief Convert a semi-structured (ij,k) cell ID to the field local
+     *        ordinal.
+     * @throws std::invalid_argument if the mesh does not use
+     *         SemiStructuredIndexer::CellID.
+     */
+    local_ordinal_type cell_local_id(
+        Meshes::SemiStructuredIndexer::CellID id) const
+    {
+        return geometry_to_local_cell(
+            visit_indexed_cell(id));
+    }
+
+    /**
+     * @brief Convert a semi-structured (ij,k,orientation) face ID to the
+     *        field local ordinal.
+     * @throws std::invalid_argument if the mesh does not use
+     *         SemiStructuredIndexer::FaceID.
+     */
+    local_ordinal_type face_local_id(
+        Meshes::SemiStructuredIndexer::FaceID id) const
+    {
+        return geometry_to_local_face(
+            visit_indexed_face(id));
     }
 
     template<class MeshType>
@@ -633,6 +501,84 @@ private:
         CHECK_BOUNDS(face_lid, 0, num_faces());
     }
 
+    /**
+     * @brief Dispatch a structured cell ID to the concrete mesh's
+     *        cell_local_id() and return the geometry local ID.
+     * @throws std::invalid_argument if the mesh type does not accept the ID.
+     */
+    template<class CellID>
+    size_t visit_indexed_cell(CellID id) const
+    {
+        return visit(
+            [&](const auto& mesh) -> size_t
+            {
+                using mesh_type = std::decay_t<decltype(mesh)>;
+                if constexpr (detail::mesh_has_cell_local_id<
+                                  mesh_type, CellID>)
+                {
+                    return static_cast<size_t>(
+                        mesh.cell_local_id(id));
+                }
+                throw std::invalid_argument(
+                    "MeshHandle received a structured cell ID "
+                    "but the active mesh type does not support it.");
+            });
+    }
+
+    /**
+     * @brief Dispatch a structured face ID to the concrete mesh's
+     *        face_local_id() and return the geometry local ID.
+     * @throws std::invalid_argument if the mesh type does not accept the ID.
+     */
+    template<class FaceID>
+    size_t visit_indexed_face(FaceID id) const
+    {
+        return visit(
+            [&](const auto& mesh) -> size_t
+            {
+                using mesh_type = std::decay_t<decltype(mesh)>;
+                if constexpr (detail::mesh_has_face_local_id<
+                                  mesh_type, FaceID>)
+                {
+                    return static_cast<size_t>(
+                        mesh.face_local_id(id));
+                }
+                throw std::invalid_argument(
+                    "MeshHandle received a structured face ID "
+                    "but the active mesh type does not support it.");
+            });
+    }
+
+    /**
+     * @brief Look up the field local ordinal for a geometry cell index.
+     * @returns The local ordinal, or invalid_local_id() if not locally
+     *          available.
+     */
+    local_ordinal_type geometry_to_local_cell(
+        size_t geometry_lid) const noexcept
+    {
+        const auto iter =
+            d_cell_local_by_geometry.find(geometry_lid);
+        return iter == d_cell_local_by_geometry.end()
+             ? invalid_local_id()
+             : iter->second;
+    }
+
+    /**
+     * @brief Look up the field local ordinal for a geometry face index.
+     * @returns The local ordinal, or invalid_local_id() if not locally
+     *          available.
+     */
+    local_ordinal_type geometry_to_local_face(
+        size_t geometry_lid) const noexcept
+    {
+        const auto iter =
+            d_face_local_by_geometry.find(geometry_lid);
+        return iter == d_face_local_by_geometry.end()
+             ? invalid_local_id()
+             : iter->second;
+    }
+
     variant_type d_mesh;
     size_t d_num_owned_cells = 0;
     size_t d_num_owned_faces = 0;
@@ -654,3 +600,6 @@ private:
 };
 
 } // namespace SimpleFluid
+
+//----------------------------- inline functions ---------------------------------//
+#include "geometry/MeshHandle.ipp"

@@ -81,6 +81,7 @@ SemiStructMeshTopo::SemiStructMeshTopo(
         nodes_per_layer,
         layers,
         axial_periodic);
+    initialize_face_adjacency();
     initialize_cell_adjacency();
     initialize_boundary_patches();
 }
@@ -107,31 +108,26 @@ SemiStructMeshTopo::cell_faces(CellID id) const
 
 auto SemiStructMeshTopo::owner_cell(FaceID id) const noexcept -> CellID
 {
-    if (id.orientation == Indexer::AXIAL)
-    {
-        if (id.k == 0 && d_indexer.axial_periodic)
-        {
-            return {id.ij, d_indexer.num_layers - 1};
-        }
-        return {id.ij, id.k == 0 ? 0U : id.k - 1};
-    }
-    return {d_side_faces[id.ij].owner, id.k};
+    const auto coordinate =
+        id.orientation == Indexer::AXIAL ? id.k : id.ij;
+    const auto owner =
+        d_face_cells_per_orientation[id.orientation][coordinate].owner;
+    return id.orientation == Indexer::AXIAL
+         ? CellID{id.ij, owner}
+         : CellID{owner, id.k};
 }
 
 auto SemiStructMeshTopo::neighbor_cell(FaceID id) const noexcept -> CellID
 {
-    if (id.orientation == Indexer::AXIAL)
-    {
-        return d_indexer.axial_periodic
-                || (id.k != 0 && id.k != d_indexer.num_layers)
-             ? CellID{id.ij, id.k}
-             : CellID{};
-    }
-
-    const auto neighbor = d_side_faces[id.ij].neighbor;
+    const auto coordinate =
+        id.orientation == Indexer::AXIAL ? id.k : id.ij;
+    const auto neighbor =
+        d_face_cells_per_orientation[id.orientation][coordinate].neighbor;
     return neighbor == invalid_ordinal
          ? CellID{}
-         : CellID{neighbor, id.k};
+         : id.orientation == Indexer::AXIAL
+             ? CellID{id.ij, neighbor}
+             : CellID{neighbor, id.k};
 }
 
 bool SemiStructMeshTopo::is_boundary_face(FaceID face_id) const noexcept
@@ -199,59 +195,119 @@ int SemiStructMeshTopo::num_boundary_patches() const noexcept
     return static_cast<int>(d_boundary_patches.size());
 }
 
+void SemiStructMeshTopo::initialize_face_adjacency()
+{
+    auto& axial_faces =
+        d_face_cells_per_orientation[Indexer::AXIAL];
+    axial_faces.resize(d_indexer.num_node_layers);
+    if (d_indexer.axial_periodic)
+    {
+        for (Ordinal face = 0;
+             face < d_indexer.num_layers;
+             ++face)
+        {
+            axial_faces[face] = {
+                face == 0 ? d_indexer.num_layers - 1 : face - 1,
+                face};
+        }
+    }
+    else
+    {
+        axial_faces[0] = {0, invalid_ordinal};
+        for (Ordinal face = 1;
+             face < d_indexer.num_layers;
+             ++face)
+        {
+            axial_faces[face] = {face - 1, face};
+        }
+        axial_faces[d_indexer.num_layers] = {
+            d_indexer.num_layers - 1,
+            invalid_ordinal};
+    }
+
+    auto& side_faces =
+        d_face_cells_per_orientation[Indexer::SIDE];
+    side_faces.reserve(d_side_faces.size());
+    for (const auto& side_face : d_side_faces)
+    {
+        side_faces.push_back(
+            {side_face.owner, side_face.neighbor});
+    }
+}
+
 void SemiStructMeshTopo::initialize_cell_adjacency()
 {
-    d_neighbor_cells.resize(d_indexer.total_cells());
-    d_interior_cell_patch.reserve(d_indexer.total_cells());
-
-    for (size_t local_id = 0;
-         local_id < d_indexer.total_cells();
-         ++local_id)
+    d_base_neighbor_cells.resize(d_indexer.num_cells_per_layer);
+    for (Ordinal cell = 0;
+         cell < d_indexer.num_cells_per_layer;
+         ++cell)
     {
-        const auto cell = d_indexer.cell_id(local_id);
-        const auto& side_faces = d_cell_side_faces[cell.ij];
-        auto& neighbors = d_neighbor_cells[local_id];
-        neighbors.reserve(side_faces.size() + 2);
-
-        if (cell.k > 0)
-        {
-            neighbors.push_back({cell.ij, cell.k - 1});
-        }
-        else if (d_indexer.axial_periodic)
-        {
-            neighbors.push_back(
-                {cell.ij, d_indexer.num_layers - 1});
-        }
-
-        if (cell.k + 1 < d_indexer.num_layers)
-        {
-            neighbors.push_back({cell.ij, cell.k + 1});
-        }
-        else if (d_indexer.axial_periodic)
-        {
-            neighbors.push_back({cell.ij, 0});
-        }
-
+        const auto& side_faces = d_cell_side_faces[cell];
+        auto& neighbors = d_base_neighbor_cells[cell];
+        neighbors.reserve(side_faces.size());
         for (const auto side_face_id : side_faces)
         {
             const auto& side_face = d_side_faces[side_face_id];
-            if (cell.ij == side_face.owner)
+            if (cell == side_face.owner)
             {
                 if (side_face.neighbor != invalid_ordinal)
                 {
-                    neighbors.push_back(
-                        {side_face.neighbor, cell.k});
+                    neighbors.push_back(side_face.neighbor);
                 }
             }
             else
             {
-                neighbors.push_back({side_face.owner, cell.k});
+                neighbors.push_back(side_face.owner);
             }
         }
+    }
 
-        if (neighbors.size() == side_faces.size() + 2)
+    const auto layers = d_indexer.num_layers;
+    d_axial_neighbors.resize(layers);
+    if (layers == 1)
+    {
+        if (d_indexer.axial_periodic)
         {
-            d_interior_cell_patch.push_back(cell);
+            d_axial_neighbors[0] = {2, {0, 0}};
+        }
+    }
+    else
+    {
+        for (Ordinal layer = 1; layer < layers - 1; ++layer)
+        {
+            d_axial_neighbors[layer] =
+                {2, {layer - 1, layer + 1}};
+        }
+        if (d_indexer.axial_periodic)
+        {
+            d_axial_neighbors[0] = {2, {layers - 1, 1}};
+            d_axial_neighbors[layers - 1] =
+                {2, {layers - 2, 0}};
+        }
+        else
+        {
+            d_axial_neighbors[0] = {1, {1}};
+            d_axial_neighbors[layers - 1] =
+                {1, {layers - 2}};
+        }
+    }
+
+    d_interior_cell_patch.reserve(d_indexer.total_cells());
+    for (Ordinal layer = 0; layer < layers; ++layer)
+    {
+        if (d_axial_neighbors[layer].num != 2)
+        {
+            continue;
+        }
+        for (Ordinal cell = 0;
+             cell < d_indexer.num_cells_per_layer;
+             ++cell)
+        {
+            if (d_base_neighbor_cells[cell].size()
+                == d_cell_side_faces[cell].size())
+            {
+                d_interior_cell_patch.push_back({cell, layer});
+            }
         }
     }
 }

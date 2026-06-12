@@ -84,9 +84,23 @@ public:
     {
         return d_interior_cell_patch;
     }
-    const NeighborCells& neighbor_cells(CellID cell_id) const noexcept
+    NeighborCells neighbor_cells(CellID cell_id) const
     {
-        return d_neighbor_cells[d_indexer.cell_local_id(cell_id)];
+        const auto& axial_neighbors = d_axial_neighbors[cell_id.k];
+        const auto& base_neighbors = d_base_neighbor_cells[cell_id.ij];
+
+        NeighborCells result;
+        result.reserve(axial_neighbors.num + base_neighbors.size());
+        for (unsigned k = 0; k < axial_neighbors.num; ++k)
+        {
+            result.push_back(
+                {cell_id.ij, axial_neighbors.indices[k]});
+        }
+        for (const auto base_neighbor : base_neighbors)
+        {
+            result.push_back({base_neighbor, cell_id.k});
+        }
+        return result;
     }
 
     bool is_boundary_face(FaceID face_id) const noexcept;
@@ -101,18 +115,33 @@ public:
     int num_boundary_patches() const noexcept;
 
 private:
+    struct FaceCells
+    {
+        Ordinal owner = invalid_ordinal;
+        Ordinal neighbor = invalid_ordinal;
+    };
+
+    struct AxialNeighbors
+    {
+        unsigned num{};
+        std::array<Ordinal, 2> indices{};
+    };
+
     void build_base_topology(
         Ordinal nodes_per_layer,
         const Arr<Arr<Ordinal>>& cell_nodes,
         const Arr<BoundaryEdge>& boundary_edges);
+    void initialize_face_adjacency();
     void initialize_cell_adjacency();
     void initialize_boundary_patches();
 
     Indexer d_indexer;
     Arr<SideFace> d_side_faces;
     Arr<Arr<Ordinal>> d_cell_side_faces;
+    std::array<Arr<FaceCells>, 2> d_face_cells_per_orientation;
     CellPatch d_interior_cell_patch;
-    std::vector<NeighborCells> d_neighbor_cells;
+    Arr<Arr<Ordinal>> d_base_neighbor_cells;
+    Arr<AxialNeighbors> d_axial_neighbors;
     BoundaryNames d_boundary_names;
     BoundaryPatchMap d_boundary_patches;
 };
