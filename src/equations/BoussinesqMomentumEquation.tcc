@@ -43,7 +43,7 @@ BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
  * @param linear_options Linear solver configuration.
  */
 template<TpetraTypePack Pack>
-void BoussinesqMomentumEquation<Pack>::advance_velocity(
+auto BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
     const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
@@ -51,6 +51,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     const TimeStepperOptions& options,
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const
+    -> LinearSolveSummary
 {
     auto zero_source =
         [](local_ordinal_type) -> typename velocity_field_type::vec_type
@@ -58,9 +59,9 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         return {};
     };
 
-    advance_velocity(old_velocity, face_fluxes, temperature,
-                     velocity_boundary_cache, options, velocity,
-                     zero_source, linear_options);
+    return advance_velocity(old_velocity, face_fluxes, temperature,
+                            velocity_boundary_cache, options, velocity,
+                            zero_source, linear_options);
 }
 
 template<TpetraTypePack Pack>
@@ -182,7 +183,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_system(
  *         negative viscosity, or wrong boundary-cache size.
  */
 template<TpetraTypePack Pack>
-void BoussinesqMomentumEquation<Pack>::advance_velocity(
+auto BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
     const FaceField<Pack>& face_fluxes,
     const field_type& temperature,
@@ -191,6 +192,7 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
     velocity_field_type& velocity,
     const source_type& right_hand_source,
     const LinearSolverOptions& linear_options) const
+    -> LinearSolveSummary
 {
     EquationValidation::require_mesh_match(*d_mesh, velocity,
                                            "BoussinesqMomentumEquation");
@@ -211,26 +213,20 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         transport_old_velocity = &old_velocity_snapshot;
     }
 
+    LinearSolveSummary summary;
     auto solve_system =
         [&](const auto& system)
     {
-        bool has_nonzero_rhs = false;
-        for (size_t component = 0;
-             component < velocity_field_type::num_components && !has_nonzero_rhs;
-             ++component)
-        {
-            const auto rhs_data = system.rhs->getData(component);
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto cell_lid = static_cast<local_ordinal_type>(owned);
-                if (std::abs(rhs_data[cell_lid]) > 0.0)
+        Teuchos::Array<scalar_type> rhs_norms(
+            velocity_field_type::num_components);
+        system.rhs->norm2(rhs_norms());
+        const auto has_nonzero_rhs =
+            std::any_of(
+                rhs_norms.begin(), rhs_norms.end(),
+                [](scalar_type norm)
                 {
-                    has_nonzero_rhs = true;
-                    break;
-                }
-            }
-        }
-
+                    return norm > scalar_type{};
+                });
         velocity.owned_data().putScalar(0.0);
         if (!has_nonzero_rhs)
         {
@@ -239,11 +235,12 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
         }
 
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-        const auto converged =
-            d_linear_solver.solve(
+        const auto statistics =
+            d_linear_solver.solve_with_statistics(
                 matrix, *system.rhs,
                 velocity.owned_data(), linear_options);
-        if (!converged)
+        summary.add(statistics);
+        if (!statistics.converged)
         {
             throw std::runtime_error(
                 "BoussinesqMomentumEquation velocity transport solve did not converge.");
@@ -286,6 +283,8 @@ void BoussinesqMomentumEquation<Pack>::advance_velocity(
             break;
         }
     }
+
+    return summary;
 }
 
 } // namespace SimpleFluid

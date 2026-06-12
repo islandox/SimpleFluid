@@ -122,6 +122,10 @@ add_subdirectory(equations/unitTests)
 add_subdirectory(solvers/unitTests)
 add_subdirectory(io/unitTests)
 
+if(SIMPLEFLUID_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
 simplefluid_reuse_precompiled_header(natural_convection_box)

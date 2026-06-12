@@ -9,8 +9,3 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_reuse_precompiled_header(${TEST_NAME})
   gtest_discover_tests(${TEST_NAME})
 endforeach()
-
-# The diffusion profiling test also needs the solvers library
-if(TARGET testOrthogonalDiffusionProfile)
-  target_link_libraries(testOrthogonalDiffusionProfile SimpleFluid::Solvers)
-endif()

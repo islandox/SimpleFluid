@@ -18,6 +18,8 @@ set_property(GLOBAL PROPERTY JOB_POOLS
 
 option(SIMPLEFLUID_ENABLE_COVERAGE
        "Build with compiler coverage instrumentation" OFF)
+option(SIMPLEFLUID_BUILD_BENCHMARKS
+       "Build performance and solver-regression benchmarks" ON)
 if(SIMPLEFLUID_ENABLE_COVERAGE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(--coverage -O0 -g)

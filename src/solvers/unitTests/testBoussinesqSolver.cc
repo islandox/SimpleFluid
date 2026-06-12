@@ -550,6 +550,7 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
             solver.velocity(), solver.pressure(),
             time_options.time_step, cache);
         const auto residuals = solver.last_pressure_velocity_residuals();
+        const auto statistics = solver.last_step_statistics();
 
         EXPECT_EQ(solver.step_index(), 1);
         expect_finite_solution(*mesh, solver);
@@ -560,6 +561,13 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         EXPECT_GE(residuals.momentum, 0.0);
         EXPECT_GE(residuals.pressure, 0.0);
         EXPECT_GE(residuals.continuity, 0.0);
+        EXPECT_TRUE(statistics.converged);
+        EXPECT_GE(statistics.nonlinear_iterations, 1);
+        EXPECT_GE(statistics.linear_solves, 1);
+        EXPECT_GE(statistics.krylov_iterations, 0);
+        EXPECT_NEAR(statistics.momentum, residuals.momentum, 1.0e-12);
+        EXPECT_NEAR(statistics.pressure, residuals.pressure, 1.0e-12);
+        EXPECT_NEAR(statistics.continuity, residuals.continuity, 1.0e-12);
         if (mode == SimpleFluid::PressureVelocityCoupling::SIMPLE)
         {
             simple_continuity = residuals.continuity;

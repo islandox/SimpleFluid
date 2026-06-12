@@ -52,7 +52,7 @@ public:
 
     explicit BoussinesqMomentumEquation(SP<const mesh_type> mesh);
 
-    void advance_velocity(
+    LinearSolveSummary advance_velocity(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
         const field_type& temperature,
@@ -61,7 +61,7 @@ public:
         velocity_field_type& velocity,
         const LinearSolverOptions& linear_options = {}) const;
 
-    void advance_velocity(
+    LinearSolveSummary advance_velocity(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
         const field_type& temperature,

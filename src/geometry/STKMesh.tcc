@@ -185,6 +185,7 @@ void STKMesh<Pack>::assemble()
     build_cell_list();
     compute_cell_geometry();
     build_face_table();
+    assign_boundary_ids_from_stk_side_parts();
 
     // Partition replicated programmatic meshes for parallel runs.
     // Returns true if partitioning occurred (face geometry already computed).
@@ -659,6 +660,7 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
     for (size_t fid = 0; fid < d_faces.size(); ++fid)
     {
         auto& face_info = d_faces[fid];
+        const auto preserved_boundary_id = face_info.boundary_id;
         face_info.boundary_id = invalid_boundary_id;
 
         if (face_info.neighbor != invalid_id<local_ordinal_type>())
@@ -667,13 +669,20 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
         }
 
         const auto iter = face_key_to_part.find(make_face_key(face_info.node_gids));
-        if (iter == face_key_to_part.end())
+        if (iter != face_key_to_part.end())
+        {
+            auto boundary_name = iter->second->name();
+            face_info.boundary_id =
+                get_or_create_boundary_id(boundary_name);
+        }
+        else
+        {
+            face_info.boundary_id = preserved_boundary_id;
+        }
+        if (face_info.boundary_id == invalid_boundary_id)
         {
             continue;
         }
-
-        auto boundary_name = iter->second->name();
-        face_info.boundary_id = get_or_create_boundary_id(boundary_name);
         auto& face_patch = d_boundary_id_to_face_patch[face_info.boundary_id];
         face_patch.id = face_info.boundary_id;
         face_patch.face_lids.push_back(static_cast<local_ordinal_type>(fid));

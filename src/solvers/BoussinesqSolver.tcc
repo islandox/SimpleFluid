@@ -315,7 +315,8 @@ auto BoussinesqSolver<Pack>::velocity_update_norm(
  * @brief Solve the semi-implicit momentum predictor and report its update norm.
  */
 template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::run_momentum_predictor()
+auto BoussinesqSolver<Pack>::run_momentum_predictor()
+    -> LinearSolveSummary
 {
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -327,15 +328,18 @@ void BoussinesqSolver<Pack>::run_momentum_predictor()
     FVM::pressure_weighted_face_fluxes(
         velocity(), pressure(), d_problem.time_options().time_step,
         velocity_boundary_cache(), old_face_fluxes());
-    momentum_equation().advance_velocity(velocity(),
-                                         old_face_fluxes(),
-                                         temperature(),
-                                         velocity_boundary_cache(),
-                                         d_problem.time_options(),
-                                         velocity(),
-                                         d_problem.linear_options());
+    const auto linear_summary =
+        momentum_equation().advance_velocity(
+            velocity(),
+            old_face_fluxes(),
+            temperature(),
+            velocity_boundary_cache(),
+            d_problem.time_options(),
+            velocity(),
+            d_problem.linear_options());
     pressure_velocity_residuals().momentum =
         velocity_update_norm(predictor_velocity(), velocity());
+    return linear_summary;
 }
 
 /**
@@ -402,6 +406,11 @@ void BoussinesqSolver<Pack>::solve_coupled_krylov()
         result.achieved_tolerance;
     pressure_velocity_residuals().linear_iterations =
         result.iterations;
+    d_last_step_statistics.nonlinear_iterations = 1;
+    d_last_step_statistics.add(LinearSolveStatistics{
+        result.converged,
+        result.iterations,
+        result.achieved_tolerance});
 
     FVM::pressure_weighted_face_fluxes(
         velocity(), pressure(), d_problem.time_options().time_step,
@@ -456,12 +465,14 @@ void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
 
     for (int outer = 0; outer < outer_corrections; ++outer)
     {
-        run_momentum_predictor();
+        ++d_last_step_statistics.nonlinear_iterations;
+        d_last_step_statistics.add(run_momentum_predictor());
 
         typename PressureProjectionEquation<Pack>::ProjectionResult result;
         for (int corrector = 0; corrector < pressure_corrections; ++corrector)
         {
             result = run_pressure_correction();
+            d_last_step_statistics.add(result.linear_solve);
         }
 
         pressure_velocity_residuals().pressure =
@@ -469,6 +480,10 @@ void BoussinesqSolver<Pack>::solve_pressure_velocity_coupling()
         pressure_velocity_residuals().continuity =
             result.continuity;
     }
+    pressure_velocity_residuals().linear_iterations =
+        d_last_step_statistics.krylov_iterations;
+    pressure_velocity_residuals().achieved_tolerance =
+        d_last_step_statistics.achieved_tolerance;
 
     FVM::pressure_weighted_face_fluxes(
         velocity(), pressure(), d_problem.time_options().time_step,
@@ -592,6 +607,7 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::step()
 {
+    d_last_step_statistics = {};
     if (d_step_index == 0)
     {
         d_mesh->sync_periodic_boundaries(temperature());
@@ -599,12 +615,23 @@ void BoussinesqSolver<Pack>::step()
     }
 
     solve_pressure_velocity_coupling();
-    temperature_equation().advance_semi_implicit(temperature(),
-                                                 projected_face_fluxes(),
-                                                 d_problem.time_options().time_step,
-                                                 d_problem.time_options().thermal_diffusivity,
-                                                 temperature(),
-                                                 d_problem.linear_options());
+    const auto temperature_statistics =
+        temperature_equation().advance_semi_implicit(
+            temperature(),
+            projected_face_fluxes(),
+            d_problem.time_options().time_step,
+            d_problem.time_options().thermal_diffusivity,
+            temperature(),
+            d_problem.linear_options());
+    d_last_step_statistics.add(temperature_statistics);
+    d_last_step_statistics.momentum =
+        pressure_velocity_residuals().momentum;
+    d_last_step_statistics.pressure =
+        pressure_velocity_residuals().pressure;
+    d_last_step_statistics.temperature =
+        temperature_statistics.achieved_tolerance;
+    d_last_step_statistics.continuity =
+        pressure_velocity_residuals().continuity;
 
     d_mesh->sync_periodic_boundaries(temperature());
     d_mesh->sync_periodic_boundaries(velocity());
