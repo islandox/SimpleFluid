@@ -79,3 +79,6 @@ CMakePresets.json
 .github
 .codex
 .agents
+
+# python cache
+__pycache__
