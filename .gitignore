@@ -79,5 +79,8 @@ CMakePresets.json
 .github/prompts
 .github/agents
 .github/reports
+.github/evals
+.github/plans
+.github/skills
 .codex
 .agents

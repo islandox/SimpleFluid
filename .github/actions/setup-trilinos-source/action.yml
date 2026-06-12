@@ -72,7 +72,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: |
-          ${{ github.workspace }}/_deps/trilinos-install
+          ${{ github.workspace }}/_deps/trilinos_install
         key: ${{ inputs.trilinos-version }}-install-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix }}
 
     - name: Restore Trilinos build cache
@@ -94,6 +94,19 @@ runs:
         git clone --depth 1 --branch ${{ inputs.trilinos-version }} \
           https://github.com/trilinos/Trilinos.git \
           ${{ github.workspace }}/_deps/Trilinos
+
+        # Patch Teuchos for LLVM: C++23 requires `return {}` instead of `return 0`
+        # in constexpr functions returning a magnitudeType (which may not be int).
+        # See Teuchos_ScalarTraitsDecl.hpp line ~120.
+        if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
+          TEUCHOS_SCALAR_TRAITS="${{ github.workspace }}/_deps/Trilinos/packages/teuchos/core/src/Teuchos_ScalarTraitsDecl.hpp"
+          if [ -f "$TEUCHOS_SCALAR_TRAITS" ]; then
+            sed -i '120s/return 0/return {}/' "$TEUCHOS_SCALAR_TRAITS"
+            echo "Patched Teuchos_ScalarTraitsDecl.hpp for LLVM"
+          else
+            echo "WARNING: Teuchos_ScalarTraitsDecl.hpp not found at expected path"
+          fi
+        fi
 
         NETCDF_INCLUDE_DIR="$(dpkg -L libnetcdf-mpi-dev | grep '/netcdf.h$' | head -n 1 | xargs dirname)"
         NETCDF_LIBRARY="$(dpkg -L libnetcdf-mpi-dev | grep '/libnetcdf.so$' | head -n 1)"
@@ -128,10 +141,10 @@ runs:
         echo "NETCDF_LIBRARY=$NETCDF_LIBRARY"
 
         cmake -S ${{ github.workspace }}/_deps/Trilinos \
-          -B ${{ github.workspace }}/_deps/trilinos-build \
+          -B ${{ github.workspace }}/_deps/trilinos_build \
           -G Ninja \
           -D CMAKE_BUILD_TYPE=Release \
-          -D CMAKE_INSTALL_PREFIX=${{ github.workspace }}/_deps/trilinos-install \
+          -D CMAKE_INSTALL_PREFIX=${{ github.workspace }}/_deps/trilinos_install \
           -D CMAKE_C_COMPILER=mpicc \
           -D CMAKE_CXX_COMPILER=mpicxx \
           -D CMAKE_Fortran_COMPILER=mpifort \
@@ -156,6 +169,7 @@ runs:
           -D Trilinos_ENABLE_MueLu=ON \
           -D Trilinos_ENABLE_STK=ON \
           -D Trilinos_ENABLE_SEACAS=ON \
+          -D numbers_EXE_DISABLE=ON \
           -D Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES=OFF
 
         cmake --build ${{ github.workspace }}/_deps/trilinos-build --parallel 2
