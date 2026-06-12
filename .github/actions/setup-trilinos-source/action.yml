@@ -172,11 +172,11 @@ runs:
           -D numbers_EXE_DISABLE=ON \
           -D Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES=OFF
 
-        cmake --build ${{ github.workspace }}/_deps/trilinos-build --parallel 2
-        cmake --install ${{ github.workspace }}/_deps/trilinos-build
+        cmake --build ${{ github.workspace }}/_deps/trilinos_build --parallel 2
+        cmake --install ${{ github.workspace }}/_deps/trilinos_build
 
     - name: Export Trilinos prefix
       shell: bash
       run: |
-        echo "CMAKE_PREFIX_PATH=${{ github.workspace }}/_deps/trilinos-install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-        echo "Trilinos_DIR=${{ github.workspace }}/_deps/trilinos-install/lib/cmake/Trilinos" >> "$GITHUB_ENV"
+        echo "CMAKE_PREFIX_PATH=${{ github.workspace }}/_deps/trilinos_install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
+        echo "Trilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos" >> "$GITHUB_ENV"
