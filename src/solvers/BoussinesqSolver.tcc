@@ -100,7 +100,29 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
               require_mesh(std::move(mesh))),
           std::move(boundary_conditions),
           time_options,
-          linear_options)
+          linear_options,
+          BoussinesqModelOptions::legacy_defaults(time_options),
+          false,
+          PhysicalModelTag{})
+{
+}
+
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(
+    SP<const mesh_type> mesh,
+    BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options,
+    LinearSolverOptions linear_options,
+    BoussinesqModelOptions model_options)
+    : BoussinesqSolver(
+          std::make_shared<MeshHandle<Pack>>(
+              require_mesh(std::move(mesh))),
+          std::move(boundary_conditions),
+          time_options,
+          linear_options,
+          std::move(model_options),
+          true,
+          PhysicalModelTag{})
 {
 }
 
@@ -110,16 +132,58 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     BoundaryConditionSet boundary_conditions,
     TimeStepperOptions time_options,
     LinearSolverOptions linear_options)
+    : BoussinesqSolver(
+          std::move(mesh),
+          std::move(boundary_conditions),
+          time_options,
+          linear_options,
+          BoussinesqModelOptions::legacy_defaults(time_options),
+          false,
+          PhysicalModelTag{})
+{
+}
+
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(
+    SP<const MeshHandle<Pack>> mesh,
+    BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options,
+    LinearSolverOptions linear_options,
+    BoussinesqModelOptions model_options)
+    : BoussinesqSolver(
+          std::move(mesh),
+          std::move(boundary_conditions),
+          time_options,
+          linear_options,
+          std::move(model_options),
+          true,
+          PhysicalModelTag{})
+{
+}
+
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(
+    SP<const MeshHandle<Pack>> mesh,
+    BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options,
+    LinearSolverOptions linear_options,
+    BoussinesqModelOptions model_options,
+    bool physical_model_enabled,
+    PhysicalModelTag)
     : d_mesh(require_legacy_mesh(mesh)),
       d_problem(std::make_shared<MeshHandle<Pack>>(d_mesh),
                 std::move(boundary_conditions),
                 time_options,
-                linear_options)
+                linear_options),
+      d_model_options(std::move(model_options)),
+      d_physical_model_enabled(physical_model_enabled)
 {
     if (d_problem.time_options().time_step <= 0.0)
     {
         throw std::invalid_argument("BoussinesqSolver requires a positive time step.");
     }
+    detail::validate_model_options(
+        d_model_options, d_problem.time_options());
 
     d_problem.template emplace_object<FVM::VelocityBoundaryCache<Pack>>(
         "velocity_boundary_cache",
@@ -153,6 +217,23 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
         "projected_face_flux", d_mesh, "projected_face_flux");
     d_problem.template emplace_object<residual_type>(
         "pressure_velocity_residuals");
+    d_problem.template emplace_object<MaterialPropertyFields<Pack>>(
+        "material_properties",
+        d_mesh,
+        d_model_options,
+        d_problem.time_options());
+    auto& sources =
+        d_problem.template emplace_object<
+            TemperatureSourceRegistry<Pack>>(
+                "temperature_sources", d_mesh);
+    for (size_t index = 0;
+         index < d_model_options.temperature_source_names.size();
+         ++index)
+    {
+        sources.add(
+            d_model_options.temperature_source_names[index],
+            d_model_options.temperature_source_power_densities[index]);
+    }
 }
 
 template<TpetraTypePack Pack>
@@ -193,6 +274,130 @@ auto BoussinesqSolver<Pack>::velocity() noexcept
     -> velocity_field_type&
 {
     return d_problem.template object<velocity_field_type>("velocity");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::stored_material_properties()
+    -> MaterialPropertyFields<Pack>&
+{
+    return d_problem.template object<
+        MaterialPropertyFields<Pack>>("material_properties");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::stored_material_properties() const
+    -> const MaterialPropertyFields<Pack>&
+{
+    return d_problem.template object<
+        MaterialPropertyFields<Pack>>("material_properties");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::material_properties() noexcept
+    -> MaterialPropertyFields<Pack>&
+{
+    d_physical_model_enabled = true;
+    return stored_material_properties();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::material_properties() const noexcept
+    -> const MaterialPropertyFields<Pack>&
+{
+    return stored_material_properties();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::stored_temperature_sources()
+    -> TemperatureSourceRegistry<Pack>&
+{
+    return d_problem.template object<
+        TemperatureSourceRegistry<Pack>>("temperature_sources");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::stored_temperature_sources() const
+    -> const TemperatureSourceRegistry<Pack>&
+{
+    return d_problem.template object<
+        TemperatureSourceRegistry<Pack>>("temperature_sources");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::temperature_sources() noexcept
+    -> TemperatureSourceRegistry<Pack>&
+{
+    d_physical_model_enabled = true;
+    return stored_temperature_sources();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::temperature_sources() const noexcept
+    -> const TemperatureSourceRegistry<Pack>&
+{
+    return stored_temperature_sources();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::add_temperature_source(
+    std::string name,
+    scalar_type initial_power_density)
+    -> VolumetricScalarSource<Pack>&
+{
+    d_physical_model_enabled = true;
+    return stored_temperature_sources().add(
+        std::move(name), initial_power_density);
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_temperature_source(
+    const std::string& name)
+{
+    return stored_temperature_sources().remove(name);
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_temperature_source(
+    const std::string& name) noexcept
+    -> VolumetricScalarSource<Pack>*
+{
+    return stored_temperature_sources().find(name);
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_temperature_source(
+    const std::string& name) const noexcept
+    -> const VolumetricScalarSource<Pack>*
+{
+    return stored_temperature_sources().find(name);
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::set_material_updater(
+    typename MaterialPropertyFields<Pack>::updater_type updater)
+{
+    d_physical_model_enabled = true;
+    stored_material_properties().set_updater(std::move(updater));
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::clear_material_updater() noexcept
+{
+    stored_material_properties().clear_updater();
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::refresh_physical_models()
+{
+    BoussinesqUpdateContext<Pack> context{
+        d_time,
+        d_step_index,
+        *d_mesh,
+        temperature(),
+        pressure(),
+        velocity()};
+    stored_material_properties().update(context);
+    stored_temperature_sources().update(context);
 }
 
 template<TpetraTypePack Pack>
@@ -328,15 +533,41 @@ auto BoussinesqSolver<Pack>::run_momentum_predictor()
     FVM::pressure_weighted_face_fluxes(
         velocity(), pressure(), d_problem.time_options().time_step,
         velocity_boundary_cache(), old_face_fluxes());
-    const auto linear_summary =
-        momentum_equation().advance_velocity(
-            velocity(),
-            old_face_fluxes(),
-            temperature(),
-            velocity_boundary_cache(),
-            d_problem.time_options(),
-            velocity(),
-            d_problem.linear_options());
+    LinearSolveSummary linear_summary;
+    if (d_physical_model_enabled)
+    {
+        auto zero_source =
+            [](local_ordinal_type)
+                -> typename velocity_field_type::vec_type
+        {
+            return {};
+        };
+        linear_summary =
+            momentum_equation().advance_velocity_physical(
+                velocity(),
+                old_face_fluxes(),
+                temperature(),
+                velocity_boundary_cache(),
+                d_problem.time_options(),
+                stored_material_properties(),
+                d_model_options.reference_density,
+                d_model_options.density_feedback_enabled,
+                velocity(),
+                zero_source,
+                d_problem.linear_options());
+    }
+    else
+    {
+        linear_summary =
+            momentum_equation().advance_velocity(
+                velocity(),
+                old_face_fluxes(),
+                temperature(),
+                velocity_boundary_cache(),
+                d_problem.time_options(),
+                velocity(),
+                d_problem.linear_options());
+    }
     pressure_velocity_residuals().momentum =
         velocity_update_norm(predictor_velocity(), velocity());
     return linear_summary;
@@ -385,7 +616,12 @@ void BoussinesqSolver<Pack>::solve_coupled_krylov()
             old_face_fluxes(),
             velocity_boundary_cache(),
             d_problem.boundary_conditions(),
-            d_problem.time_options());
+            d_problem.time_options(),
+            d_physical_model_enabled
+                ? &stored_material_properties()
+                : nullptr,
+            d_model_options.reference_density,
+            d_model_options.density_feedback_enabled);
     const auto result =
         coupled_pressure_velocity_solver().solve(
             system,
@@ -613,16 +849,43 @@ void BoussinesqSolver<Pack>::step()
         d_mesh->sync_periodic_boundaries(temperature());
         d_mesh->sync_periodic_boundaries(velocity());
     }
+    if (d_physical_model_enabled)
+    {
+        refresh_physical_models();
+    }
 
     solve_pressure_velocity_coupling();
-    const auto temperature_statistics =
-        temperature_equation().advance_semi_implicit(
-            temperature(),
-            projected_face_fluxes(),
-            d_problem.time_options().time_step,
-            d_problem.time_options().thermal_diffusivity,
-            temperature(),
-            d_problem.linear_options());
+    LinearSolveStatistics temperature_statistics;
+    if (d_physical_model_enabled)
+    {
+        auto total_power_density =
+            [&](local_ordinal_type cell_lid)
+        {
+            return stored_temperature_sources()
+                .total_power_density(cell_lid);
+        };
+        temperature_statistics =
+            temperature_equation().advance_physical(
+                temperature(),
+                projected_face_fluxes(),
+                d_problem.time_options().time_step,
+                stored_material_properties(),
+                temperature(),
+                total_power_density,
+                d_problem.time_options().non_orthogonal_treatment,
+                d_problem.linear_options());
+    }
+    else
+    {
+        temperature_statistics =
+            temperature_equation().advance_semi_implicit(
+                temperature(),
+                projected_face_fluxes(),
+                d_problem.time_options().time_step,
+                d_problem.time_options().thermal_diffusivity,
+                temperature(),
+                d_problem.linear_options());
+    }
     d_last_step_statistics.add(temperature_statistics);
     d_last_step_statistics.momentum =
         pressure_velocity_residuals().momentum;
@@ -673,6 +936,14 @@ void BoussinesqSolver<Pack>::run(int steps)
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) const
+{
+    write_solution_vtu(filename, {});
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::write_solution_vtu(
+    const std::string& filename,
+    const SolutionOutputOptions& output_options) const
 {
     std::unordered_map<global_ordinal_type, global_index_t> node_lid;
     VTUWriter::VectorData node_coords;
@@ -730,6 +1001,47 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
     writer.add_scalar_cell_data("temperature", std::move(temperature_values));
     writer.add_scalar_cell_data("pressure", std::move(pressure_values));
     writer.add_vector_cell_data("velocity", std::move(velocity_values));
+
+    auto collect_scalar_field =
+        [&](const field_type& field)
+    {
+        VTUWriter::ScalarData values;
+        values.reserve(d_mesh->num_local_cells());
+        for (size_t lid = 0;
+             lid < d_mesh->num_local_cells();
+             ++lid)
+        {
+            values.push_back(static_cast<real_t>(
+                field.local_value(
+                    static_cast<local_ordinal_type>(lid))));
+        }
+        return values;
+    };
+
+    if (output_options.include_material_properties)
+    {
+        const auto& material = stored_material_properties();
+        writer.add_scalar_cell_data(
+            "density", collect_scalar_field(material.density));
+        writer.add_scalar_cell_data(
+            "specific_heat_capacity",
+            collect_scalar_field(material.specific_heat_capacity));
+        writer.add_scalar_cell_data(
+            "dynamic_viscosity",
+            collect_scalar_field(material.dynamic_viscosity));
+        writer.add_scalar_cell_data(
+            "thermal_conductivity",
+            collect_scalar_field(material.thermal_conductivity));
+    }
+    if (output_options.include_sources)
+    {
+        for (const auto& [name, source] :
+             stored_temperature_sources().entries())
+        {
+            writer.add_scalar_cell_data(
+                name, collect_scalar_field(source->field()));
+        }
+    }
     writer.write(filename);
 }
 

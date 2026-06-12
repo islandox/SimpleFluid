@@ -150,6 +150,48 @@ inline MeshUtils::Vec3 non_orthogonal_area_vector(
 }
 
 /**
+ * @brief Distance-weighted harmonic interpolation of a positive cell field
+ *        to an interior face.
+ *
+ * A zero value on either side produces a zero face coefficient. If geometric
+ * cell-to-face distances are unavailable, the ordinary harmonic mean is used.
+ */
+template<class MeshType, class FieldType>
+inline auto harmonic_face_value(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::local_ordinal_type other_lid,
+    const FieldType& field) -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+
+    const auto cell_value = field.local_value(cell_lid);
+    const auto other_value = field.local_value(other_lid);
+    if (cell_value <= scalar_type{} || other_value <= scalar_type{})
+    {
+        return scalar_type{};
+    }
+
+    const auto cell_distance =
+        mesh.cell_to_face_distance(face_lid, cell_lid);
+    const auto other_distance =
+        mesh.cell_to_face_distance(face_lid, other_lid);
+    const auto total_distance = cell_distance + other_distance;
+    if (cell_distance > scalar_type{}
+        && other_distance > scalar_type{}
+        && total_distance > scalar_type{})
+    {
+        return total_distance
+             / (cell_distance / cell_value
+              + other_distance / other_value);
+    }
+
+    return scalar_type{2} * cell_value * other_value
+         / (cell_value + other_value);
+}
+
+/**
  * @brief Compute the diffusion coefficient at an interior face for a
  *        two-point flux approximation.
  *

@@ -1136,3 +1136,135 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 0, 1), -1.0, 1.0e-12);
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 0), -1.0, 1.0e-12);
 }
+
+TEST(FvmOperatorsTest, HarmonicFaceValueUsesCellToFaceDistances)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    FieldType coefficient(mesh, "coefficient");
+    coefficient.set_value(0, 1.0);
+    coefficient.set_value(1, 4.0);
+    coefficient.sync_ghosts();
+
+    MeshType::local_ordinal_type interior_face =
+        static_cast<MeshType::local_ordinal_type>(-1);
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<MeshType::local_ordinal_type>(face);
+        if (mesh->is_interior_face(face_lid))
+        {
+            interior_face = face_lid;
+            break;
+        }
+    }
+    ASSERT_GE(interior_face, 0);
+
+    EXPECT_NEAR(
+        SimpleFluid::FVM::detail::harmonic_face_value(
+            *mesh, interior_face, 0, 1, coefficient),
+        1.6,
+        1.0e-12);
+}
+
+TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    FieldType temperature(mesh, 0.0, "temperature");
+    FieldType density(mesh, 1.0, "density");
+    FieldType heat_capacity(mesh, 1.0, "heat_capacity");
+    FieldType conductivity(mesh, "conductivity");
+    conductivity.set_value(0, 1.0);
+    conductivity.set_value(1, 4.0);
+    conductivity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "face_flux");
+
+    auto boundary_condition =
+        [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{};
+    };
+    auto boundary_value =
+        [](int, size_t)
+    {
+        return 0.0;
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type)
+    {
+        return 0.0;
+    };
+
+    for (const auto treatment : {
+             SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+             SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+             SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
+    {
+        const auto system =
+            SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+                temperature,
+                zero_fluxes,
+                1.0,
+                density,
+                heat_capacity,
+                conductivity,
+                boundary_condition,
+                boundary_value,
+                zero_source,
+                treatment,
+                treatment
+                        == SimpleFluid::FVM::NonOrthogonalTreatment::Implicit
+                    ? nullptr
+                    : &temperature);
+        EXPECT_NEAR(
+            local_matrix_entry(*system.matrix, 0, 1),
+            -1.6,
+            1.0e-12);
+        EXPECT_NEAR(
+            local_matrix_entry(*system.matrix, 1, 0),
+            -1.6,
+            1.0e-12);
+    }
+
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType dynamic_viscosity(mesh, "dynamic_viscosity");
+    dynamic_viscosity.set_value(0, 2.0);
+    dynamic_viscosity.set_value(1, 8.0);
+    dynamic_viscosity.sync_ghosts();
+    auto velocity_boundary =
+        [](int, MeshType::local_ordinal_type)
+    {
+        return SimpleFluid::vec3<>{};
+    };
+    auto zero_acceleration =
+        [](MeshType::local_ordinal_type)
+    {
+        return SimpleFluid::vec3<>{};
+    };
+    for (const auto treatment : {
+             SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+             SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+             SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
+    {
+        const auto momentum =
+            SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+                velocity,
+                zero_fluxes,
+                1.0,
+                dynamic_viscosity,
+                2.0,
+                velocity_boundary,
+                zero_acceleration,
+                treatment,
+                treatment
+                        == SimpleFluid::FVM::NonOrthogonalTreatment::Implicit
+                    ? nullptr
+                    : &velocity);
+        EXPECT_NEAR(
+            local_matrix_entry(*momentum.matrix, 0, 1),
+            -1.6,
+            1.0e-12);
+    }
+}

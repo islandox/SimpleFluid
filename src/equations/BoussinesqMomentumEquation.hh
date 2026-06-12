@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "equations/BoussinesqModel.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
@@ -85,6 +86,31 @@ public:
         const field_type& temperature,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const TimeStepperOptions& options,
+        const source_type& right_hand_source,
+        const velocity_field_type* correction_field = nullptr) const;
+
+    LinearSolveSummary advance_velocity_physical(
+        const velocity_field_type& old_velocity,
+        const FaceField<Pack>& face_fluxes,
+        const field_type& temperature,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const MaterialPropertyFields<Pack>& material,
+        scalar_type reference_density,
+        bool density_feedback_enabled,
+        velocity_field_type& velocity,
+        const source_type& right_hand_source,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    system_type assemble_physical_system(
+        const velocity_field_type& old_velocity,
+        const FaceField<Pack>& face_fluxes,
+        const field_type& temperature,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const MaterialPropertyFields<Pack>& material,
+        scalar_type reference_density,
+        bool density_feedback_enabled,
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
 

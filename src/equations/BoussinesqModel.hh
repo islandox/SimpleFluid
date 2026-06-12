@@ -1,0 +1,746 @@
+/**
+ * @file BoussinesqModel.hh
+ * @brief Physical material fields and volumetric heat-source infrastructure.
+ */
+#pragma once
+
+#include "dataclass/Database.hh"
+#include "equations/TimeStepperOptions.hh"
+#include "fields/CellField.hh"
+#include "fields/VectorCellField.hh"
+
+#include <cmath>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace SimpleFluid
+{
+
+/**
+ * @brief Uniform initial values for the physical Boussinesq material fields.
+ *
+ * Units are kg/m^3, J/(kg K), Pa s, and W/(m K), respectively.
+ */
+struct BoussinesqModelOptions
+{
+    real_t reference_density = 1.0;
+    real_t density = 1.0;
+    real_t specific_heat_capacity = 1.0;
+    std::optional<real_t> dynamic_viscosity;
+    std::optional<real_t> thermal_conductivity;
+    bool density_feedback_enabled = false;
+    ArrString temperature_source_names;
+    ArrReal temperature_source_power_densities;
+
+    static BoussinesqModelOptions legacy_defaults(
+        const TimeStepperOptions& time_options)
+    {
+        BoussinesqModelOptions options;
+        options.dynamic_viscosity =
+            options.reference_density * time_options.kinematic_viscosity;
+        options.thermal_conductivity =
+            options.reference_density
+          * options.specific_heat_capacity
+          * time_options.thermal_diffusivity;
+        return options;
+    }
+};
+
+namespace detail
+{
+
+template<class T>
+T database_value_or(
+    const Database& database,
+    const std::string& key,
+    T fallback)
+{
+    if (!database.contains(key))
+    {
+        return fallback;
+    }
+
+    try
+    {
+        return database.get<T>(key);
+    }
+    catch (const std::out_of_range&)
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option '" + key + "' has the wrong type.");
+    }
+}
+
+inline void require_finite(
+    real_t value,
+    const std::string& name)
+{
+    if (!std::isfinite(value))
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option '" + name + "' must be finite.");
+    }
+}
+
+inline void validate_model_options(
+    const BoussinesqModelOptions& options,
+    const TimeStepperOptions& time_options)
+{
+    require_finite(options.reference_density, "reference_density");
+    require_finite(options.density, "density");
+    require_finite(
+        options.specific_heat_capacity, "specific_heat_capacity");
+    if (options.reference_density <= 0.0)
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option 'reference_density' must be positive.");
+    }
+    if (options.density <= 0.0)
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option 'density' must be positive.");
+    }
+    if (options.specific_heat_capacity <= 0.0)
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option 'specific_heat_capacity' must be positive.");
+    }
+
+    const auto dynamic_viscosity =
+        options.dynamic_viscosity.value_or(
+            options.reference_density
+          * time_options.kinematic_viscosity);
+    const auto thermal_conductivity =
+        options.thermal_conductivity.value_or(
+            options.reference_density
+          * options.specific_heat_capacity
+          * time_options.thermal_diffusivity);
+    require_finite(dynamic_viscosity, "dynamic_viscosity");
+    require_finite(thermal_conductivity, "thermal_conductivity");
+    if (dynamic_viscosity < 0.0)
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option 'dynamic_viscosity' cannot be negative.");
+    }
+    if (thermal_conductivity < 0.0)
+    {
+        throw std::invalid_argument(
+            "Boussinesq model option 'thermal_conductivity' cannot be negative.");
+    }
+
+    if (options.temperature_source_names.size()
+        != options.temperature_source_power_densities.size())
+    {
+        throw std::invalid_argument(
+            "Boussinesq model temperature source names and power densities "
+            "must have the same length.");
+    }
+
+    std::set<std::string> names;
+    for (size_t index = 0;
+         index < options.temperature_source_names.size();
+         ++index)
+    {
+        const auto& name = options.temperature_source_names[index];
+        if (name.empty())
+        {
+            throw std::invalid_argument(
+                "Boussinesq model temperature source names cannot be empty.");
+        }
+        if (!names.insert(name).second)
+        {
+            throw std::invalid_argument(
+                "Duplicate Boussinesq temperature source name '" + name + "'.");
+        }
+        require_finite(
+            options.temperature_source_power_densities[index],
+            "temperature_source_power_densities");
+    }
+}
+
+} // namespace detail
+
+/**
+ * @brief Parse and validate physical Boussinesq options from a flat database.
+ */
+inline BoussinesqModelOptions boussinesq_model_options_from_database(
+    const Database& database,
+    const TimeStepperOptions& time_options)
+{
+    auto options = BoussinesqModelOptions::legacy_defaults(time_options);
+    options.reference_density = detail::database_value_or<real_t>(
+        database, "reference_density", options.reference_density);
+    options.density = detail::database_value_or<real_t>(
+        database, "density", options.reference_density);
+    options.specific_heat_capacity = detail::database_value_or<real_t>(
+        database, "specific_heat_capacity",
+        options.specific_heat_capacity);
+    if (database.contains("dynamic_viscosity"))
+    {
+        options.dynamic_viscosity =
+            detail::database_value_or<real_t>(
+                database, "dynamic_viscosity", 0.0);
+    }
+    else
+    {
+        options.dynamic_viscosity =
+            options.reference_density
+          * time_options.kinematic_viscosity;
+    }
+    if (database.contains("thermal_conductivity"))
+    {
+        options.thermal_conductivity =
+            detail::database_value_or<real_t>(
+                database, "thermal_conductivity", 0.0);
+    }
+    else
+    {
+        options.thermal_conductivity =
+            options.reference_density
+          * options.specific_heat_capacity
+          * time_options.thermal_diffusivity;
+    }
+    options.density_feedback_enabled =
+        detail::database_value_or<bool>(
+            database, "density_feedback_enabled", false);
+    options.temperature_source_names =
+        detail::database_value_or<ArrString>(
+            database, "temperature_source_names", {});
+    options.temperature_source_power_densities =
+        detail::database_value_or<ArrReal>(
+            database, "temperature_source_power_densities", {});
+
+    detail::validate_model_options(options, time_options);
+    return options;
+}
+
+template<TpetraTypePack Pack>
+struct MaterialPropertyFields;
+
+template<TpetraTypePack Pack>
+struct BoussinesqUpdateContext
+{
+    using scalar_type = typename Pack::scalar_type;
+    using mesh_type = Mesh<Pack>;
+    using field_type = CellField<Pack>;
+    using velocity_field_type = VectorCellField<Pack>;
+
+    scalar_type time{};
+    int step_index{};
+    const mesh_type& mesh;
+    const field_type& temperature;
+    const field_type& pressure;
+    const velocity_field_type& velocity;
+};
+
+/**
+ * @brief Initialize a scalar cell field from a centroid-based provider.
+ */
+template<TpetraTypePack Pack, class Provider, class Validator>
+void initialize_cell_field(
+    CellField<Pack>& field,
+    Provider&& provider,
+    Validator&& validator,
+    const std::string& label)
+{
+    const auto& mesh = field.mesh();
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<typename Pack::local_ordinal_type>(owned);
+        const auto value =
+            std::invoke(provider, mesh.cell_centroid(cell_lid));
+        if (!std::isfinite(value))
+        {
+            throw std::invalid_argument(
+                label + " initializer produced a non-finite value.");
+        }
+        std::invoke(validator, value, label);
+        field.set_owned_value(cell_lid, value);
+    }
+    field.sync_ghosts();
+}
+
+template<TpetraTypePack Pack, class Validator>
+void initialize_cell_field(
+    CellField<Pack>& field,
+    typename Pack::scalar_type value,
+    Validator&& validator,
+    const std::string& label)
+{
+    initialize_cell_field(
+        field,
+        [value](const auto&) { return value; },
+        std::forward<Validator>(validator),
+        label);
+}
+
+/**
+ * @brief Named physical heat-source field in W/m^3.
+ */
+template<TpetraTypePack Pack = DefaultTpetraTypes>
+class VolumetricScalarSource
+{
+public:
+    using scalar_type = typename Pack::scalar_type;
+    using field_type = CellField<Pack>;
+    using context_type = BoussinesqUpdateContext<Pack>;
+    using updater_type =
+        std::function<void(const context_type&, field_type&)>;
+
+    VolumetricScalarSource(
+        SP<const Mesh<Pack>> mesh,
+        std::string name,
+        scalar_type initial_value = {})
+        : d_name(require_name(std::move(name))),
+          d_field(std::move(mesh), initial_value, d_name)
+    {
+        validate();
+    }
+
+    const std::string& name() const noexcept { return d_name; }
+    field_type& field() noexcept { return d_field; }
+    const field_type& field() const noexcept { return d_field; }
+    bool enabled() const noexcept { return d_enabled; }
+    void set_enabled(bool enabled) noexcept { d_enabled = enabled; }
+
+    void set_updater(updater_type updater)
+    {
+        if (!updater)
+        {
+            throw std::invalid_argument(
+                "VolumetricScalarSource updater must be callable.");
+        }
+        d_updater = std::move(updater);
+    }
+
+    void clear_updater() noexcept { d_updater = {}; }
+
+    void update(const context_type& context)
+    {
+        if (d_updater)
+        {
+            d_updater(context, d_field);
+        }
+        validate();
+        d_field.sync_ghosts();
+    }
+
+    template<class Provider>
+    void initialize(Provider&& provider)
+    {
+        initialize_cell_field(
+            d_field,
+            std::forward<Provider>(provider),
+            [](scalar_type, const std::string&) {},
+            "Temperature source '" + d_name + "'");
+    }
+
+    void initialize(scalar_type value)
+    {
+        initialize_cell_field(
+            d_field,
+            value,
+            [](scalar_type, const std::string&) {},
+            "Temperature source '" + d_name + "'");
+    }
+
+    void validate() const
+    {
+        for (size_t owned = 0;
+             owned < d_field.num_owned_cells();
+             ++owned)
+        {
+            const auto value = d_field.value(
+                static_cast<typename Pack::local_ordinal_type>(owned));
+            if (!std::isfinite(value))
+            {
+                throw std::invalid_argument(
+                    "Temperature source '" + d_name
+                    + "' contains a non-finite value.");
+            }
+        }
+    }
+
+private:
+    static std::string require_name(std::string name)
+    {
+        if (name.empty())
+        {
+            throw std::invalid_argument(
+                "VolumetricScalarSource requires a non-empty name.");
+        }
+        return name;
+    }
+
+    std::string d_name;
+    field_type d_field;
+    bool d_enabled = true;
+    updater_type d_updater;
+};
+
+/**
+ * @brief Deterministic registry of named temperature heat-source fields.
+ */
+template<TpetraTypePack Pack = DefaultTpetraTypes>
+class TemperatureSourceRegistry
+{
+public:
+    using source_type = VolumetricScalarSource<Pack>;
+    using scalar_type = typename Pack::scalar_type;
+    using context_type = BoussinesqUpdateContext<Pack>;
+
+    explicit TemperatureSourceRegistry(SP<const Mesh<Pack>> mesh)
+        : d_mesh(std::move(mesh))
+    {
+        if (!d_mesh)
+        {
+            throw std::invalid_argument(
+                "TemperatureSourceRegistry requires a non-null mesh.");
+        }
+    }
+
+    source_type& add(std::string name, scalar_type initial_value = {})
+    {
+        if (is_reserved_name(name))
+        {
+            throw std::invalid_argument(
+                "Temperature source name '" + name
+                + "' collides with a solution or material field.");
+        }
+        if (d_sources.contains(name))
+        {
+            throw std::invalid_argument(
+                "Temperature source '" + name + "' already exists.");
+        }
+
+        auto source = std::make_unique<source_type>(
+            d_mesh, name, initial_value);
+        auto [iter, inserted] = d_sources.emplace(
+            std::move(name), std::move(source));
+        (void)inserted;
+        return *iter->second;
+    }
+
+    bool remove(const std::string& name)
+    {
+        return d_sources.erase(name) > 0;
+    }
+
+    source_type* find(const std::string& name) noexcept
+    {
+        const auto iter = d_sources.find(name);
+        return iter == d_sources.end() ? nullptr : iter->second.get();
+    }
+
+    const source_type* find(const std::string& name) const noexcept
+    {
+        const auto iter = d_sources.find(name);
+        return iter == d_sources.end() ? nullptr : iter->second.get();
+    }
+
+    source_type& at(const std::string& name)
+    {
+        auto* result = find(name);
+        if (!result)
+        {
+            throw std::out_of_range(
+                "Temperature source '" + name + "' does not exist.");
+        }
+        return *result;
+    }
+
+    const source_type& at(const std::string& name) const
+    {
+        const auto* result = find(name);
+        if (!result)
+        {
+            throw std::out_of_range(
+                "Temperature source '" + name + "' does not exist.");
+        }
+        return *result;
+    }
+
+    const auto& entries() const noexcept { return d_sources; }
+
+    void update(const context_type& context)
+    {
+        for (auto& [name, source] : d_sources)
+        {
+            (void)name;
+            source->update(context);
+        }
+    }
+
+    scalar_type total_power_density(
+        typename Pack::local_ordinal_type cell_lid) const
+    {
+        scalar_type total{};
+        for (const auto& [name, source] : d_sources)
+        {
+            (void)name;
+            if (source->enabled())
+            {
+                total += source->field().value(cell_lid);
+            }
+        }
+        return total;
+    }
+
+private:
+    static bool is_reserved_name(const std::string& name)
+    {
+        static const std::set<std::string> reserved{
+            "temperature",
+            "pressure",
+            "velocity",
+            "density",
+            "specific_heat_capacity",
+            "dynamic_viscosity",
+            "thermal_conductivity"};
+        return reserved.contains(name);
+    }
+
+    SP<const Mesh<Pack>> d_mesh;
+    std::map<std::string, std::unique_ptr<source_type>> d_sources;
+};
+
+/**
+ * @brief Updateable physical material-property fields.
+ */
+template<TpetraTypePack Pack = DefaultTpetraTypes>
+struct MaterialPropertyFields
+{
+    using scalar_type = typename Pack::scalar_type;
+    using context_type = BoussinesqUpdateContext<Pack>;
+    using updater_type =
+        std::function<void(const context_type&, MaterialPropertyFields&)>;
+
+    MaterialPropertyFields(
+        SP<const Mesh<Pack>> mesh,
+        const BoussinesqModelOptions& options,
+        const TimeStepperOptions& time_options)
+        : density(mesh, options.density, "density"),
+          specific_heat_capacity(
+              mesh,
+              options.specific_heat_capacity,
+              "specific_heat_capacity"),
+          dynamic_viscosity(
+              mesh,
+              options.dynamic_viscosity.value_or(
+                  options.reference_density
+                * time_options.kinematic_viscosity),
+              "dynamic_viscosity"),
+          thermal_conductivity(
+              std::move(mesh),
+              options.thermal_conductivity.value_or(
+                  options.reference_density
+                * options.specific_heat_capacity
+                * time_options.thermal_diffusivity),
+              "thermal_conductivity")
+    {
+        validate_and_sync();
+    }
+
+    CellField<Pack> density;
+    CellField<Pack> specific_heat_capacity;
+    CellField<Pack> dynamic_viscosity;
+    CellField<Pack> thermal_conductivity;
+
+    template<class Provider>
+    void initialize_density(Provider&& provider)
+    {
+        initialize_positive(
+            density,
+            std::forward<Provider>(provider),
+            "density");
+    }
+
+    void initialize_density(scalar_type value)
+    {
+        initialize_positive(
+            density,
+            [value](const auto&) { return value; },
+            "density");
+    }
+
+    template<class Provider>
+    void initialize_specific_heat_capacity(Provider&& provider)
+    {
+        initialize_positive(
+            specific_heat_capacity,
+            std::forward<Provider>(provider),
+            "specific_heat_capacity");
+    }
+
+    void initialize_specific_heat_capacity(scalar_type value)
+    {
+        initialize_positive(
+            specific_heat_capacity,
+            [value](const auto&) { return value; },
+            "specific_heat_capacity");
+    }
+
+    template<class Provider>
+    void initialize_dynamic_viscosity(Provider&& provider)
+    {
+        initialize_non_negative(
+            dynamic_viscosity,
+            std::forward<Provider>(provider),
+            "dynamic_viscosity");
+    }
+
+    void initialize_dynamic_viscosity(scalar_type value)
+    {
+        initialize_non_negative(
+            dynamic_viscosity,
+            [value](const auto&) { return value; },
+            "dynamic_viscosity");
+    }
+
+    template<class Provider>
+    void initialize_thermal_conductivity(Provider&& provider)
+    {
+        initialize_non_negative(
+            thermal_conductivity,
+            std::forward<Provider>(provider),
+            "thermal_conductivity");
+    }
+
+    void initialize_thermal_conductivity(scalar_type value)
+    {
+        initialize_non_negative(
+            thermal_conductivity,
+            [value](const auto&) { return value; },
+            "thermal_conductivity");
+    }
+
+    void set_updater(updater_type value)
+    {
+        if (!value)
+        {
+            throw std::invalid_argument(
+                "Material property updater must be callable.");
+        }
+        updater = std::move(value);
+    }
+
+    void clear_updater() noexcept { updater = {}; }
+
+    void update(const context_type& context)
+    {
+        if (updater)
+        {
+            updater(context, *this);
+        }
+        validate_and_sync();
+    }
+
+    void validate_and_sync()
+    {
+        validate_positive(density, "density");
+        validate_positive(
+            specific_heat_capacity, "specific_heat_capacity");
+        validate_non_negative(
+            dynamic_viscosity, "dynamic_viscosity");
+        validate_non_negative(
+            thermal_conductivity, "thermal_conductivity");
+        density.sync_ghosts();
+        specific_heat_capacity.sync_ghosts();
+        dynamic_viscosity.sync_ghosts();
+        thermal_conductivity.sync_ghosts();
+    }
+
+private:
+    template<class Provider>
+    static void initialize_positive(
+        CellField<Pack>& field,
+        Provider&& provider,
+        const std::string& name)
+    {
+        initialize_cell_field(
+            field,
+            std::forward<Provider>(provider),
+            [](scalar_type value, const std::string& label)
+            {
+                if (value <= scalar_type{})
+                {
+                    throw std::invalid_argument(
+                        "Material field '" + label
+                        + "' must be positive.");
+                }
+            },
+            name);
+    }
+
+    template<class Provider>
+    static void initialize_non_negative(
+        CellField<Pack>& field,
+        Provider&& provider,
+        const std::string& name)
+    {
+        initialize_cell_field(
+            field,
+            std::forward<Provider>(provider),
+            [](scalar_type value, const std::string& label)
+            {
+                if (value < scalar_type{})
+                {
+                    throw std::invalid_argument(
+                        "Material field '" + label
+                        + "' cannot be negative.");
+                }
+            },
+            name);
+    }
+
+    static void validate_positive(
+        const CellField<Pack>& field,
+        const std::string& name)
+    {
+        for (size_t owned = 0; owned < field.num_owned_cells(); ++owned)
+        {
+            const auto value = field.value(
+                static_cast<typename Pack::local_ordinal_type>(owned));
+            if (!std::isfinite(value) || value <= scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "Material field '" + name
+                    + "' must contain finite positive values.");
+            }
+        }
+    }
+
+    static void validate_non_negative(
+        const CellField<Pack>& field,
+        const std::string& name)
+    {
+        for (size_t owned = 0; owned < field.num_owned_cells(); ++owned)
+        {
+            const auto value = field.value(
+                static_cast<typename Pack::local_ordinal_type>(owned));
+            if (!std::isfinite(value) || value < scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "Material field '" + name
+                    + "' must contain finite non-negative values.");
+            }
+        }
+    }
+
+    updater_type updater;
+};
+
+struct SolutionOutputOptions
+{
+    bool include_sources = false;
+    bool include_material_properties = false;
+};
+
+} // namespace SimpleFluid

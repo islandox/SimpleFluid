@@ -476,7 +476,10 @@ public:
         const face_flux_field_type& face_fluxes,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions,
-        const TimeStepperOptions& time_options) const
+        const TimeStepperOptions& time_options,
+        const MaterialPropertyFields<Pack>* material = nullptr,
+        scalar_type reference_density = scalar_type{1},
+        bool density_feedback_enabled = false) const
     {
         EquationValidation::require_mesh_match(
             *d_mesh, velocity, "CoupledPressureVelocitySolver");
@@ -490,10 +493,34 @@ public:
                 == FVM::NonOrthogonalTreatment::Implicit
           ? nullptr
           : &velocity;
-        auto momentum = momentum_equation.assemble_system(
-            velocity, face_fluxes, temperature,
-            velocity_boundary_cache, time_options,
-            correction_field);
+        typename BoussinesqMomentumEquation<Pack>::system_type momentum;
+        if (material != nullptr)
+        {
+            auto zero_source =
+                [](local_ordinal_type)
+                    -> typename velocity_field_type::vec_type
+            {
+                return {};
+            };
+            momentum = momentum_equation.assemble_physical_system(
+                velocity,
+                face_fluxes,
+                temperature,
+                velocity_boundary_cache,
+                time_options,
+                *material,
+                reference_density,
+                density_feedback_enabled,
+                zero_source,
+                correction_field);
+        }
+        else
+        {
+            momentum = momentum_equation.assemble_system(
+                velocity, face_fluxes, temperature,
+                velocity_boundary_cache, time_options,
+                correction_field);
+        }
 
         auto [coupled_map, coupled_overlap_map] =
             detail::make_coupled_maps(*d_mesh);
