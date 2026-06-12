@@ -11,6 +11,7 @@
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Tpetra_CombineMode.hpp>
 
+#include <concepts>
 #include <cstddef>
 #include <stdexcept>
 #include <type_traits>
@@ -271,6 +272,216 @@ public:
     {
         return overlap_row_or_invalid(local_id)
             != invalid_local_ordinal();
+    }
+
+    // === Structured-ID accessors ===
+    // Each templated overload is constrained so it only matches structured
+    // CellID / FaceID types that MeshHandle can actually convert.  Scalar
+    // types (int, size_t, etc.) continue to be handled by the non-template
+    // local_ordinal_type overloads.
+
+    /** @brief Owned value by structured cell ID. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    value_type value(CellID id) const
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "value(CellID) requires a cell-located field.");
+        return value(d_mesh->cell_local_id(id));
+    }
+
+    /** @brief Overlap (ghost-aware) value by structured cell ID. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    value_type local_value(CellID id) const
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "local_value(CellID) requires a cell-located field.");
+        return local_value(d_mesh->cell_local_id(id));
+    }
+
+    /** @brief Update owned and ghost copies by structured cell ID. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    void set_value(CellID id, const value_type& value)
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "set_value(CellID) requires a cell-located field.");
+        set_value(d_mesh->cell_local_id(id), value);
+    }
+
+    /** @brief Update only owned storage by structured cell ID. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    void set_owned_value(CellID id, const value_type& value)
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "set_owned_value(CellID) requires a cell-located field.");
+        set_owned_value(d_mesh->cell_local_id(id), value);
+    }
+
+    /** @brief Single component of owned entry by structured cell ID. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    scalar_type component_value(CellID id, size_t component) const
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "component_value(CellID) requires a cell-located field.");
+        return component_value(
+            d_mesh->cell_local_id(id), component);
+    }
+
+    /** @brief Set one component by structured cell ID. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    void set_component_value(CellID id, size_t component,
+                             scalar_type value)
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "set_component_value(CellID) requires a cell-located "
+                      "field.");
+        set_component_value(
+            d_mesh->cell_local_id(id), component, value);
+    }
+
+    /** @brief Test whether the cell with this structured ID is locally owned. */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    bool is_owned(CellID id) const
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "is_owned(CellID) requires a cell-located field.");
+        return is_owned(d_mesh->cell_local_id(id));
+    }
+
+    /** @brief Test whether the cell with this structured ID is available
+     *         locally (owned or ghost). */
+    template<class CellID>
+        requires requires(const MeshHandle<Pack>& m, CellID id) {
+            { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    bool is_local(CellID id) const
+    {
+        static_assert(std::is_same_v<location_type, CellLocation>,
+                      "is_local(CellID) requires a cell-located field.");
+        return is_local(d_mesh->cell_local_id(id));
+    }
+
+    // FaceID overloads — mirror the CellID set above.
+
+    /** @brief Owned value by structured face ID. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    value_type value(FaceID id) const
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "value(FaceID) requires a face-located field.");
+        return value(d_mesh->face_local_id(id));
+    }
+
+    /** @brief Overlap value by structured face ID. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    value_type local_value(FaceID id) const
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "local_value(FaceID) requires a face-located field.");
+        return local_value(d_mesh->face_local_id(id));
+    }
+
+    /** @brief Update owned and ghost copies by structured face ID. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    void set_value(FaceID id, const value_type& value)
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "set_value(FaceID) requires a face-located field.");
+        set_value(d_mesh->face_local_id(id), value);
+    }
+
+    /** @brief Update only owned storage by structured face ID. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    void set_owned_value(FaceID id, const value_type& value)
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "set_owned_value(FaceID) requires a face-located field.");
+        set_owned_value(d_mesh->face_local_id(id), value);
+    }
+
+    /** @brief Single component of owned face entry by structured face ID. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    scalar_type component_value(FaceID id, size_t component) const
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "component_value(FaceID) requires a face-located field.");
+        return component_value(
+            d_mesh->face_local_id(id), component);
+    }
+
+    /** @brief Set one face component by structured face ID. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    void set_component_value(FaceID id, size_t component,
+                             scalar_type value)
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "set_component_value(FaceID) requires a face-located "
+                      "field.");
+        set_component_value(
+            d_mesh->face_local_id(id), component, value);
+    }
+
+    /** @brief Test whether the face with this structured ID is locally owned. */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    bool is_owned(FaceID id) const
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "is_owned(FaceID) requires a face-located field.");
+        return is_owned(d_mesh->face_local_id(id));
+    }
+
+    /** @brief Test whether the face with this structured ID is available
+     *         locally (owned or ghost). */
+    template<class FaceID>
+        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+            { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
+        }
+    bool is_local(FaceID id) const
+    {
+        static_assert(std::is_same_v<location_type, FaceLocation>,
+                      "is_local(FaceID) requires a face-located field.");
+        return is_local(d_mesh->face_local_id(id));
     }
 
 private:

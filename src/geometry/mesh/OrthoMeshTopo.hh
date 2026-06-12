@@ -33,10 +33,21 @@ public:
     using Ordinal = Indexer::Ordinal;
     using CellID = Indexer::CellID;
     using FaceID = Indexer::FaceID;
+    using enum Indexer::Dimension;
     using BoundaryNames = std::array<std::string, 6>;
-    using NeighborCells = std::vector<CellID>;
 
     static constexpr int invalid_boundary_id = -1;
+    static constexpr int max_neighbors = 6;
+    static constexpr Ordinal invalid_ordinal =
+        static_cast<Ordinal>(-1);
+
+    struct NeighborCells
+    {
+        unsigned num{};
+        std::array<CellID, max_neighbors> neighbors{};
+
+        constexpr bool operator==(const NeighborCells&) const = default;
+    };
 
     OrthoMeshTopo() = default;
     OrthoMeshTopo(const Indexer& indexer, BoundaryNames boundary_names);
@@ -52,21 +63,21 @@ public:
     /// Lazy cartesian_product view of CellID over interior cells.
     auto interior_cell_patch() const
     {
-        const auto ni = d_indexer.num_cells_per_dim[Indexer::I];
-        const auto nj = d_indexer.num_cells_per_dim[Indexer::J];
-        const auto nk = d_indexer.num_cells_per_dim[Indexer::K];
+        const auto ni = d_indexer.num_cells_per_dim[I];
+        const auto nj = d_indexer.num_cells_per_dim[J];
+        const auto nk = d_indexer.num_cells_per_dim[K];
 
-        const auto i_beg = d_indexer.periodic_dimensions[Indexer::I]
+        const auto i_beg = d_indexer.periodic_dimensions[I]
             ? Ordinal{0} : Ordinal{1};
-        const auto i_end = d_indexer.periodic_dimensions[Indexer::I]
+        const auto i_end = d_indexer.periodic_dimensions[I]
             ? ni : (ni > 0 ? ni - 1 : 0);
-        const auto j_beg = d_indexer.periodic_dimensions[Indexer::J]
+        const auto j_beg = d_indexer.periodic_dimensions[J]
             ? Ordinal{0} : Ordinal{1};
-        const auto j_end = d_indexer.periodic_dimensions[Indexer::J]
+        const auto j_end = d_indexer.periodic_dimensions[J]
             ? nj : (nj > 0 ? nj - 1 : 0);
-        const auto k_beg = d_indexer.periodic_dimensions[Indexer::K]
+        const auto k_beg = d_indexer.periodic_dimensions[K]
             ? Ordinal{0} : Ordinal{1};
-        const auto k_end = d_indexer.periodic_dimensions[Indexer::K]
+        const auto k_end = d_indexer.periodic_dimensions[K]
             ? nk : (nk > 0 ? nk - 1 : 0);
 
         return cartesian_product_3d(i_beg, i_end, j_beg, j_end, k_beg, k_end)
@@ -76,9 +87,34 @@ public:
               });
     }
 
-    const NeighborCells& neighbor_cells(CellID cell_id) const noexcept
+    NeighborCells neighbor_cells(CellID cell_id) const noexcept
     {
-        return d_neighbor_cells[d_indexer.cell_local_id(cell_id)];
+        const auto& i_neighbors = d_neighbors_per_dim[I][cell_id.i];
+        const auto& j_neighbors = d_neighbors_per_dim[J][cell_id.j];
+        const auto& k_neighbors = d_neighbors_per_dim[K][cell_id.k];
+
+        NeighborCells result;
+        result.num =
+            i_neighbors.num + j_neighbors.num + k_neighbors.num;
+
+        unsigned offset = 0;
+        for (unsigned i = 0; i < i_neighbors.num; ++i)
+        {
+            result.neighbors[offset++] =
+                {i_neighbors.indices[i], cell_id.j, cell_id.k};
+        }
+        for (unsigned j = 0; j < j_neighbors.num; ++j)
+        {
+            result.neighbors[offset++] =
+                {cell_id.i, j_neighbors.indices[j], cell_id.k};
+        }
+        for (unsigned k = 0; k < k_neighbors.num; ++k)
+        {
+            result.neighbors[offset++] =
+                {cell_id.i, cell_id.j, k_neighbors.indices[k]};
+        }
+
+        return result;
     }
 
     bool is_boundary_face(FaceID face_id) const noexcept;
@@ -125,6 +161,18 @@ public:
     int num_boundary_patches() const noexcept;
 
 private:
+    struct FaceCells
+    {
+        Ordinal owner = invalid_ordinal;
+        Ordinal neighbor = invalid_ordinal;
+    };
+
+    struct DimensionNeighbors
+    {
+        unsigned num{};
+        std::array<Ordinal, 2> indices{};
+    };
+
     /// Functor that maps a 2-D cartesian-product tuple to a FaceID,
     /// with a consistent type across all face orientations.
     struct FacePatchMapper
@@ -147,12 +195,14 @@ private:
         }
     };
 
+    void initialize_face_adjacency();
     void initialize_cell_adjacency();
     void validate_boundary_patch(int patch_id) const;
 
     Indexer d_indexer;
     BoundaryNames d_boundary_names{};
-    std::vector<NeighborCells> d_neighbor_cells;
+    Vec3D<Arr<FaceCells>> d_face_cells_per_dim;
+    Vec3D<Arr<DimensionNeighbors>> d_neighbors_per_dim;
 };
 
 } // namespace SimpleFluid::Meshes

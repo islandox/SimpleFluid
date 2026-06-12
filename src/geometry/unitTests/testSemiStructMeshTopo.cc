@@ -31,7 +31,9 @@ Topology make_topology(bool axial_periodic = false)
         axial_periodic);
 }
 
-Topology make_topology_with_interior_cell()
+Topology make_topology_with_interior_cell(
+    unsigned layers = 3,
+    bool axial_periodic = false)
 {
     return Topology(
         12,
@@ -41,7 +43,9 @@ Topology make_topology_with_interior_cell()
             {1, 6, 7, 2},
             {3, 2, 8, 9},
             {10, 0, 3, 11}},
-        3);
+        layers,
+        {},
+        axial_periodic);
 }
 
 } // namespace
@@ -164,6 +168,48 @@ TEST(SemiStructMeshTopoTest, WrapsAxialFacesPeriodically)
     EXPECT_EQ(
         topology.neighbor_cells(CellID{0, 0}),
         (Topology::NeighborCells{{0, 1}, {0, 1}}));
+}
+
+TEST(SemiStructMeshTopoTest, HandlesSingleAxialLayer)
+{
+    const Topology non_periodic(
+        4,
+        {{0, 1, 3}, {1, 2, 3}},
+        1);
+    const FaceID lower{0, 0, Indexer::AXIAL};
+    const FaceID upper{0, 1, Indexer::AXIAL};
+    EXPECT_EQ(non_periodic.owner_cell(lower), (CellID{0, 0}));
+    EXPECT_EQ(non_periodic.owner_cell(upper), (CellID{0, 0}));
+    EXPECT_EQ(non_periodic.neighbor_cell(lower), CellID{});
+    EXPECT_EQ(non_periodic.neighbor_cell(upper), CellID{});
+    EXPECT_EQ(
+        non_periodic.neighbor_cells(CellID{0, 0}),
+        (Topology::NeighborCells{{1, 0}}));
+
+    const Topology periodic(
+        4,
+        {{0, 1, 3}, {1, 2, 3}},
+        1,
+        {},
+        true);
+    const FaceID periodic_seam{0, 0, Indexer::AXIAL};
+    EXPECT_EQ(periodic.owner_cell(periodic_seam), (CellID{0, 0}));
+    EXPECT_EQ(
+        periodic.neighbor_cell(periodic_seam),
+        (CellID{0, 0}));
+    EXPECT_EQ(
+        periodic.neighbor_cells(CellID{0, 0}),
+        (Topology::NeighborCells{
+            {0, 0},
+            {0, 0},
+            {1, 0}}));
+
+    const auto periodic_with_interior =
+        make_topology_with_interior_cell(1, true);
+    ASSERT_EQ(periodic_with_interior.interior_cell_patch().size(), 1U);
+    EXPECT_EQ(
+        periodic_with_interior.interior_cell_patch()[0],
+        (CellID{0, 0}));
 }
 
 TEST(SemiStructMeshTopoTest, RejectsInvalidBaseTopology)

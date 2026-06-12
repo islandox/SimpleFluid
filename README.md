@@ -1,7 +1,9 @@
 # SimpleFluid
+
 Simple fluid code for convection in vessels
 
 ## Applications
+
 - natural convection
 - with or without boiling
 - bubbles in dispersed phase
@@ -9,6 +11,7 @@ Simple fluid code for convection in vessels
 ## Features
 
 ### Mesh
+
 - Finite-volume mesh for hybrid **triangular-prism** and **hexahedral** cell types
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
@@ -17,16 +20,19 @@ Simple fluid code for convection in vessels
 - Boundary condition support via sideset / side-part name mapping
 
 ### Mesh Generation
+
 - Programmatic mesh generation for **box**, **cylinder**, and **sphere** domains
 - External mesh file loading through Trilinos/STK
 - Configuration-driven via the built-in typed key-value `Database`
 
 ### Fields
+
 - **Cell-centered** scalar fields backed by Tpetra distributed vectors
 - **Face-centered** scalar fields backed by Tpetra distributed vectors
 - Ghosted data exchange via Tpetra import/export
 
 ### Data & Utilities
+
 - Typed key-value `Database` (int, real, string, bool, and vector variants)
 - `RandomAccessView` — lightweight non-owning view with STL-compatible random-access iterators
 - Generic `vec3` 3D vector class with arithmetic operators
@@ -34,13 +40,14 @@ Simple fluid code for convection in vessels
 - Mesh utility functions (centroid, face/cell type classification)
 
 ### Parallelism
+
 - MPI distributed-memory parallelism via Trilinos/Tpetra
 - Kokkos on-node parallelism (CPU serial, OpenMP, CUDA, HIP, SYCL)
 
 ## Dependencies
 
 | Dependency | Role |
-|---|---|
+| --------- | ---- |
 | **MPI** | Distributed-memory parallelism — used by Trilinos/Tpetra for cross-process communication |
 | **Kokkos** | On-node parallel programming model — enables portability across CPU (Serial, OpenMP) and GPU (CUDA, HIP, SYCL) backends |
 | **Teuchos** | Trilinos utility library — provides smart pointers (`RCP`), parameter lists, timers, and exception handling |
@@ -54,6 +61,7 @@ Simple fluid code for convection in vessels
 | **GTest** | Google Test framework — C++ unit testing (build-time dependency only) |
 
 ## License
+
 This project is distributed in MIT License.
 
 ## AI assistance
