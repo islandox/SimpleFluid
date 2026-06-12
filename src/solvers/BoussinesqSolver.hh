@@ -62,10 +62,22 @@ public:
                      TimeStepperOptions time_options = {},
                      LinearSolverOptions linear_options = {});
 
+    BoussinesqSolver(SP<const mesh_type> mesh,
+                     BoundaryConditionSet boundary_conditions,
+                     TimeStepperOptions time_options,
+                     LinearSolverOptions linear_options,
+                     BoussinesqModelOptions model_options);
+
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
                      BoundaryConditionSet boundary_conditions,
                      TimeStepperOptions time_options = {},
                      LinearSolverOptions linear_options = {});
+
+    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
+                     BoundaryConditionSet boundary_conditions,
+                     TimeStepperOptions time_options,
+                     LinearSolverOptions linear_options,
+                     BoussinesqModelOptions model_options);
 
     void initialize_linear_temperature(const vec_type& direction,
                                        scalar_type hot_at_min,
@@ -100,10 +112,41 @@ public:
     field_type& pressure() noexcept;
     velocity_field_type& velocity() noexcept;
 
+    MaterialPropertyFields<Pack>& material_properties() noexcept;
+    const MaterialPropertyFields<Pack>& material_properties() const noexcept;
+
+    VolumetricScalarSource<Pack>& add_temperature_source(
+        std::string name,
+        scalar_type initial_power_density = {});
+    bool remove_temperature_source(const std::string& name);
+    VolumetricScalarSource<Pack>* find_temperature_source(
+        const std::string& name) noexcept;
+    const VolumetricScalarSource<Pack>* find_temperature_source(
+        const std::string& name) const noexcept;
+    TemperatureSourceRegistry<Pack>& temperature_sources() noexcept;
+    const TemperatureSourceRegistry<Pack>& temperature_sources() const noexcept;
+
+    void set_material_updater(
+        typename MaterialPropertyFields<Pack>::updater_type updater);
+    void clear_material_updater() noexcept;
+
     void write_vtu(const std::string& filename) const { d_mesh->export_vtu(filename); }
     void write_solution_vtu(const std::string& filename) const;
+    void write_solution_vtu(
+        const std::string& filename,
+        const SolutionOutputOptions& output_options) const;
 
 private:
+    struct PhysicalModelTag {};
+
+    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
+                     BoundaryConditionSet boundary_conditions,
+                     TimeStepperOptions time_options,
+                     LinearSolverOptions linear_options,
+                     BoussinesqModelOptions model_options,
+                     bool physical_model_enabled,
+                     PhysicalModelTag);
+
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
     static SP<const mesh_type> require_legacy_mesh(
         const SP<const MeshHandle<Pack>>& mesh);
@@ -127,9 +170,16 @@ private:
     face_flux_field_type& projected_face_fluxes();
     residual_type& pressure_velocity_residuals();
     const residual_type& pressure_velocity_residuals() const;
+    MaterialPropertyFields<Pack>& stored_material_properties();
+    const MaterialPropertyFields<Pack>& stored_material_properties() const;
+    TemperatureSourceRegistry<Pack>& stored_temperature_sources();
+    const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
+    void refresh_physical_models();
 
     SP<const mesh_type> d_mesh;
     Problem<Pack> d_problem;
+    BoussinesqModelOptions d_model_options;
+    bool d_physical_model_enabled = false;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;

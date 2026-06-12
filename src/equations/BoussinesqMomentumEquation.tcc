@@ -287,4 +287,172 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity(
     return summary;
 }
 
+template<TpetraTypePack Pack>
+auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
+    const velocity_field_type& old_velocity,
+    const FaceField<Pack>& face_fluxes,
+    const field_type& temperature,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const MaterialPropertyFields<Pack>& material,
+    scalar_type reference_density,
+    bool density_feedback_enabled,
+    const source_type& right_hand_source,
+    const velocity_field_type* correction_field) const -> system_type
+{
+    EquationValidation::require_mesh_match(
+        *d_mesh, old_velocity, "BoussinesqMomentumEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, temperature, "BoussinesqMomentumEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, material.density, "BoussinesqMomentumEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, material.dynamic_viscosity,
+        "BoussinesqMomentumEquation");
+    if (reference_density <= scalar_type{})
+    {
+        throw std::invalid_argument(
+            "BoussinesqMomentumEquation requires positive reference density.");
+    }
+
+    auto boundary_value =
+        [&](int boundary_id,
+            local_ordinal_type boundary_face_id)
+    {
+        const auto face = static_cast<size_t>(boundary_face_id);
+        if (velocity_boundary_cache.type.at(boundary_id)
+            == BoundaryConditionType::Slip)
+        {
+            const auto face_lid =
+                d_mesh->boundary_face_patch(
+                    boundary_id).face_lids[face];
+            return FVM::detail::slip_face_velocity(
+                old_velocity, face_lid);
+        }
+        return velocity_boundary_cache.value.at(
+            boundary_id)[face];
+    };
+
+    const auto gravity = options.gravity_vector();
+    auto acceleration =
+        [&](local_ordinal_type cell_lid)
+            -> typename velocity_field_type::vec_type
+    {
+        typename velocity_field_type::vec_type buoyancy{};
+        if (density_feedback_enabled)
+        {
+            const auto scale =
+                (material.density.value(cell_lid)
+                 - reference_density)
+              / reference_density;
+            buoyancy = gravity * scale;
+        }
+        else
+        {
+            const auto scale =
+                options.thermal_expansion
+              * (temperature.value(cell_lid)
+                 - options.reference_temperature);
+            buoyancy = gravity * (-scale);
+        }
+        return buoyancy + right_hand_source(cell_lid);
+    };
+
+    auto system = FVM::physical_momentum_transport_system<Pack>(
+        old_velocity,
+        face_fluxes,
+        options.time_step,
+        material.dynamic_viscosity,
+        reference_density,
+        boundary_value,
+        acceleration,
+        options.non_orthogonal_treatment,
+        correction_field,
+        d_cached_transport_matrix);
+    d_cached_transport_matrix = system.matrix;
+    return system;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
+    const velocity_field_type& old_velocity,
+    const FaceField<Pack>& face_fluxes,
+    const field_type& temperature,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const MaterialPropertyFields<Pack>& material,
+    scalar_type reference_density,
+    bool density_feedback_enabled,
+    velocity_field_type& velocity,
+    const source_type& right_hand_source,
+    const LinearSolverOptions& linear_options) const
+    -> LinearSolveSummary
+{
+    EquationValidation::require_mesh_match(
+        *d_mesh, velocity, "BoussinesqMomentumEquation");
+
+    velocity_field_type old_snapshot(
+        old_velocity.mesh_ptr(),
+        "physical_momentum_old_velocity",
+        false);
+    const velocity_field_type* transport_old = &old_velocity;
+    if (&old_velocity == &velocity
+        && options.n_non_orthogonal_correctors > 0)
+    {
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            old_snapshot.set_value(
+                cell_lid, old_velocity.value(cell_lid));
+        }
+        old_snapshot.sync_ghosts();
+        transport_old = &old_snapshot;
+    }
+
+    LinearSolveSummary summary;
+    for (int corrector = 0;
+         corrector <= options.n_non_orthogonal_correctors;
+         ++corrector)
+    {
+        const auto* correction_field =
+            corrector == 0 ? nullptr : &velocity;
+        auto system = assemble_physical_system(
+            *transport_old,
+            face_fluxes,
+            temperature,
+            velocity_boundary_cache,
+            options,
+            material,
+            reference_density,
+            density_feedback_enabled,
+            right_hand_source,
+            correction_field);
+        velocity.owned_data().putScalar(0.0);
+        Teuchos::RCP<const typename Pack::matrix_type> matrix =
+            system.matrix;
+        const auto statistics =
+            d_linear_solver.solve_with_statistics(
+                matrix,
+                *system.rhs,
+                velocity.owned_data(),
+                linear_options);
+        summary.add(statistics);
+        if (!statistics.converged)
+        {
+            throw std::runtime_error(
+                "BoussinesqMomentumEquation physical transport solve did not converge.");
+        }
+        d_mesh->sync_periodic_boundaries(velocity);
+        if (options.non_orthogonal_treatment
+            == FVM::NonOrthogonalTreatment::Implicit)
+        {
+            break;
+        }
+    }
+    return summary;
+}
+
 } // namespace SimpleFluid

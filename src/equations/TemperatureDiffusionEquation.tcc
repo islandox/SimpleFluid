@@ -343,4 +343,96 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     return accepted_statistics;
 }
 
+template<TpetraTypePack Pack>
+auto TemperatureDiffusionEquation<Pack>::advance_physical(
+    const field_type& old_temperature,
+    const FaceField<Pack>& face_fluxes,
+    scalar_type time_step,
+    const MaterialPropertyFields<Pack>& material,
+    field_type& temperature,
+    const source_type& power_density,
+    FVM::NonOrthogonalTreatment treatment,
+    const LinearSolverOptions& linear_options) const
+    -> LinearSolveStatistics
+{
+    EquationValidation::require_mesh_match(
+        *d_mesh, old_temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, material.density, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, material.specific_heat_capacity,
+        "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(
+        *d_mesh, material.thermal_conductivity,
+        "TemperatureDiffusionEquation");
+    if (time_step <= scalar_type{})
+    {
+        throw std::invalid_argument(
+            "TemperatureDiffusionEquation requires a positive time step.");
+    }
+    if (!power_density)
+    {
+        throw std::invalid_argument(
+            "TemperatureDiffusionEquation requires a power-density provider.");
+    }
+
+    auto boundary_condition =
+        [&](int patch_id, size_t)
+    {
+        const auto name = d_mesh->boundary_patch_name(patch_id);
+        const auto iter = d_boundary_condition->find(name);
+        return iter == d_boundary_condition->end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    auto boundary_value =
+        [&](int patch_id, size_t in_patch_id) -> scalar_type
+    {
+        const auto iter =
+            d_face_boundary_temperature.value.find(patch_id);
+        return iter == d_face_boundary_temperature.value.end()
+             ? scalar_type{}
+             : iter->second[in_patch_id];
+    };
+
+    const auto* correction_field =
+        treatment == FVM::NonOrthogonalTreatment::Implicit
+      ? nullptr
+      : &old_temperature;
+    auto system =
+        FVM::physical_temperature_transport_system<Pack>(
+            old_temperature,
+            face_fluxes,
+            time_step,
+            material.density,
+            material.specific_heat_capacity,
+            material.thermal_conductivity,
+            boundary_condition,
+            boundary_value,
+            power_density,
+            treatment,
+            correction_field,
+            d_cached_transport_matrix);
+    d_cached_transport_matrix = system.matrix;
+
+    temperature.owned_data().putScalar(0.0);
+    Teuchos::RCP<const typename Pack::matrix_type> matrix =
+        system.matrix;
+    const auto statistics =
+        d_linear_solver.solve_with_statistics(
+            matrix,
+            *system.rhs,
+            temperature.owned_data(),
+            linear_options);
+    if (!statistics.converged)
+    {
+        throw std::runtime_error(
+            "TemperatureDiffusionEquation physical transport solve did not converge.");
+    }
+    d_mesh->sync_periodic_boundaries(temperature);
+    return statistics;
+}
+
 } // namespace SimpleFluid

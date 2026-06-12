@@ -11,6 +11,7 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
+#include "equations/BoussinesqModel.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -77,6 +78,16 @@ public:
         scalar_type thermal_diffusivity,
         field_type& temperature,
         const source_type& right_hand_source,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    LinearSolveStatistics advance_physical(
+        const field_type& old_temperature,
+        const FaceField<Pack>& face_fluxes,
+        scalar_type time_step,
+        const MaterialPropertyFields<Pack>& material,
+        field_type& temperature,
+        const source_type& power_density,
+        FVM::NonOrthogonalTreatment treatment,
         const LinearSolverOptions& linear_options = {}) const;
 
 private:
