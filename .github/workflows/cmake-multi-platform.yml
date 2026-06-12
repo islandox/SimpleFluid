@@ -34,9 +34,9 @@ jobs:
 #            cpp_compiler: cl
           - os: ubuntu-latest
             compiler_id: GCC
-            c_compiler: gcc
-            cpp_compiler: g++
-            fortran_compiler: gfortran
+            c_compiler: gcc-14
+            cpp_compiler: g++-14
+            fortran_compiler: gfortran-14
           - os: ubuntu-latest
             compiler_id: LLVM
             c_compiler: clang-18
@@ -65,6 +65,17 @@ jobs:
           flang-18 --version
           echo "LLVM_FC=flang-18" >> "$GITHUB_ENV"
         fi
+
+    - name: Install GCC compilers
+      if: matrix.compiler_id == 'GCC'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          gcc-14 g++14 gfortran-14
+
+        gcc-14 --version
+        g++-14 --version
+        gfortran-14 --version
 
     - name: Install dependencies on Ubuntu
       if: runner.os == 'Linux'
