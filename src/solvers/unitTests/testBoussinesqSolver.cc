@@ -673,3 +673,298 @@ TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
 
     EXPECT_THROW(solver.step(), std::invalid_argument);
 }
+
+TEST(BoussinesqSolverTest, PhysicalHeatSourcesGiveAnalyticalOneCellRise)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_diffusivity = 0.0;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 2.0;
+    model_options.density = 2.0;
+    model_options.specific_heat_capacity = 5.0;
+    model_options.dynamic_viscosity = 0.0;
+    model_options.thermal_conductivity = 0.0;
+    model_options.temperature_source_names = {"heating", "sink"};
+    model_options.temperature_source_power_densities = {20.0, -5.0};
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        {},
+        time_options,
+        {},
+        model_options);
+    solver.temperature().put_scalar(10.0);
+    solver.step();
+
+    EXPECT_NEAR(
+        solver.temperature().value(0),
+        10.0 + 0.1 * 15.0 / (2.0 * 5.0),
+        1.0e-12);
+}
+
+TEST(BoussinesqSolverTest, RefreshesMaterialBeforeSourcesAtStepStart)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_diffusivity = 0.0;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 2.0;
+    model_options.density = 2.0;
+    model_options.specific_heat_capacity = 4.0;
+    model_options.dynamic_viscosity = 0.0;
+    model_options.thermal_conductivity = 0.0;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.temperature().put_scalar(10.0);
+
+    std::vector<std::string> updates;
+    solver.set_material_updater(
+        [&](const auto& context, auto& material)
+        {
+            updates.push_back("material");
+            EXPECT_DOUBLE_EQ(context.time, 0.0);
+            EXPECT_EQ(context.step_index, 0);
+            material.specific_heat_capacity.put_scalar(5.0);
+        });
+    auto& zeta_source = solver.add_temperature_source("zeta");
+    zeta_source.set_updater(
+        [&](const auto& context, auto& field)
+        {
+            updates.push_back("zeta");
+            EXPECT_DOUBLE_EQ(context.temperature.value(0), 10.0);
+            field.put_scalar(0.0);
+        });
+    auto& alpha_source = solver.add_temperature_source("alpha");
+    alpha_source.set_updater(
+        [&](const auto& context, auto& field)
+        {
+            updates.push_back("alpha");
+            EXPECT_DOUBLE_EQ(context.temperature.value(0), 10.0);
+            field.put_scalar(20.0);
+        });
+
+    solver.step();
+
+    EXPECT_EQ(
+        updates,
+        (std::vector<std::string>{"material", "alpha", "zeta"}));
+    EXPECT_DOUBLE_EQ(
+        solver.material_properties()
+            .specific_heat_capacity.value(0),
+        5.0);
+    EXPECT_DOUBLE_EQ(alpha_source.field().value(0), 20.0);
+    EXPECT_DOUBLE_EQ(zeta_source.field().value(0), 0.0);
+    EXPECT_NEAR(solver.temperature().value(0), 10.2, 1.0e-12);
+}
+
+TEST(BoussinesqSolverTest, DensityFeedbackUsesReferenceDensityBuoyancy)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_diffusivity = 0.0;
+    time_options.gravity_x = 0.0;
+    time_options.gravity_y = 0.0;
+    time_options.gravity_z = -10.0;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 1.0;
+    model_options.density = 0.8;
+    model_options.specific_heat_capacity = 1.0;
+    model_options.dynamic_viscosity = 0.0;
+    model_options.thermal_conductivity = 0.0;
+    model_options.density_feedback_enabled = true;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.temperature().put_scalar(1.0);
+    solver.step();
+
+    const auto velocity = solver.velocity().value(0);
+    EXPECT_NEAR(velocity.x, 0.0, 1.0e-12);
+    EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);
+    EXPECT_NEAR(velocity.z, 0.2, 1.0e-12);
+}
+
+TEST(BoussinesqSolverTest, PhysicalDefaultsMatchLegacySolver)
+{
+    auto legacy_mesh = make_box_mesh();
+    auto physical_mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    bcs.temperature["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    for (const auto* name :
+         {"ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.temperature[name] = {
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.01;
+    time_options.thermal_diffusivity = 0.01;
+    time_options.kinematic_viscosity = 0.01;
+
+    SimpleFluid::BoussinesqSolver<Pack> legacy(
+        legacy_mesh, bcs, time_options);
+    SimpleFluid::BoussinesqSolver<Pack> physical(
+        physical_mesh,
+        bcs,
+        time_options,
+        {},
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
+            time_options));
+    legacy.initialize_heated_box(1.0, 0.0);
+    physical.initialize_heated_box(1.0, 0.0);
+    legacy.step();
+    physical.step();
+
+    for (size_t owned = 0;
+         owned < legacy_mesh->num_owned_cells();
+         ++owned)
+    {
+        const auto lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_NEAR(
+            legacy.temperature().value(lid),
+            physical.temperature().value(lid),
+            1.0e-11);
+        const auto legacy_velocity = legacy.velocity().value(lid);
+        const auto physical_velocity = physical.velocity().value(lid);
+        EXPECT_NEAR(
+            legacy_velocity.x, physical_velocity.x, 1.0e-11);
+        EXPECT_NEAR(
+            legacy_velocity.y, physical_velocity.y, 1.0e-11);
+        EXPECT_NEAR(
+            legacy_velocity.z, physical_velocity.z, 1.0e-11);
+    }
+}
+
+TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
+            time_options);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.add_temperature_source("qdot_test", 12.0);
+
+    const auto unique_id =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto base =
+        std::filesystem::temp_directory_path()
+      / ("SimpleFluid_phase10_" + std::to_string(unique_id));
+    const auto default_file = base.string() + "_default.vtu";
+    const auto auxiliary_file = base.string() + "_auxiliary.vtu";
+
+    solver.write_solution_vtu(default_file);
+    solver.write_solution_vtu(
+        auxiliary_file,
+        SimpleFluid::SolutionOutputOptions{
+            .include_sources = true,
+            .include_material_properties = true});
+
+    auto read_file =
+        [](const std::string& filename)
+    {
+        std::ifstream input(filename);
+        return std::string(
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>());
+    };
+    const auto default_contents = read_file(default_file);
+    const auto auxiliary_contents = read_file(auxiliary_file);
+
+    EXPECT_EQ(
+        default_contents.find("Name=\"qdot_test\""),
+        std::string::npos);
+    EXPECT_EQ(
+        default_contents.find("Name=\"density\""),
+        std::string::npos);
+    EXPECT_NE(
+        auxiliary_contents.find("Name=\"qdot_test\""),
+        std::string::npos);
+    EXPECT_NE(
+        auxiliary_contents.find("Name=\"density\""),
+        std::string::npos);
+    EXPECT_NE(
+        auxiliary_contents.find(
+            "Name=\"specific_heat_capacity\""),
+        std::string::npos);
+    EXPECT_NE(
+        auxiliary_contents.find("Name=\"dynamic_viscosity\""),
+        std::string::npos);
+    EXPECT_NE(
+        auxiliary_contents.find("Name=\"thermal_conductivity\""),
+        std::string::npos);
+
+    std::filesystem::remove(default_file);
+    std::filesystem::remove(auxiliary_file);
+}
+
+TEST(BoussinesqSolverTest, RejectsNonFiniteSourceUpdaterOutput)
+{
+    auto mesh = make_single_cell_box_mesh();
+    const SimpleFluid::TimeStepperOptions time_options;
+    auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
+            time_options);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    auto& source = solver.add_temperature_source("invalid");
+    source.set_updater(
+        [](const auto&, auto& field)
+        {
+            field.put_scalar(
+                std::numeric_limits<double>::quiet_NaN());
+        });
+
+    EXPECT_THROW(solver.step(), std::invalid_argument);
+}
+
+TEST(BoussinesqSolverTest, CoupledKrylovUsesPhysicalMaterialPath)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.01;
+    time_options.pressure_velocity_coupling =
+        SimpleFluid::PressureVelocityCoupling::CoupledKrylov;
+    time_options.kinematic_viscosity = 0.01;
+    time_options.thermal_diffusivity = 0.0;
+    time_options.thermal_expansion = 0.0;
+
+    auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
+            time_options);
+    model_options.dynamic_viscosity = 0.02;
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, bcs, time_options, {}, model_options);
+    solver.temperature().put_scalar(0.5);
+    solver.step();
+
+    expect_finite_solution(*mesh, solver);
+    EXPECT_GT(solver.last_step_statistics().linear_solves, 0);
+}

@@ -97,23 +97,23 @@ Keep this phase independent of the new physics so solver performance changes can
 
 Before adding radiolysis or boiling, make the solver accept explicit source fields and updateable material properties cleanly.
 
-- [ ] Add a generic volumetric scalar source interface for transport equations.
-- [ ] Add source-term support to the temperature/energy equation.
-- [ ] Add optional explicit source fields to VTU output.
-- [ ] Add a reusable material-property interface for:
-  - [ ] density-like feedback field
-  - [ ] viscosity-like feedback field
-  - [ ] thermal diffusivity or conductivity if already supported by the energy equation
-- [ ] Add `Database` parsing helpers with defaults, validation, and unit comments.
-- [ ] Add robust field initialization from programmatic configuration.
-- [ ] Preserve existing Boussinesq behavior when new models are disabled.
+- [x] Add a generic volumetric scalar source interface for transport equations.
+- [x] Add source-term support to the temperature/energy equation.
+- [x] Add optional explicit source fields to VTU output.
+- [x] Add a reusable material-property interface for:
+  - [x] density-like feedback field
+  - [x] viscosity-like feedback field
+  - [x] thermal diffusivity or conductivity if already supported by the energy equation
+- [x] Add `Database` parsing helpers with defaults, validation, and unit comments.
+- [x] Add robust field initialization from programmatic configuration.
+- [x] Preserve existing Boussinesq behavior when new models are disabled.
 
 ### Phase 10 acceptance criteria
 
-- [ ] Existing natural-convection examples reproduce their old behavior when all new model switches are off.
-- [ ] A constant heat source produces the expected one-cell analytic temperature change when diffusion/advection are disabled.
-- [ ] Invalid source/property parameters fail with clear error messages.
-- [ ] Source fields can be written to VTU.
+- [x] Existing natural-convection examples reproduce their old behavior when all new model switches are off.
+- [x] A constant heat source produces the expected one-cell analytic temperature change when diffusion/advection are disabled.
+- [x] Invalid source/property parameters fail with clear error messages.
+- [x] Source fields can be written to VTU.
 
 ---
 
@@ -598,12 +598,11 @@ This phase is explicitly deferred until the scalar void-fraction source model is
 
 ## Suggested immediate Codex task order
 
-1. Implement Phase 10 source-term infrastructure.
-2. Implement Phase 11 fission heat source.
-3. Implement Phase 12 radiolytic gas source.
-4. Implement Phase 14 explicit bounded `alpha_g` update.
-5. Implement Phase 15 density feedback.
-6. Add Phase 17 unit tests for the implemented subset.
-7. Add Phase 16 demo case.
-8. Implement Phase 13 boiling only after source/latent-heat plumbing is tested.
-9. Document everything in Phase 18.
+1. Implement Phase 11 fission heat source.
+2. Implement Phase 12 radiolytic gas source.
+3. Implement Phase 14 explicit bounded `alpha_g` update.
+4. Implement Phase 15 density feedback.
+5. Add Phase 17 unit tests for the implemented subset.
+6. Add Phase 16 demo case.
+7. Implement Phase 13 boiling only after source/latent-heat plumbing is tested.
+8. Document everything in Phase 18.

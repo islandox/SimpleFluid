@@ -7,11 +7,12 @@ GPU-portable parallelism.
 ## Project Status
 
 SimpleFluid is in active development with a **verified incompressible Navier–Stokes**
-solver for natural convection. All Phases 0–8 of the planned roadmap are complete (~37 kLOC
-source, ~11 kLOC tests), covering mesh infrastructure through verification against
-OpenFOAM.
+solver for natural convection. Phases 0–10 of the planned roadmap are complete,
+covering mesh infrastructure, verification, performance benchmarking, physical
+heat sources, and updateable material properties.
 
-**Phase 9 performance benchmarking is complete; multiphysics coupling remains in the roadmap.**
+**Phase 10 source and material infrastructure is complete; fission-source coupling
+is the next roadmap phase.**
 
 | Capability | Status |
 | ---------- | ------ |
@@ -26,6 +27,7 @@ OpenFOAM.
 | Verification suite (cavity, Poiseuille, MMS, OpenFOAM comparison) | ✅ |
 | Boussinesq natural convection examples | ✅ |
 | Performance benchmarks & scaling tests | ✅ |
+| Physical heat sources & material-property fields | ✅ |
 | TH/neutronics multiphysics coupling | ⬜ |
 
 ## Governing Equations
@@ -119,6 +121,7 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - `CoupledPressureVelocitySolver` — monolithic block-Krylov solver
 - `BelosLinearSolver` — unified interface to Trilinos iterative solvers
 - Runtime residual reporting for momentum, pressure, and continuity
+- Named volumetric heat sources and updateable physical material fields
 
 ### FVM Operators
 
@@ -257,6 +260,41 @@ mpiexec -n 4 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --outpu
 Use `--case`, `--configuration`, `--nx`, `--ny`, `--nz`, `--shear`,
 `--repetitions`, and `--warmups` for focused runs. Existing CSV files are
 appended only when their header matches the current schema.
+
+## Physical Sources And Materials
+
+`BoussinesqModelOptions` enables conservative temperature transport with
+density (`kg/m³`), specific heat (`J/(kg K)`), dynamic viscosity (`Pa s`),
+thermal conductivity (`W/(m K)`), and named heat-source fields (`W/m³`).
+Missing viscosity and conductivity values are derived from the legacy
+kinematic viscosity and thermal diffusivity.
+
+```cpp
+SimpleFluid::BoussinesqModelOptions model;
+model.reference_density = 1000.0;
+model.density = 1000.0;
+model.specific_heat_capacity = 4180.0;
+model.dynamic_viscosity = 1.0e-3;
+model.thermal_conductivity = 0.6;
+
+SimpleFluid::BoussinesqSolver<> solver(
+    mesh, boundary_conditions, time_options, linear_options, model);
+solver.add_temperature_source("qdot_external", 2.0e5);
+```
+
+Material and source updater callbacks run once at the beginning of each time
+step, with material updates preceding source updates. The same options can be
+parsed from flat `Database` keys using
+`boussinesq_model_options_from_database()`.
+
+Auxiliary fields are opt-in for solution output:
+
+```cpp
+solver.write_solution_vtu(
+    "solution.vtu",
+    {.include_sources = true,
+     .include_material_properties = true});
+```
 
 ## Dependencies
 

@@ -267,6 +267,192 @@ void add_explicit_non_orthogonal_correction(
 }
 
 /**
+ * @brief Add a scalar explicit non-orthogonal correction using a
+ *        cell-centered variable diffusion coefficient.
+ */
+template<TpetraTypePack Pack, class BoundaryConditionProvider>
+void add_variable_explicit_non_orthogonal_correction(
+    const CellField<Pack>& correction_field,
+    const CellField<Pack>& coefficient_field,
+    BoundaryConditionProvider boundary_condition,
+    typename Pack::vector_type& rhs,
+    typename Pack::scalar_type correction_weight = 1.0)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    const auto& mesh = correction_field.mesh();
+    if (&coefficient_field.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "Variable non-orthogonal correction requires coefficient and "
+            "solution fields on the same mesh.");
+    }
+    if (rhs.getMap().get() != mesh.owned_cell_map().get())
+    {
+        throw std::invalid_argument(
+            "Variable non-orthogonal correction requires an owned-cell RHS.");
+    }
+
+    std::vector<typename Mesh<Pack>::Vec3> gradients;
+    cell_gradient(correction_field, gradients);
+
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            if (!mesh.is_interior_face(face_lid))
+            {
+                continue;
+            }
+
+            const auto other =
+                mesh.opposite_or_periodic_neighbor_cell(
+                    face_lid, cell_lid);
+            auto gradient = gradients[owned];
+            if (mesh.is_owned_cell(other)
+                && static_cast<size_t>(other) < gradients.size())
+            {
+                gradient =
+                    (gradient + gradients[static_cast<size_t>(other)])
+                  / scalar_type{2};
+            }
+            const auto face_coefficient =
+                detail::harmonic_face_value(
+                    mesh, face_lid, cell_lid, other,
+                    coefficient_field);
+            const auto tangential_area =
+                detail::non_orthogonal_area_vector(
+                    mesh.face_area_vector_outward(face_lid, cell_lid),
+                    mesh.cell_center_vector(face_lid, cell_lid));
+            rhs.sumIntoLocalValue(
+                cell_lid,
+                correction_weight * face_coefficient
+              * gradient.dot(tangential_area));
+        }
+    }
+
+    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    {
+        for (size_t in_patch_id = 0;
+             in_patch_id < patch.face_lids.size();
+             ++in_patch_id)
+        {
+            const auto face_lid = patch.face_lids[in_patch_id];
+            if (!mesh.is_owned_face(face_lid)
+                || !mesh.is_boundary_face(face_lid)
+                || boundary_condition(patch_id, in_patch_id).type
+                    != BoundaryConditionType::Dirichlet)
+            {
+                continue;
+            }
+
+            const auto owner = mesh.owner_cell(face_lid);
+            const auto tangential_area =
+                detail::non_orthogonal_area_vector(
+                    mesh.face_area_vector_outward(face_lid, owner),
+                    mesh.face_centroid(face_lid)
+                        - mesh.cell_centroid(owner));
+            rhs.sumIntoLocalValue(
+                owner,
+                correction_weight
+              * coefficient_field.local_value(owner)
+              * gradients[static_cast<size_t>(owner)].dot(
+                    tangential_area));
+        }
+    }
+}
+
+/**
+ * @brief Add a vector explicit non-orthogonal correction using a
+ *        cell-centered variable diffusion coefficient.
+ */
+template<TpetraTypePack Pack>
+void add_variable_explicit_non_orthogonal_correction(
+    const VectorCellField<Pack>& correction_field,
+    const CellField<Pack>& coefficient_field,
+    typename Pack::multi_vector_type& rhs,
+    typename Pack::scalar_type correction_weight = 1.0)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    constexpr size_t components = VectorCellField<Pack>::num_components;
+
+    const auto& mesh = correction_field.mesh();
+    if (&coefficient_field.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "Variable vector non-orthogonal correction requires coefficient "
+            "and solution fields on the same mesh.");
+    }
+    if (rhs.getMap().get() != mesh.owned_cell_map().get()
+        || rhs.getNumVectors() != components)
+    {
+        throw std::invalid_argument(
+            "Variable vector non-orthogonal correction received an "
+            "incompatible RHS.");
+    }
+
+    std::vector<VectorCellGradient<Pack>> gradients;
+    cell_gradient(correction_field, gradients);
+
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            const auto tangential_area =
+                detail::non_orthogonal_area_vector(
+                    mesh.face_area_vector_outward(face_lid, cell_lid),
+                    mesh.is_interior_face(face_lid)
+                        ? mesh.cell_center_vector(face_lid, cell_lid)
+                        : mesh.face_centroid(face_lid)
+                            - mesh.cell_centroid(cell_lid));
+
+            scalar_type face_coefficient =
+                coefficient_field.local_value(cell_lid);
+            auto gradient = gradients[owned];
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                face_coefficient =
+                    detail::harmonic_face_value(
+                        mesh, face_lid, cell_lid, other,
+                        coefficient_field);
+                if (mesh.is_owned_cell(other)
+                    && static_cast<size_t>(other) < gradients.size())
+                {
+                    const auto& other_gradient =
+                        gradients[static_cast<size_t>(other)];
+                    for (size_t component = 0;
+                         component < components;
+                         ++component)
+                    {
+                        gradient[component] =
+                            (gradient[component]
+                             + other_gradient[component])
+                          / scalar_type{2};
+                    }
+                }
+            }
+
+            for (size_t component = 0;
+                 component < components;
+                 ++component)
+            {
+                rhs.sumIntoLocalValue(
+                    cell_lid, component,
+                    correction_weight * face_coefficient
+                  * gradient[component].dot(tangential_area));
+            }
+        }
+    }
+}
+
+/**
  * @brief Assemble a scalar diffusion system with an explicit
  *        non-orthogonal correction from a previous solution.
  *
