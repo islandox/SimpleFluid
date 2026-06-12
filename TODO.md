@@ -155,24 +155,24 @@ Implement the first conservative unresolved gas-generation model. This phase pro
 
 ### Baseline model
 
-\[
+$$
 \dot n_g = \eta_g\,G_g\,\dot q_f
-\]
+$$
 
-\[
-\dot V_g = \dot n_g \frac{R T}{p}
-\]
+$$
+\dot V_g = \dot n_g \frac{\mathrm R T}{p}
+$$
 
-\[
+$$
 S_{\alpha,rad} = \alpha_l \dot V_g
-\]
+$$
 
 where:
 
-- `G_g` is the configurable gas yield in mol/J
-- `eta_g` is a release efficiency
-- `R` is the ideal-gas constant
-- `S_alpha_rad` has units 1/s
+- $G_g$ is the configurable gas yield in mol/J
+- $eta_g$ is a release efficiency
+- $\mathrm R$ is the ideal-gas constant
+- $S_{\alpha,rad}$ has units 1/s
 
 ### Tasks
 
@@ -211,45 +211,45 @@ Add a simple energy-consistent boiling model. This is a placeholder for a later 
 
 For cells with:
 
-\[
+$$
 T > T_{sat} + \Delta T_{act}
-\]
+$$
 
 compute an available energy rate:
 
-\[
+$$
 \dot e_{avail} = \rho_l c_{p,l}\frac{\max(T - T_{sat},0)}{\tau_b}
-\]
+$$
 
 then:
 
-\[
+$$
 \dot m_b = \frac{\dot e_{avail}}{h_{fg}}
-\]
+$$
 
-\[
+$$
 S_{\alpha,boil} = \frac{\dot m_b}{\rho_g}
-\]
+$$
 
 and latent heat sink:
 
-\[
+$$
 Q_{latent} = \dot m_b h_{fg}
-\]
+$$
 
 ### Wall boiling placeholder
 
 For heated boundary faces:
 
-\[
+$$
 \dot m''_w = f_{evap}\frac{q''_w}{h_{fg}}
-\]
+$$
 
 Distribute to owner cells:
 
-\[
+$$
 \dot m_{w,vol} = \dot m''_w \frac{A_f}{V_P}
-\]
+$$
 
 ### Tasks
 
@@ -290,28 +290,28 @@ Introduce `alpha_g` as the first unresolved gas-state field.
 
 ### Minimum required update
 
-\[
+$$
 \alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,total},\alpha_{min},\alpha_{max}\right)
-\]
+$$
 
 where:
 
-\[
+$$
 S_{\alpha,total} = S_{\alpha,rad} + S_{\alpha,boil} + S_{\alpha,wall} - S_{\alpha,collapse}
-\]
+$$
 
 ### Optional transport upgrade
 
 If the existing scalar transport API allows it cleanly, add:
 
-\[
+$$
 \frac{\partial \alpha_g}{\partial t}
 + \nabla\cdot(U_l \alpha_g)
 + \nabla\cdot(U_{slip}\alpha_g)
 =
 \nabla\cdot(D_\alpha\nabla\alpha_g)
 + S_{\alpha,total}
-\]
+$$
 
 ### Tasks
 
@@ -343,28 +343,28 @@ Add property feedback fields for neutronics-oriented thermal-hydraulics.
 
 Support a conservative default:
 
-\[
+$$
 \rho_{mix}(T,\alpha_g)
 = (1 - \alpha_g)\rho_l(T) + \alpha_g\rho_g
-\]
+$$
 
 and a Boussinesq-compatible form:
 
-\[
+$$
 \rho_{fb}(T,\alpha_g)
 = \rho_{ref}\left[1 - \beta(T - T_{ref})\right](1-\alpha_g)
 + \rho_g\alpha_g
-\]
+$$
 
 ### Viscosity feedback
 
 Start with:
 
-\[
+$$
 \mu_{eff}(T,\alpha_g) = \mu_l(T) f_\mu(\alpha_g)
-\]
+$$
 
-where `f_mu(alpha_g) = 1` by default until a validated correction is added.
+where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
 
 ### Tasks
 
@@ -495,14 +495,14 @@ After velocity, temperature, and void feedback fields are available, add precurs
 
 For precursor group `i`:
 
-\[
+$$
 \frac{\partial (\alpha_l C_i)}{\partial t}
 + \nabla\cdot(\alpha_l U_l C_i)
 =
 \nabla\cdot(\alpha_l D_i^{eff}\nabla C_i)
 + S_i
 - \lambda_i \alpha_l C_i
-\]
+$$
 
 ### Tasks
 
