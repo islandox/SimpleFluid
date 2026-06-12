@@ -42,7 +42,7 @@ public:
     using face_id_t = typename Base::face_id_t;
     using node_id_t = typename Base::node_id_t;
     using Vec3 = typename Base::Vec3;
-    using BoundaryFacePatch = typename Base::BoundaryFacePatch;
+    using BoundaryFaceBatch = typename Base::BoundaryFaceBatch;
 
     enum Dimension : uint8_t
     {
@@ -99,10 +99,10 @@ private:
     Vec3 node_coordinates_impl(node_id_t node_id) const;
 
     int boundary_id_impl(face_id_t face_id) const;
-    const std::string& boundary_patch_name_impl(int patch_id) const;
-    auto boundary_face_patch_impl(int patch_id) const;
-    auto boundary_patch_ids_impl() const;
-    int num_boundary_patches_impl() const noexcept;
+    const std::string& boundary_batch_name_impl(int batch_id) const;
+    auto boundary_face_batch_impl(int batch_id) const;
+    auto boundary_batch_ids_impl() const;
+    int num_boundary_batches_impl() const noexcept;
 
     Vec3D<Arr<real_t>> d_cell_edges;
     Vec3D<Arr<real_t>> d_cell_centroids;

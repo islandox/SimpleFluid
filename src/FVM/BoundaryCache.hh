@@ -55,9 +55,9 @@ BoundaryCache<Pack> cache_boundary_conditions(
     }
     BoundaryCache<Pack> cache{ {}, mesh };
 
-    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
     {
-        const auto& boundary_name = mesh->boundary_patch_name(patch_id);
+        const auto& boundary_name = mesh->boundary_batch_name(batch_id);
         const auto& bc_it = boundary_conditions.find(boundary_name);
         if (bc_it == boundary_conditions.end())
         {
@@ -67,9 +67,9 @@ BoundaryCache<Pack> cache_boundary_conditions(
         const auto& bc = bc_it->second;
         if (bc.type == BoundaryConditionType::Dirichlet)
         {
-            Arr<value_type> patch_values(boundary_patch.face_lids.size(),
+            Arr<value_type> batch_values(boundary_batch.face_lids.size(),
                                         static_cast<value_type>(bc.value));
-            cache.value[patch_id] = std::move(patch_values);
+            cache.value[batch_id] = std::move(batch_values);
         }
     }
 

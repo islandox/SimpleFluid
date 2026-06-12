@@ -68,28 +68,28 @@ TEST(OrthoMeshTopoTest, QueriesNonPeriodicOwnerAndNeighborCells)
     EXPECT_FALSE(topology.is_boundary_face(k_interior));
 }
 
-TEST(OrthoMeshTopoTest, BuildsBoundaryFacePatches)
+TEST(OrthoMeshTopoTest, BuildsBoundaryFaceBatches)
 {
     const auto topology = make_topology();
 
-    EXPECT_EQ(topology.num_boundary_patches(), 6);
+    EXPECT_EQ(topology.num_boundary_batches(), 6);
     EXPECT_EQ(
-        std::ranges::distance(topology.boundary_face_patch(0)), 12);
+        std::ranges::distance(topology.boundary_face_batch(0)), 12);
     EXPECT_EQ(
-        std::ranges::distance(topology.boundary_face_patch(1)), 12);
+        std::ranges::distance(topology.boundary_face_batch(1)), 12);
     EXPECT_EQ(
-        std::ranges::distance(topology.boundary_face_patch(2)), 8);
+        std::ranges::distance(topology.boundary_face_batch(2)), 8);
     EXPECT_EQ(
-        std::ranges::distance(topology.boundary_face_patch(3)), 8);
+        std::ranges::distance(topology.boundary_face_batch(3)), 8);
     EXPECT_EQ(
-        std::ranges::distance(topology.boundary_face_patch(4)), 6);
+        std::ranges::distance(topology.boundary_face_batch(4)), 6);
     EXPECT_EQ(
-        std::ranges::distance(topology.boundary_face_patch(5)), 6);
+        std::ranges::distance(topology.boundary_face_batch(5)), 6);
 
-    EXPECT_EQ(topology.boundary_patch_name(0), "imin");
-    EXPECT_EQ(topology.boundary_patch_name(5), "kmax");
-    EXPECT_THROW(topology.boundary_face_patch(6), std::out_of_range);
-    EXPECT_THROW(topology.boundary_patch_name(6), std::out_of_range);
+    EXPECT_EQ(topology.boundary_batch_name(0), "imin");
+    EXPECT_EQ(topology.boundary_batch_name(5), "kmax");
+    EXPECT_THROW(topology.boundary_face_batch(6), std::out_of_range);
+    EXPECT_THROW(topology.boundary_batch_name(6), std::out_of_range);
 }
 
 TEST(OrthoMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
@@ -98,7 +98,7 @@ TEST(OrthoMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
         Indexer(3, 3, 3),
         {{"imin", "imax", "jmin", "jmax", "kmin", "kmax"}});
 
-    auto interior = topology.interior_cell_patch();
+    auto interior = topology.interior_cell_batch();
     ASSERT_EQ(std::ranges::distance(interior), 1);
     EXPECT_EQ(*std::ranges::begin(interior), (CellID{1, 1, 1}));
     EXPECT_EQ(
@@ -138,9 +138,9 @@ TEST(OrthoMeshTopoTest, WrapsPeriodicDimensions)
     EXPECT_FALSE(topology.is_boundary_face(i_seam));
     EXPECT_FALSE(topology.is_boundary_face(j_seam));
     EXPECT_FALSE(topology.is_boundary_face(k_seam));
-    EXPECT_EQ(topology.num_boundary_patches(), 0);
+    EXPECT_EQ(topology.num_boundary_batches(), 0);
     EXPECT_EQ(
-        std::ranges::distance(topology.interior_cell_patch()),
+        std::ranges::distance(topology.interior_cell_batch()),
         topology.indexer().total_cells());
     EXPECT_EQ(
         topology.neighbor_cells(CellID{0, 0, 0}),

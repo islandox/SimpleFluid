@@ -58,12 +58,12 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
 MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
                                                const char* boundary_name)
 {
-    for (const auto& [patch_id, patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, batch] : mesh.boundary_batches())
     {
-        if (mesh.boundary_patch_name(patch_id) == boundary_name
-            && !patch.face_lids.empty())
+        if (mesh.boundary_batch_name(batch_id) == boundary_name
+            && !batch.face_lids.empty())
         {
-            return patch.face_lids.front();
+            return batch.face_lids.front();
         }
     }
 
@@ -360,11 +360,11 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     phi.sync_ghosts();
 
     auto boundary_condition =
-        [&](int patch_id, size_t in_patch_id)
+        [&](int batch_id, size_t in_batch_id)
             -> SimpleFluid::BoundaryCondition
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[in_patch_id];
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         return {SimpleFluid::BoundaryConditionType::Dirichlet,
                 nonlinear_scalar(mesh->face_centroid(face_lid))};
     };
@@ -884,11 +884,11 @@ SimpleFluid::SP<MeshType> make_periodic_box_mesh()
     // Find xmin and xmax boundary faces.
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
-    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
-        const auto& name = mesh->boundary_patch_name(patch_id);
-        if (name == "xmin" && !patch.face_lids.empty()) xmin_face = patch.face_lids[0];
-        if (name == "xmax" && !patch.face_lids.empty()) xmax_face = patch.face_lids[0];
+        const auto& name = mesh->boundary_batch_name(batch_id);
+        if (name == "xmin" && !batch.face_lids.empty()) xmin_face = batch.face_lids[0];
+        if (name == "xmax" && !batch.face_lids.empty()) xmax_face = batch.face_lids[0];
     }
 
     // The cell adjacent to the xmin face is cell 0; its paired cell is the
@@ -922,11 +922,11 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
     // Find periodic faces.
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
-    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
-        const auto& name = mesh->boundary_patch_name(patch_id);
-        if (name == "xmin" && !patch.face_lids.empty()) xmin_face = patch.face_lids[0];
-        if (name == "xmax" && !patch.face_lids.empty()) xmax_face = patch.face_lids[0];
+        const auto& name = mesh->boundary_batch_name(batch_id);
+        if (name == "xmin" && !batch.face_lids.empty()) xmin_face = batch.face_lids[0];
+        if (name == "xmax" && !batch.face_lids.empty()) xmax_face = batch.face_lids[0];
     }
 
     ASSERT_NE(xmin_face, -1);
@@ -969,7 +969,7 @@ TEST(FvmOperatorsTest, PeriodicVelocityCacheDoesNotOverwritePairedFaceVelocity)
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
-    EXPECT_EQ(cache.value.size(), mesh->boundary_patches().size());
+    EXPECT_EQ(cache.value.size(), mesh->boundary_batches().size());
 
     SimpleFluid::VectorFaceField<Pack> face_vel(mesh, "face_vel");
     EXPECT_NO_THROW(SimpleFluid::FVM::face_velocities(
@@ -1003,10 +1003,10 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFluxIsComputed)
     SimpleFluid::FVM::face_fluxes(velocity, fluxes);
 
     SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
-    for (const auto& [patch_id, patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
-        if (mesh->boundary_patch_name(patch_id) == "xmax" && !patch.face_lids.empty())
-            xmax_face = patch.face_lids[0];
+        if (mesh->boundary_batch_name(batch_id) == "xmax" && !batch.face_lids.empty())
+            xmax_face = batch.face_lids[0];
     }
     ASSERT_NE(xmax_face, -1);
     ASSERT_TRUE(fluxes.is_owned_face(xmax_face));
@@ -1071,11 +1071,11 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [&](int patch_id, MeshType::local_ordinal_type in_patch_id)
+        [&](int batch_id, MeshType::local_ordinal_type in_batch_id)
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[
-                static_cast<size_t>(in_patch_id)];
+            mesh->boundary_face_batch(batch_id).face_lids[
+                static_cast<size_t>(in_batch_id)];
         EXPECT_TRUE(mesh->is_boundary_face(face_lid));
         return 0.0;
     };
@@ -1119,11 +1119,11 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [&](int patch_id, MeshType::local_ordinal_type in_patch_id)
+        [&](int batch_id, MeshType::local_ordinal_type in_batch_id)
     {
         const auto face_lid =
-            mesh->boundary_face_patch(patch_id).face_lids[
-                static_cast<size_t>(in_patch_id)];
+            mesh->boundary_face_batch(batch_id).face_lids[
+                static_cast<size_t>(in_batch_id)];
         EXPECT_TRUE(mesh->is_boundary_face(face_lid));
         return SimpleFluid::vec3<Pack::scalar_type>{};
     };

@@ -417,8 +417,8 @@ template<class MeshType>
 struct BoundaryFaceLocation
 {
     bool active = false;
-    int patch_id = MeshType::invalid_boundary_id;
-    size_t in_patch_id = 0;
+    int batch_id = MeshType::invalid_boundary_id;
+    size_t in_batch_id = 0;
 };
 
 template<class MeshType, class FaceID>
@@ -437,8 +437,8 @@ size_t packed_face_local_id(const MeshType& mesh, FaceID face_id)
 /**
  * @brief Compute a per-face lookup of boundary-face locations.
  *
- * Supports both the legacy Mesh API (boundary_patches() map) and the
- * new view-based MeshBase API (boundary_patch_ids() + boundary_face_patch()).
+ * Supports both the legacy Mesh API (boundary_batches() map) and the
+ * new view-based MeshBase API (boundary_batch_ids() + boundary_face_batch()).
  *
  * @tparam MeshType The mesh type.
  * @param mesh The computational mesh.
@@ -451,34 +451,34 @@ boundary_face_locations(const MeshType& mesh)
     std::vector<BoundaryFaceLocation<MeshType>> locations(mesh.num_faces());
 
     if constexpr (std::ranges::range<
-                      decltype(mesh.boundary_face_patch(0))>)
+                      decltype(mesh.boundary_face_batch(0))>)
     {
-        // New view-based API: boundary_face_patch() is directly iterable
-        for (int patch_id : mesh.boundary_patch_ids())
+        // New view-based API: boundary_face_batch() is directly iterable
+        for (int batch_id : mesh.boundary_batch_ids())
         {
-            size_t in_patch_id = 0;
-            for (auto face_id : mesh.boundary_face_patch(patch_id))
+            size_t in_batch_id = 0;
+            for (auto face_id : mesh.boundary_face_batch(batch_id))
             {
                 locations[packed_face_local_id(mesh, face_id)] =
-                    {true, patch_id, in_patch_id};
-                ++in_patch_id;
+                    {true, batch_id, in_batch_id};
+                ++in_batch_id;
             }
         }
     }
     else
     {
         // Legacy materialized-map API
-        for (const auto& [patch_id, boundary_patch] :
-             mesh.boundary_patches())
+        for (const auto& [batch_id, boundary_batch] :
+             mesh.boundary_batches())
         {
-            for (size_t in_patch_id = 0;
-                 in_patch_id < boundary_patch.face_lids.size();
-                 ++in_patch_id)
+            for (size_t in_batch_id = 0;
+                 in_batch_id < boundary_batch.face_lids.size();
+                 ++in_batch_id)
             {
                 const auto face_lid =
-                    boundary_patch.face_lids[in_patch_id];
+                    boundary_batch.face_lids[in_batch_id];
                 locations[packed_face_local_id(mesh, face_lid)] =
-                    {true, patch_id, in_patch_id};
+                    {true, batch_id, in_batch_id};
             }
         }
     }

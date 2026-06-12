@@ -160,9 +160,9 @@ OrthogonalCylindrial3D::OrthogonalCylindrial3D(
 }
 
 const std::string&
-OrthogonalCylindrial3D::boundary_patch_name_impl(int patch_id) const
+OrthogonalCylindrial3D::boundary_batch_name_impl(int batch_id) const
 {
-    return d_topology.boundary_patch_name(patch_id);
+    return d_topology.boundary_batch_name(batch_id);
 }
 
 } // namespace SimpleFluid::Meshes

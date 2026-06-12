@@ -70,7 +70,7 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
         EXPECT_EQ(
             handle->overlap_face_map()->getLocalNumElements(),
             handle->num_faces());
-        EXPECT_FALSE(handle->boundary_patches().empty());
+        EXPECT_FALSE(handle->boundary_batches().empty());
     }
 }
 

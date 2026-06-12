@@ -199,21 +199,21 @@ inline int OrthogonalCylindrial3D::boundary_id_impl(face_id_t id) const
 }
 
 inline auto
-OrthogonalCylindrial3D::boundary_face_patch_impl(int patch_id) const
+OrthogonalCylindrial3D::boundary_face_batch_impl(int batch_id) const
 {
-    return d_topology.boundary_face_patch(patch_id);
+    return d_topology.boundary_face_batch(batch_id);
 }
 
 inline auto
-OrthogonalCylindrial3D::boundary_patch_ids_impl() const
+OrthogonalCylindrial3D::boundary_batch_ids_impl() const
 {
-    return d_topology.boundary_patch_ids();
+    return d_topology.boundary_batch_ids();
 }
 
 inline int
-OrthogonalCylindrial3D::num_boundary_patches_impl() const noexcept
+OrthogonalCylindrial3D::num_boundary_batches_impl() const noexcept
 {
-    return d_topology.num_boundary_patches();
+    return d_topology.num_boundary_batches();
 }
 
 } // namespace SimpleFluid

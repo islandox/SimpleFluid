@@ -212,7 +212,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
 template<TpetraTypePack Pack>
 void Mesh<Pack>::create_maps()
 {
-    if (d_boundary_id_to_face_patch.empty())
+    if (d_boundary_id_to_face_batch.empty())
     {
         for (size_t fid = 0; fid < d_faces.size(); ++fid)
         {
@@ -222,9 +222,9 @@ void Mesh<Pack>::create_maps()
                 continue;
             }
 
-            auto& face_patch = d_boundary_id_to_face_patch[boundary_id];
-            face_patch.id = boundary_id;
-            face_patch.face_lids.push_back(
+            auto& face_batch = d_boundary_id_to_face_batch[boundary_id];
+            face_batch.id = boundary_id;
+            face_batch.face_lids.push_back(
                 detail::checked_size_to_ordinal<local_ordinal_type>(
                     fid, "boundary face local id"));
         }
@@ -288,10 +288,10 @@ void Mesh<Pack>::create_maps()
         comm));
 
     ArrGO boundary_face_gids;
-    for (const auto& [patch_id, face_patch] : d_boundary_id_to_face_patch)
+    for (const auto& [batch_id, face_batch] : d_boundary_id_to_face_batch)
     {
-        (void)patch_id;
-        for (const auto& face_lid : face_patch.face_lids)
+        (void)batch_id;
+        for (const auto& face_lid : face_batch.face_lids)
         {
             if (!is_owned_face(face_lid))
             {
@@ -390,7 +390,7 @@ void Mesh<Pack>::create_device_views()
     ArrLO face_owner;
     ArrLO face_neighbor;
     ArrInt face_type;
-    ArrInt face_patch_values;
+    ArrInt face_batch_values;
     ArrReal face_area_values;
     ArrVec3 face_area_vector_values;
     ArrVec3 face_centroid_values;
@@ -398,7 +398,7 @@ void Mesh<Pack>::create_device_views()
     face_owner.reserve(d_faces.size());
     face_neighbor.reserve(d_faces.size());
     face_type.reserve(d_faces.size());
-    face_patch_values.reserve(d_faces.size());
+    face_batch_values.reserve(d_faces.size());
     face_area_values.reserve(d_faces.size());
     face_area_vector_values.reserve(d_faces.size());
     face_centroid_values.reserve(d_faces.size());
@@ -408,7 +408,7 @@ void Mesh<Pack>::create_device_views()
         face_owner.push_back(face_info.owner);
         face_neighbor.push_back(face_info.neighbor);
         face_type.push_back(static_cast<int>(face_info.type));
-        face_patch_values.push_back(face_info.boundary_id);
+        face_batch_values.push_back(face_info.boundary_id);
         face_area_values.push_back(face_info.area);
         face_area_vector_values.push_back(
             face_info.unit_normal_from_owner * face_info.area);
@@ -457,7 +457,7 @@ void Mesh<Pack>::create_device_views()
     d_device_views.face_owner = make_vector_view("face_owner", face_owner);
     d_device_views.face_neighbor = make_vector_view("face_neighbor", face_neighbor);
     d_device_views.face_type = make_vector_view("face_type", face_type);
-    d_device_views.face_patch = make_vector_view("face_patch", face_patch_values);
+    d_device_views.face_batch = make_vector_view("face_batch", face_batch_values);
 
     d_device_views.face_area = make_vector_view("face_area", face_area_values);
     d_device_views.face_area_vector = make_vectorV3D_view("face_area_vector", face_area_vector_values);
@@ -551,8 +551,8 @@ void Mesh<Pack>::check_connectivity() const
 
         if (face.boundary_id != invalid_boundary_id)
         {
-            const auto patch_iter = d_boundary_id_to_face_patch.find(face.boundary_id);
-            CHECK(patch_iter != d_boundary_id_to_face_patch.end());
+            const auto patch_iter = d_boundary_id_to_face_batch.find(face.boundary_id);
+            CHECK(patch_iter != d_boundary_id_to_face_batch.end());
             auto& face_lids = patch_iter->second.face_lids;
             CHECK(std::find(face_lids.begin(), face_lids.end(),
                             static_cast<local_ordinal_type>(fid)) != face_lids.end());
