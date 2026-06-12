@@ -13,7 +13,6 @@
 - [x] `AssembledEquation` classes holding fields with solve interfaces, supporting scalar/vector equations and coupled equations.
 - [x] `Problem` class holding meshes, fields, equations, boundary conditions, assembled equations, coupled equations, and solver/time options.
 
-
 ## Phase 0 — Baseline infrastructure
 
 - [x] Add `VectorField`, `ScalarField`, `FaceField` abstractions if missing.
