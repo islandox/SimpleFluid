@@ -4,6 +4,9 @@
  */
 #pragma once
 
+#include "solvers/BelosLinearSolver.hh"
+
+#include <algorithm>
 #include <stdexcept>
 #include <string_view>
 
@@ -79,6 +82,38 @@ struct PressureVelocityResiduals
     Scalar continuity = {};
     Scalar achieved_tolerance = {};
     int linear_iterations = 0;
+};
+
+template<class Scalar>
+struct BoussinesqStepStatistics
+{
+    bool converged = true;
+    int nonlinear_iterations = 0;
+    int linear_solves = 0;
+    int krylov_iterations = 0;
+    Scalar achieved_tolerance = {};
+    Scalar momentum = {};
+    Scalar pressure = {};
+    Scalar temperature = {};
+    Scalar continuity = {};
+
+    void add(const LinearSolveStatistics& statistics)
+    {
+        converged = converged && statistics.converged;
+        ++linear_solves;
+        krylov_iterations += statistics.iterations;
+        achieved_tolerance =
+            std::max(achieved_tolerance, statistics.achieved_tolerance);
+    }
+
+    void add(const LinearSolveSummary& summary)
+    {
+        converged = converged && summary.converged;
+        linear_solves += summary.solves;
+        krylov_iterations += summary.iterations;
+        achieved_tolerance =
+            std::max(achieved_tolerance, summary.achieved_tolerance);
+    }
 };
 
 } // namespace SimpleFluid

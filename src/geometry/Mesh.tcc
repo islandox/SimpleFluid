@@ -491,6 +491,12 @@ void Mesh<Pack>::prefer_owned_face_owners()
         {
             face_info.owner = neighbor;
             face_info.neighbor = owner;
+            std::swap(
+                face_info.unit_normal_from_owner,
+                face_info.unit_normal_from_neighbor);
+            std::swap(
+                face_info.owner_to_face_distance,
+                face_info.neighbor_to_face_distance);
         }
     }
 }

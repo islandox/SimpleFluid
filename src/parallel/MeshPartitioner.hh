@@ -41,7 +41,9 @@ struct CellPacket {
     Vec3 center{};
     double volume = 0.0;
     std::vector<GO> node_gids;
+    std::vector<Vec3> node_coords;
     std::vector<std::vector<GO>> face_node_keys;
+    std::vector<int> face_boundary_ids;
 
     /**
      * @brief Serialise a vector of cell packets into a flat byte buffer for MPI transmission.
@@ -60,10 +62,18 @@ struct CellPacket {
             append(buf, p.volume);
             std::uint32_t nn = static_cast<std::uint32_t>(p.node_gids.size());
             append(buf, nn);
-            for (auto id : p.node_gids) append(buf, id);
+            for (size_t node = 0; node < p.node_gids.size(); ++node) {
+                append(buf, p.node_gids[node]);
+                append(buf, p.node_coords[node].x);
+                append(buf, p.node_coords[node].y);
+                append(buf, p.node_coords[node].z);
+            }
             std::uint32_t nf = static_cast<std::uint32_t>(p.face_node_keys.size());
             append(buf, nf);
-            for (auto& fn : p.face_node_keys) {
+            for (size_t face = 0; face < p.face_node_keys.size(); ++face) {
+                append(buf, static_cast<std::int32_t>(
+                    p.face_boundary_ids[face]));
+                const auto& fn = p.face_node_keys[face];
                 std::uint32_t fnsz = static_cast<std::uint32_t>(fn.size());
                 append(buf, fnsz);
                 for (auto id : fn) append(buf, id);
@@ -89,9 +99,22 @@ struct CellPacket {
             CellPacket pk;
             rd(pk.gid); std::int32_t ct = 0; rd(ct); pk.cell_type = static_cast<CellType>(ct);
             rd(pk.center.x); rd(pk.center.y); rd(pk.center.z); rd(pk.volume);
-            std::uint32_t nn = 0; rd(nn); rd_gos(pk.node_gids, nn);
-            std::uint32_t nf = 0; rd(nf); pk.face_node_keys.resize(nf);
+            std::uint32_t nn = 0; rd(nn);
+            pk.node_gids.resize(nn);
+            pk.node_coords.resize(nn);
+            for (std::uint32_t node = 0; node < nn; ++node) {
+                rd(pk.node_gids[node]);
+                rd(pk.node_coords[node].x);
+                rd(pk.node_coords[node].y);
+                rd(pk.node_coords[node].z);
+            }
+            std::uint32_t nf = 0; rd(nf);
+            pk.face_node_keys.resize(nf);
+            pk.face_boundary_ids.resize(nf);
             for (std::uint32_t f = 0; f < nf; ++f) {
+                std::int32_t boundary_id = 0;
+                rd(boundary_id);
+                pk.face_boundary_ids[f] = boundary_id;
                 std::uint32_t fnsz = 0; rd(fnsz); rd_gos(pk.face_node_keys[f], fnsz);
             }
             pkts.push_back(std::move(pk));

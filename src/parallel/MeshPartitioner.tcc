@@ -110,11 +110,15 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
         Packet p;
         p.gid = gid; p.cell_type = cell.type; p.center = cell.center; p.volume = cell.volume;
         p.node_gids.assign(cell.node_gids.begin(), cell.node_gids.end());
+        p.node_coords.reserve(p.node_gids.size());
+        for (const auto node_gid : p.node_gids) {
+            p.node_coords.push_back(mesh.node_coord(node_gid));
+        }
         for (auto fid : cell.faces) {
             auto& face = mesh.d_faces[static_cast<size_t>(fid)];
             std::vector<GO> fn(face.node_gids.begin(), face.node_gids.end());
-            std::sort(fn.begin(), fn.end());
             p.face_node_keys.push_back(std::move(fn));
+            p.face_boundary_ids.push_back(face.boundary_id);
         }
         send_p[static_cast<size_t>(dest)].push_back(std::move(p));
     }
@@ -406,13 +410,61 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     mesh.d_tpetra_gid_to_mesh_gid.clear();
     mesh.d_tpetra_gid_offset = 0;
 
-    std::unordered_set<GO> needed_nodes;
-    for (auto& p : owned_pkts) { for (auto n : p.node_gids) needed_nodes.insert(n); for (auto& fn : p.face_node_keys) for (auto n : fn) needed_nodes.insert(n); }
-    for (auto& p : ghost_pkts) { for (auto n : p.node_gids) needed_nodes.insert(n); for (auto& fn : p.face_node_keys) for (auto n : fn) needed_nodes.insert(n); }
-    for (GO nid : needed_nodes) {
-        auto it = orig_ng2l.find(nid); if (it == orig_ng2l.end()) continue;
-        mesh.d_node_gid_to_lid[nid] = static_cast<LO>(mesh.d_node_coords.size());
-        mesh.d_node_coords.push_back(orig_coords[static_cast<size_t>(it->second)]);
+    const auto total_cells = owned_pkts.size() + ghost_pkts.size();
+    size_t total_cell_nodes = 0;
+    size_t maximum_face_nodes = 0;
+    for (const auto* packets : {&owned_pkts, &ghost_pkts})
+    {
+        for (const auto& packet : *packets)
+        {
+            total_cell_nodes += packet.node_gids.size();
+            for (const auto& face_nodes : packet.face_node_keys)
+            {
+                maximum_face_nodes += face_nodes.size();
+            }
+        }
+    }
+    mesh.d_cells.reserve(total_cells);
+    mesh.d_owned_cell_ids.reserve(owned_pkts.size());
+    mesh.d_owned_cell_global_ids.reserve(owned_pkts.size());
+    mesh.d_ghost_cell_global_ids.reserve(ghost_pkts.size());
+    mesh.d_cell_owned_node_global_ids.reserve(total_cell_nodes);
+    mesh.d_face_owned_node_global_ids.reserve(maximum_face_nodes);
+
+    std::unordered_map<GO, Vec3> needed_nodes;
+    for (const auto* packets : {&owned_pkts, &ghost_pkts}) {
+        for (const auto& packet : *packets) {
+            if (packet.node_gids.size() != packet.node_coords.size()) {
+                throw std::runtime_error(
+                    "MeshPartitioner cell packet has inconsistent node coordinates.");
+            }
+            if (packet.face_node_keys.size()
+                != packet.face_boundary_ids.size()) {
+                throw std::runtime_error(
+                    "MeshPartitioner cell packet has inconsistent boundary IDs.");
+            }
+            for (size_t node = 0; node < packet.node_gids.size(); ++node) {
+                needed_nodes.emplace(
+                    packet.node_gids[node], packet.node_coords[node]);
+            }
+            for (const auto& face_nodes : packet.face_node_keys) {
+                for (const auto node_gid : face_nodes) {
+                    if (needed_nodes.contains(node_gid)) continue;
+                    const auto original = orig_ng2l.find(node_gid);
+                    if (original != orig_ng2l.end()) {
+                        needed_nodes.emplace(
+                            node_gid,
+                            orig_coords[static_cast<size_t>(original->second)]);
+                    }
+                }
+            }
+        }
+    }
+    mesh.d_node_coords.reserve(needed_nodes.size());
+    for (const auto& [node_gid, coordinate] : needed_nodes) {
+        mesh.d_node_gid_to_lid[node_gid] =
+            static_cast<LO>(mesh.d_node_coords.size());
+        mesh.d_node_coords.push_back(coordinate);
     }
 
     auto add_cell = [&](const Packet& p, bool owned) -> LO {
@@ -436,7 +488,12 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     auto all = owned_pkts; all.insert(all.end(), ghost_pkts.begin(), ghost_pkts.end());
     for (size_t ci = 0; ci < all.size(); ++ci) {
         auto& p = all[ci]; LO cl = static_cast<LO>(ci);
-        for (auto& fn : p.face_node_keys) {
+        for (size_t packet_face = 0;
+             packet_face < p.face_node_keys.size();
+             ++packet_face) {
+            auto& fn = p.face_node_keys[packet_face];
+            const auto boundary_id =
+                p.face_boundary_ids[packet_face];
             std::string key = Mesh<Pack>::make_face_key(typename Mesh<Pack>::ViewGO(const_cast<GO*>(fn.data()), fn.size()));
             auto it = mesh.d_face_key_to_face.find(key);
             if (it == mesh.d_face_key_to_face.end()) {
@@ -445,7 +502,7 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
                 mesh.d_face_owned_node_global_ids.insert(mesh.d_face_owned_node_global_ids.end(), fn.begin(), fn.end());
                 FaceInfo fi;
                 fi.type = (fn.size() == 3) ? MeshUtils::FaceType::TRIANGLE : MeshUtils::FaceType::QUAD;
-                fi.boundary_id = Mesh<Pack>::invalid_boundary_id;
+                fi.boundary_id = boundary_id;
                 fi.owner = cl; fi.neighbor = invalid_lid;
                 fi.node_gids = typename Mesh<Pack>::ViewGO(mesh.d_face_owned_node_global_ids.data() + off, fn.size());
                 mesh.d_faces.push_back(std::move(fi));
@@ -454,6 +511,11 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
             } else {
                 LO fid = it->second;
                 auto& fi = mesh.d_faces[static_cast<size_t>(fid)];
+                if (fi.boundary_id == Mesh<Pack>::invalid_boundary_id
+                    && boundary_id != Mesh<Pack>::invalid_boundary_id)
+                {
+                    fi.boundary_id = boundary_id;
+                }
                 if (fi.neighbor == invalid_lid) {
                     fi.neighbor = cl;
                     cfl[static_cast<size_t>(cl)].push_back(fid);

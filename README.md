@@ -11,7 +11,7 @@ solver for natural convection. All Phases 0–8 of the planned roadmap are compl
 source, ~11 kLOC tests), covering mesh infrastructure through verification against
 OpenFOAM.
 
-**Phases 9–10 (performance profiling and multiphysics coupling) remain in the roadmap.**
+**Phase 9 performance benchmarking is complete; multiphysics coupling remains in the roadmap.**
 
 | Capability | Status |
 | ---------- | ------ |
@@ -25,7 +25,7 @@ OpenFOAM.
 | Rhie–Chow collocated stabilization | ✅ |
 | Verification suite (cavity, Poiseuille, MMS, OpenFOAM comparison) | ✅ |
 | Boussinesq natural convection examples | ✅ |
-| Performance benchmarks & scaling tests | ⬜ |
+| Performance benchmarks & scaling tests | ✅ |
 | TH/neutronics multiphysics coupling | ⬜ |
 
 ## Governing Equations
@@ -214,6 +214,49 @@ ctest --output-on-failure
 ./build/bin/Release/natural_convection_box
 ./build/bin/Release/natural_convection_cylinder
 ```
+
+## Performance Benchmarks
+
+Build the standalone benchmark executable and run the local Debug-safe suite:
+
+```bash
+cmake --build build --config Debug --target simplefluid_benchmark
+ctest --test-dir build -C Debug -L benchmark --output-on-failure
+```
+
+The benchmark writes one CSV row per measured repetition. Rows include solver
+configuration, mesh and MPI sizes, non-orthogonality angles, nonlinear and
+Krylov iterations, residuals, setup/solve/total wall time, process memory,
+compiler/build metadata, and the Git revision.
+
+Run the larger profiling preset with frame pointers and debug symbols:
+
+```bash
+cmake --build build --config RelWithDebInfo --target simplefluid_benchmark
+./build/bin/RelWithDebInfo/simplefluid_benchmark \
+  --preset release-profile \
+  --output build/benchmarks/release-profile.csv
+```
+
+Run strong-scaling measurements sequentially:
+
+```bash
+mpiexec -n 1 ./build/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/benchmarks/mpi-strong.csv
+mpiexec -n 2 ./build/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/benchmarks/mpi-strong.csv
+mpiexec -n 4 ./build/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/benchmarks/mpi-strong.csv
+```
+
+Run weak-scaling measurements with approximately `32x32x8` cells per rank:
+
+```bash
+mpiexec -n 1 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/benchmarks/mpi-weak.csv
+mpiexec -n 2 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/benchmarks/mpi-weak.csv
+mpiexec -n 4 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/benchmarks/mpi-weak.csv
+```
+
+Use `--case`, `--configuration`, `--nx`, `--ny`, `--nz`, `--shear`,
+`--repetitions`, and `--warmups` for focused runs. Existing CSV files are
+appended only when their header matches the current schema.
 
 ## Dependencies
 

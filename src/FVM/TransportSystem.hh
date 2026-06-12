@@ -56,7 +56,9 @@ PreparedTransportMatrix<Pack> prepare_transport_matrix(
     }
     if (!cached_matrix->isFillComplete()
         || !cached_matrix->getRowMap()->isSameAs(*mesh.owned_cell_map())
-        || !cached_matrix->getDomainMap()->isSameAs(*mesh.overlap_cell_map()))
+        || cached_matrix->getColMap().is_null()
+        || !cached_matrix->getColMap()->isSameAs(*mesh.overlap_cell_map())
+        || !cached_matrix->getDomainMap()->isSameAs(*mesh.owned_cell_map()))
     {
         throw std::invalid_argument(
             "transport_system cached matrix is incompatible with the mesh.");
