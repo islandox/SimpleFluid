@@ -6,7 +6,7 @@
 #pragma once
 
 #include "geometry/MeshUtils.hh"
-#include "geometry/mesh/BoundaryFacePatch.hh"
+#include "geometry/mesh/BoundaryFaceBatch.hh"
 
 #include <cstddef>
 #include <limits>
@@ -35,7 +35,7 @@ public:
     using local_ordinal_type = size_t;
     using scalar_type = real_t;
     using Vec3 = MeshUtils::Vec3;
-    using BoundaryFacePatch = Meshes::BoundaryFacePatch<face_id_t>;
+    using BoundaryFaceBatch = Meshes::BoundaryFaceBatch<face_id_t>;
 
     static constexpr int invalid_boundary_id = -1;
     static constexpr local_ordinal_type invalid_local_id =
@@ -448,13 +448,13 @@ public:
 
     const std::string& boundary_name(face_id_t face_id) const
     {
-        const auto patch_id = boundary_id(face_id);
-        if (patch_id == invalid_boundary_id)
+        const auto batch_id = boundary_id(face_id);
+        if (batch_id == invalid_boundary_id)
         {
             throw std::out_of_range(
                 "Requested face is not a boundary face.");
         }
-        return boundary_patch_name(patch_id);
+        return boundary_batch_name(batch_id);
     }
 
     const std::string& boundary_name(local_ordinal_type local_id) const
@@ -462,29 +462,29 @@ public:
         return boundary_name(face_id(local_id));
     }
 
-    const std::string& boundary_patch_name(int patch_id) const
+    const std::string& boundary_batch_name(int batch_id) const
     {
-        return derived().boundary_patch_name_impl(patch_id);
+        return derived().boundary_batch_name_impl(batch_id);
     }
 
-    auto boundary_face_patch(int patch_id) const
+    auto boundary_face_batch(int batch_id) const
     {
-        return derived().boundary_face_patch_impl(patch_id);
+        return derived().boundary_face_batch_impl(batch_id);
     }
 
-    auto boundary_patch_ids() const
+    auto boundary_batch_ids() const
     {
-        return derived().boundary_patch_ids_impl();
+        return derived().boundary_batch_ids_impl();
     }
 
-    int num_boundary_patches() const noexcept
+    int num_boundary_batches() const noexcept
     {
-        return derived().num_boundary_patches_impl();
+        return derived().num_boundary_batches_impl();
     }
 
-    auto boundary_patches() const
+    auto boundary_batches() const
     {
-        return derived().boundary_patches_impl();
+        return derived().boundary_batches_impl();
     }
 
     Vec3 node_coordinates(node_id_t node_id) const

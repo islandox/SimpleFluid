@@ -167,7 +167,7 @@ private:
     using Base::create_cell_face_distances;
     using Base::create_maps;
     using Base::create_device_views;
-    using Base::d_boundary_id_to_face_patch;
+    using Base::d_boundary_id_to_face_batch;
     using Base::d_boundary_id_to_name;
     using Base::d_boundary_name_to_id;
     using Base::d_cell_gid_to_lid;

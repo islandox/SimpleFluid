@@ -101,32 +101,32 @@ TEST(SemiStructMeshTopoTest, QueriesCellFacesAndAdjacency)
     EXPECT_EQ(topology.neighbor_cell(axial), (CellID{0, 1}));
 }
 
-TEST(SemiStructMeshTopoTest, BuildsBoundaryPatches)
+TEST(SemiStructMeshTopoTest, BuildsBoundaryBatches)
 {
     const auto topology = make_topology();
 
-    EXPECT_EQ(topology.boundary_patches().size(), 6U);
-    EXPECT_EQ(topology.boundary_patch_name(0), "zmin");
-    EXPECT_EQ(topology.boundary_patch_name(1), "zmax");
+    EXPECT_EQ(topology.boundary_batches().size(), 6U);
+    EXPECT_EQ(topology.boundary_batch_name(0), "zmin");
+    EXPECT_EQ(topology.boundary_batch_name(1), "zmax");
     for (int patch = 0; patch < 6; ++patch)
     {
-        EXPECT_EQ(topology.boundary_face_patch(patch).face_lids.size(), 2U);
+        EXPECT_EQ(topology.boundary_face_batch(patch).face_lids.size(), 2U);
     }
 
     const FaceID ymin{0, 1, Indexer::SIDE};
     EXPECT_TRUE(topology.is_boundary_face(ymin));
-    EXPECT_EQ(topology.boundary_patch_name(topology.boundary_id(ymin)),
+    EXPECT_EQ(topology.boundary_batch_name(topology.boundary_id(ymin)),
               "ymin");
     EXPECT_EQ(topology.neighbor_cell(ymin), CellID{});
-    EXPECT_THROW(topology.boundary_face_patch(6), std::out_of_range);
+    EXPECT_THROW(topology.boundary_face_batch(6), std::out_of_range);
 }
 
 TEST(SemiStructMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
 {
     const auto topology = make_topology_with_interior_cell();
 
-    ASSERT_EQ(topology.interior_cell_patch().size(), 1U);
-    EXPECT_EQ(topology.interior_cell_patch()[0], (CellID{0, 1}));
+    ASSERT_EQ(topology.interior_cell_batch().size(), 1U);
+    EXPECT_EQ(topology.interior_cell_batch()[0], (CellID{0, 1}));
     EXPECT_EQ(
         topology.neighbor_cells(CellID{0, 1}),
         (Topology::NeighborCells{
@@ -161,10 +161,10 @@ TEST(SemiStructMeshTopoTest, WrapsAxialFacesPeriodically)
     EXPECT_FALSE(topology.is_boundary_face(seam));
     EXPECT_EQ(topology.cell_faces(CellID{0, 1})[1], seam);
 
-    EXPECT_EQ(topology.boundary_patches().size(), 1U);
-    EXPECT_EQ(topology.boundary_face_patch(2).face_lids.size(), 6U);
-    EXPECT_THROW(topology.boundary_face_patch(0), std::out_of_range);
-    EXPECT_TRUE(topology.interior_cell_patch().empty());
+    EXPECT_EQ(topology.boundary_batches().size(), 1U);
+    EXPECT_EQ(topology.boundary_face_batch(2).face_lids.size(), 6U);
+    EXPECT_THROW(topology.boundary_face_batch(0), std::out_of_range);
+    EXPECT_TRUE(topology.interior_cell_batch().empty());
     EXPECT_EQ(
         topology.neighbor_cells(CellID{0, 0}),
         (Topology::NeighborCells{{0, 1}, {0, 1}}));
@@ -206,9 +206,9 @@ TEST(SemiStructMeshTopoTest, HandlesSingleAxialLayer)
 
     const auto periodic_with_interior =
         make_topology_with_interior_cell(1, true);
-    ASSERT_EQ(periodic_with_interior.interior_cell_patch().size(), 1U);
+    ASSERT_EQ(periodic_with_interior.interior_cell_batch().size(), 1U);
     EXPECT_EQ(
-        periodic_with_interior.interior_cell_patch()[0],
+        periodic_with_interior.interior_cell_batch()[0],
         (CellID{0, 0}));
 }
 

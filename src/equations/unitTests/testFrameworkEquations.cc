@@ -98,15 +98,15 @@ TEST(FrameworkEquationTest, SolvesScalarDiffusionOnCartesianHandle)
         SimpleFluid::FVM::SourceOperator<Pack>{
             [](int, size_t) { return 0.0; }});
     equation.set_boundary_providers(
-        [](int patch_id)
+        [](int batch_id)
         {
-            return patch_id < 2
+            return batch_id < 2
                  ? SimpleFluid::BoundaryConditionType::Dirichlet
                  : SimpleFluid::BoundaryConditionType::Neumann;
         },
-        [](int patch_id, size_t, size_t)
+        [](int batch_id, size_t, size_t)
         {
-            return patch_id == 1 ? 1.0 : 0.0;
+            return batch_id == 1 ? 1.0 : 0.0;
         });
 
     auto assembled = equation.assemble();

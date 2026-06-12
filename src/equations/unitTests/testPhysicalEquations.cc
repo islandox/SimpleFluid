@@ -557,7 +557,7 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     ASSERT_GE(mesh->num_owned_cells(), 3u * 3u * 3u);
-    EXPECT_EQ(mesh->boundary_patches().size(), 6u);
+    EXPECT_EQ(mesh->boundary_batches().size(), 6u);
 
     bool saw_triangular_face = false;
     size_t boundary_cells = 0;

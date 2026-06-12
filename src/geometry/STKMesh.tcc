@@ -229,7 +229,7 @@ void STKMesh<Pack>::build_cell_list()
     d_cell_gid_to_lid.clear();
     d_node_gid_to_lid.clear();
     d_face_key_to_face.clear();
-    d_boundary_id_to_face_patch.clear();
+    d_boundary_id_to_face_batch.clear();
 
     d_stk.coord_field = nullptr;
     if (const auto* coord_base = d_stk.meta->coordinate_field(); coord_base != nullptr)
@@ -558,7 +558,7 @@ void STKMesh<Pack>::initialize_boundary_id_maps()
 {
     d_boundary_id_to_name.clear();
     d_boundary_name_to_id.clear();
-    d_boundary_id_to_face_patch.clear();
+    d_boundary_id_to_face_batch.clear();
     d_next_boundary_id = 1;
 
     for (const auto& [name, id] : d_stk.options.boundary_name_to_id)
@@ -618,7 +618,7 @@ int STKMesh<Pack>::get_or_create_boundary_id(const std::string& name)
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
 {
-    d_boundary_id_to_face_patch.clear();
+    d_boundary_id_to_face_batch.clear();
 
     const auto side_rank = d_stk.meta->side_rank();
     std::unordered_map<std::string, const stk::mesh::Part*> face_key_to_part;
@@ -683,9 +683,9 @@ void STKMesh<Pack>::assign_boundary_ids_from_stk_side_parts()
         {
             continue;
         }
-        auto& face_patch = d_boundary_id_to_face_patch[face_info.boundary_id];
-        face_patch.id = face_info.boundary_id;
-        face_patch.face_lids.push_back(static_cast<local_ordinal_type>(fid));
+        auto& face_batch = d_boundary_id_to_face_batch[face_info.boundary_id];
+        face_batch.id = face_info.boundary_id;
+        face_batch.face_lids.push_back(static_cast<local_ordinal_type>(fid));
     }
 }
 

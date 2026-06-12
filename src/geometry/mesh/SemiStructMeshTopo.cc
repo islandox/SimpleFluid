@@ -83,7 +83,7 @@ SemiStructMeshTopo::SemiStructMeshTopo(
         axial_periodic);
     initialize_face_adjacency();
     initialize_cell_adjacency();
-    initialize_boundary_patches();
+    initialize_boundary_batches();
 }
 
 std::vector<SemiStructMeshTopo::FaceID>
@@ -157,42 +157,42 @@ int SemiStructMeshTopo::boundary_id(FaceID id) const noexcept
 }
 
 const std::string&
-SemiStructMeshTopo::boundary_patch_name(int patch_id) const
+SemiStructMeshTopo::boundary_batch_name(int batch_id) const
 {
-    const auto patch = d_boundary_names.find(patch_id);
-    if (patch == d_boundary_names.end())
+    const auto iter = d_boundary_names.find(batch_id);
+    if (iter == d_boundary_names.end())
     {
-        throw std::out_of_range("Requested boundary patch is not found.");
+        throw std::out_of_range("Requested boundary batch is not found.");
     }
-    return patch->second;
+    return iter->second;
 }
 
-const SemiStructMeshTopo::BoundaryPatch&
-SemiStructMeshTopo::boundary_face_patch(int patch_id) const
+const SemiStructMeshTopo::BoundaryBatch&
+SemiStructMeshTopo::boundary_face_batch(int batch_id) const
 {
-    const auto patch = d_boundary_patches.find(patch_id);
-    if (patch == d_boundary_patches.end())
+    const auto iter = d_boundary_batches.find(batch_id);
+    if (iter == d_boundary_batches.end())
     {
-        throw std::out_of_range("Requested boundary patch is not found.");
+        throw std::out_of_range("Requested boundary batch is not found.");
     }
-    return patch->second;
+    return iter->second;
 }
 
-std::vector<int> SemiStructMeshTopo::boundary_patch_ids() const
+std::vector<int> SemiStructMeshTopo::boundary_batch_ids() const
 {
     std::vector<int> ids;
-    ids.reserve(d_boundary_patches.size());
-    for (const auto& [id, patch] : d_boundary_patches)
+    ids.reserve(d_boundary_batches.size());
+    for (const auto& [id, batch] : d_boundary_batches)
     {
-        (void)patch;
+        (void)batch;
         ids.push_back(id);
     }
     return ids;
 }
 
-int SemiStructMeshTopo::num_boundary_patches() const noexcept
+int SemiStructMeshTopo::num_boundary_batches() const noexcept
 {
-    return static_cast<int>(d_boundary_patches.size());
+    return static_cast<int>(d_boundary_batches.size());
 }
 
 void SemiStructMeshTopo::initialize_face_adjacency()
@@ -292,7 +292,7 @@ void SemiStructMeshTopo::initialize_cell_adjacency()
         }
     }
 
-    d_interior_cell_patch.reserve(d_indexer.total_cells());
+    d_interior_cell_batch.reserve(d_indexer.total_cells());
     for (Ordinal layer = 0; layer < layers; ++layer)
     {
         if (d_axial_neighbors[layer].num != 2)
@@ -306,7 +306,7 @@ void SemiStructMeshTopo::initialize_cell_adjacency()
             if (d_base_neighbor_cells[cell].size()
                 == d_cell_side_faces[cell].size())
             {
-                d_interior_cell_patch.push_back({cell, layer});
+                d_interior_cell_batch.push_back({cell, layer});
             }
         }
     }
@@ -451,19 +451,19 @@ void SemiStructMeshTopo::build_base_topology(
     }
 }
 
-void SemiStructMeshTopo::initialize_boundary_patches()
+void SemiStructMeshTopo::initialize_boundary_batches()
 {
-    for (const auto& [patch_id, name] : d_boundary_names)
+    for (const auto& [batch_id, name] : d_boundary_names)
     {
         static_cast<void>(name);
         if (d_indexer.axial_periodic
-            && (patch_id == 0 || patch_id == 1))
+            && (batch_id == 0 || batch_id == 1))
         {
             continue;
         }
-        d_boundary_patches.emplace(
-            patch_id,
-            BoundaryPatch{patch_id, {}});
+        d_boundary_batches.emplace(
+            batch_id,
+            BoundaryBatch{batch_id, {}});
     }
 
     if (!d_indexer.axial_periodic)
@@ -472,9 +472,9 @@ void SemiStructMeshTopo::initialize_boundary_patches()
              cell < d_indexer.num_cells_per_layer;
              ++cell)
         {
-            d_boundary_patches.at(0).face_lids.push_back(
+            d_boundary_batches.at(0).face_lids.push_back(
                 {cell, 0, Indexer::AXIAL});
-            d_boundary_patches.at(1).face_lids.push_back(
+            d_boundary_batches.at(1).face_lids.push_back(
                 {cell, d_indexer.num_layers, Indexer::AXIAL});
         }
     }
@@ -483,8 +483,8 @@ void SemiStructMeshTopo::initialize_boundary_patches()
          side_face < d_side_faces.size();
          ++side_face)
     {
-        const auto patch_id = d_side_faces[side_face].boundary_id;
-        if (patch_id == invalid_boundary_id)
+        const auto batch_id = d_side_faces[side_face].boundary_id;
+        if (batch_id == invalid_boundary_id)
         {
             continue;
         }
@@ -492,7 +492,7 @@ void SemiStructMeshTopo::initialize_boundary_patches()
              layer < d_indexer.num_layers;
              ++layer)
         {
-            d_boundary_patches.at(patch_id).face_lids.push_back(
+            d_boundary_batches.at(batch_id).face_lids.push_back(
                 {side_face, layer, Indexer::SIDE});
         }
     }

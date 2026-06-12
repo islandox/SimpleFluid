@@ -166,12 +166,12 @@ public:
     };
 
     /**
-     * @brief Logical grouping of faces belonging to one boundary patch.
+     * @brief Logical grouping of faces belonging to one boundary batch.
      *
      * Each patch has a unique integer identifier and a list of face local
      * ordinals that form the patch.
      */
-    struct BoundaryFacePatch
+    struct BoundaryFaceBatch
     {
         int id = invalid_boundary_id;
         ArrLO face_lids;
@@ -239,9 +239,9 @@ public:
      * @brief Return the global offset of this process's owned-cell Tpetra GID block.
      */
     global_ordinal_type tpetra_gid_offset() const noexcept { return d_tpetra_gid_offset; }
-    const std::unordered_map<int, BoundaryFacePatch>& boundary_patches() const noexcept
+    const std::unordered_map<int, BoundaryFaceBatch>& boundary_batches() const noexcept
     {
-        return d_boundary_id_to_face_patch;
+        return d_boundary_id_to_face_batch;
     }
 
 //------------------------------ random access -------------------------------//
@@ -320,8 +320,8 @@ public:
 
     inline int boundary_id(local_ordinal_type fid) const;
     inline const std::string& boundary_name(local_ordinal_type fid) const;
-    inline const std::string& boundary_patch_name(int patch_id) const;
-    inline const BoundaryFacePatch& boundary_face_patch(int patch_id) const;
+    inline const std::string& boundary_batch_name(int batch_id) const;
+    inline const BoundaryFaceBatch& boundary_face_batch(int batch_id) const;
 
     inline local_ordinal_type global_to_local_cell(global_ordinal_type gid) const;
 
@@ -375,7 +375,7 @@ protected:
 
     std::unordered_map<int, std::string> d_boundary_id_to_name;
     std::unordered_map<std::string, int> d_boundary_name_to_id;
-    std::unordered_map<int, BoundaryFacePatch> d_boundary_id_to_face_patch;
+    std::unordered_map<int, BoundaryFaceBatch> d_boundary_id_to_face_batch;
     int d_next_boundary_id = 0;
 
     RCP<const map_type> d_owned_cell_map;
@@ -405,7 +405,7 @@ struct Mesh<Pack>::DeviceViews
     kokkos_1dview<const local_ordinal_type>   face_owner;
     kokkos_1dview<const local_ordinal_type>   face_neighbor;
     kokkos_1dview<const int>                  face_type;
-    kokkos_1dview<const int>                  face_patch;
+    kokkos_1dview<const int>                  face_batch;
 
     kokkos_1dview<const real_t>          face_area;
     kokkos_vec3view<const real_t>        face_area_vector;

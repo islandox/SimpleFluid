@@ -1,6 +1,6 @@
 /**
- * @file StructuredPatchView.hh
- * @brief Cartesian-product views for structured mesh patches.
+ * @file StructuredBatchView.hh
+ * @brief Cartesian-product views for structured mesh batches.
  *
  * Delegates to `std::views::cartesian_product` when the standard library
  * provides it; falls back to a minimal forward-range implementation on

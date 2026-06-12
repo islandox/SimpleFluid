@@ -118,7 +118,7 @@ public:
     /**
      * @brief Set callbacks used to assemble boundary contributions.
      *
-     * The value provider receives patch ID, in-patch face index, and component
+     * The value provider receives patch ID, in-batch face index, and component
      * index.
      *
      * @throws std::invalid_argument If either provider is empty.
@@ -347,14 +347,14 @@ private:
         const auto& mesh = d_unknown->mesh();
         const auto* diffusion = find_diffusion();
         const auto* convection = find_convection();
-        for (const auto& [patch_id, patch] : mesh.boundary_patches())
+        for (const auto& [batch_id, batch] : mesh.boundary_batches())
         {
-            const auto type = d_boundary_type(patch_id);
+            const auto type = d_boundary_type(batch_id);
             for (size_t in_patch = 0;
-                 in_patch < patch.face_lids.size();
+                 in_patch < batch.face_lids.size();
                  ++in_patch)
             {
-                const auto face_lid = patch.face_lids[in_patch];
+                const auto face_lid = batch.face_lids[in_patch];
                 if (!mesh.is_owned_face(face_lid)
                     || !mesh.is_boundary_face(face_lid))
                 {
@@ -386,7 +386,7 @@ private:
                             additions[component] +=
                                 coefficient
                               * d_boundary_value(
-                                    patch_id, in_patch, component);
+                                    batch_id, in_patch, component);
                         }
                     }
                     else if (type == BoundaryConditionType::Neumann)
@@ -398,7 +398,7 @@ private:
                             additions[component] +=
                                 diffusion->diffusivity
                               * d_boundary_value(
-                                    patch_id, in_patch, component)
+                                    batch_id, in_patch, component)
                               * mesh.face_area(face_lid);
                         }
                     }
@@ -431,7 +431,7 @@ private:
                             additions[component] -=
                                 outward_flux
                               * d_boundary_value(
-                                    patch_id, in_patch, component);
+                                    batch_id, in_patch, component);
                         }
                     }
                 }

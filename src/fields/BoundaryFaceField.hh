@@ -143,14 +143,14 @@ public:
     scalar_type value(local_ordinal_type face_lid) const;
 
     /**
-     * @brief Read the value stored at a boundary face by boundary ID and in-patch ID.
+     * @brief Read the value stored at a boundary face by boundary ID and in-batch ID.
      *
-     * @param boundary_id Boundary patch ID.
-     * @param in_patch_id Local ID of the face within the boundary patch.
+     * @param boundary_id Boundary batch ID.
+     * @param in_batch_id Local ID of the face within the boundary batch.
      * @return Stored scalar value.
-     * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID is out of bounds for the patch.
+     * @throws std::out_of_range if the boundary batch is not found or if the in-batch ID is out of bounds for the batch.
      */
-    scalar_type value(int boundary_id, local_ordinal_type in_patch_id) const;
+    scalar_type value(int boundary_id, local_ordinal_type in_batch_id) const;
 
     /**
      * @brief Write a value to a boundary face.
@@ -163,14 +163,14 @@ public:
     void set_value(local_ordinal_type face_lid, const scalar_type& value);
 
     /**
-     * @brief Write a value to a boundary face by boundary ID and in-patch ID.
+     * @brief Write a value to a boundary face by boundary ID and in-batch ID.
      *
-     * @param boundary_id Boundary patch ID.
-     * @param in_patch_id Local ID of the face within the boundary patch.
+     * @param boundary_id Boundary batch ID.
+     * @param in_batch_id Local ID of the face within the boundary batch.
      * @param value Scalar value to store.
-     * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID is out of bounds for the patch.
+     * @throws std::out_of_range if the boundary batch is not found or if the in-batch ID is out of bounds for the batch.
      */
-    void set_value(int boundary_id, local_ordinal_type in_patch_id, const scalar_type& value);
+    void set_value(int boundary_id, local_ordinal_type in_batch_id, const scalar_type& value);
 
     // -------- queries --------
 
@@ -312,20 +312,20 @@ auto BoundaryFaceField<Pack>::make_boundary_face_map(
     }
 
     size_t num_boundary_faces = 0;
-    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
     {
-        (void)patch_id;
-        num_boundary_faces += boundary_patch.face_lids.size();
+        (void)batch_id;
+        num_boundary_faces += boundary_batch.face_lids.size();
     }
 
     owned_boundary_face_ids.clear();
     owned_boundary_face_ids.reserve(num_boundary_faces);
     face_lid_to_owned_row.assign(mesh->num_faces(), invalid_owned_row());
 
-    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
     {
-        (void)patch_id;
-        for (auto fid : boundary_patch.face_lids)
+        (void)batch_id;
+        for (auto fid : boundary_batch.face_lids)
         {
             if (!mesh->is_boundary_face(fid))
             {
@@ -429,37 +429,37 @@ auto BoundaryFaceField<Pack>::value(local_ordinal_type face_lid) const
 }
 
 /**
- * @brief Read the value stored at a boundary face by boundary ID and in-patch ID.
+ * @brief Read the value stored at a boundary face by boundary ID and in-batch ID.
  *
  * @tparam Pack Tpetra type pack.
- * @param patch_id Boundary patch ID.
- * @param in_patch_id Local ID of the face within the boundary patch.
+ * @param batch_id Boundary batch ID.
+ * @param in_batch_id Local ID of the face within the boundary batch.
  * @return Stored scalar value.
- * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID
- *         is out of bounds for the patch.
+ * @throws std::out_of_range if the boundary batch is not found or if the in-batch ID
+ *         is out of bounds for the batch.
  */
 template<TpetraTypePack Pack>
-auto BoundaryFaceField<Pack>::value(int patch_id, local_ordinal_type in_patch_id) const
+auto BoundaryFaceField<Pack>::value(int batch_id, local_ordinal_type in_batch_id) const
     -> scalar_type
 {
-    const auto& face_patch = d_mesh->boundary_face_patch(patch_id);
+    const auto& face_batch = d_mesh->boundary_face_batch(batch_id);
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
-        if (in_patch_id < 0)
+        if (in_batch_id < 0)
         {
             throw std::out_of_range(
-                "In-patch ID cannot be negative: "
-                + std::to_string(in_patch_id));
+                "In-batch ID cannot be negative: "
+                + std::to_string(in_batch_id));
         }
     }
 
-    const auto patch_index = static_cast<size_t>(in_patch_id);
-    if (patch_index >= face_patch.face_lids.size())
+    const auto batch_index = static_cast<size_t>(in_batch_id);
+    if (batch_index >= face_batch.face_lids.size())
     {
-        throw std::out_of_range("In-patch ID is out of bounds for the specified boundary patch.");
+        throw std::out_of_range("In-batch ID is out of bounds for the specified boundary batch.");
     }
 
-    return value(face_patch.face_lids[patch_index]);
+    return value(face_batch.face_lids[batch_index]);
 }
 
 /**
@@ -478,38 +478,38 @@ void BoundaryFaceField<Pack>::set_value(local_ordinal_type face_lid,
 }
 
 /**
- * @brief Write a value to a boundary face by boundary ID and in-patch ID.
+ * @brief Write a value to a boundary face by boundary ID and in-batch ID.
  *
  * @tparam Pack Tpetra type pack.
- * @param patch_id Boundary patch ID.
- * @param in_patch_id Local ID of the face within the boundary patch.
+ * @param batch_id Boundary batch ID.
+ * @param in_batch_id Local ID of the face within the boundary batch.
  * @param value Scalar value to store.
- * @throws std::out_of_range if the boundary patch is not found or if the in-patch ID
- *         is out of bounds for the patch.
+ * @throws std::out_of_range if the boundary batch is not found or if the in-batch ID
+ *         is out of bounds for the batch.
  */
 template<TpetraTypePack Pack>
-void BoundaryFaceField<Pack>::set_value(int patch_id,
-                                        local_ordinal_type in_patch_id,
+void BoundaryFaceField<Pack>::set_value(int batch_id,
+                                        local_ordinal_type in_batch_id,
                                         const scalar_type& value)
 {
-    const auto& face_patch = d_mesh->boundary_face_patch(patch_id);
+    const auto& face_batch = d_mesh->boundary_face_batch(batch_id);
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
-        if (in_patch_id < 0)
+        if (in_batch_id < 0)
         {
             throw std::out_of_range(
-                "In-patch ID cannot be negative: "
-                + std::to_string(in_patch_id));
+                "In-batch ID cannot be negative: "
+                + std::to_string(in_batch_id));
         }
     }
 
-    const auto patch_index = static_cast<size_t>(in_patch_id);
-    if (patch_index >= face_patch.face_lids.size())
+    const auto batch_index = static_cast<size_t>(in_batch_id);
+    if (batch_index >= face_batch.face_lids.size())
     {
-        throw std::out_of_range("In-patch ID is out of bounds for the specified boundary patch.");
+        throw std::out_of_range("In-batch ID is out of bounds for the specified boundary batch.");
     }
 
-    set_value(face_patch.face_lids[patch_index], value);
+    set_value(face_batch.face_lids[batch_index], value);
 }
 
 /**

@@ -77,13 +77,13 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
 
     VelocityBoundaryCache<Pack> cache(mesh);
 
-    for (const auto& [patch_id, boundary_patch] : mesh->boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
     {
         typename VelocityBoundaryCache<Pack>::vec_type prescribed_value{};
         auto boundary_type = BoundaryConditionType::Neumann;
 
         const auto iter =
-            boundary_conditions.velocity.find(mesh->boundary_patch_name(patch_id));
+            boundary_conditions.velocity.find(mesh->boundary_batch_name(batch_id));
         if (iter != boundary_conditions.velocity.end())
         {
             boundary_type = iter->second.type;
@@ -101,10 +101,10 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
             }
         }
 
-        Arr<typename VelocityBoundaryCache<Pack>::vec_type> patch_values(
-            boundary_patch.face_lids.size(), prescribed_value);
-        cache.value[patch_id] = std::move(patch_values);
-        cache.type[patch_id] = boundary_type;
+        Arr<typename VelocityBoundaryCache<Pack>::vec_type> batch_values(
+            boundary_batch.face_lids.size(), prescribed_value);
+        cache.value[batch_id] = std::move(batch_values);
+        cache.type[batch_id] = boundary_type;
     }
 
     return cache;
@@ -129,11 +129,11 @@ void validate_face_flux_inputs(
     const VelocityBoundaryCache<Pack>* boundary_cache)
 {
     const auto& mesh = velocity.mesh();
-    if (boundary_cache != nullptr && boundary_cache->value.size() != mesh.boundary_patches().size())
+    if (boundary_cache != nullptr && boundary_cache->value.size() != mesh.boundary_batches().size())
     {
         throw std::invalid_argument("face_fluxes received the wrong boundary-cache size.");
     }
-    if (boundary_cache != nullptr && boundary_cache->type.size() != mesh.boundary_patches().size())
+    if (boundary_cache != nullptr && boundary_cache->type.size() != mesh.boundary_batches().size())
     {
         throw std::invalid_argument("face_fluxes received the wrong boundary-cache type size.");
     }
@@ -224,27 +224,27 @@ void load_boundary_face_velocity(
     if (boundary_cache == nullptr) return;
 
     const auto& mesh = face_velocity.mesh();
-    for (auto [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (auto [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        if (boundary_patch.face_lids.empty())
+        if (boundary_batch.face_lids.empty())
         {
             continue;
         }
 
-        const auto iter = boundary_cache->value.find(patch_id);
+        const auto iter = boundary_cache->value.find(batch_id);
         if (iter == boundary_cache->value.end())
         {
             continue;
         }
-        const auto type_iter = boundary_cache->type.find(patch_id);
+        const auto type_iter = boundary_cache->type.find(batch_id);
         const auto boundary_type =
             type_iter == boundary_cache->type.end()
           ? BoundaryConditionType::Neumann
           : type_iter->second;
 
-        for (size_t i = 0; i < boundary_patch.face_lids.size(); ++i)
+        for (size_t i = 0; i < boundary_batch.face_lids.size(); ++i)
         {
-            const auto face_lid = boundary_patch.face_lids[i];
+            const auto face_lid = boundary_batch.face_lids[i];
             if (!face_velocity.is_owned_face(face_lid)) continue;
             if (!mesh.is_boundary_face(face_lid)) continue;
 

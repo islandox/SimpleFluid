@@ -69,7 +69,7 @@ TEST(FieldStoredTest, SupportsFaceAndBoundaryFaceLocations)
         mesh);
 
     const auto boundary_face =
-        mesh->boundary_patches().begin()->second.face_lids.front();
+        mesh->boundary_batches().begin()->second.face_lids.front();
     boundary.set_value(boundary_face, 7.0);
 
     EXPECT_DOUBLE_EQ(faces.value(0), 1.0);

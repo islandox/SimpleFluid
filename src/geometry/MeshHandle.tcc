@@ -183,7 +183,7 @@ void MeshHandle<Pack>::initialize_orthogonal(
     }
     initialize_faces(std::move(owned_faces), std::move(overlap_faces));
     initialize_cell_faces();
-    initialize_boundary_patches(*mesh);
+    initialize_boundary_batches(*mesh);
     create_maps(comm);
 }
 
@@ -247,7 +247,7 @@ void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
     }
     initialize_faces(std::move(owned_faces), std::move(overlap_faces));
     initialize_cell_faces();
-    initialize_boundary_patches(*adapter);
+    initialize_boundary_batches(*adapter);
 
     d_owned_cell_map = mesh.owned_cell_map();
     d_overlap_cell_map = mesh.overlap_cell_map();
@@ -288,7 +288,7 @@ void MeshHandle<Pack>::initialize_serial(const MeshType& mesh)
     }
     initialize_faces(std::move(faces), {});
     initialize_cell_faces();
-    initialize_boundary_patches(mesh);
+    initialize_boundary_batches(mesh);
     create_maps(Tpetra::getDefaultComm());
 }
 
@@ -382,23 +382,23 @@ void MeshHandle<Pack>::initialize_cell_faces()
 }
 
 /**
- * @brief Materialize locally visible boundary patches.
+ * @brief Materialize locally visible boundary batches.
  *
  * Supports both view-based and legacy materialized boundary-patch APIs.
  *
  * @tparam MeshType Concrete mesh or adapter type.
- * @param mesh Mesh providing boundary patch metadata and face IDs.
+ * @param mesh Mesh providing boundary batch metadata and face IDs.
  */
 template<TpetraTypePack Pack>
 template<class MeshType>
-void MeshHandle<Pack>::initialize_boundary_patches(
+void MeshHandle<Pack>::initialize_boundary_batches(
     const MeshType& mesh)
 {
-    auto materialize_patch =
-        [&](int patch_id, const auto& source_faces)
+    auto materialize_batch =
+        [&](int batch_id, const auto& source_faces)
     {
-        BoundaryFacePatch patch;
-        patch.id = patch_id;
+        BoundaryFaceBatch batch;
+        batch.id = batch_id;
         for (const auto face : source_faces)
         {
             const auto geometry_lid =
@@ -407,34 +407,34 @@ void MeshHandle<Pack>::initialize_boundary_patches(
                 d_face_local_by_geometry.find(geometry_lid);
             if (iter != d_face_local_by_geometry.end())
             {
-                patch.face_lids.push_back(iter->second);
+                batch.face_lids.push_back(iter->second);
             }
         }
-        if (!patch.face_lids.empty())
+        if (!batch.face_lids.empty())
         {
             d_boundary_names.emplace(
-                patch_id, mesh.boundary_patch_name(patch_id));
-            d_boundary_patches.emplace(patch_id, std::move(patch));
+                batch_id, mesh.boundary_batch_name(batch_id));
+            d_boundary_batches.emplace(batch_id, std::move(batch));
         }
     };
 
     if constexpr (std::ranges::range<
-                      decltype(mesh.boundary_face_patch(0))>)
+                      decltype(mesh.boundary_face_batch(0))>)
     {
-        // New view-based API: boundary_face_patch() returns a view
-        for (int patch_id : mesh.boundary_patch_ids())
+        // New view-based API: boundary_face_batch() returns a view
+        for (int batch_id : mesh.boundary_batch_ids())
         {
-            materialize_patch(
-                patch_id, mesh.boundary_face_patch(patch_id));
+            materialize_batch(
+                batch_id, mesh.boundary_face_batch(batch_id));
         }
     }
     else
     {
         // Legacy materialized-map API
-        for (const auto& [patch_id, source_patch] :
-             mesh.boundary_patches())
+        for (const auto& [batch_id, source_batch] :
+             mesh.boundary_batches())
         {
-            materialize_patch(patch_id, source_patch.face_lids);
+            materialize_batch(batch_id, source_batch.face_lids);
         }
     }
 }

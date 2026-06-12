@@ -161,19 +161,19 @@ TEST(OrthogonalCartesian3DTest, ComputesBoundaryFacesAndPatches)
     EXPECT_EQ(mesh.boundary_id(xmin), 0);
     EXPECT_EQ(mesh.boundary_name(xmin), "xmin");
 
-    EXPECT_EQ(mesh.num_boundary_patches(), 6);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(0)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(1)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(2)), 4);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(3)), 4);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(4)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(5)), 2);
-    EXPECT_EQ(mesh.boundary_patch_name(5), "zmax");
+    EXPECT_EQ(mesh.num_boundary_batches(), 6);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(0)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(1)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(2)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(3)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(4)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(5)), 2);
+    EXPECT_EQ(mesh.boundary_batch_name(5), "zmax");
 
     EXPECT_THROW(
         mesh.boundary_name(FaceID{1, 0, 0, Mesh::X_FACE}),
         std::out_of_range);
-    EXPECT_THROW(mesh.boundary_face_patch(6), std::out_of_range);
+    EXPECT_THROW(mesh.boundary_face_batch(6), std::out_of_range);
 }
 
 TEST(OrthogonalCartesian3DTest, MapsStructuredAndLocalIdentifiers)

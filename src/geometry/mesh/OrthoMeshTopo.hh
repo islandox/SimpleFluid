@@ -6,7 +6,7 @@
 #pragma once
 
 #include "geometry/mesh/OrthogonalIndexer.hh"
-#include "geometry/mesh/StructuredPatchView.hh"
+#include "geometry/mesh/StructuredBatchView.hh"
 
 #include <array>
 #include <string>
@@ -16,11 +16,11 @@ namespace SimpleFluid::Meshes
 {
 
 /**
- * @brief Connectivity and boundary patches for an orthogonal 3D mesh.
+ * @brief Connectivity and boundary batches for an orthogonal 3D mesh.
  *
- * Boundary patch IDs are assigned in dimension order: lower and upper I,
+ * Boundary batch IDs are assigned in dimension order: lower and upper I,
  * lower and upper J, then lower and upper K. Periodic dimensions have no
- * boundary patches and wrap the face at coordinate zero.
+ * boundary batches and wrap the face at coordinate zero.
  *
  * Cell and face patches are returned as lazy
  * `std::ranges::views::cartesian_product` views, avoiding materialized
@@ -61,7 +61,7 @@ public:
     CellID neighbor_cell(FaceID face_id) const noexcept;
 
     /// Lazy cartesian_product view of CellID over interior cells.
-    auto interior_cell_patch() const
+    auto interior_cell_batch() const
     {
         const auto ni = d_indexer.num_cells_per_dim[I];
         const auto nj = d_indexer.num_cells_per_dim[J];
@@ -119,19 +119,19 @@ public:
 
     bool is_boundary_face(FaceID face_id) const noexcept;
     int boundary_id(FaceID face_id) const noexcept;
-    const std::string& boundary_patch_name(int patch_id) const;
+    const std::string& boundary_batch_name(int batch_id) const;
 
-    /// Lazy cartesian_product view of FaceID for boundary patch @p patch_id.
-    auto boundary_face_patch(int patch_id) const
+    /// Lazy cartesian_product view of FaceID for boundary batch @p batch_id.
+    auto boundary_face_batch(int batch_id) const
     {
-        validate_boundary_patch(patch_id);
+        validate_boundary_batch(batch_id);
 
         const auto ni = d_indexer.num_cells_per_dim[Indexer::I];
         const auto nj = d_indexer.num_cells_per_dim[Indexer::J];
         const auto nk = d_indexer.num_cells_per_dim[Indexer::K];
 
-        const auto dim = patch_id / 2;
-        const auto is_upper = (patch_id % 2) == 1;
+        const auto dim = batch_id / 2;
+        const auto is_upper = (batch_id % 2) == 1;
 
         if (dim == 0) // I faces: vary j, k
         {
@@ -154,11 +154,11 @@ public:
                   FacePatchMapper{k, Indexer::K_FACE});
     }
 
-    /// IDs of all available (non-periodic) boundary patches.
-    std::vector<int> boundary_patch_ids() const;
+    /// IDs of all available (non-periodic) boundary batches.
+    std::vector<int> boundary_batch_ids() const;
 
-    /// Number of available boundary patches.
-    int num_boundary_patches() const noexcept;
+    /// Number of available boundary batches.
+    int num_boundary_batches() const noexcept;
 
 private:
     struct FaceCells
@@ -197,7 +197,7 @@ private:
 
     void initialize_face_adjacency();
     void initialize_cell_adjacency();
-    void validate_boundary_patch(int patch_id) const;
+    void validate_boundary_batch(int batch_id) const;
 
     Indexer d_indexer;
     BoundaryNames d_boundary_names{};

@@ -36,7 +36,7 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
 /**
  * @brief Refresh the cached Dirichlet boundary temperature values.
  *
- * Scans all boundary patches and stores the prescribed Dirichlet
+ * Scans all boundary batches and stores the prescribed Dirichlet
  * temperature for each owned boundary face. Neumann and NoSlip conditions
  * are handled implicitly in the diffusion solve and are not cached here.
  *
@@ -45,18 +45,18 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
 {
-    for (const auto& [patch_id, boundary_patch] : d_mesh->boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
     {
         const auto iter =
             d_boundary_condition->find(
-                d_mesh->boundary_patch_name(patch_id));
+                d_mesh->boundary_batch_name(batch_id));
         if (iter == d_boundary_condition->end()
             || iter->second.type != BoundaryConditionType::Dirichlet)
         {
             continue;
         }
 
-        for (auto face_lid : boundary_patch.face_lids)
+        for (auto face_lid : boundary_batch.face_lids)
         {
             if (!d_mesh->is_owned_face(face_lid))
             {
@@ -65,8 +65,8 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
 
             // Cache only Dirichlet temperature values for now; Neumann and
             // NoSlip conditions are handled implicitly in the diffusion solve.
-            d_face_boundary_temperature.value[patch_id] = Arr<
-                typename Pack::scalar_type>(boundary_patch.face_lids.size(), iter->second.value);
+            d_face_boundary_temperature.value[batch_id] = Arr<
+                typename Pack::scalar_type>(boundary_batch.face_lids.size(), iter->second.value);
         }
     }
 }
@@ -170,20 +170,20 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
 
     // Apply Dirichlet boundary contributions on top of the interior-face
     // laplacian already computed above.
-    for (const auto& [patch_id, boundary_patch] : d_mesh->boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
     {
-        auto boundary_name = d_mesh->boundary_patch_name(patch_id);
+        auto boundary_name = d_mesh->boundary_batch_name(batch_id);
         if (!d_boundary_condition->contains(boundary_name)) continue;
 
-        auto BC = d_boundary_condition->at(d_mesh->boundary_patch_name(patch_id));
+        auto BC = d_boundary_condition->at(d_mesh->boundary_batch_name(batch_id));
         if (BC.type == BoundaryConditionType::Dirichlet)
         {
-            for (size_t in_patch_id = 0; in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+            for (size_t in_batch_id = 0; in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
             {
-                const auto boundary_face_lid = boundary_patch.face_lids[in_patch_id];
+                const auto boundary_face_lid = boundary_batch.face_lids[in_batch_id];
                 if (d_mesh->is_owned_face(boundary_face_lid))
                 {
-                    const auto boundary_temperature = d_face_boundary_temperature.value.at(patch_id)[in_patch_id];
+                    const auto boundary_temperature = d_face_boundary_temperature.value.at(batch_id)[in_batch_id];
                     const auto owner = d_mesh->owner_cell(boundary_face_lid);
                     const auto temp_p = old_temperature[owner];
                     const auto distance_to_face = d_mesh->cell_to_face_distance(boundary_face_lid, owner);
@@ -293,14 +293,14 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
                                              "TemperatureDiffusionEquation");
 
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id) -> typename Pack::scalar_type
+        [&](int batch_id, size_t in_batch_id) -> typename Pack::scalar_type
     {
-        const auto cache_it = d_face_boundary_temperature.value.find(patch_id);
+        const auto cache_it = d_face_boundary_temperature.value.find(batch_id);
         if (cache_it == d_face_boundary_temperature.value.end())
         {
             return typename Pack::scalar_type{};
         }
-        return cache_it->second[in_patch_id];
+        return cache_it->second[in_batch_id];
     };
 
     auto system = FVM::transport_system<Pack>(
@@ -379,22 +379,22 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     }
 
     auto boundary_condition =
-        [&](int patch_id, size_t)
+        [&](int batch_id, size_t)
     {
-        const auto name = d_mesh->boundary_patch_name(patch_id);
+        const auto name = d_mesh->boundary_batch_name(batch_id);
         const auto iter = d_boundary_condition->find(name);
         return iter == d_boundary_condition->end()
              ? BoundaryCondition{}
              : iter->second;
     };
     auto boundary_value =
-        [&](int patch_id, size_t in_patch_id) -> scalar_type
+        [&](int batch_id, size_t in_batch_id) -> scalar_type
     {
         const auto iter =
-            d_face_boundary_temperature.value.find(patch_id);
+            d_face_boundary_temperature.value.find(batch_id);
         return iter == d_face_boundary_temperature.value.end()
              ? scalar_type{}
-             : iter->second[in_patch_id];
+             : iter->second[in_batch_id];
     };
 
     const auto* correction_field =

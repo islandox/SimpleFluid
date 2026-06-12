@@ -1,6 +1,6 @@
 /**
- * @file BoundaryFacePatch.hh
- * @brief Boundary-face patch data shared by mesh implementations.
+ * @file BoundaryFaceBatch.hh
+ * @brief Boundary-face batch data shared by mesh implementations.
  */
 
 #pragma once
@@ -11,7 +11,7 @@ namespace SimpleFluid::Meshes
 {
 
 template <class FaceID>
-struct BoundaryFacePatch
+struct BoundaryFaceBatch
 {
     int id = -1;
     std::vector<FaceID> face_lids;

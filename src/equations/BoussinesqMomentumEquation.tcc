@@ -110,8 +110,8 @@ auto BoussinesqMomentumEquation<Pack>::assemble_system(
         EquationValidation::require_mesh_match(
             *d_mesh, *correction_field, "BoussinesqMomentumEquation");
     }
-    if (velocity_boundary_cache.value.size() != d_mesh->boundary_patches().size()
-        || velocity_boundary_cache.type.size() != d_mesh->boundary_patches().size()
+    if (velocity_boundary_cache.value.size() != d_mesh->boundary_batches().size()
+        || velocity_boundary_cache.type.size() != d_mesh->boundary_batches().size()
         || velocity_boundary_cache.mesh != d_mesh)
     {
         throw std::invalid_argument(
@@ -128,7 +128,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_system(
         if (boundary_type == BoundaryConditionType::Slip)
         {
             const auto face_lid =
-                d_mesh->boundary_face_patch(boundary_id).face_lids[face];
+                d_mesh->boundary_face_batch(boundary_id).face_lids[face];
             return FVM::detail::slip_face_velocity(
                 old_velocity, face_lid);
         }
@@ -324,7 +324,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
             == BoundaryConditionType::Slip)
         {
             const auto face_lid =
-                d_mesh->boundary_face_patch(
+                d_mesh->boundary_face_batch(
                     boundary_id).face_lids[face];
             return FVM::detail::slip_face_velocity(
                 old_velocity, face_lid);

@@ -131,7 +131,7 @@ struct VectorTransportSystem
  *
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryValueProvider A callable with signature
- *         scalar_type(int patch_id, local_ordinal_type boundary_face_id).
+ *         scalar_type(int batch_id, local_ordinal_type boundary_face_id).
  * @tparam SourceProvider A callable with signature
  *         scalar_type(local_ordinal_type cell_lid).
  * @param old_values Previous time-step scalar field. Its overlap values
@@ -264,12 +264,12 @@ transport_system(const CellField<Pack>& old_values,
     }
 
     // Apply boundary conditions using sumIntoLocalValues (works reliably).
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        for (size_t in_batch_id = 0;
+             in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
         {
-            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            const auto face_lid = boundary_batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid))
             {
                 continue;
@@ -288,7 +288,7 @@ transport_system(const CellField<Pack>& old_values,
                     : scalar_type{};
 
             const auto boundary_face_value =
-                boundary_value(patch_id, in_patch_id);
+                boundary_value(batch_id, in_batch_id);
 
             if (out_flux >= scalar_type{0})
             {
@@ -340,7 +340,7 @@ transport_system(const CellField<Pack>& old_values,
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryValueProvider Callable returning scalar boundary value
- *         for (patch id, boundary face id).
+ *         for (batch id, boundary face id).
  * @param old_values Previous time-step scalar field.
  * @param face_fluxes Pre-computed face volumetric fluxes.
  * @param time_step Time-step size (must be positive).
@@ -384,7 +384,7 @@ transport_system(const CellField<Pack>& old_values,
  *
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryValueProvider A callable with signature
- *         vec_type(int patch_id, local_ordinal_type boundary_face_id).
+ *         vec_type(int batch_id, local_ordinal_type boundary_face_id).
  * @tparam SourceProvider A callable with signature
  *         vec_type(local_ordinal_type cell_lid).
  * @param old_values Previous time-step vector field. Its overlap values
@@ -520,12 +520,12 @@ transport_system(const VectorCellField<Pack>& old_values,
         }
     }
 
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        for (size_t in_batch_id = 0;
+             in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
         {
-            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            const auto face_lid = boundary_batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid))
             {
                 continue;
@@ -542,7 +542,7 @@ transport_system(const VectorCellField<Pack>& old_values,
                     : scalar_type{};
 
             const auto boundary_face_value =
-                boundary_value(patch_id, in_patch_id);
+                boundary_value(batch_id, in_batch_id);
 
             if (out_flux >= scalar_type{0})
             {
@@ -748,7 +748,7 @@ non_orthogonal_transport_system(
                 const auto location =
                     boundary_locations[static_cast<size_t>(face_lid)];
                 const auto boundary_face_value =
-                    boundary_value(location.patch_id, location.in_patch_id);
+                    boundary_value(location.batch_id, location.in_batch_id);
                 for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
@@ -806,7 +806,7 @@ non_orthogonal_transport_system(
             const auto location =
                 boundary_locations[static_cast<size_t>(face_lid)];
             const auto boundary_face_value =
-                boundary_value(location.patch_id, location.in_patch_id);
+                boundary_value(location.batch_id, location.in_batch_id);
             const auto coeff =
                 detail::boundary_diffusion_coefficient(
                     mesh, face_lid, cell_lid, diffusivity);
@@ -1028,8 +1028,8 @@ physical_temperature_transport_system(
                     cell_lid,
                     -out_flux * cell_capacity
                   * boundary_value(
-                        location.patch_id,
-                        location.in_patch_id));
+                        location.batch_id,
+                        location.in_batch_id));
             }
 
             if (mesh.is_interior_face(face_lid))
@@ -1093,7 +1093,7 @@ physical_temperature_transport_system(
                 boundary_locations[static_cast<size_t>(face_lid)];
             const auto condition =
                 boundary_condition(
-                    location.patch_id, location.in_patch_id);
+                    location.batch_id, location.in_batch_id);
             if (condition.type != BoundaryConditionType::Dirichlet)
             {
                 continue;
@@ -1113,8 +1113,8 @@ physical_temperature_transport_system(
                     cell_lid,
                     coefficient
                   * boundary_value(
-                        location.patch_id,
-                        location.in_patch_id));
+                        location.batch_id,
+                        location.in_batch_id));
             }
 
             const auto tangential_area =
@@ -1318,8 +1318,8 @@ physical_momentum_transport_system(
                         static_cast<size_t>(face_lid)];
                 const auto face_value =
                     boundary_value(
-                        location.patch_id,
-                        location.in_patch_id);
+                        location.batch_id,
+                        location.in_batch_id);
                 for (size_t component = 0;
                      component < components;
                      ++component)
@@ -1407,8 +1407,8 @@ physical_momentum_transport_system(
                     row_values, cell_lid, coefficient);
                 const auto face_value =
                     boundary_value(
-                        location.patch_id,
-                        location.in_patch_id);
+                        location.batch_id,
+                        location.in_batch_id);
                 for (size_t component = 0;
                      component < components;
                      ++component)

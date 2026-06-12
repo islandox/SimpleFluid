@@ -6,7 +6,7 @@
 #pragma once
 
 #include "dataclass/typedefs.hh"
-#include "geometry/mesh/BoundaryFacePatch.hh"
+#include "geometry/mesh/BoundaryFaceBatch.hh"
 #include "geometry/mesh/SemiStructuredIndexer.hh"
 
 #include <array>
@@ -18,7 +18,7 @@ namespace SimpleFluid::Meshes
 {
 
 /**
- * @brief Connectivity and boundary patches for a layered semi-structured mesh.
+ * @brief Connectivity and boundary batches for a layered semi-structured mesh.
  *
  * Base cells are supplied as consistently oriented node loops. Their edges
  * are deduplicated into side faces, then repeated through every axial layer.
@@ -30,10 +30,10 @@ public:
     using Ordinal = Indexer::Ordinal;
     using CellID = Indexer::CellID;
     using FaceID = Indexer::FaceID;
-    using BoundaryPatch = BoundaryFacePatch<FaceID>;
-    using BoundaryPatchMap = std::unordered_map<int, BoundaryPatch>;
+    using BoundaryBatch = BoundaryFaceBatch<FaceID>;
+    using BoundaryBatchMap = std::unordered_map<int, BoundaryBatch>;
     using BoundaryNames = std::unordered_map<int, std::string>;
-    using CellPatch = std::vector<CellID>;
+    using CellBatch = std::vector<CellID>;
     using NeighborCells = std::vector<CellID>;
 
     static constexpr int invalid_boundary_id = -1;
@@ -80,9 +80,9 @@ public:
     std::vector<FaceID> cell_faces(CellID cell_id) const;
     CellID owner_cell(FaceID face_id) const noexcept;
     CellID neighbor_cell(FaceID face_id) const noexcept;
-    const CellPatch& interior_cell_patch() const noexcept
+    const CellBatch& interior_cell_batch() const noexcept
     {
-        return d_interior_cell_patch;
+        return d_interior_cell_batch;
     }
     NeighborCells neighbor_cells(CellID cell_id) const
     {
@@ -105,14 +105,14 @@ public:
 
     bool is_boundary_face(FaceID face_id) const noexcept;
     int boundary_id(FaceID face_id) const noexcept;
-    const std::string& boundary_patch_name(int patch_id) const;
-    const BoundaryPatch& boundary_face_patch(int patch_id) const;
-    const BoundaryPatchMap& boundary_patches() const noexcept
+    const std::string& boundary_batch_name(int batch_id) const;
+    const BoundaryBatch& boundary_face_batch(int batch_id) const;
+    const BoundaryBatchMap& boundary_batches() const noexcept
     {
-        return d_boundary_patches;
+        return d_boundary_batches;
     }
-    std::vector<int> boundary_patch_ids() const;
-    int num_boundary_patches() const noexcept;
+    std::vector<int> boundary_batch_ids() const;
+    int num_boundary_batches() const noexcept;
 
 private:
     struct FaceCells
@@ -133,17 +133,17 @@ private:
         const Arr<BoundaryEdge>& boundary_edges);
     void initialize_face_adjacency();
     void initialize_cell_adjacency();
-    void initialize_boundary_patches();
+    void initialize_boundary_batches();
 
     Indexer d_indexer;
     Arr<SideFace> d_side_faces;
     Arr<Arr<Ordinal>> d_cell_side_faces;
     std::array<Arr<FaceCells>, 2> d_face_cells_per_orientation;
-    CellPatch d_interior_cell_patch;
+    CellBatch d_interior_cell_batch;
     Arr<Arr<Ordinal>> d_base_neighbor_cells;
     Arr<AxialNeighbors> d_axial_neighbors;
     BoundaryNames d_boundary_names;
-    BoundaryPatchMap d_boundary_patches;
+    BoundaryBatchMap d_boundary_batches;
 };
 
 } // namespace SimpleFluid::Meshes

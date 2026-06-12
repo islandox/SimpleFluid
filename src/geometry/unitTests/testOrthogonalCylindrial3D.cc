@@ -120,24 +120,24 @@ TEST(OrthogonalCylindrial3DTest, ComputesFaceGeometryAndTopology)
     EXPECT_DOUBLE_EQ(mesh.face_centroid(axial).z, 2.0);
 }
 
-TEST(OrthogonalCylindrial3DTest, BuildsSectorBoundaryPatches)
+TEST(OrthogonalCylindrial3DTest, BuildsSectorBoundaryBatches)
 {
     const auto mesh = make_sector_mesh();
 
-    EXPECT_EQ(mesh.num_boundary_patches(), 6);
-    EXPECT_EQ(mesh.boundary_patch_name(0), "rmin");
-    EXPECT_EQ(mesh.boundary_patch_name(1), "rmax");
-    EXPECT_EQ(mesh.boundary_patch_name(2), "thetamin");
-    EXPECT_EQ(mesh.boundary_patch_name(3), "thetamax");
-    EXPECT_EQ(mesh.boundary_patch_name(4), "zmin");
-    EXPECT_EQ(mesh.boundary_patch_name(5), "zmax");
+    EXPECT_EQ(mesh.num_boundary_batches(), 6);
+    EXPECT_EQ(mesh.boundary_batch_name(0), "rmin");
+    EXPECT_EQ(mesh.boundary_batch_name(1), "rmax");
+    EXPECT_EQ(mesh.boundary_batch_name(2), "thetamin");
+    EXPECT_EQ(mesh.boundary_batch_name(3), "thetamax");
+    EXPECT_EQ(mesh.boundary_batch_name(4), "zmin");
+    EXPECT_EQ(mesh.boundary_batch_name(5), "zmax");
 
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(0)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(1)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(2)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(3)), 2);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(4)), 4);
-    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_patch(5)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(0)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(1)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(2)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(3)), 2);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(4)), 4);
+    EXPECT_EQ(std::ranges::distance(mesh.boundary_face_batch(5)), 4);
 
     const FaceID theta_min{0, 0, 0, Mesh::THETA_FACE};
     EXPECT_EQ(mesh.boundary_name(theta_min), "thetamin");
@@ -153,8 +153,8 @@ TEST(OrthogonalCylindrial3DTest, ConnectsFullCirclePeriodically)
     EXPECT_EQ(mesh.num_cells(), 2U);
     EXPECT_EQ(mesh.num_faces(), 10U);
     EXPECT_EQ(mesh.num_nodes(), 8U);
-    EXPECT_EQ(mesh.num_boundary_patches(), 4);
-    EXPECT_THROW(mesh.boundary_face_patch(2), std::out_of_range);
+    EXPECT_EQ(mesh.num_boundary_batches(), 4);
+    EXPECT_THROW(mesh.boundary_face_batch(2), std::out_of_range);
 
     EXPECT_TRUE(mesh.is_interior_face(seam));
     EXPECT_FALSE(mesh.is_boundary_face(seam));

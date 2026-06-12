@@ -62,7 +62,7 @@ struct VectorDiffusionSystem
  *
  * @tparam Pack The Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @tparam SourceProvider Callable returning scalar source for a cell LID.
  * @param mesh The computational mesh.
  * @param diffusivity Constant scalar diffusivity coefficient.
@@ -129,19 +129,19 @@ diffusion_system(const Mesh<Pack>& mesh,
             cell_lid, mesh.cell_volume(cell_lid) * right_hand_source(cell_lid));
     }
 
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        for (size_t in_batch_id = 0;
+             in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
         {
-            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            const auto face_lid = boundary_batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
             {
                 continue;
             }
 
             const auto owner = mesh.owner_cell(face_lid);
-            const auto bc = boundary_condition(patch_id, in_patch_id);
+            const auto bc = boundary_condition(batch_id, in_batch_id);
             if (bc.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coeff =
@@ -179,7 +179,7 @@ diffusion_system(const Mesh<Pack>& mesh,
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @param mesh The computational mesh.
  * @param diffusivity Constant scalar diffusivity coefficient.
  * @param boundary_condition Boundary-condition provider.
@@ -213,7 +213,7 @@ diffusion_system(const Mesh<Pack>& mesh,
  *
  * @tparam Pack Tpetra type pack.
  * @tparam BoundaryConditionProvider Callable returning BoundaryCondition
- *         for (patch id, in-patch face id).
+ *         for (batch id, in-batch face id).
  * @tparam SourceProvider Callable returning vector source for a cell LID.
  * @param mesh The computational mesh.
  * @param diffusivity Constant scalar diffusivity coefficient.
@@ -292,19 +292,19 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
         }
     }
 
-    for (const auto& [patch_id, boundary_patch] : mesh.boundary_patches())
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        for (size_t in_patch_id = 0;
-             in_patch_id < boundary_patch.face_lids.size(); ++in_patch_id)
+        for (size_t in_batch_id = 0;
+             in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
         {
-            const auto face_lid = boundary_patch.face_lids[in_patch_id];
+            const auto face_lid = boundary_batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
             {
                 continue;
             }
 
             const auto owner = mesh.owner_cell(face_lid);
-            const auto bc = boundary_condition(patch_id, in_patch_id);
+            const auto bc = boundary_condition(batch_id, in_batch_id);
             if (bc.type == BoundaryConditionType::Dirichlet
                 || bc.type == BoundaryConditionType::NoSlip)
             {

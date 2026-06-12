@@ -656,7 +656,7 @@ public:
                 const auto location =
                     boundary_locations[static_cast<size_t>(face_lid)];
                 const auto patch_name =
-                    d_mesh->boundary_patch_name(location.patch_id);
+                    d_mesh->boundary_batch_name(location.batch_id);
                 const auto pressure_iter =
                     boundary_conditions.pressure.find(patch_name);
                 const auto pressure_condition =
@@ -690,13 +690,13 @@ public:
                 }
 
                 const auto velocity_type =
-                    velocity_boundary_cache.type.at(location.patch_id);
+                    velocity_boundary_cache.type.at(location.batch_id);
                 const auto prescribed =
                     velocity_type == BoundaryConditionType::Slip
                   ? FVM::detail::slip_face_velocity(
                         velocity, face_lid)
                   : velocity_boundary_cache.value.at(
-                        location.patch_id)[location.in_patch_id];
+                        location.batch_id)[location.in_batch_id];
                 continuity_rhs -= prescribed.dot(area);
             }
 

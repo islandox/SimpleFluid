@@ -330,7 +330,7 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
 }
 
 /**
- * @brief Verifies a spherified-cube mesh has correct cell count, type, volumes, and a single surface boundary patch.
+ * @brief Verifies a spherified-cube mesh has correct cell count, type, volumes, and a single surface boundary batch.
  */
 TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
 {
@@ -368,7 +368,7 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
 }
 
 /**
- * @brief Verifies a sphere can split its surface into lower and upper thermal boundary patches.
+ * @brief Verifies a sphere can split its surface into lower and upper thermal boundary batches.
  */
 TEST(MeshFactoryTest, SphereBuildsSplitSurfacePatches)
 {
