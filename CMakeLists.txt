@@ -20,6 +20,9 @@ option(SIMPLEFLUID_ENABLE_COVERAGE
        "Build with compiler coverage instrumentation" OFF)
 option(SIMPLEFLUID_BUILD_BENCHMARKS
        "Build performance and solver-regression benchmarks" ON)
+
+set(SIMPLEFLUID_MAX_TEST_PROCS "0" CACHE STRING
+    "Maximum MPI processes for tests (0 = unlimited). Set to 2 for free-tier runners.")
 if(SIMPLEFLUID_ENABLE_COVERAGE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(--coverage -O0 -g)

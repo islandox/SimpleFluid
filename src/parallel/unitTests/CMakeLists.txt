@@ -12,6 +12,11 @@ else()
 endif()
 set(METIS_PART_CTEST_FILE
     "${CMAKE_CURRENT_BINARY_DIR}/MeshPartitionerCTest.cmake")
+if(NOT SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0 AND SIMPLEFLUID_MAX_TEST_PROCS LESS 4)
+  set(_metis_4proc_test "")
+else()
+  set(_metis_4proc_test "add_test(MeshPartitioner_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${METIS_PART_EXECUTABLE}\")\nset_tests_properties(MeshPartitioner_4procs PROPERTIES PROCESSORS 4)\n")
+endif()
 if(CMAKE_CONFIGURATION_TYPES)
   file(WRITE "${METIS_PART_CTEST_FILE}"
        "if(CTEST_CONFIGURATION_TYPE)\n"
@@ -21,14 +26,12 @@ if(CMAKE_CONFIGURATION_TYPES)
        "endif()\n"
        "add_test(MeshPartitioner_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${METIS_PART_EXECUTABLE}\")\n"
        "set_tests_properties(MeshPartitioner_2procs PROPERTIES PROCESSORS 2)\n"
-       "add_test(MeshPartitioner_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${METIS_PART_EXECUTABLE}\")\n"
-       "set_tests_properties(MeshPartitioner_4procs PROPERTIES PROCESSORS 4)\n")
+       "${_metis_4proc_test}")
 else()
   file(WRITE "${METIS_PART_CTEST_FILE}"
        "add_test(MeshPartitioner_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${METIS_PART_EXECUTABLE}\")\n"
        "set_tests_properties(MeshPartitioner_2procs PROPERTIES PROCESSORS 2)\n"
-       "add_test(MeshPartitioner_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${METIS_PART_EXECUTABLE}\")\n"
-       "set_tests_properties(MeshPartitioner_4procs PROPERTIES PROCESSORS 4)\n")
+       "${_metis_4proc_test}")
 endif()
 set_property(DIRECTORY APPEND PROPERTY
              TEST_INCLUDE_FILES "${METIS_PART_CTEST_FILE}")
