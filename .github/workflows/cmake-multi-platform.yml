@@ -39,9 +39,9 @@ jobs:
             fortran_compiler: gfortran
           - os: ubuntu-latest
             compiler_id: LLVM
-            c_compiler: clang
-            cpp_compiler: clang++
-            fortran_compiler: flang
+            c_compiler: clang-18
+            cpp_compiler: clang++-18
+            fortran_compiler: flang-18
 
     steps:
     - uses: actions/checkout@v4

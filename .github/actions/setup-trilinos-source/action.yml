@@ -44,6 +44,7 @@ runs:
           libnetcdf-mpi-dev \
           libpnetcdf-dev \
           netcdf-bin \
+          googletest \
           zlib1g-dev
 
     - name: Inspect HDF5 and NetCDF
