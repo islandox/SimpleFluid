@@ -102,7 +102,8 @@ jobs:
         cmake -B ${{ steps.strings.outputs.build-output-dir }}
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
-        -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos-install/lib/cmake/Trilinos
+        -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
+        -DSIMPLEFLUID_MAX_TEST_PROCS=2
         -G"Ninja Multi-Config"
         -S ${{ github.workspace }}
 
