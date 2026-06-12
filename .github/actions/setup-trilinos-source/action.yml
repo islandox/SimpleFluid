@@ -44,7 +44,8 @@ runs:
           libnetcdf-mpi-dev \
           libpnetcdf-dev \
           netcdf-bin \
-          googletest \
+          libgtest-dev \
+          libgmock-dev \
           zlib1g-dev
 
     - name: Inspect HDF5 and NetCDF
@@ -103,6 +104,26 @@ runs:
           exit 1
         fi
 
+        if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
+          if command -v flang-new-18 >/dev/null 2>&1; then
+            FC_PATH="$(command -v flang-new-18)"
+          elif command -v flang-18 >/dev/null 2>&1; then
+            FC_PATH="$(command -v flang-18)"
+          else
+            echo "No LLVM flang found"
+            find /usr/bin -maxdepth 1 -name '*flang*' -print
+            exit 1
+          fi
+
+          export OMPI_CC="$(command -v clang-18)"
+          export OMPI_CXX="$(command -v clang++-18)"
+          export OMPI_FC="$FC_PATH"
+        elif [ "{{ inputs.compiler-id }}" = "GCC" ]; then
+          export OMPI_CC=$(command -v gcc)
+          export OMPI_CXX=$(command -v g++)
+          export OMPI_FC=$(command -v gfortran)
+        fi
+
         echo "NETCDF_INCLUDE_DIR=$NETCDF_INCLUDE_DIR"
         echo "NETCDF_LIBRARY=$NETCDF_LIBRARY"
 
@@ -111,9 +132,9 @@ runs:
           -G Ninja \
           -D CMAKE_BUILD_TYPE=Release \
           -D CMAKE_INSTALL_PREFIX=${{ github.workspace }}/_deps/trilinos-install \
-          -D CMAKE_C_COMPILER=${{ inputs.c-compiler }} \
-          -D CMAKE_CXX_COMPILER=${{ inputs.cxx-compiler }} \
-          -D CMAKE_Fortran_COMPILER=${{ inputs.fortran-compiler }} \
+          -D CMAKE_C_COMPILER=mpicc \
+          -D CMAKE_CXX_COMPILER=mpicxx \
+          -D CMAKE_Fortran_COMPILER=mpifort \
           -D CMAKE_CXX_STANDARD=20 \
           -D CMAKE_CXX_EXTENSIONS=OFF \
           -D TPL_ENABLE_MPI=ON \
