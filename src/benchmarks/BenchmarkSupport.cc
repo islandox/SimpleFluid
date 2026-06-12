@@ -1,3 +1,13 @@
+/**
+ * @file BenchmarkSupport.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Implementations of benchmark support utilities: memory, CSV, timestamps.
+ * @version 0.1
+ * @date 2026-06-12
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
 #include "benchmarks/BenchmarkSupport.hh"
 
 #include <sys/resource.h>
@@ -17,6 +27,12 @@ namespace SimpleFluid::Benchmark
 namespace
 {
 
+/**
+ * @brief Read a memory value in KiB from /proc/self/status.
+ *
+ * @param key Status file key (e.g., "VmRSS:").
+ * @return Value in KiB, or 0 if not found.
+ */
 long long status_value_kib(std::string_view key)
 {
     std::ifstream status("/proc/self/status");
@@ -34,6 +50,13 @@ long long status_value_kib(std::string_view key)
     return 0;
 }
 
+/**
+ * @brief Append a value to an output stream (generic overload).
+ *
+ * @tparam Value Type of value to write.
+ * @param output Output stream.
+ * @param value Value to append.
+ */
 template<class Value>
 void append_value(std::ostream& output, const Value& value)
 {
@@ -47,6 +70,13 @@ void append_value(std::ostream& output, const std::string& value)
 
 } // namespace
 
+/**
+ * @brief Sample current and peak resident memory usage of the process.
+ *
+ * Reads from /proc/self/status, falling back to getrusage.
+ *
+ * @return ProcessMemory with resident_kib and peak_resident_kib populated.
+ */
 ProcessMemory sample_process_memory()
 {
     ProcessMemory result{
@@ -72,6 +102,11 @@ ProcessMemory sample_process_memory()
     return result;
 }
 
+/**
+ * @brief Return the current UTC timestamp as an ISO 8601 string.
+ *
+ * @return Timestamp formatted as YYYY-MM-DDTHH:MM:SSZ.
+ */
 std::string utc_timestamp()
 {
     const auto now = std::chrono::system_clock::now();
@@ -84,6 +119,11 @@ std::string utc_timestamp()
     return output.str();
 }
 
+/**
+ * @brief Return the hostname of the current machine.
+ *
+ * @return Hostname string, or "unknown" on failure.
+ */
 std::string host_name()
 {
     char buffer[256]{};
@@ -94,6 +134,15 @@ std::string host_name()
     return buffer;
 }
 
+/**
+ * @brief Escape a string value for inclusion in a CSV field.
+ *
+ * Wraps the value in quotes and doubles embedded quotes if the value
+ * contains commas, quotes, newlines, or carriage returns.
+ *
+ * @param value String to escape.
+ * @return CSV-safe escaped string.
+ */
 std::string csv_escape(std::string_view value)
 {
     const bool needs_quotes =
@@ -119,6 +168,11 @@ std::string csv_escape(std::string_view value)
     return escaped;
 }
 
+/**
+ * @brief Return the CSV header line matching the Record schema.
+ *
+ * @return Comma-separated header string.
+ */
 std::string CsvWriter::header()
 {
     return
@@ -134,6 +188,12 @@ std::string CsvWriter::header()
         "continuity_residual,l2_error,linf_error,achieved_tolerance,converged";
 }
 
+/**
+ * @brief Construct a CsvWriter, creating the output directory and validating any existing header.
+ *
+ * @param path Path to the output CSV file.
+ * @throws std::runtime_error if an existing CSV has an incompatible header or the file cannot be created.
+ */
 CsvWriter::CsvWriter(std::filesystem::path path)
     : d_path(std::move(path))
 {
@@ -164,6 +224,12 @@ CsvWriter::CsvWriter(std::filesystem::path path)
     output << header() << '\n';
 }
 
+/**
+ * @brief Append a benchmark record as a new CSV row.
+ *
+ * @param record Benchmark record to write.
+ * @throws std::runtime_error if the output file cannot be opened for appending.
+ */
 void CsvWriter::append(const Record& record)
 {
     std::ofstream output(d_path, std::ios::app);
