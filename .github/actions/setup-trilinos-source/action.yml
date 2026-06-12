@@ -42,7 +42,7 @@ runs:
           libboost-dev \
           libhdf5-openmpi-dev \
           libnetcdf-mpi-dev \
-          libpnetcdf-mpi-dev \
+          libpnetcdf-dev \
           netcdf-bin \
           zlib1g-dev
 
