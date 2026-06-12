@@ -51,9 +51,9 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
-        clang-18 \
-        lld-18 \
-        flang-18
+          clang-18 \
+          lld-18 \
+          flang-18
 
         clang-18 --version
         clang++-18 --version
@@ -71,6 +71,7 @@ jobs:
       uses: ./.github/actions/setup-trilinos-source
       with:
         trilinos-version: trilinos-release-17-1-1
+        compiler-id: ${{ matrix.compiler_id }}
         c-compiler: ${{ matrix.c_compiler }}
         cxx-compiler: ${{ matrix.cpp_compiler }}
         fortran-compiler: ${{ matrix.fortran_compiler }}

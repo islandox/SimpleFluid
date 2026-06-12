@@ -6,6 +6,8 @@ inputs:
     description: Trilinos git tag
     required: false
     default: trilinos-release-17-1-1
+  compiler-id:
+    required: true
   c-compiler:
     required: false
     default: mpicc
@@ -40,6 +42,8 @@ runs:
           libboost-dev \
           libhdf5-openmpi-dev \
           libnetcdf-mpi-dev \
+          libpnetcdf-mpi-dev \
+          netcdf-bin \
           zlib1g-dev
 
     - name: Inspect HDF5 and NetCDF
@@ -49,6 +53,13 @@ runs:
         h5pcc -show || true
 
         which nc-config || true
+
+        echo "=== libnetcdf-mpi-dev files ==="
+        dpkg -L libnetcdf-mpi-dev | grep -E 'netcdf\.h$|libnetcdf\.so$|cmake|pkgconfig|nc-config' || true
+
+        echo "=== possible NetCDF headers ==="
+        find /usr/include /usr/lib/x86_64-linux-gnu -name netcdf.h -o -name libnetcdf.so 2>/dev/null || true
+
         nc-config --version || true
         nc-config --libs || true
         nc-config --cflags || true
@@ -72,7 +83,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ${{ github.workspace }}/_deps/trilinos-install
-        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.cxx-compiler }}-mpi-core-v1
+        key: trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-core-v1
 
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
@@ -81,6 +92,18 @@ runs:
         git clone --depth 1 --branch ${{ inputs.trilinos-version }} \
           https://github.com/trilinos/Trilinos.git \
           ${{ github.workspace }}/_deps/Trilinos
+
+        NETCDF_INCLUDE_DIR="$(dpkg -L libnetcdf-mpi-dev | grep '/netcdf.h$' | head -n 1 | xargs dirname)"
+        NETCDF_LIBRARY="$(dpkg -L libnetcdf-mpi-dev | grep '/libnetcdf.so$' | head -n 1)"
+
+        if [ -z "$NETCDF_INCLUDE_DIR" ] || [ -z "$NETCDF_LIBRARY" ]; then
+          echo "Could not locate NetCDF MPI headers/library"
+          dpkg -L libnetcdf-mpi-dev
+          exit 1
+        fi
+
+        echo "NETCDF_INCLUDE_DIR=$NETCDF_INCLUDE_DIR"
+        echo "NETCDF_LIBRARY=$NETCDF_LIBRARY"
 
         cmake -S ${{ github.workspace }}/_deps/Trilinos \
           -B ${{ github.workspace }}/_deps/trilinos-build \
@@ -98,6 +121,8 @@ runs:
           -D TPL_ENABLE_BOOST=ON \
           -D TPL_ENABLE_HDF5=ON \
           -D TPL_ENABLE_Netcdf=ON \
+          -D TPL_Netcdf_INCLUDE_DIRS="$NETCDF_INCLUDE_DIR" \
+          -D TPL_Netcdf_LIBRARIES="$NETCDF_LIBRARY" \
           -D Trilinos_ENABLE_TESTS=OFF \
           -D Trilinos_ENABLE_EXAMPLES=OFF \
           -D Trilinos_ENABLE_Teuchos=ON \
