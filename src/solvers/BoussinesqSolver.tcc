@@ -408,6 +408,56 @@ auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept
 }
 
 template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
+    const RadiolyticGasOptions& options) -> RadiolyticGasModel<Pack>&
+{
+    validate_radiolytic_gas_options(options);
+    d_physical_model_enabled = true;
+    if (!d_radiolytic_gas_model)
+    {
+        d_radiolytic_gas_model =
+            std::make_unique<RadiolyticGasModel<Pack>>(
+                d_mesh, options);
+    }
+    else
+    {
+        d_radiolytic_gas_model->configure(options);
+    }
+    return *d_radiolytic_gas_model;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
+    const Database& database) -> RadiolyticGasModel<Pack>&
+{
+    return configure_radiolytic_gas(
+        radiolytic_gas_options_from_database(database));
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
+{
+    if (!d_radiolytic_gas_model)
+        return false;
+    d_radiolytic_gas_model.reset();
+    return true;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() noexcept
+    -> RadiolyticGasModel<Pack>*
+{
+    return d_radiolytic_gas_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept
+    -> const RadiolyticGasModel<Pack>*
+{
+    return d_radiolytic_gas_model.get();
+}
+
+template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_temperature_source(
     const std::string& name)
 {
@@ -957,6 +1007,22 @@ void BoussinesqSolver<Pack>::step()
     d_mesh->sync_periodic_boundaries(temperature());
     d_mesh->sync_periodic_boundaries(velocity());
 
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled())
+    {
+        d_radiolytic_gas_model->advance(
+            d_time + d_problem.time_options().time_step,
+            d_problem.time_options().time_step,
+            temperature(),
+            pressure(),
+            velocity(),
+            projected_face_fluxes(),
+            stored_material_properties(),
+            d_fission_power_source
+                ? &d_fission_power_source->field()
+                : nullptr);
+    }
+
     d_time += d_problem.time_options().time_step;
     ++d_step_index;
 }
@@ -1098,6 +1164,25 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
         {
             writer.add_scalar_cell_data(
                 name, collect_scalar_field(source->field()));
+        }
+        if (d_radiolytic_gas_model)
+        {
+            writer.add_scalar_cell_data(
+                "S_alpha_rad",
+                collect_scalar_field(
+                    d_radiolytic_gas_model->source_alpha_rad()));
+        }
+    }
+    if (output_options.include_radiolytic_gas_fields
+        && d_radiolytic_gas_model)
+    {
+        for (const auto& [name, field] :
+             d_radiolytic_gas_model->output_fields())
+        {
+            if (name == "S_alpha_rad")
+                continue;
+            writer.add_scalar_cell_data(
+                name, collect_scalar_field(*field));
         }
     }
     writer.write(filename);

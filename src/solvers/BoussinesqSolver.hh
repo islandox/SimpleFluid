@@ -15,6 +15,7 @@
 #include "equations/EquationValidation.hh"
 #include "equations/FissionPowerSource.hh"
 #include "equations/PressureProjectionEquation.hh"
+#include "equations/RadiolyticGasModel.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
@@ -134,6 +135,15 @@ public:
     FissionPowerSource<Pack>* find_fission_power_source() noexcept;
     const FissionPowerSource<Pack>* find_fission_power_source() const noexcept;
 
+    RadiolyticGasModel<Pack>& configure_radiolytic_gas(
+        const RadiolyticGasOptions& options);
+    RadiolyticGasModel<Pack>& configure_radiolytic_gas(
+        const Database& database);
+    bool remove_radiolytic_gas_model() noexcept;
+    RadiolyticGasModel<Pack>* find_radiolytic_gas_model() noexcept;
+    const RadiolyticGasModel<Pack>*
+    find_radiolytic_gas_model() const noexcept;
+
     void set_material_updater(
         typename MaterialPropertyFields<Pack>::updater_type updater);
     void clear_material_updater() noexcept;
@@ -189,6 +199,7 @@ private:
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
     std::unique_ptr<FissionPowerSource<Pack>> d_fission_power_source;
+    std::unique_ptr<RadiolyticGasModel<Pack>> d_radiolytic_gas_model;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
