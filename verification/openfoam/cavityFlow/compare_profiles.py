@@ -6,10 +6,19 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
 from pathlib import Path
 
 
 COMPONENTS = {"ux": 1, "uy": 2, "uz": 3}
+
+
+def nonnegative_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result) or result < 0.0:
+        raise argparse.ArgumentTypeError(
+            "tolerances must be finite and non-negative")
+    return result
 
 
 def read_openfoam(path: Path) -> list[tuple[float, float, float, float]]:
@@ -66,6 +75,8 @@ def main() -> int:
     parser.add_argument("--openfoam", type=Path, required=True)
     parser.add_argument("--simplefluid", type=Path, required=True)
     parser.add_argument("--component", choices=COMPONENTS, required=True)
+    parser.add_argument("--max-l2", type=nonnegative_float)
+    parser.add_argument("--max-linf", type=nonnegative_float)
     arguments = parser.parse_args()
 
     openfoam = read_openfoam(arguments.openfoam)
@@ -79,6 +90,16 @@ def main() -> int:
     l2 = math.sqrt(sum(error * error for error in errors) / len(errors))
     maximum = max(abs(error) for error in errors)
     print(f"samples={len(errors)} l2={l2:.12g} linf={maximum:.12g}")
+
+    failures: list[str] = []
+    if arguments.max_l2 is not None and l2 > arguments.max_l2:
+        failures.append(f"l2 {l2:.12g} exceeds {arguments.max_l2:.12g}")
+    if arguments.max_linf is not None and maximum > arguments.max_linf:
+        failures.append(
+            f"linf {maximum:.12g} exceeds {arguments.max_linf:.12g}")
+    if failures:
+        print("comparison failed: " + "; ".join(failures), file=sys.stderr)
+        return 1
     return 0
 
 
