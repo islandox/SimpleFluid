@@ -346,6 +346,16 @@ TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)
     EXPECT_NEAR(pressure.value(0), 0.0, 1.0e-12);
 }
 
+TEST(PhysicalEquationsTest, PressureProjectionUsesMueLuByDefault)
+{
+    auto mesh = make_2x2x2_mesh();
+    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh);
+
+    EXPECT_EQ(
+        equation.linear_solver_options().preconditioner,
+        SimpleFluid::LinearPreconditioner::MueLu);
+}
+
 /**
  * @brief Verifies an external source term is incorporated into the Poisson RHS during pressure projection.
  */

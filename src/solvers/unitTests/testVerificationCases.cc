@@ -19,13 +19,16 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -42,6 +45,50 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 constexpr double pi = 3.141592653589793238462643383279502884;
+
+int cavity_mesh_cells()
+{
+    const auto* value = std::getenv("SIMPLEFLUID_CAVITY_MESH_CELLS");
+    if (value == nullptr || value[0] == '\0')
+    {
+        return 8;
+    }
+
+    int result = 0;
+    const std::string_view text(value);
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), result);
+    if (error != std::errc{} || end != text.data() + text.size()
+        || result < 2)
+    {
+        throw std::invalid_argument(
+            "SIMPLEFLUID_CAVITY_MESH_CELLS must be an integer >= 2.");
+    }
+    return result;
+}
+
+int cavity_max_linear_iterations()
+{
+    const auto* value =
+        std::getenv("SIMPLEFLUID_CAVITY_MAX_LINEAR_ITERATIONS");
+    if (value == nullptr || value[0] == '\0')
+    {
+        return 300;
+    }
+
+    int result = 0;
+    const std::string_view text(value);
+    const auto [end, error] =
+        std::from_chars(text.data(), text.data() + text.size(), result);
+    if (error != std::errc{} || end != text.data() + text.size()
+        || result < 1)
+    {
+        throw std::invalid_argument(
+            "SIMPLEFLUID_CAVITY_MAX_LINEAR_ITERATIONS must be a "
+            "positive integer.");
+    }
+    return result;
+}
 
 SimpleFluid::SP<MeshType> make_box_mesh(int nx, int ny, int nz)
 {
@@ -138,7 +185,7 @@ void verify_lid_driven_cavity(
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-11;
-    linear_options.max_iterations = 300;
+    linear_options.max_iterations = cavity_max_linear_iterations();
 
     auto verify = [&](const auto& input_mesh)
     {
@@ -157,6 +204,7 @@ void verify_lid_driven_cavity(
             solver.velocity(), cache, face_velocity);
 
         double kinetic_energy = 0.0;
+        double cross_stream_kinetic_energy = 0.0;
         bool saw_moving_wall = false;
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
@@ -167,6 +215,8 @@ void verify_lid_driven_cavity(
             EXPECT_TRUE(std::isfinite(velocity.y));
             kinetic_energy += velocity.dot(velocity)
                             * mesh->cell_volume(cell_lid);
+            cross_stream_kinetic_energy += velocity.y * velocity.y
+                                         * mesh->cell_volume(cell_lid);
         }
         for (const auto& [batch_id, batch] : mesh->boundary_batches())
         {
@@ -188,6 +238,7 @@ void verify_lid_driven_cavity(
 
         EXPECT_TRUE(saw_moving_wall);
         EXPECT_GT(kinetic_energy, 1.0e-12);
+        EXPECT_GT(cross_stream_kinetic_energy, 1.0e-12);
         EXPECT_LT(
             stabilized_continuity_norm(
                 solver.velocity(), solver.pressure(),
@@ -218,11 +269,13 @@ void verify_lid_driven_cavity(
 
     if (use_orthogonal_cartesian)
     {
-        verify(make_cartesian_cavity_mesh(8, 8, 1));
+        const auto cells = cavity_mesh_cells();
+        verify(make_cartesian_cavity_mesh(cells, cells, 1));
     }
     else
     {
-        verify(make_box_mesh(8, 8, 1));
+        const auto cells = cavity_mesh_cells();
+        verify(make_box_mesh(cells, cells, 1));
     }
 }
 
