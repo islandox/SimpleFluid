@@ -6,13 +6,14 @@ GPU-portable parallelism.
 
 ## Project Status
 
-SimpleFluid is in active development with a **verified incompressible Navier–Stokes**
-solver for natural convection. Phases 0–11 of the planned roadmap are complete,
+SimpleFluid is in active development with a tested incompressible Navier–Stokes
+solver for natural convection. Phases 0–12 of the planned roadmap are complete,
 covering mesh infrastructure, verification, performance benchmarking, physical
-heat sources, updateable material properties, and prescribed fission heating.
+heat sources, updateable material properties, prescribed fission heating, and
+the baseline radiolytic-gas source.
 
-**Phase 11 prescribed fission heating is complete; radiolytic gas generation is
-the next roadmap phase.**
+**The advanced Phase 12.1 two-population radiolytic-bubble model is implemented
+in part and remains under verification.**
 
 | Capability | Status |
 | ---------- | ------ |
@@ -24,11 +25,14 @@ the next roadmap phase.**
 | Pressure–velocity coupling (SIMPLE/PISO/PIMPLE) | ✅ |
 | Coupled Krylov solver (block Schur + MueLu AMG) | ✅ |
 | Rhie–Chow collocated stabilization | ✅ |
-| Verification suite (cavity, Poiseuille, MMS, OpenFOAM comparison) | ✅ |
+| Verification suite (cavity smoke cases, Poiseuille, MMS) | ✅ |
+| External OpenFOAM profile-comparison workflow | ✅ |
 | Boussinesq natural convection examples | ✅ |
 | Performance benchmarks & scaling tests | ✅ |
 | Physical heat sources & material-property fields | ✅ |
 | Prescribed fission power-density profiles | ✅ |
+| Baseline ideal-gas radiolytic source | ✅ |
+| Two-population radiolytic-bubble model | 🚧 |
 | TH/neutronics multiphysics coupling | ⬜ |
 
 ## Governing Equations
@@ -54,8 +58,8 @@ $$
 ### Discretization
 
 - **Collocated** finite-volume method on arbitrary unstructured meshes
-- **First-order upwind** convection (implicit) with optional deferred correction
-- **Crank–Nicolson** and **backward Euler** time integration
+- **First-order upwind** convection (implicit)
+- **Backward Euler** time integration
 - Gradient reconstruction via **least-squares** on extended stencils
 
 ### Diffusion Operator
@@ -154,16 +158,22 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 
 ## Verification
 
-The solver is verified against analytical and reference solutions:
+The automated suite combines analytical checks, convergence tests, and
+short-running physical smoke cases:
 
 | Case | Description |
 | ---- | ----------- |
-| Lid-driven cavity | Re = 100, 1000 — benchmarked against Ghia et al. |
+| Lid-driven cavity | Re = 100, 1000 transient smoke cases; optional centerline-profile export |
 | Poiseuille flow | Parabolic profile recovery in a channel |
 | Manufactured solution | Method of manufactured solutions for Navier–Stokes |
 | Skewed diffusion | Non-orthogonal mesh convergence with all three treatments |
 | Natural convection cavity | Differentially heated square cavity |
-| OpenFOAM comparison | Matching case cross-validation with OpenFOAM |
+| OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
+
+The cavity smoke tests do not currently assert agreement with Ghia et al. or
+with bundled OpenFOAM profile data. See
+`verification/openfoam/cavityFlow/README.md` for the external comparison
+workflow.
 
 ## Examples
 
@@ -337,6 +347,17 @@ may scale the base profile once per step at `t_n`; the retained
 `SolutionOutputOptions::include_sources` and is additive with other named
 temperature sources. Neutronics feedback and file-based power import remain
 future work.
+
+## Radiolytic Gas Models
+
+The optional radiolysis subsystem provides a bounded ideal-gas void-source
+model and an advanced two-population hydrogen-bubble model. The latter includes
+dissolved hydrogen, bubble populations, pressure-sensitive properties,
+transport, escape, and diagnostic inventory accounting, but is not yet fully
+accepted as a validated physical model.
+
+See [`docs/radiolytic-gas-models.md`](docs/radiolytic-gas-models.md) for units,
+configuration, numerical ordering, conservation accounting, and limitations.
 
 ## Dependencies
 

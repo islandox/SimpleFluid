@@ -42,9 +42,12 @@ python3 verification/openfoam/cavityFlow/compare_profiles.py \
 OpenFOAM raw input is expected as `coordinate ux uy uz`. SimpleFluid input is
 expected as `coordinate,ux,uy,uz`. The script linearly interpolates the
 OpenFOAM profile to SimpleFluid sample locations and reports L2 and maximum
-absolute differences.
+absolute differences. Add `--max-l2` and/or `--max-linf` to make the command
+exit unsuccessfully when a project-approved tolerance is exceeded. No default
+tolerance is imposed because the repository does not yet contain a validated
+reference profile and acceptance threshold.
 
 OpenFOAM is not bundled with SimpleFluid, so generating the external raw file
 remains an environment-level step. The automated verification test checks
 that the SimpleFluid Re=1000 case definition uses the same nondimensional
-parameters and wall conditions.
+parameters and wall conditions; it does not claim numerical profile agreement.
