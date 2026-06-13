@@ -85,7 +85,7 @@ struct PressureVelocityResiduals
 };
 
 template<class Scalar>
-struct BoussinesqStepStatistics
+struct FluidStepStatistics
 {
     bool converged = true;
     int nonlinear_iterations = 0;
@@ -115,5 +115,8 @@ struct BoussinesqStepStatistics
             std::max(achieved_tolerance, summary.achieved_tolerance);
     }
 };
+
+template<class Scalar>
+using BoussinesqStepStatistics = FluidStepStatistics<Scalar>;
 
 } // namespace SimpleFluid

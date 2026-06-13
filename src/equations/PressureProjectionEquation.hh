@@ -22,7 +22,6 @@
 #include <functional>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 
 namespace SimpleFluid
 {
@@ -102,10 +101,9 @@ private:
     LinearSolverOptions d_linear_options;
     mutable face_velocity_field_type d_cached_face_velocity;
     mutable face_flux_field_type d_cached_face_fluxes;
-    mutable std::vector<typename mesh_type::Vec3> d_cached_gradients;
+    mutable velocity_field_type d_cached_gradient;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
-    mutable Teuchos::RCP<typename Pack::multi_vector_type> d_cached_gradient;
     BelosLinearSolver<Pack> d_linear_solver;
 };
 

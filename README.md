@@ -119,8 +119,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 
 ### Solvers & Equations
 
-- `BoussinesqSolver` — transient natural convection driver
-- `BoussinesqMomentumEquation` — momentum equation assembly
+- `FluidSolver` — reusable transient incompressible pressure-velocity driver
+- `BoussinesqSolver` — thermal natural-convection specialization
+- `IncompressibleMomentumEquation` — generic velocity-transport assembly
+- `BoussinesqMomentumEquation` — incompressible momentum with buoyancy
 - `PressureProjectionEquation` — pressure-correction / Poisson system
 - `TemperatureDiffusionEquation` — energy equation assembly
 - `CoupledPressureVelocitySolver` — monolithic block-Krylov solver

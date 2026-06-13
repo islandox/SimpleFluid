@@ -118,7 +118,7 @@ public:
     /**
      * @brief Set callbacks used to assemble boundary contributions.
      *
-     * The value provider receives patch ID, in-batch face index, and component
+     * The value provider receives batch ID, in-batch face index, and component
      * index.
      *
      * @throws std::invalid_argument If either provider is empty.

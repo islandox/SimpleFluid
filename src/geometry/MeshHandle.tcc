@@ -384,7 +384,7 @@ void MeshHandle<Pack>::initialize_cell_faces()
 /**
  * @brief Materialize locally visible boundary batches.
  *
- * Supports both view-based and legacy materialized boundary-patch APIs.
+ * Supports both view-based and legacy materialized boundary-batch APIs.
  *
  * @tparam MeshType Concrete mesh or adapter type.
  * @param mesh Mesh providing boundary batch metadata and face IDs.

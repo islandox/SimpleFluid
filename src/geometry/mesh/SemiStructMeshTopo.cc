@@ -332,7 +332,7 @@ void SemiStructMeshTopo::build_base_topology(
             || boundary.patch_name == "zmax")
         {
             throw std::invalid_argument(
-                "Semi-structured boundary edge has an invalid patch name.");
+                "Semi-structured boundary edge has an invalid batch name.");
         }
         if (!boundary_tags.emplace(
                 edge_key(boundary.node0, boundary.node1),

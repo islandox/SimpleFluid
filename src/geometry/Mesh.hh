@@ -37,6 +37,9 @@ class CellField;
 template<TpetraTypePack Pack>
 class VectorCellField;
 
+template<TpetraTypePack Pack>
+class TensorCellField;
+
 template <typename ID>
 constexpr ID invalid_id() noexcept
 {
@@ -168,8 +171,8 @@ public:
     /**
      * @brief Logical grouping of faces belonging to one boundary batch.
      *
-     * Each patch has a unique integer identifier and a list of face local
-     * ordinals that form the patch.
+     * Each batch has a unique integer identifier and a list of face local
+     * ordinals that form the batch.
      */
     struct BoundaryFaceBatch
     {
@@ -304,6 +307,8 @@ public:
      * existing Tpetra ghost import is the synchronization path.
      */
     inline void sync_periodic_boundaries(VectorCellField<Pack>& field) const;
+
+    inline void sync_periodic_boundaries(TensorCellField<Pack>& field) const;
 
     /**
      * @brief Manually set a periodic face pair (used for testing or when the

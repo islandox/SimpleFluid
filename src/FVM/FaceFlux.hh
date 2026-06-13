@@ -455,16 +455,9 @@ void pressure_weighted_face_fluxes(
     }
 
     const auto& mesh = velocity.mesh();
-    std::vector<typename Mesh<Pack>::Vec3> owned_gradients;
-    cell_gradient(pressure, owned_gradients);
     VectorCellField<Pack> pressure_gradient(
         velocity.mesh_ptr(), "rhie_chow_pressure_gradient");
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        pressure_gradient.set_owned_value(
-            static_cast<local_ordinal_type>(owned),
-            owned_gradients[owned]);
-    }
+    cell_gradient(pressure, pressure_gradient);
     pressure_gradient.sync_ghosts();
 
     for (size_t face = 0; face < mesh.num_faces(); ++face)

@@ -252,6 +252,18 @@ inline void Mesh<Pack>::sync_periodic_boundaries(VectorCellField<Pack>& field) c
 }
 
 template<TpetraTypePack Pack>
+inline void Mesh<Pack>::sync_periodic_boundaries(TensorCellField<Pack>& field) const
+{
+    if (field.mesh_ptr().get() != this)
+    {
+        throw std::invalid_argument(
+            "sync_periodic_boundaries requires a field on this mesh.");
+    }
+
+    field.sync_ghosts();
+}
+
+template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::face_area(local_ordinal_type fid) const
 {
     return face(fid).area;

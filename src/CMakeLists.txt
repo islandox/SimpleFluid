@@ -74,6 +74,7 @@ target_link_libraries(SimpleFluidFVM INTERFACE SimpleFluidFields)
 
 add_library(SimpleFluidEquations STATIC
     equations/BoussinesqMomentumEquation.cc
+    equations/IncompressibleMomentumEquation.cc
     equations/PressureProjectionEquation.cc
     equations/RadiolyticGasProperties.cc
     equations/TemperatureDiffusionEquation.cc
@@ -84,6 +85,7 @@ target_link_libraries(SimpleFluidEquations PUBLIC SimpleFluidFVM)
 
 add_library(SimpleFluidSolvers STATIC
     solvers/BoussinesqSolver.cc
+    solvers/FluidSolver.cc
 )
 add_library(SimpleFluid::Solvers ALIAS SimpleFluidSolvers)
 simplefluid_configure_library(SimpleFluidSolvers)

@@ -10,28 +10,15 @@
  */
 #pragma once
 
-#include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
-#include "equations/EquationValidation.hh"
 #include "equations/FissionPowerSource.hh"
-#include "equations/PressureProjectionEquation.hh"
 #include "equations/RadiolyticGasModel.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
-#include "equations/TimeStepperOptions.hh"
-#include "fields/CellField.hh"
-#include "fields/FaceField.hh"
-#include "fields/VectorCellField.hh"
-#include "geometry/MeshUtils.hh"
-#include "io/VTUWriter.hh"
-#include "FVM/Operators.hh"
-#include "problems/Problem.hh"
-#include "solvers/CoupledPressureVelocitySolver.hh"
+#include "solvers/FluidSolver.hh"
 
 #include <algorithm>
-#include <cstdint>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -44,20 +31,24 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for vector storage and communication.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class BoussinesqSolver
+class BoussinesqSolver : public FluidSolver<Pack>
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
-    using face_flux_field_type = FaceField<Pack>;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-    using global_ordinal_type = typename Pack::global_ordinal_type;
-    using vec_type = typename mesh_type::Vec3;
+    using base_type = FluidSolver<Pack>;
+    using typename base_type::mesh_type;
+    using typename base_type::field_type;
+    using typename base_type::velocity_field_type;
+    using typename base_type::face_flux_field_type;
+    using typename base_type::scalar_type;
+    using typename base_type::local_ordinal_type;
+    using typename base_type::global_ordinal_type;
+    using typename base_type::vec_type;
+    using typename base_type::residual_type;
+    using typename base_type::step_statistics_type;
+    using typename base_type::coupled_system_type;
     using cell_type = typename mesh_type::CellType;
-    using residual_type = PressureVelocityResiduals<scalar_type>;
-    using step_statistics_type = BoussinesqStepStatistics<scalar_type>;
+    using base_type::pressure;
+    using base_type::velocity;
 
     BoussinesqSolver(SP<const mesh_type> mesh,
                      BoundaryConditionSet boundary_conditions,
@@ -94,25 +85,10 @@ public:
                                         scalar_type cold_temperature,
                                         scalar_type initial_pressure = 0.0);
 
-    void step();
-    void run(int steps);
-    void run() { run(d_problem.time_options().steps); }
-
-    scalar_type time() const noexcept { return d_time; }
-    int step_index() const noexcept { return d_step_index; }
+    void step() override;
 
     const field_type& temperature() const noexcept;
-    const field_type& pressure() const noexcept;
-    const velocity_field_type& velocity() const noexcept;
-    const residual_type& last_pressure_velocity_residuals() const noexcept;
-    const step_statistics_type& last_step_statistics() const noexcept
-    {
-        return d_last_step_statistics;
-    }
-
     field_type& temperature() noexcept;
-    field_type& pressure() noexcept;
-    velocity_field_type& velocity() noexcept;
 
     MaterialPropertyFields<Pack>& material_properties() noexcept;
     const MaterialPropertyFields<Pack>& material_properties() const noexcept;
@@ -148,13 +124,29 @@ public:
         typename MaterialPropertyFields<Pack>::updater_type updater);
     void clear_material_updater() noexcept;
 
-    void write_vtu(const std::string& filename) const { d_mesh->export_vtu(filename); }
     void write_solution_vtu(const std::string& filename) const;
     void write_solution_vtu(
         const std::string& filename,
         const SolutionOutputOptions& output_options) const;
 
 private:
+    using base_type::begin_step;
+    using base_type::collect_scalar_field;
+    using base_type::coupled_pressure_velocity_solver;
+    using base_type::d_last_step_statistics;
+    using base_type::d_mesh;
+    using base_type::d_problem;
+    using base_type::d_step_index;
+    using base_type::d_time;
+    using base_type::finish_step;
+    using base_type::fluid_solution_writer;
+    using base_type::old_face_fluxes;
+    using base_type::pressure_velocity_residuals;
+    using base_type::projected_face_fluxes;
+    using base_type::require_mesh;
+    using base_type::solve_pressure_velocity_coupling;
+    using base_type::velocity_boundary_cache;
+
     struct PhysicalModelTag {};
 
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
@@ -165,45 +157,20 @@ private:
                      bool physical_model_enabled,
                      PhysicalModelTag);
 
-    static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
-    static SP<const mesh_type> require_legacy_mesh(
-        const SP<const MeshHandle<Pack>>& mesh);
-
-    void solve_pressure_velocity_coupling();
-    void solve_coupled_krylov();
-    LinearSolveSummary run_momentum_predictor();
-    typename PressureProjectionEquation<Pack>::ProjectionResult
-    run_pressure_correction();
-    scalar_type velocity_update_norm(const velocity_field_type& before,
-                                     const velocity_field_type& after) const;
-
     TemperatureDiffusionEquation<Pack>& temperature_equation();
-    BoussinesqMomentumEquation<Pack>& momentum_equation();
-    PressureProjectionEquation<Pack>& pressure_projection();
-    CoupledPressureVelocitySolver<Pack>& coupled_pressure_velocity_solver();
-    FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache();
-    field_type& pressure_correction();
-    velocity_field_type& predictor_velocity();
-    face_flux_field_type& old_face_fluxes();
-    face_flux_field_type& projected_face_fluxes();
-    residual_type& pressure_velocity_residuals();
-    const residual_type& pressure_velocity_residuals() const;
+    BoussinesqMomentumEquation<Pack>& momentum_equation() override;
+    LinearSolveSummary advance_momentum() override;
+    coupled_system_type assemble_coupled_system() override;
     MaterialPropertyFields<Pack>& stored_material_properties();
     const MaterialPropertyFields<Pack>& stored_material_properties() const;
     TemperatureSourceRegistry<Pack>& stored_temperature_sources();
     const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
     void refresh_physical_models();
 
-    SP<const mesh_type> d_mesh;
-    Problem<Pack> d_problem;
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
     std::unique_ptr<FissionPowerSource<Pack>> d_fission_power_source;
     std::unique_ptr<RadiolyticGasModel<Pack>> d_radiolytic_gas_model;
-
-    scalar_type d_time = 0.0;
-    int d_step_index = 0;
-    step_statistics_type d_last_step_statistics;
 };
 
 } // namespace SimpleFluid
