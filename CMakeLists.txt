@@ -12,9 +12,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_host_system_information(RESULT NCPU QUERY NUMBER_OF_LOGICAL_CORES)
 
 # parallel job pool settings, only available for ninja build.
+math(EXPR SIMPLEFLUID_COMPILE_JOBS "${NCPU} / 2")
+math(EXPR SIMPLEFLUID_LINK_JOBS "${NCPU} / 5")
+if(SIMPLEFLUID_COMPILE_JOBS LESS 1)
+    set(SIMPLEFLUID_COMPILE_JOBS 1)
+endif()
+if(SIMPLEFLUID_LINK_JOBS LESS 1)
+    set(SIMPLEFLUID_LINK_JOBS 1)
+endif()
 set_property(GLOBAL PROPERTY JOB_POOLS
-    compile_pool=${NCPU}/2
-    link_pool=${NCPU}/5)
+    compile_pool=${SIMPLEFLUID_COMPILE_JOBS}
+    link_pool=${SIMPLEFLUID_LINK_JOBS})
+set(CMAKE_JOB_POOL_COMPILE compile_pool)
+set(CMAKE_JOB_POOL_LINK link_pool)
 
 option(SIMPLEFLUID_ENABLE_COVERAGE
        "Build with compiler coverage instrumentation" OFF)
@@ -61,5 +71,15 @@ find_package(GTest)
 
 enable_testing()
 include(GoogleTest)
+
+set(SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT "30" CACHE STRING
+    "Maximum seconds allowed for GoogleTest test discovery")
+
+function(simplefluid_discover_tests target)
+    gtest_discover_tests(
+        ${target}
+        DISCOVERY_TIMEOUT ${SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT}
+        ${ARGN})
+endfunction()
 
 add_subdirectory(src)
