@@ -75,6 +75,7 @@ target_link_libraries(SimpleFluidFVM INTERFACE SimpleFluidFields)
 add_library(SimpleFluidEquations STATIC
     equations/BoussinesqMomentumEquation.cc
     equations/PressureProjectionEquation.cc
+    equations/ReactingGasProperties.cc
     equations/TemperatureDiffusionEquation.cc
 )
 add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)

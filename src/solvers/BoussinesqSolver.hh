@@ -15,6 +15,7 @@
 #include "equations/EquationValidation.hh"
 #include "equations/PrescribedHeatSource.hh"
 #include "equations/PressureProjectionEquation.hh"
+#include "equations/ReactingGasModel.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
@@ -134,6 +135,15 @@ public:
     PrescribedHeatSource<Pack>* find_prescribed_heat_source() noexcept;
     const PrescribedHeatSource<Pack>* find_prescribed_heat_source() const noexcept;
 
+    ReactingGasModel<Pack>& configure_reacting_gas(
+        const ReactingGasOptions& options);
+    ReactingGasModel<Pack>& configure_reacting_gas(
+        const Database& database);
+    bool remove_reacting_gas_model() noexcept;
+    ReactingGasModel<Pack>* find_reacting_gas_model() noexcept;
+    const ReactingGasModel<Pack>*
+    find_reacting_gas_model() const noexcept;
+
     void set_material_updater(
         typename MaterialPropertyFields<Pack>::updater_type updater);
     void clear_material_updater() noexcept;
@@ -189,6 +199,7 @@ private:
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
     std::unique_ptr<PrescribedHeatSource<Pack>> d_prescribed_heat_source;
+    std::unique_ptr<ReactingGasModel<Pack>> d_reacting_gas_model;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
