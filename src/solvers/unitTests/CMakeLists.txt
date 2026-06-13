@@ -7,11 +7,11 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
   simplefluid_reuse_precompiled_header(${TEST_NAME})
   if(TEST_NAME STREQUAL "testVerificationCases")
-    gtest_discover_tests(
+    simplefluid_discover_tests(
       ${TEST_NAME}
       PROPERTIES LABELS "verification\\;integration"
     )
   else()
-    gtest_discover_tests(${TEST_NAME})
+    simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()

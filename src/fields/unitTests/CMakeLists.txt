@@ -7,7 +7,7 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testGhostSyncMultiRank\\.cc$")
 add_executable(testFields ${TEST_SOURCES})
 target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
 simplefluid_reuse_precompiled_header(testFields)
-gtest_discover_tests(testFields)
+simplefluid_discover_tests(testFields)
 
 add_executable(testGhostSyncMultiRank testGhostSyncMultiRank.cc)
 target_link_libraries(testGhostSyncMultiRank SimpleFluid::Fields GTest::gtest_main)

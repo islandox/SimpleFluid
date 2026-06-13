@@ -9,9 +9,11 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   simplefluid_reuse_precompiled_header(${TEST_NAME})
   if(TEST_NAME STREQUAL "testAnalyticalConvergence")
-    gtest_discover_tests(${TEST_NAME} PROPERTIES LABELS "slow\\;analytical")
+    simplefluid_discover_tests(
+      ${TEST_NAME}
+      PROPERTIES LABELS "slow\\;analytical")
   else()
-    gtest_discover_tests(${TEST_NAME})
+    simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
 
