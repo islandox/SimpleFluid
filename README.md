@@ -7,12 +7,12 @@ GPU-portable parallelism.
 ## Project Status
 
 SimpleFluid is in active development with a **verified incompressible Navier–Stokes**
-solver for natural convection. Phases 0–10 of the planned roadmap are complete,
+solver for natural convection. Phases 0–11 of the planned roadmap are complete,
 covering mesh infrastructure, verification, performance benchmarking, physical
-heat sources, and updateable material properties.
+heat sources, updateable material properties, and prescribed fission heating.
 
-**Phase 10 source and material infrastructure is complete; fission-source coupling
-is the next roadmap phase.**
+**Phase 11 prescribed fission heating is complete; radiolytic gas generation is
+the next roadmap phase.**
 
 | Capability | Status |
 | ---------- | ------ |
@@ -28,6 +28,7 @@ is the next roadmap phase.**
 | Boussinesq natural convection examples | ✅ |
 | Performance benchmarks & scaling tests | ✅ |
 | Physical heat sources & material-property fields | ✅ |
+| Prescribed fission power-density profiles | ✅ |
 | TH/neutronics multiphysics coupling | ⬜ |
 
 ## Governing Equations
@@ -295,6 +296,47 @@ solver.write_solution_vtu(
     {.include_sources = true,
      .include_material_properties = true});
 ```
+
+## Fission Power Source
+
+`FissionPowerSource` registers the specialized temperature source
+`qdot_fission` in W/m³. Constant power density, normalized three-axis Gaussian
+profiles, and caller-provided cell fields are supported:
+
+```cpp
+SimpleFluid::FissionPowerSourceOptions fission;
+fission.profile = SimpleFluid::FissionPowerProfile::Gaussian;
+fission.total_power = 1.0e6;
+fission.center = {0.0, 0.0, 1.0};
+fission.standard_deviation = {0.25, 0.25, 0.5};
+solver.configure_fission_power_source(fission);
+```
+
+Gaussian values are sampled at cell centroids and normalized with the
+distributed discrete volume integral, so `integrated_power()` equals the
+requested total power. Cylindrical axisymmetry is obtained by placing the
+center on the cylinder axis and setting equal X and Y widths.
+
+The equivalent flat `Database` keys are:
+
+```text
+fission_power_mode = disabled | constant | gaussian
+fission_power_density
+fission_total_power
+fission_center = [x, y, z]
+fission_standard_deviation = [sigma_x, sigma_y, sigma_z]
+```
+
+For externally prepared fields, use `initialize_from_power_density()` to copy
+W/m³ values or `initialize_from_shape()` to normalize a nonnegative shape to a
+total power. The model owns its copied profile. A programmatic time multiplier
+may scale the base profile once per step at `t_n`; the retained
+`qdot_fission` field is the value used for that step.
+
+`qdot_fission` is included by
+`SolutionOutputOptions::include_sources` and is additive with other named
+temperature sources. Neutronics feedback and file-based power import remain
+future work.
 
 ## Dependencies
 

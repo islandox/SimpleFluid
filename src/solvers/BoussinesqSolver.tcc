@@ -350,6 +350,64 @@ auto BoussinesqSolver<Pack>::add_temperature_source(
 }
 
 template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::add_fission_power_source()
+    -> FissionPowerSource<Pack>&
+{
+    if (d_fission_power_source)
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver already has a fission power source.");
+    }
+    d_physical_model_enabled = true;
+    d_fission_power_source =
+        std::make_unique<FissionPowerSource<Pack>>(
+            d_mesh, stored_temperature_sources());
+    return *d_fission_power_source;
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::configure_fission_power_source(
+    const FissionPowerSourceOptions& options)
+{
+    detail::validate_fission_power_options(options);
+    if (options.profile == FissionPowerProfile::Disabled)
+    {
+        remove_fission_power_source();
+        return;
+    }
+
+    auto& source = d_fission_power_source
+        ? *d_fission_power_source
+        : add_fission_power_source();
+    source.configure(options);
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_fission_power_source() noexcept
+{
+    if (!d_fission_power_source)
+    {
+        return false;
+    }
+    d_fission_power_source.reset();
+    return true;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_fission_power_source() noexcept
+    -> FissionPowerSource<Pack>*
+{
+    return d_fission_power_source.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept
+    -> const FissionPowerSource<Pack>*
+{
+    return d_fission_power_source.get();
+}
+
+template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_temperature_source(
     const std::string& name)
 {
