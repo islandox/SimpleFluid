@@ -410,14 +410,16 @@ auto BoussinesqSolver<Pack>::momentum_equation()
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
+    FVM::cell_gradient(pressure(), predictor_pressure_gradient());
+    auto pressure_source =
+        [&](local_ordinal_type cell_lid) -> vec_type
+    {
+        return predictor_pressure_gradient().value(cell_lid)
+             * scalar_type{-1};
+    };
+
     if (d_physical_model_enabled)
     {
-        auto zero_source =
-            [](local_ordinal_type)
-                -> typename velocity_field_type::vec_type
-        {
-            return {};
-        };
         return momentum_equation().advance_velocity_physical(
             velocity(),
             old_face_fluxes(),
@@ -428,7 +430,7 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
             d_model_options.reference_density,
             d_model_options.density_feedback_enabled,
             velocity(),
-            zero_source,
+            pressure_source,
             d_problem.linear_options());
     }
     return momentum_equation().advance_velocity(
@@ -438,6 +440,7 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
         velocity_boundary_cache(),
         d_problem.time_options(),
         velocity(),
+        pressure_source,
         d_problem.linear_options());
 }
 
