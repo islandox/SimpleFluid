@@ -350,6 +350,64 @@ auto BoussinesqSolver<Pack>::add_temperature_source(
 }
 
 template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::add_prescribed_heat_source()
+    -> PrescribedHeatSource<Pack>&
+{
+    if (d_prescribed_heat_source)
+    {
+        throw std::invalid_argument(
+            "BoussinesqSolver already has a prescribed_heat power source.");
+    }
+    d_physical_model_enabled = true;
+    d_prescribed_heat_source =
+        std::make_unique<PrescribedHeatSource<Pack>>(
+            d_mesh, stored_temperature_sources());
+    return *d_prescribed_heat_source;
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::configure_prescribed_heat_source(
+    const PrescribedHeatSourceOptions& options)
+{
+    detail::validate_prescribed_heat_power_options(options);
+    if (options.profile == PrescribedHeatProfile::Disabled)
+    {
+        remove_prescribed_heat_source();
+        return;
+    }
+
+    auto& source = d_prescribed_heat_source
+        ? *d_prescribed_heat_source
+        : add_prescribed_heat_source();
+    source.configure(options);
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_prescribed_heat_source() noexcept
+{
+    if (!d_prescribed_heat_source)
+    {
+        return false;
+    }
+    d_prescribed_heat_source.reset();
+    return true;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_prescribed_heat_source() noexcept
+    -> PrescribedHeatSource<Pack>*
+{
+    return d_prescribed_heat_source.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_prescribed_heat_source() const noexcept
+    -> const PrescribedHeatSource<Pack>*
+{
+    return d_prescribed_heat_source.get();
+}
+
+template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_temperature_source(
     const std::string& name)
 {

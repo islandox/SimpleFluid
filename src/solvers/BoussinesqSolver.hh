@@ -13,6 +13,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
 #include "equations/EquationValidation.hh"
+#include "equations/PrescribedHeatSource.hh"
 #include "equations/PressureProjectionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TimeStepperOptions.hh"
@@ -126,6 +127,13 @@ public:
     TemperatureSourceRegistry<Pack>& temperature_sources() noexcept;
     const TemperatureSourceRegistry<Pack>& temperature_sources() const noexcept;
 
+    PrescribedHeatSource<Pack>& add_prescribed_heat_source();
+    void configure_prescribed_heat_source(
+        const PrescribedHeatSourceOptions& options);
+    bool remove_prescribed_heat_source() noexcept;
+    PrescribedHeatSource<Pack>* find_prescribed_heat_source() noexcept;
+    const PrescribedHeatSource<Pack>* find_prescribed_heat_source() const noexcept;
+
     void set_material_updater(
         typename MaterialPropertyFields<Pack>::updater_type updater);
     void clear_material_updater() noexcept;
@@ -180,6 +188,7 @@ private:
     Problem<Pack> d_problem;
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
+    std::unique_ptr<PrescribedHeatSource<Pack>> d_prescribed_heat_source;
 
     scalar_type d_time = 0.0;
     int d_step_index = 0;
