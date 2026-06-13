@@ -158,6 +158,67 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     }
 }
 
+TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(3, 3, 1, 0.25));
+    FieldType phi(mesh, "planar_phi");
+
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+                   mesh->num_owned_cells());
+         ++lid)
+    {
+        const auto& center = mesh->cell_centroid(lid);
+        phi.set_value(lid, 1.0 + 2.0 * center.x - 3.0 * center.y);
+    }
+    phi.sync_ghosts();
+
+    std::vector<MeshType::Vec3> gradients;
+    SimpleFluid::FVM::cell_gradient(phi, gradients);
+
+    ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
+    for (const auto& gradient : gradients)
+    {
+        EXPECT_NEAR(gradient.x, 2.0, 1.0e-12);
+        EXPECT_NEAR(gradient.y, -3.0, 1.0e-12);
+        EXPECT_NEAR(gradient.z, 0.0, 1.0e-12);
+    }
+}
+
+TEST(FvmOperatorsTest, SolvesRankDeficientNormalSystemInObliquePlane)
+{
+    const MeshType::Vec3 first_direction{1.0, 0.0, 1.0};
+    const MeshType::Vec3 second_direction{0.0, 1.0, 1.0};
+    const MeshType::Vec3 expected =
+        first_direction * 2.0 - second_direction * 3.0;
+
+    std::array<std::array<SimpleFluid::real_t, 3>, 3> normal{};
+    MeshType::Vec3 rhs{};
+    for (const auto& direction :
+         std::array<MeshType::Vec3, 2>{
+             first_direction, second_direction})
+    {
+        for (size_t row = 0; row < 3; ++row)
+        {
+            for (size_t column = 0; column < 3; ++column)
+            {
+                normal[row][column] +=
+                    direction.component(row)
+                  * direction.component(column);
+            }
+        }
+        rhs = rhs + direction * direction.dot(expected);
+    }
+
+    const auto actual =
+        SimpleFluid::FVM::detail::solve_3x3(normal, rhs);
+
+    EXPECT_NEAR(actual.x, expected.x, 1.0e-12);
+    EXPECT_NEAR(actual.y, expected.y, 1.0e-12);
+    EXPECT_NEAR(actual.z, expected.z, 1.0e-12);
+}
+
 /**
  * @brief Verifies the vector cell gradient operator recovers the exact gradient of a linear velocity field.
  */

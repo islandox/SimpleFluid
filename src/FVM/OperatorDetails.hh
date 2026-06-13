@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -36,18 +37,139 @@ inline real_t& component(MeshUtils::Vec3& vector, size_t index)
 }
 
 /**
+ * @brief Solve a symmetric positive-semidefinite 3x3 system with a
+ *        Moore-Penrose pseudoinverse.
+ *
+ * Least-squares gradient normal matrices become rank deficient on
+ * one-cell-thick or one-dimensional meshes. Jacobi diagonalization retains
+ * the resolvable in-plane components and sets null-space components to zero.
+ */
+inline MeshUtils::Vec3 solve_symmetric_3x3_pseudoinverse(
+    const std::array<std::array<real_t, 3>, 3>& input,
+    const MeshUtils::Vec3& rhs)
+{
+    auto matrix = input;
+    std::array<std::array<real_t, 3>, 3> eigenvectors{{
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+        {{0.0, 0.0, 1.0}}}};
+
+    for (size_t sweep = 0; sweep < 24; ++sweep)
+    {
+        size_t p = 0;
+        size_t q = 1;
+        auto largest = std::abs(matrix[p][q]);
+        for (const auto [row, column] :
+             std::array<std::array<size_t, 2>, 3>{{
+                 {{0, 2}}, {{1, 2}}, {{0, 1}}}})
+        {
+            const auto magnitude = std::abs(matrix[row][column]);
+            if (magnitude > largest)
+            {
+                largest = magnitude;
+                p = row;
+                q = column;
+            }
+        }
+
+        const auto scale = std::max({
+            std::abs(matrix[0][0]),
+            std::abs(matrix[1][1]),
+            std::abs(matrix[2][2])});
+        if (scale == real_t{}
+            || largest <= std::numeric_limits<real_t>::epsilon()
+                              * real_t{64} * scale)
+        {
+            break;
+        }
+
+        const auto app = matrix[p][p];
+        const auto aqq = matrix[q][q];
+        const auto apq = matrix[p][q];
+        const auto tau = (aqq - app) / (real_t{2} * apq);
+        const auto tangent =
+            tau >= real_t{}
+          ? real_t{1} / (tau + std::sqrt(real_t{1} + tau * tau))
+          : -real_t{1} / (-tau + std::sqrt(real_t{1} + tau * tau));
+        const auto cosine =
+            real_t{1} / std::sqrt(real_t{1} + tangent * tangent);
+        const auto sine = tangent * cosine;
+
+        for (size_t row = 0; row < 3; ++row)
+        {
+            if (row == p || row == q)
+            {
+                continue;
+            }
+            const auto arp = matrix[row][p];
+            const auto arq = matrix[row][q];
+            matrix[row][p] = matrix[p][row] =
+                cosine * arp - sine * arq;
+            matrix[row][q] = matrix[q][row] =
+                sine * arp + cosine * arq;
+        }
+        matrix[p][p] = app - tangent * apq;
+        matrix[q][q] = aqq + tangent * apq;
+        matrix[p][q] = matrix[q][p] = real_t{};
+
+        for (size_t row = 0; row < 3; ++row)
+        {
+            const auto vrp = eigenvectors[row][p];
+            const auto vrq = eigenvectors[row][q];
+            eigenvectors[row][p] =
+                cosine * vrp - sine * vrq;
+            eigenvectors[row][q] =
+                sine * vrp + cosine * vrq;
+        }
+    }
+
+    const auto largest_eigenvalue = std::max({
+        std::abs(matrix[0][0]),
+        std::abs(matrix[1][1]),
+        std::abs(matrix[2][2])});
+    if (largest_eigenvalue == real_t{})
+    {
+        return {};
+    }
+    const auto threshold =
+        largest_eigenvalue * real_t{1.0e-12};
+
+    MeshUtils::Vec3 solution{};
+    for (size_t eigenvector = 0; eigenvector < 3; ++eigenvector)
+    {
+        const auto eigenvalue = matrix[eigenvector][eigenvector];
+        if (eigenvalue <= threshold)
+        {
+            continue;
+        }
+        const auto projection =
+            eigenvectors[0][eigenvector] * rhs.x
+          + eigenvectors[1][eigenvector] * rhs.y
+          + eigenvectors[2][eigenvector] * rhs.z;
+        const auto weight = projection / eigenvalue;
+        solution.x += eigenvectors[0][eigenvector] * weight;
+        solution.y += eigenvectors[1][eigenvector] * weight;
+        solution.z += eigenvectors[2][eigenvector] * weight;
+    }
+    return solution;
+}
+
+/**
  * @brief Solve a 3×3 linear system Ax = b using Gaussian elimination with
  *        partial pivoting.
  *
  * @param[in,out] a The 3×3 coefficient matrix, modified in place.
  * @param[in,out] b The right-hand-side vector; on output contains the
  *        solution x.
- * @return The solution vector (same as @p b on return, or zero if
- *         singular).
+ * @return The solution vector. Rank-deficient symmetric normal systems use
+ *         a Moore-Penrose pseudoinverse.
  */
 inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
                                  MeshUtils::Vec3& b)
 {
+    const auto original_matrix = a;
+    const auto original_rhs = b;
+
     for (size_t pivot = 0; pivot < 3; ++pivot)
     {
         size_t best = pivot;
@@ -61,8 +183,9 @@ inline MeshUtils::Vec3 solve_3x3(std::array<std::array<real_t, 3>, 3>& a,
 
         if (std::abs(a[best][pivot]) < 1.0e-14)
         {
-            b = {};
-            return {};
+            b = solve_symmetric_3x3_pseudoinverse(
+                original_matrix, original_rhs);
+            return b;
         }
 
         if (best != pivot)
