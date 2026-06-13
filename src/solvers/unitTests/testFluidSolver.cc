@@ -48,6 +48,35 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
     return SimpleFluid::MeshFactory(database).template build<Pack>();
 }
 
+SimpleFluid::SP<MeshType> make_two_cell_line_mesh()
+{
+    auto database = std::make_shared<SimpleFluid::Database>();
+    database->set("dimension", 3);
+    database->set("mesh_size", SimpleFluid::real_t{0.5});
+    database->set(
+        "domain_type",
+        static_cast<int>(SimpleFluid::MeshFactory::DomainType::BOX));
+    database->set("X", SimpleFluid::ArrReal{0.0, 0.5, 1.0});
+    database->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
+    database->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
+    database->set(
+        "domain_exterior_face_types",
+        SimpleFluid::ArrString{
+            "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+    return SimpleFluid::MeshFactory(database).template build<Pack>();
+}
+
+class TestFluidSolver : public SimpleFluid::FluidSolver<Pack>
+{
+public:
+    using SimpleFluid::FluidSolver<Pack>::FluidSolver;
+
+    SimpleFluid::LinearSolveSummary advance_momentum_once()
+    {
+        return advance_momentum();
+    }
+};
+
 } // namespace
 
 static_assert(std::is_base_of_v<
@@ -84,6 +113,38 @@ TEST(FluidSolverTest, AdvancesPressureVelocityWithoutThermalFields)
     EXPECT_NEAR(statistics.momentum, residuals.momentum, 1.0e-12);
     EXPECT_NEAR(statistics.pressure, residuals.pressure, 1.0e-12);
     EXPECT_NEAR(statistics.continuity, residuals.continuity, 1.0e-12);
+}
+
+TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
+{
+    auto mesh = make_two_cell_line_mesh();
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.kinematic_viscosity = 0.0;
+
+    TestFluidSolver solver(mesh, {}, time_options);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        solver.pressure().set_value(
+            cell_lid, mesh->cell_centroid(cell_lid).x);
+    }
+    mesh->sync_periodic_boundaries(solver.pressure());
+
+    const auto summary = solver.advance_momentum_once();
+
+    EXPECT_TRUE(summary.converged);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto velocity = solver.velocity().value(cell_lid);
+        EXPECT_NEAR(velocity.x, -time_options.time_step, 1.0e-12);
+        EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);
+        EXPECT_NEAR(velocity.z, 0.0, 1.0e-12);
+    }
 }
 
 TEST(FluidSolverTest, WritesOnlyCoreFluidFields)

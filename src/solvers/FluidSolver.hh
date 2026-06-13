@@ -107,6 +107,7 @@ protected:
     CoupledPressureVelocitySolver<Pack>& coupled_pressure_velocity_solver();
     FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache();
     field_type& pressure_correction();
+    velocity_field_type& predictor_pressure_gradient();
     velocity_field_type& predictor_velocity();
     face_flux_field_type& old_face_fluxes();
     face_flux_field_type& projected_face_fluxes();

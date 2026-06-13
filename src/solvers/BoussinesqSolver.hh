@@ -141,6 +141,7 @@ private:
     using base_type::finish_step;
     using base_type::fluid_solution_writer;
     using base_type::old_face_fluxes;
+    using base_type::predictor_pressure_gradient;
     using base_type::pressure_velocity_residuals;
     using base_type::projected_face_fluxes;
     using base_type::require_mesh;

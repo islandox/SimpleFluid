@@ -156,6 +156,10 @@ FluidSolver<Pack>::FluidSolver(
     d_problem.template emplace_object<velocity_field_type>(
         "velocity", d_mesh, "velocity");
     d_problem.template emplace_object<velocity_field_type>(
+        "predictor_pressure_gradient",
+        d_mesh,
+        "predictor_pressure_gradient");
+    d_problem.template emplace_object<velocity_field_type>(
         "pressure_velocity_predictor",
         d_mesh,
         "pressure_velocity_predictor");
@@ -239,6 +243,14 @@ auto FluidSolver<Pack>::pressure_correction() -> field_type&
 }
 
 template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::predictor_pressure_gradient()
+    -> velocity_field_type&
+{
+    return d_problem.template object<velocity_field_type>(
+        "predictor_pressure_gradient");
+}
+
+template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::predictor_velocity() -> velocity_field_type&
 {
     return d_problem.template object<velocity_field_type>(
@@ -298,12 +310,21 @@ auto FluidSolver<Pack>::velocity_update_norm(
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
+    FVM::cell_gradient(pressure(), predictor_pressure_gradient());
+    auto pressure_source =
+        [&](local_ordinal_type cell_lid) -> vec_type
+    {
+        return predictor_pressure_gradient().value(cell_lid)
+             * scalar_type{-1};
+    };
+
     return momentum_equation().advance_velocity(
         velocity(),
         old_face_fluxes(),
         velocity_boundary_cache(),
         d_problem.time_options(),
         velocity(),
+        pressure_source,
         d_problem.linear_options());
 }
 
