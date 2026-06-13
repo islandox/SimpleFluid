@@ -12,19 +12,17 @@
 
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/OperatorDetails.hh"
 
 #include <array>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 namespace SimpleFluid::FVM
 {
-
-template<TpetraTypePack Pack>
-using VectorCellGradient =
-    std::array<typename Mesh<Pack>::Vec3, VectorCellField<Pack>::num_components>;
 
 /**
  * @brief Compute a least-squares cell-centered gradient for every owned
@@ -32,24 +30,27 @@ using VectorCellGradient =
  *
  * @tparam Pack The Tpetra type pack.
  * @param field Scalar cell field whose gradient is computed.
- * @param[out] gradients Pre-allocated vector to receive the gradient at
+ * @param[out] gradients Vector cell field to receive the gradient at
  *        each owned cell.
  */
 template<TpetraTypePack Pack>
 void cell_gradient(const CellField<Pack>& field,
-                   std::vector<typename Mesh<Pack>::Vec3>& gradients)
+                   VectorCellField<Pack>& gradients)
 {
     using mesh_type = Mesh<Pack>;
     using local_ordinal_type = typename mesh_type::local_ordinal_type;
 
     const auto& mesh = field.mesh();
-    gradients.assign(mesh.num_owned_cells(), typename mesh_type::Vec3{});
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_gradient requires input and output fields on one mesh.");
+    }
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto phi_p = field.value(cell_lid);
-        const auto& center_p = mesh.cell_centroid(cell_lid);
 
         std::array<std::array<real_t, 3>, 3> normal{};
         typename mesh_type::Vec3 rhs{};
@@ -81,7 +82,8 @@ void cell_gradient(const CellField<Pack>& field,
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
-        gradients[owned] = detail::solve_3x3(normal, rhs);
+        gradients.set_owned_value(
+            cell_lid, detail::solve_3x3(normal, rhs));
     }
 }
 
@@ -89,24 +91,29 @@ void cell_gradient(const CellField<Pack>& field,
  * @brief Compute least-squares cell-centered gradients for each component
  *        of a vector field.
  *
- * The returned array is component-major: gradients[cell][0] is the
- * gradient of the x component, gradients[cell][1] of y, and gradients[cell][2]
- * of z.
+ * The tensor rows are component-major: gradients.value(cell)[0] is the
+ * gradient of the x component, gradients.value(cell)[1] of y, and
+ * gradients.value(cell)[2] of z.
  *
  * @tparam Pack The Tpetra type pack.
  * @param field Vector cell field whose component gradients are computed.
- * @param[out] gradients Pre-allocated vector to receive one 3x3 gradient
- *        tensor per owned cell.
+ * @param[out] gradients Tensor cell field to receive one 3x3 gradient per
+ *        owned cell.
  */
 template<TpetraTypePack Pack>
 void cell_gradient(const VectorCellField<Pack>& field,
-                   std::vector<VectorCellGradient<Pack>>& gradients)
+                   TensorCellField<Pack>& gradients)
 {
     using mesh_type = Mesh<Pack>;
     using local_ordinal_type = typename mesh_type::local_ordinal_type;
+    using tensor_type = typename TensorCellField<Pack>::tensor_type;
 
     const auto& mesh = field.mesh();
-    gradients.assign(mesh.num_owned_cells(), VectorCellGradient<Pack>{});
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_gradient requires input and output fields on one mesh.");
+    }
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -114,7 +121,7 @@ void cell_gradient(const VectorCellField<Pack>& field,
         const auto value_p = field.value(cell_lid);
 
         std::array<std::array<real_t, 3>, 3> normal{};
-        VectorCellGradient<Pack> rhs{};
+        tensor_type rhs{};
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
@@ -149,14 +156,16 @@ void cell_gradient(const VectorCellField<Pack>& field,
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
+        tensor_type gradient{};
         for (size_t component = 0;
              component < VectorCellField<Pack>::num_components;
              ++component)
         {
             auto component_normal = normal;
-            gradients[owned][component] =
+            gradient[component] =
                 detail::solve_3x3(component_normal, rhs[component]);
         }
+        gradients.set_owned_value(cell_lid, gradient);
     }
 }
 

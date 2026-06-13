@@ -19,7 +19,6 @@
 #include "solvers/BelosLinearSolver.hh"
 
 #include <stdexcept>
-#include <vector>
 
 namespace SimpleFluid::FVM
 {
@@ -64,19 +63,19 @@ void add_explicit_non_orthogonal_correction(
             "add_explicit_non_orthogonal_correction requires an owned-cell RHS.");
     }
 
-    std::vector<typename Mesh<Pack>::Vec3> gradients;
+    VectorCellField<Pack> gradients(
+        correction_field.mesh_ptr(), "non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        auto gradient = gradients[static_cast<size_t>(cell_lid)];
-        if (mesh.is_owned_cell(other_lid)
-            && static_cast<size_t>(other_lid) < gradients.size())
+        auto gradient = gradients.value(cell_lid);
+        if (mesh.is_owned_cell(other_lid))
         {
             gradient = (gradient
-                      + gradients[static_cast<size_t>(other_lid)])
+                      + gradients.value(other_lid))
                      / 2.0;
         }
         return gradient;
@@ -132,7 +131,7 @@ void add_explicit_non_orthogonal_correction(
                 mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(area_vector, d);
-            const auto& gradient = gradients[static_cast<size_t>(owner)];
+            const auto gradient = gradients.value(owner);
 
             rhs.sumIntoLocalValue(
                 owner,
@@ -179,19 +178,19 @@ void add_explicit_non_orthogonal_correction(
             "add_explicit_non_orthogonal_correction requires a three-component RHS.");
     }
 
-    std::vector<VectorCellGradient<Pack>> gradients;
+    TensorCellField<Pack> gradients(
+        correction_field.mesh_ptr(), "vector_non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
-            local_ordinal_type other_lid) -> VectorCellGradient<Pack>
+            local_ordinal_type other_lid)
+            -> typename TensorCellField<Pack>::tensor_type
     {
-        auto gradient = gradients[static_cast<size_t>(cell_lid)];
-        if (mesh.is_owned_cell(other_lid)
-            && static_cast<size_t>(other_lid) < gradients.size())
+        auto gradient = gradients.value(cell_lid);
+        if (mesh.is_owned_cell(other_lid))
         {
-            const auto& other_gradient =
-                gradients[static_cast<size_t>(other_lid)];
+            const auto other_gradient = gradients.value(other_lid);
             for (size_t component = 0;
                  component < num_components;
                  ++component)
@@ -251,7 +250,7 @@ void add_explicit_non_orthogonal_correction(
                 mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(area_vector, d);
-            const auto& gradient = gradients[static_cast<size_t>(owner)];
+            const auto gradient = gradients.value(owner);
 
             for (size_t component = 0;
                  component < num_components;
@@ -294,7 +293,8 @@ void add_variable_explicit_non_orthogonal_correction(
             "Variable non-orthogonal correction requires an owned-cell RHS.");
     }
 
-    std::vector<typename Mesh<Pack>::Vec3> gradients;
+    VectorCellField<Pack> gradients(
+        correction_field.mesh_ptr(), "variable_non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
@@ -310,12 +310,11 @@ void add_variable_explicit_non_orthogonal_correction(
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(
                     face_lid, cell_lid);
-            auto gradient = gradients[owned];
-            if (mesh.is_owned_cell(other)
-                && static_cast<size_t>(other) < gradients.size())
+            auto gradient = gradients.value(cell_lid);
+            if (mesh.is_owned_cell(other))
             {
                 gradient =
-                    (gradient + gradients[static_cast<size_t>(other)])
+                    (gradient + gradients.value(other))
                   / scalar_type{2};
             }
             const auto face_coefficient =
@@ -358,8 +357,7 @@ void add_variable_explicit_non_orthogonal_correction(
                 owner,
                 correction_weight
               * coefficient_field.local_value(owner)
-              * gradients[static_cast<size_t>(owner)].dot(
-                    tangential_area));
+              * gradients.value(owner).dot(tangential_area));
         }
     }
 }
@@ -394,7 +392,9 @@ void add_variable_explicit_non_orthogonal_correction(
             "incompatible RHS.");
     }
 
-    std::vector<VectorCellGradient<Pack>> gradients;
+    TensorCellField<Pack> gradients(
+        correction_field.mesh_ptr(),
+        "variable_vector_non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
@@ -412,7 +412,7 @@ void add_variable_explicit_non_orthogonal_correction(
 
             scalar_type face_coefficient =
                 coefficient_field.local_value(cell_lid);
-            auto gradient = gradients[owned];
+            auto gradient = gradients.value(cell_lid);
             if (mesh.is_interior_face(face_lid))
             {
                 const auto other =
@@ -422,11 +422,9 @@ void add_variable_explicit_non_orthogonal_correction(
                     detail::harmonic_face_value(
                         mesh, face_lid, cell_lid, other,
                         coefficient_field);
-                if (mesh.is_owned_cell(other)
-                    && static_cast<size_t>(other) < gradients.size())
+                if (mesh.is_owned_cell(other))
                 {
-                    const auto& other_gradient =
-                        gradients[static_cast<size_t>(other)];
+                    const auto other_gradient = gradients.value(other);
                     for (size_t component = 0;
                          component < components;
                          ++component)
@@ -787,19 +785,18 @@ full_diffusion_residual(
         new typename Pack::vector_type(mesh.owned_cell_map(), true));
     const auto boundary_locations = detail::boundary_face_locations(mesh);
 
-    std::vector<typename Mesh<Pack>::Vec3> gradients;
+    VectorCellField<Pack> gradients(
+        field.mesh_ptr(), "full_diffusion_gradient");
     cell_gradient(field, gradients);
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        auto gradient = gradients[static_cast<size_t>(cell_lid)];
-        if (mesh.is_owned_cell(other_lid)
-            && static_cast<size_t>(other_lid) < gradients.size())
+        auto gradient = gradients.value(cell_lid);
+        if (mesh.is_owned_cell(other_lid))
         {
-            const auto& other_gradient =
-                gradients[static_cast<size_t>(other_lid)];
+            const auto other_gradient = gradients.value(other_lid);
             gradient = {(gradient.x + other_gradient.x) / 2.0,
                         (gradient.y + other_gradient.y) / 2.0,
                         (gradient.z + other_gradient.z) / 2.0};
@@ -858,8 +855,7 @@ full_diffusion_residual(
                   - mesh.cell_centroid(cell_lid);
                 const auto tangential_area =
                     detail::non_orthogonal_area_vector(area_vector, d);
-                const auto& gradient =
-                    gradients[static_cast<size_t>(cell_lid)];
+                const auto gradient = gradients.value(cell_lid);
 
                 value += coeff * (phi_p - bc.value)
                        - diffusivity * gradient.dot(tangential_area);

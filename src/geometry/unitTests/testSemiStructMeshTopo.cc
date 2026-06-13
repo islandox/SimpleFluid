@@ -108,9 +108,9 @@ TEST(SemiStructMeshTopoTest, BuildsBoundaryBatches)
     EXPECT_EQ(topology.boundary_batches().size(), 6U);
     EXPECT_EQ(topology.boundary_batch_name(0), "zmin");
     EXPECT_EQ(topology.boundary_batch_name(1), "zmax");
-    for (int patch = 0; patch < 6; ++patch)
+    for (int batch = 0; batch < 6; ++batch)
     {
-        EXPECT_EQ(topology.boundary_face_batch(patch).face_lids.size(), 2U);
+        EXPECT_EQ(topology.boundary_face_batch(batch).face_lids.size(), 2U);
     }
 
     const FaceID ymin{0, 1, Indexer::SIDE};

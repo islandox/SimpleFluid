@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "fields/CellField.hh"
+#include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/Operators.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
@@ -31,6 +32,7 @@ using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
+using TensorFieldType = SimpleFluid::TensorCellField<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -147,11 +149,12 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     }
     phi.sync_ghosts();
 
-    std::vector<MeshType::Vec3> gradients;
+    VectorFieldType gradients(mesh, "gradient");
     SimpleFluid::FVM::cell_gradient(phi, gradients);
-    ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
-    for (const auto& gradient : gradients)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
+        const auto gradient = gradients.value(
+            static_cast<MeshType::local_ordinal_type>(owned));
         EXPECT_NEAR(gradient.x, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient.y, 3.0, 1.0e-12);
         EXPECT_NEAR(gradient.z, 4.0, 1.0e-12);
@@ -174,12 +177,13 @@ TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
     }
     phi.sync_ghosts();
 
-    std::vector<MeshType::Vec3> gradients;
+    VectorFieldType gradients(mesh, "gradient");
     SimpleFluid::FVM::cell_gradient(phi, gradients);
 
-    ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
-    for (const auto& gradient : gradients)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
+        const auto gradient = gradients.value(
+            static_cast<MeshType::local_ordinal_type>(owned));
         EXPECT_NEAR(gradient.x, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient.y, -3.0, 1.0e-12);
         EXPECT_NEAR(gradient.z, 0.0, 1.0e-12);
@@ -239,11 +243,12 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
     }
     velocity.sync_ghosts();
 
-    std::vector<SimpleFluid::FVM::VectorCellGradient<Pack>> gradients;
+    TensorFieldType gradients(mesh, "velocity_gradient");
     SimpleFluid::FVM::cell_gradient(velocity, gradients);
-    ASSERT_EQ(gradients.size(), mesh->num_owned_cells());
-    for (const auto& gradient : gradients)
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
+        const auto gradient = gradients.value(
+            static_cast<MeshType::local_ordinal_type>(owned));
         EXPECT_NEAR(gradient[0].x, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient[0].y, -3.0, 1.0e-12);
         EXPECT_NEAR(gradient[0].z, 4.0, 1.0e-12);
@@ -310,12 +315,12 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
     }
     phi.sync_ghosts();
 
-    std::vector<MeshType::Vec3> gradients;
+    VectorFieldType gradients(mesh, "gradient");
     SimpleFluid::FVM::cell_gradient(phi, gradients);
     const auto stencils =
         SimpleFluid::FVM::detail::least_squares_gradient_stencils(*mesh);
 
-    ASSERT_EQ(stencils.size(), gradients.size());
+    ASSERT_EQ(stencils.size(), gradients.num_owned_cells());
     for (size_t row = 0; row < stencils.size(); ++row)
     {
         MeshType::Vec3 reconstructed{};
@@ -325,9 +330,11 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
             reconstructed = reconstructed + entry.coefficient * value;
         }
 
-        EXPECT_NEAR(reconstructed.x, gradients[row].x, 1.0e-12);
-        EXPECT_NEAR(reconstructed.y, gradients[row].y, 1.0e-12);
-        EXPECT_NEAR(reconstructed.z, gradients[row].z, 1.0e-12);
+        const auto gradient = gradients.value(
+            static_cast<MeshType::local_ordinal_type>(row));
+        EXPECT_NEAR(reconstructed.x, gradient.x, 1.0e-12);
+        EXPECT_NEAR(reconstructed.y, gradient.y, 1.0e-12);
+        EXPECT_NEAR(reconstructed.z, gradient.z, 1.0e-12);
     }
 }
 

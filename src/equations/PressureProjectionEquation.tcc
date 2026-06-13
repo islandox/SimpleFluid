@@ -33,7 +33,8 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
           std::move(mesh), "PressureProjectionEquation")),
       d_linear_options(linear_options),
       d_cached_face_velocity(d_mesh, "pressure_projection_face_velocity"),
-      d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux")
+      d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"),
+      d_cached_gradient(d_mesh, "pressure_projection_gradient")
 {
     require_owned_cell_map(d_mesh);
 }
@@ -217,29 +218,9 @@ auto PressureProjectionEquation<Pack>::project(
                                * d_mesh->cell_volume(cell_lid);
     }
 
-    FVM::cell_gradient(pressure, d_cached_gradients);
-
-    if (d_cached_gradient.is_null())
-    {
-        d_cached_gradient = Teuchos::rcp(
-            new typename Pack::multi_vector_type(
-                d_mesh->owned_cell_map(),
-                velocity_field_type::num_components,
-                true));
-    }
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto& gradient = d_cached_gradients[owned];
-        for (size_t comp = 0; comp < velocity_field_type::num_components; ++comp)
-        {
-            d_cached_gradient->replaceLocalValue(
-                cell_lid, comp,
-                FVM::detail::component_value(gradient, comp));
-        }
-    }
+    FVM::cell_gradient(pressure, d_cached_gradient);
     velocity.owned_data().update(
-        -time_step, *d_cached_gradient, 1.0);
+        -time_step, d_cached_gradient.owned_data(), 1.0);
 
     d_mesh->sync_periodic_boundaries(velocity);
 

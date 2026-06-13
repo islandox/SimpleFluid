@@ -6,6 +6,7 @@
 
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
+#include "equations/IncompressibleMomentumEquation.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
@@ -459,6 +460,7 @@ public:
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using matrix_type = typename Pack::matrix_type;
     using vector_type = typename Pack::vector_type;
+    using momentum_system_type = FVM::VectorTransportSystem<Pack>;
     using system_type = CoupledPressureVelocitySystem<Pack>;
     using result_type = CoupledPressureVelocityResult<scalar_type>;
 
@@ -466,6 +468,40 @@ public:
         : d_mesh(EquationValidation::require_non_null_mesh(
               std::move(mesh), "CoupledPressureVelocitySolver"))
     {
+    }
+
+    system_type assemble(
+        const IncompressibleMomentumEquation<Pack>& momentum_equation,
+        const velocity_field_type& velocity,
+        const field_type& pressure,
+        const face_flux_field_type& face_fluxes,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options) const
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, velocity, "CoupledPressureVelocitySolver");
+        EquationValidation::require_mesh_match(
+            *d_mesh, pressure, "CoupledPressureVelocitySolver");
+
+        const auto* correction_field =
+            time_options.non_orthogonal_treatment
+                == FVM::NonOrthogonalTreatment::Implicit
+          ? nullptr
+          : &velocity;
+        const auto momentum = momentum_equation.assemble_system(
+            velocity,
+            face_fluxes,
+            velocity_boundary_cache,
+            time_options,
+            correction_field);
+        return assemble_coupled_system(
+            momentum,
+            velocity,
+            pressure,
+            velocity_boundary_cache,
+            boundary_conditions,
+            time_options);
     }
 
     system_type assemble(
@@ -522,6 +558,24 @@ public:
                 correction_field);
         }
 
+        return assemble_coupled_system(
+            momentum,
+            velocity,
+            pressure,
+            velocity_boundary_cache,
+            boundary_conditions,
+            time_options);
+    }
+
+private:
+    system_type assemble_coupled_system(
+        const momentum_system_type& momentum,
+        const velocity_field_type& velocity,
+        const field_type& pressure,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options) const
+    {
         auto [coupled_map, coupled_overlap_map] =
             detail::make_coupled_maps(*d_mesh);
         auto coupled_matrix = Teuchos::rcp(new matrix_type(
@@ -854,6 +908,7 @@ public:
             std::move(schur)};
     }
 
+public:
     result_type solve(
         const system_type& system,
         velocity_field_type& velocity,

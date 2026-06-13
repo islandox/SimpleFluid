@@ -151,9 +151,9 @@ TEST(SemiStructuredXY_ZTest, BuildsBoundaryBatches)
     EXPECT_EQ(mesh.boundary_name(bottom), "ymin");
 
     EXPECT_EQ(mesh.num_boundary_batches(), 6);
-    for (int patch = 0; patch < 6; ++patch)
+    for (int batch = 0; batch < 6; ++batch)
     {
-        EXPECT_EQ(mesh.boundary_face_batch(patch).face_lids.size(), 2U);
+        EXPECT_EQ(mesh.boundary_face_batch(batch).face_lids.size(), 2U);
     }
     EXPECT_EQ(mesh.boundary_batch_name(0), "zmin");
     EXPECT_EQ(mesh.boundary_batch_name(1), "zmax");
