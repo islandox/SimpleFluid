@@ -25,6 +25,19 @@ This writes:
 - `profiles/simplefluid_lineX.csv`
 - `profiles/simplefluid_lineY.csv`
 
+For mesh-refinement studies, set `SIMPLEFLUID_CAVITY_MESH_CELLS` to the
+number of cells in each in-plane direction. The default is `8`. Fine meshes
+may also need a larger pressure-solver budget through
+`SIMPLEFLUID_CAVITY_MAX_LINEAR_ITERATIONS`, whose default is `300`:
+
+```sh
+SIMPLEFLUID_CAVITY_MESH_CELLS=64 \
+SIMPLEFLUID_CAVITY_MAX_LINEAR_ITERATIONS=2000 \
+SIMPLEFLUID_PROFILE_OUTPUT_DIR="$PWD/profiles-64" \
+  build/bin/RelWithDebInfo/testVerificationCases \
+  --gtest_filter=VerificationCasesTest.LidDrivenCavityRe1000
+```
+
 The helper samples the nearest cell-center line and volume-averages symmetric
 ties, which handles even structured grids where the geometric centerline lies
 between two cell rows.

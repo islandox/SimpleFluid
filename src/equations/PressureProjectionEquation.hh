@@ -27,6 +27,13 @@
 namespace SimpleFluid
 {
 
+inline LinearSolverOptions pressure_projection_linear_solver_options()
+{
+    LinearSolverOptions options;
+    options.preconditioner = LinearPreconditioner::MueLu;
+    return options;
+}
+
 /**
  * @brief Pressure-projection solve used to correct transient velocity fields.
  *
@@ -57,7 +64,8 @@ public:
 
     explicit PressureProjectionEquation(
         SP<const mesh_type> mesh,
-        LinearSolverOptions linear_options = {});
+        LinearSolverOptions linear_options =
+            pressure_projection_linear_solver_options());
 
     void set_linear_solver_options(LinearSolverOptions options)
     {

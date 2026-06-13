@@ -195,8 +195,11 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
         d_problem.boundary_conditions());
     d_problem.template emplace_object<BoussinesqMomentumEquation<Pack>>(
         "momentum_equation", d_mesh);
+    auto pressure_linear_options = d_problem.linear_options();
+    pressure_linear_options.preconditioner =
+        LinearPreconditioner::MueLu;
     d_problem.template emplace_object<PressureProjectionEquation<Pack>>(
-        "pressure_projection", d_mesh, d_problem.linear_options());
+        "pressure_projection", d_mesh, pressure_linear_options);
     d_problem.template emplace_object<CoupledPressureVelocitySolver<Pack>>(
         "coupled_pressure_velocity_solver", d_mesh);
     d_problem.template emplace_object<field_type>(
