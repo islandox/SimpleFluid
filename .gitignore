@@ -87,3 +87,6 @@ CMakePresets.json
 
 # python cache
 __pycache__
+
+# Referenced documents PDFs to avoid unauthorized redistribution.
+docs/references/*.pdf
