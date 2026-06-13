@@ -121,23 +121,23 @@ Before adding radiolysis or boiling, make the solver accept explicit source fiel
 
 Add the thermal source used by the criticality-accident model, initially without a neutronics solver.
 
-- [ ] Add a `FissionPowerSource` or equivalent model.
-- [ ] Support at least these power-density modes:
-  - [ ] constant volumetric power density
-  - [ ] Gaussian spatial profile
-  - [ ] user-provided cell field, if the existing field API makes this straightforward
-- [ ] Add total-power normalization for spatial profiles.
-- [ ] Add source field `qdot_fission` with units W/m³.
-- [ ] Couple `qdot_fission` into the temperature equation.
-- [ ] Add optional time-dependent multiplier for transient tests.
-- [ ] Write `qdot_fission` to VTU.
+- [x] Add a `FissionPowerSource` or equivalent model.
+- [x] Support at least these power-density modes:
+  - [x] constant volumetric power density
+  - [x] Gaussian spatial profile
+  - [x] user-provided cell field, if the existing field API makes this straightforward
+- [x] Add total-power normalization for spatial profiles.
+- [x] Add source field `qdot_fission` with units W/m³.
+- [x] Couple `qdot_fission` into the temperature equation.
+- [x] Add optional time-dependent multiplier for transient tests.
+- [x] Write `qdot_fission` to VTU.
 
 ### Phase 11 acceptance criteria
 
-- [ ] Integrated power equals configured total power within tolerance.
-- [ ] Zero power gives zero thermal source.
-- [ ] Constant power in a closed one-cell thermal problem gives the expected temperature rise.
-- [ ] Gaussian profile is centered and normalized correctly on Cartesian and cylindrical meshes.
+- [x] Integrated power equals configured total power within tolerance.
+- [x] Zero power gives zero thermal source.
+- [x] Constant power in a closed one-cell thermal problem gives the expected temperature rise.
+- [x] Gaussian profile is centered and normalized correctly on Cartesian and cylindrical meshes.
 
 ---
 
@@ -598,11 +598,10 @@ This phase is explicitly deferred until the scalar void-fraction source model is
 
 ## Suggested immediate Codex task order
 
-1. Implement Phase 11 fission heat source.
-2. Implement Phase 12 radiolytic gas source.
-3. Implement Phase 14 explicit bounded `alpha_g` update.
-4. Implement Phase 15 density feedback.
-5. Add Phase 17 unit tests for the implemented subset.
-6. Add Phase 16 demo case.
-7. Implement Phase 13 boiling only after source/latent-heat plumbing is tested.
-8. Document everything in Phase 18.
+1. Implement Phase 12 radiolytic gas source.
+2. Implement Phase 14 explicit bounded `alpha_g` update.
+3. Implement Phase 15 density feedback.
+4. Add Phase 17 unit tests for the implemented subset.
+5. Add Phase 16 demo case.
+6. Implement Phase 13 boiling only after source/latent-heat plumbing is tested.
+7. Document everything in Phase 18.

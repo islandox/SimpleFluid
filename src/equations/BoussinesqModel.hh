@@ -22,6 +22,9 @@
 namespace SimpleFluid
 {
 
+template<TpetraTypePack Pack>
+class FissionPowerSource;
+
 /**
  * @brief Uniform initial values for the physical Boussinesq material fields.
  *
@@ -430,6 +433,12 @@ public:
 
     bool remove(const std::string& name)
     {
+        if (name == "qdot_fission")
+        {
+            throw std::invalid_argument(
+                "Temperature source name '" + name
+                + "' is reserved for a specialized model.");
+        }
         return d_sources.erase(name) > 0;
     }
 
@@ -494,6 +503,38 @@ public:
     }
 
 private:
+    template<TpetraTypePack>
+    friend class FissionPowerSource;
+
+    source_type& add_reserved(
+        std::string name,
+        scalar_type initial_value = {})
+    {
+        if (!is_reserved_name(name))
+        {
+            throw std::invalid_argument(
+                "Specialized temperature source name '" + name
+                + "' is not reserved.");
+        }
+        if (d_sources.contains(name))
+        {
+            throw std::invalid_argument(
+                "Temperature source '" + name + "' already exists.");
+        }
+
+        auto source = std::make_unique<source_type>(
+            d_mesh, name, initial_value);
+        auto [iter, inserted] = d_sources.emplace(
+            std::move(name), std::move(source));
+        (void)inserted;
+        return *iter->second;
+    }
+
+    void remove_reserved(const std::string& name) noexcept
+    {
+        d_sources.erase(name);
+    }
+
     static bool is_reserved_name(const std::string& name)
     {
         static const std::set<std::string> reserved{
@@ -503,7 +544,8 @@ private:
             "density",
             "specific_heat_capacity",
             "dynamic_viscosity",
-            "thermal_conductivity"};
+            "thermal_conductivity",
+            "qdot_fission"};
         return reserved.contains(name);
     }
 

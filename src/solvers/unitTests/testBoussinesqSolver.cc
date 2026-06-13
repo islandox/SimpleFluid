@@ -707,6 +707,108 @@ TEST(BoussinesqSolverTest, PhysicalHeatSourcesGiveAnalyticalOneCellRise)
         1.0e-12);
 }
 
+TEST(BoussinesqSolverTest, FissionPowerAddsToOtherPhysicalHeatSources)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_diffusivity = 0.0;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 2.0;
+    model_options.density = 2.0;
+    model_options.specific_heat_capacity = 5.0;
+    model_options.dynamic_viscosity = 0.0;
+    model_options.thermal_conductivity = 0.0;
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.temperature().put_scalar(10.0);
+    solver.add_temperature_source("heat_sink", -5.0);
+    auto& fission = solver.add_fission_power_source();
+    fission.initialize_constant(20.0);
+    solver.step();
+
+    EXPECT_NEAR(solver.temperature().value(0), 10.15, 1.0e-12);
+    EXPECT_DOUBLE_EQ(fission.field().value(0), 20.0);
+    EXPECT_NE(
+        solver.find_temperature_source("qdot_fission"),
+        nullptr);
+}
+
+TEST(BoussinesqSolverTest, FissionMultiplierUsesStepStartContext)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_diffusivity = 0.0;
+
+    auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
+            time_options);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.temperature().put_scalar(0.0);
+    auto& fission = solver.add_fission_power_source();
+    fission.initialize_constant(10.0);
+
+    std::vector<double> update_times;
+    fission.set_time_multiplier(
+        [&](const auto& context)
+        {
+            update_times.push_back(context.time);
+            return 1.0 + context.time;
+        });
+
+    solver.step();
+    EXPECT_NEAR(solver.temperature().value(0), 1.0, 1.0e-12);
+    EXPECT_DOUBLE_EQ(fission.field().value(0), 10.0);
+    solver.step();
+    EXPECT_NEAR(solver.temperature().value(0), 2.1, 1.0e-12);
+    EXPECT_DOUBLE_EQ(fission.field().value(0), 11.0);
+    EXPECT_EQ(update_times, (std::vector<double>{0.0, 0.1}));
+}
+
+TEST(BoussinesqSolverTest, ManagesSpecializedFissionSourceLifecycle)
+{
+    auto mesh = make_single_cell_box_mesh();
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+
+    EXPECT_EQ(solver.find_fission_power_source(), nullptr);
+    EXPECT_THROW(
+        solver.add_temperature_source("qdot_fission", 1.0),
+        std::invalid_argument);
+    EXPECT_THROW(
+        solver.remove_temperature_source("qdot_fission"),
+        std::invalid_argument);
+
+    SimpleFluid::FissionPowerSourceOptions options;
+    options.profile =
+        SimpleFluid::FissionPowerProfile::Constant;
+    options.power_density = 4.0;
+    solver.configure_fission_power_source(options);
+    ASSERT_NE(solver.find_fission_power_source(), nullptr);
+    EXPECT_DOUBLE_EQ(
+        solver.find_fission_power_source()->field().value(0),
+        4.0);
+    EXPECT_THROW(
+        solver.add_fission_power_source(),
+        std::invalid_argument);
+
+    options.profile =
+        SimpleFluid::FissionPowerProfile::Disabled;
+    solver.configure_fission_power_source(options);
+    EXPECT_EQ(solver.find_fission_power_source(), nullptr);
+    EXPECT_EQ(
+        solver.find_temperature_source("qdot_fission"),
+        nullptr);
+    EXPECT_FALSE(solver.remove_fission_power_source());
+}
+
 TEST(BoussinesqSolverTest, RefreshesMaterialBeforeSourcesAtStepStart)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -863,6 +965,8 @@ TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
     SimpleFluid::BoussinesqSolver<Pack> solver(
         mesh, {}, time_options, {}, model_options);
     solver.add_temperature_source("qdot_test", 12.0);
+    auto& fission = solver.add_fission_power_source();
+    fission.initialize_constant(8.0);
 
     const auto unique_id =
         std::chrono::steady_clock::now().time_since_epoch().count();
@@ -894,10 +998,16 @@ TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
         default_contents.find("Name=\"qdot_test\""),
         std::string::npos);
     EXPECT_EQ(
+        default_contents.find("Name=\"qdot_fission\""),
+        std::string::npos);
+    EXPECT_EQ(
         default_contents.find("Name=\"density\""),
         std::string::npos);
     EXPECT_NE(
         auxiliary_contents.find("Name=\"qdot_test\""),
+        std::string::npos);
+    EXPECT_NE(
+        auxiliary_contents.find("Name=\"qdot_fission\""),
         std::string::npos);
     EXPECT_NE(
         auxiliary_contents.find("Name=\"density\""),
