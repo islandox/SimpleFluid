@@ -176,30 +176,30 @@ where:
 
 ### Tasks
 
-- [ ] Add `GasGenerationProperties` or equivalent configuration struct.
-- [ ] Add `RadiolyticGasModel` with small testable pure functions.
-- [ ] Add configurable parameters:
-  - [ ] `enableRadiolysis`
-  - [ ] `radiolysisGasYieldMolPerJ`
-  - [ ] `gasReleaseEfficiency`
-  - [ ] `referencePressure`
-  - [ ] `gasConstant`
-  - [ ] `alphaMin`
-  - [ ] `alphaMax`
-  - [ ] `maxSourceAlphaRate`
-- [ ] Compute `S_alpha_rad` as a cell field.
-- [ ] Clamp or limit source terms so `alpha_g` remains bounded.
-- [ ] Write `S_alpha_rad` to VTU.
+- [x] Add `GasGenerationProperties` or equivalent configuration struct.
+- [x] Add `RadiolyticGasModel` with small testable pure functions.
+- [x] Add configurable parameters:
+  - [x] `enableRadiolysis`
+  - [x] `radiolysisGasYieldMolPerJ`
+  - [x] `gasReleaseEfficiency`
+  - [x] `referencePressure`
+  - [x] `gasConstant`
+  - [x] `alphaMin`
+  - [x] `alphaMax`
+  - [x] `maxSourceAlphaRate`
+- [x] Compute `S_alpha_rad` as a cell field.
+- [x] Clamp or limit source terms so `alpha_g` remains bounded.
+- [x] Write `S_alpha_rad` to VTU.
 
 ### Phase 12 acceptance criteria
 
-- [ ] `qdot_fission = 0` gives `S_alpha_rad = 0`.
-- [ ] Doubling `qdot_fission` doubles `S_alpha_rad`.
-- [ ] Doubling `radiolysisGasYieldMolPerJ` doubles `S_alpha_rad`.
-- [ ] Higher temperature increases ideal-gas volume source.
-- [ ] Higher pressure decreases ideal-gas volume source.
-- [ ] Source is non-negative and bounded by `maxSourceAlphaRate`.
-- [ ] Source vanishes or is limited as `alpha_g` approaches `alphaMax`.
+- [x] `qdot_fission = 0` gives `S_alpha_rad = 0`.
+- [x] Doubling `qdot_fission` doubles `S_alpha_rad`.
+- [x] Doubling `radiolysisGasYieldMolPerJ` doubles `S_alpha_rad`.
+- [x] Higher temperature increases ideal-gas volume source.
+- [x] Higher pressure decreases ideal-gas volume source.
+- [x] Source is non-negative and bounded by `maxSourceAlphaRate`.
+- [x] Source vanishes or is limited as `alpha_g` approaches `alphaMax`.
 
 ---
 
@@ -211,37 +211,37 @@ Phase 12 remains the low-cost baseline. Phase 12.1 adds dissolved hydrogen, micr
 
 ### Model selection and scope
 
-- [ ] Add a runtime selector:
+- [x] Add a runtime selector:
 
   ```yaml
   radiolyticBubbleModel: idealGasSource | sheng2024TwoPopulation
   ```
 
-- [ ] Keep `idealGasSource` as the default until the advanced model is verified.
-- [ ] Treat H₂ as the only radiolytic gas in the initial short-pulse implementation.
-- [ ] Supply temperature, absolute liquid pressure, liquid velocity, and fission power density from thermal-hydraulic fields.
-- [ ] Do not treat the incompressible pressure-correction field directly as absolute thermodynamic pressure.
-- [ ] Add an explicit absolute-pressure reconstruction/interface.
-- [ ] Support:
-  - [ ] prescribed constant pressure
-  - [ ] prescribed pressure history
-  - [ ] reconstructed local absolute pressure
-  - [ ] future inertial-pressure coupling
+- [x] Keep `idealGasSource` as the default until the advanced model is verified.
+- [x] Treat H₂ as the only radiolytic gas in the initial short-pulse implementation.
+- [x] Supply temperature, absolute liquid pressure, liquid velocity, and fission power density from thermal-hydraulic fields.
+- [x] Do not treat the incompressible pressure-correction field directly as absolute thermodynamic pressure.
+- [x] Add an explicit absolute-pressure reconstruction/interface.
+- [x] Support:
+  - [x] prescribed constant pressure
+  - [x] prescribed pressure history
+  - [x] reconstructed local absolute pressure
+  - [x] future inertial-pressure coupling
 
 ### State fields
 
 Add cell fields with documented SI units:
 
-- [ ] `C_H2` — dissolved hydrogen concentration, mol/m³ liquid
-- [ ] `N_micro` — microbubble number density, 1/m³ bulk volume
-- [ ] `M_micro` — H₂ moles in microbubbles, mol/m³ bulk volume
-- [ ] `N_large` — large-bubble number density, 1/m³ bulk volume
-- [ ] `M_large` — H₂ moles in large bubbles, mol/m³ bulk volume
-- [ ] `r_nucleation`, `r_micro`, `r_large` — m
-- [ ] `C_critical`, `C_equilibrium` — mol/m³
-- [ ] `K_L` — liquid-side mass-transfer coefficient, m/s
-- [ ] `alpha_g_micro`, `alpha_g_large`, and total `alpha_g`
-- [ ] diagnostic production, conversion, growth, dissolution, escape, and inventory fields
+- [x] `C_H2` — dissolved hydrogen concentration, mol/m³ liquid
+- [x] `N_micro` — microbubble number density, 1/m³ bulk volume
+- [x] `M_micro` — H₂ moles in microbubbles, mol/m³ bulk volume
+- [x] `N_large` — large-bubble number density, 1/m³ bulk volume
+- [x] `M_large` — H₂ moles in large bubbles, mol/m³ bulk volume
+- [x] `r_nucleation`, `r_micro`, `r_large` — m
+- [x] `C_critical`, `C_equilibrium` — mol/m³
+- [x] `K_L` — liquid-side mass-transfer coefficient, m/s
+- [x] `alpha_g_micro`, `alpha_g_large`, and total `alpha_g`
+- [x] diagnostic production, conversion, growth, dissolution, escape, and inventory fields
 
 ### Henry-law equilibrium and critical concentration
 
@@ -255,17 +255,17 @@ $$
 C_{crit}(p_l,r_0)=H_{H_2}\left(p_l+\frac{2\sigma}{r_0}\right).
 $$
 
-- [ ] Add configurable/property-model inputs for `H_H2`, surface tension, and absolute pressure.
-- [ ] Document the selected Henry-law convention and units explicitly.
-- [ ] Guard against very small radius and non-positive pressure.
-- [ ] Verify pressure and Laplace-pressure monotonicity.
+- [x] Add configurable/property-model inputs for `H_H2`, surface tension, and absolute pressure.
+- [x] Document the selected Henry-law convention and units explicitly.
+- [x] Guard against very small radius and non-positive pressure.
+- [x] Verify pressure and Laplace-pressure monotonicity.
 
 ### Pressure-corrected nucleation radius
 
 Implement Eqs. (11)–(15) of the article in a dedicated property class.
 
-- [ ] Compute the atmospheric-pressure nucleation radius from temperature, uranyl-nitrate concentration, mean LET, and H₂ yield.
-- [ ] Apply:
+- [x] Compute the atmospheric-pressure nucleation radius from temperature, uranyl-nitrate concentration, mean LET, and H₂ yield.
+- [x] Apply:
 
 $$
 f^P_{corr}
@@ -280,9 +280,9 @@ $$
 r_0=f^P_{corr}r_0^*.
 $$
 
-- [ ] Require explicit concentration and temperature units at the API boundary.
+- [x] Require explicit concentration and temperature units at the API boundary.
 - [ ] Add validity-range checks and warnings for extrapolation.
-- [ ] Add tabulated regression tests evaluated directly from the published equations.
+- [x] Add tabulated regression tests evaluated directly from the published equations.
 
 ### Dissolved-hydrogen equation
 
@@ -301,10 +301,10 @@ $$
 =\nabla\cdot(\alpha_lD\nabla C)+Q_{M1}+Q_{M2}.
 $$
 
-- [ ] Add configurable or temperature-dependent H₂ diffusivity.
-- [ ] Retain no-advection mode for short-pulse reproduction.
-- [ ] Use existing scalar-transport infrastructure for advective mode.
-- [ ] Conserve dissolved-plus-bubble H₂ up to fission production and boundary escape.
+- [x] Add configurable or temperature-dependent H₂ diffusivity.
+- [x] Retain no-advection mode for short-pulse reproduction.
+- [x] Use existing scalar-transport infrastructure for advective mode.
+- [x] Conserve dissolved-plus-bubble H₂ up to fission production and boundary escape.
 
 ### Bubble-population balances
 
@@ -324,7 +324,7 @@ The article uses axial transport; use the general finite-volume divergence form 
 
 #### Fission-fragment production
 
-- [ ] Implement:
+- [x] Implement:
 
   \[
   P_{M1}=G\dot q_f,
@@ -334,12 +334,12 @@ The article uses axial transport; use the general finite-volume divergence form 
   P_{M2}=P_{N2}=0.
   \]
 
-- [ ] Convert H₂ yield to mol/J consistently.
-- [ ] Compute nucleation-bubble molar content `zeta_0` from the bubble equation of state.
+- [x] Convert H₂ yield to mol/J consistently.
+- [x] Compute nucleation-bubble molar content `zeta_0` from the bubble equation of state.
 
 #### Microbubble dissolution
 
-- [ ] Implement:
+- [x] Implement:
 
   \[
   Q_{N1}=\frac{N_1}{\tau_1},
@@ -347,7 +347,7 @@ The article uses axial transport; use the general finite-volume divergence form 
   Q_{M1}=\frac{M_1}{\tau_1}.
   \]
 
-- [ ] Make `tauMicro` configurable; document approximately 10 μs as the article default rather than a universal constant.
+- [x] Make `tauMicro` configurable; document approximately 10 μs as the article default rather than a universal constant.
 
 #### Pressure-dependent micro-to-large conversion
 
@@ -363,11 +363,11 @@ $$
 S_{M1}=\zeta_0S_{N1}.
 $$
 
-- [ ] Enforce category conservation:
-  - [ ] `S_N2 = -S_N1`
-  - [ ] `S_M2 = -S_M1`
-- [ ] Make `F` configurable and mark it as an empirical calibration parameter with units 1/(Pa·s).
-- [ ] Support exact and optionally smoothed Heaviside functions.
+- [x] Enforce category conservation:
+  - [x] `S_N2 = -S_N1`
+  - [x] `S_M2 = -S_M1`
+- [x] Make `F` configurable and mark it as an empirical calibration parameter with units 1/(Pa·s).
+- [x] Support exact and optionally smoothed Heaviside functions.
 
 #### Large-bubble growth and dissolution
 
@@ -387,7 +387,7 @@ $$
 A_2=4\pi N_2r_2^2.
 $$
 
-- [ ] Make `tauLarge` configurable; document approximately 50 μs as the article default.
+- [x] Make `tauLarge` configurable; document approximately 50 μs as the article default.
 - [ ] Verify that supersaturation grows `M_large` without creating bubble number.
 - [ ] Verify that undersaturation reduces both bubble moles and, through dissolution, bubble number.
 
@@ -411,9 +411,9 @@ Sh=
 \end{cases}
 $$
 
-- [ ] Check the published validity range, especially for `Sc`.
-- [ ] Evaluate liquid properties locally.
-- [ ] Depend on a bubble-velocity interface rather than a hard-coded rise law.
+- [x] Check the published validity range, especially for `Sc`.
+- [x] Evaluate liquid properties locally.
+- [x] Depend on a bubble-velocity interface rather than a hard-coded rise law.
 
 ### Bubble equation of state and radius solve
 
@@ -427,9 +427,9 @@ $$
 \zeta_i=\frac{M_i}{N_i}.
 $$
 
-- [ ] Implement a robust positive-root solver using bracketed Newton or bisection.
-- [ ] Define empty-population behavior without dividing by tiny `N_i`.
-- [ ] Add minimum and maximum radius guards.
+- [x] Implement a robust positive-root solver using bracketed Newton or bisection.
+- [x] Define empty-population behavior without dividing by tiny `N_i`.
+- [x] Add minimum and maximum radius guards.
 - [ ] Verify residuals and monotonic trends with temperature, pressure, bubble moles, and bubble count.
 
 ### Void fraction and characteristic radius
@@ -451,10 +451,10 @@ r_c
        {r_1^2N_1+r_2^2N_2}.
 $$
 
-- [ ] Report microbubble and large-bubble void separately.
-- [ ] Enforce void bounds without silently deleting H₂ inventory.
+- [x] Report microbubble and large-bubble void separately.
+- [x] Enforce void bounds without silently deleting H₂ inventory.
 - [ ] Record clipped inventory if a safety bound is reached.
-- [ ] Integrate total void volume:
+- [x] Integrate total void volume:
 
   \[
   \Delta V_{void}=\int_V\alpha_g\,dV.
@@ -462,15 +462,15 @@ $$
 
 ### Bubble transport and free-surface escape
 
-- [ ] Add `BubbleRiseVelocityModel`.
-- [ ] Provide:
-  - [ ] zero-slip mode
-  - [ ] constant upward-slip mode
-  - [ ] article-compatible radius correlation after verifying the cited Celata relation and units
+- [x] Add `BubbleRiseVelocityModel`.
+- [x] Provide:
+  - [x] zero-slip mode
+  - [x] constant upward-slip mode
+  - [x] article-compatible radius correlation after verifying the cited Celata relation and units
   - [ ] future Euler–Euler gas-velocity mode
-- [ ] Advect `N_i` and `M_i` with the same category velocity.
-- [ ] Add a conservative free-surface escape boundary condition.
-- [ ] Track escaped H₂ moles and bubble count.
+- [x] Advect `N_i` and `M_i` with the same category velocity.
+- [x] Add a conservative free-surface escape boundary condition.
+- [x] Track escaped H₂ moles and bubble count.
 
 ### Optional inertial-pressure coupling
 
@@ -482,7 +482,7 @@ Implement this behind an experimental switch and do not destabilize the incompre
   enableInertialPressureCoupling: false
   ```
 
-- [ ] Implement:
+- [x] Implement:
 
 $$
 \kappa
@@ -504,55 +504,55 @@ $$
 +\frac{1}{\rho_l\kappa}\frac{d\rho_l}{dt}.
 $$
 
-- [ ] Add a separately named absolute-pressure evolution field.
-- [ ] Couple density change to velocity divergence and bubble compression consistently with the project's continuity treatment.
-- [ ] Do not replace the pressure-projection equation without a design review.
-- [ ] Initially use a local or weakly coupled equation-of-state pressure update.
-- [ ] Support constant-pressure and inertial-pressure modes for comparison.
+- [x] Add a separately named absolute-pressure evolution field.
+- [x] Couple density change to velocity divergence and bubble compression consistently with the project's continuity treatment.
+- [x] Do not replace the pressure-projection equation without a design review.
+- [x] Initially use a local or weakly coupled equation-of-state pressure update.
+- [x] Support constant-pressure and inertial-pressure modes for comparison.
 
 ### Numerical integration and stiffness
 
 The microsecond dissolution time scales can be far shorter than the CFD time step.
 
-- [ ] Use a positivity-preserving local kinetics update:
+- [x] Use a positivity-preserving local kinetics update:
   - [ ] implicit Euler, or
   - [ ] analytic linear decays plus implicit nonlinear transfer, or
   - [ ] adaptive per-cell subcycling
-- [ ] Use operator splitting between transport and local bubble kinetics.
+- [x] Use operator splitting between transport and local bubble kinetics.
 - [ ] Add source-Jacobian hooks for future monolithic coupling.
-- [ ] Preserve non-negativity of `C_H2`, `N_i`, `M_i`, and radii.
+- [x] Preserve non-negativity of `C_H2`, `N_i`, `M_i`, and radii.
 - [ ] Keep the local update Kokkos-compatible and allocation-free per cell.
-- [ ] Report substeps, clipping, radius-solver failure, and inventory error.
+- [x] Report substeps, clipping, radius-solver failure, and inventory error.
 
 ### Configuration
 
-- [ ] `hydrogenYieldMolPerJ`
-- [ ] `henryCoefficient` and convention
-- [ ] `surfaceTensionModel`
-- [ ] `uraniumConcentration`
+- [x] `hydrogenYieldMolPerJ`
+- [x] `henryCoefficient` and convention
+- [x] `surfaceTensionModel`
+- [x] `uraniumConcentration`
 - [ ] `nitricAcidConcentration`, where required
-- [ ] `atmosphericPressure`
-- [ ] `microbubbleLifetime`
-- [ ] `largeBubbleDissolutionTime`
-- [ ] `microToLargeConversionCoefficient`
-- [ ] `hydrogenDiffusivityModel`
-- [ ] `bubbleRiseVelocityModel`
-- [ ] initial `C_H2`, `N_micro`, `M_micro`, `N_large`, and `M_large`
-- [ ] radius/population/concentration floors and ceilings
-- [ ] local ODE tolerance and maximum subcycles
+- [x] `atmosphericPressure`
+- [x] `microbubbleLifetime`
+- [x] `largeBubbleDissolutionTime`
+- [x] `microToLargeConversionCoefficient`
+- [x] `hydrogenDiffusivityModel`
+- [x] `bubbleRiseVelocityModel`
+- [x] initial `C_H2`, `N_micro`, `M_micro`, `N_large`, and `M_large`
+- [x] radius/population/concentration floors and ceilings
+- [x] local ODE tolerance and maximum subcycles
 
 ### Verification tests
 
-- [ ] Henry-law pressure monotonicity.
-- [ ] Laplace-pressure/radius monotonicity.
-- [ ] Nucleation pressure-correction regression.
-- [ ] Bubble-radius equation residual.
-- [ ] Microbubble exponential dissolution.
+- [x] Henry-law pressure monotonicity.
+- [x] Laplace-pressure/radius monotonicity.
+- [x] Nucleation pressure-correction regression.
+- [x] Bubble-radius equation residual.
+- [x] Microbubble exponential dissolution.
 - [ ] Micro-to-large conversion conservation.
 - [ ] Large-bubble supersaturated growth.
 - [ ] Large-bubble undersaturated dissolution.
-- [ ] H₂ inventory conservation without production or escape.
-- [ ] H₂ balance with known fission production.
+- [x] H₂ inventory conservation without production or escape.
+- [x] H₂ balance with known fission production.
 - [ ] Population-transport conservation.
 - [ ] Void reconstruction from prescribed populations and radii.
 - [ ] Characteristic-radius calculation.
