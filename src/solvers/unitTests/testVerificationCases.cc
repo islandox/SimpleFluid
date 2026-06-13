@@ -559,7 +559,7 @@ TEST(VerificationCasesTest, NaturalConvectionSquareCavityRemainsBounded)
     EXPECT_GT(kinetic_energy, 1.0e-12);
 }
 
-TEST(VerificationCasesTest, MatchesPublishedOpenFoamCavityDefinition)
+TEST(VerificationCasesTest, MatchesDocumentedOpenFoamCavityConfiguration)
 {
     constexpr int openfoam_cells_x = 100;
     constexpr int openfoam_cells_y = 100;

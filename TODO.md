@@ -31,7 +31,7 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] Hybrid implicit/explicit non-orthogonal treatment
   - [x] Scalar/vector transport systems
   - [x] First-order upwind convection
-  - [x] Backward Euler and Crank–Nicolson time integration
+  - [x] Backward Euler time integration
 - [x] Momentum and pressure-velocity coupling
   - [x] Momentum equation assembly
   - [x] SIMPLE
@@ -53,15 +53,23 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] `vec3`
   - [x] Concept-based Tpetra type configuration
 - [x] Verification suite
-  - [x] Lid-driven cavity, Re = 100 and 1000
+  - [x] Lid-driven cavity transient smoke cases, Re = 100 and 1000
   - [x] Poiseuille flow
   - [x] Manufactured incompressible Navier–Stokes solutions
   - [x] Skewed-mesh diffusion
   - [x] Natural-convection square cavity
-  - [x] OpenFOAM comparison case
+  - [x] External OpenFOAM comparison workflow and case-definition check
   - [x] Gradient/divergence reconstruction tests
   - [x] Pressure projection tests
   - [x] Rhie–Chow checkerboard-suppression tests
+
+### Known foundational gaps
+
+- [ ] Add and verify Crank–Nicolson or another second-order time integrator.
+- [ ] Add a higher-order convection scheme or deferred-correction path.
+- [ ] Add quantitative lid-driven-cavity profile checks against Ghia et al.
+- [ ] Bundle validated OpenFOAM centerline profiles and enforce tolerances in
+      an automated test.
 
 ---
 
