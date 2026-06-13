@@ -1,7 +1,7 @@
 /**
  * @file BoussinesqMomentumEquation.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Boussinesq buoyancy and velocity-transport updates.
+ * @brief Boussinesq buoyancy specialization of incompressible momentum.
  * @version 0.1
  * @date 2026-05-28
  *
@@ -11,21 +11,7 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
-#include "equations/EquationValidation.hh"
-#include "equations/TimeStepperOptions.hh"
-#include "fields/CellField.hh"
-#include "fields/FaceField.hh"
-#include "fields/VectorCellField.hh"
-#include "FVM/Operators.hh"
-#include "solvers/BelosLinearSolver.hh"
-
-#include <Teuchos_RCP.hpp>
-
-#include <cmath>
-#include <cstddef>
-#include <functional>
-#include <stdexcept>
-#include <utility>
+#include "equations/IncompressibleMomentumEquation.hh"
 
 namespace SimpleFluid
 {
@@ -40,16 +26,22 @@ namespace SimpleFluid
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class BoussinesqMomentumEquation
+    : public IncompressibleMomentumEquation<Pack>
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-    using source_type =
-        std::function<typename velocity_field_type::vec_type(local_ordinal_type)>;
-    using system_type = FVM::VectorTransportSystem<Pack>;
+    using base_type = IncompressibleMomentumEquation<Pack>;
+    using mesh_type = typename base_type::mesh_type;
+    using field_type = typename base_type::field_type;
+    using velocity_field_type = typename base_type::velocity_field_type;
+    using scalar_type = typename base_type::scalar_type;
+    using local_ordinal_type = typename base_type::local_ordinal_type;
+    using source_type = typename base_type::source_type;
+    using system_type = typename base_type::system_type;
+
+    using base_type::advance_velocity;
+    using base_type::advance_velocity_physical;
+    using base_type::assemble_physical_system;
+    using base_type::assemble_system;
 
     explicit BoussinesqMomentumEquation(SP<const mesh_type> mesh);
 
@@ -113,11 +105,6 @@ public:
         bool density_feedback_enabled,
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
-
-private:
-    SP<const mesh_type> d_mesh;
-    mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
-    mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
 } // namespace SimpleFluid
