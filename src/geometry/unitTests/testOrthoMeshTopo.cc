@@ -92,7 +92,7 @@ TEST(OrthoMeshTopoTest, BuildsBoundaryFaceBatches)
     EXPECT_THROW(topology.boundary_batch_name(6), std::out_of_range);
 }
 
-TEST(OrthoMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
+TEST(OrthoMeshTopoTest, CachesInteriorBatchAndCellNeighbors)
 {
     const Topology topology(
         Indexer(3, 3, 3),

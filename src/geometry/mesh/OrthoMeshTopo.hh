@@ -22,7 +22,7 @@ namespace SimpleFluid::Meshes
  * lower and upper J, then lower and upper K. Periodic dimensions have no
  * boundary batches and wrap the face at coordinate zero.
  *
- * Cell and face patches are returned as lazy
+ * Cell and face batches are returned as lazy
  * `std::ranges::views::cartesian_product` views, avoiding materialized
  * storage for the structured topology.
  */
@@ -138,20 +138,20 @@ public:
             const auto i = is_upper ? ni : Ordinal{0};
             return cartesian_product_2d(Ordinal{0}, nj, Ordinal{0}, nk)
                 | std::views::transform(
-                      FacePatchMapper{i, Indexer::I_FACE});
+                      FaceBatchMapper{i, Indexer::I_FACE});
         }
         if (dim == 1) // J faces: vary i, k
         {
             const auto j = is_upper ? nj : Ordinal{0};
             return cartesian_product_2d(Ordinal{0}, ni, Ordinal{0}, nk)
                 | std::views::transform(
-                      FacePatchMapper{j, Indexer::J_FACE});
+                      FaceBatchMapper{j, Indexer::J_FACE});
         }
         // K faces: vary i, j
         const auto k = is_upper ? nk : Ordinal{0};
         return cartesian_product_2d(Ordinal{0}, ni, Ordinal{0}, nj)
             | std::views::transform(
-                  FacePatchMapper{k, Indexer::K_FACE});
+                  FaceBatchMapper{k, Indexer::K_FACE});
     }
 
     /// IDs of all available (non-periodic) boundary batches.
@@ -175,7 +175,7 @@ private:
 
     /// Functor that maps a 2-D cartesian-product tuple to a FaceID,
     /// with a consistent type across all face orientations.
-    struct FacePatchMapper
+    struct FaceBatchMapper
     {
         Ordinal fixed_coord;
         uint8_t orientation;

@@ -332,7 +332,7 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
 /**
  * @brief Verifies a spherified-cube mesh has correct cell count, type, volumes, and a single surface boundary batch.
  */
-TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
+TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfaceBatch)
 {
     auto db = make_sphere_database();
     SimpleFluid::MeshFactory factory(db);
@@ -370,7 +370,7 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfacePatch)
 /**
  * @brief Verifies a sphere can split its surface into lower and upper thermal boundary batches.
  */
-TEST(MeshFactoryTest, SphereBuildsSplitSurfacePatches)
+TEST(MeshFactoryTest, SphereBuildsSplitSurfaceBatches)
 {
     auto db = make_split_sphere_database();
     SimpleFluid::MeshFactory factory(db);

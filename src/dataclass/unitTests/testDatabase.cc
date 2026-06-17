@@ -41,11 +41,11 @@ TEST(DatabaseTest, StoresSupportedScalarAndArrayTypes)
     db.set("enabled", enabled);
     db.set("indices", indices);
     db.set("weights", weights);
-    db.set("patches", SimpleFluid::ArrString{"xmin", "xmax"});
+    db.set("batches", SimpleFluid::ArrString{"xmin", "xmax"});
 
     EXPECT_EQ(db.size(), 7u);
     EXPECT_TRUE(db.contains("dimension"));
-    EXPECT_TRUE(db.contains("patches"));
+    EXPECT_TRUE(db.contains("batches"));
     EXPECT_FALSE(db.contains("missing"));
 
     EXPECT_EQ(db.get<int>("dimension"), 3);
@@ -54,12 +54,12 @@ TEST(DatabaseTest, StoresSupportedScalarAndArrayTypes)
     EXPECT_TRUE(db.get<bool>("enabled"));
     EXPECT_EQ(db.get<std::vector<int>>("indices"), indices);
     EXPECT_EQ(db.get<std::vector<SimpleFluid::real_t>>("weights"), weights);
-    EXPECT_EQ(db.get<std::vector<std::string>>("patches"),
+    EXPECT_EQ(db.get<std::vector<std::string>>("batches"),
               (std::vector<std::string>{"xmin", "xmax"}));
 
     const SimpleFluid::Database& const_db = db;
     EXPECT_EQ(const_db.get<int>("dimension"), 3);
-    EXPECT_EQ(const_db.get<std::vector<std::string>>("patches").size(), 2u);
+    EXPECT_EQ(const_db.get<std::vector<std::string>>("batches").size(), 2u);
 }
 
 /**
