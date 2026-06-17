@@ -20,7 +20,7 @@ testing::Environment* const kokkos_environment =
 
 } // namespace
 
-TEST(BoundaryCacheTest, CachesOnlyConfiguredDirichletPatches)
+TEST(BoundaryCacheTest, CachesOnlyConfiguredDirichletBatches)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
