@@ -327,16 +327,16 @@ void SemiStructMeshTopo::build_base_topology(
             throw std::invalid_argument(
                 "Semi-structured boundary edge has invalid node IDs.");
         }
-        if (boundary.patch_name.empty()
-            || boundary.patch_name == "zmin"
-            || boundary.patch_name == "zmax")
+        if (boundary.batch_name.empty()
+            || boundary.batch_name == "zmin"
+            || boundary.batch_name == "zmax")
         {
             throw std::invalid_argument(
                 "Semi-structured boundary edge has an invalid batch name.");
         }
         if (!boundary_tags.emplace(
                 edge_key(boundary.node0, boundary.node1),
-                boundary.patch_name).second)
+                boundary.batch_name).second)
         {
             throw std::invalid_argument(
                 "Semi-structured boundary edge is specified more than once.");
@@ -423,14 +423,14 @@ void SemiStructMeshTopo::build_base_topology(
             continue;
         }
 
-        const std::string patch_name =
+        const std::string batch_name =
             tag == boundary_tags.end() ? "side" : tag->second;
         if (tag != boundary_tags.end())
         {
             used_boundary_tags.insert(key);
         }
 
-        const auto existing_id = boundary_ids.find(patch_name);
+        const auto existing_id = boundary_ids.find(batch_name);
         if (existing_id != boundary_ids.end())
         {
             side_face.boundary_id = existing_id->second;
@@ -438,8 +438,8 @@ void SemiStructMeshTopo::build_base_topology(
         }
 
         side_face.boundary_id = next_boundary_id;
-        boundary_ids.emplace(patch_name, next_boundary_id);
-        d_boundary_names.emplace(next_boundary_id, patch_name);
+        boundary_ids.emplace(batch_name, next_boundary_id);
+        d_boundary_names.emplace(next_boundary_id, batch_name);
         ++next_boundary_id;
     }
 

@@ -145,7 +145,7 @@ TEST(OrthogonalCartesian3DTest, ComputesIndexedQueriesAcrossOrientations)
     EXPECT_EQ(mesh.boundary_id(zmax), 5);
 }
 
-TEST(OrthogonalCartesian3DTest, ComputesBoundaryFacesAndPatches)
+TEST(OrthogonalCartesian3DTest, ComputesBoundaryFacesAndBatches)
 {
     const auto mesh = make_mesh();
     const FaceID xmin{0, 0, 0, Mesh::X_FACE};

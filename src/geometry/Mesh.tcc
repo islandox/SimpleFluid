@@ -551,9 +551,9 @@ void Mesh<Pack>::check_connectivity() const
 
         if (face.boundary_id != invalid_boundary_id)
         {
-            const auto patch_iter = d_boundary_id_to_face_batch.find(face.boundary_id);
-            CHECK(patch_iter != d_boundary_id_to_face_batch.end());
-            auto& face_lids = patch_iter->second.face_lids;
+            const auto batch_iter = d_boundary_id_to_face_batch.find(face.boundary_id);
+            CHECK(batch_iter != d_boundary_id_to_face_batch.end());
+            auto& face_lids = batch_iter->second.face_lids;
             CHECK(std::find(face_lids.begin(), face_lids.end(),
                             static_cast<local_ordinal_type>(fid)) != face_lids.end());
         }

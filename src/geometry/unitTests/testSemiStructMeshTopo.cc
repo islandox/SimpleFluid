@@ -121,7 +121,7 @@ TEST(SemiStructMeshTopoTest, BuildsBoundaryBatches)
     EXPECT_THROW(topology.boundary_face_batch(6), std::out_of_range);
 }
 
-TEST(SemiStructMeshTopoTest, CachesInteriorPatchAndCellNeighbors)
+TEST(SemiStructMeshTopoTest, CachesInteriorBatchAndCellNeighbors)
 {
     const auto topology = make_topology_with_interior_cell();
 

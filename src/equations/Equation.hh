@@ -350,11 +350,11 @@ private:
         for (const auto& [batch_id, batch] : mesh.boundary_batches())
         {
             const auto type = d_boundary_type(batch_id);
-            for (size_t in_patch = 0;
-                 in_patch < batch.face_lids.size();
-                 ++in_patch)
+            for (size_t in_batch = 0;
+                 in_batch < batch.face_lids.size();
+                 ++in_batch)
             {
-                const auto face_lid = batch.face_lids[in_patch];
+                const auto face_lid = batch.face_lids[in_batch];
                 if (!mesh.is_owned_face(face_lid)
                     || !mesh.is_boundary_face(face_lid))
                 {
@@ -386,7 +386,7 @@ private:
                             additions[component] +=
                                 coefficient
                               * d_boundary_value(
-                                    batch_id, in_patch, component);
+                                    batch_id, in_batch, component);
                         }
                     }
                     else if (type == BoundaryConditionType::Neumann)
@@ -398,7 +398,7 @@ private:
                             additions[component] +=
                                 diffusion->diffusivity
                               * d_boundary_value(
-                                    batch_id, in_patch, component)
+                                    batch_id, in_batch, component)
                               * mesh.face_area(face_lid);
                         }
                     }
@@ -431,7 +431,7 @@ private:
                             additions[component] -=
                                 outward_flux
                               * d_boundary_value(
-                                    batch_id, in_patch, component);
+                                    batch_id, in_batch, component);
                         }
                     }
                 }

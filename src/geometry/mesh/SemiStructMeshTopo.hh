@@ -44,7 +44,7 @@ public:
     {
         Ordinal node0 = invalid_ordinal;
         Ordinal node1 = invalid_ordinal;
-        std::string patch_name = "side";
+        std::string batch_name = "side";
     };
 
     struct SideFace

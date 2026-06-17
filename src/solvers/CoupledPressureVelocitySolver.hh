@@ -709,10 +709,10 @@ private:
 
                 const auto location =
                     boundary_locations[static_cast<size_t>(face_lid)];
-                const auto patch_name =
+                const auto batch_name =
                     d_mesh->boundary_batch_name(location.batch_id);
                 const auto pressure_iter =
-                    boundary_conditions.pressure.find(patch_name);
+                    boundary_conditions.pressure.find(batch_name);
                 const auto pressure_condition =
                     pressure_iter == boundary_conditions.pressure.end()
                   ? BoundaryCondition{}
