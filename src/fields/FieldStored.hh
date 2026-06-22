@@ -1,6 +1,12 @@
 /**
  * @file FieldStored.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Mesh-aware distributed storage for typed field descriptors.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -55,8 +61,11 @@ inline constexpr bool supported_field_location =
  *
  * @tparam FieldType Field descriptor defining value and location types.
  * @tparam Pack Tpetra scalar, ordinal, map, and vector types.
+ * @tparam MeshType MeshHandle or a compatible partitioned CRTP mesh.
  */
-template<class FieldType, TpetraTypePack Pack = DefaultTpetraTypes>
+template<class FieldType,
+         TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 class FieldStored
 {
 public:
@@ -69,6 +78,7 @@ public:
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using map_type = typename Pack::map_type;
     using import_type = typename Pack::import_type;
+    using mesh_type = MeshType;
     using storage_type = std::conditional_t<
         value_traits::is_vector,
         typename Pack::multi_vector_type,
@@ -89,7 +99,7 @@ public:
      */
     explicit FieldStored(
         descriptor_type descriptor,
-        SP<const MeshHandle<Pack>> mesh,
+        SP<const mesh_type> mesh,
         bool zero_out = true)
         : d_descriptor(std::move(descriptor)),
           d_mesh(require_mesh(std::move(mesh))),
@@ -106,7 +116,7 @@ public:
 
     /** @brief Allocate storage and initialize every local entry. */
     FieldStored(descriptor_type descriptor,
-                SP<const MeshHandle<Pack>> mesh,
+                SP<const mesh_type> mesh,
                 const value_type& initial_value)
         : FieldStored(
               std::move(descriptor), std::move(mesh), false)
@@ -125,8 +135,8 @@ public:
         return d_descriptor.name();
     }
 
-    const MeshHandle<Pack>& mesh() const noexcept { return *d_mesh; }
-    SP<const MeshHandle<Pack>> mesh_ptr() const noexcept { return d_mesh; }
+    const mesh_type& mesh() const noexcept { return *d_mesh; }
+    SP<const mesh_type> mesh_ptr() const noexcept { return d_mesh; }
 
     storage_type& data() noexcept { return d_owned; }
     const storage_type& data() const noexcept { return d_owned; }
@@ -282,7 +292,7 @@ public:
 
     /** @brief Owned value by structured cell ID. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     value_type value(CellID id) const
@@ -294,7 +304,7 @@ public:
 
     /** @brief Overlap (ghost-aware) value by structured cell ID. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     value_type local_value(CellID id) const
@@ -306,7 +316,7 @@ public:
 
     /** @brief Update owned and ghost copies by structured cell ID. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     void set_value(CellID id, const value_type& value)
@@ -318,7 +328,7 @@ public:
 
     /** @brief Update only owned storage by structured cell ID. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     void set_owned_value(CellID id, const value_type& value)
@@ -330,7 +340,7 @@ public:
 
     /** @brief Single component of owned entry by structured cell ID. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     scalar_type component_value(CellID id, size_t component) const
@@ -343,7 +353,7 @@ public:
 
     /** @brief Set one component by structured cell ID. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     void set_component_value(CellID id, size_t component,
@@ -358,7 +368,7 @@ public:
 
     /** @brief Test whether the cell with this structured ID is locally owned. */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     bool is_owned(CellID id) const
@@ -371,7 +381,7 @@ public:
     /** @brief Test whether the cell with this structured ID is available
      *         locally (owned or ghost). */
     template<class CellID>
-        requires requires(const MeshHandle<Pack>& m, CellID id) {
+        requires requires(const mesh_type& m, CellID id) {
             { m.cell_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     bool is_local(CellID id) const
@@ -385,7 +395,7 @@ public:
 
     /** @brief Owned value by structured face ID. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     value_type value(FaceID id) const
@@ -397,7 +407,7 @@ public:
 
     /** @brief Overlap value by structured face ID. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     value_type local_value(FaceID id) const
@@ -409,7 +419,7 @@ public:
 
     /** @brief Update owned and ghost copies by structured face ID. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     void set_value(FaceID id, const value_type& value)
@@ -421,7 +431,7 @@ public:
 
     /** @brief Update only owned storage by structured face ID. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     void set_owned_value(FaceID id, const value_type& value)
@@ -433,7 +443,7 @@ public:
 
     /** @brief Single component of owned face entry by structured face ID. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     scalar_type component_value(FaceID id, size_t component) const
@@ -446,7 +456,7 @@ public:
 
     /** @brief Set one face component by structured face ID. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     void set_component_value(FaceID id, size_t component,
@@ -461,7 +471,7 @@ public:
 
     /** @brief Test whether the face with this structured ID is locally owned. */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     bool is_owned(FaceID id) const
@@ -474,7 +484,7 @@ public:
     /** @brief Test whether the face with this structured ID is available
      *         locally (owned or ghost). */
     template<class FaceID>
-        requires requires(const MeshHandle<Pack>& m, FaceID id) {
+        requires requires(const mesh_type& m, FaceID id) {
             { m.face_local_id(id) } -> std::convertible_to<local_ordinal_type>;
         }
     bool is_local(FaceID id) const
@@ -485,8 +495,8 @@ public:
     }
 
 private:
-    static SP<const MeshHandle<Pack>> require_mesh(
-        SP<const MeshHandle<Pack>> mesh)
+    static SP<const mesh_type> require_mesh(
+        SP<const mesh_type> mesh)
     {
         if (!mesh)
         {
@@ -498,7 +508,7 @@ private:
 
     template<bool Overlap>
     static Teuchos::RCP<const map_type> map_for(
-        const MeshHandle<Pack>& mesh)
+        const mesh_type& mesh)
     {
         if constexpr (std::is_same_v<location_type, CellLocation>)
         {
@@ -669,43 +679,50 @@ private:
     }
 
     descriptor_type d_descriptor;
-    SP<const MeshHandle<Pack>> d_mesh;
+    SP<const mesh_type> d_mesh;
     storage_type d_owned;
     storage_type d_overlap;
     Teuchos::RCP<const import_type> d_import;
 };
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using ScalarCellFieldStored =
-    FieldStored<ScalarCellFieldDescriptor<Pack>, Pack>;
+    FieldStored<ScalarCellFieldDescriptor<Pack>, Pack, MeshType>;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using VectorCellFieldStored =
-    FieldStored<VectorCellFieldDescriptor<Pack>, Pack>;
+    FieldStored<VectorCellFieldDescriptor<Pack>, Pack, MeshType>;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using ScalarFaceFieldStored =
-    FieldStored<ScalarFaceFieldDescriptor<Pack>, Pack>;
+    FieldStored<ScalarFaceFieldDescriptor<Pack>, Pack, MeshType>;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using VectorFaceFieldStored =
-    FieldStored<VectorFaceFieldDescriptor<Pack>, Pack>;
+    FieldStored<VectorFaceFieldDescriptor<Pack>, Pack, MeshType>;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using ScalarBoundaryFaceFieldStored =
-    FieldStored<ScalarBoundaryFaceFieldDescriptor<Pack>, Pack>;
+    FieldStored<ScalarBoundaryFaceFieldDescriptor<Pack>, Pack, MeshType>;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using VectorBoundaryFaceFieldStored =
-    FieldStored<VectorBoundaryFaceFieldDescriptor<Pack>, Pack>;
+    FieldStored<VectorBoundaryFaceFieldDescriptor<Pack>, Pack, MeshType>;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using AnyFieldStored = std::variant<
-    SP<ScalarCellFieldStored<Pack>>,
-    SP<VectorCellFieldStored<Pack>>,
-    SP<ScalarFaceFieldStored<Pack>>,
-    SP<VectorFaceFieldStored<Pack>>,
-    SP<ScalarBoundaryFaceFieldStored<Pack>>,
-    SP<VectorBoundaryFaceFieldStored<Pack>>>;
+    SP<ScalarCellFieldStored<Pack, MeshType>>,
+    SP<VectorCellFieldStored<Pack, MeshType>>,
+    SP<ScalarFaceFieldStored<Pack, MeshType>>,
+    SP<VectorFaceFieldStored<Pack, MeshType>>,
+    SP<ScalarBoundaryFaceFieldStored<Pack, MeshType>>,
+    SP<VectorBoundaryFaceFieldStored<Pack, MeshType>>>;
 
 } // namespace SimpleFluid

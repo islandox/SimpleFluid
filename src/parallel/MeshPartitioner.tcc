@@ -11,6 +11,7 @@
 
 #include "MeshPartitioner.hh"
 
+#include <map>
 
 #include <Zoltan2_PartitioningProblem.hpp>
 #include <Zoltan2_PartitioningSolution.hpp>
@@ -285,6 +286,735 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
 }
 
 /**
+ * @brief Partition a replicated CRTP unstructured mesh.
+ *
+ * Cell geometry local IDs are used as graph global IDs while the input mesh is
+ * replicated. The input object is replaced by compact rank-local geometry,
+ * while the returned indexer retains those original IDs.
+ *
+ * @param mesh Replicated unstructured mesh geometry.
+ * @param comm Teuchos MPI communicator.
+ * @return Global indexing and ownership metadata for the rebuilt mesh.
+ */
+template<TpetraTypePack Pack>
+auto MeshPartitioner<Pack>::partition(
+    Meshes::UnstructuredMesh& mesh,
+    const Teuchos::RCP<const comm_type>& comm) -> UnstructuredPartition
+{
+    const auto nranks = comm->getSize();
+    const auto myrank = comm->getRank();
+    if (nranks <= 1)
+    {
+        std::vector<int> owner_ranks(mesh.num_cells(), 0);
+        return rebuild(mesh, std::move(owner_ranks), myrank);
+    }
+
+    return rebuild(
+        mesh,
+        compute_unstructured_owner_ranks(mesh, comm),
+        myrank);
+}
+
+template<TpetraTypePack Pack>
+auto MeshPartitioner<Pack>::build_partition_graph(
+    const Mesh<Pack>& mesh,
+    const Teuchos::RCP<const comm_type>& comm) -> PartitionGraph
+{
+    const auto nranks = comm->getSize();
+    const auto myrank = comm->getRank();
+    PartitionGraph graph;
+    const auto cell_count = mesh.d_owned_cell_global_ids.size();
+
+    std::unordered_map<GO, std::vector<GO>> adjacency_by_gid;
+    graph.column_gids.reserve(cell_count);
+    for (size_t i = 0; i < cell_count; ++i)
+    {
+        const auto gid = mesh.d_owned_cell_global_ids[i];
+        const auto lid = mesh.d_owned_cell_ids[i];
+        graph.column_gids.push_back(gid);
+
+        const auto& cell = mesh.d_cells[static_cast<size_t>(lid)];
+        std::unordered_set<GO> neighbors;
+        for (const auto face_lid : cell.faces)
+        {
+            const auto& face = mesh.d_faces[static_cast<size_t>(face_lid)];
+            if (face.owner == lid && face.neighbor != invalid_lid)
+            {
+                neighbors.insert(mesh.cell_global_id(face.neighbor));
+            }
+            else if (face.neighbor == lid)
+            {
+                neighbors.insert(mesh.cell_global_id(face.owner));
+            }
+        }
+
+        auto& adjacency = adjacency_by_gid[gid];
+        adjacency.assign(neighbors.begin(), neighbors.end());
+        std::sort(adjacency.begin(), adjacency.end());
+    }
+
+    for (const auto gid : graph.column_gids)
+    {
+        if (static_cast<int>(
+                static_cast<size_t>(gid) % static_cast<size_t>(nranks))
+            != myrank)
+        {
+            continue;
+        }
+        graph.row_gids.push_back(gid);
+        graph.row_adjacency.push_back(adjacency_by_gid.at(gid));
+    }
+    return graph;
+}
+
+template<TpetraTypePack Pack>
+auto MeshPartitioner<Pack>::build_partition_graph(
+    const Meshes::UnstructuredMesh& mesh,
+    const Teuchos::RCP<const comm_type>& comm) -> PartitionGraph
+{
+    const auto nranks = comm->getSize();
+    const auto myrank = comm->getRank();
+    PartitionGraph graph;
+
+    graph.column_gids.reserve(mesh.num_cells());
+    for (size_t lid = 0; lid < mesh.num_cells(); ++lid)
+    {
+        graph.column_gids.push_back(static_cast<GO>(lid));
+    }
+
+    for (size_t cell_lid = 0; cell_lid < mesh.num_cells(); ++cell_lid)
+    {
+        if (static_cast<int>(cell_lid % static_cast<size_t>(nranks))
+            != myrank)
+        {
+            continue;
+        }
+
+        graph.row_gids.push_back(static_cast<GO>(cell_lid));
+        const auto cell = mesh.cell_id(cell_lid);
+        std::unordered_set<GO> neighbors;
+        for (const auto face : mesh.faces(cell))
+        {
+            const auto other = mesh.opposite_cell(face, cell);
+            if (other == Meshes::UnstructuredMesh::invalid_cell_id())
+            {
+                continue;
+            }
+            neighbors.insert(static_cast<GO>(
+                mesh.cell_local_id(other)));
+        }
+
+        auto& adjacency =
+            graph.row_adjacency.emplace_back(
+                neighbors.begin(),
+                neighbors.end());
+        std::sort(adjacency.begin(), adjacency.end());
+    }
+    return graph;
+}
+
+template<TpetraTypePack Pack>
+auto MeshPartitioner<Pack>::solve_partition_graph(
+    const PartitionGraph& partition_graph,
+    const Teuchos::RCP<const comm_type>& comm)
+    -> std::unordered_map<GO, int>
+{
+    const auto nranks = comm->getSize();
+    const auto invalid_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+
+    Teuchos::RCP<const map_type> row_map;
+    if (!partition_graph.row_gids.empty())
+    {
+        row_map = Teuchos::rcp(new map_type(
+            invalid_size,
+            partition_graph.row_gids.data(),
+            partition_graph.row_gids.size(),
+            GO{},
+            comm));
+    }
+    else
+    {
+        row_map = Teuchos::rcp(new map_type(
+            invalid_size,
+            size_t{},
+            GO{},
+            comm));
+    }
+
+    Teuchos::RCP<const map_type> column_map;
+    if (!partition_graph.column_gids.empty())
+    {
+        column_map = Teuchos::rcp(new map_type(
+            invalid_size,
+            partition_graph.column_gids.data(),
+            partition_graph.column_gids.size(),
+            GO{},
+            comm));
+    }
+    else
+    {
+        column_map = Teuchos::rcp(new map_type(
+            invalid_size,
+            size_t{},
+            GO{},
+            comm));
+    }
+
+    size_t max_adjacency = 0;
+    for (const auto& adjacency : partition_graph.row_adjacency)
+    {
+        max_adjacency = std::max(max_adjacency, adjacency.size());
+    }
+
+    auto graph = Teuchos::rcp(new graph_type(
+        row_map,
+        column_map,
+        max_adjacency));
+    for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
+    {
+        const auto& adjacency = partition_graph.row_adjacency[row];
+        if (!adjacency.empty())
+        {
+            graph->insertGlobalIndices(
+                partition_graph.row_gids[row],
+                adjacency.size(),
+                adjacency.data());
+        }
+    }
+    graph->fillComplete();
+
+    std::unordered_map<GO, int> local_parts;
+    {
+        using adapter_type = Zoltan2::TpetraRowGraphAdapter<graph_type>;
+        Teuchos::ParameterList parameters;
+        parameters.set("algorithm", "parmetis");
+        parameters.set("num_global_parts", nranks);
+        adapter_type adapter(graph);
+        Zoltan2::PartitioningProblem<adapter_type> problem(
+            &adapter,
+            &parameters,
+            comm);
+        problem.solve();
+
+        const auto& solution = problem.getSolution();
+        const auto* parts = solution.getPartListView();
+        for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
+        {
+            local_parts[partition_graph.row_gids[row]] = parts[row];
+        }
+    }
+
+    std::vector<GO> local_pairs;
+    local_pairs.reserve(local_parts.size() * 2);
+    for (const auto& [cell_gid, owner_rank] : local_parts)
+    {
+        local_pairs.push_back(cell_gid);
+        local_pairs.push_back(static_cast<GO>(owner_rank));
+    }
+
+    const auto my_pair_count =
+        static_cast<int>(local_pairs.size());
+    std::vector<int> counts(static_cast<size_t>(nranks), 0);
+    MPI_Allgather(&my_pair_count, 1, MPI_INT,
+                  counts.data(), 1, MPI_INT,
+                  get_mpi_comm(*comm));
+
+    std::vector<int> displacements(static_cast<size_t>(nranks), 0);
+    for (int r = 1; r < nranks; ++r)
+    {
+        displacements[static_cast<size_t>(r)] =
+            displacements[static_cast<size_t>(r - 1)]
+          + counts[static_cast<size_t>(r - 1)];
+    }
+
+    const auto total_pairs =
+        displacements.back() + counts.back();
+    std::vector<GO> gathered_pairs(
+        static_cast<size_t>(std::max(total_pairs, 1)));
+    MPI_Allgatherv(local_pairs.data(), my_pair_count, mpi_go_type(),
+                   gathered_pairs.data(), counts.data(),
+                   displacements.data(), mpi_go_type(),
+                   get_mpi_comm(*comm));
+
+    local_parts.clear();
+    for (int pair = 0; pair + 1 < total_pairs; pair += 2)
+    {
+        local_parts[gathered_pairs[static_cast<size_t>(pair)]] =
+            static_cast<int>(
+                gathered_pairs[static_cast<size_t>(pair + 1)]);
+    }
+    return local_parts;
+}
+
+template<TpetraTypePack Pack>
+template<class CellFaces, class OppositeCell, class FaceNodes, class CellNodes>
+auto MeshPartitioner<Pack>::reorder_local_entities(
+    size_t cell_count,
+    const std::vector<int>& cell_owner_ranks,
+    int rank,
+    CellFaces&& cell_faces,
+    OppositeCell&& opposite_cell,
+    FaceNodes&& face_nodes,
+    CellNodes&& cell_nodes) -> LocalEntityOrder
+{
+    if (cell_owner_ranks.size() != cell_count)
+    {
+        throw std::invalid_argument(
+            "Mesh partition has wrong cell count.");
+    }
+
+    LocalEntityOrder order;
+    order.owned_cells.reserve(cell_count);
+    std::vector<bool> ghost_cell_flags(cell_count, false);
+    for (size_t cell_lid = 0; cell_lid < cell_count; ++cell_lid)
+    {
+        if (cell_owner_ranks[cell_lid] != rank)
+        {
+            continue;
+        }
+
+        order.owned_cells.push_back(cell_lid);
+        for (const auto face : cell_faces(cell_lid))
+        {
+            const auto neighbor =
+                static_cast<size_t>(opposite_cell(face, cell_lid));
+            if (neighbor >= cell_count)
+            {
+                continue;
+            }
+            if (cell_owner_ranks[neighbor] != rank)
+            {
+                ghost_cell_flags[neighbor] = true;
+            }
+        }
+    }
+
+    for (size_t cell_lid = 0; cell_lid < ghost_cell_flags.size(); ++cell_lid)
+    {
+        if (ghost_cell_flags[cell_lid])
+        {
+            order.ghost_cells.push_back(cell_lid);
+        }
+    }
+
+    std::unordered_set<size_t> seen_faces;
+    auto append_cell_faces =
+        [&](const std::vector<size_t>& cells, std::vector<size_t>& faces)
+    {
+        for (const auto cell_lid : cells)
+        {
+            for (const auto face : cell_faces(cell_lid))
+            {
+                const auto face_lid = static_cast<size_t>(face);
+                if (seen_faces.insert(face_lid).second)
+                {
+                    faces.push_back(face_lid);
+                }
+            }
+        }
+    };
+    append_cell_faces(order.owned_cells, order.owned_faces);
+    append_cell_faces(order.ghost_cells, order.overlap_faces);
+
+    std::unordered_map<size_t, int> node_owner_ranks;
+    for (size_t cell_lid = 0; cell_lid < cell_count; ++cell_lid)
+    {
+        for (const auto node : cell_nodes(cell_lid))
+        {
+            const auto node_lid = static_cast<size_t>(node);
+            const auto [owner, inserted] = node_owner_ranks.emplace(
+                node_lid, cell_owner_ranks[cell_lid]);
+            if (!inserted)
+            {
+                owner->second = std::min(
+                    owner->second, cell_owner_ranks[cell_lid]);
+            }
+        }
+    }
+
+    std::unordered_set<size_t> seen_nodes;
+    std::vector<size_t> local_nodes;
+    auto append_nodes = [&](const auto& ids)
+    {
+        for (const auto node : ids)
+        {
+            const auto node_lid = static_cast<size_t>(node);
+            if (seen_nodes.insert(node_lid).second)
+            {
+                local_nodes.push_back(node_lid);
+            }
+        }
+    };
+    for (const auto cell_lid : order.owned_cells)
+    {
+        append_nodes(cell_nodes(cell_lid));
+    }
+    for (const auto cell_lid : order.ghost_cells)
+    {
+        append_nodes(cell_nodes(cell_lid));
+    }
+    for (const auto face_lid : order.owned_faces)
+    {
+        append_nodes(face_nodes(face_lid));
+    }
+    for (const auto face_lid : order.overlap_faces)
+    {
+        append_nodes(face_nodes(face_lid));
+    }
+
+    for (const auto node_lid : local_nodes)
+    {
+        if (node_owner_ranks.at(node_lid) == rank)
+        {
+            order.owned_nodes.push_back(node_lid);
+        }
+        else
+        {
+            order.overlap_nodes.push_back(node_lid);
+        }
+    }
+
+    return order;
+}
+
+template<TpetraTypePack Pack>
+std::vector<int> MeshPartitioner<Pack>::compute_unstructured_owner_ranks(
+    const Meshes::UnstructuredMesh& mesh,
+    const Teuchos::RCP<const comm_type>& comm)
+{
+    const auto nranks = comm->getSize();
+    if (nranks <= 1)
+    {
+        return std::vector<int>(mesh.num_cells(), 0);
+    }
+
+    const auto rank_by_gid =
+        solve_partition_graph(build_partition_graph(mesh, comm), comm);
+    std::vector<int> owner_ranks(mesh.num_cells(), -1);
+    for (const auto& [cell_gid, owner_rank] : rank_by_gid)
+    {
+        const auto cell_lid = static_cast<size_t>(cell_gid);
+        if (cell_lid >= owner_ranks.size())
+        {
+            throw std::runtime_error(
+                "Unstructured mesh partitioner returned an invalid "
+                "cell ID.");
+        }
+        owner_ranks[cell_lid] = owner_rank;
+    }
+
+    if (std::find(owner_ranks.begin(), owner_ranks.end(), -1)
+        != owner_ranks.end())
+    {
+        throw std::runtime_error(
+            "Unstructured mesh partitioner did not assign every cell.");
+    }
+    return owner_ranks;
+}
+
+template<TpetraTypePack Pack>
+auto MeshPartitioner<Pack>::rebuild(
+    Meshes::UnstructuredMesh& mesh,
+    std::vector<int> cell_owner_ranks,
+    int rank) -> UnstructuredPartition
+{
+    auto order = reorder_local_entities(
+        mesh.num_cells(),
+        cell_owner_ranks,
+        rank,
+        [&](size_t cell_lid)
+        {
+            return mesh.faces(mesh.cell_id(cell_lid));
+        },
+        [&](const auto face, size_t cell_lid) -> size_t
+        {
+            const auto neighbor =
+                mesh.opposite_cell(face, mesh.cell_id(cell_lid));
+            if (neighbor == Meshes::UnstructuredMesh::invalid_cell_id())
+            {
+                return mesh.num_cells();
+            }
+            return mesh.cell_local_id(neighbor);
+        },
+        [&](size_t face_lid)
+        {
+            return mesh.face_nodes(mesh.face_id(face_lid));
+        },
+        [&](size_t cell_lid)
+        {
+            return mesh.cell_nodes(mesh.cell_id(cell_lid));
+        });
+
+    auto to_cell_ids = [&](std::vector<size_t> local_ids)
+    {
+        std::vector<typename indexer_type::cell_id_t> global_ids;
+        global_ids.reserve(local_ids.size());
+        for (const auto local_id : local_ids)
+        {
+            global_ids.push_back(mesh.cell_id(local_id));
+        }
+        return global_ids;
+    };
+    auto to_face_ids = [&](const std::vector<size_t>& local_ids)
+    {
+        std::vector<typename indexer_type::face_id_t> global_ids;
+        global_ids.reserve(local_ids.size());
+        for (const auto local_id : local_ids)
+        {
+            global_ids.push_back(mesh.face_id(local_id));
+        }
+        return global_ids;
+    };
+    auto to_node_ids = [&](const std::vector<size_t>& local_ids)
+    {
+        std::vector<typename indexer_type::node_id_t> global_ids;
+        global_ids.reserve(local_ids.size());
+        for (const auto local_id : local_ids)
+        {
+            global_ids.push_back(mesh.node_id(local_id));
+        }
+        return global_ids;
+    };
+
+    const auto owned_cell_ids = to_cell_ids(order.owned_cells);
+    const auto ghost_cell_ids = to_cell_ids(order.ghost_cells);
+    const auto owned_node_ids = to_node_ids(order.owned_nodes);
+    const auto overlap_node_ids = to_node_ids(order.overlap_nodes);
+    std::vector<typename indexer_type::node_id_t> node_global_ids =
+        owned_node_ids;
+    node_global_ids.insert(
+        node_global_ids.end(),
+        overlap_node_ids.begin(),
+        overlap_node_ids.end());
+
+    std::vector<size_t> source_cell_lids = order.owned_cells;
+    source_cell_lids.insert(
+        source_cell_lids.end(),
+        order.ghost_cells.begin(),
+        order.ghost_cells.end());
+    std::vector<size_t> source_face_lids = order.owned_faces;
+    source_face_lids.insert(
+        source_face_lids.end(),
+        order.overlap_faces.begin(),
+        order.overlap_faces.end());
+
+    using UnstructuredMesh = Meshes::UnstructuredMesh;
+    using NodeID = UnstructuredMesh::NodeID;
+    using FaceID = UnstructuredMesh::FaceID;
+    using FaceKey = std::vector<NodeID>;
+
+    std::unordered_map<NodeID, NodeID> local_node_by_global;
+    Arr<Vec3> local_nodes;
+    local_nodes.reserve(node_global_ids.size());
+    for (size_t local = 0; local < node_global_ids.size(); ++local)
+    {
+        const auto global_id = node_global_ids[local];
+        local_node_by_global.emplace(
+            global_id, static_cast<NodeID>(local));
+        local_nodes.push_back(mesh.node_coordinates(global_id));
+    }
+
+    Arr<UnstructuredMesh::CellDefinition> local_cells;
+    local_cells.reserve(source_cell_lids.size());
+    for (const auto source_lid : source_cell_lids)
+    {
+        const auto source_id = mesh.cell_id(source_lid);
+        UnstructuredMesh::CellDefinition cell;
+        cell.type = mesh.cell_type(source_id);
+        cell.node_ids.reserve(mesh.cell_nodes(source_id).size());
+        for (const auto node_id : mesh.cell_nodes(source_id))
+        {
+            cell.node_ids.push_back(local_node_by_global.at(node_id));
+        }
+        local_cells.push_back(std::move(cell));
+    }
+
+    Arr<UnstructuredMesh::BoundaryFaceDefinition> local_boundaries;
+    for (const auto source_lid : source_face_lids)
+    {
+        const auto source_id = mesh.face_id(source_lid);
+        if (!mesh.is_boundary_face(source_id))
+        {
+            continue;
+        }
+
+        UnstructuredMesh::BoundaryFaceDefinition boundary;
+        boundary.boundary_id = mesh.boundary_id(source_id);
+        boundary.name = mesh.boundary_name(source_id);
+        boundary.node_ids.reserve(mesh.face_nodes(source_id).size());
+        for (const auto node_id : mesh.face_nodes(source_id))
+        {
+            boundary.node_ids.push_back(local_node_by_global.at(node_id));
+        }
+        local_boundaries.push_back(std::move(boundary));
+    }
+
+    UnstructuredMesh local_mesh(
+        local_nodes,
+        local_cells,
+        local_boundaries,
+        order.owned_cells.size(),
+        order.owned_faces.size());
+
+    auto source_face_key = [&](FaceID source_id)
+    {
+        FaceKey key = mesh.face_nodes(source_id);
+        std::sort(key.begin(), key.end());
+        return key;
+    };
+    std::map<FaceKey, FaceID> source_face_by_key;
+    for (const auto source_lid : source_face_lids)
+    {
+        const auto source_id = mesh.face_id(source_lid);
+        source_face_by_key.emplace(source_face_key(source_id), source_id);
+    }
+
+    std::vector<typename indexer_type::face_id_t> face_global_ids;
+    face_global_ids.reserve(local_mesh.num_faces());
+    for (size_t local_lid = 0;
+         local_lid < local_mesh.num_faces();
+         ++local_lid)
+    {
+        FaceKey key;
+        for (const auto local_node_id :
+             local_mesh.face_nodes(local_mesh.face_id(local_lid)))
+        {
+            key.push_back(node_global_ids.at(
+                static_cast<size_t>(local_node_id)));
+        }
+        std::sort(key.begin(), key.end());
+        const auto source_face = source_face_by_key.find(key);
+        if (source_face == source_face_by_key.end())
+        {
+            throw std::runtime_error(
+                "MeshPartitioner rebuilt an unknown local face.");
+        }
+        face_global_ids.push_back(source_face->second);
+    }
+
+    if (face_global_ids.size() != source_face_lids.size())
+    {
+        throw std::runtime_error(
+            "MeshPartitioner rebuilt the wrong number of local faces.");
+    }
+
+    const auto owned_source_face_ids = to_face_ids(order.owned_faces);
+    const std::unordered_set<FaceID> owned_face_ids(
+        owned_source_face_ids.begin(),
+        owned_source_face_ids.end());
+    for (size_t local_lid = 0; local_lid < face_global_ids.size(); ++local_lid)
+    {
+        const bool expected_owned = local_lid < order.owned_faces.size();
+        if (owned_face_ids.contains(face_global_ids[local_lid])
+            != expected_owned)
+        {
+            throw std::runtime_error(
+                "MeshPartitioner local face ownership is not contiguous.");
+        }
+    }
+
+    const auto owned_face_end = face_global_ids.begin()
+        + static_cast<std::ptrdiff_t>(order.owned_faces.size());
+    std::vector<typename indexer_type::face_id_t> owned_face_global_ids(
+        face_global_ids.begin(), owned_face_end);
+    std::vector<typename indexer_type::face_id_t> overlap_face_global_ids(
+        owned_face_end, face_global_ids.end());
+
+    auto checked_global_ordinal = [](const auto global_id) -> GO
+    {
+        if (!std::in_range<GO>(global_id))
+        {
+            throw std::overflow_error(
+                "MeshPartitioner global entity ID exceeds the global "
+                "ordinal type.");
+        }
+        return static_cast<GO>(global_id);
+    };
+
+    std::vector<typename indexer_type::CellMapping> owned_cell_mappings;
+    std::vector<typename indexer_type::CellMapping> ghost_cell_mappings;
+    owned_cell_mappings.reserve(owned_cell_ids.size());
+    ghost_cell_mappings.reserve(ghost_cell_ids.size());
+    for (size_t local = 0; local < owned_cell_ids.size(); ++local)
+    {
+        const auto global_id = owned_cell_ids[local];
+        owned_cell_mappings.push_back({
+            local_mesh.cell_id(local),
+            global_id,
+            checked_global_ordinal(global_id)});
+    }
+    for (size_t ghost = 0; ghost < ghost_cell_ids.size(); ++ghost)
+    {
+        const auto local = owned_cell_ids.size() + ghost;
+        const auto global_id = ghost_cell_ids[ghost];
+        ghost_cell_mappings.push_back({
+            local_mesh.cell_id(local),
+            global_id,
+            checked_global_ordinal(global_id)});
+    }
+
+    std::vector<typename indexer_type::FaceMapping> owned_face_mappings;
+    std::vector<typename indexer_type::FaceMapping> overlap_face_mappings;
+    owned_face_mappings.reserve(owned_face_global_ids.size());
+    overlap_face_mappings.reserve(overlap_face_global_ids.size());
+    for (size_t local = 0; local < owned_face_global_ids.size(); ++local)
+    {
+        const auto global_id = owned_face_global_ids[local];
+        owned_face_mappings.push_back({
+            local_mesh.face_id(local),
+            global_id,
+            checked_global_ordinal(global_id)});
+    }
+    for (size_t overlap = 0;
+         overlap < overlap_face_global_ids.size();
+         ++overlap)
+    {
+        const auto local = owned_face_global_ids.size() + overlap;
+        const auto global_id = overlap_face_global_ids[overlap];
+        overlap_face_mappings.push_back({
+            local_mesh.face_id(local),
+            global_id,
+            checked_global_ordinal(global_id)});
+    }
+
+    std::vector<typename indexer_type::NodeMapping> owned_node_mappings;
+    std::vector<typename indexer_type::NodeMapping> overlap_node_mappings;
+    owned_node_mappings.reserve(owned_node_ids.size());
+    overlap_node_mappings.reserve(overlap_node_ids.size());
+    for (size_t local = 0; local < owned_node_ids.size(); ++local)
+    {
+        const auto global_id = owned_node_ids[local];
+        owned_node_mappings.push_back({
+            local_mesh.node_id(local),
+            global_id,
+            checked_global_ordinal(global_id)});
+    }
+    for (size_t overlap = 0; overlap < overlap_node_ids.size(); ++overlap)
+    {
+        const auto local = owned_node_ids.size() + overlap;
+        const auto global_id = overlap_node_ids[overlap];
+        overlap_node_mappings.push_back({
+            local_mesh.node_id(local),
+            global_id,
+            checked_global_ordinal(global_id)});
+    }
+
+    UnstructuredPartition partition;
+    partition.indexer = indexer_type(
+        std::move(owned_cell_mappings),
+        std::move(ghost_cell_mappings),
+        std::move(owned_face_mappings),
+        std::move(overlap_face_mappings),
+        std::move(owned_node_mappings),
+        std::move(overlap_node_mappings));
+    partition.cell_owner_ranks = std::move(cell_owner_ranks);
+    mesh = std::move(local_mesh);
+
+    return partition;
+}
+
+/**
  * @brief Compute the mapping from cell global ID to destination MPI rank.
  *
  * Builds a Tpetra CRS graph from face-based cell adjacency, wraps it in
@@ -299,84 +1029,7 @@ template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::compute_gid_to_rank_map(
     const Mesh<Pack>& mesh, const Teuchos::RCP<const comm_type>& comm) -> std::unordered_map<GO, int>
 {
-    int nranks = comm->getSize(), myrank = comm->getRank();
-    std::unordered_map<GO, int> result;
-    auto nc = mesh.d_owned_cell_global_ids.size();
-
-    std::unordered_map<GO, std::vector<GO>> all_adj;
-    for (size_t i = 0; i < nc; ++i) {
-        GO gid = mesh.d_owned_cell_global_ids[i];
-        LO lid = mesh.d_owned_cell_ids[i];
-        auto& cell = mesh.d_cells[static_cast<size_t>(lid)];
-        std::unordered_set<GO> ns;
-        for (auto fid : cell.faces) {
-            auto& face = mesh.d_faces[static_cast<size_t>(fid)];
-            if (face.owner == lid && face.neighbor != invalid_lid) ns.insert(mesh.cell_global_id(face.neighbor));
-            else if (face.neighbor == lid) ns.insert(mesh.cell_global_id(face.owner));
-        }
-        all_adj[gid] = std::vector<GO>(ns.begin(), ns.end());
-    }
-
-    std::vector<GO> my_gids;
-    std::vector<std::vector<GO>> my_adj;
-    for (size_t i = 0; i < nc; ++i) {
-        GO gid = mesh.d_owned_cell_global_ids[i];
-        if (static_cast<int>(static_cast<size_t>(gid) % static_cast<size_t>(nranks)) == myrank) {
-            my_gids.push_back(gid);
-            my_adj.push_back(all_adj[gid]);
-        }
-    }
-
-    auto inv_g = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
-    Teuchos::RCP<const map_type> row_map;
-    if (!my_gids.empty())
-        row_map = Teuchos::rcp(new map_type(inv_g, my_gids.data(), static_cast<size_t>(my_gids.size()), static_cast<GO>(0), comm));
-    else
-        row_map = Teuchos::rcp(new map_type(inv_g, static_cast<size_t>(0), static_cast<GO>(0), comm));
-    Teuchos::RCP<const map_type> col_map;
-    if (!mesh.d_owned_cell_global_ids.empty())
-        col_map = Teuchos::rcp(new map_type(inv_g, mesh.d_owned_cell_global_ids.data(), static_cast<size_t>(nc), static_cast<GO>(0), comm));
-    else
-        col_map = Teuchos::rcp(new map_type(inv_g, static_cast<size_t>(0), static_cast<GO>(0), comm));
-
-    size_t max_adj = 0;
-    for (auto& a : my_adj) if (a.size() > max_adj) max_adj = a.size();
-    Teuchos::RCP<graph_type> graph = Teuchos::rcp(new graph_type(row_map, col_map, max_adj));
-    for (size_t i = 0; i < my_gids.size(); ++i) {
-        auto& adj = my_adj[i];
-        if (!adj.empty()) graph->insertGlobalIndices(my_gids[i], adj.size(), adj.data());
-    }
-    graph->fillComplete();
-
-    {
-        using adapter_t = Zoltan2::TpetraRowGraphAdapter<graph_type>;
-        Teuchos::ParameterList params;
-        params.set("algorithm", "parmetis");
-        params.set("num_global_parts", nranks);
-        adapter_t adapter(graph);
-        Zoltan2::PartitioningProblem<adapter_t> problem(&adapter, &params, comm);
-        problem.solve();
-        auto& sol = problem.getSolution();
-        auto* pl = sol.getPartListView();
-        for (size_t i = 0; i < my_gids.size(); ++i) result[my_gids[i]] = pl[i];
-    }
-
-    // Allgatherv full map
-    {
-        std::vector<GO> pairs; pairs.reserve(result.size() * 2);
-        for (auto& [g, r] : result) { pairs.push_back(g); pairs.push_back(static_cast<GO>(r)); }
-        int mc = static_cast<int>(pairs.size());
-        std::vector<int> ac(static_cast<size_t>(nranks));
-        MPI_Allgather(&mc, 1, MPI_INT, ac.data(), 1, MPI_INT, get_mpi_comm(*comm));
-        std::vector<int> ad(static_cast<size_t>(nranks), 0);
-        for (int r = 1; r < nranks; ++r) ad[static_cast<size_t>(r)] = ad[static_cast<size_t>(r - 1)] + ac[static_cast<size_t>(r - 1)];
-        int tot = ad.back() + ac.back();
-        std::vector<GO> ap(static_cast<size_t>(std::max(tot, 0)));
-        MPI_Allgatherv(pairs.data(), mc, mpi_go_type(), ap.data(), ac.data(), ad.data(), mpi_go_type(), get_mpi_comm(*comm));
-        result.clear();
-        for (size_t i = 0; i + 1 < ap.size(); i += 2) result[ap[i]] = static_cast<int>(ap[i + 1]);
-    }
-    return result;
+    return solve_partition_graph(build_partition_graph(mesh, comm), comm);
 }
 
 

@@ -272,6 +272,50 @@ inline MeshUtils::Vec3 non_orthogonal_area_vector(
          - orthogonal_area_vector(area_vector, cell_center_vector);
 }
 
+template<class MeshType>
+auto query_cell_id(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type cell_lid)
+{
+    if constexpr (requires { mesh.cell_id(cell_lid); })
+    {
+        return mesh.cell_id(cell_lid);
+    }
+    else
+    {
+        return cell_lid;
+    }
+}
+
+template<class MeshType>
+auto query_face_id(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid)
+{
+    if constexpr (requires { mesh.face_id(face_lid); })
+    {
+        return mesh.face_id(face_lid);
+    }
+    else
+    {
+        return face_lid;
+    }
+}
+
+template<class MeshType, class CellID>
+auto packed_cell_local_id(const MeshType& mesh, CellID cell_id)
+    -> typename MeshType::local_ordinal_type
+{
+    if constexpr (requires { mesh.cell_local_id(cell_id); })
+    {
+        return mesh.cell_local_id(cell_id);
+    }
+    else
+    {
+        return static_cast<typename MeshType::local_ordinal_type>(cell_id);
+    }
+}
+
 /**
  * @brief Distance-weighted harmonic interpolation of a positive cell field
  *        to an interior face.
@@ -296,10 +340,11 @@ inline auto harmonic_face_value(
         return scalar_type{};
     }
 
+    const auto face_id = query_face_id(mesh, face_lid);
     const auto cell_distance =
-        mesh.cell_to_face_distance(face_lid, cell_lid);
+        mesh.cell_to_face_distance(face_id, query_cell_id(mesh, cell_lid));
     const auto other_distance =
-        mesh.cell_to_face_distance(face_lid, other_lid);
+        mesh.cell_to_face_distance(face_id, query_cell_id(mesh, other_lid));
     const auto total_distance = cell_distance + other_distance;
     if (cell_distance > scalar_type{}
         && other_distance > scalar_type{}
@@ -338,7 +383,10 @@ inline auto interior_diffusion_coefficient(
 {
     using scalar_type = typename MeshType::scalar_type;
 
-    const auto d = mesh.cell_centroid(other_lid) - mesh.cell_centroid(cell_lid);
+    const auto face_id = query_face_id(mesh, face_lid);
+    const auto cell_id = query_cell_id(mesh, cell_lid);
+    const auto other_id = query_cell_id(mesh, other_lid);
+    const auto d = mesh.cell_centroid(other_id) - mesh.cell_centroid(cell_id);
     const auto d2 = d.dot(d);
     if (d2 <= scalar_type{0})
     {
@@ -350,20 +398,20 @@ inline auto interior_diffusion_coefficient(
             + ".");
     }
 
-    const auto& normal = mesh.face_normal_outward(face_lid, cell_lid);
-    const auto projected = mesh.face_area(face_lid) * normal.dot(d) / d2;
+    const auto& normal = mesh.face_normal_outward(face_id, cell_id);
+    const auto projected = mesh.face_area(face_id) * normal.dot(d) / d2;
     if (projected > scalar_type{0})
     {
         return diffusivity * projected;
     }
 
     const auto stored_distance =
-        mesh.face_cell_center_distance(face_lid);
+        mesh.face_cell_center_distance(face_id);
     const auto distance =
         stored_distance > scalar_type{0}
       ? stored_distance
       : std::sqrt(d2);
-    return diffusivity * mesh.face_area(face_lid) / distance;
+    return diffusivity * mesh.face_area(face_id) / distance;
 }
 
 /**
@@ -388,23 +436,25 @@ inline auto boundary_diffusion_coefficient(
 {
     using scalar_type = typename MeshType::scalar_type;
 
-    const auto d = mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
+    const auto face_id = query_face_id(mesh, face_lid);
+    const auto cell_id = query_cell_id(mesh, cell_lid);
+    const auto d = mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
     const auto d2 = d.dot(d);
     if (d2 <= scalar_type{0})
     {
         return scalar_type{};
     }
 
-    const auto& normal = mesh.face_normal_outward(face_lid, cell_lid);
-    const auto projected = mesh.face_area(face_lid) * normal.dot(d) / d2;
+    const auto& normal = mesh.face_normal_outward(face_id, cell_id);
+    const auto projected = mesh.face_area(face_id) * normal.dot(d) / d2;
     if (projected > scalar_type{0})
     {
         return diffusivity * projected;
     }
 
-    const auto distance = mesh.cell_to_face_distance(face_lid, cell_lid);
+    const auto distance = mesh.cell_to_face_distance(face_id, cell_id);
     return distance > scalar_type{0}
-         ? diffusivity * mesh.face_area(face_lid) / distance
+         ? diffusivity * mesh.face_area(face_id) / distance
          : scalar_type{};
 }
 
@@ -471,17 +521,18 @@ least_squares_gradient_stencils(const MeshType& mesh)
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto cell_id = query_cell_id(mesh, cell_lid);
         std::array<std::array<real_t, 3>, 3> normal{};
         std::vector<typename MeshType::Vec3> directions;
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        for (const auto face_id : mesh.faces(cell_id))
         {
-            if (!mesh.is_interior_face(face_lid))
+            if (!mesh.is_interior_face(face_id))
             {
                 continue;
             }
 
-            const auto d = mesh.cell_center_vector(face_lid, cell_lid);
+            const auto d = mesh.cell_center_vector(face_id, cell_id);
             directions.push_back(d);
 
             normal[0][0] += d.x * d.x;
@@ -501,9 +552,9 @@ least_squares_gradient_stencils(const MeshType& mesh)
         coefficients.reserve(directions.size() + 1);
 
         size_t direction_id = 0;
-        for (const auto face_lid : mesh.faces(cell_lid))
+        for (const auto face_id : mesh.faces(cell_id))
         {
-            if (!mesh.is_interior_face(face_lid))
+            if (!mesh.is_interior_face(face_id))
             {
                 continue;
             }
@@ -511,11 +562,12 @@ least_squares_gradient_stencils(const MeshType& mesh)
             auto rhs = directions[direction_id++];
             auto local_normal = normal;
             const auto basis = solve_3x3(local_normal, rhs);
-            const auto other =
-                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            const auto other_id =
+                mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
+            const auto other_lid = packed_cell_local_id(mesh, other_id);
 
             add_gradient_coefficient<MeshType>(
-                coefficients, other, basis);
+                coefficients, other_lid, basis);
             add_gradient_coefficient<MeshType>(
                 coefficients, cell_lid,
                 {-basis.x, -basis.y, -basis.z});

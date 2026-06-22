@@ -1,10 +1,16 @@
 /**
  * @file testOrthogonalDiffusionProfile.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Performance profiling: 100³ orthogonal mesh diffusion solve.
  *
  * Exercises the template-heavy MeshBase / OrthoMeshTopo code paths by
  * assembling and solving a scalar diffusion problem on a 1M-cell mesh.
  * Designed for sampling profilers (macOS sample / Instruments).
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -153,7 +159,7 @@ assemble_diffusion(const CartMesh& mesh,
         for (auto face_id : mesh.boundary_face_batch(batch_id))
         {
             const auto face_lid = mesh.face_local_id(face_id);
-            if (!mesh.is_boundary_face(face_lid)) continue;
+            if (!mesh.is_boundary_face(face_id)) continue;
 
             const auto owner_id = mesh.owner_cell(face_id);
             const auto owner_lid = static_cast<LO>(mesh.cell_local_id(owner_id));
@@ -188,6 +194,13 @@ assemble_diffusion(const CartMesh& mesh,
 // ---------------------------------------------------------------------------
 // Test: 100³ diffusion solve with manufactured solution
 // ---------------------------------------------------------------------------
+/**
+ * @brief Profile a 100³-cell orthogonal mesh diffusion assembly and solve.
+ *
+ * Builds a 1M-cell Cartesian mesh, assembles a manufactured-solution
+ * diffusion system with Tpetra, solves with Belos, and verifies L2 error.
+ * Runs five iterations for profiling. Disabled by default.
+ */
 TEST(OrthogonalDiffusionProfile, DISABLED_HundredCubedManufacturedSolution)
 {
     constexpr size_t n = 100;

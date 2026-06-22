@@ -1,6 +1,12 @@
 /**
  * @file CoupledPressureVelocitySolver.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Monolithic velocity-pressure assembly and Schur-preconditioned solve.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -35,6 +41,14 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Monolithic coupled momentum-pressure linear system.
+ *
+ * Stores the block matrix, RHS, momentum sub-block, gradient/divergence
+ * operators, pressure stabilization, and Schur complement approximation.
+ *
+ * @tparam Pack Tpetra type pack providing matrix, map, and vector types.
+ */
 template<TpetraTypePack Pack>
 struct CoupledPressureVelocitySystem
 {
@@ -53,6 +67,11 @@ struct CoupledPressureVelocitySystem
     Teuchos::RCP<matrix_type> schur;
 };
 
+/**
+ * @brief Convergence result from a monolithic pressure-velocity solve.
+ *
+ * @tparam Scalar Floating-point type for tolerance values.
+ */
 template<class Scalar>
 struct CoupledPressureVelocityResult
 {

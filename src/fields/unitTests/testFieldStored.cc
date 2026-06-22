@@ -1,6 +1,12 @@
 /**
  * @file testFieldStored.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for typed field descriptors and mesh-aware storage.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -16,6 +22,8 @@ namespace
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
+using PartitionedCartesian =
+    SimpleFluid::Meshes::PartitionedMesh<Cartesian, Pack>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
@@ -29,6 +37,19 @@ SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_handle()
             {0.0, 1.0},
             {0.0, 1.0}}});
     return std::make_shared<SimpleFluid::MeshHandle<Pack>>(mesh);
+}
+
+SimpleFluid::SP<const PartitionedCartesian> make_partitioned_cartesian()
+{
+    auto mesh = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0, 2.0},
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+
+    PartitionedCartesian::indexer_type indexer(mesh->indexer());
+    return std::make_shared<PartitionedCartesian>(
+        std::move(mesh), std::move(indexer));
 }
 
 } // namespace
@@ -99,6 +120,31 @@ TEST(FieldStoredTest, UsesSTKStorageGlobalIds)
               mesh->cell_global_id(0));
     EXPECT_EQ(faces.map()->getGlobalElement(0),
               mesh->face_global_id(0));
+}
+
+TEST(FieldStoredTest, AcceptsPartitionedCRTPMesh)
+{
+    auto mesh = make_partitioned_cartesian();
+    SimpleFluid::ScalarCellFieldStored<Pack, PartitionedCartesian> cells(
+        SimpleFluid::ScalarCellFieldDescriptor<Pack>("temperature"),
+        mesh);
+    SimpleFluid::ScalarFaceFieldStored<Pack, PartitionedCartesian> faces(
+        SimpleFluid::ScalarFaceFieldDescriptor<Pack>("flux"),
+        mesh);
+
+    const auto structured_cell = mesh->mesh().cell_id(1);
+    cells.set_value(structured_cell, 4.5);
+    faces.set_value(0, 2.0);
+
+    EXPECT_DOUBLE_EQ(cells.value(structured_cell), 4.5);
+    EXPECT_DOUBLE_EQ(faces.value(0), 2.0);
+    EXPECT_EQ(mesh->num_global_cells(), mesh->num_local_cells());
+    EXPECT_EQ(mesh->num_global_faces(), mesh->num_local_faces());
+    EXPECT_EQ(mesh->num_global_nodes(), mesh->num_local_nodes());
+    EXPECT_EQ(mesh->cell_global_id(1), 1);
+    EXPECT_TRUE(mesh->is_owned_cell(1));
+    EXPECT_TRUE(mesh->is_owned_face(0));
+    EXPECT_TRUE(mesh->is_owned_node(0));
 }
 
 TEST(FieldStoredTest, ProblemRejectsDuplicateNamesAndWrongTypes)
