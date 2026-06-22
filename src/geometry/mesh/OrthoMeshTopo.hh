@@ -1,6 +1,12 @@
 /**
  * @file OrthoMeshTopo.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Topology queries shared by three-dimensional orthogonal meshes.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once

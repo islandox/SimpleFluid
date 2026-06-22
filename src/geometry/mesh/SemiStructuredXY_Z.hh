@@ -1,6 +1,12 @@
 /**
  * @file SemiStructuredXY_Z.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Finite-volume mesh formed by extruding a polygonal XY mesh in Z.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -23,10 +29,7 @@ namespace SimpleFluid::Meshes
  * and the directed edge follows that owner's counter-clockwise loop.
  */
 class SemiStructuredXY_Z
-    : public MeshBase<SemiStructuredXY_Z,
-                      SemiStructuredIndexer::CellID,
-                      SemiStructuredIndexer::FaceID,
-                      SemiStructuredIndexer::NodeID>
+    : public MeshBase<SemiStructuredXY_Z, SemiStructuredMeshIndexTypes>
 {
 public:
     using Indexer = SemiStructuredIndexer;
@@ -37,7 +40,7 @@ public:
     using enum Indexer::Dimension;
     using enum Indexer::FaceOrientation;
 
-    using Base = MeshBase<SemiStructuredXY_Z, CellID, FaceID, NodeID>;
+    using Base = MeshBase<SemiStructuredXY_Z, SemiStructuredMeshIndexTypes>;
     using cell_id_t = typename Base::cell_id_t;
     using face_id_t = typename Base::face_id_t;
     using node_id_t = typename Base::node_id_t;

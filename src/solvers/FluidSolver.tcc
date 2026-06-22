@@ -1,6 +1,12 @@
 /**
  * @file FluidSolver.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Template implementations for FluidSolver.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "FluidSolver.hh"

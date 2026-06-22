@@ -1,6 +1,12 @@
 /**
  * @file testIncompressibleMomentumEquation.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for generic incompressible momentum transport.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -31,6 +37,10 @@ SimpleFluid::SP<MeshType> make_single_hex_mesh()
 
 } // namespace
 
+/**
+ * @brief Verify that a constant body-force source advances velocity
+ *        linearly on a single-hex mesh with zero viscosity.
+ */
 TEST(IncompressibleMomentumEquationTest, AdvancesVelocityFromSource)
 {
     auto mesh = make_single_hex_mesh();
@@ -60,6 +70,10 @@ TEST(IncompressibleMomentumEquationTest, AdvancesVelocityFromSource)
     EXPECT_NEAR(velocity.value(0).z, 0.3, 1.0e-12);
 }
 
+/**
+ * @brief Verify the physical momentum advance with explicit density,
+ *        dynamic viscosity, and acceleration on a single-hex mesh.
+ */
 TEST(IncompressibleMomentumEquationTest, AdvancesPhysicalMomentum)
 {
     auto mesh = make_single_hex_mesh();
