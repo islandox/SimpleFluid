@@ -1,7 +1,13 @@
 /**
  * @file MeshHandle.ipp
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Inline definitions for per-face and per-cell geometry queries
  *        on MeshHandle.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -147,8 +153,7 @@ MeshHandle<Pack>::boundary_id(local_ordinal_type face_lid) const
 ///         exist in the local partition or the face is on the boundary.
 /// @note Performs a two-step lookup:
 ///       1. Use the geometry mesh to obtain the geometry-level cell id.
-///       2. Map that geometry id back to a local cell id via the
-///          `d_cell_local_by_geometry` dictionary.
+///       2. Map that geometry id back to a local cell id via the indexer.
 template<TpetraTypePack Pack>
 inline typename MeshHandle<Pack>::local_ordinal_type
 MeshHandle<Pack>::adjacent_cell(local_ordinal_type face_lid,
@@ -184,10 +189,7 @@ MeshHandle<Pack>::adjacent_cell(local_ordinal_type face_lid,
     {
         return invalid_local_id();
     }
-    const auto iter = d_cell_local_by_geometry.find(geometry_cell);
-    return iter == d_cell_local_by_geometry.end()
-         ? invalid_local_id()
-         : iter->second;
+    return geometry_to_local_cell(geometry_cell);
 }
 
 /// @}

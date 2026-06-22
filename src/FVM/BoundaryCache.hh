@@ -20,6 +20,11 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Pre-computed boundary condition values cached per batch for FVM operator assembly.
+ *
+ * @tparam Pack Tpetra type pack providing scalar and mesh types.
+ */
 template<TpetraTypePack Pack>
 struct BoundaryCache
 {

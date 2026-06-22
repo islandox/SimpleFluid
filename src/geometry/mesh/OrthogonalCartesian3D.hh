@@ -1,6 +1,12 @@
 /**
  * @file OrthogonalCartesian3D.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Three-dimensional orthogonal Cartesian finite-volume mesh.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -24,10 +30,7 @@ namespace SimpleFluid::Meshes
  * neighbor. On exterior faces the normal points out of the domain.
  */
 class OrthogonalCartesian3D
-    : public MeshBase<OrthogonalCartesian3D,
-                      OrthogonalIndexer::CellID,
-                      OrthogonalIndexer::FaceID,
-                      OrthogonalIndexer::NodeID>
+    : public MeshBase<OrthogonalCartesian3D, OrthogonalMeshIndexTypes>
 {
 public:
     using Indexer = OrthogonalIndexer;
@@ -37,7 +40,7 @@ public:
     using enum Indexer::Dimension;
     using enum Indexer::FaceOrientation;
 
-    using Base = MeshBase<OrthogonalCartesian3D, CellID, FaceID, NodeID>;
+    using Base = MeshBase<OrthogonalCartesian3D, OrthogonalMeshIndexTypes>;
     using cell_id_t = typename Base::cell_id_t;
     using face_id_t = typename Base::face_id_t;
     using node_id_t = typename Base::node_id_t;

@@ -1,6 +1,12 @@
 /**
  * @file testMeshHandle.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for the variant-backed mesh runtime.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -22,6 +28,7 @@ using Handle = SimpleFluid::MeshHandle<Pack>;
 using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
+using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
@@ -48,10 +55,26 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
             {0.0, 1.0, 0.0}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}},
         SimpleFluid::ArrReal{0.0, 1.0});
+    const auto unstructured = std::make_shared<Unstructured>(
+        SimpleFluid::Arr<Unstructured::Vec3>{
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {1.0, 1.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+            {1.0, 0.0, 1.0},
+            {1.0, 1.0, 1.0},
+            {0.0, 1.0, 1.0}},
+        SimpleFluid::Arr<Unstructured::CellDefinition>{
+            {Unstructured::CellType::HEXAHEDRON,
+             {0, 1, 2, 3, 4, 5, 6, 7}}},
+        SimpleFluid::Arr<Unstructured::BoundaryFaceDefinition>{
+            {{3, 7, 4, 0}, 6, "xmin"}});
 
     const Handle cartesian_handle(cartesian);
     const Handle cylindrical_handle(cylindrical);
     const Handle semi_structured_handle(semi_structured);
+    const Handle unstructured_handle(unstructured);
 
     EXPECT_EQ(
         cartesian_handle.visit(
@@ -59,11 +82,18 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
         cartesian->num_cells());
     EXPECT_EQ(cylindrical_handle.num_owned_cells(), 1U);
     EXPECT_EQ(semi_structured_handle.num_owned_cells(), 1U);
+    EXPECT_EQ(unstructured_handle.num_owned_cells(), 1U);
 
     for (const auto* handle :
          {&cartesian_handle, &cylindrical_handle,
-          &semi_structured_handle})
+          &semi_structured_handle, &unstructured_handle})
     {
+        EXPECT_EQ(
+            handle->indexer().num_owned_cells(),
+            handle->num_owned_cells());
+        EXPECT_EQ(
+            handle->indexer().num_local_faces(),
+            handle->num_faces());
         EXPECT_EQ(
             handle->owned_cell_map()->getLocalNumElements(),
             handle->num_owned_cells());
@@ -71,6 +101,21 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
             handle->overlap_face_map()->getLocalNumElements(),
             handle->num_faces());
         EXPECT_FALSE(handle->boundary_batches().empty());
+    }
+
+    EXPECT_EQ(
+        unstructured_handle.indexer().num_local_nodes(),
+        unstructured->num_nodes());
+    for (size_t local = 0;
+         local < unstructured_handle.num_local_cells();
+         ++local)
+    {
+        const auto local_id = static_cast<Pack::local_ordinal_type>(local);
+        const auto global_id =
+            unstructured_handle.indexer().cell_global_id(local_id);
+        EXPECT_EQ(
+            unstructured_handle.indexer().cell_local_id(global_id),
+            local_id);
     }
 }
 
@@ -137,6 +182,15 @@ TEST(MeshHandleTest, BuildsOrthogonalSlabOwnershipAndGhostMaps)
     EXPECT_EQ(handle.overlap_cell_map()->getLocalNumElements(), 3U);
     EXPECT_TRUE(handle.is_owned_cell(0));
     EXPECT_FALSE(handle.is_owned_cell(2));
+    EXPECT_EQ(handle.indexer().num_local_nodes(), 16U);
+    for (size_t local = 0;
+         local < handle.indexer().num_local_nodes();
+         ++local)
+    {
+        const auto local_id = static_cast<Pack::local_ordinal_type>(local);
+        const auto global_id = handle.indexer().node_global_id(local_id);
+        EXPECT_EQ(handle.indexer().node_local_id(global_id), local_id);
+    }
 }
 
 TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
@@ -145,6 +199,8 @@ TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
     const auto cylindrical_file = "mesh_handle_cylindrical.vtu";
     const auto semi_structured_file =
         "mesh_handle_semi_structured.vtu";
+    const auto unstructured_file =
+        "mesh_handle_unstructured.vtu";
     const auto cartesian = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
             {0.0, 1.0},
@@ -166,16 +222,32 @@ TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
             {0.0, 1.0, 0.0}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}},
         SimpleFluid::ArrReal{0.0, 1.0});
+    const auto unstructured = std::make_shared<Unstructured>(
+        SimpleFluid::Arr<Unstructured::Vec3>{
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {1.0, 1.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+            {1.0, 0.0, 1.0},
+            {1.0, 1.0, 1.0},
+            {0.0, 1.0, 1.0}},
+        SimpleFluid::Arr<Unstructured::CellDefinition>{
+            {Unstructured::CellType::HEXAHEDRON,
+             {0, 1, 2, 3, 4, 5, 6, 7}}});
 
     Handle(cartesian).export_vtu(cartesian_file);
     Handle(cylindrical).export_vtu(cylindrical_file);
     Handle(semi_structured).export_vtu(semi_structured_file);
+    Handle(unstructured).export_vtu(unstructured_file);
 
     EXPECT_TRUE(std::filesystem::exists(cartesian_file));
     EXPECT_TRUE(std::filesystem::exists(cylindrical_file));
     EXPECT_TRUE(std::filesystem::exists(semi_structured_file));
+    EXPECT_TRUE(std::filesystem::exists(unstructured_file));
 
     std::filesystem::remove(cartesian_file);
     std::filesystem::remove(cylindrical_file);
     std::filesystem::remove(semi_structured_file);
+    std::filesystem::remove(unstructured_file);
 }

@@ -1,6 +1,12 @@
 /**
  * @file testMeshInterfaces.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for the FVM-facing interface of statically dispatched meshes.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -23,7 +29,7 @@ using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 
 template<class Mesh>
-void expect_local_identifier_interface(const Mesh& mesh)
+void expect_identifier_conversion_interface(const Mesh& mesh)
 {
     static_assert(
         std::is_same_v<typename Mesh::local_ordinal_type, size_t>);
@@ -32,28 +38,29 @@ void expect_local_identifier_interface(const Mesh& mesh)
 
     for (size_t local_id = 0; local_id < mesh.num_cells(); ++local_id)
     {
-        EXPECT_EQ(mesh.cell_local_id(mesh.cell_id(local_id)), local_id);
-        EXPECT_EQ(mesh.cell_volume(local_id),
-                  mesh.cell_volume(mesh.cell_id(local_id)));
+        const auto cell_id = mesh.cell_id(local_id);
+        EXPECT_EQ(mesh.cell_local_id(cell_id), local_id);
+        EXPECT_GT(mesh.cell_volume(cell_id), 0.0);
     }
     for (size_t local_id = 0; local_id < mesh.num_faces(); ++local_id)
     {
-        EXPECT_EQ(mesh.face_local_id(mesh.face_id(local_id)), local_id);
-        EXPECT_EQ(mesh.face_area(local_id),
-                  mesh.face_area(mesh.face_id(local_id)));
+        const auto face_id = mesh.face_id(local_id);
+        EXPECT_EQ(mesh.face_local_id(face_id), local_id);
+        EXPECT_GT(mesh.face_area(face_id), 0.0);
     }
     for (size_t local_id = 0; local_id < mesh.num_nodes(); ++local_id)
     {
-        EXPECT_EQ(mesh.node_local_id(mesh.node_id(local_id)), local_id);
-        EXPECT_EQ(mesh.node_coord(local_id),
-                  mesh.node_coord(mesh.node_id(local_id)));
+        const auto node_id = mesh.node_id(local_id);
+        EXPECT_EQ(mesh.node_local_id(node_id), local_id);
+        EXPECT_EQ(mesh.node_coord(node_id), mesh.node_coordinates(node_id));
     }
 
     for (size_t face_lid = 0; face_lid < mesh.num_faces(); ++face_lid)
     {
-        if (mesh.is_exterior_face(face_lid))
+        const auto face_id = mesh.face_id(face_lid);
+        if (mesh.is_exterior_face(face_id))
         {
-            EXPECT_EQ(mesh.neighbor_cell(face_lid), Mesh::invalid_local_id);
+            EXPECT_EQ(mesh.neighbor_cell(face_id), Mesh::invalid_cell_id());
             return;
         }
     }
@@ -70,21 +77,24 @@ void expect_fvm_geometry_helpers(const Mesh& mesh)
          cell_lid < mesh.num_owned_cells();
          ++cell_lid)
     {
-        for (const auto face_lid : mesh.faces(cell_lid))
+        const auto cell_id = mesh.cell_id(cell_lid);
+        for (const auto face_id : mesh.faces(cell_id))
         {
-            if (!tested_interior && mesh.is_interior_face(face_lid))
+            const auto face_lid = mesh.face_local_id(face_id);
+            if (!tested_interior && mesh.is_interior_face(face_id))
             {
-                const auto other =
+                const auto other_id =
                     mesh.opposite_or_periodic_neighbor_cell(
-                        face_lid, cell_lid);
+                        face_id, cell_id);
+                const auto other_lid = mesh.cell_local_id(other_id);
                 EXPECT_GT(
                     SimpleFluid::FVM::detail::
                         interior_diffusion_coefficient(
-                            mesh, face_lid, cell_lid, other, 1.0),
+                            mesh, face_lid, cell_lid, other_lid, 1.0),
                     0.0);
                 tested_interior = true;
             }
-            if (!tested_boundary && mesh.is_boundary_face(face_lid))
+            if (!tested_boundary && mesh.is_boundary_face(face_id))
             {
                 EXPECT_GT(
                     SimpleFluid::FVM::detail::
@@ -180,11 +190,11 @@ SemiStructured make_semi_structured()
 
 } // namespace
 
-TEST(MeshInterfacesTest, ConvertsStructuredAndPackedLocalIdentifiers)
+TEST(MeshInterfacesTest, ConvertsIdentifiersAndQueriesById)
 {
-    expect_local_identifier_interface(make_cartesian());
-    expect_local_identifier_interface(make_cylindrical());
-    expect_local_identifier_interface(make_semi_structured());
+    expect_identifier_conversion_interface(make_cartesian());
+    expect_identifier_conversion_interface(make_cylindrical());
+    expect_identifier_conversion_interface(make_semi_structured());
 }
 
 TEST(MeshInterfacesTest, SupportsFiniteVolumeGeometryHelpers)

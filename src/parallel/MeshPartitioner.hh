@@ -11,12 +11,15 @@
 #pragma once
 
 #include "geometry/Mesh.hh"
+#include "geometry/mesh/LocalGlobalIndexer.hh"
+#include "geometry/mesh/UnstructuredMesh.hh"
 #include "parallel/MPI_interface.hh"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace SimpleFluid {
@@ -153,7 +156,22 @@ public:
     using CellInfo = typename Mesh<Pack>::CellInfo;
     using FaceInfo = typename Mesh<Pack>::FaceInfo;
     using Packet = partition_detail::CellPacket<Pack>;
+    using indexer_type =
+        Meshes::UnstructuredMesh::local_global_indexer_t<LO, GO>;
     static constexpr LO invalid_lid = invalid_id<LO>();
+
+    /**
+     * @brief Local entity lists for a partitioned CRTP unstructured mesh.
+     *
+     * The input mesh is rebuilt to contain only entities visible on this
+     * rank. The indexer maps its compact local IDs to IDs in the original
+     * replicated mesh. Owned entities precede overlap entities.
+     */
+    struct UnstructuredPartition
+    {
+        indexer_type indexer;
+        std::vector<int> cell_owner_ranks;
+    };
 
     /**
      * @brief Main entry point — partition a replicated mesh across MPI ranks.
@@ -177,7 +195,61 @@ public:
      */
     static bool partition(Mesh<Pack>& mesh, const Teuchos::RCP<const comm_type>& comm);
 
+    /**
+     * @brief Partition a replicated CRTP unstructured mesh.
+     *
+     * Cell geometry local IDs are used as graph global IDs. The input mesh
+     * is replaced by rank-local geometry and the returned partition
+     * contains its rebuilt local/global cell, face, and node indexer.
+     *
+     * @param mesh Replicated geometry, rebuilt in place for the local rank.
+     * @param comm Teuchos MPI communicator.
+     * @return Global indexing and ownership metadata for the rebuilt mesh.
+     */
+    static UnstructuredPartition partition(
+        Meshes::UnstructuredMesh& mesh,
+        const Teuchos::RCP<const comm_type>& comm);
+
 private:
+    struct PartitionGraph
+    {
+        std::vector<GO> row_gids;
+        std::vector<std::vector<GO>> row_adjacency;
+        std::vector<GO> column_gids;
+    };
+
+    struct LocalEntityOrder
+    {
+        std::vector<size_t> owned_cells;
+        std::vector<size_t> ghost_cells;
+        std::vector<size_t> owned_faces;
+        std::vector<size_t> overlap_faces;
+        std::vector<size_t> owned_nodes;
+        std::vector<size_t> overlap_nodes;
+    };
+
+    static PartitionGraph build_partition_graph(
+        const Mesh<Pack>& mesh,
+        const Teuchos::RCP<const comm_type>& comm);
+
+    static PartitionGraph build_partition_graph(
+        const Meshes::UnstructuredMesh& mesh,
+        const Teuchos::RCP<const comm_type>& comm);
+
+    static std::unordered_map<GO, int> solve_partition_graph(
+        const PartitionGraph& graph,
+        const Teuchos::RCP<const comm_type>& comm);
+
+    template<class CellFaces, class OppositeCell, class FaceNodes, class CellNodes>
+    static LocalEntityOrder reorder_local_entities(
+        size_t cell_count,
+        const std::vector<int>& cell_owner_ranks,
+        int rank,
+        CellFaces&& cell_faces,
+        OppositeCell&& opposite_cell,
+        FaceNodes&& face_nodes,
+        CellNodes&& cell_nodes);
+
     /**
      * @brief Compute the mapping from cell global ID to destination MPI rank.
      *
@@ -191,6 +263,15 @@ private:
      */
     static std::unordered_map<GO, int> compute_gid_to_rank_map(
         const Mesh<Pack>& mesh, const Teuchos::RCP<const comm_type>& comm);
+
+    static std::vector<int> compute_unstructured_owner_ranks(
+        const Meshes::UnstructuredMesh& mesh,
+        const Teuchos::RCP<const comm_type>& comm);
+
+    static UnstructuredPartition rebuild(
+        Meshes::UnstructuredMesh& mesh,
+        std::vector<int> cell_owner_ranks,
+        int rank);
 
     /**
      * @brief Rebuild the mesh data structures from owned and ghost cell packets.

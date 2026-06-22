@@ -1,6 +1,12 @@
 /**
  * @file testBoundaryCache.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Direct tests for finite-volume boundary-condition caching.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>

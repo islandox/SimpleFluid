@@ -1,6 +1,12 @@
 /**
  * @file IncompressibleMomentumEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Incompressible velocity-transport assembly and solution.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 

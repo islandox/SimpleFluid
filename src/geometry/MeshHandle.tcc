@@ -1,6 +1,12 @@
 /**
  * @file MeshHandle.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Template implementations for MeshHandle construction and VTU output.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -52,6 +58,34 @@ MeshHandle<Pack>::MeshHandle(SemiStructuredPtr mesh)
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_semi_structured(std::get<SemiStructuredPtr>(d_mesh));
+}
+
+/**
+ * @brief Construct a serial unstructured mesh handle.
+ *
+ * @param mesh Unstructured mesh to wrap.
+ */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(UnstructuredPtr mesh)
+    : d_mesh(require_mesh(std::move(mesh)))
+{
+    initialize_unstructured(std::get<UnstructuredPtr>(d_mesh));
+}
+
+/**
+ * @brief Construct a handle from an already partitioned unstructured mesh.
+ *
+ * @param mesh Rank-local unstructured mesh geometry.
+ * @param indexer Mapping from compact local IDs to original global IDs.
+ */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    UnstructuredPtr mesh,
+    const unstructured_indexer_type& indexer)
+    : d_mesh(require_mesh(std::move(mesh)))
+{
+    initialize_unstructured(
+        std::get<UnstructuredPtr>(d_mesh), indexer);
 }
 
 /**
@@ -158,7 +192,7 @@ void MeshHandle<Pack>::initialize_orthogonal(
     std::unordered_set<size_t> seen_faces;
     std::vector<size_t> owned_faces;
     std::vector<size_t> overlap_faces;
-    for (const auto cell_geometry_lid : d_cell_geometry_lids)
+    for (const auto cell_geometry_lid : d_indexer.cell_global_ids())
     {
         const typename MeshType::cell_id_t typed_cell =
             mesh->indexer().cell_id(cell_geometry_lid);
@@ -166,7 +200,7 @@ void MeshHandle<Pack>::initialize_orthogonal(
         for (const auto face : typed_faces)
         {
             const auto face_geometry_lid =
-                mesh->indexer().face_local_id(face);
+                mesh->indexer().face_ordinal(face);
             if (!seen_faces.insert(face_geometry_lid).second)
             {
                 continue;
@@ -182,6 +216,43 @@ void MeshHandle<Pack>::initialize_orthogonal(
         }
     }
     initialize_faces(std::move(owned_faces), std::move(overlap_faces));
+
+    constexpr std::array<std::array<unsigned, 3>, 8> corners{{
+        {{0, 0, 0}},
+        {{1, 0, 0}},
+        {{1, 1, 0}},
+        {{0, 1, 0}},
+        {{0, 0, 1}},
+        {{1, 0, 1}},
+        {{1, 1, 1}},
+        {{0, 1, 1}}
+    }};
+    std::unordered_set<size_t> seen_nodes;
+    std::vector<size_t> local_nodes;
+    for (const auto cell_geometry_lid : d_indexer.cell_global_ids())
+    {
+        const auto cell = mesh->cell_id(
+            static_cast<size_t>(cell_geometry_lid));
+        for (const auto& corner : corners)
+        {
+            const typename MeshType::NodeID node{
+                static_cast<unsigned>(
+                    (cell.i + corner[0])
+                    % mesh->indexer().num_nodes_per_dim[0]),
+                static_cast<unsigned>(
+                    (cell.j + corner[1])
+                    % mesh->indexer().num_nodes_per_dim[1]),
+                static_cast<unsigned>(
+                    (cell.k + corner[2])
+                    % mesh->indexer().num_nodes_per_dim[2])};
+            const auto global_node = mesh->node_local_id(node);
+            if (seen_nodes.insert(global_node).second)
+            {
+                local_nodes.push_back(global_node);
+            }
+        }
+    }
+    d_indexer.set_nodes(checked_global_ids(std::move(local_nodes)));
     initialize_cell_faces();
     initialize_boundary_batches(*mesh);
     create_maps(comm);
@@ -205,6 +276,80 @@ void MeshHandle<Pack>::initialize_semi_structured(
             "distribution.");
     }
     initialize_serial(*mesh);
+}
+
+/**
+ * @brief Initialize a serial unstructured mesh handle.
+ *
+ * @param mesh Unstructured mesh to initialize from.
+ */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::initialize_unstructured(
+    UnstructuredPtr mesh)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 1)
+    {
+        throw std::invalid_argument(
+            "Distributed UnstructuredMesh must be partitioned before "
+            "constructing MeshHandle.");
+    }
+    initialize_serial(*mesh);
+}
+
+/**
+ * @brief Initialize from rank-local geometry and its global indexer.
+ *
+ * @param mesh Previously partitioned unstructured mesh.
+ * @param indexer Mapping from mesh-local IDs to original global IDs.
+ */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::initialize_unstructured(
+    UnstructuredPtr mesh,
+    const unstructured_indexer_type& indexer)
+{
+    if (mesh->num_cells() != indexer.num_local_cells()
+        || mesh->num_owned_cells() != indexer.num_owned_cells()
+        || mesh->num_faces() != indexer.num_local_faces()
+        || mesh->num_owned_faces() != indexer.num_owned_faces()
+        || mesh->num_nodes() != indexer.num_local_nodes())
+    {
+        throw std::invalid_argument(
+            "Partitioned UnstructuredMesh does not match its indexer.");
+    }
+
+    auto global_ids = [&](const auto& ids)
+    {
+        std::vector<size_t> flattened;
+        flattened.reserve(ids.size());
+        for (const auto id : ids)
+        {
+            using id_type = std::remove_cvref_t<decltype(id)>;
+            if constexpr (
+                std::numeric_limits<id_type>::digits
+                > std::numeric_limits<size_t>::digits)
+            {
+                if (id > static_cast<id_type>(
+                        std::numeric_limits<size_t>::max()))
+                {
+                    throw std::overflow_error(
+                        "MeshHandle unstructured global ID overflow.");
+                }
+            }
+            flattened.push_back(static_cast<size_t>(id));
+        }
+        return checked_global_ids(std::move(flattened));
+    };
+
+    initialize_indexer(indexer_type(
+        global_ids(indexer.owned_cell_global_ids()),
+        global_ids(indexer.ghost_cell_global_ids()),
+        global_ids(indexer.owned_face_global_ids()),
+        global_ids(indexer.overlap_face_global_ids()),
+        global_ids(indexer.node_global_ids())));
+    initialize_cell_faces();
+    initialize_boundary_batches(*mesh);
+    create_maps(Tpetra::getDefaultComm());
 }
 
 /**
@@ -254,8 +399,8 @@ void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
     d_owned_face_map = mesh.owned_face_map();
     d_boundary_face_map = mesh.boundary_face_map();
     std::vector<global_ordinal_type> overlap_face_gids;
-    overlap_face_gids.reserve(d_face_geometry_lids.size());
-    for (const auto face_lid : d_face_geometry_lids)
+    overlap_face_gids.reserve(d_indexer.face_global_ids().size());
+    for (const auto face_lid : d_indexer.face_global_ids())
     {
         overlap_face_gids.push_back(
             mesh.face_global_id(checked_local(face_lid)));
@@ -287,16 +432,22 @@ void MeshHandle<Pack>::initialize_serial(const MeshType& mesh)
         faces[lid] = lid;
     }
     initialize_faces(std::move(faces), {});
+
+    std::vector<size_t> nodes(mesh.num_nodes());
+    for (size_t lid = 0; lid < nodes.size(); ++lid)
+    {
+        nodes[lid] = lid;
+    }
+    d_indexer.set_nodes(checked_global_ids(std::move(nodes)));
     initialize_cell_faces();
     initialize_boundary_batches(mesh);
     create_maps(Tpetra::getDefaultComm());
 }
 
 /**
- * @brief Store owned and ghost cell geometry IDs in local-ID order.
+ * @brief Store owned and ghost cell global IDs in the local/global indexer.
  *
- * Owned cells are placed before ghost cells and reverse geometry-to-local
- * lookup entries are populated.
+ * Owned cells are placed before ghost cells and reverse lookup is populated.
  *
  * @param owned Geometry-local IDs of owned cells.
  * @param ghost Geometry-local IDs of ghost cells.
@@ -306,22 +457,15 @@ void MeshHandle<Pack>::initialize_cells(
     std::vector<size_t> owned,
     std::vector<size_t> ghost)
 {
-    d_num_owned_cells = owned.size();
-    d_cell_geometry_lids = std::move(owned);
-    d_cell_geometry_lids.insert(
-        d_cell_geometry_lids.end(), ghost.begin(), ghost.end());
-    for (size_t local = 0; local < d_cell_geometry_lids.size(); ++local)
-    {
-        d_cell_local_by_geometry.emplace(
-            d_cell_geometry_lids[local], checked_local(local));
-    }
+    d_indexer.set_cells(
+        checked_global_ids(std::move(owned)),
+        checked_global_ids(std::move(ghost)));
 }
 
 /**
- * @brief Store owned and overlap face geometry IDs in local-ID order.
+ * @brief Store owned and overlap face global IDs in the local/global indexer.
  *
- * Owned faces are placed before overlap faces and reverse geometry-to-local
- * lookup entries are populated.
+ * Owned faces are placed before overlap faces and reverse lookup is populated.
  *
  * @param owned Geometry-local IDs of owned faces.
  * @param overlap Geometry-local IDs of non-owned locally visible faces.
@@ -331,15 +475,15 @@ void MeshHandle<Pack>::initialize_faces(
     std::vector<size_t> owned,
     std::vector<size_t> overlap)
 {
-    d_num_owned_faces = owned.size();
-    d_face_geometry_lids = std::move(owned);
-    d_face_geometry_lids.insert(
-        d_face_geometry_lids.end(), overlap.begin(), overlap.end());
-    for (size_t local = 0; local < d_face_geometry_lids.size(); ++local)
-    {
-        d_face_local_by_geometry.emplace(
-            d_face_geometry_lids[local], checked_local(local));
-    }
+    d_indexer.set_faces(
+        checked_global_ids(std::move(owned)),
+        checked_global_ids(std::move(overlap)));
+}
+
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::initialize_indexer(indexer_type indexer)
+{
+    d_indexer = std::move(indexer);
 }
 
 /**
@@ -352,16 +496,21 @@ void MeshHandle<Pack>::initialize_cell_faces()
 {
     d_cell_face_offsets.clear();
     d_cell_face_lids.clear();
-    d_cell_face_offsets.reserve(d_cell_geometry_lids.size() + 1);
+    d_cell_face_offsets.reserve(d_indexer.num_local_cells() + 1);
     d_cell_face_offsets.push_back(0);
 
     visit(
         [&](const auto& mesh)
         {
-            for (const auto geometry_lid : d_cell_geometry_lids)
+            for (size_t local_lid = 0;
+                 local_lid < d_indexer.num_local_cells();
+                 ++local_lid)
             {
+                const auto geometry_lid = geometry_cell_lid(
+                    checked_local(local_lid));
                 const auto geometry_faces =
-                    mesh.faces(mesh.cell_id(geometry_lid));
+                    mesh.faces(mesh.cell_id(
+                        static_cast<size_t>(geometry_lid)));
                 d_cell_face_lids.reserve(
                     d_cell_face_lids.size() + geometry_faces.size());
                 for (const auto geometry_face : geometry_faces)
@@ -369,11 +518,11 @@ void MeshHandle<Pack>::initialize_cell_faces()
                     const auto face_geometry_lid =
                         static_cast<size_t>(
                             mesh.face_local_id(geometry_face));
-                    const auto iter =
-                        d_face_local_by_geometry.find(face_geometry_lid);
-                    if (iter != d_face_local_by_geometry.end())
+                    const auto local_face =
+                        geometry_to_local_face(face_geometry_lid);
+                    if (local_face != invalid_local_id())
                     {
-                        d_cell_face_lids.push_back(iter->second);
+                        d_cell_face_lids.push_back(local_face);
                     }
                 }
                 d_cell_face_offsets.push_back(d_cell_face_lids.size());
@@ -403,11 +552,10 @@ void MeshHandle<Pack>::initialize_boundary_batches(
         {
             const auto geometry_lid =
                 static_cast<size_t>(mesh.face_local_id(face));
-            const auto iter =
-                d_face_local_by_geometry.find(geometry_lid);
-            if (iter != d_face_local_by_geometry.end())
+            const auto local_face = geometry_to_local_face(geometry_lid);
+            if (local_face != invalid_local_id())
             {
-                batch.face_lids.push_back(iter->second);
+                batch.face_lids.push_back(local_face);
             }
         }
         if (!batch.face_lids.empty())
@@ -462,6 +610,10 @@ void MeshHandle<Pack>::export_vtu(const std::string& filename) const
             {
                 export_semi_structured_vtu(mesh, filename);
             }
+            else if constexpr (std::is_same_v<mesh_type, Unstructured>)
+            {
+                export_unstructured_vtu(mesh, filename);
+            }
             else
             {
                 export_orthogonal_vtu(mesh, filename);
@@ -503,10 +655,10 @@ void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
     VTUWriter::Int64Data cell_ids;
     VTUWriter::ScalarData cell_volumes;
     VTUWriter::VectorData cell_centroids;
-    cell_ids.reserve(d_num_owned_cells);
-    cell_volumes.reserve(d_num_owned_cells);
-    cell_centroids.reserve(d_num_owned_cells);
-    for (size_t lid = 0; lid < d_num_owned_cells; ++lid)
+    cell_ids.reserve(num_owned_cells());
+    cell_volumes.reserve(num_owned_cells());
+    cell_centroids.reserve(num_owned_cells());
+    for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
         const auto local_id = checked_local(lid);
         cell_ids.push_back(static_cast<global_index_t>(
@@ -536,7 +688,7 @@ VTUWriter::VectorData MeshHandle<Pack>::collect_vtu_points(
     points.reserve(mesh.num_nodes());
     for (size_t lid = 0; lid < mesh.num_nodes(); ++lid)
     {
-        points.push_back(mesh.node_coordinates(lid));
+        points.push_back(mesh.node_coordinates(mesh.node_id(lid)));
     }
     return points;
 }
@@ -584,9 +736,9 @@ void MeshHandle<Pack>::export_orthogonal_vtu(
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
     VTUWriter::UInt8Data cell_types;
-    connectivity.reserve(d_num_owned_cells * 8);
-    offsets.reserve(d_num_owned_cells);
-    cell_types.reserve(d_num_owned_cells);
+    connectivity.reserve(num_owned_cells() * 8);
+    offsets.reserve(num_owned_cells());
+    cell_types.reserve(num_owned_cells());
 
     constexpr std::array<std::array<unsigned, 3>, 8> corners{{
         {{0, 0, 0}},
@@ -599,9 +751,10 @@ void MeshHandle<Pack>::export_orthogonal_vtu(
         {{0, 1, 1}}
     }};
     const auto& indexer = mesh.indexer();
-    for (size_t lid = 0; lid < d_num_owned_cells; ++lid)
+    for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
-        const auto cell = mesh.cell_id(d_cell_geometry_lids[lid]);
+        const auto cell = mesh.cell_id(static_cast<size_t>(
+            geometry_cell_lid(checked_local(lid))));
         for (const auto& corner : corners)
         {
             const typename MeshType::NodeID node{
@@ -643,12 +796,13 @@ void MeshHandle<Pack>::export_semi_structured_vtu(
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
     VTUWriter::UInt8Data cell_types;
-    offsets.reserve(d_num_owned_cells);
-    cell_types.reserve(d_num_owned_cells);
+    offsets.reserve(num_owned_cells());
+    cell_types.reserve(num_owned_cells());
     const auto& indexer = mesh.indexer();
-    for (size_t lid = 0; lid < d_num_owned_cells; ++lid)
+    for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
-        const auto cell = mesh.cell_id(d_cell_geometry_lids[lid]);
+        const auto cell = mesh.cell_id(static_cast<size_t>(
+            geometry_cell_lid(checked_local(lid))));
         const auto& xy_nodes = mesh.xy_cell_nodes()[cell.ij];
         const auto top_layer = (cell.k + 1) % indexer.num_node_layers;
         for (const auto xy_node : xy_nodes)
@@ -677,6 +831,46 @@ void MeshHandle<Pack>::export_semi_structured_vtu(
         {
             cell_types.push_back(41); // VTK_CONVEX_POINT_SET
         }
+    }
+
+    write_vtu(
+        filename,
+        collect_vtu_points(mesh),
+        std::move(connectivity),
+        std::move(offsets),
+        std::move(cell_types));
+}
+
+/**
+ * @brief Export owned unstructured cells using their explicit node lists.
+ *
+ * @param mesh Unstructured mesh providing node connectivity.
+ * @param filename Requested output filename.
+ */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::export_unstructured_vtu(
+    const Unstructured& mesh,
+    const std::string& filename) const
+{
+    VTUWriter::Int64Data connectivity;
+    VTUWriter::Int64Data offsets;
+    VTUWriter::UInt8Data cell_types;
+    offsets.reserve(num_owned_cells());
+    cell_types.reserve(num_owned_cells());
+
+    for (size_t lid = 0; lid < num_owned_cells(); ++lid)
+    {
+        const auto cell = mesh.cell_id(static_cast<size_t>(
+            geometry_cell_lid(checked_local(lid))));
+        for (const auto node : mesh.cell_nodes(cell))
+        {
+            connectivity.push_back(static_cast<global_index_t>(
+                mesh.node_local_id(node)));
+        }
+        offsets.push_back(static_cast<global_index_t>(
+            connectivity.size()));
+        cell_types.push_back(static_cast<std::uint8_t>(
+            MeshUtils::vtu_cell_type_code(mesh.cell_type(cell))));
     }
 
     write_vtu(

@@ -1,16 +1,25 @@
 /**
  * @file MeshHandle.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Variant-backed runtime handle for all supported mesh families.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
 
 #include "dataclass/TpetraTypes.hh"
+#include "geometry/mesh/LocalGlobalIndexer.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/OrthoMeshPartitioner.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/STKMeshAdapter.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/mesh/UnstructuredMesh.hh"
 #include "io/VTUWriter.hh"
 #include "utils/debug_check.hh"
 
@@ -68,20 +77,34 @@ public:
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using map_type = typename Pack::map_type;
+    using mesh_index_type_pack = MeshIndexTypes<
+        global_ordinal_type,
+        global_ordinal_type,
+        global_ordinal_type,
+        local_ordinal_type,
+        global_ordinal_type>;
+    using indexer_type = Meshes::LocalGlobalIndexer<mesh_index_type_pack>;
     using Vec3 = MeshUtils::Vec3;
 
     using Cartesian = Meshes::OrthogonalCartesian3D;
     using Cylindrical = Meshes::OrthogonalCylindrial3D;
     using SemiStructured = Meshes::SemiStructuredXY_Z;
+    using Unstructured = Meshes::UnstructuredMesh;
     using STKAdapter = Meshes::STKMeshAdapter<Pack>;
+    using unstructured_indexer_type =
+        Unstructured::local_global_indexer_t<
+            local_ordinal_type,
+            global_ordinal_type>;
 
     using CartesianPtr = SP<const Cartesian>;
     using CylindricalPtr = SP<const Cylindrical>;
     using SemiStructuredPtr = SP<const SemiStructured>;
+    using UnstructuredPtr = SP<const Unstructured>;
     using STKAdapterPtr = SP<const STKAdapter>;
     using variant_type = std::variant<CartesianPtr,
                                       CylindricalPtr,
                                       SemiStructuredPtr,
+                                      UnstructuredPtr,
                                       STKAdapterPtr>;
 
     /** @brief Locally visible faces belonging to one boundary batch. */
@@ -112,6 +135,37 @@ public:
     /** @brief Build a handle for a semi-structured mesh. */
     explicit MeshHandle(SemiStructuredPtr mesh);
 
+    /** @brief Build a serial unstructured mesh handle. */
+    explicit MeshHandle(UnstructuredPtr mesh);
+
+    /** @brief Build a handle from a previously partitioned mesh. */
+    MeshHandle(
+        UnstructuredPtr mesh,
+        const unstructured_indexer_type& indexer);
+
+    template<class Partitioned>
+        requires Meshes::PartitionedMeshClass<
+            std::remove_const_t<Partitioned>>
+    explicit MeshHandle(const SP<Partitioned>& partitioned)
+    {
+        using partitioned_type = std::remove_const_t<Partitioned>;
+        static_assert(std::is_same_v<
+            typename partitioned_type::mesh_type,
+            Unstructured>);
+        static_assert(std::is_same_v<
+            typename partitioned_type::tpetra_type_pack,
+            Pack>);
+        if (!partitioned)
+        {
+            throw std::invalid_argument(
+                "MeshHandle requires a non-null partitioned mesh.");
+        }
+        d_mesh = UnstructuredPtr(partitioned->mesh_ptr());
+        initialize_unstructured(
+            std::get<UnstructuredPtr>(d_mesh),
+            partitioned->indexer());
+    }
+
     /** @brief Build a handle around a legacy STK adapter. */
     explicit MeshHandle(STKAdapterPtr mesh);
 
@@ -119,6 +173,7 @@ public:
     explicit MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh);
 
     const variant_type& variant() const noexcept { return d_mesh; }
+    const indexer_type& indexer() const noexcept { return d_indexer; }
 
     /**
      * @brief Invoke a visitor with the concrete mesh object.
@@ -151,22 +206,34 @@ public:
     }
 
     size_t spatial_dimension() const noexcept { return 3; }
-    size_t num_owned_cells() const noexcept { return d_num_owned_cells; }
-    size_t num_local_cells() const noexcept { return d_cell_geometry_lids.size(); }
+    size_t num_owned_cells() const noexcept
+    {
+        return d_indexer.num_owned_cells();
+    }
+    size_t num_local_cells() const noexcept
+    {
+        return d_indexer.num_local_cells();
+    }
     size_t num_cells() const noexcept { return num_local_cells(); }
-    size_t num_owned_faces() const noexcept { return d_num_owned_faces; }
-    size_t num_faces() const noexcept { return d_face_geometry_lids.size(); }
+    size_t num_owned_faces() const noexcept
+    {
+        return d_indexer.num_owned_faces();
+    }
+    size_t num_faces() const noexcept
+    {
+        return d_indexer.num_local_faces();
+    }
 
     bool is_owned_cell(local_ordinal_type cell_lid) const
     {
         check_cell(cell_lid);
-        return static_cast<size_t>(cell_lid) < d_num_owned_cells;
+        return d_indexer.is_owned_cell(cell_lid);
     }
 
     bool is_owned_face(local_ordinal_type face_lid) const
     {
         check_face(face_lid);
-        return static_cast<size_t>(face_lid) < d_num_owned_faces;
+        return d_indexer.is_owned_face(face_lid);
     }
 
     global_ordinal_type cell_global_id(local_ordinal_type cell_lid) const
@@ -175,10 +242,10 @@ public:
         if (const auto legacy = legacy_mesh())
         {
             return legacy->mesh_gid_to_tpetra_gid(
-                legacy->cell_global_id(geometry_cell_lid(cell_lid)));
+                legacy->cell_global_id(checked_local(static_cast<size_t>(
+                    geometry_cell_lid(cell_lid)))));
         }
-        return static_cast<global_ordinal_type>(
-            d_cell_geometry_lids[static_cast<size_t>(cell_lid)]);
+        return d_indexer.cell_global_id(cell_lid);
     }
 
     global_ordinal_type face_global_id(local_ordinal_type face_lid) const
@@ -187,10 +254,10 @@ public:
         if (const auto legacy = legacy_mesh())
         {
             return legacy->face_global_id(
-                geometry_face_lid(face_lid));
+                checked_local(static_cast<size_t>(
+                    geometry_face_lid(face_lid))));
         }
-        return static_cast<global_ordinal_type>(
-            d_face_geometry_lids[static_cast<size_t>(face_lid)]);
+        return d_indexer.face_global_id(face_lid);
     }
 
     real_t cell_volume(local_ordinal_type cell_lid) const;
@@ -270,7 +337,7 @@ public:
 
     static constexpr local_ordinal_type invalid_local_id() noexcept
     {
-        return Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
+        return indexer_type::invalid_local_id();
     }
 
     template<class StoredField>
@@ -310,6 +377,29 @@ private:
         return static_cast<local_ordinal_type>(value);
     }
 
+    static std::vector<global_ordinal_type> checked_global_ids(
+        std::vector<size_t> ids)
+    {
+        std::vector<global_ordinal_type> result;
+        result.reserve(ids.size());
+        for (const auto id : ids)
+        {
+            if constexpr (
+                std::numeric_limits<global_ordinal_type>::digits
+                < std::numeric_limits<size_t>::digits)
+            {
+                if (id > static_cast<size_t>(
+                        std::numeric_limits<global_ordinal_type>::max()))
+                {
+                    throw std::overflow_error(
+                        "MeshHandle global ordinal overflow.");
+                }
+            }
+            result.push_back(static_cast<global_ordinal_type>(id));
+        }
+        return result;
+    }
+
     std::string local_output_filename(
         const std::string& filename) const;
 
@@ -335,20 +425,30 @@ private:
         const SemiStructured& mesh,
         const std::string& filename) const;
 
-    local_ordinal_type geometry_cell_lid(
+    void export_unstructured_vtu(
+        const Unstructured& mesh,
+        const std::string& filename) const;
+
+    global_ordinal_type geometry_cell_lid(
         local_ordinal_type local_id) const
     {
         check_cell(local_id);
-        return checked_local(
-            d_cell_geometry_lids[static_cast<size_t>(local_id)]);
+        if (std::holds_alternative<UnstructuredPtr>(d_mesh))
+        {
+            return static_cast<global_ordinal_type>(local_id);
+        }
+        return d_indexer.cell_global_id(local_id);
     }
 
-    local_ordinal_type geometry_face_lid(
+    global_ordinal_type geometry_face_lid(
         local_ordinal_type local_id) const
     {
         check_face(local_id);
-        return checked_local(
-            d_face_geometry_lids[static_cast<size_t>(local_id)]);
+        if (std::holds_alternative<UnstructuredPtr>(d_mesh))
+        {
+            return static_cast<global_ordinal_type>(local_id);
+        }
+        return d_indexer.face_global_id(local_id);
     }
 
     template<class Function>
@@ -421,6 +521,12 @@ private:
 
     void initialize_semi_structured(SemiStructuredPtr mesh);
 
+    void initialize_unstructured(UnstructuredPtr mesh);
+
+    void initialize_unstructured(
+        UnstructuredPtr mesh,
+        const unstructured_indexer_type& indexer);
+
     void initialize_stk(STKAdapterPtr adapter);
 
     template<class MeshType>
@@ -432,15 +538,17 @@ private:
     void initialize_faces(std::vector<size_t> owned,
                           std::vector<size_t> overlap);
 
+    void initialize_indexer(indexer_type indexer);
+
     void initialize_cell_faces();
 
     template<class MeshType>
     void initialize_boundary_batches(const MeshType& mesh);
 
-    template<class CommPtr, class Id>
+    template<class CommPtr, class Range>
     Teuchos::RCP<const map_type> make_map(
         const CommPtr& comm,
-        const std::vector<Id>& ids) const
+        const Range& ids) const
     {
         std::vector<global_ordinal_type> gids;
         gids.reserve(ids.size());
@@ -461,15 +569,7 @@ private:
     template<class CommPtr>
     void create_maps(const CommPtr& comm)
     {
-        std::vector<size_t> owned_cells(
-            d_cell_geometry_lids.begin(),
-            d_cell_geometry_lids.begin()
-                + static_cast<std::ptrdiff_t>(d_num_owned_cells));
-        std::vector<size_t> owned_faces(
-            d_face_geometry_lids.begin(),
-            d_face_geometry_lids.begin()
-                + static_cast<std::ptrdiff_t>(d_num_owned_faces));
-        std::vector<size_t> boundary_faces;
+        std::vector<global_ordinal_type> boundary_faces;
         for (const auto& [batch_id, batch] : d_boundary_batches)
         {
             (void)batch_id;
@@ -478,16 +578,19 @@ private:
                 if (is_owned_face(face_lid))
                 {
                     boundary_faces.push_back(
-                        d_face_geometry_lids[
-                            static_cast<size_t>(face_lid)]);
+                        d_indexer.face_global_id(face_lid));
                 }
             }
         }
 
-        d_owned_cell_map = make_map(comm, owned_cells);
-        d_overlap_cell_map = make_map(comm, d_cell_geometry_lids);
-        d_owned_face_map = make_map(comm, owned_faces);
-        d_overlap_face_map = make_map(comm, d_face_geometry_lids);
+        d_owned_cell_map = make_map(
+            comm, d_indexer.owned_cell_global_ids());
+        d_overlap_cell_map = make_map(
+            comm, d_indexer.cell_global_ids());
+        d_owned_face_map = make_map(
+            comm, d_indexer.owned_face_global_ids());
+        d_overlap_face_map = make_map(
+            comm, d_indexer.face_global_ids());
         d_boundary_face_map = make_map(comm, boundary_faces);
     }
 
@@ -557,11 +660,18 @@ private:
     local_ordinal_type geometry_to_local_cell(
         size_t geometry_lid) const noexcept
     {
-        const auto iter =
-            d_cell_local_by_geometry.find(geometry_lid);
-        return iter == d_cell_local_by_geometry.end()
-             ? invalid_local_id()
-             : iter->second;
+        if (std::holds_alternative<UnstructuredPtr>(d_mesh))
+        {
+            if (geometry_lid >= d_indexer.num_local_cells()
+                || geometry_lid > static_cast<size_t>(
+                    std::numeric_limits<local_ordinal_type>::max()))
+            {
+                return invalid_local_id();
+            }
+            return static_cast<local_ordinal_type>(geometry_lid);
+        }
+        return d_indexer.cell_local_id(
+            static_cast<global_ordinal_type>(geometry_lid));
     }
 
     /**
@@ -572,24 +682,24 @@ private:
     local_ordinal_type geometry_to_local_face(
         size_t geometry_lid) const noexcept
     {
-        const auto iter =
-            d_face_local_by_geometry.find(geometry_lid);
-        return iter == d_face_local_by_geometry.end()
-             ? invalid_local_id()
-             : iter->second;
+        if (std::holds_alternative<UnstructuredPtr>(d_mesh))
+        {
+            if (geometry_lid >= d_indexer.num_local_faces()
+                || geometry_lid > static_cast<size_t>(
+                    std::numeric_limits<local_ordinal_type>::max()))
+            {
+                return invalid_local_id();
+            }
+            return static_cast<local_ordinal_type>(geometry_lid);
+        }
+        return d_indexer.face_local_id(
+            static_cast<global_ordinal_type>(geometry_lid));
     }
 
     variant_type d_mesh;
-    size_t d_num_owned_cells = 0;
-    size_t d_num_owned_faces = 0;
-    std::vector<size_t> d_cell_geometry_lids;
-    std::vector<size_t> d_face_geometry_lids;
+    indexer_type d_indexer;
     std::vector<size_t> d_cell_face_offsets;
     std::vector<local_ordinal_type> d_cell_face_lids;
-    std::unordered_map<size_t, local_ordinal_type>
-        d_cell_local_by_geometry;
-    std::unordered_map<size_t, local_ordinal_type>
-        d_face_local_by_geometry;
     std::unordered_map<int, std::string> d_boundary_names;
     std::unordered_map<int, BoundaryFaceBatch> d_boundary_batches;
     Teuchos::RCP<const map_type> d_owned_cell_map;

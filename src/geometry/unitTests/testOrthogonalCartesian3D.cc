@@ -1,6 +1,12 @@
 /**
  * @file testOrthogonalCartesian3D.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for the structured Cartesian mesh.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -17,10 +23,13 @@ namespace
 {
 
 using Mesh = SimpleFluid::Meshes::OrthogonalCartesian3D;
+using Indexer = Mesh::Indexer;
 using CellID = Mesh::CellID;
 using FaceID = Mesh::FaceID;
 using NodeID = Mesh::NodeID;
 using Vec3 = Mesh::Vec3;
+
+static_assert(SimpleFluid::MeshIndexer<Indexer>);
 
 Mesh make_mesh()
 {
@@ -183,15 +192,15 @@ TEST(OrthogonalCartesian3DTest, MapsStructuredAndLocalIdentifiers)
 
     for (size_t id = 0; id < mesh.num_cells(); ++id)
     {
-        EXPECT_EQ(indexer.cell_local_id(indexer.cell_id(id)), id);
+        EXPECT_EQ(indexer.cell_ordinal(indexer.cell_id(id)), id);
     }
     for (size_t id = 0; id < mesh.num_faces(); ++id)
     {
-        EXPECT_EQ(indexer.face_local_id(indexer.face_id(id)), id);
+        EXPECT_EQ(indexer.face_ordinal(indexer.face_id(id)), id);
     }
     for (size_t id = 0; id < mesh.num_nodes(); ++id)
     {
-        EXPECT_EQ(indexer.node_local_id(indexer.node_id(id)), id);
+        EXPECT_EQ(indexer.node_ordinal(indexer.node_id(id)), id);
     }
 
     EXPECT_EQ(mesh.node_coordinates(NodeID{2, 1, 2}),

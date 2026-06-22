@@ -43,12 +43,16 @@ add_library(SimpleFluidMesh STATIC
     geometry/MeshHandle.cc
     geometry/STKMesh.cc
     geometry/MeshFactory.cc
+    geometry/mesh/LocalGlobalIndexer.cc
+    geometry/mesh/OrthogonalLocalGlobalIndexer.cc
+    geometry/mesh/PartitionedMeshBase.cc
     geometry/mesh/OrthoMeshPartitioner.cc
     geometry/mesh/OrthoMeshTopo.cc
     geometry/mesh/OrthogonalCartesian3D.cc
     geometry/mesh/OrthogonalCylindrial3D.cc
     geometry/mesh/SemiStructMeshTopo.cc
     geometry/mesh/SemiStructuredXY_Z.cc
+    geometry/mesh/UnstructuredMesh.cc
     io/VTUWriter.cc
     parallel/MeshPartitioner.cc
 )

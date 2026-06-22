@@ -1,6 +1,12 @@
 /**
  * @file SemiStructMeshTopo.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Layered semi-structured mesh topology implementation.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/SemiStructMeshTopo.hh"
@@ -27,6 +33,13 @@ struct EdgeKeyHash
     }
 };
 
+/**
+ * @brief Create a normalized (min, max) edge key from two node ordinals.
+ *
+ * @param node0 First node ordinal.
+ * @param node1 Second node ordinal.
+ * @return EdgeKey with the smaller ordinal first.
+ */
 EdgeKey edge_key(
     SemiStructMeshTopo::Ordinal node0,
     SemiStructMeshTopo::Ordinal node1)
@@ -38,6 +51,17 @@ EdgeKey edge_key(
 
 } // namespace
 
+/**
+ * @brief Construct a semi-structured topology from base nodes, cells, layers, and boundary edges.
+ *
+ * @param nodes_per_layer Number of nodes per XY layer.
+ * @param cell_nodes Node-ordered cell connectivity for a single layer.
+ * @param layers Number of axial extrusion layers.
+ * @param boundary_edges Side-face boundary edge definitions.
+ * @param axial_periodic Whether the axial direction wraps periodically.
+ * @throws std::invalid_argument if any size parameter is zero.
+ * @throws std::overflow_error if cell or face counts exceed the ordinal type.
+ */
 SemiStructMeshTopo::SemiStructMeshTopo(
     Ordinal nodes_per_layer,
     const Arr<Arr<Ordinal>>& cell_nodes,
@@ -86,6 +110,15 @@ SemiStructMeshTopo::SemiStructMeshTopo(
     initialize_boundary_batches();
 }
 
+/**
+ * @brief Return all faces bounding a cell.
+ *
+ * Returns the lower axial face, upper axial face (or wrapped periodic
+ * equivalent), and the side faces inherited from the base 2D topology.
+ *
+ * @param id Cell identifier.
+ * @return Vector of FaceID entries for all bounding faces.
+ */
 std::vector<SemiStructMeshTopo::FaceID>
 SemiStructMeshTopo::cell_faces(CellID id) const
 {
@@ -106,6 +139,15 @@ SemiStructMeshTopo::cell_faces(CellID id) const
     return faces;
 }
 
+/**
+ * @brief Return the owner cell of a face.
+ *
+ * For axial faces the owner is the cell on the lower-k side. For side faces
+ * the orientation follows the base-topology owner.
+ *
+ * @param id Face identifier.
+ * @return CellID of the owning cell.
+ */
 auto SemiStructMeshTopo::owner_cell(FaceID id) const noexcept -> CellID
 {
     const auto coordinate =
@@ -117,6 +159,12 @@ auto SemiStructMeshTopo::owner_cell(FaceID id) const noexcept -> CellID
          : CellID{owner, id.k};
 }
 
+/**
+ * @brief Return the neighbor cell of an interior face, or an invalid cell for boundaries.
+ *
+ * @param id Face identifier.
+ * @return CellID of the neighboring cell, or a default CellID if the face is on a boundary.
+ */
 auto SemiStructMeshTopo::neighbor_cell(FaceID id) const noexcept -> CellID
 {
     const auto coordinate =
@@ -130,11 +178,23 @@ auto SemiStructMeshTopo::neighbor_cell(FaceID id) const noexcept -> CellID
              : CellID{neighbor, id.k};
 }
 
+/**
+ * @brief Return true if the face lies on a domain boundary.
+ *
+ * @param face_id Face identifier.
+ * @return true if the face has a boundary batch ID.
+ */
 bool SemiStructMeshTopo::is_boundary_face(FaceID face_id) const noexcept
 {
     return boundary_id(face_id) != invalid_boundary_id;
 }
 
+/**
+ * @brief Return the boundary batch ID for a face, or invalid_boundary_id for interior faces.
+ *
+ * @param id Face identifier.
+ * @return Boundary batch ID or invalid_boundary_id.
+ */
 int SemiStructMeshTopo::boundary_id(FaceID id) const noexcept
 {
     if (id.orientation == Indexer::AXIAL)
@@ -156,6 +216,13 @@ int SemiStructMeshTopo::boundary_id(FaceID id) const noexcept
     return d_side_faces[id.ij].boundary_id;
 }
 
+/**
+ * @brief Return the human-readable name of a boundary batch.
+ *
+ * @param batch_id Boundary batch ID.
+ * @return Const reference to the batch name string.
+ * @throws std::out_of_range if @p batch_id is not registered.
+ */
 const std::string&
 SemiStructMeshTopo::boundary_batch_name(int batch_id) const
 {
@@ -167,6 +234,13 @@ SemiStructMeshTopo::boundary_batch_name(int batch_id) const
     return iter->second;
 }
 
+/**
+ * @brief Return the face list for a boundary batch.
+ *
+ * @param batch_id Boundary batch ID.
+ * @return Const reference to the boundary face batch.
+ * @throws std::out_of_range if @p batch_id is not registered.
+ */
 const SemiStructMeshTopo::BoundaryBatch&
 SemiStructMeshTopo::boundary_face_batch(int batch_id) const
 {
@@ -178,6 +252,11 @@ SemiStructMeshTopo::boundary_face_batch(int batch_id) const
     return iter->second;
 }
 
+/**
+ * @brief Return a vector of all registered boundary batch IDs.
+ *
+ * @return Vector of batch IDs in no particular order.
+ */
 std::vector<int> SemiStructMeshTopo::boundary_batch_ids() const
 {
     std::vector<int> ids;
@@ -190,6 +269,11 @@ std::vector<int> SemiStructMeshTopo::boundary_batch_ids() const
     return ids;
 }
 
+/**
+ * @brief Return the number of registered boundary batches.
+ *
+ * @return Count of boundary batches.
+ */
 int SemiStructMeshTopo::num_boundary_batches() const noexcept
 {
     return static_cast<int>(d_boundary_batches.size());

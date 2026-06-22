@@ -1,6 +1,12 @@
 /**
  * @file OrthogonalCylindrial3D.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Three-dimensional orthogonal cylindrical finite-volume mesh.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -26,10 +32,7 @@ namespace SimpleFluid::Meshes
  * direction and omits the two angular boundary batches.
  */
 class OrthogonalCylindrial3D
-    : public MeshBase<OrthogonalCylindrial3D,
-                      OrthogonalIndexer::CellID,
-                      OrthogonalIndexer::FaceID,
-                      OrthogonalIndexer::NodeID>
+    : public MeshBase<OrthogonalCylindrial3D, OrthogonalMeshIndexTypes>
 {
 public:
     using Indexer = OrthogonalIndexer;
@@ -39,7 +42,7 @@ public:
     using CellID = Indexer::CellID;
     using FaceID = Indexer::FaceID;
     using NodeID = Indexer::NodeID;
-    using Base = MeshBase<OrthogonalCylindrial3D, CellID, FaceID, NodeID>;
+    using Base = MeshBase<OrthogonalCylindrial3D, OrthogonalMeshIndexTypes>;
     using cell_id_t = typename Base::cell_id_t;
     using face_id_t = typename Base::face_id_t;
     using node_id_t = typename Base::node_id_t;

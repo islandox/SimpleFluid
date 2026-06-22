@@ -17,6 +17,8 @@ using CellID = Indexer::CellID;
 using FaceID = Indexer::FaceID;
 using NodeID = Indexer::NodeID;
 
+static_assert(SimpleFluid::MeshIndexer<Indexer>);
+
 TEST(SemiStructuredIndexerTest, ComputesNonPeriodicCountsAndOffsets)
 {
     const Indexer indexer(3, 5, 4, 2);
@@ -47,37 +49,37 @@ TEST(SemiStructuredIndexerTest, MapsNonPeriodicIdentifiers)
 {
     const Indexer indexer(3, 5, 4, 2);
 
-    EXPECT_EQ(indexer.cell_local_id(CellID{2, 1}), 5U);
+    EXPECT_EQ(indexer.cell_ordinal(CellID{2, 1}), 5U);
     EXPECT_EQ(indexer.cell_id(5), (CellID{2, 1}));
 
     EXPECT_EQ(
-        indexer.face_local_id(FaceID{2, 2, Indexer::AXIAL}),
+        indexer.face_ordinal(FaceID{2, 2, Indexer::AXIAL}),
         8U);
     EXPECT_EQ(
         indexer.face_id(8),
         (FaceID{2, 2, Indexer::AXIAL}));
 
     EXPECT_EQ(
-        indexer.face_local_id(FaceID{4, 1, Indexer::SIDE}),
+        indexer.face_ordinal(FaceID{4, 1, Indexer::SIDE}),
         18U);
     EXPECT_EQ(
         indexer.face_id(18),
         (FaceID{4, 1, Indexer::SIDE}));
 
-    EXPECT_EQ(indexer.node_local_id(NodeID{3, 2}), 11U);
+    EXPECT_EQ(indexer.node_ordinal(NodeID{3, 2}), 11U);
     EXPECT_EQ(indexer.node_id(11), (NodeID{3, 2}));
 
     for (size_t id = 0; id < indexer.total_cells(); ++id)
     {
-        EXPECT_EQ(indexer.cell_local_id(indexer.cell_id(id)), id);
+        EXPECT_EQ(indexer.cell_ordinal(indexer.cell_id(id)), id);
     }
     for (size_t id = 0; id < indexer.total_faces(); ++id)
     {
-        EXPECT_EQ(indexer.face_local_id(indexer.face_id(id)), id);
+        EXPECT_EQ(indexer.face_ordinal(indexer.face_id(id)), id);
     }
     for (size_t id = 0; id < indexer.total_nodes(); ++id)
     {
-        EXPECT_EQ(indexer.node_local_id(indexer.node_id(id)), id);
+        EXPECT_EQ(indexer.node_ordinal(indexer.node_id(id)), id);
     }
 }
 
@@ -96,15 +98,15 @@ TEST(SemiStructuredIndexerTest, SupportsPeriodicAxialDirection)
 
     for (size_t id = 0; id < indexer.total_cells(); ++id)
     {
-        EXPECT_EQ(indexer.cell_local_id(indexer.cell_id(id)), id);
+        EXPECT_EQ(indexer.cell_ordinal(indexer.cell_id(id)), id);
     }
     for (size_t id = 0; id < indexer.total_faces(); ++id)
     {
-        EXPECT_EQ(indexer.face_local_id(indexer.face_id(id)), id);
+        EXPECT_EQ(indexer.face_ordinal(indexer.face_id(id)), id);
     }
     for (size_t id = 0; id < indexer.total_nodes(); ++id)
     {
-        EXPECT_EQ(indexer.node_local_id(indexer.node_id(id)), id);
+        EXPECT_EQ(indexer.node_ordinal(indexer.node_id(id)), id);
     }
 }
 

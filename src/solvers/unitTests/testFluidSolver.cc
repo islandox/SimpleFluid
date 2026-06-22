@@ -1,6 +1,12 @@
 /**
  * @file testFluidSolver.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for the reusable incompressible fluid solver.
+ * @version 0.1
+ * @date 2026-06-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -83,6 +89,10 @@ static_assert(std::is_base_of_v<
               SimpleFluid::FluidSolver<Pack>,
               SimpleFluid::BoussinesqSolver<Pack>>);
 
+/**
+ * @brief Verify that FluidSolver advances pressure and velocity over two
+ *        time steps on a single-cell mesh with zero viscosity.
+ */
 TEST(FluidSolverTest, AdvancesPressureVelocityWithoutThermalFields)
 {
     auto mesh = make_single_cell_mesh();
@@ -115,6 +125,10 @@ TEST(FluidSolverTest, AdvancesPressureVelocityWithoutThermalFields)
     EXPECT_NEAR(statistics.continuity, residuals.continuity, 1.0e-12);
 }
 
+/**
+ * @brief Confirm that the momentum predictor uses the previous pressure
+ *        gradient, producing a linear velocity ramp on a two-cell mesh.
+ */
 TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
 {
     auto mesh = make_two_cell_line_mesh();
@@ -147,6 +161,10 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
     }
 }
 
+/**
+ * @brief Ensure VTU output contains pressure and velocity but excludes
+ *        temperature when no thermal model is active.
+ */
 TEST(FluidSolverTest, WritesOnlyCoreFluidFields)
 {
     auto mesh = make_single_cell_mesh();
@@ -172,6 +190,10 @@ TEST(FluidSolverTest, WritesOnlyCoreFluidFields)
     std::filesystem::remove(output_file);
 }
 
+/**
+ * @brief Validate a single coupled-Krylov pressure-velocity step on a
+ *        single-cell mesh with zero viscosity.
+ */
 TEST(FluidSolverTest, SupportsCoupledKrylovPressureVelocitySolve)
 {
     auto mesh = make_single_cell_mesh();

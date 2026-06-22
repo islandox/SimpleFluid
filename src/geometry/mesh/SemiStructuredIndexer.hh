@@ -1,14 +1,17 @@
 /**
  * @file SemiStructuredIndexer.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Indexing utilities for meshes formed by extruding a 2D topology.
  * @version 0.1
- * @date 2026-06-09
- * 
+ * @date 2026-06-21
+ *
  * @copyright Copyright (c) 2026
- * 
+ *
  */
 
 #pragma once
+
+#include "geometry/mesh/MeshIndexTypes.hh"
 
 #include <array>
 #include <compare>
@@ -66,6 +69,11 @@ struct SemiStructuredIndexer
 
         constexpr auto operator<=>(const NodeID&) const = default;
     };
+
+    using cell_id_t = CellID;
+    using face_id_t = FaceID;
+    using node_id_t = NodeID;
+    using ordinal_t = size_t;
 
     Ordinal num_cells_per_layer = 0;
     Ordinal num_side_faces_per_layer = 0;
@@ -128,13 +136,13 @@ struct SemiStructuredIndexer
              * num_node_layers;
     }
 
-    constexpr size_t cell_local_id(const CellID& cell_id) const noexcept
+    constexpr size_t cell_ordinal(const CellID& cell_id) const noexcept
     {
         return cell_id.ij
              + static_cast<size_t>(num_cells_per_layer) * cell_id.k;
     }
 
-    constexpr size_t face_local_id(const FaceID& face_id) const noexcept
+    constexpr size_t face_ordinal(const FaceID& face_id) const noexcept
     {
         const auto orientation = face_id.orientation;
         return face_id.ij * face_strides[orientation][IJ]
@@ -142,10 +150,25 @@ struct SemiStructuredIndexer
              + face_offsets[orientation];
     }
 
-    constexpr size_t node_local_id(const NodeID& node_id) const noexcept
+    constexpr size_t node_ordinal(const NodeID& node_id) const noexcept
     {
         return node_id.ij
              + static_cast<size_t>(num_nodes_per_layer) * node_id.k;
+    }
+
+    constexpr size_t cell_local_id(const CellID& cell_id) const noexcept
+    {
+        return cell_ordinal(cell_id);
+    }
+
+    constexpr size_t face_local_id(const FaceID& face_id) const noexcept
+    {
+        return face_ordinal(face_id);
+    }
+
+    constexpr size_t node_local_id(const NodeID& node_id) const noexcept
+    {
+        return node_ordinal(node_id);
     }
 
     constexpr CellID cell_id(size_t local_id) const noexcept
@@ -179,5 +202,12 @@ struct SemiStructuredIndexer
             static_cast<Ordinal>(local_id / num_nodes_per_layer)};
     }
 };
+
+using SemiStructuredMeshIndexTypes = MeshIndexTypes<
+    SemiStructuredIndexer::CellID,
+    SemiStructuredIndexer::FaceID,
+    SemiStructuredIndexer::NodeID,
+    size_t,
+    uint64_t>;
 
 } // namespace SimpleFluid::Meshes
