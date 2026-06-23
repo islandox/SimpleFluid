@@ -236,9 +236,30 @@ void verify_lid_driven_cavity(
             }
         }
 
-        EXPECT_TRUE(saw_moving_wall);
-        EXPECT_GT(kinetic_energy, 1.0e-12);
-        EXPECT_GT(cross_stream_kinetic_energy, 1.0e-12);
+        const int local_saw_moving_wall =
+            saw_moving_wall ? 1 : 0;
+        int global_saw_moving_wall = 0;
+        EXPECT_EQ(
+            my_mpi::global_max(
+                local_saw_moving_wall, global_saw_moving_wall),
+            MPI_SUCCESS);
+
+        double global_kinetic_energy = 0.0;
+        EXPECT_EQ(
+            my_mpi::global_sum(
+                kinetic_energy, global_kinetic_energy),
+            MPI_SUCCESS);
+
+        double global_cross_stream_kinetic_energy = 0.0;
+        EXPECT_EQ(
+            my_mpi::global_sum(
+                cross_stream_kinetic_energy,
+                global_cross_stream_kinetic_energy),
+            MPI_SUCCESS);
+
+        EXPECT_TRUE(global_saw_moving_wall != 0);
+        EXPECT_GT(global_kinetic_energy, 1.0e-12);
+        EXPECT_GT(global_cross_stream_kinetic_energy, 1.0e-12);
         EXPECT_LT(
             stabilized_continuity_norm(
                 solver.velocity(), solver.pressure(),
