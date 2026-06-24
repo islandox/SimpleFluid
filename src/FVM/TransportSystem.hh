@@ -601,7 +601,10 @@ transport_system(const VectorCellField<Pack>& old_values,
  * two-point stencil plus Phase 2/3 non-orthogonal treatment selected by
  * @p treatment.
  */
-template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+template<TpetraTypePack Pack,
+         class BoundaryValueProvider,
+         class SourceProvider,
+         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary>
     requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
 VectorTransportSystem<Pack>
 non_orthogonal_transport_system(
@@ -613,7 +616,9 @@ non_orthogonal_transport_system(
     SourceProvider right_hand_source,
     NonOrthogonalTreatment treatment,
     const VectorCellField<Pack>* correction_field = nullptr,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    BoundaryDiffusionProvider boundary_diffusion =
+        BoundaryDiffusionProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -805,6 +810,11 @@ non_orthogonal_transport_system(
 
             const auto location =
                 boundary_locations[static_cast<size_t>(face_lid)];
+            if (!boundary_diffusion(location.batch_id,
+                                    location.in_batch_id))
+            {
+                continue;
+            }
             const auto boundary_face_value =
                 boundary_value(location.batch_id, location.in_batch_id);
             const auto coeff =
@@ -1468,7 +1478,8 @@ physical_temperature_transport_system(
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,
-         class SourceProvider>
+         class SourceProvider,
+         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary>
 VectorTransportSystem<Pack>
 physical_momentum_transport_system(
     const VectorCellField<Pack>& old_velocity,
@@ -1480,7 +1491,9 @@ physical_momentum_transport_system(
     SourceProvider acceleration_source,
     NonOrthogonalTreatment treatment,
     const VectorCellField<Pack>* correction_field = nullptr,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    BoundaryDiffusionProvider boundary_diffusion =
+        BoundaryDiffusionProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1702,6 +1715,11 @@ physical_momentum_transport_system(
             }
             const auto location =
                 boundary_locations[static_cast<size_t>(face_lid)];
+            if (!boundary_diffusion(location.batch_id,
+                                    location.in_batch_id))
+            {
+                continue;
+            }
             const auto face_kinematic_viscosity =
                 dynamic_viscosity.local_value(cell_lid)
               / reference_density;
