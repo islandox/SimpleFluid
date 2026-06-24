@@ -197,6 +197,105 @@ TEST(RadiolyticGasModelTest, MicrobubbleDecayIsAnalyticAndConservative)
         1.0e-15);
 }
 
+TEST(RadiolyticGasModelTest, MicroToLargeConversionConservesCategories)
+{
+    auto mesh = make_single_cell_mesh();
+    auto options = sheng_options();
+    options.initial_dissolved_hydrogen = 1.0e3;
+    options.initial_micro_number_density = 1.0e8;
+    options.initial_micro_moles = 1.0e-8;
+    options.microbubble_lifetime = 1.0e9;
+    options.large_bubble_dissolution_time = 1.0e9;
+    options.micro_to_large_conversion_coefficient = 1.0e-8;
+    SimpleFluid::RadiolyticGasModel<Pack> model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+
+    const auto total_number_before =
+        model.micro_number_density().value(0)
+      + model.large_number_density().value(0);
+    const auto total_moles_before =
+        model.micro_moles().value(0)
+      + model.large_moles().value(0);
+    model.advance(
+        1.0e-7,
+        1.0e-7,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+
+    EXPECT_LT(
+        model.micro_number_density().value(0),
+        options.initial_micro_number_density);
+    EXPECT_GT(model.large_number_density().value(0), 0.0);
+    EXPECT_NEAR(
+        model.micro_number_density().value(0)
+      + model.large_number_density().value(0),
+        total_number_before,
+        total_number_before * 1.0e-12);
+    EXPECT_NEAR(
+        model.micro_moles().value(0) + model.large_moles().value(0),
+        total_moles_before,
+        total_moles_before * 1.0e-10);
+}
+
+TEST(RadiolyticGasModelTest, LargeBubbleGrowthAndDissolutionFollowSaturation)
+{
+    auto mesh = make_single_cell_mesh();
+    auto options = sheng_options();
+    options.initial_dissolved_hydrogen = 1.0e3;
+    options.initial_large_number_density = 1.0e6;
+    options.initial_large_moles = 1.0e-7;
+    options.large_bubble_dissolution_time = 1.0e9;
+    SimpleFluid::RadiolyticGasModel<Pack> saturated(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+
+    saturated.advance(
+        1.0e-6,
+        1.0e-6,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+    EXPECT_GT(saturated.large_moles().value(0), 1.0e-7);
+    EXPECT_GT(saturated.alpha_g().value(0), 0.0);
+    EXPECT_NEAR(
+        saturated.large_number_density().value(0),
+        options.initial_large_number_density,
+        options.initial_large_number_density * 1.0e-12);
+
+    options.initial_dissolved_hydrogen = 0.0;
+    options.large_bubble_dissolution_time = 1.0e-5;
+    SimpleFluid::RadiolyticGasModel<Pack> undersaturated(mesh, options);
+    undersaturated.advance(
+        1.0e-6,
+        1.0e-6,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+    EXPECT_LT(undersaturated.large_moles().value(0), 1.0e-7);
+    EXPECT_LT(
+        undersaturated.large_number_density().value(0),
+        options.initial_large_number_density);
+}
+
 TEST(RadiolyticGasModelTest, PrescribedPressureHistoryInterpolates)
 {
     auto mesh = make_single_cell_mesh();

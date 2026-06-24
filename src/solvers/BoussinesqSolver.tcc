@@ -296,6 +296,7 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
 {
     validate_radiolytic_gas_options(options);
     d_physical_model_enabled = true;
+    ensure_scalar_void_fraction_model();
     if (!d_radiolytic_gas_model)
     {
         d_radiolytic_gas_model =
@@ -338,6 +339,206 @@ auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept
     -> const RadiolyticGasModel<Pack>*
 {
     return d_radiolytic_gas_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_boiling_source(
+    const BoilingSourceOptions& options) -> BoilingSourceModel<Pack>&
+{
+    validate_boiling_source_options(options);
+    d_physical_model_enabled = true;
+    ensure_scalar_void_fraction_model();
+    if (!d_boiling_source_model)
+    {
+        d_boiling_source_model =
+            std::make_unique<BoilingSourceModel<Pack>>(
+                d_mesh, options);
+    }
+    else
+    {
+        d_boiling_source_model->configure(options);
+    }
+    return *d_boiling_source_model;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_boiling_source(
+    const Database& database) -> BoilingSourceModel<Pack>&
+{
+    return configure_boiling_source(
+        boiling_source_options_from_database(database));
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
+{
+    if (!d_boiling_source_model)
+        return false;
+    d_boiling_source_model.reset();
+    return true;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_boiling_source_model() noexcept
+    -> BoilingSourceModel<Pack>*
+{
+    return d_boiling_source_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_boiling_source_model() const noexcept
+    -> const BoilingSourceModel<Pack>*
+{
+    return d_boiling_source_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
+    const ScalarVoidFractionOptions& options)
+    -> ScalarVoidFractionModel<Pack>&
+{
+    validate_scalar_void_fraction_options(options);
+    d_physical_model_enabled = true;
+    if (!d_scalar_void_fraction_model)
+    {
+        d_scalar_void_fraction_model =
+            std::make_unique<ScalarVoidFractionModel<Pack>>(
+                d_mesh, options);
+    }
+    else
+    {
+        d_scalar_void_fraction_model->configure(options);
+    }
+    return *d_scalar_void_fraction_model;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
+    const Database& database) -> ScalarVoidFractionModel<Pack>&
+{
+    return configure_scalar_void_fraction(
+        scalar_void_fraction_options_from_database(database));
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() noexcept
+    -> ScalarVoidFractionModel<Pack>*
+{
+    return d_scalar_void_fraction_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() const noexcept
+    -> const ScalarVoidFractionModel<Pack>*
+{
+    return d_scalar_void_fraction_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_material_feedback(
+    const MaterialFeedbackOptions& options)
+    -> MaterialFeedbackModel<Pack>&
+{
+    validate_material_feedback_options(options);
+    d_physical_model_enabled = true;
+    if (!d_material_feedback_model)
+    {
+        d_material_feedback_model =
+            std::make_unique<MaterialFeedbackModel<Pack>>(
+                d_mesh, options);
+    }
+    else
+    {
+        d_material_feedback_model->configure(options);
+    }
+    d_model_options.density_feedback_enabled =
+        d_material_feedback_model->density_feedback_enabled();
+    return *d_material_feedback_model;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_material_feedback(
+    const Database& database) -> MaterialFeedbackModel<Pack>&
+{
+    return configure_material_feedback(
+        material_feedback_options_from_database(
+            database, d_model_options, d_problem.time_options()));
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
+{
+    if (!d_material_feedback_model)
+        return false;
+    d_material_feedback_model.reset();
+    d_model_options.density_feedback_enabled = false;
+    return true;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_material_feedback_model() noexcept
+    -> MaterialFeedbackModel<Pack>*
+{
+    return d_material_feedback_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_material_feedback_model() const noexcept
+    -> const MaterialFeedbackModel<Pack>*
+{
+    return d_material_feedback_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_precursors(
+    const DelayedNeutronPrecursorOptions& options)
+    -> DelayedNeutronPrecursorModel<Pack>&
+{
+    validate_delayed_neutron_precursor_options(options);
+    d_physical_model_enabled = true;
+    ensure_scalar_void_fraction_model();
+    if (!d_precursor_model)
+    {
+        d_precursor_model =
+            std::make_unique<DelayedNeutronPrecursorModel<Pack>>(
+                d_mesh, options);
+    }
+    else
+    {
+        d_precursor_model->configure(options);
+    }
+    return *d_precursor_model;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_precursors(
+    const Database& database) -> DelayedNeutronPrecursorModel<Pack>&
+{
+    return configure_precursors(
+        delayed_neutron_precursor_options_from_database(database));
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_precursor_model() noexcept
+{
+    if (!d_precursor_model)
+        return false;
+    d_precursor_model.reset();
+    return true;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_precursor_model() noexcept
+    -> DelayedNeutronPrecursorModel<Pack>*
+{
+    return d_precursor_model.get();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept
+    -> const DelayedNeutronPrecursorModel<Pack>*
+{
+    return d_precursor_model.get();
 }
 
 template<TpetraTypePack Pack>
@@ -388,7 +589,99 @@ void BoussinesqSolver<Pack>::refresh_physical_models()
         pressure(),
         velocity()};
     stored_material_properties().update(context);
+    refresh_material_feedback(d_time);
     stored_temperature_sources().update(context);
+    if (d_boiling_source_model)
+    {
+        d_boiling_source_model->update(
+            temperature(), stored_material_properties());
+    }
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::refresh_material_feedback(scalar_type time)
+{
+    if (!d_material_feedback_model)
+    {
+        return;
+    }
+    BoussinesqUpdateContext<Pack> context{
+        time,
+        d_step_index,
+        *d_mesh,
+        temperature(),
+        pressure(),
+        velocity()};
+    d_material_feedback_model->apply(
+        context, active_alpha_g_field(), stored_material_properties());
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
+{
+    if (!d_scalar_void_fraction_model)
+    {
+        configure_scalar_void_fraction(ScalarVoidFractionOptions{});
+    }
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::active_alpha_g_field() const noexcept
+    -> const field_type*
+{
+    if (d_scalar_void_fraction_model)
+    {
+        return &d_scalar_void_fraction_model->alpha_g();
+    }
+    if (d_radiolytic_gas_model)
+    {
+        return &d_radiolytic_gas_model->alpha_g();
+    }
+    return nullptr;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::active_alpha_l_field() const noexcept
+    -> const field_type*
+{
+    if (d_scalar_void_fraction_model)
+    {
+        return &d_scalar_void_fraction_model->alpha_l();
+    }
+    if (d_radiolytic_gas_model)
+    {
+        return &d_radiolytic_gas_model->alpha_l();
+    }
+    return nullptr;
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::update_void_fraction_models(
+    scalar_type time_step)
+{
+    if (!d_scalar_void_fraction_model)
+    {
+        return;
+    }
+
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->supplies_void_fraction())
+    {
+        d_scalar_void_fraction_model->mirror(
+            d_radiolytic_gas_model->alpha_g(),
+            d_radiolytic_gas_model->alpha_l(),
+            d_radiolytic_gas_model->source_alpha_rad());
+        return;
+    }
+
+    d_scalar_void_fraction_model->update_explicit(
+        time_step,
+        d_radiolytic_gas_model
+            ? &d_radiolytic_gas_model->source_alpha_rad()
+            : nullptr,
+        d_boiling_source_model
+            ? &d_boiling_source_model->source_alpha_boil()
+            : nullptr);
 }
 
 template<TpetraTypePack Pack>
@@ -598,8 +891,14 @@ void BoussinesqSolver<Pack>::step()
         auto total_power_density =
             [&](local_ordinal_type cell_lid)
         {
-            return stored_temperature_sources()
+            auto total = stored_temperature_sources()
                 .total_power_density(cell_lid);
+            if (d_boiling_source_model)
+            {
+                total += d_boiling_source_model
+                    ->temperature_source(cell_lid);
+            }
+            return total;
         };
         temperature_statistics =
             temperature_equation().advance_physical(
@@ -646,6 +945,28 @@ void BoussinesqSolver<Pack>::step()
                 : nullptr);
     }
 
+    update_void_fraction_models(
+        d_problem.time_options().time_step);
+
+    if (d_precursor_model && d_precursor_model->enabled())
+    {
+        const auto* alpha_l = active_alpha_l_field();
+        if (alpha_l == nullptr)
+        {
+            throw std::runtime_error(
+                "Precursor model requires a liquid fraction field.");
+        }
+        d_precursor_model->advance(
+            d_problem.time_options().time_step,
+            *alpha_l,
+            d_fission_power_source
+                ? &d_fission_power_source->field()
+                : nullptr);
+    }
+
+    refresh_material_feedback(
+        d_time + d_problem.time_options().time_step);
+
     finish_step();
 }
 
@@ -687,6 +1008,15 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
         writer.add_scalar_cell_data(
             "thermal_conductivity",
             collect_scalar_field(material.thermal_conductivity));
+        if (d_material_feedback_model)
+        {
+            for (const auto& [name, field] :
+                 d_material_feedback_model->output_fields())
+            {
+                writer.add_scalar_cell_data(
+                    name, collect_scalar_field(*field));
+            }
+        }
     }
     if (output_options.include_sources)
     {
@@ -703,6 +1033,41 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
                 collect_scalar_field(
                     d_radiolytic_gas_model->source_alpha_rad()));
         }
+        if (d_boiling_source_model)
+        {
+            for (const auto& [name, field] :
+                 d_boiling_source_model->output_fields())
+            {
+                writer.add_scalar_cell_data(
+                    name, collect_scalar_field(*field));
+            }
+        }
+        if (d_scalar_void_fraction_model)
+        {
+            writer.add_scalar_cell_data(
+                "S_alpha_total",
+                collect_scalar_field(
+                    d_scalar_void_fraction_model
+                        ->source_alpha_total()));
+        }
+    }
+    if (output_options.include_radiolytic_gas_fields
+        && d_scalar_void_fraction_model)
+    {
+        writer.add_scalar_cell_data(
+            "alpha_g",
+            collect_scalar_field(d_scalar_void_fraction_model->alpha_g()));
+        writer.add_scalar_cell_data(
+            "alpha_l",
+            collect_scalar_field(d_scalar_void_fraction_model->alpha_l()));
+        if (!output_options.include_sources)
+        {
+            writer.add_scalar_cell_data(
+                "S_alpha_total",
+                collect_scalar_field(
+                    d_scalar_void_fraction_model
+                        ->source_alpha_total()));
+        }
     }
     if (output_options.include_radiolytic_gas_fields
         && d_radiolytic_gas_model)
@@ -712,6 +1077,21 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
         {
             if (name == "S_alpha_rad")
                 continue;
+            if (d_scalar_void_fraction_model
+                && (name == "alpha_g" || name == "alpha_l"))
+            {
+                continue;
+            }
+            writer.add_scalar_cell_data(
+                name, collect_scalar_field(*field));
+        }
+    }
+    if (output_options.include_precursor_fields
+        && d_precursor_model)
+    {
+        for (const auto& [name, field] :
+             d_precursor_model->output_fields())
+        {
             writer.add_scalar_cell_data(
                 name, collect_scalar_field(*field));
         }

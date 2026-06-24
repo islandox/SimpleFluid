@@ -201,6 +201,55 @@ TEST(RadiolyticGasPropertiesTest, BubbleRadiusSolvesEos)
     EXPECT_GT(larger.radius, result.radius);
 }
 
+TEST(RadiolyticGasPropertiesTest, BubbleRadiusTrendsWithState)
+{
+    constexpr double pressure = 101325.0;
+    constexpr double surface_tension = 0.07;
+    constexpr double gas_constant = 8.314462618;
+    constexpr double temperature = 300.0;
+    constexpr double moles = 1.0e-12;
+
+    const auto base = Physics::solve_bubble_radius(
+        moles, pressure, surface_tension, gas_constant, temperature,
+        1.0e-8, 1.0e-2);
+    const auto hot = Physics::solve_bubble_radius(
+        moles, pressure, surface_tension, gas_constant, 2.0 * temperature,
+        1.0e-8, 1.0e-2);
+    const auto compressed = Physics::solve_bubble_radius(
+        moles, 2.0 * pressure, surface_tension, gas_constant, temperature,
+        1.0e-8, 1.0e-2);
+    const auto more_bubbles = Physics::solve_bubble_radius(
+        0.5 * moles, pressure, surface_tension, gas_constant, temperature,
+        1.0e-8, 1.0e-2);
+
+    ASSERT_TRUE(base.converged);
+    ASSERT_TRUE(hot.converged);
+    ASSERT_TRUE(compressed.converged);
+    ASSERT_TRUE(more_bubbles.converged);
+    EXPECT_GT(hot.radius, base.radius);
+    EXPECT_LT(compressed.radius, base.radius);
+    EXPECT_LT(more_bubbles.radius, base.radius);
+}
+
+TEST(RadiolyticGasPropertiesTest, VoidAndCharacteristicRadiusReconstruct)
+{
+    const auto micro_void =
+        Physics::bubble_void_fraction(2.0e9, 1.0e-6);
+    const auto large_void =
+        Physics::bubble_void_fraction(5.0e6, 1.0e-4);
+    EXPECT_GT(micro_void, 0.0);
+    EXPECT_GT(large_void, micro_void);
+
+    const auto characteristic =
+        Physics::characteristic_radius(
+            2.0e9, 1.0e-6, 5.0e6, 1.0e-4);
+    EXPECT_GT(characteristic, 1.0e-6);
+    EXPECT_LT(characteristic, 1.0e-4);
+    EXPECT_DOUBLE_EQ(
+        Physics::characteristic_radius(0.0, 0.0, 0.0, 0.0),
+        0.0);
+}
+
 TEST(RadiolyticGasPropertiesTest, ParsesFlatRuntimeSelectors)
 {
     SimpleFluid::Database database;

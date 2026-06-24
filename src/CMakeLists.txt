@@ -149,11 +149,16 @@ add_executable(natural_convection_boundary_layer_box examples/natural_convection
 target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
 simplefluid_reuse_precompiled_header(natural_convection_boundary_layer_box)
 
+add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
+target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
+simplefluid_reuse_precompiled_header(fissile_solution_tank_demo)
+
 foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_box
     natural_convection_cylinder
     natural_convection_sphere
-    natural_convection_boundary_layer_box)
+    natural_convection_boundary_layer_box
+    fissile_solution_tank_demo)
   add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
   set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
       LABELS integration
