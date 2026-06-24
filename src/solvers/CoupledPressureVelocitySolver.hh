@@ -990,15 +990,15 @@ public:
         parameters->set("Convergence Tolerance", options.tolerance);
         parameters->set("Verbosity", options.verbosity);
         parameters->set("Flexible Gmres", true);
-        parameters->set("Block Size", 1);
+        parameters->set("Block Size", 4);
         parameters->set(
             "Num Blocks",
             std::max(
                 1,
                 std::min(
-                    options.max_iterations,
+                    std::max(1, options.max_iterations / 4),
                     static_cast<int>(
-                        system.map->getGlobalNumElements()))));
+                        system.map->getGlobalNumElements() / 4))));
         auto solver = Teuchos::rcp(
             new solver_type(problem, parameters));
         const auto converged =

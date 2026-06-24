@@ -45,6 +45,7 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
 template<TpetraTypePack Pack>
 void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
 {
+    d_face_boundary_temperature.value.clear();
     for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
     {
         const auto iter =
@@ -63,8 +64,6 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
                 continue;
             }
 
-            // Cache only Dirichlet temperature values for now; Neumann and
-            // NoSlip conditions are handled implicitly in the diffusion solve.
             d_face_boundary_temperature.value[batch_id] = Arr<
                 typename Pack::scalar_type>(boundary_batch.face_lids.size(), iter->second.value);
         }
@@ -292,20 +291,35 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
                                              "TemperatureDiffusionEquation");
 
+    auto boundary_condition =
+        [&](int batch_id, size_t)
+    {
+        const auto name = d_mesh->boundary_batch_name(batch_id);
+        const auto iter = d_boundary_condition->find(name);
+        return iter == d_boundary_condition->end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+
     auto boundary_value =
         [&](int batch_id, size_t in_batch_id) -> typename Pack::scalar_type
     {
         const auto cache_it = d_face_boundary_temperature.value.find(batch_id);
-        if (cache_it == d_face_boundary_temperature.value.end())
+        if (cache_it != d_face_boundary_temperature.value.end())
         {
-            return typename Pack::scalar_type{};
+            return cache_it->second[in_batch_id];
         }
-        return cache_it->second[in_batch_id];
+
+        const auto face_lid =
+            d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        const auto owner = d_mesh->owner_cell(face_lid);
+        return old_temperature.local_value(owner);
     };
 
     auto system = FVM::transport_system<Pack>(
         old_temperature, face_fluxes, time_step,
-        thermal_diffusivity, boundary_value, right_hand_source,
+        thermal_diffusivity, boundary_condition, boundary_value,
+        right_hand_source,
         d_cached_transport_matrix);
 
     if (d_cached_transport_matrix.is_null())
@@ -392,9 +406,15 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     {
         const auto iter =
             d_face_boundary_temperature.value.find(batch_id);
-        return iter == d_face_boundary_temperature.value.end()
-             ? scalar_type{}
-             : iter->second[in_batch_id];
+        if (iter != d_face_boundary_temperature.value.end())
+        {
+            return iter->second[in_batch_id];
+        }
+
+        const auto face_lid =
+            d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        const auto owner = d_mesh->owner_cell(face_lid);
+        return old_temperature.local_value(owner);
     };
 
     const auto* correction_field =

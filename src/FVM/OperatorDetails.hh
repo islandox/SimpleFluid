@@ -320,8 +320,10 @@ auto packed_cell_local_id(const MeshType& mesh, CellID cell_id)
  * @brief Distance-weighted harmonic interpolation of a positive cell field
  *        to an interior face.
  *
- * A zero value on either side produces a zero face coefficient. If geometric
- * cell-to-face distances are unavailable, the ordinary harmonic mean is used.
+ * A zero value on either side produces a zero face coefficient. Negative
+ * values are invalid because they would hide a material-property bug by
+ * silently removing diffusion at the face. If geometric cell-to-face distances
+ * are unavailable, the ordinary harmonic mean is used.
  */
 template<class MeshType, class FieldType>
 inline auto harmonic_face_value(
@@ -335,7 +337,12 @@ inline auto harmonic_face_value(
 
     const auto cell_value = field.local_value(cell_lid);
     const auto other_value = field.local_value(other_lid);
-    if (cell_value <= scalar_type{} || other_value <= scalar_type{})
+    if (cell_value < scalar_type{} || other_value < scalar_type{})
+    {
+        throw std::invalid_argument(
+            "harmonic_face_value requires non-negative cell values.");
+    }
+    if (cell_value == scalar_type{} || other_value == scalar_type{})
     {
         return scalar_type{};
     }
