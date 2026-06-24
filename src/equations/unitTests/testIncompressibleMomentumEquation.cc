@@ -35,6 +35,30 @@ SimpleFluid::SP<MeshType> make_single_hex_mesh()
         SimpleFluid::test::make_single_hex_database());
 }
 
+Pack::scalar_type local_matrix_entry(
+    const Pack::matrix_type& matrix,
+    MeshType::local_ordinal_type row,
+    MeshType::local_ordinal_type column)
+{
+    const auto row_entries = matrix.getNumEntriesInLocalRow(row);
+    typename Pack::matrix_type::nonconst_local_inds_host_view_type columns(
+        "columns", row_entries);
+    typename Pack::matrix_type::nonconst_values_host_view_type values(
+        "values", row_entries);
+    size_t num_entries = 0;
+    matrix.getLocalRowCopy(row, columns, values, num_entries);
+
+    Pack::scalar_type entry = 0.0;
+    for (size_t i = 0; i < num_entries; ++i)
+    {
+        if (columns(i) == column)
+        {
+            entry += values(i);
+        }
+    }
+    return entry;
+}
+
 } // namespace
 
 /**
@@ -102,4 +126,55 @@ TEST(IncompressibleMomentumEquationTest, AdvancesPhysicalMomentum)
     EXPECT_NEAR(velocity.value(0).x, -0.4, 1.0e-12);
     EXPECT_NEAR(velocity.value(0).y, 0.2, 1.0e-12);
     EXPECT_NEAR(velocity.value(0).z, 0.1, 1.0e-12);
+}
+
+TEST(IncompressibleMomentumEquationTest,
+     SlipBoundariesDoNotAddDiffusiveMomentumDiagonal)
+{
+    auto mesh = make_single_hex_mesh();
+    VectorFieldType velocity(
+        mesh,
+        VectorFieldType::vec_type{1.0, 2.0, 3.0},
+        "slip_velocity");
+    velocity.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        boundary_conditions.velocity[name] =
+            {SimpleFluid::BoundaryConditionType::Slip, {}};
+    }
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.25;
+    options.kinematic_viscosity = 10.0;
+    const auto transient = mesh->cell_volume(0) / options.time_step;
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    const auto constant_viscosity_system = equation.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options);
+    EXPECT_NEAR(
+        local_matrix_entry(*constant_viscosity_system.matrix, 0, 0),
+        transient,
+        1.0e-12);
+
+    FieldType dynamic_viscosity(mesh, 10.0, "dynamic_viscosity");
+    auto zero_acceleration =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        return {};
+    };
+    const auto physical_viscosity_system =
+        equation.assemble_physical_system(
+            velocity, zero_fluxes, boundary_cache, options,
+            dynamic_viscosity, 1.0, zero_acceleration);
+    EXPECT_NEAR(
+        local_matrix_entry(*physical_viscosity_system.matrix, 0, 0),
+        transient,
+        1.0e-12);
 }

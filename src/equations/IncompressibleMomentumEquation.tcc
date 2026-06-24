@@ -108,12 +108,18 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         }
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
+    auto boundary_diffusion =
+        [&](int boundary_id, local_ordinal_type)
+    {
+        return velocity_boundary_cache.type.at(boundary_id)
+            != BoundaryConditionType::Slip;
+    };
 
     auto system = FVM::non_orthogonal_transport_system<Pack>(
         old_velocity, face_fluxes, options.time_step,
         options.kinematic_viscosity, boundary_value, right_hand_source,
         options.non_orthogonal_treatment, correction_field,
-        d_cached_transport_matrix);
+        d_cached_transport_matrix, boundary_diffusion);
     d_cached_transport_matrix = system.matrix;
     return system;
 }
@@ -277,12 +283,18 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         }
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
+    auto boundary_diffusion =
+        [&](int boundary_id, local_ordinal_type)
+    {
+        return velocity_boundary_cache.type.at(boundary_id)
+            != BoundaryConditionType::Slip;
+    };
 
     auto system = FVM::physical_momentum_transport_system<Pack>(
         old_velocity, face_fluxes, options.time_step, dynamic_viscosity,
         reference_density, boundary_value, acceleration_source,
         options.non_orthogonal_treatment, correction_field,
-        d_cached_transport_matrix);
+        d_cached_transport_matrix, boundary_diffusion);
     d_cached_transport_matrix = system.matrix;
     return system;
 }
