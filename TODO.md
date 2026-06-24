@@ -1,6 +1,7 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Status date:** June 12, 2026  
+**Status date:** June 24, 2026
+
 **Near-term goal:** add conservative radiolytic-gas, boiling, void-fraction, and thermal-feedback infrastructure for fissile-solution-tank criticality-accident simulations, without prematurely implementing a full Euler–Euler two-fluid solver.
 
 ## Completed foundation — squashed Phases -1 to 8
@@ -30,6 +31,7 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] Fully implicit non-orthogonal diffusion
   - [x] Hybrid implicit/explicit non-orthogonal treatment
   - [x] Scalar/vector transport systems
+  - [x] Boundary-condition-aware diffusion in transport systems
   - [x] First-order upwind convection
   - [x] Backward Euler time integration
 - [x] Momentum and pressure-velocity coupling
@@ -39,6 +41,7 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] PIMPLE
   - [x] Fully coupled block-Krylov pressure-velocity solver
   - [x] Rhie–Chow collocated-grid stabilization
+  - [x] Slip-wall momentum transport without spurious boundary diffusion
   - [x] Residual reporting for momentum, pressure, and continuity
 - [x] Physical solver baseline
   - [x] Transient incompressible Navier–Stokes
@@ -62,6 +65,7 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] Gradient/divergence reconstruction tests
   - [x] Pressure projection tests
   - [x] Rhie–Chow checkerboard-suppression tests
+  - [x] Slip-boundary momentum-diffusion regression tests
 
 ### Known foundational gaps
 
@@ -211,11 +215,155 @@ where:
 
 ---
 
-## Phase 12.1 — Pressure-coupled two-population radiolytic bubble model
+## Phase 13 — Bulk and wall boiling source model
 
-Implement the pressure-sensitive hydrogen-bubble model from Sheng et al. (2024) as an advanced, runtime-selectable refinement of Phase 12.
+Add a simple energy-consistent boiling model. This is a placeholder for a later RPI-like wall heat-flux partitioning model.
 
-Phase 12 remains the low-cost baseline. Phase 12.1 adds dissolved hydrogen, microbubble and large-bubble populations, pressure-dependent nucleation, interphase mass transfer, bubble growth/dissolution, rise/escape, and optional inertial-pressure feedback.
+### Bulk superheat model
+
+For cells with:
+
+$$
+T > T_{sat} + \Delta T_{act}
+$$
+
+compute an available energy rate:
+
+$$
+\dot e_{avail} = \rho_l c_{p,l}\frac{\max(T - T_{sat},0)}{\tau_b}
+$$
+
+then:
+
+$$
+\dot m_b = \frac{\dot e_{avail}}{h_{fg}}
+$$
+
+$$
+S_{\alpha,boil} = \frac{\dot m_b}{\rho_g}
+$$
+
+and latent heat sink:
+
+$$
+Q_{latent} = \dot m_b h_{fg}
+$$
+
+### Wall boiling placeholder
+
+For heated boundary faces:
+
+$$
+\dot m''_w = f_{evap}\frac{q''_w}{h_{fg}}
+$$
+
+Distribute to owner cells:
+
+$$
+\dot m_{w,vol} = \dot m''_w \frac{A_f}{V_P}
+$$
+
+### Tasks
+
+- [ ] Add `BoilingSourceModel` or equivalent.
+- [ ] Add configurable parameters:
+  - [ ] `enableBulkBoiling`
+  - [ ] `enableWallBoiling`
+  - [ ] `saturationTemperature`
+  - [ ] `boilingActivationDeltaT`
+  - [ ] `boilingTimeScale`
+  - [ ] `latentHeat`
+  - [ ] `gasDensity`
+  - [ ] `wallEvaporationFraction`
+- [ ] Compute `S_alpha_boil` as a cell field.
+- [ ] Compute `latentHeatSink` as a cell field in W/m³.
+- [ ] Subtract `latentHeatSink` from the temperature equation.
+- [ ] Write `S_alpha_boil` and `latentHeatSink` to VTU.
+- [ ] Keep the implementation explicit and bounded.
+- [ ] Leave a clean interface for future wall heat-flux partitioning:
+  - [ ] convective heat transfer
+  - [ ] quenching heat transfer
+  - [ ] evaporative heat transfer
+
+### Phase 13 acceptance criteria
+
+- [ ] Below threshold, boiling source is zero.
+- [ ] Above threshold, boiling source is positive.
+- [ ] `latentHeatSink == mDot * latentHeat` within tolerance.
+- [ ] Zero latent heat or invalid density fails with clear error.
+- [ ] Wall boiling distributes face source to owner cells conservatively.
+- [ ] Existing cases are unchanged when boiling is disabled.
+
+---
+
+## Phase 14 — Low-order void-fraction field update and optional transport
+
+Introduce `alpha_g` as the first unresolved gas-state field for source-driven
+radiolysis and boiling workflows. This phase is the low-order scalar path:
+Phase 12 produces `S_alpha_rad`, Phase 13 will add boiling sources, and
+Phase 14.1 can replace the scalar update with a two-population bubble model
+that reconstructs `alpha_g` from bubble inventories.
+
+The already implemented radiolytic ideal-gas mode publishes `S_alpha_rad` and
+keeps `alpha_g` unchanged. The missing Phase 14 work is the aggregate
+`S_alpha_total` bookkeeping and the bounded low-order scalar update.
+
+### Minimum required update
+
+$$
+\alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,total},\alpha_{min},\alpha_{max}\right)
+$$
+
+where:
+
+$$
+S_{\alpha,total} = S_{\alpha,rad} + S_{\alpha,boil} + S_{\alpha,wall} - S_{\alpha,collapse}
+$$
+
+### Optional transport upgrade
+
+If the existing scalar transport API allows it cleanly, add:
+
+$$
+\frac{\partial \alpha_g}{\partial t}
++ \nabla\cdot(U_l \alpha_g)
++ \nabla\cdot(U_{slip}\alpha_g)
+=
+\nabla\cdot(D_\alpha\nabla\alpha_g)
++ S_{\alpha,total}
+$$
+
+### Tasks
+
+- [x] Allocate and initialize radiolytic `alpha_g` and `alpha_l`.
+- [x] Allocate and initialize `S_alpha_rad`.
+- [ ] Allocate and initialize `S_alpha_total`.
+- [ ] Add bounded explicit update for the low-order scalar model.
+- [ ] Add optional scalar-transport path for the low-order scalar model if low-risk.
+- [ ] Add configurable upward slip velocity aligned opposite gravity.
+- [ ] Add configurable `alphaDiffusivity`.
+- [ ] Add optional simple collapse/removal time scale for gas disengagement tests.
+- [x] Ensure radiolytic gas fields are ghost-synchronized after model advance.
+- [x] Write radiolytic `alpha_g`, `alpha_l`, and `S_alpha_rad` to VTU behind output switches.
+- [ ] Write `S_alpha_total` to VTU after aggregate source bookkeeping exists.
+
+### Phase 14 acceptance criteria
+
+- [ ] One-cell constant-source update matches the analytic result.
+- [ ] `alpha_g` never leaves `[alphaMin, alphaMax]`.
+- [x] Ideal-gas radiolysis mode does not advance `alpha_g` before the low-order update path exists.
+- [ ] With all sources disabled, `alpha_g` remains unchanged.
+- [ ] Optional transport conserves total gas inventory up to boundary flux and sources.
+- [x] VTU output can include radiolytic `alpha_g` and `S_alpha_rad`.
+- [ ] VTU output includes `S_alpha_total`.
+
+---
+
+## Phase 14.1 — Pressure-coupled two-population radiolytic bubble model
+
+Implement the pressure-sensitive hydrogen-bubble model from Sheng et al. (2024) as an advanced, runtime-selectable refinement of the Phase 12 ideal-gas source and the Phase 14 scalar void-fraction path.
+
+Phase 12 remains the low-cost source model. Phase 14 remains the lower-order scalar `alpha_g` path. Phase 14.1 adds dissolved hydrogen, microbubble and large-bubble populations, pressure-dependent nucleation, interphase mass transfer, bubble growth/dissolution, rise/escape, and optional inertial-pressure feedback.
 
 ### Model selection and scope
 
@@ -568,18 +716,18 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [ ] Stiff-source convergence versus substep size.
 - [ ] Serial/MPI consistency of global H₂ and void inventories.
 
-### Phase 12.1 acceptance criteria
+### Phase 14.1 acceptance criteria
 
-- [ ] The advanced model is runtime-selectable and does not change Phase 12 results when disabled.
+- [x] The advanced model is runtime-selectable and does not change Phase 12 results when disabled.
 - [ ] All state variables remain finite, non-negative, and bounded.
-- [ ] H₂ inventory is conserved after accounting for fission production and boundary escape.
+- [x] H₂ inventory is conserved after accounting for fission production and boundary escape in focused tests.
 - [ ] Micro-to-large conversion conserves bubble number and gas moles according to the model equations.
 - [ ] Bubble-radius solves converge over the documented operating range.
 - [ ] Increasing pressure raises `C_critical` and delays large-bubble conversion.
 - [ ] Supersaturation grows large bubbles and increases void fraction.
 - [ ] Constant-pressure and inertial-pressure options run from the same case definition.
 - [ ] Component behavior reproduces the equations and qualitative pressure trends reported by Sheng et al.
-- [ ] Full SILENE power/pressure validation is deferred until point-kinetics or neutronics coupling is available.
+- [x] Full SILENE power/pressure validation is deferred until point-kinetics or neutronics coupling is available.
 
 ### Reference and known limitations
 
@@ -595,138 +743,6 @@ Known limitations:
 - [ ] Bubble rise velocity strongly affects late-time local void fraction.
 - [ ] Axial/prescribed bubble motion is not a replacement for a gas momentum equation.
 - [ ] A later Euler–Euler phase should solve gas velocity and use validated drag closures.
-
----
-
-## Phase 13 — Bulk and wall boiling source model
-
-Add a simple energy-consistent boiling model. This is a placeholder for a later RPI-like wall heat-flux partitioning model.
-
-### Bulk superheat model
-
-For cells with:
-
-$$
-T > T_{sat} + \Delta T_{act}
-$$
-
-compute an available energy rate:
-
-$$
-\dot e_{avail} = \rho_l c_{p,l}\frac{\max(T - T_{sat},0)}{\tau_b}
-$$
-
-then:
-
-$$
-\dot m_b = \frac{\dot e_{avail}}{h_{fg}}
-$$
-
-$$
-S_{\alpha,boil} = \frac{\dot m_b}{\rho_g}
-$$
-
-and latent heat sink:
-
-$$
-Q_{latent} = \dot m_b h_{fg}
-$$
-
-### Wall boiling placeholder
-
-For heated boundary faces:
-
-$$
-\dot m''_w = f_{evap}\frac{q''_w}{h_{fg}}
-$$
-
-Distribute to owner cells:
-
-$$
-\dot m_{w,vol} = \dot m''_w \frac{A_f}{V_P}
-$$
-
-### Tasks
-
-- [ ] Add `BoilingSourceModel` or equivalent.
-- [ ] Add configurable parameters:
-  - [ ] `enableBulkBoiling`
-  - [ ] `enableWallBoiling`
-  - [ ] `saturationTemperature`
-  - [ ] `boilingActivationDeltaT`
-  - [ ] `boilingTimeScale`
-  - [ ] `latentHeat`
-  - [ ] `gasDensity`
-  - [ ] `wallEvaporationFraction`
-- [ ] Compute `S_alpha_boil` as a cell field.
-- [ ] Compute `latentHeatSink` as a cell field in W/m³.
-- [ ] Subtract `latentHeatSink` from the temperature equation.
-- [ ] Write `S_alpha_boil` and `latentHeatSink` to VTU.
-- [ ] Keep the implementation explicit and bounded.
-- [ ] Leave a clean interface for future wall heat-flux partitioning:
-  - [ ] convective heat transfer
-  - [ ] quenching heat transfer
-  - [ ] evaporative heat transfer
-
-### Phase 13 acceptance criteria
-
-- [ ] Below threshold, boiling source is zero.
-- [ ] Above threshold, boiling source is positive.
-- [ ] `latentHeatSink == mDot * latentHeat` within tolerance.
-- [ ] Zero latent heat or invalid density fails with clear error.
-- [ ] Wall boiling distributes face source to owner cells conservatively.
-- [ ] Existing cases are unchanged when boiling is disabled.
-
----
-
-## Phase 14 — Void-fraction field update and optional transport
-
-Introduce `alpha_g` as the first unresolved gas-state field.
-
-### Minimum required update
-
-$$
-\alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,total},\alpha_{min},\alpha_{max}\right)
-$$
-
-where:
-
-$$
-S_{\alpha,total} = S_{\alpha,rad} + S_{\alpha,boil} + S_{\alpha,wall} - S_{\alpha,collapse}
-$$
-
-### Optional transport upgrade
-
-If the existing scalar transport API allows it cleanly, add:
-
-$$
-\frac{\partial \alpha_g}{\partial t}
-+ \nabla\cdot(U_l \alpha_g)
-+ \nabla\cdot(U_{slip}\alpha_g)
-=
-\nabla\cdot(D_\alpha\nabla\alpha_g)
-+ S_{\alpha,total}
-$$
-
-### Tasks
-
-- [ ] Allocate and initialize `alpha_g`.
-- [ ] Allocate and initialize `S_alpha_total`.
-- [ ] Add bounded explicit update.
-- [ ] Add optional scalar-transport path if low-risk.
-- [ ] Add configurable upward slip velocity aligned opposite gravity.
-- [ ] Add configurable `alphaDiffusivity`.
-- [ ] Add optional simple collapse/removal time scale for gas disengagement tests.
-- [ ] Ensure ghost synchronization before neighbor-based operations.
-- [ ] Write `alpha_g` and `S_alpha_total` to VTU.
-
-### Phase 14 acceptance criteria
-
-- [ ] One-cell constant-source update matches the analytic result.
-- [ ] `alpha_g` never leaves `[alphaMin, alphaMax]`.
-- [ ] With all sources disabled, `alpha_g` remains unchanged.
-- [ ] Optional transport conserves total gas inventory up to boundary flux and sources.
-- [ ] VTU output includes `alpha_g` and source fields.
 
 ---
 
@@ -855,7 +871,7 @@ Collect the new physics tests into a focused verification suite.
 
 ## Phase 18 — Documentation and configuration examples
 
-Document the simplified model clearly so future work does not confuse it with a full Euler–Euler method.
+Document the low-order scalar model and the two-population radiolytic bubble model clearly so future work does not confuse either path with a full Euler–Euler method.
 
 - [ ] Add `docs/modeling/radiolytic_bubble_boiling.md`.
 - [ ] Document model equations and units.
@@ -863,7 +879,8 @@ Document the simplified model clearly so future work does not confuse it with a 
 - [ ] Document limitations:
   - [ ] no separate gas momentum equation
   - [ ] no drag-law closure yet
-  - [ ] no population balance
+  - [ ] scalar `alpha_g` mode has no population balance
+  - [ ] Phase 14.1 has two representative populations, not a full size distribution
   - [ ] no detailed radiolysis chemistry
   - [ ] no full RPI wall-boiling partitioning
   - [ ] no neutronics solver yet
@@ -953,7 +970,7 @@ Add data structures for mapping CFD feedback fields to a coarser neutronics mesh
 
 ## Phase 21 — Full Euler–Euler two-fluid extension, deferred
 
-This phase is explicitly deferred until the scalar void-fraction source model is verified.
+This phase is explicitly deferred until the scalar void-fraction source model and the two-population radiolytic bubble model are verified.
 
 - [ ] Add separate gas velocity field `U_g`.
 - [ ] Add gas-phase continuity equation.
@@ -966,7 +983,7 @@ This phase is explicitly deferred until the scalar void-fraction source model is
 - [ ] Add lift, virtual mass, turbulent dispersion, and wall-lubrication hooks.
 - [ ] Add gas/liquid heat-transfer closure.
 - [ ] Add optional bubble diameter field.
-- [ ] Add optional population-balance model.
+- [ ] Add optional full size-distribution population-balance model.
 - [ ] Validate against a bubbly-plume or bubble-column benchmark before applying to criticality accident analysis.
 
 ### Phase 21 acceptance criteria
@@ -993,10 +1010,9 @@ This phase is explicitly deferred until the scalar void-fraction source model is
 
 ## Suggested immediate Codex task order
 
-1. Implement Phase 12 radiolytic gas source.
-2. Implement Phase 14 explicit bounded `alpha_g` update.
-3. Implement Phase 15 density feedback.
-4. Add Phase 17 unit tests for the implemented subset.
-5. Add Phase 16 demo case.
-6. Implement Phase 13 boiling only after source/latent-heat plumbing is tested.
-7. Document everything in Phase 18.
+1. Close Phase 14 aggregate `S_alpha_total` bookkeeping and low-order bounded `alpha_g` update.
+2. Add the remaining Phase 14.1 verification tests for conversion conservation, large-bubble growth/dissolution, radius trends, and serial/MPI inventory consistency.
+3. Implement Phase 15 density feedback against the scalar or two-population `alpha_g` provider.
+4. Implement Phase 13 boiling after source/latent-heat plumbing is tested.
+5. Add the Phase 16 demo case with the low-order and two-population radiolysis modes selectable.
+6. Update Phase 18 documentation for both radiolysis modes and their validation limits.
