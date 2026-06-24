@@ -32,6 +32,7 @@ in part and remains under verification.**
 | Physical heat sources & material-property fields | ✅ |
 | Prescribed heat power-density profiles | ✅ |
 | Baseline ideal-gas reacting source | ✅ |
+| Scalar void, boiling, feedback, and scalar source-decay infrastructure | 🚧 |
 | Two-population reacting-bubble model | 🚧 |
 | TH/external-source physics multiphysics coupling | ⬜ |
 
@@ -358,8 +359,16 @@ dissolved hydrogen, bubble populations, pressure-sensitive properties,
 transport, escape, and diagnostic inventory accounting, but is not yet fully
 accepted as a validated physical model.
 
-See [`docs/reacting-gas-models.md`](docs/reacting-gas-models.md) for units,
-configuration, numerical ordering, conservation accounting, and limitations.
+See [`docs/reacting-gas-models.md`](docs/reacting-gas-models.md) for the
+advanced supplied reaction sources model and
+[`docs/modeling/reacting_bubble_boiling.md`](docs/modeling/reacting_bubble_boiling.md)
+for the scalar void, boiling, feedback, scalar source-decay, and output workflow.
+
+The heated-solution tank smoke case builds as `reacting_solution_tank_demo`.
+After `cmake --build --preset Debug`, run
+`build/bin/Debug/reacting_solution_tank_demo` and inspect the generated VTU
+files in ParaView. Boiling is disabled by default; the example source shows the
+switches for enabling the placeholder bulk/wall boiling path.
 
 ## Dependencies
 

@@ -35,6 +35,7 @@ namespace SimpleFluid
  * @param linear_options Linear solver parameters.
  * @param initialize Callable used to initialise solver fields before running.
  * @param vtu_filename Output VTU file path.
+ * @param output_options Optional field-selection controls for solution output.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes, class Initializer>
 void run_boussinesq_example(
@@ -43,7 +44,8 @@ void run_boussinesq_example(
     const TimeStepperOptions& time_options,
     const LinearSolverOptions& linear_options,
     Initializer&& initialize,
-    const std::string& vtu_filename)
+    const std::string& vtu_filename,
+    const SolutionOutputOptions& output_options = {})
 {
     MeshFactory factory(db);
     auto mesh = factory.build_handle<Pack>();
@@ -52,7 +54,7 @@ void run_boussinesq_example(
                                   time_options, linear_options);
     std::forward<Initializer>(initialize)(solver);
     solver.run();
-    solver.write_solution_vtu(vtu_filename);
+    solver.write_solution_vtu(vtu_filename, output_options);
 
     if (mesh->owned_cell_map()->getComm()->getRank() == 0)
     {

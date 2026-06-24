@@ -784,6 +784,7 @@ struct SolutionOutputOptions
     bool include_sources = false;
     bool include_material_properties = false;
     bool include_reacting_gas_fields = false;
+    bool include_scalar_group_fields = false;
 };
 
 } // namespace SimpleFluid
