@@ -596,6 +596,15 @@ struct BoundaryFaceLocation
     size_t in_batch_id = 0;
 };
 
+struct AlwaysDiffuseBoundary
+{
+    template<class... Args>
+    constexpr bool operator()(Args&&...) const noexcept
+    {
+        return true;
+    }
+};
+
 template<class MeshType, class FaceID>
 size_t packed_face_local_id(const MeshType& mesh, FaceID face_id)
 {
