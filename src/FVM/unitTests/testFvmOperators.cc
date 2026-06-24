@@ -20,6 +20,7 @@
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
+#include <array>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
@@ -884,6 +885,185 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
     }
 }
 
+TEST(FvmOperatorsTest, ScalarTransportTreatsNeumannBoundaryAsFlux)
+{
+    auto mesh = make_mesh();
+    FieldType old_values(mesh, 0.0, "old_values");
+    old_values.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+
+    const int neumann_batch = mesh->boundary_batches().begin()->first;
+    constexpr double diffusivity = 2.0;
+    constexpr double gradient = 3.0;
+    constexpr double time_step = 1.0;
+    auto boundary_condition =
+        [&](int batch_id, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {
+            batch_id == neumann_batch
+                ? SimpleFluid::BoundaryConditionType::Neumann
+                : SimpleFluid::BoundaryConditionType::Dirichlet,
+            batch_id == neumann_batch ? gradient : 0.0};
+    };
+    auto boundary_value =
+        [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
+        old_values, zero_fluxes, time_step, diffusivity,
+        boundary_condition, boundary_value, zero_source);
+
+    std::vector<double> expected_diagonal(mesh->num_owned_cells(), 0.0);
+    std::vector<double> expected_rhs(mesh->num_owned_cells(), 0.0);
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        expected_diagonal[static_cast<size_t>(cell_lid)] =
+            mesh->cell_volume(cell_lid) / time_step;
+        for (const auto face_lid : mesh->faces(cell_lid))
+        {
+            if (!mesh->is_interior_face(face_lid))
+            {
+                continue;
+            }
+            const auto other =
+                mesh->opposite_or_periodic_neighbor_cell(
+                    face_lid, cell_lid);
+            expected_diagonal[static_cast<size_t>(cell_lid)] +=
+                SimpleFluid::FVM::detail::interior_diffusion_coefficient(
+                    *mesh, face_lid, cell_lid, other, diffusivity);
+        }
+    }
+
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        for (const auto face_lid : batch.face_lids)
+        {
+            if (!mesh->is_owned_face(face_lid)
+                || !mesh->is_boundary_face(face_lid))
+            {
+                continue;
+            }
+            const auto owner = mesh->owner_cell(face_lid);
+            if (batch_id == neumann_batch)
+            {
+                expected_rhs[static_cast<size_t>(owner)] +=
+                    diffusivity * gradient * mesh->face_area(face_lid);
+                continue;
+            }
+
+            expected_diagonal[static_cast<size_t>(owner)] +=
+                SimpleFluid::FVM::detail::boundary_diffusion_coefficient(
+                    *mesh, face_lid, owner, diffusivity);
+        }
+    }
+
+    const auto rhs_data = system.rhs->getData();
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        EXPECT_NEAR(
+            local_matrix_entry(*system.matrix, cell_lid, cell_lid),
+            expected_diagonal[static_cast<size_t>(cell_lid)],
+            1.0e-12);
+        EXPECT_NEAR(
+            rhs_data[cell_lid],
+            expected_rhs[static_cast<size_t>(cell_lid)],
+            1.0e-12);
+    }
+}
+
+TEST(FvmOperatorsTest, VectorTransportTreatsNeumannBoundaryAsFlux)
+{
+    auto mesh = make_mesh();
+    VectorFieldType old_values(mesh, "old_values");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++lid)
+    {
+        old_values.set_value(lid, {});
+    }
+    old_values.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+
+    const int neumann_batch = mesh->boundary_batches().begin()->first;
+    constexpr double diffusivity = 2.0;
+    const SimpleFluid::vec3<Pack::scalar_type> gradient{1.0, 2.0, 3.0};
+    auto boundary_condition =
+        [&](int batch_id, size_t) -> SimpleFluid::VectorBoundaryCondition
+    {
+        return {
+            batch_id == neumann_batch
+                ? SimpleFluid::BoundaryConditionType::Neumann
+                : SimpleFluid::BoundaryConditionType::Dirichlet,
+            batch_id == neumann_batch
+                ? gradient
+                : SimpleFluid::vec3<Pack::scalar_type>{}};
+    };
+    auto boundary_value =
+        [](int, size_t) -> SimpleFluid::vec3<Pack::scalar_type>
+    {
+        return {};
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type)
+            -> SimpleFluid::vec3<Pack::scalar_type>
+    {
+        return {};
+    };
+
+    const auto system = SimpleFluid::FVM::transport_system<Pack>(
+        old_values, zero_fluxes, 1.0, diffusivity,
+        boundary_condition, boundary_value, zero_source);
+
+    std::array<double, VectorFieldType::num_components> expected_rhs{};
+    for (const auto face_lid :
+         mesh->boundary_batches().at(neumann_batch).face_lids)
+    {
+        if (!mesh->is_owned_face(face_lid)
+            || !mesh->is_boundary_face(face_lid))
+        {
+            continue;
+        }
+        for (size_t component = 0;
+             component < VectorFieldType::num_components;
+             ++component)
+        {
+            expected_rhs[component] +=
+                diffusivity * gradient.component(component)
+              * mesh->face_area(face_lid);
+        }
+    }
+
+    for (size_t component = 0;
+         component < VectorFieldType::num_components;
+         ++component)
+    {
+        const auto rhs_data = system.rhs->getData(component);
+        double actual = 0.0;
+        for (MeshType::local_ordinal_type cell_lid = 0;
+             cell_lid < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_owned_cells());
+             ++cell_lid)
+        {
+            actual += rhs_data[cell_lid];
+        }
+        EXPECT_NEAR(actual, expected_rhs[component], 1.0e-12);
+    }
+}
+
 TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
 {
     auto mesh = make_mesh();
@@ -1233,6 +1413,181 @@ TEST(FvmOperatorsTest, HarmonicFaceValueUsesCellToFaceDistances)
             *mesh, interior_face, 0, 1, coefficient),
         1.6,
         1.0e-12);
+}
+
+TEST(FvmOperatorsTest, HarmonicFaceValueRejectsNegativeCellValues)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    FieldType coefficient(mesh, "coefficient");
+    coefficient.set_value(0, 1.0);
+    coefficient.set_value(1, -1.0);
+    coefficient.sync_ghosts();
+
+    MeshType::local_ordinal_type interior_face =
+        static_cast<MeshType::local_ordinal_type>(-1);
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<MeshType::local_ordinal_type>(face);
+        if (mesh->is_interior_face(face_lid))
+        {
+            interior_face = face_lid;
+            break;
+        }
+    }
+    ASSERT_GE(interior_face, 0);
+
+    EXPECT_THROW(
+        SimpleFluid::FVM::detail::harmonic_face_value(
+            *mesh, interior_face, 0, 1, coefficient),
+        std::invalid_argument);
+}
+
+TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
+{
+    auto mesh = make_mesh();
+    FieldType scalar(mesh, 0.0, "scalar");
+    FieldType storage(mesh, 1.0, "storage");
+    FieldType advection(mesh, 0.0, "advection");
+    FieldType diffusivity(mesh, 2.0, "diffusivity");
+    scalar.sync_ghosts();
+    diffusivity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+
+    const int neumann_batch = mesh->boundary_batches().begin()->first;
+    constexpr double gradient = 3.0;
+    auto boundary_condition =
+        [&](int batch_id, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {
+            batch_id == neumann_batch
+                ? SimpleFluid::BoundaryConditionType::Neumann
+                : SimpleFluid::BoundaryConditionType::Dirichlet,
+            batch_id == neumann_batch ? gradient : 0.0};
+    };
+    auto boundary_value =
+        [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    const auto system =
+        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar,
+            zero_fluxes,
+            1.0,
+            storage,
+            advection,
+            diffusivity,
+            boundary_condition,
+            boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+
+    std::vector<double> expected_rhs(mesh->num_owned_cells(), 0.0);
+    for (const auto face_lid :
+         mesh->boundary_batches().at(neumann_batch).face_lids)
+    {
+        if (!mesh->is_owned_face(face_lid)
+            || !mesh->is_boundary_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        expected_rhs[static_cast<size_t>(owner)] +=
+            diffusivity.value(owner) * gradient * mesh->face_area(face_lid);
+    }
+
+    const auto rhs_data = system.rhs->getData();
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        EXPECT_NEAR(
+            rhs_data[cell_lid],
+            expected_rhs[static_cast<size_t>(cell_lid)],
+            1.0e-12);
+    }
+}
+
+TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
+{
+    auto mesh = make_mesh();
+    FieldType temperature(mesh, 0.0, "temperature");
+    FieldType density(mesh, 1.0, "density");
+    FieldType heat_capacity(mesh, 1.0, "heat_capacity");
+    FieldType conductivity(mesh, 2.0, "conductivity");
+    temperature.sync_ghosts();
+    conductivity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+
+    const int neumann_batch = mesh->boundary_batches().begin()->first;
+    constexpr double gradient = 3.0;
+    auto boundary_condition =
+        [&](int batch_id, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {
+            batch_id == neumann_batch
+                ? SimpleFluid::BoundaryConditionType::Neumann
+                : SimpleFluid::BoundaryConditionType::Dirichlet,
+            batch_id == neumann_batch ? gradient : 0.0};
+    };
+    auto boundary_value =
+        [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    const auto system =
+        SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+            temperature,
+            zero_fluxes,
+            1.0,
+            density,
+            heat_capacity,
+            conductivity,
+            boundary_condition,
+            boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+
+    std::vector<double> expected_rhs(mesh->num_owned_cells(), 0.0);
+    for (const auto face_lid :
+         mesh->boundary_batches().at(neumann_batch).face_lids)
+    {
+        if (!mesh->is_owned_face(face_lid)
+            || !mesh->is_boundary_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        expected_rhs[static_cast<size_t>(owner)] +=
+            conductivity.value(owner) * gradient * mesh->face_area(face_lid);
+    }
+
+    const auto rhs_data = system.rhs->getData();
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        EXPECT_NEAR(
+            rhs_data[cell_lid],
+            expected_rhs[static_cast<size_t>(cell_lid)],
+            1.0e-12);
+    }
 }
 
 TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)

@@ -23,6 +23,7 @@
 #include <concepts>
 #include <cstddef>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 
 namespace SimpleFluid::FVM
@@ -35,6 +36,20 @@ struct PreparedTransportMatrix
 {
     Teuchos::RCP<typename Pack::matrix_type> matrix;
     bool reused = false;
+};
+
+template<class Provider, class Condition>
+concept BoundaryConditionProviderFor =
+    requires(Provider provider, int batch_id, size_t in_batch_id)
+{
+    { provider(batch_id, in_batch_id) } -> std::convertible_to<Condition>;
+};
+
+template<class Provider, class Value>
+concept BoundaryValueProviderFor =
+    requires(Provider provider, int batch_id, size_t in_batch_id)
+{
+    { provider(batch_id, in_batch_id) } -> std::convertible_to<Value>;
 };
 
 template<TpetraTypePack Pack, class MeshType>
@@ -130,8 +145,10 @@ struct VectorTransportSystem
  * as a per-unit-volume quantity and contributes @f$V_i s_i@f$ to the RHS.
  *
  * @tparam Pack The Tpetra type pack.
+ * @tparam BoundaryConditionProvider A callable returning BoundaryCondition
+ *         for (batch id, in-batch face id).
  * @tparam BoundaryValueProvider A callable with signature
- *         scalar_type(int batch_id, local_ordinal_type boundary_face_id).
+ *         scalar_type(int batch_id, size_t boundary_face_id).
  * @tparam SourceProvider A callable with signature
  *         scalar_type(local_ordinal_type cell_lid).
  * @param old_values Previous time-step scalar field. Its overlap values
@@ -139,8 +156,10 @@ struct VectorTransportSystem
  * @param face_fluxes Pre-computed face volumetric fluxes.
  * @param time_step Time-step size (must be positive).
  * @param diffusivity Constant scalar diffusivity (non-negative).
- * @param boundary_value Callable that returns the prescribed boundary
- *        value for a face.
+ * @param boundary_condition Callable that returns the boundary-condition type
+ *        and flux value for a face.
+ * @param boundary_value Callable that returns the prescribed boundary value
+ *        used by Dirichlet diffusion and inflow advection.
  * @param right_hand_source Callable that returns the per-unit-volume source
  *        term for an owned cell.
  * @param[in,out] cached_matrix Optional fill-complete matrix whose graph and
@@ -151,13 +170,21 @@ struct VectorTransportSystem
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
  */
-template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider,
+         class SourceProvider>
     requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
+          && detail::BoundaryConditionProviderFor<
+                 BoundaryConditionProvider, BoundaryCondition>
+          && detail::BoundaryValueProviderFor<
+                 BoundaryValueProvider, typename Pack::scalar_type>
 TransportSystem<Pack>
 transport_system(const CellField<Pack>& old_values,
                  const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
+                 BoundaryConditionProvider boundary_condition,
                  BoundaryValueProvider boundary_value,
                  SourceProvider right_hand_source,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
@@ -209,6 +236,14 @@ transport_system(const CellField<Pack>& old_values,
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
+            const auto is_interior = mesh.is_interior_face(face_lid);
+            local_ordinal_type other{};
+            if (is_interior)
+            {
+                other =
+                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            }
+
             // === advection (upwind) ===
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
@@ -223,21 +258,17 @@ transport_system(const CellField<Pack>& old_values,
                 detail::add_matrix_entry(
                     row_values, cell_lid, out_flux);
             }
-            else if (mesh.is_interior_face(face_lid))
+            else if (is_interior)
             {
-                const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
 
             // === diffusion ===
-            if (!mesh.is_interior_face(face_lid))
+            if (!is_interior)
             {
                 continue;
             }
 
-            const auto other =
-                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
             row_values.try_emplace(other, scalar_type{});
             if (diffusivity <= scalar_type{0})
             {
@@ -289,6 +320,8 @@ transport_system(const CellField<Pack>& old_values,
 
             const auto boundary_face_value =
                 boundary_value(batch_id, in_batch_id);
+            const auto condition =
+                boundary_condition(batch_id, in_batch_id);
 
             if (out_flux >= scalar_type{0})
             {
@@ -313,22 +346,104 @@ transport_system(const CellField<Pack>& old_values,
             const auto coeff =
                 detail::boundary_diffusion_coefficient(
                     mesh, face_lid, owner, diffusivity);
-            if (coeff > scalar_type{0})
+            if (condition.type == BoundaryConditionType::Dirichlet)
             {
-                local_ordinal_type col = owner;
-                scalar_type bval = coeff;
-                matrix->sumIntoLocalValues(
+                if (coeff > scalar_type{0})
+                {
+                    local_ordinal_type col = owner;
+                    scalar_type bval = coeff;
+                    matrix->sumIntoLocalValues(
+                        owner,
+                        Teuchos::arrayView(&col, 1),
+                        Teuchos::arrayView(&bval, 1));
+                    rhs->sumIntoLocalValue(owner,
+                                           coeff * boundary_face_value);
+                }
+            }
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
+                rhs->sumIntoLocalValue(
                     owner,
-                    Teuchos::arrayView(&col, 1),
-                    Teuchos::arrayView(&bval, 1));
-                rhs->sumIntoLocalValue(owner,
-                                       coeff * boundary_face_value);
+                    diffusivity * condition.value
+                  * mesh.face_area(face_lid));
+            }
+            else if (condition.type == BoundaryConditionType::Robin)
+            {
+                throw std::runtime_error(
+                    "Robin boundary conditions are not yet implemented in transport_system.");
             }
         }
     }
 
     matrix->fillComplete();
     return {matrix, rhs};
+}
+
+/**
+ * @brief Assemble scalar transport using value-only boundary data.
+ *
+ * This compatibility overload treats every boundary value as Dirichlet,
+ * matching the historical transport_system() behavior.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+    requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
+          && detail::BoundaryValueProviderFor<
+                 BoundaryValueProvider, typename Pack::scalar_type>
+TransportSystem<Pack>
+transport_system(const CellField<Pack>& old_values,
+                 const FaceField<Pack>& face_fluxes,
+                 typename Pack::scalar_type time_step,
+                 typename Pack::scalar_type diffusivity,
+                 BoundaryValueProvider boundary_value,
+                 SourceProvider right_hand_source,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    auto dirichlet_condition =
+        [](int, size_t)
+    {
+        return BoundaryCondition{
+            BoundaryConditionType::Dirichlet,
+            typename Pack::scalar_type{}};
+    };
+
+    return transport_system<Pack>(
+        old_values, face_fluxes, time_step, diffusivity,
+        dirichlet_condition, boundary_value, right_hand_source,
+        cached_matrix);
+}
+
+/**
+ * @brief Assemble scalar transport with boundary-condition-aware diffusion
+ *        and zero explicit source.
+ */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+    requires detail::BoundaryConditionProviderFor<
+                 BoundaryConditionProvider, BoundaryCondition>
+          && detail::BoundaryValueProviderFor<
+                 BoundaryValueProvider, typename Pack::scalar_type>
+TransportSystem<Pack>
+transport_system(const CellField<Pack>& old_values,
+                 const FaceField<Pack>& face_fluxes,
+                 typename Pack::scalar_type time_step,
+                 typename Pack::scalar_type diffusivity,
+                 BoundaryConditionProvider boundary_condition,
+                 BoundaryValueProvider boundary_value,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    return transport_system<Pack>(
+        old_values, face_fluxes, time_step, diffusivity,
+        boundary_condition, boundary_value, zero_source, cached_matrix);
 }
 
 /**
@@ -383,8 +498,10 @@ transport_system(const CellField<Pack>& old_values,
  * @f$V_i \mathbf{s}_i@f$ to the RHS.
  *
  * @tparam Pack The Tpetra type pack.
+ * @tparam BoundaryConditionProvider A callable returning
+ *         VectorBoundaryCondition for (batch id, in-batch face id).
  * @tparam BoundaryValueProvider A callable with signature
- *         vec_type(int batch_id, local_ordinal_type boundary_face_id).
+ *         vec_type(int batch_id, size_t boundary_face_id).
  * @tparam SourceProvider A callable with signature
  *         vec_type(local_ordinal_type cell_lid).
  * @param old_values Previous time-step vector field. Its overlap values
@@ -392,8 +509,10 @@ transport_system(const CellField<Pack>& old_values,
  * @param face_fluxes Pre-computed face volumetric fluxes.
  * @param time_step Time-step size (must be positive).
  * @param diffusivity Constant scalar diffusivity (non-negative).
- * @param boundary_value Callable that returns the prescribed boundary
- *        vector value for a face.
+ * @param boundary_condition Callable that returns the boundary-condition type
+ *        and vector flux value for a face.
+ * @param boundary_value Callable that returns the prescribed boundary vector
+ *        used by Dirichlet diffusion and inflow advection.
  * @param right_hand_source Callable that returns the per-unit-volume source
  *        vector for an owned cell.
  * @param[in,out] cached_matrix Optional fill-complete matrix whose graph and
@@ -405,13 +524,21 @@ transport_system(const CellField<Pack>& old_values,
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
  */
-template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider,
+         class SourceProvider>
     requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
+          && detail::BoundaryConditionProviderFor<
+                 BoundaryConditionProvider, VectorBoundaryCondition>
+          && detail::BoundaryValueProviderFor<
+                 BoundaryValueProvider, typename VectorCellField<Pack>::vec_type>
 VectorTransportSystem<Pack>
 transport_system(const VectorCellField<Pack>& old_values,
                  const FaceField<Pack>& face_fluxes,
                  typename Pack::scalar_type time_step,
                  typename Pack::scalar_type diffusivity,
+                 BoundaryConditionProvider boundary_condition,
                  BoundaryValueProvider boundary_value,
                  SourceProvider right_hand_source,
                  Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
@@ -463,6 +590,14 @@ transport_system(const VectorCellField<Pack>& old_values,
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
+            const auto is_interior = mesh.is_interior_face(face_lid);
+            local_ordinal_type other{};
+            if (is_interior)
+            {
+                other =
+                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+            }
+
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
                     ? face_fluxes.value(face_lid)
@@ -476,20 +611,16 @@ transport_system(const VectorCellField<Pack>& old_values,
                 detail::add_matrix_entry(
                     row_values, cell_lid, out_flux);
             }
-            else if (mesh.is_interior_face(face_lid))
+            else if (is_interior)
             {
-                const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
 
-            if (!mesh.is_interior_face(face_lid))
+            if (!is_interior)
             {
                 continue;
             }
 
-            const auto other =
-                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
             row_values.try_emplace(other, scalar_type{});
             if (diffusivity <= scalar_type{0})
             {
@@ -543,6 +674,8 @@ transport_system(const VectorCellField<Pack>& old_values,
 
             const auto boundary_face_value =
                 boundary_value(batch_id, in_batch_id);
+            const auto condition =
+                boundary_condition(batch_id, in_batch_id);
 
             if (out_flux >= scalar_type{0})
             {
@@ -570,26 +703,112 @@ transport_system(const VectorCellField<Pack>& old_values,
             const auto coeff =
                 detail::boundary_diffusion_coefficient(
                     mesh, face_lid, owner, diffusivity);
-            if (coeff > scalar_type{0})
+            if (condition.type == BoundaryConditionType::Dirichlet
+                || condition.type == BoundaryConditionType::NoSlip)
             {
-                local_ordinal_type col = owner;
-                scalar_type bval = coeff;
-                matrix->sumIntoLocalValues(
-                    owner,
-                    Teuchos::arrayView(&col, 1),
-                    Teuchos::arrayView(&bval, 1));
+                if (coeff > scalar_type{0})
+                {
+                    local_ordinal_type col = owner;
+                    scalar_type bval = coeff;
+                    matrix->sumIntoLocalValues(
+                        owner,
+                        Teuchos::arrayView(&col, 1),
+                        Teuchos::arrayView(&bval, 1));
+                    for (size_t comp = 0; comp < num_components; ++comp)
+                    {
+                        rhs->sumIntoLocalValue(
+                            owner, comp,
+                            coeff * boundary_face_value.component(comp));
+                    }
+                }
+            }
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
                 for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
                         owner, comp,
-                        coeff * boundary_face_value.component(comp));
+                        diffusivity * condition.value.component(comp)
+                      * mesh.face_area(face_lid));
                 }
+            }
+            else if (condition.type == BoundaryConditionType::Robin)
+            {
+                throw std::runtime_error(
+                    "Robin boundary conditions are not yet implemented in vector transport_system.");
             }
         }
     }
 
     matrix->fillComplete();
     return {matrix, rhs};
+}
+
+/**
+ * @brief Assemble vector transport using value-only boundary data.
+ *
+ * This compatibility overload treats every boundary value as Dirichlet,
+ * matching the historical transport_system() behavior.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider, class SourceProvider>
+    requires std::invocable<SourceProvider, typename Pack::local_ordinal_type>
+          && detail::BoundaryValueProviderFor<
+                 BoundaryValueProvider, typename VectorCellField<Pack>::vec_type>
+VectorTransportSystem<Pack>
+transport_system(const VectorCellField<Pack>& old_values,
+                 const FaceField<Pack>& face_fluxes,
+                 typename Pack::scalar_type time_step,
+                 typename Pack::scalar_type diffusivity,
+                 BoundaryValueProvider boundary_value,
+                 SourceProvider right_hand_source,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    auto dirichlet_condition =
+        [](int, size_t)
+    {
+        return VectorBoundaryCondition{
+            BoundaryConditionType::Dirichlet,
+            typename VectorCellField<Pack>::vec_type{}};
+    };
+
+    return transport_system<Pack>(
+        old_values, face_fluxes, time_step, diffusivity,
+        dirichlet_condition, boundary_value, right_hand_source,
+        cached_matrix);
+}
+
+/**
+ * @brief Assemble vector transport with boundary-condition-aware diffusion
+ *        and zero explicit source.
+ */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+    requires detail::BoundaryConditionProviderFor<
+                 BoundaryConditionProvider, VectorBoundaryCondition>
+          && detail::BoundaryValueProviderFor<
+                 BoundaryValueProvider, typename VectorCellField<Pack>::vec_type>
+VectorTransportSystem<Pack>
+transport_system(const VectorCellField<Pack>& old_values,
+                 const FaceField<Pack>& face_fluxes,
+                 typename Pack::scalar_type time_step,
+                 typename Pack::scalar_type diffusivity,
+                 BoundaryConditionProvider boundary_condition,
+                 BoundaryValueProvider boundary_value,
+                 Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using vec_type = typename VectorCellField<Pack>::vec_type;
+
+    auto zero_source =
+        [](local_ordinal_type) -> vec_type
+    {
+        return vec_type{};
+    };
+
+    return transport_system<Pack>(
+        old_values, face_fluxes, time_step, diffusivity,
+        boundary_condition, boundary_value, zero_source, cached_matrix);
 }
 
 /**
@@ -1116,34 +1335,46 @@ weighted_scalar_transport_system(
             const auto condition =
                 boundary_condition(
                     location.batch_id, location.in_batch_id);
-            if (condition.type != BoundaryConditionType::Dirichlet)
-                continue;
-
             const auto cell_diffusivity =
                 diffusivity.local_value(cell_lid);
-            const auto coefficient =
-                detail::boundary_diffusion_coefficient(
-                    mesh, face_lid, cell_lid, cell_diffusivity);
-            if (coefficient > scalar_type{})
+            if (condition.type == BoundaryConditionType::Dirichlet)
             {
-                detail::add_matrix_entry(
-                    row_values, cell_lid, coefficient);
+                const auto coefficient =
+                    detail::boundary_diffusion_coefficient(
+                        mesh, face_lid, cell_lid, cell_diffusivity);
+                if (coefficient > scalar_type{})
+                {
+                    detail::add_matrix_entry(
+                        row_values, cell_lid, coefficient);
+                    rhs->sumIntoLocalValue(
+                        cell_lid,
+                        coefficient
+                      * boundary_value(
+                            location.batch_id,
+                            location.in_batch_id));
+                }
+                const auto tangential_area =
+                    detail::non_orthogonal_area_vector(
+                        mesh.face_area_vector_outward(
+                            face_lid, cell_lid),
+                        mesh.face_centroid(face_lid)
+                            - mesh.cell_centroid(cell_lid));
+                add_non_orthogonal_stencil(
+                    cell_lid, scalar_type{1},
+                    cell_diffusivity, tangential_area);
+            }
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
                 rhs->sumIntoLocalValue(
                     cell_lid,
-                    coefficient
-                  * boundary_value(
-                        location.batch_id,
-                        location.in_batch_id));
+                    cell_diffusivity * condition.value
+                  * mesh.face_area(face_lid));
             }
-            const auto tangential_area =
-                detail::non_orthogonal_area_vector(
-                    mesh.face_area_vector_outward(
-                        face_lid, cell_lid),
-                    mesh.face_centroid(face_lid)
-                        - mesh.cell_centroid(cell_lid));
-            add_non_orthogonal_stencil(
-                cell_lid, scalar_type{1},
-                cell_diffusivity, tangential_area);
+            else if (condition.type == BoundaryConditionType::Robin)
+            {
+                throw std::runtime_error(
+                    "Robin boundary conditions are not yet implemented in weighted_scalar_transport_system.");
+            }
         }
 
         columns.clear();
@@ -1412,38 +1643,48 @@ physical_temperature_transport_system(
             const auto condition =
                 boundary_condition(
                     location.batch_id, location.in_batch_id);
-            if (condition.type != BoundaryConditionType::Dirichlet)
-            {
-                continue;
-            }
-
             const auto face_conductivity =
                 thermal_conductivity.local_value(cell_lid);
-            const auto coefficient =
-                detail::boundary_diffusion_coefficient(
-                    mesh, face_lid, cell_lid,
-                    face_conductivity);
-            if (coefficient > scalar_type{})
+            if (condition.type == BoundaryConditionType::Dirichlet)
             {
-                detail::add_matrix_entry(
-                    row_values, cell_lid, coefficient);
+                const auto coefficient =
+                    detail::boundary_diffusion_coefficient(
+                        mesh, face_lid, cell_lid,
+                        face_conductivity);
+                if (coefficient > scalar_type{})
+                {
+                    detail::add_matrix_entry(
+                        row_values, cell_lid, coefficient);
+                    rhs->sumIntoLocalValue(
+                        cell_lid,
+                        coefficient
+                      * boundary_value(
+                            location.batch_id,
+                            location.in_batch_id));
+                }
+
+                const auto tangential_area =
+                    detail::non_orthogonal_area_vector(
+                        mesh.face_area_vector_outward(
+                            face_lid, cell_lid),
+                        mesh.face_centroid(face_lid)
+                            - mesh.cell_centroid(cell_lid));
+                add_non_orthogonal_stencil(
+                    cell_lid, scalar_type{1},
+                    face_conductivity, tangential_area);
+            }
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
                 rhs->sumIntoLocalValue(
                     cell_lid,
-                    coefficient
-                  * boundary_value(
-                        location.batch_id,
-                        location.in_batch_id));
+                    face_conductivity * condition.value
+                  * mesh.face_area(face_lid));
             }
-
-            const auto tangential_area =
-                detail::non_orthogonal_area_vector(
-                    mesh.face_area_vector_outward(
-                        face_lid, cell_lid),
-                    mesh.face_centroid(face_lid)
-                        - mesh.cell_centroid(cell_lid));
-            add_non_orthogonal_stencil(
-                cell_lid, scalar_type{1},
-                face_conductivity, tangential_area);
+            else if (condition.type == BoundaryConditionType::Robin)
+            {
+                throw std::runtime_error(
+                    "Robin boundary conditions are not yet implemented in physical_temperature_transport_system.");
+            }
         }
 
         columns.clear();
