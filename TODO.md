@@ -265,21 +265,21 @@ $$
 
 ### Tasks
 
-- [ ] Add `BoilingSourceModel` or equivalent.
-- [ ] Add configurable parameters:
-  - [ ] `enableBulkBoiling`
-  - [ ] `enableWallBoiling`
-  - [ ] `saturationTemperature`
-  - [ ] `boilingActivationDeltaT`
-  - [ ] `boilingTimeScale`
-  - [ ] `latentHeat`
-  - [ ] `gasDensity`
-  - [ ] `wallEvaporationFraction`
-- [ ] Compute `S_alpha_boil` as a cell field.
-- [ ] Compute `latentHeatSink` as a cell field in W/m³.
-- [ ] Subtract `latentHeatSink` from the temperature equation.
-- [ ] Write `S_alpha_boil` and `latentHeatSink` to VTU.
-- [ ] Keep the implementation explicit and bounded.
+- [x] Add `BoilingSourceModel` or equivalent.
+- [x] Add configurable parameters:
+  - [x] `enable_bulk_boiling`
+  - [x] `enable_wall_boiling`
+  - [x] `saturation_temperature`
+  - [x] `boiling_activation_delta_t`
+  - [x] `boiling_time_scale`
+  - [x] `latent_heat`
+  - [x] `gas_density`
+  - [x] `wall_evaporation_fraction`
+- [x] Compute `S_alpha_boil` as a cell field.
+- [x] Compute `latentHeatSink` as a cell field in W/m³.
+- [x] Subtract `latentHeatSink` from the temperature equation.
+- [x] Write `S_alpha_boil` and `latentHeatSink` to VTU.
+- [x] Keep the implementation explicit and bounded.
 - [ ] Leave a clean interface for future wall heat-flux partitioning:
   - [ ] convective heat transfer
   - [ ] quenching heat transfer
@@ -287,12 +287,12 @@ $$
 
 ### Phase 13 acceptance criteria
 
-- [ ] Below threshold, boiling source is zero.
-- [ ] Above threshold, boiling source is positive.
-- [ ] `latentHeatSink == mDot * latentHeat` within tolerance.
-- [ ] Zero latent heat or invalid density fails with clear error.
-- [ ] Wall boiling distributes face source to owner cells conservatively.
-- [ ] Existing cases are unchanged when boiling is disabled.
+- [x] Below threshold, boiling source is zero.
+- [x] Above threshold, boiling source is positive.
+- [x] `latentHeatSink == mDot * latentHeat` within tolerance.
+- [x] Zero latent heat or invalid density fails with clear error.
+- [x] Wall boiling distributes face source to owner cells conservatively.
+- [x] Existing cases are unchanged when boiling is disabled.
 
 ---
 
@@ -337,25 +337,25 @@ $$
 
 - [x] Allocate and initialize radiolytic `alpha_g` and `alpha_l`.
 - [x] Allocate and initialize `S_alpha_rad`.
-- [ ] Allocate and initialize `S_alpha_total`.
-- [ ] Add bounded explicit update for the low-order scalar model.
+- [x] Allocate and initialize `S_alpha_total`.
+- [x] Add bounded explicit update for the low-order scalar model.
 - [ ] Add optional scalar-transport path for the low-order scalar model if low-risk.
 - [ ] Add configurable upward slip velocity aligned opposite gravity.
-- [ ] Add configurable `alphaDiffusivity`.
-- [ ] Add optional simple collapse/removal time scale for gas disengagement tests.
+- [x] Add configurable `alpha_diffusivity`.
+- [x] Add optional simple collapse/removal time scale for gas disengagement tests.
 - [x] Ensure radiolytic gas fields are ghost-synchronized after model advance.
 - [x] Write radiolytic `alpha_g`, `alpha_l`, and `S_alpha_rad` to VTU behind output switches.
-- [ ] Write `S_alpha_total` to VTU after aggregate source bookkeeping exists.
+- [x] Write `S_alpha_total` to VTU after aggregate source bookkeeping exists.
 
 ### Phase 14 acceptance criteria
 
-- [ ] One-cell constant-source update matches the analytic result.
-- [ ] `alpha_g` never leaves `[alphaMin, alphaMax]`.
+- [x] One-cell constant-source update matches the analytic result.
+- [x] `alpha_g` never leaves `[alphaMin, alphaMax]`.
 - [x] Ideal-gas radiolysis mode does not advance `alpha_g` before the low-order update path exists.
-- [ ] With all sources disabled, `alpha_g` remains unchanged.
+- [x] With all sources disabled, `alpha_g` remains unchanged.
 - [ ] Optional transport conserves total gas inventory up to boundary flux and sources.
 - [x] VTU output can include radiolytic `alpha_g` and `S_alpha_rad`.
-- [ ] VTU output includes `S_alpha_total`.
+- [x] VTU output includes `S_alpha_total`.
 
 ---
 
@@ -544,8 +544,8 @@ A_2=4\pi N_2r_2^2.
 $$
 
 - [x] Make `tauLarge` configurable; document approximately 50 μs as the article default.
-- [ ] Verify that supersaturation grows `M_large` without creating bubble number.
-- [ ] Verify that undersaturation reduces both bubble moles and, through dissolution, bubble number.
+- [x] Verify that supersaturation grows `M_large` without creating bubble number.
+- [x] Verify that undersaturation reduces both bubble moles and, through dissolution, bubble number.
 
 ### Interfacial mass transfer
 
@@ -586,7 +586,7 @@ $$
 - [x] Implement a robust positive-root solver using bracketed Newton or bisection.
 - [x] Define empty-population behavior without dividing by tiny `N_i`.
 - [x] Add minimum and maximum radius guards.
-- [ ] Verify residuals and monotonic trends with temperature, pressure, bubble moles, and bubble count.
+- [x] Verify residuals and monotonic trends with temperature, pressure, bubble moles, and bubble count.
 
 ### Void fraction and characteristic radius
 
@@ -704,14 +704,14 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] Nucleation pressure-correction regression.
 - [x] Bubble-radius equation residual.
 - [x] Microbubble exponential dissolution.
-- [ ] Micro-to-large conversion conservation.
-- [ ] Large-bubble supersaturated growth.
-- [ ] Large-bubble undersaturated dissolution.
+- [x] Micro-to-large conversion conservation.
+- [x] Large-bubble supersaturated growth.
+- [x] Large-bubble undersaturated dissolution.
 - [x] H₂ inventory conservation without production or escape.
 - [x] H₂ balance with known fission production.
 - [ ] Population-transport conservation.
-- [ ] Void reconstruction from prescribed populations and radii.
-- [ ] Characteristic-radius calculation.
+- [x] Void reconstruction from prescribed populations and radii.
+- [x] Characteristic-radius calculation.
 - [ ] Constant-pressure versus prescribed-pressure-pulse regression.
 - [ ] Stiff-source convergence versus substep size.
 - [ ] Serial/MPI consistency of global H₂ and void inventories.
@@ -721,10 +721,10 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] The advanced model is runtime-selectable and does not change Phase 12 results when disabled.
 - [ ] All state variables remain finite, non-negative, and bounded.
 - [x] H₂ inventory is conserved after accounting for fission production and boundary escape in focused tests.
-- [ ] Micro-to-large conversion conserves bubble number and gas moles according to the model equations.
-- [ ] Bubble-radius solves converge over the documented operating range.
+- [x] Micro-to-large conversion conserves bubble number and gas moles according to the model equations.
+- [x] Bubble-radius solves converge over the documented operating range.
 - [ ] Increasing pressure raises `C_critical` and delays large-bubble conversion.
-- [ ] Supersaturation grows large bubbles and increases void fraction.
+- [x] Supersaturation grows large bubbles and increases void fraction.
 - [ ] Constant-pressure and inertial-pressure options run from the same case definition.
 - [ ] Component behavior reproduces the equations and qualitative pressure trends reported by Sheng et al.
 - [x] Full SILENE power/pressure validation is deferred until point-kinetics or neutronics coupling is available.
@@ -779,29 +779,29 @@ where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
 
 ### Tasks
 
-- [ ] Add `MaterialFeedbackModel` or equivalent.
-- [ ] Add configurable density model:
-  - [ ] constant
-  - [ ] Boussinesq temperature-only
-  - [ ] Boussinesq + void fraction
-  - [ ] mixture density
-- [ ] Add configurable viscosity model:
-  - [ ] constant
+- [x] Add `MaterialFeedbackModel` or equivalent.
+- [x] Add configurable density model:
+  - [x] constant
+  - [x] Boussinesq temperature-only
+  - [x] Boussinesq + void fraction
+  - [x] mixture density
+- [x] Add configurable viscosity model:
+  - [x] constant
   - [ ] temperature-dependent if existing support is available
   - [ ] optional void correction
-- [ ] Add safety floors:
-  - [ ] `minDensity`
-  - [ ] `minViscosity`
-- [ ] Couple density feedback into buoyancy/body-force calculation.
-- [ ] Couple viscosity feedback into momentum diffusion only if existing equation design allows it cleanly.
-- [ ] Write `rhoFeedback` and `muFeedback` to VTU.
+- [x] Add safety floors:
+  - [x] `min_density`
+  - [x] `min_viscosity`
+- [x] Couple density feedback into buoyancy/body-force calculation.
+- [x] Couple viscosity feedback into momentum diffusion only if existing equation design allows it cleanly.
+- [x] Write `rhoFeedback` and `muFeedback` to VTU.
 
 ### Phase 15 acceptance criteria
 
-- [ ] Increasing `alpha_g` lowers density for liquid-like systems.
-- [ ] Increasing `T` lowers density under Boussinesq settings.
-- [ ] Density and viscosity never become negative.
-- [ ] Existing Boussinesq cases remain unchanged when feedback models are disabled.
+- [x] Increasing `alpha_g` lowers density for liquid-like systems.
+- [x] Increasing `T` lowers density under Boussinesq settings.
+- [x] Density and viscosity never become negative.
+- [x] Existing Boussinesq cases remain unchanged when feedback models are disabled.
 - [ ] Natural-convection benchmark remains stable with temperature-dependent density enabled.
 
 ---
@@ -810,34 +810,34 @@ where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
 
 Add a small demonstration case that exercises the new source models without requiring a neutronics solver.
 
-- [ ] Add example executable:
+- [x] Add example executable:
   - [ ] `radiolytic_bubble_cylinder`, or
-  - [ ] `fissile_solution_tank_demo`
-- [ ] Use a cylindrical tank mesh.
-- [ ] Initialize quiescent liquid.
-- [ ] Use configurable central or axial fission power deposition.
-- [ ] Enable radiolytic gas generation.
-- [ ] Keep boiling disabled by default, with a documented switch to enable it.
-- [ ] Output at least:
-  - [ ] `T`
-  - [ ] `U`
-  - [ ] `p`
-  - [ ] `qdot_fission`
-  - [ ] `alpha_g`
-  - [ ] `S_alpha_rad`
-  - [ ] `S_alpha_boil`
-  - [ ] `S_alpha_total`
-  - [ ] `latentHeatSink`
-  - [ ] `rhoFeedback`
-- [ ] Add a short README section or example note explaining how to run and inspect in ParaView.
+  - [x] `fissile_solution_tank_demo`
+- [x] Use a cylindrical tank mesh.
+- [x] Initialize quiescent liquid.
+- [x] Use configurable central or axial fission power deposition.
+- [x] Enable radiolytic gas generation.
+- [x] Keep boiling disabled by default, with a documented switch to enable it.
+- [x] Output at least:
+  - [x] `T`
+  - [x] `U`
+  - [x] `p`
+  - [x] `qdot_fission`
+  - [x] `alpha_g`
+  - [x] `S_alpha_rad`
+  - [x] `S_alpha_boil`
+  - [x] `S_alpha_total`
+  - [x] `latentHeatSink`
+  - [x] `rhoFeedback`
+- [x] Add a short README section or example note explaining how to run and inspect in ParaView.
 
 ### Phase 16 acceptance criteria
 
-- [ ] Example builds in Debug and Release.
-- [ ] Example runs for a few time steps in serial.
+- [x] Example builds in Debug and Release.
+- [x] Example runs for a few time steps in serial.
 - [ ] Output files open in ParaView.
 - [ ] Disabled radiolysis/boiling gives a standard natural-convection-like result.
-- [ ] Enabled radiolysis produces nonzero bounded `alpha_g` in the powered region.
+- [x] Enabled radiolysis produces nonzero bounded `alpha_g` in the powered region.
 
 ---
 
@@ -845,27 +845,27 @@ Add a small demonstration case that exercises the new source models without requ
 
 Collect the new physics tests into a focused verification suite.
 
-- [ ] Radiolysis zero-source test.
-- [ ] Radiolysis linearity test with respect to power density.
-- [ ] Radiolysis linearity test with respect to gas yield.
-- [ ] Ideal-gas temperature scaling test.
-- [ ] Ideal-gas pressure scaling test.
-- [ ] Alpha boundedness test.
-- [ ] Boiling threshold test.
-- [ ] Boiling latent-heat conservation test.
-- [ ] Wall-boiling owner-cell distribution test.
-- [ ] Density feedback monotonicity test.
-- [ ] Viscosity floor test.
-- [ ] One-cell alpha update analytic test.
-- [ ] `Database` parsing/defaults test.
-- [ ] Regression test that all models disabled leaves old solver behavior unchanged.
+- [x] Radiolysis zero-source test.
+- [x] Radiolysis linearity test with respect to power density.
+- [x] Radiolysis linearity test with respect to gas yield.
+- [x] Ideal-gas temperature scaling test.
+- [x] Ideal-gas pressure scaling test.
+- [x] Alpha boundedness test.
+- [x] Boiling threshold test.
+- [x] Boiling latent-heat conservation test.
+- [x] Wall-boiling owner-cell distribution test.
+- [x] Density feedback monotonicity test.
+- [x] Viscosity floor test.
+- [x] One-cell alpha update analytic test.
+- [x] `Database` parsing/defaults test.
+- [x] Regression test that all models disabled leaves old solver behavior unchanged.
 
 ### Phase 17 acceptance criteria
 
-- [ ] All new tests are deterministic.
-- [ ] Tests are safe in serial and do not require MPI launch unless explicitly marked.
-- [ ] Debug test suite passes except for known environment-blocked MPI launches.
-- [ ] Tolerances are documented and physically meaningful.
+- [x] All new tests are deterministic.
+- [x] Tests are safe in serial and do not require MPI launch unless explicitly marked.
+- [x] Debug test suite passes except for known environment-blocked MPI launches.
+- [x] Tolerances are documented and physically meaningful.
 
 ---
 
@@ -873,29 +873,29 @@ Collect the new physics tests into a focused verification suite.
 
 Document the low-order scalar model and the two-population radiolytic bubble model clearly so future work does not confuse either path with a full Euler–Euler method.
 
-- [ ] Add `docs/modeling/radiolytic_bubble_boiling.md`.
-- [ ] Document model equations and units.
-- [ ] Document configuration keys and defaults.
-- [ ] Document limitations:
-  - [ ] no separate gas momentum equation
-  - [ ] no drag-law closure yet
-  - [ ] scalar `alpha_g` mode has no population balance
-  - [ ] Phase 14.1 has two representative populations, not a full size distribution
-  - [ ] no detailed radiolysis chemistry
-  - [ ] no full RPI wall-boiling partitioning
-  - [ ] no neutronics solver yet
-- [ ] Document intended neutronics feedback fields:
-  - [ ] `T`
-  - [ ] `alpha_g`
-  - [ ] `rhoFeedback`
-  - [ ] future delayed-neutron precursor fields
-- [ ] Add a short section to `README.md` linking the new model document and demo.
+- [x] Add `docs/modeling/radiolytic_bubble_boiling.md`.
+- [x] Document model equations and units.
+- [x] Document configuration keys and defaults.
+- [x] Document limitations:
+  - [x] no separate gas momentum equation
+  - [x] no drag-law closure yet
+  - [x] scalar `alpha_g` mode has no population balance
+  - [x] Phase 14.1 has two representative populations, not a full size distribution
+  - [x] no detailed radiolysis chemistry
+  - [x] no full RPI wall-boiling partitioning
+  - [x] no neutronics solver yet
+- [x] Document intended neutronics feedback fields:
+  - [x] `T`
+  - [x] `alpha_g`
+  - [x] `rhoFeedback`
+  - [x] future delayed-neutron precursor fields
+- [x] Add a short section to `README.md` linking the new model document and demo.
 
 ### Phase 18 acceptance criteria
 
-- [ ] A new developer can enable/disable the model from documentation alone.
-- [ ] All dimensional parameters include units.
-- [ ] Future full Euler–Euler work is clearly separated from the current scalar-void model.
+- [x] A new developer can enable/disable the model from documentation alone.
+- [x] All dimensional parameters include units.
+- [x] Future full Euler–Euler work is clearly separated from the current scalar-void model.
 
 ---
 
@@ -918,23 +918,23 @@ $$
 
 ### Tasks
 
-- [ ] Add configurable number of delayed-neutron precursor groups.
-- [ ] Add per-group fields `C_1 ... C_N`.
-- [ ] Add per-group decay constants `lambda_i`.
-- [ ] Add per-group source fields from fission power or imported neutronics data.
+- [x] Add configurable number of delayed-neutron precursor groups.
+- [x] Add per-group fields `C_1 ... C_N`.
+- [x] Add per-group decay constants `lambda_i`.
+- [x] Add per-group source fields from fission power or imported neutronics data.
 - [ ] Advect precursors with liquid velocity, not mixture velocity.
-- [ ] Include `alpha_l = 1 - alpha_g` weighting.
-- [ ] Add optional effective diffusivity.
-- [ ] Write precursor fields to VTU.
+- [x] Include `alpha_l = 1 - alpha_g` weighting.
+- [x] Add optional effective diffusivity.
+- [x] Write precursor fields to VTU.
 - [ ] Add group inventory diagnostics.
 
 ### Phase 19 acceptance criteria
 
-- [ ] Zero source and zero initial concentration remains zero.
-- [ ] Pure decay one-cell test matches analytic exponential decay.
-- [ ] Constant source plus decay one-cell test reaches correct asymptotic value.
+- [x] Zero source and zero initial concentration remains zero.
+- [x] Pure decay one-cell test matches analytic exponential decay.
+- [x] Constant source plus decay one-cell test reaches correct asymptotic value.
 - [ ] Advective transport conserves precursor inventory up to decay, boundary flux, and source.
-- [ ] Precursor fields remain finite and non-negative under bounded test cases.
+- [x] Precursor fields remain finite and non-negative under bounded test cases.
 
 ---
 
@@ -947,9 +947,9 @@ Add data structures for mapping CFD feedback fields to a coarser neutronics mesh
   - [ ] `alpha_g`
   - [ ] `rhoFeedback`
   - [ ] `C_i`
-- [ ] Add volume-averaging utilities from CFD cells to feedback cells.
-- [ ] Add conservative mapping tests for scalar fields.
-- [ ] Add import path for externally supplied fission power density.
+- [x] Add volume-averaging utilities from CFD cells to feedback cells.
+- [x] Add conservative mapping tests for scalar fields.
+- [x] Add import path for externally supplied fission power density.
 - [ ] Add export path for mapped thermal-hydraulic feedback.
 - [ ] Add a simple outer-coupling driver stub:
   - [ ] receive or compute `qdot_fission`
@@ -957,13 +957,13 @@ Add data structures for mapping CFD feedback fields to a coarser neutronics mesh
   - [ ] map feedback fields
   - [ ] call placeholder neutronics update
   - [ ] repeat
-- [ ] Keep the interface file-based or in-memory depending on the existing code style; do not force an external dependency.
+- [x] Keep the interface file-based or in-memory depending on the existing code style; do not force an external dependency.
 
 ### Phase 20 acceptance criteria
 
-- [ ] Constant CFD field maps to the same constant feedback field.
-- [ ] Volume-weighted integral is preserved for mapped scalar fields.
-- [ ] File or in-memory coupling path is documented.
+- [x] Constant CFD field maps to the same constant feedback field.
+- [x] Volume-weighted integral is preserved for mapped scalar fields.
+- [x] File or in-memory coupling path is documented.
 - [ ] Coupling driver can run with a placeholder neutronics model.
 
 ---
@@ -998,15 +998,15 @@ This phase is explicitly deferred until the scalar void-fraction source model an
 ## Global acceptance criteria
 
 - [ ] `cmake --preset Local` succeeds.
-- [ ] `cmake --build --preset Debug` succeeds.
-- [ ] `ctest --test-dir build -C Debug --output-on-failure` passes for non-MPI tests.
-- [ ] Any MPI failures caused by sandbox/PMIx restrictions are reported separately from code failures.
-- [ ] Existing verified cases remain stable when new physics is disabled.
-- [ ] New physics fields are bounded and finite.
-- [ ] New source terms are dimensionally documented.
-- [ ] VTU output supports all new feedback fields.
-- [ ] Solver configuration can be changed from `Database` without recompilation.
-- [ ] Documentation clearly states which models are engineering placeholders and which are verified numerical capabilities.
+- [x] `cmake --build --preset Debug` succeeds.
+- [x] `ctest --test-dir build -C Debug --output-on-failure` passes for non-MPI tests.
+- [x] Any MPI failures caused by sandbox/PMIx restrictions are reported separately from code failures.
+- [x] Existing verified cases remain stable when new physics is disabled.
+- [x] New physics fields are bounded and finite.
+- [x] New source terms are dimensionally documented.
+- [x] VTU output supports all new feedback fields.
+- [x] Solver configuration can be changed from `Database` without recompilation.
+- [x] Documentation clearly states which models are engineering placeholders and which are verified numerical capabilities.
 
 ## Suggested immediate Codex task order
 

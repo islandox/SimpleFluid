@@ -10,9 +10,13 @@
  */
 #pragma once
 
+#include "equations/BoilingSourceModel.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
+#include "equations/DelayedNeutronPrecursorModel.hh"
 #include "equations/FissionPowerSource.hh"
+#include "equations/MaterialFeedbackModel.hh"
 #include "equations/RadiolyticGasModel.hh"
+#include "equations/ScalarVoidFractionModel.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "solvers/FluidSolver.hh"
 
@@ -120,6 +124,42 @@ public:
     const RadiolyticGasModel<Pack>*
     find_radiolytic_gas_model() const noexcept;
 
+    BoilingSourceModel<Pack>& configure_boiling_source(
+        const BoilingSourceOptions& options);
+    BoilingSourceModel<Pack>& configure_boiling_source(
+        const Database& database);
+    bool remove_boiling_source_model() noexcept;
+    BoilingSourceModel<Pack>* find_boiling_source_model() noexcept;
+    const BoilingSourceModel<Pack>*
+    find_boiling_source_model() const noexcept;
+
+    ScalarVoidFractionModel<Pack>& configure_scalar_void_fraction(
+        const ScalarVoidFractionOptions& options);
+    ScalarVoidFractionModel<Pack>& configure_scalar_void_fraction(
+        const Database& database);
+    ScalarVoidFractionModel<Pack>* find_scalar_void_fraction_model()
+        noexcept;
+    const ScalarVoidFractionModel<Pack>*
+    find_scalar_void_fraction_model() const noexcept;
+
+    MaterialFeedbackModel<Pack>& configure_material_feedback(
+        const MaterialFeedbackOptions& options);
+    MaterialFeedbackModel<Pack>& configure_material_feedback(
+        const Database& database);
+    bool remove_material_feedback_model() noexcept;
+    MaterialFeedbackModel<Pack>* find_material_feedback_model() noexcept;
+    const MaterialFeedbackModel<Pack>*
+    find_material_feedback_model() const noexcept;
+
+    DelayedNeutronPrecursorModel<Pack>& configure_precursors(
+        const DelayedNeutronPrecursorOptions& options);
+    DelayedNeutronPrecursorModel<Pack>& configure_precursors(
+        const Database& database);
+    bool remove_precursor_model() noexcept;
+    DelayedNeutronPrecursorModel<Pack>* find_precursor_model() noexcept;
+    const DelayedNeutronPrecursorModel<Pack>*
+    find_precursor_model() const noexcept;
+
     void set_material_updater(
         typename MaterialPropertyFields<Pack>::updater_type updater);
     void clear_material_updater() noexcept;
@@ -167,11 +207,23 @@ private:
     TemperatureSourceRegistry<Pack>& stored_temperature_sources();
     const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
     void refresh_physical_models();
+    void refresh_material_feedback(scalar_type time);
+    void update_void_fraction_models(scalar_type time_step);
+    const field_type* active_alpha_g_field() const noexcept;
+    const field_type* active_alpha_l_field() const noexcept;
+    void ensure_scalar_void_fraction_model();
 
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
     std::unique_ptr<FissionPowerSource<Pack>> d_fission_power_source;
     std::unique_ptr<RadiolyticGasModel<Pack>> d_radiolytic_gas_model;
+    std::unique_ptr<BoilingSourceModel<Pack>> d_boiling_source_model;
+    std::unique_ptr<ScalarVoidFractionModel<Pack>>
+        d_scalar_void_fraction_model;
+    std::unique_ptr<MaterialFeedbackModel<Pack>>
+        d_material_feedback_model;
+    std::unique_ptr<DelayedNeutronPrecursorModel<Pack>>
+        d_precursor_model;
 };
 
 } // namespace SimpleFluid

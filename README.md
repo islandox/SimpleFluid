@@ -32,6 +32,7 @@ in part and remains under verification.**
 | Physical heat sources & material-property fields | ✅ |
 | Prescribed fission power-density profiles | ✅ |
 | Baseline ideal-gas radiolytic source | ✅ |
+| Scalar void, boiling, feedback, and precursor infrastructure | 🚧 |
 | Two-population radiolytic-bubble model | 🚧 |
 | TH/neutronics multiphysics coupling | ⬜ |
 
@@ -358,8 +359,16 @@ dissolved hydrogen, bubble populations, pressure-sensitive properties,
 transport, escape, and diagnostic inventory accounting, but is not yet fully
 accepted as a validated physical model.
 
-See [`docs/radiolytic-gas-models.md`](docs/radiolytic-gas-models.md) for units,
-configuration, numerical ordering, conservation accounting, and limitations.
+See [`docs/radiolytic-gas-models.md`](docs/radiolytic-gas-models.md) for the
+advanced radiolysis model and
+[`docs/modeling/radiolytic_bubble_boiling.md`](docs/modeling/radiolytic_bubble_boiling.md)
+for the scalar void, boiling, feedback, precursor, and output workflow.
+
+The fissile-solution tank smoke case builds as `fissile_solution_tank_demo`.
+After `cmake --build --preset Debug`, run
+`build/bin/Debug/fissile_solution_tank_demo` and inspect the generated VTU
+files in ParaView. Boiling is disabled by default; the example source shows the
+switches for enabling the placeholder bulk/wall boiling path.
 
 ## Dependencies
 
