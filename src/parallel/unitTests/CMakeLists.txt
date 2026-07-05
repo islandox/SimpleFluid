@@ -2,7 +2,7 @@
 # Multi-rank MetisPartitioner tests
 add_executable(testMeshPartitioner testMeshPartitioner.cc)
 target_link_libraries(testMeshPartitioner SimpleFluid::Fields GTest::gtest_main)
-simplefluid_reuse_precompiled_header(testMeshPartitioner)
+simplefluid_exe_reuse_precompiled_header(testMeshPartitioner)
 if(CMAKE_CONFIGURATION_TYPES)
   set(METIS_PART_EXECUTABLE
       "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/\${_metis_config}/testMeshPartitioner")
@@ -38,7 +38,7 @@ set_property(DIRECTORY APPEND PROPERTY
 
 add_executable(testMPIInterface testMPIInterface.cc)
 target_link_libraries(testMPIInterface SimpleFluid::Fields GTest::gtest_main)
-simplefluid_reuse_precompiled_header(testMPIInterface)
+simplefluid_exe_reuse_precompiled_header(testMPIInterface)
 if(CMAKE_CONFIGURATION_TYPES)
   set(MPI_INTERFACE_EXECUTABLE
       "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/\${_mpi_interface_config}/testMPIInterface")

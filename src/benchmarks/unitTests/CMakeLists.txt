@@ -4,5 +4,5 @@ target_link_libraries(
     SimpleFluid::BenchmarkSupport
     GTest::gtest_main
 )
-simplefluid_reuse_precompiled_header(testBenchmarkSupport)
+simplefluid_exe_reuse_precompiled_header(testBenchmarkSupport)
 simplefluid_discover_tests(testBenchmarkSupport)

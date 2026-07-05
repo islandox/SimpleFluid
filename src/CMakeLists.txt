@@ -28,6 +28,7 @@ simplefluid_configure_library(SimpleFluidPch)
 target_precompile_headers(SimpleFluidPch PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"
 )
+set_target_properties(SimpleFluidPch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Low-level data structures and the runtime database.
 add_library(SimpleFluidCore STATIC
@@ -35,6 +36,7 @@ add_library(SimpleFluidCore STATIC
 )
 add_library(SimpleFluid::Core ALIAS SimpleFluidCore)
 simplefluid_configure_library(SimpleFluidCore)
+set_target_properties(SimpleFluidCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Mesh owns geometry, partitioning, and mesh output. These implementations are
 # kept together because STKMesh and MeshHandle directly use both facilities.
@@ -58,6 +60,7 @@ add_library(SimpleFluidMesh STATIC
 )
 add_library(SimpleFluid::Mesh ALIAS SimpleFluidMesh)
 simplefluid_configure_library(SimpleFluidMesh)
+set_target_properties(SimpleFluidMesh PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 
 # Fields and FVM are currently header-only. Interface targets still isolate
@@ -76,7 +79,7 @@ target_include_directories(SimpleFluidFVM INTERFACE
 )
 target_link_libraries(SimpleFluidFVM INTERFACE SimpleFluidFields)
 
-add_library(SimpleFluidEquations STATIC
+add_library(SimpleFluidEquations SHARED
     equations/BoussinesqMomentumEquation.cc
     equations/IncompressibleMomentumEquation.cc
     equations/PressureProjectionEquation.cc
@@ -87,7 +90,7 @@ add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
 simplefluid_configure_library(SimpleFluidEquations)
 target_link_libraries(SimpleFluidEquations PUBLIC SimpleFluidFVM)
 
-add_library(SimpleFluidSolvers STATIC
+add_library(SimpleFluidSolvers SHARED
     solvers/BoussinesqSolver.cc
     solvers/FluidSolver.cc
 )
@@ -106,19 +109,26 @@ target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidPch)
 target_precompile_headers(SimpleFluidEquations REUSE_FROM SimpleFluidPch)
 target_precompile_headers(SimpleFluidSolvers REUSE_FROM SimpleFluidPch)
 
-function(simplefluid_reuse_precompiled_header target_name)
-    target_precompile_headers(${target_name} REUSE_FROM SimpleFluidPch)
-endfunction()
-
 # Only define the optional application when main.cc contains an entry point.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cc")
     file(SIZE "${CMAKE_CURRENT_SOURCE_DIR}/main.cc" SIMPLEFLUID_MAIN_SIZE)
     if(SIMPLEFLUID_MAIN_SIZE GREATER 0)
         add_executable(SimpleFluid_app main.cc)
         target_link_libraries(SimpleFluid_app PRIVATE SimpleFluid)
-        simplefluid_reuse_precompiled_header(SimpleFluid_app)
+        target_precompile_headers(SimpleFluid_app PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"
+)
     endif()
 endif()
+
+
+function(simplefluid_lib_reuse_precompiled_header target_name)
+    target_precompile_headers(${target_name} REUSE_FROM SimpleFluidPch)
+endfunction()
+
+function(simplefluid_exe_reuse_precompiled_header target_name)
+    target_precompile_headers(${target_name} REUSE_FROM SimpleFluid_app)
+endfunction()
 
 add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)
@@ -135,23 +145,23 @@ endif()
 
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_box)
+simplefluid_exe_reuse_precompiled_header(natural_convection_box)
 
 add_executable(natural_convection_cylinder examples/natural_convection_cylinder.cc)
 target_link_libraries(natural_convection_cylinder PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_cylinder)
+simplefluid_exe_reuse_precompiled_header(natural_convection_cylinder)
 
 add_executable(natural_convection_sphere examples/natural_convection_sphere.cc)
 target_link_libraries(natural_convection_sphere PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_sphere)
+simplefluid_exe_reuse_precompiled_header(natural_convection_sphere)
 
 add_executable(natural_convection_boundary_layer_box examples/natural_convection_boundary_layer_box.cc)
 target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(natural_convection_boundary_layer_box)
+simplefluid_exe_reuse_precompiled_header(natural_convection_boundary_layer_box)
 
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
 target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
-simplefluid_reuse_precompiled_header(fissile_solution_tank_demo)
+simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
 
 foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_box

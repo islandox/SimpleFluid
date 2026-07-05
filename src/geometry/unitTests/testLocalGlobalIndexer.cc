@@ -76,6 +76,12 @@ using DistinctIndexTypes = SimpleFluid::MeshIndexTypes<
 using DistinctIndexer =
     SimpleFluid::Meshes::LocalGlobalIndexer<DistinctIndexTypes>;
 
+// Typedefs to disambiguate constructor calls where {…} could match both
+// the raw-id overload and the EntityMapping overload.
+using CellVec = std::vector<Indexer::cell_id_t>;
+using FaceVec = std::vector<Indexer::face_id_t>;
+using NodeVec = std::vector<Indexer::node_id_t>;
+
 static_assert(SimpleFluid::MeshIndexTypePack<
               typename Indexer::index_type_pack>);
 static_assert(SimpleFluid::MeshIndexer<Indexer>);
@@ -91,11 +97,11 @@ static_assert(std::is_same_v<
 TEST(LocalGlobalIndexerTest, MapsOwnedAndOverlapEntitiesBidirectionally)
 {
     const Indexer indexer(
-        {10, 12},
-        {11},
-        {20, 22, 24},
-        {21, 23},
-        {30, 31, 32, 33});
+        CellVec{10, 12},
+        CellVec{11},
+        FaceVec{20, 22, 24},
+        FaceVec{21, 23},
+        NodeVec{30, 31, 32, 33});
 
     EXPECT_EQ(indexer.num_owned_cells(), 2U);
     EXPECT_EQ(indexer.num_local_cells(), 3U);
@@ -142,7 +148,7 @@ TEST(LocalGlobalIndexerTest, MapsOwnedAndOverlapEntitiesBidirectionally)
 
 TEST(LocalGlobalIndexerTest, ReportsMissingAndInvalidIdentifiers)
 {
-    const Indexer indexer({1}, {2}, {3}, {}, {4});
+    const Indexer indexer(CellVec{1}, CellVec{2}, FaceVec{3}, FaceVec{}, NodeVec{4});
 
     EXPECT_EQ(indexer.cell_local_id(99), Indexer::invalid_local_id());
     EXPECT_EQ(indexer.face_local_id(99), Indexer::invalid_local_id());
@@ -166,13 +172,13 @@ TEST(LocalGlobalIndexerTest, ReportsMissingAndInvalidIdentifiers)
 TEST(LocalGlobalIndexerTest, RejectsDuplicateGlobalIdentifiers)
 {
     EXPECT_THROW(
-        Indexer({1}, {1}, {}, {}, {}),
+        Indexer(CellVec{1}, CellVec{1}, FaceVec{}, FaceVec{}, NodeVec{}),
         std::invalid_argument);
     EXPECT_THROW(
-        Indexer({}, {}, {2, 2}, {}, {}),
+        Indexer(CellVec{}, CellVec{}, FaceVec{2, 2}, FaceVec{}, NodeVec{}),
         std::invalid_argument);
     EXPECT_THROW(
-        Indexer({}, {}, {}, {}, {3, 3}),
+        Indexer(CellVec{}, CellVec{}, FaceVec{}, FaceVec{}, NodeVec{3, 3}),
         std::invalid_argument);
 }
 

@@ -4,7 +4,8 @@ add_library(SimpleFluidBenchmarkSupport STATIC
 add_library(SimpleFluid::BenchmarkSupport ALIAS SimpleFluidBenchmarkSupport)
 simplefluid_configure_library(SimpleFluidBenchmarkSupport)
 target_link_libraries(SimpleFluidBenchmarkSupport PUBLIC SimpleFluid::Solvers)
-simplefluid_reuse_precompiled_header(SimpleFluidBenchmarkSupport)
+set_target_properties(SimpleFluidBenchmarkSupport PROPERTIES POSITION_INDEPENDENT_CODE ON)
+simplefluid_lib_reuse_precompiled_header(SimpleFluidBenchmarkSupport)
 
 execute_process(
     COMMAND git rev-parse --short=12 HEAD
@@ -32,7 +33,7 @@ endif()
 add_executable(simplefluid_benchmark simplefluid_benchmark.cc)
 target_link_libraries(
     simplefluid_benchmark PRIVATE SimpleFluid::BenchmarkSupport)
-simplefluid_reuse_precompiled_header(simplefluid_benchmark)
+simplefluid_exe_reuse_precompiled_header(simplefluid_benchmark)
 target_compile_definitions(simplefluid_benchmark PRIVATE
     SIMPLEFLUID_GIT_COMMIT="${SIMPLEFLUID_GIT_COMMIT_VALUE}"
     SIMPLEFLUID_GIT_DIRTY="${SIMPLEFLUID_GIT_DIRTY_VALUE}"
