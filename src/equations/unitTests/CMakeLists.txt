@@ -7,7 +7,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
-  simplefluid_reuse_precompiled_header(${TEST_NAME})
+  simplefluid_exe_reuse_precompiled_header(${TEST_NAME})
   if(TEST_NAME STREQUAL "testAnalyticalConvergence")
     simplefluid_discover_tests(
       ${TEST_NAME}
@@ -24,7 +24,7 @@ target_link_libraries(
   testFissionPowerSourceMultiRank
   SimpleFluid::Equations
   GTest::gtest_main)
-simplefluid_reuse_precompiled_header(testFissionPowerSourceMultiRank)
+simplefluid_exe_reuse_precompiled_header(testFissionPowerSourceMultiRank)
 
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
