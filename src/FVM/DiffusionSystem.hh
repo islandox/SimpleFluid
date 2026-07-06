@@ -473,4 +473,7 @@ vector_diffusion_system(
         zero_source);
 }
 
+extern template struct DiffusionSystem<DefaultTpetraTypes>;
+extern template struct VectorDiffusionSystem<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid::FVM

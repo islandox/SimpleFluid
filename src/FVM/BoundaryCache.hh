@@ -131,6 +131,12 @@ FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
         SP<const MeshType>(std::move(mesh)), boundary_conditions);
 }
 
+extern template struct BoundaryCache<DefaultTpetraTypes>;
+extern template BoundaryCache<DefaultTpetraTypes>
+cache_boundary_conditions<DefaultTpetraTypes>(
+    SP<const Mesh<DefaultTpetraTypes>>,
+    const BoundaryConditionMap&);
+
 namespace FVM
 {
 

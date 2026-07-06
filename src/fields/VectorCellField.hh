@@ -361,4 +361,6 @@ bool VectorCellField<Pack>::is_local_cell(local_ordinal_type cell_lid) const
     return true;
 }
 
+extern template class VectorCellField<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid

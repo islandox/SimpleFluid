@@ -529,5 +529,6 @@ bool BoundaryFaceField<Pack>::is_owned_boundary_face(
            != invalid_owned_row();
 }
 
-} // namespace SimpleFluid
+extern template class BoundaryFaceField<DefaultTpetraTypes>;
 
+} // namespace SimpleFluid
