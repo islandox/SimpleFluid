@@ -1,6 +1,6 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Status date:** June 24, 2026
+**Status date:** July 7, 2026
 
 **Near-term goal:** add conservative radiolytic-gas, boiling, void-fraction, and thermal-feedback infrastructure for fissile-solution-tank criticality-accident simulations, without prematurely implementing a full Euler–Euler two-fluid solver.
 
@@ -632,10 +632,10 @@ $$
 
 Implement this behind an experimental switch and do not destabilize the incompressible pressure solver.
 
-- [ ] Add:
+- [x] Add runtime switch for inertial-pressure coupling:
 
-  ```yaml
-  enableInertialPressureCoupling: false
+  ```text
+  radiolytic_pressure_mode = constant | prescribedHistory | reconstructed | inertial
   ```
 
 - [x] Implement:
@@ -671,9 +671,9 @@ $$
 The microsecond dissolution time scales can be far shorter than the CFD time step.
 
 - [x] Use a positivity-preserving local kinetics update:
-  - [ ] implicit Euler, or
-  - [ ] analytic linear decays plus implicit nonlinear transfer, or
-  - [ ] adaptive per-cell subcycling
+  - [ ] implicit Euler
+  - [x] analytic linear decays plus bounded local transfer
+  - [x] lifetime-limited local subcycling with `max_radiolytic_subcycles`
 - [x] Use operator splitting between transport and local bubble kinetics.
 - [ ] Add source-Jacobian hooks for future monolithic coupling.
 - [x] Preserve non-negativity of `C_H2`, `N_i`, `M_i`, and radii.
@@ -997,7 +997,7 @@ This phase is explicitly deferred until the scalar void-fraction source model an
 
 ## Global acceptance criteria
 
-- [ ] `cmake --preset Local` succeeds.
+- [x] `cmake --preset Local` succeeds.
 - [x] `cmake --build --preset Debug` succeeds.
 - [x] `ctest --test-dir build -C Debug --output-on-failure` passes for non-MPI tests.
 - [x] Any MPI failures caused by sandbox/PMIx restrictions are reported separately from code failures.
@@ -1010,9 +1010,9 @@ This phase is explicitly deferred until the scalar void-fraction source model an
 
 ## Suggested immediate Codex task order
 
-1. Close Phase 14 aggregate `S_alpha_total` bookkeeping and low-order bounded `alpha_g` update.
-2. Add the remaining Phase 14.1 verification tests for conversion conservation, large-bubble growth/dissolution, radius trends, and serial/MPI inventory consistency.
-3. Implement Phase 15 density feedback against the scalar or two-population `alpha_g` provider.
-4. Implement Phase 13 boiling after source/latent-heat plumbing is tested.
-5. Add the Phase 16 demo case with the low-order and two-population radiolysis modes selectable.
-6. Update Phase 18 documentation for both radiolysis modes and their validation limits.
+1. Add the remaining Phase 14.1 verification tests: population-transport conservation, pressure-delayed conversion, pressure-mode regression, stiff-source convergence, and serial/MPI H2 inventory consistency.
+2. Add the Phase 20 feedback-field registry, mapped-feedback export path, and placeholder outer-coupling driver.
+3. Add Phase 19 liquid-velocity precursor transport, precursor inventory diagnostics, and the corresponding conservative transport test.
+4. Decide whether Phase 14's optional scalar-void transport/slip path is still needed now that Phase 14.1 owns bubble transport; implement it or explicitly defer it.
+5. Add Phase 16 demo validation checks for ParaView-readable output and disabled-radiolysis/boiling baseline behavior.
+6. Revisit foundational numerics gaps: second-order time integration, higher-order convection, Ghia profile checks, and bundled OpenFOAM centerline tolerances.
