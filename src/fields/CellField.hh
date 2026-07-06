@@ -327,4 +327,6 @@ bool CellField<Pack>::is_local_global_cell(global_ordinal_type cell_gid) const
     return row != Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
 }
 
+extern template class CellField<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid

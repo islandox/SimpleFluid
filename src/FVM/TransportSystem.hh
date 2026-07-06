@@ -921,6 +921,26 @@ SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<Pack> transport_system(const Vector
     VectorBoundaryValueProvider<Pack> boundary_value,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null);
 
+namespace detail
+{
+
+extern template struct PreparedTransportMatrix<DefaultTpetraTypes>;
+extern template PreparedTransportMatrix<DefaultTpetraTypes>
+prepare_transport_matrix<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>(
+    const Mesh<DefaultTpetraTypes>&,
+    Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
+    size_t);
+extern template void add_transport_values<DefaultTpetraTypes>(
+    const PreparedTransportMatrix<DefaultTpetraTypes>&,
+    DefaultTpetraTypes::local_ordinal_type,
+    const Teuchos::ArrayView<const DefaultTpetraTypes::local_ordinal_type>&,
+    const Teuchos::ArrayView<const DefaultTpetraTypes::scalar_type>&);
+
+} // namespace detail
+
+extern template struct TransportSystem<DefaultTpetraTypes>;
+extern template struct VectorTransportSystem<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid::FVM
 
 #include "FVM/details/TransportGeometryCache.hh"
