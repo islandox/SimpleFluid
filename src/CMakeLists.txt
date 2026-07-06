@@ -158,16 +158,23 @@ set_target_properties(SimpleFluidMesh PROPERTIES
     VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 
-# Fields remain header-only. FVM exports the deliberately supported template
-# pack from a shared library so consumers reuse the compiled assembly kernels.
-add_library(SimpleFluidFields INTERFACE)
-add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
-target_include_directories(SimpleFluidFields INTERFACE
-    ${SIMPLEFLUID_PUBLIC_INCLUDE_DIRS}
+# Fields keep template definitions in public headers for non-default packs,
+# while compiling the default pack once to reduce downstream rebuilds.
+add_library(SimpleFluidFields STATIC
+    fields/FieldInstantiations.cc
 )
-target_link_libraries(SimpleFluidFields INTERFACE SimpleFluidMesh)
+add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
+simplefluid_configure_library(SimpleFluidFields)
+simplefluid_enable_native_archive_fallback(SimpleFluidFields)
+set_target_properties(SimpleFluidFields PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
+target_link_libraries(SimpleFluidFields PUBLIC SimpleFluidMesh)
 
+# FVM retains the shared-library ownership of its supported template pack.
 add_library(SimpleFluidFVM SHARED
+    FVM/FvmInstantiations.cc
     FVM/NonOrthogonalCorrection.cc
     FVM/TransportSystem.cc
 )
@@ -178,6 +185,28 @@ set_target_properties(SimpleFluidFVM PROPERTIES
     CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
     VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
+
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    target_sources(SimpleFluidFields PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES fields/Fields.cppm
+    )
+    target_sources(SimpleFluidFVM PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES FVM/FVM.cppm
+    )
+    set_source_files_properties(
+        fields/Fields.cppm
+        FVM/FVM.cppm
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    set_source_files_properties(
+        fields/Fields.cppm
+        FVM/FVM.cppm
+        PROPERTIES COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+endif()
 
 set(SIMPLEFLUID_EQUATION_SOURCES
     equations/BoussinesqMomentumEquation.cc
@@ -423,6 +452,7 @@ endif()
 # Reuse a visibility-compatible PCH for every object embedded in the DSO.
 target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidFields REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidFVM REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidSolvers REUSE_FROM SimpleFluidSharedPch)
 

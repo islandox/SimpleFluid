@@ -210,4 +210,6 @@ void FaceField<Pack>::sum_into_global_value(global_ordinal_type face_gid,
         this->owned_row_for_global_face(face_gid), value);
 }
 
+extern template class FaceField<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid
