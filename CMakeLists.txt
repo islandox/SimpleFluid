@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.28)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -60,6 +60,25 @@ elseif(SIMPLEFLUID_ENABLE_LTO AND SIMPLEFLUID_ENABLE_COVERAGE)
 endif()
 
 simplefluid_configure_profile_guided_optimization()
+
+set(SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT ON)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT OFF)
+endif()
+option(SIMPLEFLUID_ENABLE_CXX_MODULES
+       "Build C++ module interfaces for module-capable toolchains"
+       ${SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT})
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Trilinos 17 has fallback template bodies that Clang diagnoses eagerly
+    # against libstdc++'s C++23 string(nullptr_t) deletion.
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:CXX>:-fdelayed-template-parsing>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wno-delayed-template-parsing-in-cxx20>"
+        "$<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated>"
+    )
+endif()
 
 cmake_host_system_information(RESULT NCPU QUERY NUMBER_OF_LOGICAL_CORES)
 

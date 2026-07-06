@@ -3,10 +3,16 @@
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testGhostSyncMultiRank\\.cc$")
+if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testFieldsModule\\.cc$")
+endif()
 
 add_executable(testFields ${TEST_SOURCES})
 target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testFields)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+  set_target_properties(testFields PROPERTIES CXX_SCAN_FOR_MODULES ON)
+endif()
 simplefluid_discover_tests(testFields)
 
 add_executable(testGhostSyncMultiRank testGhostSyncMultiRank.cc)

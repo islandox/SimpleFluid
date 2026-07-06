@@ -83,6 +83,12 @@ BoundaryCache<Pack> cache_boundary_conditions(
     return cache;
 }
 
+extern template struct BoundaryCache<DefaultTpetraTypes>;
+extern template BoundaryCache<DefaultTpetraTypes>
+cache_boundary_conditions<DefaultTpetraTypes>(
+    SP<const Mesh<DefaultTpetraTypes>>,
+    const BoundaryConditionMap&);
+
 namespace FVM
 {
 

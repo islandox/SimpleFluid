@@ -1535,4 +1535,20 @@ cell_divergence_from_fluxes(
     return divergence;
 }
 
+extern template void cell_gradient<DefaultTpetraTypes>(
+    const CellField<DefaultTpetraTypes>&,
+    VectorCellField<DefaultTpetraTypes>&);
+extern template void cell_gradient<DefaultTpetraTypes>(
+    const VectorCellField<DefaultTpetraTypes>&,
+    TensorCellField<DefaultTpetraTypes>&);
+extern template DefaultTpetraTypes::scalar_type
+cell_flux_balance<DefaultTpetraTypes>(
+    const Mesh<DefaultTpetraTypes>&,
+    const FaceField<DefaultTpetraTypes>&,
+    DefaultTpetraTypes::local_ordinal_type);
+extern template std::vector<DefaultTpetraTypes::scalar_type>
+cell_divergence_from_fluxes<DefaultTpetraTypes>(
+    const Mesh<DefaultTpetraTypes>&,
+    const FaceField<DefaultTpetraTypes>&);
+
 } // namespace SimpleFluid::FVM

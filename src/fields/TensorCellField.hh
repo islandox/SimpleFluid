@@ -504,4 +504,6 @@ bool TensorCellField<Pack>::is_local_cell(local_ordinal_type cell_lid) const
     return true;
 }
 
+extern template class TensorCellField<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid

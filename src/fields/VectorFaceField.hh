@@ -311,4 +311,6 @@ void VectorFaceField<Pack>::set_global_component_value(
         this->owned_row_for_global_face(face_gid), component, value);
 }
 
+extern template class VectorFaceField<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid

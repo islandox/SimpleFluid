@@ -309,4 +309,21 @@ pressure_poisson_matrix(
         mesh, gauge_cell_gid, homogeneous_neumann);
 }
 
+extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
+identity_matrix<DefaultTpetraTypes>(
+    const Teuchos::RCP<const DefaultTpetraTypes::map_type>&,
+    DefaultTpetraTypes::scalar_type);
+extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
+diffusion_matrix<DefaultTpetraTypes>(
+    const Mesh<DefaultTpetraTypes>&,
+    DefaultTpetraTypes::scalar_type);
+extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
+upwind_convection_matrix<DefaultTpetraTypes>(
+    const Mesh<DefaultTpetraTypes>&,
+    const FaceField<DefaultTpetraTypes>&);
+extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
+pressure_poisson_matrix<DefaultTpetraTypes>(
+    const Mesh<DefaultTpetraTypes>&,
+    DefaultTpetraTypes::global_ordinal_type);
+
 } // namespace SimpleFluid::FVM

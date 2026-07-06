@@ -374,4 +374,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
         mesh, diffusivity, boundary_condition, zero_source);
 }
 
+extern template struct DiffusionSystem<DefaultTpetraTypes>;
+extern template struct VectorDiffusionSystem<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid::FVM
