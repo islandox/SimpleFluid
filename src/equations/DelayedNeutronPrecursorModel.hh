@@ -16,6 +16,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Runtime controls for delayed-neutron precursor groups.
+ */
 struct DelayedNeutronPrecursorOptions
 {
     int group_count = 0;
@@ -26,6 +29,11 @@ struct DelayedNeutronPrecursorOptions
     real_t effective_diffusivity = 0.0;
 };
 
+/**
+ * @brief Validate precursor group counts, vectors, and transport constants.
+ *
+ * @param options Candidate precursor configuration.
+ */
 inline void validate_delayed_neutron_precursor_options(
     const DelayedNeutronPrecursorOptions& options)
 {
@@ -82,6 +90,12 @@ inline void validate_delayed_neutron_precursor_options(
     }
 }
 
+/**
+ * @brief Parse delayed-neutron precursor options from a flat database.
+ *
+ * @param database Database containing optional precursor keys.
+ * @return Validated precursor options.
+ */
 inline DelayedNeutronPrecursorOptions
 delayed_neutron_precursor_options_from_database(
     const Database& database)
@@ -107,6 +121,11 @@ delayed_neutron_precursor_options_from_database(
     return options;
 }
 
+/**
+ * @brief Liquid-phase explicit delayed-neutron precursor source model.
+ *
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class DelayedNeutronPrecursorModel
 {
@@ -116,6 +135,9 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
 
+    /**
+     * @brief Construct a precursor model on a mesh.
+     */
     DelayedNeutronPrecursorModel(
         SP<const mesh_type> mesh,
         DelayedNeutronPrecursorOptions options = {})
@@ -129,6 +151,9 @@ public:
         configure(options);
     }
 
+    /**
+     * @brief Replace precursor options and rebuild group fields.
+     */
     void configure(const DelayedNeutronPrecursorOptions& options)
     {
         validate_delayed_neutron_precursor_options(options);
@@ -160,29 +185,47 @@ public:
         }
     }
 
+    /**
+     * @brief True when at least one precursor group is active.
+     */
     bool enabled() const noexcept
     {
         return !d_fields.empty();
     }
 
+    /**
+     * @brief Number of configured precursor groups.
+     */
     size_t group_count() const noexcept { return d_fields.size(); }
 
+    /**
+     * @brief Concentration field for a zero-based precursor group index.
+     */
     const field_type& concentration(size_t group) const
     {
         return *d_fields.at(group);
     }
 
+    /**
+     * @brief Source field for a zero-based precursor group index.
+     */
     const field_type& source(size_t group) const
     {
         return *d_sources.at(group);
     }
 
+    /**
+     * @brief Fields that can be published to solution output.
+     */
     const std::map<std::string, const field_type*>& output_fields() const
         noexcept
     {
         return d_output_fields;
     }
 
+    /**
+     * @brief Advance all precursor groups by one explicit source/decay step.
+     */
     void advance(
         scalar_type time_step,
         const field_type& alpha_l,

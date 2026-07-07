@@ -609,7 +609,7 @@ $$
 
 - [x] Report microbubble and large-bubble void separately.
 - [x] Enforce void bounds without silently deleting H₂ inventory.
-- [ ] Record clipped inventory if a safety bound is reached.
+- [x] Record clipped inventory if a safety bound is reached.
 - [x] Integrate total void volume:
 
   \[
@@ -709,23 +709,23 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] Large-bubble undersaturated dissolution.
 - [x] H₂ inventory conservation without production or escape.
 - [x] H₂ balance with known fission production.
-- [ ] Population-transport conservation.
+- [x] Population-transport conservation.
 - [x] Void reconstruction from prescribed populations and radii.
 - [x] Characteristic-radius calculation.
-- [ ] Constant-pressure versus prescribed-pressure-pulse regression.
-- [ ] Stiff-source convergence versus substep size.
-- [ ] Serial/MPI consistency of global H₂ and void inventories.
+- [x] Constant-pressure versus prescribed-pressure-pulse regression.
+- [x] Stiff-source convergence versus substep size.
+- [x] Serial/MPI consistency of global H₂ and void inventories.
 
 ### Phase 14.1 acceptance criteria
 
 - [x] The advanced model is runtime-selectable and does not change Phase 12 results when disabled.
-- [ ] All state variables remain finite, non-negative, and bounded.
+- [x] All state variables remain finite, non-negative, and bounded.
 - [x] H₂ inventory is conserved after accounting for fission production and boundary escape in focused tests.
 - [x] Micro-to-large conversion conserves bubble number and gas moles according to the model equations.
 - [x] Bubble-radius solves converge over the documented operating range.
-- [ ] Increasing pressure raises `C_critical` and delays large-bubble conversion.
+- [x] Increasing pressure raises `C_critical` and delays large-bubble conversion.
 - [x] Supersaturation grows large bubbles and increases void fraction.
-- [ ] Constant-pressure and inertial-pressure options run from the same case definition.
+- [x] Constant-pressure and inertial-pressure options run from the same case definition.
 - [ ] Component behavior reproduces the equations and qualitative pressure trends reported by Sheng et al.
 - [x] Full SILENE power/pressure validation is deferred until point-kinetics or neutronics coupling is available.
 
@@ -813,11 +813,14 @@ Add a small demonstration case that exercises the new source models without requ
 - [x] Add example executable:
   - [ ] `radiolytic_bubble_cylinder`, or
   - [x] `fissile_solution_tank_demo`
+  - [x] `constant_power_cylinder_vessel`
 - [x] Use a cylindrical tank mesh.
 - [x] Initialize quiescent liquid.
 - [x] Use configurable central or axial fission power deposition.
 - [x] Enable radiolytic gas generation.
 - [x] Keep boiling disabled by default, with a documented switch to enable it.
+- [x] Add a constant-power cylinder variant with active radiolytic gas and
+  boiling coupling.
 - [x] Output at least:
   - [x] `T`
   - [x] `U`
@@ -1010,9 +1013,8 @@ This phase is explicitly deferred until the scalar void-fraction source model an
 
 ## Suggested immediate Codex task order
 
-1. Add the remaining Phase 14.1 verification tests: population-transport conservation, pressure-delayed conversion, pressure-mode regression, stiff-source convergence, and serial/MPI H2 inventory consistency.
-2. Add the Phase 20 feedback-field registry, mapped-feedback export path, and placeholder outer-coupling driver.
-3. Add Phase 19 liquid-velocity precursor transport, precursor inventory diagnostics, and the corresponding conservative transport test.
-4. Decide whether Phase 14's optional scalar-void transport/slip path is still needed now that Phase 14.1 owns bubble transport; implement it or explicitly defer it.
-5. Add Phase 16 demo validation checks for ParaView-readable output and disabled-radiolysis/boiling baseline behavior.
-6. Revisit foundational numerics gaps: second-order time integration, higher-order convection, Ghia profile checks, and bundled OpenFOAM centerline tolerances.
+1. Add the Phase 20 feedback-field registry, mapped-feedback export path, and placeholder outer-coupling driver.
+2. Add Phase 19 liquid-velocity precursor transport, precursor inventory diagnostics, and the corresponding conservative transport test.
+3. Decide whether Phase 14's optional scalar-void transport/slip path is still needed now that Phase 14.1 owns bubble transport; implement it or explicitly defer it.
+4. Add Phase 16 demo validation checks for ParaView-readable output and disabled-radiolysis/boiling baseline behavior.
+5. Revisit foundational numerics gaps: second-order time integration, higher-order convection, Ghia profile checks, and bundled OpenFOAM centerline tolerances.

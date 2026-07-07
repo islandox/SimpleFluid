@@ -19,6 +19,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Top-level radiolysis model selection.
+ */
 enum class RadiolyticGasMode
 {
     Disabled,
@@ -26,6 +29,9 @@ enum class RadiolyticGasMode
     Sheng2024TwoPopulation
 };
 
+/**
+ * @brief Strategy used to provide absolute pressure to radiolysis physics.
+ */
 enum class RadiolyticPressureMode
 {
     Constant,
@@ -34,24 +40,36 @@ enum class RadiolyticPressureMode
     Inertial
 };
 
+/**
+ * @brief Dissolved-hydrogen transport selection.
+ */
 enum class RadiolyticTransportMode
 {
     NoAdvection,
     Advective
 };
 
+/**
+ * @brief Bubble-population transport selection.
+ */
 enum class BubbleTransportMode
 {
     General,
     Axial
 };
 
+/**
+ * @brief Switch used by thresholded conversion and source terms.
+ */
 enum class RadiolyticHeavisideMode
 {
     Exact,
     Smoothed
 };
 
+/**
+ * @brief Bubble slip/rise-velocity correlation selection.
+ */
 enum class BubbleRiseVelocityMode
 {
     ZeroSlip,
@@ -59,18 +77,27 @@ enum class BubbleRiseVelocityMode
     Celata2007
 };
 
+/**
+ * @brief Surface-tension correlation selection.
+ */
 enum class SurfaceTensionMode
 {
     Constant,
     Sheng2024
 };
 
+/**
+ * @brief Hydrogen diffusivity correlation selection.
+ */
 enum class HydrogenDiffusivityMode
 {
     Constant,
     Sheng2024
 };
 
+/**
+ * @brief Runtime configuration for ideal and two-population radiolysis.
+ */
 struct RadiolyticGasOptions
 {
     RadiolyticGasMode mode = RadiolyticGasMode::Disabled;
@@ -140,9 +167,15 @@ struct RadiolyticGasOptions
     std::vector<std::string> free_surface_patches;
 };
 
+/**
+ * @brief Pure validation helpers and gas-property correlations.
+ */
 namespace RadiolyticGasPhysics
 {
 
+/**
+ * @brief Require a finite strictly positive value.
+ */
 inline real_t require_positive(
     real_t value,
     std::string_view label)
@@ -155,6 +188,9 @@ inline real_t require_positive(
     return value;
 }
 
+/**
+ * @brief Require a finite non-negative value.
+ */
 inline real_t require_non_negative(
     real_t value,
     std::string_view label)
@@ -167,6 +203,9 @@ inline real_t require_non_negative(
     return value;
 }
 
+/**
+ * @brief Convert fission power density to an ideal-gas alpha source rate.
+ */
 inline real_t ideal_gas_alpha_source(
     real_t liquid_fraction,
     real_t release_efficiency,
@@ -206,6 +245,9 @@ inline real_t ideal_gas_alpha_source(
     return std::min(raw, max_source_rate);
 }
 
+/**
+ * @brief Henry-law equilibrium H2 concentration including Laplace pressure.
+ */
 inline real_t henry_equilibrium_concentration(
     real_t henry_coefficient,
     real_t liquid_pressure,
@@ -220,6 +262,9 @@ inline real_t henry_equilibrium_concentration(
          * (liquid_pressure + 2.0 * surface_tension / bubble_radius);
 }
 
+/**
+ * @brief Sheng pressure correction for the nucleation radius.
+ */
 inline real_t pressure_nucleation_correction(
     real_t liquid_pressure,
     real_t atmospheric_pressure)
@@ -233,8 +278,11 @@ inline real_t pressure_nucleation_correction(
          - 0.1554 * ratio + 1.134;
 }
 
-// Sheng et al. Eq. (13), from Winter et al. (2020) Eq. (32).
-// The published C_U convention is mol/m^3.
+/**
+ * @brief Mean fission-fragment LET from Sheng Eq. (13).
+ *
+ * The published C_U convention is mol/m^3.
+ */
 inline real_t mean_fission_fragment_let(
     real_t temperature_kelvin,
     real_t uranium_concentration_mol_per_m3)
@@ -248,6 +296,9 @@ inline real_t mean_fission_fragment_let(
          - 6.6431e-3 * temperature_kelvin + 8.8142;
 }
 
+/**
+ * @brief Pure-water nucleation radius correlation from Winter.
+ */
 inline real_t pure_water_nucleation_radius(
     real_t temperature_kelvin,
     real_t mean_let)
@@ -262,6 +313,9 @@ inline real_t pure_water_nucleation_radius(
          + 9.7683e-14 * t * t - 4.0125e-11 * t + 4.9092e-9;
 }
 
+/**
+ * @brief Correct pure-water nucleation radius for H2 radiation yield.
+ */
 inline real_t atmospheric_nucleation_radius(
     real_t pure_water_radius,
     real_t hydrogen_yield_molecules_per_100_ev)
@@ -282,6 +336,9 @@ inline real_t atmospheric_nucleation_radius(
          * pure_water_radius;
 }
 
+/**
+ * @brief Sheng 2024 nucleation radius assembled from LET and pressure terms.
+ */
 inline real_t sheng2024_nucleation_radius(
     real_t temperature_kelvin,
     real_t uranium_concentration_mol_per_m3,
@@ -299,9 +356,12 @@ inline real_t sheng2024_nucleation_radius(
         liquid_pressure, atmospheric_pressure) * atmospheric_radius;
 }
 
-// Sheng et al. (2024) Table 2 prints a positive quadratic term.
-// Its cited Winter sources print a negative term; this selector follows
-// the Sheng table verbatim and documents the discrepancy externally.
+/**
+ * @brief Sheng 2024 surface-tension correlation from Table 2.
+ *
+ * Sheng et al. (2024) Table 2 prints a positive quadratic term. Its cited
+ * Winter sources print a negative term; this selector follows the Sheng table.
+ */
 inline real_t sheng2024_surface_tension(
     real_t temperature_celsius,
     real_t uranium_concentration_mol_per_m3)
@@ -319,6 +379,9 @@ inline real_t sheng2024_surface_tension(
          + 7.5725e-2;
 }
 
+/**
+ * @brief Sheng 2024 hydrogen diffusivity correlation.
+ */
 inline real_t sheng2024_hydrogen_diffusivity(real_t temperature_kelvin)
 {
     require_positive(temperature_kelvin, "temperature");
@@ -326,6 +389,9 @@ inline real_t sheng2024_hydrogen_diffusivity(real_t temperature_kelvin)
         10.0, -1.46551 - 8.4259e2 / temperature_kelvin) * 1.0e-4;
 }
 
+/**
+ * @brief Hughmark Sherwood-number correlation.
+ */
 inline real_t hughmark_sherwood(real_t reynolds, real_t schmidt)
 {
     require_non_negative(reynolds, "Reynolds number");
@@ -343,6 +409,9 @@ inline real_t hughmark_sherwood(real_t reynolds, real_t schmidt)
          * std::cbrt(schmidt);
 }
 
+/**
+ * @brief Liquid-side mass-transfer coefficient from Hughmark.
+ */
 inline real_t hughmark_mass_transfer_coefficient(
     real_t diffusivity,
     real_t radius,
@@ -364,6 +433,9 @@ inline real_t hughmark_mass_transfer_coefficient(
          * diffusivity / (2.0 * radius);
 }
 
+/**
+ * @brief Celata 2007 drag coefficient from Reynolds and Eotvos numbers.
+ */
 inline real_t celata2007_drag_coefficient(
     real_t reynolds,
     real_t eotvos)
@@ -377,6 +449,9 @@ inline real_t celata2007_drag_coefficient(
     return std::max(spherical, deformed);
 }
 
+/**
+ * @brief Result and diagnostics from the bubble rise-velocity solve.
+ */
 struct BubbleRiseVelocityResult
 {
     real_t velocity = 0.0;
@@ -389,9 +464,13 @@ struct BubbleRiseVelocityResult
     bool within_experimental_range = false;
 };
 
-// Winter et al. (2022) Eq. (15), using the Celata et al. (2007)
-// drag relation. The bracketed solve avoids the zero-velocity root
-// introduced by rearranging the terminal-velocity equation.
+/**
+ * @brief Solve terminal bubble rise speed with the Celata drag relation.
+ *
+ * Winter et al. (2022) Eq. (15), using the Celata et al. (2007) drag
+ * relation. The bracketed solve avoids the zero-velocity root introduced by
+ * rearranging the terminal-velocity equation.
+ */
 inline BubbleRiseVelocityResult celata2007_bubble_rise_velocity(
     real_t radius,
     real_t liquid_density,
@@ -495,6 +574,9 @@ inline BubbleRiseVelocityResult celata2007_bubble_rise_velocity(
     return result;
 }
 
+/**
+ * @brief Result and diagnostics from the bubble-radius solve.
+ */
 struct BubbleRadiusResult
 {
     real_t radius = 0.0;
@@ -503,6 +585,9 @@ struct BubbleRadiusResult
     bool converged = true;
 };
 
+/**
+ * @brief Solve bubble radius from moles per bubble and capillary pressure.
+ */
 inline BubbleRadiusResult solve_bubble_radius(
     real_t moles_per_bubble,
     real_t liquid_pressure,
@@ -570,6 +655,9 @@ inline BubbleRadiusResult solve_bubble_radius(
     return result;
 }
 
+/**
+ * @brief Compute void fraction from bubble number density and radius.
+ */
 inline real_t bubble_void_fraction(
     real_t number_density,
     real_t radius)
@@ -580,6 +668,9 @@ inline real_t bubble_void_fraction(
          * number_density * radius * radius * radius;
 }
 
+/**
+ * @brief Compute the area-weighted characteristic radius of two populations.
+ */
 inline real_t characteristic_radius(
     real_t micro_number,
     real_t micro_radius,
@@ -596,6 +687,9 @@ inline real_t characteristic_radius(
          / denominator;
 }
 
+/**
+ * @brief Evaluate either exact or smoothed Heaviside activation.
+ */
 inline real_t smoothed_heaviside(
     real_t value,
     RadiolyticHeavisideMode mode,
@@ -609,8 +703,14 @@ inline real_t smoothed_heaviside(
 
 } // namespace RadiolyticGasPhysics
 
+/**
+ * @brief Parse radiolytic gas options from a flat database.
+ */
 RadiolyticGasOptions radiolytic_gas_options_from_database(
     const Database& database);
+/**
+ * @brief Validate radiolytic gas options and throw on inconsistent settings.
+ */
 void validate_radiolytic_gas_options(
     const RadiolyticGasOptions& options);
 

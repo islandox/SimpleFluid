@@ -1,6 +1,7 @@
 /**
- * @file fissile_solution_tank_demo.cc
- * @brief Small fissile-solution tank multiphysics smoke example.
+ * @file constant_power_cylinder_vessel.cc
+ * @brief Cylinder vessel smoke example with uniform fission power,
+ *        radiolytic gas, and boiling.
  */
 
 #include "examples/ExampleRunner.hh"
@@ -10,7 +11,7 @@
 #include <memory>
 
 /**
- * @brief Run the Gaussian fissile-solution tank multiphysics smoke case.
+ * @brief Run the constant-power cylindrical vessel multiphysics smoke case.
  *
  * @param argc Argument count passed through to Tpetra.
  * @param argv Argument vector passed through to Tpetra.
@@ -42,7 +43,7 @@ int main(int argc, char** argv)
     bcs.velocity["zmin"] =
         {SimpleFluid::BoundaryConditionType::NoSlip, {}};
     bcs.velocity["zmax"] =
-        {SimpleFluid::BoundaryConditionType::Slip, {}};
+        {SimpleFluid::BoundaryConditionType::NoSlip, {}};
     bcs.velocity["radial"] =
         {SimpleFluid::BoundaryConditionType::NoSlip, {}};
 
@@ -68,10 +69,8 @@ int main(int argc, char** argv)
             solver.initialize_bottom_hot_top_cold(300.0, 300.0);
 
             SimpleFluid::FissionPowerSourceOptions fission;
-            fission.profile = SimpleFluid::FissionPowerProfile::Gaussian;
-            fission.total_power = 1.0e3;
-            fission.center = {0.0, 0.0, 0.5};
-            fission.standard_deviation = {0.15, 0.15, 0.25};
+            fission.profile = SimpleFluid::FissionPowerProfile::Constant;
+            fission.power_density = 2.5e3;
             solver.configure_fission_power_source(fission);
 
             SimpleFluid::RadiolyticGasOptions radiolysis;
@@ -87,7 +86,13 @@ int main(int argc, char** argv)
             solver.configure_scalar_void_fraction(alpha_options);
 
             SimpleFluid::BoilingSourceOptions boiling;
-            boiling.enable_bulk_boiling = false;
+            boiling.enable_bulk_boiling = true;
+            boiling.enable_wall_boiling = true;
+            boiling.saturation_temperature = 299.99;
+            boiling.boiling_time_scale = 5.0e-2;
+            boiling.wall_evaporation_fraction = 0.2;
+            boiling.wall_heat_flux = 25.0;
+            boiling.wall_boiling_patches = {"zmax"};
             solver.configure_boiling_source(boiling);
 
             SimpleFluid::MaterialFeedbackOptions feedback;
@@ -101,7 +106,7 @@ int main(int argc, char** argv)
             feedback.reference_dynamic_viscosity = 1.0e-3;
             solver.configure_material_feedback(feedback);
         },
-        "fissile_solution_tank_demo.vtu",
+        "constant_power_cylinder_vessel.vtu",
         SimpleFluid::SolutionOutputOptions{
             .include_sources = true,
             .include_material_properties = true,

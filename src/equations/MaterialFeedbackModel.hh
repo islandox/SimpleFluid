@@ -15,6 +15,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Density update modes for thermal and void feedback.
+ */
 enum class DensityFeedbackMode
 {
     Constant,
@@ -23,11 +26,17 @@ enum class DensityFeedbackMode
     Mixture
 };
 
+/**
+ * @brief Dynamic-viscosity update modes.
+ */
 enum class ViscosityFeedbackMode
 {
     Constant
 };
 
+/**
+ * @brief Runtime controls for material-property feedback.
+ */
 struct MaterialFeedbackOptions
 {
     DensityFeedbackMode density_mode = DensityFeedbackMode::Constant;
@@ -42,6 +51,12 @@ struct MaterialFeedbackOptions
     real_t min_viscosity = 0.0;
 };
 
+/**
+ * @brief Parse a database density-feedback mode string.
+ *
+ * @param value Mode name from user input.
+ * @return Parsed density-feedback mode.
+ */
 inline DensityFeedbackMode parse_density_feedback_mode(
     const std::string& value)
 {
@@ -57,6 +72,12 @@ inline DensityFeedbackMode parse_density_feedback_mode(
         "Unknown density feedback model '" + value + "'.");
 }
 
+/**
+ * @brief Parse a database viscosity-feedback mode string.
+ *
+ * @param value Mode name from user input.
+ * @return Parsed viscosity-feedback mode.
+ */
 inline ViscosityFeedbackMode parse_viscosity_feedback_mode(
     const std::string& value)
 {
@@ -66,6 +87,11 @@ inline ViscosityFeedbackMode parse_viscosity_feedback_mode(
         "Unknown viscosity feedback model '" + value + "'.");
 }
 
+/**
+ * @brief Validate material-feedback constants and floors.
+ *
+ * @param options Candidate feedback configuration.
+ */
 inline void validate_material_feedback_options(
     const MaterialFeedbackOptions& options)
 {
@@ -102,6 +128,14 @@ inline void validate_material_feedback_options(
     }
 }
 
+/**
+ * @brief Parse material-feedback options from model, time, and database state.
+ *
+ * @param database Database containing optional feedback keys.
+ * @param model_options Boussinesq material defaults.
+ * @param time_options Time-stepper values used for Boussinesq density.
+ * @return Validated material-feedback options.
+ */
 inline MaterialFeedbackOptions material_feedback_options_from_database(
     const Database& database,
     const BoussinesqModelOptions& model_options,
@@ -132,6 +166,11 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
     return options;
 }
 
+/**
+ * @brief Updates material fields from temperature and optional void fraction.
+ *
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class MaterialFeedbackModel
 {
@@ -143,6 +182,9 @@ public:
     using material_type = MaterialPropertyFields<Pack>;
     using context_type = BoussinesqUpdateContext<Pack>;
 
+    /**
+     * @brief Construct a material-feedback model on a mesh.
+     */
     MaterialFeedbackModel(
         SP<const mesh_type> mesh,
         MaterialFeedbackOptions options = {})
@@ -163,6 +205,9 @@ public:
         configure(d_options);
     }
 
+    /**
+     * @brief Replace feedback options and reset feedback fields.
+     */
     void configure(const MaterialFeedbackOptions& options)
     {
         validate_material_feedback_options(options);
@@ -173,32 +218,50 @@ public:
         register_output_fields();
     }
 
+    /**
+     * @brief Return the active material-feedback options.
+     */
     const MaterialFeedbackOptions& options() const noexcept
     {
         return d_options;
     }
 
+    /**
+     * @brief True when density is computed from a non-constant mode.
+     */
     bool density_feedback_enabled() const noexcept
     {
         return d_options.density_mode != DensityFeedbackMode::Constant;
     }
 
+    /**
+     * @brief Density feedback field written during the last apply call.
+     */
     const field_type& density_feedback() const noexcept
     {
         return d_density_feedback;
     }
 
+    /**
+     * @brief Dynamic-viscosity feedback field written during the last apply call.
+     */
     const field_type& viscosity_feedback() const noexcept
     {
         return d_viscosity_feedback;
     }
 
+    /**
+     * @brief Fields that can be published to solution output.
+     */
     const std::map<std::string, const field_type*>& output_fields() const
         noexcept
     {
         return d_output_fields;
     }
 
+    /**
+     * @brief Apply feedback to the solver material-property fields.
+     */
     void apply(
         const context_type& context,
         const field_type* alpha_g,

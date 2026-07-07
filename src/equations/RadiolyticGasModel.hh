@@ -16,6 +16,11 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Per-step global diagnostics from a radiolytic gas update.
+ *
+ * @tparam Scalar Floating-point scalar type used by the solver fields.
+ */
 template<class Scalar>
 struct RadiolyticGasStepStatistics
 {
@@ -34,6 +39,11 @@ struct RadiolyticGasStepStatistics
     int radius_solver_failures = 0;
 };
 
+/**
+ * @brief Runtime radiolytic gas model with ideal and two-population modes.
+ *
+ * @tparam Pack Tpetra type pack used for mesh, field, and communicator types.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class RadiolyticGasModel
 {
@@ -47,25 +57,46 @@ public:
     using material_type = MaterialPropertyFields<Pack>;
     using statistics_type = RadiolyticGasStepStatistics<scalar_type>;
 
+    /**
+     * @brief Construct a radiolysis model on a mesh.
+     */
     explicit RadiolyticGasModel(
         SP<const mesh_type> mesh,
         RadiolyticGasOptions options = {});
 
+    /**
+     * @brief Replace model options and reinitialize dependent fields.
+     */
     void configure(const RadiolyticGasOptions& options);
+    /**
+     * @brief Return the active radiolysis options.
+     */
     const RadiolyticGasOptions& options() const noexcept
     {
         return d_options;
     }
+    /**
+     * @brief Return the selected radiolysis model family.
+     */
     RadiolyticGasMode mode() const noexcept { return d_options.mode; }
+    /**
+     * @brief True when the model is configured to produce radiolysis fields.
+     */
     bool enabled() const noexcept
     {
         return mode() != RadiolyticGasMode::Disabled;
     }
+    /**
+     * @brief True when the model owns alpha_g/alpha_l state directly.
+     */
     bool supplies_void_fraction() const noexcept
     {
         return mode() == RadiolyticGasMode::Sheng2024TwoPopulation;
     }
 
+    /**
+     * @brief Advance radiolysis state using current thermal-hydraulic fields.
+     */
     void advance(
         scalar_type time,
         scalar_type time_step,
@@ -76,46 +107,85 @@ public:
         const material_type& material,
         const field_type* fission_power_density);
 
+    /**
+     * @brief Mutable gas void-fraction field.
+     */
     field_type& alpha_g() noexcept { return d_alpha_g; }
+    /**
+     * @brief Gas void-fraction field.
+     */
     const field_type& alpha_g() const noexcept { return d_alpha_g; }
+    /**
+     * @brief Liquid fraction field.
+     */
     const field_type& alpha_l() const noexcept { return d_alpha_l; }
+    /**
+     * @brief Ideal-gas alpha source field.
+     */
     const field_type& source_alpha_rad() const noexcept
     {
         return d_source_alpha_rad;
     }
+    /**
+     * @brief Absolute pressure field used by radiolysis correlations.
+     */
     const field_type& absolute_pressure() const noexcept
     {
         return d_absolute_pressure;
     }
+    /**
+     * @brief Dissolved hydrogen concentration field.
+     */
     const field_type& dissolved_hydrogen() const noexcept
     {
         return d_dissolved_hydrogen;
     }
+    /**
+     * @brief Dissolved hydrogen inventory field.
+     */
     const field_type& dissolved_hydrogen_inventory() const noexcept
     {
         return d_dissolved_hydrogen_inventory;
     }
+    /**
+     * @brief Microbubble number-density field.
+     */
     const field_type& micro_number_density() const noexcept
     {
         return d_micro_number;
     }
+    /**
+     * @brief Microbubble gas inventory field.
+     */
     const field_type& micro_moles() const noexcept
     {
         return d_micro_moles;
     }
+    /**
+     * @brief Large-bubble number-density field.
+     */
     const field_type& large_number_density() const noexcept
     {
         return d_large_number;
     }
+    /**
+     * @brief Large-bubble gas inventory field.
+     */
     const field_type& large_moles() const noexcept
     {
         return d_large_moles;
     }
+    /**
+     * @brief Diagnostics from the most recent advance call.
+     */
     const statistics_type& last_statistics() const noexcept
     {
         return d_last_statistics;
     }
 
+    /**
+     * @brief Fields that can be published to solution output.
+     */
     const std::map<std::string, const field_type*>& output_fields() const
         noexcept
     {
