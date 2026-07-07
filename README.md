@@ -188,6 +188,8 @@ Pre-built example executables:
 | `natural_convection_cylinder` | Cylindrical domain natural convection |
 | `natural_convection_sphere` | Spherical domain natural convection |
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
+| `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
+| `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 
 Each example is configured via a `Database` object and runs a short transient
 simulation with VTU output.
@@ -364,11 +366,15 @@ advanced radiolysis model and
 [`docs/modeling/radiolytic_bubble_boiling.md`](docs/modeling/radiolytic_bubble_boiling.md)
 for the scalar void, boiling, feedback, precursor, and output workflow.
 
-The fissile-solution tank smoke case builds as `fissile_solution_tank_demo`.
+The fissile-solution tank smoke cases build as `fissile_solution_tank_demo`
+and `constant_power_cylinder_vessel`.
 After `cmake --build --preset Debug`, run
-`build/bin/Debug/fissile_solution_tank_demo` and inspect the generated VTU
-files in ParaView. Boiling is disabled by default; the example source shows the
-switches for enabling the placeholder bulk/wall boiling path.
+`build/bin/Debug/fissile_solution_tank_demo` or
+`build/bin/Debug/constant_power_cylinder_vessel` and inspect the generated VTU
+files in ParaView. The Gaussian tank demo keeps boiling disabled by default;
+the constant-power cylinder variant enables radiolytic gas plus bulk and wall
+boiling so the generated VTU contains the coupled gas-source and latent-heat
+fields.
 
 ## Dependencies
 

@@ -16,6 +16,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Runtime controls for the bounded scalar void-fraction model.
+ */
 struct ScalarVoidFractionOptions
 {
     real_t alpha_min = 0.0;
@@ -27,6 +30,11 @@ struct ScalarVoidFractionOptions
     real_t constant_slip_velocity = 0.0;
 };
 
+/**
+ * @brief Validate scalar void-fraction bounds and transport parameters.
+ *
+ * @param options Candidate scalar-void configuration.
+ */
 inline void validate_scalar_void_fraction_options(
     const ScalarVoidFractionOptions& options)
 {
@@ -65,6 +73,12 @@ inline void validate_scalar_void_fraction_options(
     }
 }
 
+/**
+ * @brief Parse scalar void-fraction options from a flat database.
+ *
+ * @param database Database containing optional scalar-void keys.
+ * @return Validated scalar void-fraction options.
+ */
 inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
     const Database& database)
 {
@@ -89,6 +103,11 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
     return options;
 }
 
+/**
+ * @brief Low-order bounded alpha-g/alpha-l model for source aggregation.
+ *
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class ScalarVoidFractionModel
 {
@@ -98,6 +117,9 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
 
+    /**
+     * @brief Construct a scalar void-fraction model on a mesh.
+     */
     ScalarVoidFractionModel(
         SP<const mesh_type> mesh,
         ScalarVoidFractionOptions options = {})
@@ -115,6 +137,9 @@ public:
         configure(d_options);
     }
 
+    /**
+     * @brief Replace model options and reset alpha/source fields.
+     */
     void configure(const ScalarVoidFractionOptions& options)
     {
         validate_scalar_void_fraction_options(options);
@@ -125,24 +150,42 @@ public:
         register_output_fields();
     }
 
+    /**
+     * @brief Return the active scalar void-fraction options.
+     */
     const ScalarVoidFractionOptions& options() const noexcept
     {
         return d_options;
     }
 
+    /**
+     * @brief Gas void-fraction field.
+     */
     const field_type& alpha_g() const noexcept { return d_alpha_g; }
+    /**
+     * @brief Liquid fraction field equal to one minus gas alpha after updates.
+     */
     const field_type& alpha_l() const noexcept { return d_alpha_l; }
+    /**
+     * @brief Realized total alpha source after bounds are applied.
+     */
     const field_type& source_alpha_total() const noexcept
     {
         return d_source_alpha_total;
     }
 
+    /**
+     * @brief Fields that can be published to solution output.
+     */
     const std::map<std::string, const field_type*>& output_fields() const
         noexcept
     {
         return d_output_fields;
     }
 
+    /**
+     * @brief Apply explicit radiolysis and boiling alpha sources.
+     */
     void update_explicit(
         scalar_type time_step,
         const field_type* source_alpha_rad,
@@ -182,6 +225,9 @@ public:
         sync_fields();
     }
 
+    /**
+     * @brief Mirror externally supplied alpha/source fields into this model.
+     */
     void mirror(
         const field_type& alpha_g,
         const field_type& alpha_l,

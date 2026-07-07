@@ -9,6 +9,13 @@
 
 #include <memory>
 
+/**
+ * @brief Run the Gaussian fissile-solution tank multiphysics smoke case.
+ *
+ * @param argc Argument count passed through to Tpetra.
+ * @param argv Argument vector passed through to Tpetra.
+ * @return Process exit code, zero on normal completion.
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

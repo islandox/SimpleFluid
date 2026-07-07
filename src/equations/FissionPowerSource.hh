@@ -20,6 +20,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Supported prescribed fission power-density profiles.
+ */
 enum class FissionPowerProfile
 {
     Disabled,
@@ -27,6 +30,9 @@ enum class FissionPowerProfile
     Gaussian
 };
 
+/**
+ * @brief Parse a fission power profile name.
+ */
 inline FissionPowerProfile
 fission_power_profile_from_string(std::string_view value)
 {
@@ -50,6 +56,9 @@ fission_power_profile_from_string(std::string_view value)
         "Unknown fission power mode; expected disabled, constant, or gaussian.");
 }
 
+/**
+ * @brief Runtime controls for the prescribed fission power source.
+ */
 struct FissionPowerSourceOptions
 {
     FissionPowerProfile profile = FissionPowerProfile::Disabled;
@@ -155,6 +164,9 @@ inline void validate_fission_power_options(
 
 } // namespace detail
 
+/**
+ * @brief Parse fission power-source options from a flat database.
+ */
 inline FissionPowerSourceOptions
 fission_power_source_options_from_database(const Database& database)
 {
@@ -208,6 +220,9 @@ public:
 
     static constexpr std::string_view field_name = "qdot_fission";
 
+    /**
+     * @brief Construct and reserve the qdot_fission temperature source.
+     */
     FissionPowerSource(
         SP<const Mesh<Pack>> mesh,
         TemperatureSourceRegistry<Pack>& registry)
@@ -245,6 +260,9 @@ public:
     FissionPowerSource(FissionPowerSource&&) = delete;
     FissionPowerSource& operator=(FissionPowerSource&&) = delete;
 
+    /**
+     * @brief Configure from a disabled, constant, or Gaussian profile.
+     */
     void configure(const FissionPowerSourceOptions& options)
     {
         detail::validate_fission_power_options(options);
@@ -265,6 +283,9 @@ public:
         }
     }
 
+    /**
+     * @brief Set a uniform non-negative power density.
+     */
     void initialize_constant(scalar_type power_density)
     {
         require_non_negative(power_density, "power density");
@@ -272,6 +293,9 @@ public:
         apply_base_profile(scalar_type{1});
     }
 
+    /**
+     * @brief Normalize a Gaussian shape to a distributed total power.
+     */
     void initialize_gaussian(
         scalar_type total_power,
         const vec3<scalar_type>& center,
@@ -355,6 +379,9 @@ public:
         apply_base_profile(scalar_type{1});
     }
 
+    /**
+     * @brief Copy a non-negative power-density field into the source.
+     */
     void initialize_from_power_density(const field_type& power_density)
     {
         require_same_mesh(power_density);
@@ -362,6 +389,9 @@ public:
         apply_base_profile(scalar_type{1});
     }
 
+    /**
+     * @brief Normalize a non-negative shape field to a total power.
+     */
     void initialize_from_shape(
         const field_type& shape,
         scalar_type total_power)
@@ -388,6 +418,9 @@ public:
         apply_base_profile(scalar_type{1});
     }
 
+    /**
+     * @brief Install a non-negative time multiplier for the source field.
+     */
     void set_time_multiplier(multiplier_type multiplier)
     {
         if (!multiplier)
@@ -398,21 +431,33 @@ public:
         d_time_multiplier = std::move(multiplier);
     }
 
+    /**
+     * @brief Remove any installed time multiplier.
+     */
     void clear_time_multiplier() noexcept
     {
         d_time_multiplier = {};
     }
 
+    /**
+     * @brief Distributed integral of the currently applied power density.
+     */
     scalar_type integrated_power() const
     {
         return integrate(d_source->field());
     }
 
+    /**
+     * @brief Applied qdot_fission field after the current time multiplier.
+     */
     const field_type& field() const noexcept
     {
         return d_source->field();
     }
 
+    /**
+     * @brief Stored base profile before any time multiplier is applied.
+     */
     const field_type& base_profile() const noexcept
     {
         return d_base_profile;
