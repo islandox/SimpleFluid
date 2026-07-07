@@ -108,55 +108,142 @@ public:
     TemperatureSourceRegistry<Pack>& temperature_sources() noexcept;
     const TemperatureSourceRegistry<Pack>& temperature_sources() const noexcept;
 
+    /**
+     * @brief Create the reserved qdot_external source if needed.
+     */
     PrescribedHeatSource<Pack>& add_prescribed_heat_source();
+    /**
+     * @brief Configure the reserved prescribed_heat power-density source.
+     */
     void configure_prescribed_heat_source(
         const PrescribedHeatSourceOptions& options);
+    /**
+     * @brief Remove the reserved prescribed_heat power source, if present.
+     */
     bool remove_prescribed_heat_source() noexcept;
+    /**
+     * @brief Return the mutable prescribed_heat source, or nullptr when absent.
+     */
     PrescribedHeatSource<Pack>* find_prescribed_heat_source() noexcept;
+    /**
+     * @brief Return the prescribed_heat source, or nullptr when absent.
+     */
     const PrescribedHeatSource<Pack>* find_prescribed_heat_source() const noexcept;
 
+    /**
+     * @brief Configure the optional reacting gas model from explicit options.
+     */
     ReactingGasModel<Pack>& configure_reacting_gas(
         const ReactingGasOptions& options);
+    /**
+     * @brief Configure the optional reacting gas model from database keys.
+     */
     ReactingGasModel<Pack>& configure_reacting_gas(
         const Database& database);
+    /**
+     * @brief Remove the optional reacting gas model, if present.
+     */
     bool remove_reacting_gas_model() noexcept;
+    /**
+     * @brief Return the mutable reacting gas model, or nullptr when absent.
+     */
     ReactingGasModel<Pack>* find_reacting_gas_model() noexcept;
+    /**
+     * @brief Return the reacting gas model, or nullptr when absent.
+     */
     const ReactingGasModel<Pack>*
     find_reacting_gas_model() const noexcept;
 
+    /**
+     * @brief Configure the optional boiling source from explicit options.
+     */
     BoilingSourceModel<Pack>& configure_boiling_source(
         const BoilingSourceOptions& options);
+    /**
+     * @brief Configure the optional boiling source from database keys.
+     */
     BoilingSourceModel<Pack>& configure_boiling_source(
         const Database& database);
+    /**
+     * @brief Remove the optional boiling source model, if present.
+     */
     bool remove_boiling_source_model() noexcept;
+    /**
+     * @brief Return the mutable boiling source model, or nullptr when absent.
+     */
     BoilingSourceModel<Pack>* find_boiling_source_model() noexcept;
+    /**
+     * @brief Return the boiling source model, or nullptr when absent.
+     */
     const BoilingSourceModel<Pack>*
     find_boiling_source_model() const noexcept;
 
+    /**
+     * @brief Configure the scalar void-fraction model from explicit options.
+     */
     ScalarVoidFractionModel<Pack>& configure_scalar_void_fraction(
         const ScalarVoidFractionOptions& options);
+    /**
+     * @brief Configure the scalar void-fraction model from database keys.
+     */
     ScalarVoidFractionModel<Pack>& configure_scalar_void_fraction(
         const Database& database);
+    /**
+     * @brief Return the mutable scalar void-fraction model, or nullptr.
+     */
     ScalarVoidFractionModel<Pack>* find_scalar_void_fraction_model()
         noexcept;
+    /**
+     * @brief Return the scalar void-fraction model, or nullptr when absent.
+     */
     const ScalarVoidFractionModel<Pack>*
     find_scalar_void_fraction_model() const noexcept;
 
+    /**
+     * @brief Configure material-property feedback from explicit options.
+     */
     MaterialFeedbackModel<Pack>& configure_material_feedback(
         const MaterialFeedbackOptions& options);
+    /**
+     * @brief Configure material-property feedback from database keys.
+     */
     MaterialFeedbackModel<Pack>& configure_material_feedback(
         const Database& database);
+    /**
+     * @brief Remove the optional material-feedback model, if present.
+     */
     bool remove_material_feedback_model() noexcept;
+    /**
+     * @brief Return the mutable material-feedback model, or nullptr.
+     */
     MaterialFeedbackModel<Pack>* find_material_feedback_model() noexcept;
+    /**
+     * @brief Return the material-feedback model, or nullptr when absent.
+     */
     const MaterialFeedbackModel<Pack>*
     find_material_feedback_model() const noexcept;
 
+    /**
+     * @brief Configure delayed-neutron scalar_group groups from explicit options.
+     */
     ScalarSourceDecayTransport<Pack>& configure_scalar_groups(
         const ScalarSourceDecayOptions& options);
+    /**
+     * @brief Configure delayed-neutron scalar_group groups from database keys.
+     */
     ScalarSourceDecayTransport<Pack>& configure_scalar_groups(
         const Database& database);
+    /**
+     * @brief Remove the optional scalar_group model, if present.
+     */
     bool remove_scalar_group_model() noexcept;
+    /**
+     * @brief Return the mutable scalar_group model, or nullptr when absent.
+     */
     ScalarSourceDecayTransport<Pack>* find_scalar_group_model() noexcept;
+    /**
+     * @brief Return the scalar_group model, or nullptr when absent.
+     */
     const ScalarSourceDecayTransport<Pack>*
     find_scalar_group_model() const noexcept;
 

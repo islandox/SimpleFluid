@@ -163,12 +163,19 @@ add_executable(reacting_solution_tank_demo examples/reacting_solution_tank_demo.
 target_link_libraries(reacting_solution_tank_demo PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(reacting_solution_tank_demo)
 
+add_executable(
+    constant_power_cylinder_vessel
+    examples/constant_power_cylinder_vessel.cc)
+target_link_libraries(constant_power_cylinder_vessel PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(constant_power_cylinder_vessel)
+
 foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_box
     natural_convection_cylinder
     natural_convection_sphere
     natural_convection_boundary_layer_box
-    reacting_solution_tank_demo)
+    reacting_solution_tank_demo
+    constant_power_cylinder_vessel)
   add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
   set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
       LABELS integration

@@ -188,6 +188,8 @@ Pre-built example executables:
 | `natural_convection_cylinder` | Cylindrical domain natural convection |
 | `natural_convection_sphere` | Spherical domain natural convection |
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
+| `reacting_solution_tank_demo` | Cylindrical heated-solution smoke case with Gaussian prescribed heat power |
+| `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform prescribed heat power, reacting gas, and boiling |
 
 Each example is configured via a `Database` object and runs a short transient
 simulation with VTU output.
@@ -364,11 +366,15 @@ advanced supplied reaction sources model and
 [`docs/modeling/reacting_bubble_boiling.md`](docs/modeling/reacting_bubble_boiling.md)
 for the scalar void, boiling, feedback, scalar source-decay, and output workflow.
 
-The heated-solution tank smoke case builds as `reacting_solution_tank_demo`.
+The heated-solution tank smoke cases build as `reacting_solution_tank_demo`
+and `constant_power_cylinder_vessel`.
 After `cmake --build --preset Debug`, run
-`build/bin/Debug/reacting_solution_tank_demo` and inspect the generated VTU
-files in ParaView. Boiling is disabled by default; the example source shows the
-switches for enabling the placeholder bulk/wall boiling path.
+`build/bin/Debug/reacting_solution_tank_demo` or
+`build/bin/Debug/constant_power_cylinder_vessel` and inspect the generated VTU
+files in ParaView. The Gaussian tank demo keeps boiling disabled by default;
+the constant-power cylinder variant enables reacting gas plus bulk and wall
+boiling so the generated VTU contains the coupled gas-source and latent-heat
+fields.
 
 ## Dependencies
 

@@ -16,6 +16,9 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Runtime controls for delayed-neutron scalar_group groups.
+ */
 struct ScalarSourceDecayOptions
 {
     int group_count = 0;
@@ -26,6 +29,11 @@ struct ScalarSourceDecayOptions
     real_t effective_diffusivity = 0.0;
 };
 
+/**
+ * @brief Validate scalar_group group counts, vectors, and transport constants.
+ *
+ * @param options Candidate scalar_group configuration.
+ */
 inline void validate_scalar_source_decay_options(
     const ScalarSourceDecayOptions& options)
 {
@@ -82,6 +90,12 @@ inline void validate_scalar_source_decay_options(
     }
 }
 
+/**
+ * @brief Parse delayed-neutron scalar_group options from a flat database.
+ *
+ * @param database Database containing optional scalar_group keys.
+ * @return Validated scalar_group options.
+ */
 inline ScalarSourceDecayOptions
 scalar_source_decay_options_from_database(
     const Database& database)
@@ -107,6 +121,11 @@ scalar_source_decay_options_from_database(
     return options;
 }
 
+/**
+ * @brief Liquid-phase explicit delayed-neutron scalar_group source model.
+ *
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class ScalarSourceDecayTransport
 {
@@ -116,6 +135,9 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
 
+    /**
+     * @brief Construct a scalar_group model on a mesh.
+     */
     ScalarSourceDecayTransport(
         SP<const mesh_type> mesh,
         ScalarSourceDecayOptions options = {})
@@ -129,6 +151,9 @@ public:
         configure(options);
     }
 
+    /**
+     * @brief Replace scalar_group options and rebuild group fields.
+     */
     void configure(const ScalarSourceDecayOptions& options)
     {
         validate_scalar_source_decay_options(options);
@@ -160,29 +185,47 @@ public:
         }
     }
 
+    /**
+     * @brief True when at least one scalar_group group is active.
+     */
     bool enabled() const noexcept
     {
         return !d_fields.empty();
     }
 
+    /**
+     * @brief Number of configured scalar_group groups.
+     */
     size_t group_count() const noexcept { return d_fields.size(); }
 
+    /**
+     * @brief Concentration field for a zero-based scalar_group group index.
+     */
     const field_type& concentration(size_t group) const
     {
         return *d_fields.at(group);
     }
 
+    /**
+     * @brief Source field for a zero-based scalar_group group index.
+     */
     const field_type& source(size_t group) const
     {
         return *d_sources.at(group);
     }
 
+    /**
+     * @brief Fields that can be published to solution output.
+     */
     const std::map<std::string, const field_type*>& output_fields() const
         noexcept
     {
         return d_output_fields;
     }
 
+    /**
+     * @brief Advance all scalar_group groups by one explicit source/decay step.
+     */
     void advance(
         scalar_type time_step,
         const field_type& alpha_l,
