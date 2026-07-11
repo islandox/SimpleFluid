@@ -247,28 +247,31 @@ public:
     }
 
     /**
-     * @brief Mirror externally supplied alpha/source fields into this model.
+     * @brief Mirror externally owned void and derive the realized total rate.
      */
     void mirror(
         const field_type& alpha_g,
-        const field_type& alpha_l,
-        const field_type& source_alpha_total)
+        scalar_type time_step)
     {
+        if (!std::isfinite(time_step) || time_step <= scalar_type{})
+        {
+            throw std::invalid_argument(
+                "Scalar void mirror requires a positive finite timestep.");
+        }
         check_source(&alpha_g, "alpha_g");
-        check_source(&alpha_l, "alpha_l");
-        check_source(&source_alpha_total, "S_alpha_total");
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
                 static_cast<local_ordinal_type>(owned);
+            const auto old_alpha = d_alpha_g.value(cell_lid);
             const auto alpha = std::clamp(
                 alpha_g.value(cell_lid),
                 d_options.alpha_min,
                 d_options.alpha_max);
             d_alpha_g.set_owned_value(cell_lid, alpha);
-            d_alpha_l.set_owned_value(cell_lid, alpha_l.value(cell_lid));
+            d_alpha_l.set_owned_value(cell_lid, scalar_type{1} - alpha);
             d_source_alpha_total.set_owned_value(
-                cell_lid, source_alpha_total.value(cell_lid));
+                cell_lid, (alpha - old_alpha) / time_step);
         }
         sync_fields();
     }

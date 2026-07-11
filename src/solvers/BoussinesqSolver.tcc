@@ -339,6 +339,12 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
                 "Sheng radiolysis and its scalar mirror require identical "
                 "void-fraction bounds.");
         }
+        if (std::isfinite(void_options.alpha_collapse_time))
+        {
+            throw std::invalid_argument(
+                "Sheng radiolysis cannot use scalar void collapse until "
+                "bubble inventory removal is coupled conservatively.");
+        }
     }
     if (!d_radiolytic_gas_model)
     {
@@ -458,6 +464,14 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
     {
         throw std::invalid_argument(
             "A Sheng radiolysis mirror requires its scalar void bounds.");
+    }
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->supplies_void_fraction()
+        && std::isfinite(options.alpha_collapse_time))
+    {
+        throw std::invalid_argument(
+            "Sheng radiolysis cannot use scalar void collapse until "
+            "bubble inventory removal is coupled conservatively.");
     }
     d_physical_model_enabled = true;
     if (!d_scalar_void_fraction_model)
@@ -728,8 +742,7 @@ void BoussinesqSolver<Pack>::update_void_fraction_models(
     {
         d_scalar_void_fraction_model->mirror(
             d_radiolytic_gas_model->alpha_g(),
-            d_radiolytic_gas_model->alpha_l(),
-            d_radiolytic_gas_model->source_alpha_rad());
+            time_step);
         return;
     }
 
@@ -963,6 +976,18 @@ void BoussinesqSolver<Pack>::step()
         throw std::logic_error(
             "Sheng radiolysis cannot advance with mismatched scalar mirror "
             "void-fraction bounds.");
+    }
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled()
+        && d_radiolytic_gas_model->supplies_void_fraction()
+        && d_scalar_void_fraction_model
+        && std::isfinite(
+            d_scalar_void_fraction_model->options()
+                .alpha_collapse_time))
+    {
+        throw std::logic_error(
+            "Sheng radiolysis cannot advance with scalar void collapse "
+            "until bubble inventory removal is coupled conservatively.");
     }
 
     begin_step();

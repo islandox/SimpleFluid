@@ -589,7 +589,7 @@ TEST(RadiolyticGasModelTest, PrescribedPressureHistoryInterpolates)
 }
 
 /**
- * @brief Free-surface bubble escape updates step and cumulative statistics.
+ * @brief Finite-Courant escape closes step and cumulative inventories.
  */
 TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
 {
@@ -599,8 +599,11 @@ TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
     options.initial_micro_moles = 1.0e-6;
     options.rise_velocity_mode =
         SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 0.1;
+    options.constant_slip_velocity = 10.0;
     options.free_surface_patches = {"zmax"};
+    options.microbubble_lifetime = 1.0e30;
+    options.large_bubble_dissolution_time = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
     SimpleFluid::RadiolyticGasModel<Pack> model(mesh, options);
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
@@ -609,7 +612,7 @@ TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
 
-    constexpr double time_step = 1.0e-6;
+    constexpr double time_step = 0.1;
     model.advance(
         time_step,
         time_step,
@@ -620,8 +623,25 @@ TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
         material,
         &power);
     const auto first = model.last_statistics();
-    EXPECT_GT(first.hydrogen_escaped, 0.0);
-    EXPECT_GT(first.escaped_bubble_count, 0.0);
+    EXPECT_NEAR(first.hydrogen_escaped, 5.0e-7, 1.0e-14);
+    EXPECT_NEAR(first.escaped_bubble_count, 5.0e9, 1.0e-2);
+    EXPECT_NEAR(
+        first.hydrogen_after + first.hydrogen_escaped,
+        first.hydrogen_before + first.hydrogen_produced,
+        1.0e-14);
+    EXPECT_NEAR(first.inventory_error, 0.0, 1.0e-14);
+    EXPECT_NEAR(
+        time_step
+          * global_integral(
+              model_field(model, "H2_escape_molar_rate")),
+        first.hydrogen_escaped,
+        1.0e-14);
+    EXPECT_NEAR(
+        time_step
+          * global_integral(
+              model_field(model, "bubble_escape_number_rate")),
+        first.escaped_bubble_count,
+        1.0e-2);
     EXPECT_DOUBLE_EQ(
         first.cumulative_hydrogen_escaped,
         first.hydrogen_escaped);
@@ -635,12 +655,79 @@ TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
         flux,
         material,
         &power);
-    EXPECT_GT(
-        model.last_statistics().cumulative_hydrogen_escaped,
-        first.cumulative_hydrogen_escaped);
-    EXPECT_GT(
-        model.last_statistics().cumulative_escaped_bubble_count,
-        first.cumulative_escaped_bubble_count);
+    const auto second = model.last_statistics();
+    EXPECT_LT(model.source_alpha_rad().value(0), 0.0);
+    EXPECT_NEAR(
+        second.cumulative_hydrogen_escaped,
+        first.cumulative_hydrogen_escaped + second.hydrogen_escaped,
+        1.0e-14);
+    EXPECT_NEAR(
+        second.cumulative_escaped_bubble_count,
+        first.cumulative_escaped_bubble_count
+          + second.escaped_bubble_count,
+        1.0e-2);
+}
+
+TEST(RadiolyticGasModelTest, EscapeRateFieldsAreBoundaryLocalized)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(1, 1, 2));
+    auto options = sheng_options();
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 1.0e-6;
+    options.rise_velocity_mode =
+        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = 1.0;
+    options.free_surface_patches = {"zmax"};
+    options.microbubble_lifetime = 1.0e30;
+    options.large_bubble_dissolution_time = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    SimpleFluid::RadiolyticGasModel<Pack> model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+
+    constexpr double time_step = 0.1;
+    model.advance(
+        time_step,
+        time_step,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+
+    const auto& molar_rate =
+        model_field(model, "H2_escape_molar_rate");
+    const auto& number_rate =
+        model_field(model, "bubble_escape_number_rate");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        if (mesh->cell_centroid(cell_lid).z > 1.0)
+        {
+            EXPECT_GT(molar_rate.value(cell_lid), 0.0);
+            EXPECT_GT(number_rate.value(cell_lid), 0.0);
+        }
+        else
+        {
+            EXPECT_DOUBLE_EQ(molar_rate.value(cell_lid), 0.0);
+            EXPECT_DOUBLE_EQ(number_rate.value(cell_lid), 0.0);
+        }
+    }
+    EXPECT_NEAR(
+        time_step * global_integral(molar_rate),
+        model.last_statistics().hydrogen_escaped,
+        1.0e-14);
+    EXPECT_NEAR(
+        time_step * global_integral(number_rate),
+        model.last_statistics().escaped_bubble_count,
+        1.0e-2);
 }
 
 /**

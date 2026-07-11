@@ -100,7 +100,8 @@ For each Boussinesq step:
 5. Advance temperature with all heat sources minus the accepted
    `latentHeatSink`.
 6. When selected, advance the two-population model and mirror its reconstructed
-   void into the scalar publication field.
+   void into the scalar publication field. The mirror derives `S_alpha_total`
+   from its actual old/new published state.
 7. Advance delayed-neutron precursor groups on the liquid fraction.
 8. Refresh feedback material fields for output and the next step.
 
@@ -137,6 +138,8 @@ iteration driver are intentionally deferred.
   size distribution.
 - Boiling with the Sheng 2024 model is rejected until vapor mass can be added
   conservatively to its bubble inventories.
+- Finite scalar collapse with the Sheng 2024 model is likewise rejected until
+  removal is coupled to bubble inventories and escape accounting.
 - Boiling is explicit and does not subcycle; its accepted source is limited by
   timestep sensible energy, scalar alpha capacity, radiolysis reservation, and
   configured collapse.

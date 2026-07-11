@@ -354,6 +354,8 @@ $$
 - [x] Allocate and initialize `S_alpha_rad`.
 - [x] Allocate and initialize `S_alpha_total`.
 - [x] Add bounded explicit update for the low-order scalar model.
+- [x] Derive mirrored `S_alpha_total` from the published scalar state change
+  instead of copying a provider's internal source history.
 - [ ] Add optional scalar-transport path for the low-order scalar model if low-risk.
 - [ ] Add configurable upward slip velocity aligned opposite gravity.
 - [x] Add configurable `alpha_diffusivity`.
@@ -642,6 +644,8 @@ $$
 - [x] Advect `N_i` and `M_i` with the same category velocity.
 - [x] Add a conservative free-surface escape boundary condition.
 - [x] Track escaped H₂ moles and bubble count.
+- [x] Evaluate implicit-outflow escape from the accepted transported state and
+  localize escape-rate fields to boundary-adjacent owner cells.
 
 ### Optional inertial-pressure coupling
 
@@ -730,6 +734,8 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] Constant-pressure versus prescribed-pressure-pulse regression.
 - [x] Stiff-source convergence versus substep size.
 - [x] Serial/MPI consistency of global H₂ and void inventories.
+- [x] Finite-Courant serial/MPI escape balances and rate-field integrals.
+- [x] Globally reduce advanced-model event counters across MPI ranks.
 
 ### Phase 14.1 acceptance criteria
 
