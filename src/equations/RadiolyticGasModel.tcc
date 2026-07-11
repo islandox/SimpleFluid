@@ -312,7 +312,9 @@ template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::update_ideal_gas_source(
     scalar_type time_step,
     const field_type& temperature,
-    const field_type* fission_power_density)
+    const field_type* fission_power_density,
+    const field_type& alpha_g,
+    scalar_type alpha_max)
 {
     if (!fission_power_density)
     {
@@ -329,14 +331,14 @@ void RadiolyticGasModel<Pack>::update_ideal_gas_source(
     {
         const auto cell_lid =
             static_cast<local_ordinal_type>(owned);
-        const auto alpha = d_alpha_g.value(cell_lid);
+        const auto alpha = alpha_g.value(cell_lid);
         RadiolyticGasPhysics::require_positive(
             temperature.value(cell_lid), "temperature");
         RadiolyticGasPhysics::require_positive(
             d_absolute_pressure.value(cell_lid),
             "absolute pressure");
         scalar_type source{};
-        if (alpha < d_options.alpha_max
+        if (alpha < alpha_max
             && fission_power_density->value(cell_lid) > 0.0)
         {
             source = RadiolyticGasPhysics::ideal_gas_alpha_source(
@@ -350,7 +352,7 @@ void RadiolyticGasModel<Pack>::update_ideal_gas_source(
                 d_options.max_source_alpha_rate);
             source = std::min(
                 source,
-                (d_options.alpha_max - alpha) / time_step);
+                (alpha_max - alpha) / time_step);
         }
         d_source_alpha_rad.set_owned_value(cell_lid, source);
     }
@@ -1355,6 +1357,37 @@ void RadiolyticGasModel<Pack>::advance(
     const material_type& material,
     const field_type* fission_power_density)
 {
+    if (mode() == RadiolyticGasMode::IdealGasSource)
+    {
+        throw std::logic_error(
+            "Ideal radiolysis advance requires authoritative scalar void.");
+    }
+    advance(
+        time,
+        time_step,
+        temperature,
+        gauge_pressure,
+        velocity,
+        liquid_face_flux,
+        material,
+        fission_power_density,
+        d_alpha_g,
+        d_options.alpha_max);
+}
+
+template<TpetraTypePack Pack>
+void RadiolyticGasModel<Pack>::advance(
+    scalar_type time,
+    scalar_type time_step,
+    const field_type& temperature,
+    const field_type& gauge_pressure,
+    const velocity_field_type& velocity,
+    const face_flux_field_type& liquid_face_flux,
+    const material_type& material,
+    const field_type* fission_power_density,
+    const field_type& alpha_g,
+    scalar_type alpha_max)
+{
     d_last_statistics = {};
     if (!enabled())
     {
@@ -1370,8 +1403,13 @@ void RadiolyticGasModel<Pack>::advance(
     reconstruct_absolute_pressure(time, gauge_pressure);
     if (mode() == RadiolyticGasMode::IdealGasSource)
     {
+        synchronize_void_fraction(alpha_g, alpha_max);
         update_ideal_gas_source(
-            time_step, temperature, fission_power_density);
+            time_step,
+            temperature,
+            fission_power_density,
+            alpha_g,
+            alpha_max);
         return;
     }
 
@@ -1403,6 +1441,48 @@ void RadiolyticGasModel<Pack>::advance(
         d_history_initialized = true;
     }
     sync_all_fields();
+}
+
+template<TpetraTypePack Pack>
+void RadiolyticGasModel<Pack>::synchronize_void_fraction(
+    const field_type& alpha_g,
+    scalar_type alpha_max)
+{
+    if (mode() != RadiolyticGasMode::IdealGasSource)
+    {
+        throw std::logic_error(
+            "Only ideal radiolysis can mirror authoritative scalar void.");
+    }
+    if (&alpha_g.mesh() != d_mesh.get())
+    {
+        throw std::invalid_argument(
+            "Radiolytic gas authoritative alpha_g is on the wrong mesh.");
+    }
+    if (!std::isfinite(alpha_max)
+        || alpha_max <= scalar_type{}
+        || alpha_max > scalar_type{1})
+    {
+        throw std::invalid_argument(
+            "Radiolytic gas authoritative alpha_max must be in (0, 1].");
+    }
+    for (size_t owned = 0;
+         owned < d_mesh->num_owned_cells();
+         ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto alpha = alpha_g.value(cell_lid);
+        if (!std::isfinite(alpha)
+            || alpha < scalar_type{}
+            || alpha > alpha_max)
+        {
+            throw std::invalid_argument(
+                "Radiolytic gas authoritative alpha_g is outside its bounds.");
+        }
+        d_alpha_g.set_owned_value(cell_lid, alpha);
+        d_alpha_l.set_owned_value(cell_lid, scalar_type{1} - alpha);
+    }
+    d_alpha_g.sync_ghosts();
+    d_alpha_l.sync_ghosts();
 }
 
 template<TpetraTypePack Pack>

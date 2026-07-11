@@ -307,6 +307,7 @@ private:
     std::unique_ptr<BoilingSourceModel<Pack>> d_boiling_source_model;
     std::unique_ptr<ScalarVoidFractionModel<Pack>>
         d_scalar_void_fraction_model;
+    bool d_scalar_void_fraction_explicitly_configured = false;
     std::unique_ptr<MaterialFeedbackModel<Pack>>
         d_material_feedback_model;
     std::unique_ptr<DelayedNeutronPrecursorModel<Pack>>

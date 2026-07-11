@@ -95,7 +95,9 @@ public:
     }
 
     /**
-     * @brief Advance radiolysis state using current thermal-hydraulic fields.
+     * @brief Advance disabled or two-population radiolysis state.
+     *
+     * Ideal-gas mode requires the overload carrying authoritative scalar void.
      */
     void advance(
         scalar_type time,
@@ -108,11 +110,37 @@ public:
         const field_type* fission_power_density);
 
     /**
-     * @brief Mutable gas void-fraction field.
+     * @brief Advance using the solver's authoritative scalar void state.
+     *
+     * Ideal-gas source limiting uses @p alpha_g and @p alpha_max.  The
+     * two-population model continues to reconstruct void from its conserved
+     * bubble inventories.
      */
-    field_type& alpha_g() noexcept { return d_alpha_g; }
+    void advance(
+        scalar_type time,
+        scalar_type time_step,
+        const field_type& temperature,
+        const field_type& gauge_pressure,
+        const velocity_field_type& velocity,
+        const face_flux_field_type& liquid_face_flux,
+        const material_type& material,
+        const field_type* fission_power_density,
+        const field_type& alpha_g,
+        scalar_type alpha_max);
+
     /**
-     * @brief Gas void-fraction field.
+     * @brief Synchronize ideal-mode diagnostics with canonical scalar void.
+     *
+     * The solver calls this after applying the aggregate scalar-void update so
+     * the legacy radiolysis alpha fields remain current without owning the
+     * evolving ideal-mode state.
+     */
+    void synchronize_void_fraction(
+        const field_type& alpha_g,
+        scalar_type alpha_max);
+
+    /**
+     * @brief Model-local gas void field reconstructed or mirrored on advance.
      */
     const field_type& alpha_g() const noexcept { return d_alpha_g; }
     /**
@@ -224,7 +252,9 @@ private:
     void update_ideal_gas_source(
         scalar_type time_step,
         const field_type& temperature,
-        const field_type* fission_power_density);
+        const field_type* fission_power_density,
+        const field_type& alpha_g,
+        scalar_type alpha_max);
     void advance_two_population(
         scalar_type time_step,
         const field_type& temperature,

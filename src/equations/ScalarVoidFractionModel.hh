@@ -175,6 +175,30 @@ public:
     }
 
     /**
+     * @brief Return collapse realizable without crossing alpha_min this step.
+     */
+    scalar_type bounded_collapse_rate(
+        local_ordinal_type cell_lid,
+        scalar_type time_step) const
+    {
+        if (!std::isfinite(time_step) || time_step <= scalar_type{})
+        {
+            throw std::invalid_argument(
+                "Scalar void collapse requires a positive finite timestep.");
+        }
+        if (!std::isfinite(d_options.alpha_collapse_time))
+        {
+            return scalar_type{};
+        }
+        const auto alpha = d_alpha_g.value(cell_lid);
+        const auto available_alpha = std::max(
+            alpha - d_options.alpha_min, scalar_type{});
+        return std::min(
+            alpha / d_options.alpha_collapse_time,
+            available_alpha / time_step);
+    }
+
+    /**
      * @brief Fields that can be published to solution output.
      */
     const std::map<std::string, const field_type*>& output_fields() const
@@ -209,10 +233,7 @@ public:
                 raw_rate += source_alpha_rad->value(cell_lid);
             if (source_alpha_boil)
                 raw_rate += source_alpha_boil->value(cell_lid);
-            if (std::isfinite(d_options.alpha_collapse_time))
-            {
-                raw_rate -= old_alpha / d_options.alpha_collapse_time;
-            }
+            raw_rate -= bounded_collapse_rate(cell_lid, time_step);
             const auto new_alpha = std::clamp(
                 old_alpha + time_step * raw_rate,
                 d_options.alpha_min,

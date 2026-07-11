@@ -227,10 +227,12 @@ $$
 T > T_{sat} + \Delta T_{act}
 $$
 
-compute an available energy rate:
+compute a requested energy rate, capped so one explicit step cannot remove
+more than the cell's sensible superheat:
 
 $$
-\dot e_{avail} = \rho_l c_{p,l}\frac{\max(T - T_{sat},0)}{\tau_b}
+\dot e_{avail} = \rho_l c_{p,l}
+\frac{\max(T - T_{sat},0)}{\max(\tau_b,\Delta t)}
 $$
 
 then:
@@ -248,6 +250,12 @@ and latent heat sink:
 $$
 Q_{latent} = \dot m_b h_{fg}
 $$
+
+Before the temperature update, limit aggregate bulk and wall boiling to the
+void capacity remaining after the current radiolytic source and optional
+timestep-realizable collapse. Scale `S_alpha_boil` and `Q_latent` together so
+latent energy is removed only for vapor admitted into the authoritative scalar
+`alpha_g` field.
 
 ### Wall boiling placeholder
 
@@ -318,6 +326,13 @@ where:
 
 $$
 S_{\alpha,total} = S_{\alpha,rad} + S_{\alpha,boil} + S_{\alpha,wall} - S_{\alpha,collapse}
+$$
+
+with collapse bounded over the explicit step:
+
+$$
+S_{\alpha,collapse} = \min\left(\frac{\alpha_g}{\tau_c},
+\frac{\alpha_g-\alpha_{min}}{\Delta t}\right).
 $$
 
 ### Optional transport upgrade

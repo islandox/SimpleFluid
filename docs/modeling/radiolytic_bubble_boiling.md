@@ -15,7 +15,27 @@ method.
   optional collapse into `S_alpha_total`, then applies an explicit bounded
   update.
 - Boiling source: adds explicit bulk and wall boiling alpha sources and a
-  positive latent heat sink `latentHeatSink` in W/m3.
+  positive latent heat sink `latentHeatSink` in W/m3. Bulk boiling is capped
+  by the sensible superheat available over one timestep. Bulk and wall
+  sources are then limited together by remaining scalar void capacity, with
+  the same factor applied to `latentHeatSink`.
+
+The boiling-model update accepts the canonical scalar-void model and any
+already-reserved radiolysis source in one call. This keeps `alpha_g`, both
+bounds, and collapse behavior in one authoritative object. It publishes only
+the admitted boiling source and its matching latent sink; the former unbounded
+two-argument update is no longer a supported coupling path.
+
+Collapse is limited to the gas removable without crossing `alpha_min` during
+the current timestep:
+
+```text
+S_alpha_collapse = min(alpha_g / tau_c,
+                       (alpha_g - alpha_min) / dt).
+```
+
+Boiling can reuse that realizable capacity, but cannot claim collapse that the
+bounded scalar update would otherwise discard.
 
 ## Configuration Keys
 
@@ -70,12 +90,17 @@ precursor_effective_diffusivity
 
 For each Boussinesq step:
 
-1. Refresh material properties from the previous accepted state.
+1. Refresh material properties and temperature sources from the previous
+   accepted state.
 2. Advance velocity and pressure.
-3. Refresh temperature sources and boiling source fields.
-4. Advance temperature with all heat sources minus `latentHeatSink`.
-5. Advance radiolysis or the two-population bubble model.
-6. Update or mirror the low-order scalar void field.
+3. For ideal radiolysis, compute `S_alpha_rad` from the authoritative scalar
+   `alpha_g` and its bound.
+4. Compute boiling, limit it against timestep energy and remaining void
+   capacity, then update the scalar void field.
+5. Advance temperature with all heat sources minus the accepted
+   `latentHeatSink`.
+6. When selected, advance the two-population model and mirror its reconstructed
+   void into the scalar publication field.
 7. Advance delayed-neutron precursor groups on the liquid fraction.
 8. Refresh feedback material fields for output and the next step.
 
@@ -110,8 +135,11 @@ iteration driver are intentionally deferred.
 - The scalar `alpha_g` path has no population balance.
 - The Sheng 2024 model uses two representative bubble populations, not a full
   size distribution.
-- Boiling is explicit and source-limited only by the configured timestep and
-  alpha bounds.
+- Boiling with the Sheng 2024 model is rejected until vapor mass can be added
+  conservatively to its bubble inventories.
+- Boiling is explicit and does not subcycle; its accepted source is limited by
+  timestep sensible energy, scalar alpha capacity, radiolysis reservation, and
+  configured collapse.
 - Wall boiling uses a prescribed heat flux and does not implement RPI heat
   flux partitioning.
 - Viscosity feedback currently supports a constant model with a safety floor.
