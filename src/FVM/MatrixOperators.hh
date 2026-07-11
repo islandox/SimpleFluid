@@ -180,8 +180,8 @@ upwind_convection_matrix(
  *
  * @tparam Pack The Tpetra type pack.
  * @param mesh The computational mesh.
- * @param gauge_cell_gid Global ID of the cell used to fix the pressure
- *        level.
+ * @param gauge_cell_gid Global row-map ID of the cell used to fix the
+ *        pressure level.
  * @return Fill-complete sparse matrix representing the Poisson operator.
  * @throws std::runtime_error if any interior face connects coincident
  *         cell centers.
@@ -205,7 +205,8 @@ pressure_poisson_matrix(
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid = mesh.cell_global_id(cell_lid);
+        const auto row_gid =
+            mesh.owned_cell_map()->getGlobalElement(cell_lid);
 
         cols.clear();
         vals.clear();

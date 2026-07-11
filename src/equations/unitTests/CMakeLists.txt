@@ -3,6 +3,8 @@
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFissionPowerSourceMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testPressureProjectionMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
@@ -26,6 +28,15 @@ target_link_libraries(
   GTest::gtest_main)
 simplefluid_exe_reuse_precompiled_header(testFissionPowerSourceMultiRank)
 
+add_executable(
+  testPressureProjectionMultiRank
+  testPressureProjectionMultiRank.cc)
+target_link_libraries(
+  testPressureProjectionMultiRank
+  SimpleFluid::Equations
+  GTest::gtest_main)
+simplefluid_exe_reuse_precompiled_header(testPressureProjectionMultiRank)
+
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
         OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
@@ -36,6 +47,16 @@ if(MPIEXEC_EXECUTABLE
             "$<TARGET_FILE:testFissionPowerSourceMultiRank>")
   set_tests_properties(FissionPowerSource_2procs PROPERTIES
     LABELS "mpi"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME PressureProjection_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPressureProjectionMultiRank>")
+  set_tests_properties(PressureProjection_2procs PROPERTIES
+    LABELS "mpi;pressure_projection"
     PROCESSORS 2
     TIMEOUT 120)
 endif()

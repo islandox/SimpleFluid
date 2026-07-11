@@ -232,6 +232,8 @@ build_schur_approximation(
 
     auto schur = Teuchos::rcp(new matrix_type(
         accumulated->getRowMap(), 32));
+    const auto gauge_gid =
+        accumulated->getRowMap()->getMinAllGlobalIndex();
     const auto accumulated_col_map = accumulated->getColMap();
     const auto stabilization_col_map =
         pressure_stabilization.getColMap();
@@ -240,7 +242,7 @@ build_schur_approximation(
         const auto local_row = static_cast<local_ordinal_type>(row);
         const auto global_row =
             accumulated->getRowMap()->getGlobalElement(local_row);
-        if (global_row == global_ordinal_type{0})
+        if (global_row == gauge_gid)
         {
             Teuchos::Array<global_ordinal_type> columns{global_row};
             Teuchos::Array<scalar_type> values{scalar_type{1}};
@@ -624,6 +626,8 @@ private:
         const auto momentum_rhs = momentum.rhs->getLocalViewHost(
             Tpetra::Access::ReadOnly);
         const auto momentum_col_map = momentum.matrix->getColMap();
+        const auto pressure_gauge_gid =
+            d_mesh->owned_cell_map()->getMinAllGlobalIndex();
 
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -862,7 +866,7 @@ private:
             }
 
             const auto pressure_row = 4 * cell_gid + 3;
-            if (cell_gid == global_ordinal_type{0})
+            if (cell_gid == pressure_gauge_gid)
             {
                 Teuchos::Array<global_ordinal_type> columns{pressure_row};
                 Teuchos::Array<scalar_type> values{scalar_type{1}};

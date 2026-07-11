@@ -141,6 +141,7 @@ private:
                 bool register_momentum_equation);
 
     LinearSolveSummary run_momentum_predictor();
+    scalar_type global_sum(scalar_type local_value) const;
     typename PressureProjectionEquation<Pack>::ProjectionResult
     run_pressure_correction();
     void solve_coupled_krylov();
