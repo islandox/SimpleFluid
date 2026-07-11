@@ -295,8 +295,51 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     const RadiolyticGasOptions& options) -> RadiolyticGasModel<Pack>&
 {
     validate_radiolytic_gas_options(options);
+    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation
+        && d_boiling_source_model
+        && d_boiling_source_model->enabled())
+    {
+        throw std::invalid_argument(
+            "Sheng two-population radiolysis cannot be combined with "
+            "boiling until vapor mass is coupled to bubble inventories.");
+    }
     d_physical_model_enabled = true;
-    ensure_scalar_void_fraction_model();
+    if (options.mode != RadiolyticGasMode::Disabled
+        && (!d_scalar_void_fraction_model
+            || (!d_scalar_void_fraction_explicitly_configured
+                && d_step_index == 0)))
+    {
+        ScalarVoidFractionOptions void_options;
+        void_options.alpha_min = options.alpha_min;
+        void_options.alpha_max = options.alpha_max;
+        void_options.initial_alpha = options.alpha_min;
+        if (!d_scalar_void_fraction_model)
+        {
+            d_scalar_void_fraction_model =
+                std::make_unique<ScalarVoidFractionModel<Pack>>(
+                    d_mesh, void_options);
+        }
+        else
+        {
+            d_scalar_void_fraction_model->configure(void_options);
+        }
+    }
+    else
+    {
+        ensure_scalar_void_fraction_model();
+    }
+    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation)
+    {
+        const auto& void_options =
+            d_scalar_void_fraction_model->options();
+        if (void_options.alpha_min != options.alpha_min
+            || void_options.alpha_max != options.alpha_max)
+        {
+            throw std::invalid_argument(
+                "Sheng radiolysis and its scalar mirror require identical "
+                "void-fraction bounds.");
+        }
+    }
     if (!d_radiolytic_gas_model)
     {
         d_radiolytic_gas_model =
@@ -346,6 +389,14 @@ auto BoussinesqSolver<Pack>::configure_boiling_source(
     const BoilingSourceOptions& options) -> BoilingSourceModel<Pack>&
 {
     validate_boiling_source_options(options);
+    if ((options.enable_bulk_boiling || options.enable_wall_boiling)
+        && d_radiolytic_gas_model
+        && d_radiolytic_gas_model->supplies_void_fraction())
+    {
+        throw std::invalid_argument(
+            "Boiling cannot be combined with Sheng two-population "
+            "radiolysis until vapor mass is coupled to bubble inventories.");
+    }
     d_physical_model_enabled = true;
     ensure_scalar_void_fraction_model();
     if (!d_boiling_source_model)
@@ -398,6 +449,16 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
     -> ScalarVoidFractionModel<Pack>&
 {
     validate_scalar_void_fraction_options(options);
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->supplies_void_fraction()
+        && (options.alpha_min
+                != d_radiolytic_gas_model->options().alpha_min
+            || options.alpha_max
+                != d_radiolytic_gas_model->options().alpha_max))
+    {
+        throw std::invalid_argument(
+            "A Sheng radiolysis mirror requires its scalar void bounds.");
+    }
     d_physical_model_enabled = true;
     if (!d_scalar_void_fraction_model)
     {
@@ -409,6 +470,7 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
     {
         d_scalar_void_fraction_model->configure(options);
     }
+    d_scalar_void_fraction_explicitly_configured = true;
     return *d_scalar_void_fraction_model;
 }
 
@@ -591,11 +653,6 @@ void BoussinesqSolver<Pack>::refresh_physical_models()
     stored_material_properties().update(context);
     refresh_material_feedback(d_time);
     stored_temperature_sources().update(context);
-    if (d_boiling_source_model)
-    {
-        d_boiling_source_model->update(
-            temperature(), stored_material_properties());
-    }
 }
 
 template<TpetraTypePack Pack>
@@ -621,7 +678,9 @@ void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
 {
     if (!d_scalar_void_fraction_model)
     {
-        configure_scalar_void_fraction(ScalarVoidFractionOptions{});
+        d_scalar_void_fraction_model =
+            std::make_unique<ScalarVoidFractionModel<Pack>>(
+                d_mesh, ScalarVoidFractionOptions{});
     }
 }
 
@@ -682,6 +741,14 @@ void BoussinesqSolver<Pack>::update_void_fraction_models(
         d_boiling_source_model
             ? &d_boiling_source_model->source_alpha_boil()
             : nullptr);
+
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled())
+    {
+        d_radiolytic_gas_model->synchronize_void_fraction(
+            d_scalar_void_fraction_model->alpha_g(),
+            d_scalar_void_fraction_model->options().alpha_max);
+    }
 }
 
 template<TpetraTypePack Pack>
@@ -874,6 +941,30 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::step()
 {
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled()
+        && d_radiolytic_gas_model->supplies_void_fraction()
+        && d_boiling_source_model
+        && d_boiling_source_model->enabled())
+    {
+        throw std::logic_error(
+            "Sheng two-population radiolysis cannot advance with boiling "
+            "until vapor mass is coupled to bubble inventories.");
+    }
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled()
+        && d_radiolytic_gas_model->supplies_void_fraction()
+        && d_scalar_void_fraction_model
+        && (d_scalar_void_fraction_model->options().alpha_min
+                != d_radiolytic_gas_model->options().alpha_min
+            || d_scalar_void_fraction_model->options().alpha_max
+                != d_radiolytic_gas_model->options().alpha_max))
+    {
+        throw std::logic_error(
+            "Sheng radiolysis cannot advance with mismatched scalar mirror "
+            "void-fraction bounds.");
+    }
+
     begin_step();
     if (d_step_index == 0)
     {
@@ -885,6 +976,58 @@ void BoussinesqSolver<Pack>::step()
     }
 
     solve_pressure_velocity_coupling();
+    const auto time_step = d_problem.time_options().time_step;
+    const auto advanced_radiolysis =
+        d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled()
+        && d_radiolytic_gas_model->supplies_void_fraction();
+
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->enabled()
+        && !advanced_radiolysis)
+    {
+        if (!d_scalar_void_fraction_model)
+        {
+            throw std::runtime_error(
+                "Ideal radiolysis requires the authoritative scalar void model.");
+        }
+        d_radiolytic_gas_model->advance(
+            d_time + time_step,
+            time_step,
+            temperature(),
+            pressure(),
+            velocity(),
+            projected_face_fluxes(),
+            stored_material_properties(),
+            d_fission_power_source
+                ? &d_fission_power_source->field()
+                : nullptr,
+            d_scalar_void_fraction_model->alpha_g(),
+            d_scalar_void_fraction_model->options().alpha_max);
+    }
+
+    if (!advanced_radiolysis)
+    {
+        if (d_boiling_source_model)
+        {
+            if (!d_scalar_void_fraction_model)
+            {
+                throw std::runtime_error(
+                    "Boiling requires the authoritative scalar void model.");
+            }
+            d_boiling_source_model->update(
+                time_step,
+                temperature(),
+                stored_material_properties(),
+                *d_scalar_void_fraction_model,
+                d_radiolytic_gas_model
+                        && d_radiolytic_gas_model->enabled()
+                    ? &d_radiolytic_gas_model->source_alpha_rad()
+                    : nullptr);
+        }
+        update_void_fraction_models(time_step);
+    }
+
     LinearSolveStatistics temperature_statistics;
     if (d_physical_model_enabled)
     {
@@ -904,7 +1047,7 @@ void BoussinesqSolver<Pack>::step()
             temperature_equation().advance_physical(
                 temperature(),
                 projected_face_fluxes(),
-                d_problem.time_options().time_step,
+                time_step,
                 stored_material_properties(),
                 temperature(),
                 total_power_density,
@@ -917,7 +1060,7 @@ void BoussinesqSolver<Pack>::step()
             temperature_equation().advance_semi_implicit(
                 temperature(),
                 projected_face_fluxes(),
-                d_problem.time_options().time_step,
+                time_step,
                 d_problem.time_options().thermal_diffusivity,
                 temperature(),
                 d_problem.linear_options());
@@ -929,12 +1072,11 @@ void BoussinesqSolver<Pack>::step()
     d_mesh->sync_periodic_boundaries(temperature());
     d_mesh->sync_periodic_boundaries(velocity());
 
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled())
+    if (advanced_radiolysis)
     {
         d_radiolytic_gas_model->advance(
-            d_time + d_problem.time_options().time_step,
-            d_problem.time_options().time_step,
+            d_time + time_step,
+            time_step,
             temperature(),
             pressure(),
             velocity(),
@@ -943,10 +1085,8 @@ void BoussinesqSolver<Pack>::step()
             d_fission_power_source
                 ? &d_fission_power_source->field()
                 : nullptr);
+        update_void_fraction_models(time_step);
     }
-
-    update_void_fraction_models(
-        d_problem.time_options().time_step);
 
     if (d_precursor_model && d_precursor_model->enabled())
     {
@@ -957,7 +1097,7 @@ void BoussinesqSolver<Pack>::step()
                 "Precursor model requires a liquid fraction field.");
         }
         d_precursor_model->advance(
-            d_problem.time_options().time_step,
+            time_step,
             *alpha_l,
             d_fission_power_source
                 ? &d_fission_power_source->field()
@@ -965,7 +1105,7 @@ void BoussinesqSolver<Pack>::step()
     }
 
     refresh_material_feedback(
-        d_time + d_problem.time_options().time_step);
+        d_time + time_step);
 
     finish_step();
 }

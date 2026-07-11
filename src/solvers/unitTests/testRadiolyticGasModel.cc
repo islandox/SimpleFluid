@@ -299,7 +299,8 @@ void advance_model(
 /**
  * @brief Ideal-gas source computes alpha production without changing alpha.
  */
-TEST(RadiolyticGasModelTest, IdealSourceDoesNotAdvanceVoidFraction)
+TEST(RadiolyticGasModelTest,
+     IdealSourceRequiresAndDoesNotAdvanceAuthoritativeVoid)
 {
     auto mesh = make_single_cell_mesh();
     SimpleFluid::RadiolyticGasModel<Pack> model(
@@ -307,13 +308,33 @@ TEST(RadiolyticGasModelTest, IdealSourceDoesNotAdvanceVoidFraction)
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
     FieldType power(mesh, 4.0e6, "qdot_fission");
+    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
     VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
 
+    EXPECT_THROW(
+        model.advance(
+            0.1,
+            0.1,
+            temperature,
+            pressure,
+            velocity,
+            flux,
+            material,
+            &power),
+        std::logic_error);
     model.advance(
-        0.1, 0.1, temperature, pressure, velocity, flux, material,
-        &power);
+        0.1,
+        0.1,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power,
+        authoritative_alpha,
+        model.options().alpha_max);
 
     const auto expected =
         2.0e-7 * 4.0e6 * 8.31446261815324 * 300.0 / 1.0e5;
@@ -335,20 +356,22 @@ TEST(RadiolyticGasModelTest, IdealSourceHonorsAlphaAndRateLimits)
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
     FieldType power(mesh, 1.0e12, "qdot_fission");
+    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
     VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
 
     model.advance(
         0.1, 0.1, temperature, pressure, velocity, flux, material,
-        &power);
+        &power, authoritative_alpha, options.alpha_max);
     EXPECT_DOUBLE_EQ(model.source_alpha_rad().value(0), 0.01);
 
-    model.alpha_g().put_scalar(options.alpha_max);
+    authoritative_alpha.put_scalar(options.alpha_max);
     model.advance(
         0.2, 0.1, temperature, pressure, velocity, flux, material,
-        &power);
+        &power, authoritative_alpha, options.alpha_max);
     EXPECT_DOUBLE_EQ(model.source_alpha_rad().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.alpha_g().value(0), options.alpha_max);
 }
 
 /**
@@ -554,13 +577,14 @@ TEST(RadiolyticGasModelTest, PrescribedPressureHistoryInterpolates)
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 8.0e4, "pressure");
     FieldType power(mesh, 1.0, "qdot_fission");
+    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
     VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
 
     model.advance(
         0.5, 0.1, temperature, pressure, velocity, flux, material,
-        &power);
+        &power, authoritative_alpha, options.alpha_max);
     EXPECT_DOUBLE_EQ(model.absolute_pressure().value(0), 1.5e5);
 }
 

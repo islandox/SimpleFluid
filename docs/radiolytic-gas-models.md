@@ -62,8 +62,17 @@ S_alpha_rad =
 
 The source is zero at zero fission power and when `alpha_g >= alpha_max`. It
 is limited by both `max_source_alpha_rate` and
-`(alpha_max - alpha_g) / dt`. This mode allocates `alpha_g` for model
-interoperability but does not advance it. Phase 14 owns that update.
+`(alpha_max - alpha_g) / dt`. In the Boussinesq solver, the Phase 14 scalar
+model owns the authoritative `alpha_g` field and bound; ideal radiolysis reads
+that state and mirrors it only for its model-local diagnostics.
+
+When no scalar-void model was explicitly configured, ideal-radiolysis bounds
+seed the solver's implicit scalar model before the first step. Explicit
+`ScalarVoidFractionOptions` take precedence. Reconfiguring radiolysis after
+time advancement never resets the evolved scalar state or its bounds.
+Standalone ideal-mode calls likewise must use the `advance` overload that
+supplies authoritative `alpha_g` and `alpha_max`; the shorter overload is
+reserved for disabled and two-population modes.
 
 ## Phase 12.1 state
 
@@ -82,6 +91,11 @@ It transports and reacts the following bulk quantities:
 `C_H2` is reconstructed from `I_H2 / alpha_l`. Empty bubble populations have
 zero radius and zero void diagnostics; population floors are never used as
 divisors.
+
+In this two-population mode, the radiolysis inventories own the reconstructed
+void state and the scalar model is only a common publication mirror. Their
+configured alpha bounds must match so mirroring cannot clip conserved bubble
+state.
 
 The model implements the following Sheng et al. relationships:
 
@@ -102,7 +116,7 @@ reports failed brackets or iterations.
 
 ## Numerical ordering
 
-For each configured solver step:
+For each configured two-population solver step:
 
 1. Refresh material properties and fission power.
 2. Solve velocity and pressure correction.

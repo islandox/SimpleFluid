@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "equations/BoussinesqModel.hh"
+#include "equations/ScalarVoidFractionModel.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -80,6 +80,11 @@ inline void validate_boiling_source_options(
         throw std::invalid_argument(
             "Wall evaporation fraction must be in [0, 1].");
     }
+    if (options.enable_wall_boiling && options.wall_heat_flux < 0.0)
+    {
+        throw std::invalid_argument(
+            "Wall boiling requires a non-negative wall heat flux.");
+    }
 }
 
 /**
@@ -140,6 +145,7 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using material_type = MaterialPropertyFields<Pack>;
+    using void_model_type = ScalarVoidFractionModel<Pack>;
 
     /**
      * @brief Construct a boiling model on a mesh with optional configuration.
@@ -223,12 +229,26 @@ public:
     }
 
     /**
-     * @brief Recompute boiling sources from temperature and material fields.
+     * @brief Atomically recompute boiling admitted by energy and void bounds.
+     *
+     * @param time_step Positive explicit timestep.
+     * @param temperature Current cell temperature.
+     * @param material Current material properties.
+     * @param void_model Authoritative scalar gas state and bounds.
+     * @param reserved_alpha_source Non-boiling source already reserving void.
      */
     void update(
+        scalar_type time_step,
         const field_type& temperature,
-        const material_type& material)
+        const material_type& material,
+        const void_model_type& void_model,
+        const field_type* reserved_alpha_source = nullptr)
     {
+        if (!std::isfinite(time_step) || time_step <= scalar_type{})
+        {
+            throw std::invalid_argument(
+                "Boiling source update requires a positive finite time step.");
+        }
         if (&temperature.mesh() != d_mesh.get()
             || &material.density.mesh() != d_mesh.get())
         {
@@ -236,27 +256,133 @@ public:
                 "BoilingSourceModel fields must be on the model mesh.");
         }
 
-        d_source_alpha_boil.put_scalar(0.0);
-        d_latent_heat_sink.put_scalar(0.0);
         if (!enabled())
         {
+            d_source_alpha_boil.put_scalar(0.0);
+            d_latent_heat_sink.put_scalar(0.0);
             return;
         }
 
-        if (d_options.enable_bulk_boiling)
+        validate_void_inputs(
+            void_model, reserved_alpha_source);
+        d_source_alpha_boil.put_scalar(0.0);
+        d_latent_heat_sink.put_scalar(0.0);
+        try
         {
-            add_bulk_boiling(temperature, material);
-        }
-        if (d_options.enable_wall_boiling)
-        {
-            add_wall_boiling();
-        }
+            if (d_options.enable_bulk_boiling)
+            {
+                add_bulk_boiling(time_step, temperature, material);
+            }
+            if (d_options.enable_wall_boiling)
+            {
+                add_wall_boiling();
+            }
 
+            limit_to_available_void(
+                time_step,
+                void_model,
+                reserved_alpha_source);
+        }
+        catch (...)
+        {
+            d_source_alpha_boil.put_scalar(0.0);
+            d_latent_heat_sink.put_scalar(0.0);
+            throw;
+        }
+    }
+
+private:
+    void validate_void_inputs(
+        const void_model_type& void_model,
+        const field_type* reserved_alpha_source) const
+    {
+        const auto& alpha_g = void_model.alpha_g();
+        if (&alpha_g.mesh() != d_mesh.get()
+            || (reserved_alpha_source != nullptr
+                && &reserved_alpha_source->mesh() != d_mesh.get()))
+        {
+            throw std::invalid_argument(
+                "Boiling void limiter fields must be on the model mesh.");
+        }
+        const auto& void_options = void_model.options();
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto alpha = alpha_g.value(cell_lid);
+            const auto reserved_rate = reserved_alpha_source == nullptr
+                                     ? scalar_type{}
+                                     : reserved_alpha_source->value(cell_lid);
+            if (!std::isfinite(alpha)
+                || alpha < void_options.alpha_min
+                || alpha > void_options.alpha_max
+                || !std::isfinite(reserved_rate)
+                || reserved_rate < scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "Boiling void limiter received invalid canonical state.");
+            }
+        }
+    }
+
+    /**
+     * @brief Limit requested boiling to void capacity left by other sources.
+     *
+     * The source and latent sink are reduced together so every unit of
+     * removed latent energy corresponds to vapor admitted by the scalar
+     * void-fraction update.
+     */
+    void limit_to_available_void(
+        scalar_type time_step,
+        const void_model_type& void_model,
+        const field_type* reserved_alpha_source)
+    {
+        const auto& alpha_g = void_model.alpha_g();
+        const auto& void_options = void_model.options();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto alpha = alpha_g.value(cell_lid);
+            const auto reserved_rate = reserved_alpha_source == nullptr
+                                     ? scalar_type{}
+                                     : reserved_alpha_source->value(cell_lid);
+            const auto requested_rate =
+                d_source_alpha_boil.value(cell_lid);
+            if (!std::isfinite(alpha)
+                || alpha < void_options.alpha_min
+                || alpha > void_options.alpha_max
+                || !std::isfinite(reserved_rate)
+                || !std::isfinite(requested_rate)
+                || requested_rate < scalar_type{})
+            {
+                throw std::runtime_error(
+                    "Boiling void limiter received invalid cell state.");
+            }
+
+            const auto collapse_rate =
+                void_model.bounded_collapse_rate(cell_lid, time_step);
+            const auto available_rate = std::max(
+                (void_options.alpha_max - alpha) / time_step
+              - reserved_rate
+              + collapse_rate,
+                scalar_type{});
+            const auto accepted_rate =
+                std::min(requested_rate, available_rate);
+            d_source_alpha_boil.set_owned_value(
+                cell_lid, accepted_rate);
+            d_latent_heat_sink.set_owned_value(
+                cell_lid,
+                accepted_rate
+              * d_options.gas_density
+              * d_options.latent_heat);
+        }
         d_source_alpha_boil.sync_ghosts();
         d_latent_heat_sink.sync_ghosts();
     }
 
-private:
     void register_output_fields()
     {
         d_output_fields = {
@@ -265,6 +391,7 @@ private:
     }
 
     void add_bulk_boiling(
+        scalar_type time_step,
         const field_type& temperature,
         const material_type& material)
     {
@@ -284,10 +411,13 @@ private:
             const auto superheat = std::max(
                 temperature_value - d_options.saturation_temperature,
                 scalar_type{});
-            const auto available_energy_rate =
+            const auto sensible_energy =
                 material.density.value(cell_lid)
               * material.specific_heat_capacity.value(cell_lid)
-              * superheat / d_options.boiling_time_scale;
+              * superheat;
+            const auto available_energy_rate =
+                sensible_energy
+              / std::max(d_options.boiling_time_scale, time_step);
             const auto mass_rate =
                 available_energy_rate / d_options.latent_heat;
             d_source_alpha_boil.sum_into_value(
