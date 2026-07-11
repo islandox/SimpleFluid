@@ -148,7 +148,7 @@ public:
      */
     const field_type& alpha_l() const noexcept { return d_alpha_l; }
     /**
-     * @brief Ideal-gas alpha source field.
+     * @brief Ideal alpha source or advanced net reconstructed-void rate.
      */
     const field_type& source_alpha_rad() const noexcept
     {
@@ -276,7 +276,7 @@ private:
         scalar_type diffusivity,
         bool diffuse,
         bool liquid_weighted,
-        scalar_type& escaped_inventory);
+        field_type& escape_rate);
     CellProperties cell_properties(
         local_ordinal_type cell_lid,
         const field_type& temperature,
@@ -299,6 +299,8 @@ private:
     void sync_all_fields();
     scalar_type global_integral(const field_type& field) const;
     scalar_type global_sum(scalar_type local_value) const;
+    int global_max(int local_value) const;
+    void reduce_event_statistics();
     scalar_type total_hydrogen_inventory() const;
     scalar_type rise_velocity(
         scalar_type radius,

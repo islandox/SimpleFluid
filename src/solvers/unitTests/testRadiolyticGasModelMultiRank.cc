@@ -215,3 +215,132 @@ TEST(RadiolyticGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
         EXPECT_GE(model.large_moles().value(cell_lid), 0.0);
     }
 }
+
+TEST(RadiolyticGasModelMultiRankTest,
+     ConservesFiniteCourantFreeSurfaceEscape)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto options = sheng_options();
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 1.0e-6;
+    options.rise_velocity_mode =
+        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = 10.0;
+    options.free_surface_patches = {"zmax"};
+    options.microbubble_lifetime = 1.0e30;
+    options.large_bubble_dissolution_time = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    RadiolyticModelType model(mesh, options);
+
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+
+    const auto count_before =
+        global_integral(model.micro_number_density())
+      + global_integral(model.large_number_density());
+    constexpr double time_step = 0.025;
+    model.advance(
+        time_step,
+        time_step,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+
+    const auto count_after =
+        global_integral(model.micro_number_density())
+      + global_integral(model.large_number_density());
+    const auto& statistics = model.last_statistics();
+    const auto& molar_rate =
+        *model.output_fields().at("H2_escape_molar_rate");
+    const auto& number_rate =
+        *model.output_fields().at("bubble_escape_number_rate");
+
+    EXPECT_GT(statistics.hydrogen_escaped, 0.0);
+    EXPECT_GT(statistics.escaped_bubble_count, 0.0);
+    EXPECT_NEAR(
+        statistics.hydrogen_after + statistics.hydrogen_escaped,
+        statistics.hydrogen_before + statistics.hydrogen_produced,
+        1.0e-13);
+    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-13);
+    EXPECT_NEAR(
+        count_after + statistics.escaped_bubble_count,
+        count_before,
+        count_before * 1.0e-10);
+    EXPECT_NEAR(
+        time_step * global_integral(molar_rate),
+        statistics.hydrogen_escaped,
+        1.0e-13);
+    EXPECT_NEAR(
+        time_step * global_integral(number_rate),
+        statistics.escaped_bubble_count,
+        count_before * 1.0e-10);
+
+    expect_same_on_all_ranks(*mesh, statistics.hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.escaped_bubble_count);
+    expect_same_on_all_ranks(*mesh, statistics.inventory_error);
+    expect_same_on_all_ranks(
+        *mesh, statistics.cumulative_hydrogen_escaped);
+    expect_same_on_all_ranks(
+        *mesh, statistics.cumulative_escaped_bubble_count);
+}
+
+TEST(RadiolyticGasModelMultiRankTest, ReducesClippedCellCountGlobally)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto options = sheng_options();
+    options.alpha_max = 0.01;
+    options.max_concentration = 1.0;
+    options.initial_dissolved_hydrogen = 5.0;
+    options.initial_large_number_density = 1.0e12;
+    options.initial_large_moles = 1.0;
+    options.microbubble_lifetime = 1.0e9;
+    options.large_bubble_dissolution_time = 1.0e9;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    RadiolyticModelType model(mesh, options);
+
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+
+    model.advance(
+        1.0e-9,
+        1.0e-9,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+
+    const auto expected_clipped = static_cast<int>(
+        mesh->owned_cell_map()->getGlobalNumElements());
+    EXPECT_EQ(
+        model.last_statistics().clipped_cells, expected_clipped);
+    expect_same_on_all_ranks(
+        *mesh,
+        static_cast<double>(model.last_statistics().clipped_cells));
+}

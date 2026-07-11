@@ -130,7 +130,14 @@ For each configured two-population solver step:
 Transport/local-kinetics splitting is first order. Local linear decays are
 analytic and the remaining rates use bounded subcycles. `maximum_subcycles`,
 clipping, pressure-floor events, and radius failures are exposed through
-`RadiolyticGasStepStatistics`.
+`RadiolyticGasStepStatistics` and reduced globally across MPI ranks.
+
+In ideal mode, `S_alpha_rad` is the source applied to the low-order scalar
+model. In two-population mode it is the model-owned net bounded-void rate,
+`(alpha_g_new - alpha_g_previous) / dt`; it includes reconstruction, transport,
+and escape and can therefore be negative. The common scalar mirror derives
+`S_alpha_total` independently from its own published old/new state rather than
+copying this internal history.
 
 The no-advection dissolved mode is the default paper-compatibility mode.
 Optional CFD advection uses the projected liquid face flux. Bubble number and
@@ -185,6 +192,12 @@ inventory_error =
 The inventory is the domain integral of
 `I_H2 + M_micro + M_large`. Microbubble dissolution and category conversion
 transfer moles between these fields without deleting them.
+
+Free-surface escape is evaluated from the accepted unknown of the implicit
+upwind transport solve. `H2_escape_molar_rate` and
+`bubble_escape_number_rate` are cell-volumetric rates localized to the
+free-surface owner cells, and their global integrals times `dt` reproduce the
+per-step escaped inventories.
 
 When the raw reconstructed void exceeds `alpha_max`, population inventories
 remain unchanged. `alpha_g_raw`, `alpha_g_excess`, and bounded `alpha_g`
@@ -249,6 +262,10 @@ radiolytic_free_surface_patches
 Enabled modes require an explicit positive molar yield and an explicit finite
 source-rate limit. Advanced mode also requires Henry, property, nucleation,
 radius, population, and concentration inputs.
+
+Advanced mode reconstructs void from conserved bubble inventories. It is
+therefore rejected with active boiling or finite scalar collapse until those
+mechanisms can add or remove the corresponding inventories conservatively.
 
 ## Output
 

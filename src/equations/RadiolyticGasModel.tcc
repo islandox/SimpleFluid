@@ -203,6 +203,42 @@ auto RadiolyticGasModel<Pack>::global_sum(
 }
 
 template<TpetraTypePack Pack>
+int RadiolyticGasModel<Pack>::global_max(int local_value) const
+{
+    int global_value{};
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_value,
+        &global_value);
+    return global_value;
+}
+
+template<TpetraTypePack Pack>
+void RadiolyticGasModel<Pack>::reduce_event_statistics()
+{
+    const int local_counts[]{
+        d_last_statistics.clipped_cells,
+        d_last_statistics.pressure_floor_cells,
+        d_last_statistics.radius_solver_failures};
+    int global_counts[3]{};
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        3,
+        local_counts,
+        global_counts);
+    d_last_statistics.maximum_subcycles = global_max(
+        d_last_statistics.maximum_subcycles);
+    d_last_statistics.clipped_cells = global_counts[0];
+    d_last_statistics.pressure_floor_cells = global_counts[1];
+    d_last_statistics.radius_solver_failures = global_counts[2];
+}
+
+template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::global_integral(
     const field_type& field) const -> scalar_type
 {
@@ -404,8 +440,13 @@ void RadiolyticGasModel<Pack>::transport_scalar(
     scalar_type diffusivity,
     bool diffuse,
     bool liquid_weighted,
-    scalar_type& escaped_inventory)
+    field_type& escape_rate)
 {
+    if (&escape_rate.mesh() != d_mesh.get())
+    {
+        throw std::invalid_argument(
+            "Radiolytic escape rate is on the wrong mesh.");
+    }
     field.sync_ghosts();
     d_alpha_l.sync_ghosts();
     if (slip_velocity)
@@ -490,24 +531,6 @@ void RadiolyticGasModel<Pack>::transport_scalar(
     advection_weight.sync_ghosts();
     diffusion_weight.sync_ghosts();
 
-    for (size_t face = 0; face < d_mesh->num_faces(); ++face)
-    {
-        const auto face_lid =
-            static_cast<local_ordinal_type>(face);
-        if (!transport_flux.is_owned_face(face_lid)
-            || !is_free_surface(face_lid))
-        {
-            continue;
-        }
-        const auto flux =
-            std::max(transport_flux.value(face_lid), scalar_type{});
-        const auto owner = d_mesh->owner_cell(face_lid);
-        escaped_inventory +=
-            time_step * flux
-          * advection_weight.local_value(owner)
-          * old_values.local_value(owner);
-    }
-
     auto boundary_condition =
         [](int, size_t)
     {
@@ -561,6 +584,30 @@ void RadiolyticGasModel<Pack>::transport_scalar(
         field.set_owned_value(cell_lid, transported);
     }
     field.sync_ghosts();
+
+    for (size_t face = 0; face < d_mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<local_ordinal_type>(face);
+        if (!transport_flux.is_owned_face(face_lid)
+            || !is_free_surface(face_lid))
+        {
+            continue;
+        }
+        const auto flux =
+            std::max(transport_flux.value(face_lid), scalar_type{});
+        const auto owner = d_mesh->owner_cell(face_lid);
+        const auto primary_value = liquid_weighted
+            ? field.value(owner) / storage_weight.value(owner)
+            : field.value(owner);
+        const auto boundary_rate =
+            flux
+          * advection_weight.local_value(owner)
+          * primary_value;
+        escape_rate.sum_into_value(
+            owner,
+            boundary_rate / d_mesh->cell_volume(owner));
+    }
 }
 
 template<TpetraTypePack Pack>
@@ -571,8 +618,8 @@ void RadiolyticGasModel<Pack>::transport_populations(
     const face_flux_field_type& liquid_face_flux,
     const material_type& material)
 {
-    scalar_type local_escaped_moles{};
-    scalar_type local_escaped_count{};
+    d_escape_molar_rate.put_scalar(0.0);
+    d_escape_number_rate.put_scalar(0.0);
     scalar_type diffusivity = d_options.hydrogen_diffusivity;
     if (d_options.diffusivity_mode
         == HydrogenDiffusivityMode::Sheng2024)
@@ -612,7 +659,7 @@ void RadiolyticGasModel<Pack>::transport_populations(
         diffusivity,
         true,
         true,
-        local_escaped_moles);
+        d_escape_molar_rate);
 
     face_flux_field_type axial_bubble_flux(
         d_mesh, 0.0, "radiolytic_axial_bubble_flux");
@@ -702,7 +749,7 @@ void RadiolyticGasModel<Pack>::transport_populations(
         0.0,
         false,
         false,
-        local_escaped_count);
+        d_escape_number_rate);
     transport_scalar(
         d_micro_moles,
         time_step,
@@ -711,7 +758,7 @@ void RadiolyticGasModel<Pack>::transport_populations(
         0.0,
         false,
         false,
-        local_escaped_moles);
+        d_escape_molar_rate);
 
     transport_scalar(
         d_large_number,
@@ -721,7 +768,7 @@ void RadiolyticGasModel<Pack>::transport_populations(
         0.0,
         false,
         false,
-        local_escaped_count);
+        d_escape_number_rate);
     transport_scalar(
         d_large_moles,
         time_step,
@@ -730,12 +777,14 @@ void RadiolyticGasModel<Pack>::transport_populations(
         0.0,
         false,
         false,
-        local_escaped_moles);
+        d_escape_molar_rate);
 
+    d_escape_molar_rate.sync_ghosts();
+    d_escape_number_rate.sync_ghosts();
     d_last_statistics.hydrogen_escaped =
-        global_sum(local_escaped_moles);
+        time_step * global_integral(d_escape_molar_rate);
     d_last_statistics.escaped_bubble_count =
-        global_sum(local_escaped_count);
+        time_step * global_integral(d_escape_number_rate);
     d_cumulative_hydrogen_escaped +=
         d_last_statistics.hydrogen_escaped;
     d_cumulative_escaped_bubble_count +=
@@ -1215,31 +1264,6 @@ void RadiolyticGasModel<Pack>::advance_two_population(
       - d_last_statistics.hydrogen_before
       - d_last_statistics.hydrogen_produced;
     d_last_statistics.void_volume = global_integral(d_alpha_g);
-
-    const auto total_volume = [&]()
-    {
-        scalar_type local{};
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            local += d_mesh->cell_volume(
-                static_cast<local_ordinal_type>(owned));
-        }
-        return global_sum(local);
-    }();
-    const auto escape_molar_rate =
-        total_volume > 0.0
-            ? d_last_statistics.hydrogen_escaped
-                / (time_step * total_volume)
-            : 0.0;
-    const auto escape_number_rate =
-        total_volume > 0.0
-            ? d_last_statistics.escaped_bubble_count
-                / (time_step * total_volume)
-            : 0.0;
-    d_escape_molar_rate.put_scalar(escape_molar_rate);
-    d_escape_number_rate.put_scalar(escape_number_rate);
 }
 
 template<TpetraTypePack Pack>
@@ -1410,6 +1434,7 @@ void RadiolyticGasModel<Pack>::advance(
             fission_power_density,
             alpha_g,
             alpha_max);
+        reduce_event_statistics();
         return;
     }
 
@@ -1422,6 +1447,7 @@ void RadiolyticGasModel<Pack>::advance(
         fission_power_density);
     update_inertial_pressure(
         time_step, temperature, liquid_face_flux, material);
+    reduce_event_statistics();
 
     if (d_options.pressure_mode != RadiolyticPressureMode::Inertial)
     {

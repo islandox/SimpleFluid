@@ -347,6 +347,54 @@ TEST(ScalarVoidFractionModelTest, DisabledSourcesLeaveAlphaUnchanged)
     EXPECT_DOUBLE_EQ(model.source_alpha_total().value(0), 0.0);
 }
 
+TEST(ScalarVoidFractionModelTest, MirrorDerivesRealizedRateAndComplement)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::ScalarVoidFractionOptions options;
+    options.initial_alpha = 0.1;
+    SimpleFluid::ScalarVoidFractionModel<Pack> model(mesh, options);
+    FieldType advanced_alpha(mesh, 0.02, "advanced_alpha_g");
+
+    model.mirror(advanced_alpha, 0.2);
+
+    EXPECT_DOUBLE_EQ(model.alpha_g().value(0), 0.02);
+    EXPECT_DOUBLE_EQ(model.alpha_l().value(0), 0.98);
+    EXPECT_NEAR(model.source_alpha_total().value(0), -0.4, 1.0e-14);
+}
+
+TEST(Phase13PlusCouplingTest,
+     AdvancedMirrorAggregatesItsActualScalarStateChange)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        {},
+        make_energy_test_time_options(0.1),
+        {},
+        make_energy_test_model_options());
+    solver.initialize_heated_box(300.0, 300.0);
+
+    SimpleFluid::FissionPowerSourceOptions fission;
+    fission.profile = SimpleFluid::FissionPowerProfile::Constant;
+    fission.power_density = 0.0;
+    solver.configure_fission_power_source(fission);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.initial_alpha = 0.1;
+    auto& void_model =
+        solver.configure_scalar_void_fraction(void_options);
+    auto& radiolysis =
+        solver.configure_radiolytic_gas(make_sheng_test_options());
+
+    solver.step();
+
+    EXPECT_DOUBLE_EQ(radiolysis.alpha_g().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(radiolysis.source_alpha_rad().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(void_model.alpha_g().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(void_model.alpha_l().value(0), 1.0);
+    EXPECT_NEAR(void_model.source_alpha_total().value(0), -1.0, 1.0e-13);
+}
+
 TEST(Phase13PlusCouplingTest,
      IdealRadiolysisSeedsOnlyImplicitPreStepVoidConfiguration)
 {
@@ -640,6 +688,58 @@ TEST(Phase13PlusCouplingTest,
         solver.configure_boiling_source(boiling_options);
 
         radiolysis.configure(make_sheng_test_options());
+        EXPECT_THROW(solver.step(), std::logic_error);
+    }
+}
+
+TEST(Phase13PlusCouplingTest,
+     RejectsUnconservedShengCollapseCombinationInEitherOrder)
+{
+    const auto time_options = make_energy_test_time_options(0.1);
+    SimpleFluid::ScalarVoidFractionOptions collapse_options;
+    collapse_options.alpha_collapse_time = 1.0;
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            time_options,
+            {},
+            make_energy_test_model_options());
+        solver.configure_scalar_void_fraction(collapse_options);
+        EXPECT_THROW(
+            solver.configure_radiolytic_gas(make_sheng_test_options()),
+            std::invalid_argument);
+    }
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            time_options,
+            {},
+            make_energy_test_model_options());
+        solver.configure_radiolytic_gas(make_sheng_test_options());
+        EXPECT_THROW(
+            solver.configure_scalar_void_fraction(collapse_options),
+            std::invalid_argument);
+    }
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            time_options,
+            {},
+            make_energy_test_model_options());
+        solver.configure_radiolytic_gas(make_sheng_test_options());
+        auto* void_model = solver.find_scalar_void_fraction_model();
+        ASSERT_NE(void_model, nullptr);
+        void_model->configure(collapse_options);
+
         EXPECT_THROW(solver.step(), std::logic_error);
     }
 }
