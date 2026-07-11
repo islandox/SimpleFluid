@@ -12,6 +12,8 @@
 #include "FluidSolver.hh"
 #include "geometry/MeshFactory.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -310,7 +312,21 @@ auto FluidSolver<Pack>::velocity_update_norm(
     }
 
     using std::sqrt;
-    return sqrt(norm_squared);
+    return sqrt(global_sum(norm_squared));
+}
+
+template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::global_sum(
+    scalar_type local_value) const -> scalar_type
+{
+    scalar_type global_value{};
+    Teuchos::reduceAll(
+        *d_mesh->owned_cell_map()->getComm(),
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_value,
+        &global_value);
+    return global_value;
 }
 
 template<TpetraTypePack Pack>
@@ -439,7 +455,7 @@ void FluidSolver<Pack>::solve_coupled_krylov()
     }
     using std::sqrt;
     pressure_velocity_residuals().continuity =
-        sqrt(continuity_norm_squared);
+        sqrt(global_sum(continuity_norm_squared));
 }
 
 template<TpetraTypePack Pack>
