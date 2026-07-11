@@ -11,6 +11,9 @@
 
 #include "PressureProjectionEquation.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
+#include <array>
 #include <cmath>
 
 namespace SimpleFluid
@@ -57,6 +60,11 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
         throw std::runtime_error(
             "PressureProjectionEquation requires an assembled mesh with an owned-cell map.");
     }
+    if (map->getGlobalNumElements() == 0)
+    {
+        throw std::runtime_error(
+            "PressureProjectionEquation requires at least one global cell.");
+    }
 
     return map;
 }
@@ -64,20 +72,15 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
 /**
  * @brief (Re)build the cached pressure-Poisson matrix.
  *
- * Uses the first owned-cell global ID as the gauge-fixing row.
+ * Uses the globally smallest owned-row ID as the gauge-fixing row.
  *
  * @tparam Pack Tpetra type pack.
  */
 template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::rebuild_matrix() const
 {
-    if (d_mesh->num_owned_cells() == 0)
-    {
-        d_cached_pressure_matrix = Teuchos::null;
-        return;
-    }
-
-    const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
+    const auto owned_map = require_owned_cell_map(d_mesh);
+    const auto gauge_gid = owned_map->getMinAllGlobalIndex();
     d_cached_pressure_matrix =
         FVM::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
 }
@@ -158,16 +161,12 @@ auto PressureProjectionEquation<Pack>::project(
     {
         throw std::invalid_argument("PressureProjectionEquation requires a positive time step.");
     }
-    if (d_mesh->num_owned_cells() == 0)
-    {
-        return {};
-    }
-
     FVM::face_velocities(velocity, velocity_boundary_cache,
                          d_cached_face_velocity);
     FVM::normal_face_fluxes(d_cached_face_velocity,
                             d_cached_face_fluxes);
-    const auto gauge_gid = d_mesh->owned_cell_global_ids().front();
+    const auto owned_map = require_owned_cell_map(d_mesh);
+    const auto gauge_gid = owned_map->getMinAllGlobalIndex();
     if (d_cached_pressure_matrix.is_null())
     {
         rebuild_matrix();
@@ -185,7 +184,7 @@ auto PressureProjectionEquation<Pack>::project(
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid = d_mesh->cell_global_id(cell_lid);
+        const auto row_gid = owned_map->getGlobalElement(cell_lid);
         const auto rhs_value = row_gid == gauge_gid
                              ? scalar_type{}
                              : -FVM::cell_flux_balance<Pack>(
@@ -237,10 +236,21 @@ auto PressureProjectionEquation<Pack>::project(
         continuity_norm_squared += balance * balance;
     }
 
+    const std::array<scalar_type, 2> local_norms_squared{
+        pressure_norm_squared,
+        continuity_norm_squared};
+    std::array<scalar_type, 2> global_norms_squared{};
+    Teuchos::reduceAll(
+        *owned_map->getComm(),
+        Teuchos::REDUCE_SUM,
+        2,
+        local_norms_squared.data(),
+        global_norms_squared.data());
+
     using std::sqrt;
     return {
-        sqrt(pressure_norm_squared),
-        sqrt(continuity_norm_squared),
+        sqrt(global_norms_squared[0]),
+        sqrt(global_norms_squared[1]),
         linear_statistics};
 }
 

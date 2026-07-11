@@ -778,7 +778,7 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
     auto convection =
         SimpleFluid::FVM::upwind_convection_matrix<Pack>(*mesh, fluxes);
     auto pressure = SimpleFluid::FVM::pressure_poisson_matrix<Pack>(
-        *mesh, mesh->owned_cell_global_ids().front());
+        *mesh, mesh->owned_cell_map()->getMinAllGlobalIndex());
 
     EXPECT_EQ(convection->getGlobalNumRows(),
               mesh->owned_cell_map()->getGlobalNumElements());
