@@ -49,6 +49,52 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
     return {mesh, options, time_options};
 }
 
+SimpleFluid::BoussinesqModelOptions make_energy_test_model_options()
+{
+    SimpleFluid::BoussinesqModelOptions options;
+    options.reference_density = 2.0;
+    options.density = 2.0;
+    options.specific_heat_capacity = 5.0;
+    options.dynamic_viscosity = 0.0;
+    options.thermal_conductivity = 0.0;
+    return options;
+}
+
+SimpleFluid::TimeStepperOptions make_energy_test_time_options(
+    double time_step)
+{
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = time_step;
+    options.kinematic_viscosity = 0.0;
+    options.thermal_diffusivity = 0.0;
+    options.thermal_expansion = 0.0;
+    options.gravity_x = 0.0;
+    options.gravity_y = 0.0;
+    options.gravity_z = 0.0;
+    return options;
+}
+
+SimpleFluid::ReactingGasOptions make_sheng_test_options()
+{
+    SimpleFluid::ReactingGasOptions options;
+    options.mode =
+        SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    options.hydrogen_yield_mol_per_j = 2.0e-7;
+    options.max_source_alpha_rate = 1.0;
+    options.reference_pressure = 1.0e5;
+    options.henry_coefficient = 1.0e-5;
+    options.surface_tension = 0.07;
+    options.hydrogen_diffusivity = 1.0e-8;
+    options.uranium_concentration_mol_per_m3 = 1000.0;
+    options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    options.min_radius = 1.0e-12;
+    options.max_radius = 1.0e-3;
+    options.min_population = 1.0e-40;
+    options.max_population = 1.0e40;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    return options;
+}
+
 } // namespace
 
 TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
@@ -56,6 +102,7 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
     auto mesh = make_single_cell_mesh();
     auto material = make_water_properties(mesh);
     FieldType temperature(mesh, 360.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
 
     SimpleFluid::BoilingSourceOptions options;
     options.enable_bulk_boiling = true;
@@ -66,12 +113,12 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
     options.gas_density = 2.0;
     SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
 
-    model.update(temperature, material);
+    model.update(1.0e-6, temperature, material, void_model);
     EXPECT_DOUBLE_EQ(model.source_alpha_boil().value(0), 0.0);
     EXPECT_DOUBLE_EQ(model.latent_heat_sink().value(0), 0.0);
 
     temperature.put_scalar(383.0);
-    model.update(temperature, material);
+    model.update(1.0e-6, temperature, material, void_model);
     const auto expected_energy =
         1000.0 * 4200.0 * (383.0 - 373.0) / 4.0;
     EXPECT_NEAR(
@@ -91,6 +138,7 @@ TEST(BoilingSourceModelTest, WallSourceDistributesToOwnerCell)
     auto mesh = make_single_cell_mesh();
     auto material = make_water_properties(mesh);
     FieldType temperature(mesh, 300.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
 
     SimpleFluid::BoilingSourceOptions options;
     options.enable_wall_boiling = true;
@@ -100,7 +148,7 @@ TEST(BoilingSourceModelTest, WallSourceDistributesToOwnerCell)
     options.wall_heat_flux = 80.0;
     options.wall_boiling_patches = {"zmax"};
     SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
-    model.update(temperature, material);
+    model.update(1.0, temperature, material, void_model);
 
     Pack::local_ordinal_type zmax_face = 0;
     bool found = false;
@@ -146,6 +194,119 @@ TEST(BoilingSourceModelTest, RejectsInvalidActiveParameters)
     EXPECT_THROW(
         SimpleFluid::BoilingSourceModel<Pack>(mesh, options),
         std::invalid_argument);
+
+    options.enable_bulk_boiling = false;
+    options.enable_wall_boiling = true;
+    options.gas_density = 1.0;
+    options.wall_heat_flux = -1.0;
+    EXPECT_THROW(
+        SimpleFluid::BoilingSourceModel<Pack>(mesh, options),
+        std::invalid_argument);
+}
+
+TEST(BoilingSourceModelTest, RejectsInvalidTimeStep)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    EXPECT_THROW(
+        model.update(0.0, temperature, material, void_model),
+        std::invalid_argument);
+}
+
+TEST(BoilingSourceModelTest,
+     ReservesCanonicalVoidCapacityForReactionSource)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    FieldType reaction_source(mesh, 0.08, "S_alpha_reaction");
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.initial_alpha = 0.1;
+    void_options.alpha_max = 0.2;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(
+        mesh, void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling_options;
+    boiling_options.enable_bulk_boiling = true;
+    boiling_options.saturation_temperature = 373.0;
+    boiling_options.boiling_time_scale = 1.0;
+    boiling_options.latent_heat = 10.0;
+    boiling_options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> boiling_model(
+        mesh, boiling_options);
+
+    boiling_model.update(
+        1.0,
+        temperature,
+        material,
+        void_model,
+        &reaction_source);
+    void_model.update_explicit(
+        1.0, &reaction_source, &boiling_model.source_alpha_boil());
+
+    EXPECT_NEAR(
+        boiling_model.source_alpha_boil().value(0), 0.02, 1.0e-14);
+    EXPECT_NEAR(
+        boiling_model.latent_heat_sink().value(0), 0.2, 1.0e-14);
+    EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-14);
+    EXPECT_NEAR(
+        void_model.source_alpha_total().value(0), 0.1, 1.0e-14);
+
+    reaction_source.put_scalar(0.0);
+    boiling_model.update(
+        1.0,
+        temperature,
+        material,
+        void_model,
+        &reaction_source);
+    EXPECT_DOUBLE_EQ(boiling_model.source_alpha_boil().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(boiling_model.latent_heat_sink().value(0), 0.0);
+}
+
+TEST(BoilingSourceModelTest, CollapseCapacityIsTimestepBounded)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.initial_alpha = void_options.alpha_max;
+    void_options.alpha_collapse_time = 0.1;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(
+        mesh, void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling_options;
+    boiling_options.enable_bulk_boiling = true;
+    boiling_options.saturation_temperature = 373.0;
+    boiling_options.boiling_time_scale = 1.0;
+    boiling_options.latent_heat = 10.0;
+    boiling_options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> boiling_model(
+        mesh, boiling_options);
+
+    boiling_model.update(
+        2.0,
+        temperature,
+        material,
+        void_model);
+    void_model.update_explicit(
+        2.0, nullptr, &boiling_model.source_alpha_boil());
+
+    EXPECT_NEAR(
+        boiling_model.source_alpha_boil().value(0), 0.1, 1.0e-14);
+    EXPECT_NEAR(
+        boiling_model.latent_heat_sink().value(0), 1.0, 1.0e-14);
+    EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-14);
+    EXPECT_NEAR(
+        void_model.source_alpha_total().value(0), 0.0, 1.0e-14);
 }
 
 TEST(ScalarVoidFractionModelTest, AggregatesAndBoundsSources)
@@ -184,6 +345,303 @@ TEST(ScalarVoidFractionModelTest, DisabledSourcesLeaveAlphaUnchanged)
     EXPECT_DOUBLE_EQ(model.alpha_g().value(0), 0.12);
     EXPECT_DOUBLE_EQ(model.alpha_l().value(0), 0.88);
     EXPECT_DOUBLE_EQ(model.source_alpha_total().value(0), 0.0);
+}
+
+TEST(Phase13PlusCouplingTest,
+     IdealReactionSourceSeedsOnlyImplicitPreStepVoidConfiguration)
+{
+    SimpleFluid::ReactingGasOptions reaction_source;
+    reaction_source.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
+    reaction_source.hydrogen_yield_mol_per_j = 1.0e-7;
+    reaction_source.max_source_alpha_rate = 1.0;
+    reaction_source.alpha_min = 0.05;
+    reaction_source.alpha_max = 0.2;
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            make_energy_test_time_options(0.1),
+            {},
+            make_energy_test_model_options());
+        solver.configure_boiling_source(
+            SimpleFluid::BoilingSourceOptions{});
+        solver.configure_reacting_gas(reaction_source);
+
+        const auto* void_model =
+            solver.find_scalar_void_fraction_model();
+        ASSERT_NE(void_model, nullptr);
+        EXPECT_DOUBLE_EQ(void_model->options().alpha_min, 0.05);
+        EXPECT_DOUBLE_EQ(void_model->options().alpha_max, 0.2);
+        EXPECT_DOUBLE_EQ(void_model->alpha_g().value(0), 0.05);
+    }
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            make_energy_test_time_options(0.1),
+            {},
+            make_energy_test_model_options());
+        SimpleFluid::ScalarVoidFractionOptions void_options;
+        void_options.alpha_max = 0.3;
+        void_options.initial_alpha = 0.1;
+        auto& void_model =
+            solver.configure_scalar_void_fraction(void_options);
+        solver.configure_reacting_gas(reaction_source);
+
+        EXPECT_DOUBLE_EQ(void_model.options().alpha_min, 0.0);
+        EXPECT_DOUBLE_EQ(void_model.options().alpha_max, 0.3);
+        EXPECT_DOUBLE_EQ(void_model.alpha_g().value(0), 0.1);
+    }
+}
+
+TEST(Phase13PlusCouplingTest,
+     ReactionSourceConfigurationPreservesEvolvedImplicitVoid)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        {},
+        make_energy_test_time_options(1.0),
+        {},
+        make_energy_test_model_options());
+    solver.initialize_heated_box(383.0, 383.0);
+
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 373.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    solver.configure_boiling_source(boiling);
+    solver.step();
+
+    auto* void_model = solver.find_scalar_void_fraction_model();
+    ASSERT_NE(void_model, nullptr);
+    const auto evolved_alpha = void_model->alpha_g().value(0);
+    ASSERT_GT(evolved_alpha, 0.0);
+
+    SimpleFluid::ReactingGasOptions reaction_source;
+    reaction_source.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
+    reaction_source.hydrogen_yield_mol_per_j = 1.0e-7;
+    reaction_source.max_source_alpha_rate = 1.0;
+    reaction_source.alpha_max = 0.2;
+    solver.configure_reacting_gas(reaction_source);
+
+    EXPECT_DOUBLE_EQ(void_model->options().alpha_max, 0.95);
+    EXPECT_DOUBLE_EQ(void_model->alpha_g().value(0), evolved_alpha);
+}
+
+TEST(Phase13PlusCouplingTest,
+     IdealReactionSourceUsesAuthoritativeScalarVoidLimit)
+{
+    auto mesh = make_single_cell_mesh();
+    auto time_options = make_energy_test_time_options(0.1);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        {},
+        time_options,
+        {},
+        make_energy_test_model_options());
+    solver.initialize_heated_box(300.0, 300.0);
+
+    SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
+    prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
+    prescribed_heat.power_density = 100.0;
+    solver.configure_prescribed_heat_source(prescribed_heat);
+
+    SimpleFluid::ReactingGasOptions reaction_source;
+    reaction_source.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
+    reaction_source.hydrogen_yield_mol_per_j = 1.0;
+    reaction_source.reference_pressure = 1.0e5;
+    reaction_source.max_source_alpha_rate = 1.0;
+    auto& reacting_model =
+        solver.configure_reacting_gas(reaction_source);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.initial_alpha = 0.19;
+    auto& void_model =
+        solver.configure_scalar_void_fraction(void_options);
+
+    solver.step();
+
+    const auto capacity_rate =
+        (void_options.alpha_max - void_options.initial_alpha) / 0.1;
+    EXPECT_NEAR(
+        reacting_model.source_alpha_reaction().value(0),
+        capacity_rate,
+        1.0e-13);
+    EXPECT_NEAR(
+        void_model.source_alpha_total().value(0),
+        capacity_rate,
+        1.0e-13);
+    EXPECT_NEAR(
+        void_model.alpha_g().value(0), void_options.alpha_max, 1.0e-13);
+    EXPECT_NEAR(void_model.alpha_l().value(0), 0.8, 1.0e-13);
+    EXPECT_NEAR(
+        reacting_model.alpha_g().value(0),
+        void_model.alpha_g().value(0),
+        1.0e-13);
+    EXPECT_NEAR(
+        reacting_model.alpha_l().value(0),
+        void_model.alpha_l().value(0),
+        1.0e-13);
+
+    solver.step();
+    EXPECT_DOUBLE_EQ(reacting_model.source_alpha_reaction().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(void_model.source_alpha_total().value(0), 0.0);
+}
+
+TEST(Phase13PlusCouplingTest,
+     BoilingEnergyMatchesVoidAdmittedAtScalarLimit)
+{
+    auto mesh = make_single_cell_mesh();
+    auto time_options = make_energy_test_time_options(1.0);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        {},
+        time_options,
+        {},
+        make_energy_test_model_options());
+    solver.initialize_heated_box(383.0, 383.0);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.initial_alpha = 0.19;
+    auto& void_model =
+        solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling_options;
+    boiling_options.enable_bulk_boiling = true;
+    boiling_options.saturation_temperature = 373.0;
+    boiling_options.boiling_time_scale = 1.0;
+    boiling_options.latent_heat = 10.0;
+    boiling_options.gas_density = 1.0;
+    auto& boiling_model =
+        solver.configure_boiling_source(boiling_options);
+
+    solver.step();
+
+    constexpr double accepted_source = 0.01;
+    constexpr double accepted_sink = 0.1;
+    EXPECT_NEAR(
+        boiling_model.source_alpha_boil().value(0),
+        accepted_source,
+        1.0e-13);
+    EXPECT_NEAR(
+        void_model.source_alpha_total().value(0),
+        accepted_source,
+        1.0e-13);
+    EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-13);
+    EXPECT_NEAR(
+        boiling_model.latent_heat_sink().value(0),
+        accepted_sink,
+        1.0e-13);
+    EXPECT_NEAR(
+        boiling_model.latent_heat_sink().value(0),
+        boiling_model.source_alpha_boil().value(0)
+          * boiling_options.gas_density
+          * boiling_options.latent_heat,
+        1.0e-13);
+    EXPECT_NEAR(solver.temperature().value(0), 382.99, 1.0e-10);
+}
+
+TEST(Phase13PlusCouplingTest,
+     BulkBoilingCannotConsumeMoreThanStepSensibleSuperheat)
+{
+    auto mesh = make_single_cell_mesh();
+    auto time_options = make_energy_test_time_options(2.0);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        {},
+        time_options,
+        {},
+        make_energy_test_model_options());
+    solver.initialize_heated_box(383.0, 383.0);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.95;
+    auto& void_model =
+        solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling_options;
+    boiling_options.enable_bulk_boiling = true;
+    boiling_options.saturation_temperature = 373.0;
+    boiling_options.boiling_time_scale = 1.0;
+    boiling_options.latent_heat = 1000.0;
+    boiling_options.gas_density = 1.0;
+    auto& boiling_model =
+        solver.configure_boiling_source(boiling_options);
+
+    solver.step();
+
+    EXPECT_NEAR(
+        boiling_model.latent_heat_sink().value(0), 50.0, 1.0e-10);
+    EXPECT_NEAR(
+        boiling_model.source_alpha_boil().value(0), 0.05, 1.0e-13);
+    EXPECT_NEAR(
+        void_model.source_alpha_total().value(0), 0.05, 1.0e-13);
+    EXPECT_NEAR(void_model.alpha_g().value(0), 0.1, 1.0e-13);
+    EXPECT_NEAR(solver.temperature().value(0), 373.0, 1.0e-10);
+}
+
+TEST(Phase13PlusCouplingTest,
+     RejectsUnconservedShengBoilingCombinationInEitherOrder)
+{
+    auto time_options = make_energy_test_time_options(0.1);
+    SimpleFluid::BoilingSourceOptions boiling_options;
+    boiling_options.enable_bulk_boiling = true;
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            time_options,
+            {},
+            make_energy_test_model_options());
+        solver.configure_reacting_gas(make_sheng_test_options());
+        EXPECT_THROW(
+            solver.configure_boiling_source(boiling_options),
+            std::invalid_argument);
+    }
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            time_options,
+            {},
+            make_energy_test_model_options());
+        solver.configure_boiling_source(boiling_options);
+        EXPECT_THROW(
+            solver.configure_reacting_gas(make_sheng_test_options()),
+            std::invalid_argument);
+    }
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            {},
+            time_options,
+            {},
+            make_energy_test_model_options());
+        SimpleFluid::ReactingGasOptions ideal;
+        ideal.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
+        ideal.hydrogen_yield_mol_per_j = 1.0e-7;
+        ideal.max_source_alpha_rate = 1.0;
+        auto& reaction_source = solver.configure_reacting_gas(ideal);
+        solver.configure_boiling_source(boiling_options);
+
+        reaction_source.configure(make_sheng_test_options());
+        EXPECT_THROW(solver.step(), std::logic_error);
+    }
 }
 
 TEST(MaterialFeedbackModelTest, BoussinesqVoidDensityAndFloors)
