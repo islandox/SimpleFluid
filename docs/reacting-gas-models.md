@@ -173,7 +173,9 @@ Pressure modes are:
 
 - `constant`: uniform `reference_pressure`
 - `prescribedHistory`: piecewise-linear absolute-pressure history
-- `reconstructed`: `p_ref + p_correction - volume_mean(p_correction)`
+- `reconstructed`:
+  `p_ref + p_gauge - volume_mean(p_gauge)`, where the solver gauge pressure is
+  stored in Pa
 - `inertial`: retained absolute-pressure field updated weakly after kinetics
 
 The incompressible pressure-correction field is never interpreted directly as
