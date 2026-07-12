@@ -97,6 +97,9 @@ public:
     /**
      * @brief Advance disabled or two-population radiolysis state.
      *
+     * Reconstructed pressure mode uses the supplied physical gauge-pressure
+     * variation in Pa.
+     *
      * Ideal-gas mode requires the overload carrying authoritative scalar void.
      */
     void advance(

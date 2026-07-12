@@ -419,8 +419,9 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
  * @tparam Pack The Tpetra type pack.
  * @param velocity Cell-centered velocity field.
  * @param pressure Cell-centered pressure field.
- * @param pressure_coefficient Velocity-pressure coefficient, normally the
- *        time step for the transient momentum equation.
+ * @param pressure_coefficient Velocity-pressure coefficient. For pressure
+ *        stored in Pa, this is normally the time step divided by the
+ *        reference density.
  * @param boundary_cache Pre-computed velocity-boundary cache.
  * @param[out] fluxes Pre-allocated FaceField to receive stabilized fluxes.
  */

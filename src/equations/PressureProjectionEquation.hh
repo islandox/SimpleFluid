@@ -38,6 +38,8 @@ inline LinearSolverOptions pressure_projection_linear_solver_options()
  *
  * The class keeps the legacy pressure reset and the pressure-correction
  * projection used by the Boussinesq solver separated from orchestration.
+ * Projection unknowns are normalized internally, while returned pressure
+ * corrections are physical gauge pressures in Pa.
  *
  * @tparam Pack Tpetra type pack used for matrix/vector storage.
  */
@@ -56,7 +58,7 @@ public:
     using source_type = std::function<scalar_type(local_ordinal_type)>;
     struct ProjectionResult
     {
-        scalar_type pressure_correction = {};
+        scalar_type pressure_correction = {}; ///< L2 norm of the Pa update.
         scalar_type continuity = {};
         LinearSolveStatistics linear_solve;
     };
@@ -83,12 +85,14 @@ public:
     ProjectionResult project(
         field_type& pressure,
         scalar_type time_step,
+        scalar_type reference_density,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         velocity_field_type& velocity);
 
     ProjectionResult project(
         field_type& pressure,
         scalar_type time_step,
+        scalar_type reference_density,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         velocity_field_type& velocity,
         const source_type& right_hand_source);

@@ -289,6 +289,7 @@ private:
     BoussinesqMomentumEquation<Pack>& momentum_equation() override;
     LinearSolveSummary advance_momentum() override;
     coupled_system_type assemble_coupled_system() override;
+    scalar_type pressure_reference_density() const noexcept override;
     MaterialPropertyFields<Pack>& stored_material_properties();
     const MaterialPropertyFields<Pack>& stored_material_properties() const;
     TemperatureSourceRegistry<Pack>& stored_temperature_sources();

@@ -109,6 +109,7 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
  * @tparam Pack Tpetra type pack.
  * @param[in,out] pressure Pressure field (updated on output).
  * @param time_step Time-step size.
+ * @param reference_density Density used to normalize pressure internally.
  * @param velocity_boundary_cache Cached velocity boundary conditions.
  * @param[in,out] velocity Velocity field corrected by the pressure
  *        gradient on output.
@@ -117,6 +118,7 @@ template<TpetraTypePack Pack>
 auto PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
+    scalar_type reference_density,
     const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity) -> ProjectionResult
 {
@@ -126,8 +128,13 @@ auto PressureProjectionEquation<Pack>::project(
         return scalar_type{};
     };
 
-    return project(pressure, time_step, velocity_boundary_cache, velocity,
-                   zero_source);
+    return project(
+        pressure,
+        time_step,
+        reference_density,
+        velocity_boundary_cache,
+        velocity,
+        zero_source);
 }
 
 /**
@@ -138,6 +145,8 @@ auto PressureProjectionEquation<Pack>::project(
  * @tparam Pack Tpetra type pack.
  * @param[in,out] pressure Pressure field (solved on output).
  * @param time_step Time-step size (must be positive).
+ * @param reference_density Positive density used to convert the internally
+ *        normalized correction to Pa.
  * @param velocity_boundary_cache Cached velocity boundary conditions.
  * @param[in,out] velocity Velocity field corrected by the pressure
  *        gradient on output.
@@ -149,6 +158,7 @@ template<TpetraTypePack Pack>
 auto PressureProjectionEquation<Pack>::project(
     field_type& pressure,
     scalar_type time_step,
+    scalar_type reference_density,
     const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity,
     const source_type& right_hand_source) -> ProjectionResult
@@ -160,6 +170,13 @@ auto PressureProjectionEquation<Pack>::project(
     if (time_step <= 0.0)
     {
         throw std::invalid_argument("PressureProjectionEquation requires a positive time step.");
+    }
+    if (!std::isfinite(reference_density)
+        || reference_density <= scalar_type{})
+    {
+        throw std::invalid_argument(
+            "PressureProjectionEquation requires a finite positive "
+            "reference density.");
     }
     FVM::face_velocities(velocity, velocity_boundary_cache,
                          d_cached_face_velocity);
@@ -247,9 +264,12 @@ auto PressureProjectionEquation<Pack>::project(
         local_norms_squared.data(),
         global_norms_squared.data());
 
+    pressure.owned_data().scale(reference_density);
+    d_mesh->sync_periodic_boundaries(pressure);
+
     using std::sqrt;
     return {
-        sqrt(global_norms_squared[0]),
+        reference_density * sqrt(global_norms_squared[0]),
         sqrt(global_norms_squared[1]),
         linear_statistics};
 }

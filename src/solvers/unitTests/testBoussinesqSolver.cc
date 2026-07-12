@@ -16,6 +16,7 @@
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -585,6 +586,118 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
     EXPECT_LT(coupled_continuity, 1.0e-10);
 }
 
+/**
+ * @brief Stored gauge pressure scales with density while velocity does not.
+ */
+TEST(BoussinesqSolverTest,
+     StoresPressureInPascalsAcrossSegregatedAndCoupledSolves)
+{
+    struct CaseState
+    {
+        std::vector<double> pressure;
+        std::vector<MeshType::Vec3> velocity;
+    };
+
+    auto run_case = [](
+        SimpleFluid::PressureVelocityCoupling coupling,
+        double reference_density)
+    {
+        auto mesh = make_box_mesh();
+        SimpleFluid::BoundaryConditionSet bcs;
+        bcs.temperature["xmin"] =
+            {SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+        bcs.temperature["xmax"] =
+            {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+
+        SimpleFluid::TimeStepperOptions time_options;
+        time_options.time_step = 1.0e-2;
+        time_options.steps = 2;
+        time_options.thermal_diffusivity = 0.0;
+        time_options.kinematic_viscosity = 1.0e-2;
+        time_options.thermal_expansion = 1.0;
+        time_options.gravity_x = -1.0;
+        time_options.gravity_y = -0.5;
+        time_options.gravity_z = -0.25;
+        time_options.reference_temperature = 0.5;
+        time_options.pressure_velocity_coupling = coupling;
+        time_options.n_pressure_correctors = 2;
+
+        SimpleFluid::BoussinesqModelOptions model_options;
+        model_options.reference_density = reference_density;
+        model_options.density = reference_density;
+        model_options.specific_heat_capacity = 1.0;
+        model_options.dynamic_viscosity =
+            reference_density * time_options.kinematic_viscosity;
+        model_options.thermal_conductivity = 0.0;
+
+        SimpleFluid::LinearSolverOptions linear_options;
+        linear_options.tolerance = 1.0e-12;
+        linear_options.max_iterations = 200;
+
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh,
+            bcs,
+            time_options,
+            linear_options,
+            model_options);
+        solver.initialize_heated_box(1.0, 0.0);
+        solver.run();
+
+        CaseState state;
+        state.pressure.reserve(mesh->num_owned_cells());
+        state.velocity.reserve(mesh->num_owned_cells());
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            state.pressure.push_back(solver.pressure().value(cell_lid));
+            state.velocity.push_back(solver.velocity().value(cell_lid));
+        }
+        return state;
+    };
+
+    constexpr double water_density = 1000.0;
+    for (const auto coupling : {
+             SimpleFluid::PressureVelocityCoupling::PISO,
+             SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
+    {
+        const auto unit_density = run_case(coupling, 1.0);
+        const auto water = run_case(coupling, water_density);
+        ASSERT_EQ(water.pressure.size(), unit_density.pressure.size());
+        ASSERT_EQ(water.velocity.size(), unit_density.velocity.size());
+
+        double maximum_pressure = 0.0;
+        for (size_t cell = 0; cell < unit_density.pressure.size(); ++cell)
+        {
+            maximum_pressure = std::max(
+                maximum_pressure,
+                std::abs(unit_density.pressure[cell]));
+            const auto pressure_tolerance = std::max(
+                1.0e-10,
+                std::abs(unit_density.pressure[cell]) * 1.0e-8);
+            EXPECT_NEAR(
+                water.pressure[cell] / water_density,
+                unit_density.pressure[cell],
+                pressure_tolerance);
+
+            const auto velocity_tolerance = 1.0e-9;
+            EXPECT_NEAR(
+                water.velocity[cell].x,
+                unit_density.velocity[cell].x,
+                velocity_tolerance);
+            EXPECT_NEAR(
+                water.velocity[cell].y,
+                unit_density.velocity[cell].y,
+                velocity_tolerance);
+            EXPECT_NEAR(
+                water.velocity[cell].z,
+                unit_density.velocity[cell].z,
+                velocity_tolerance);
+        }
+        EXPECT_GT(maximum_pressure, 1.0e-8);
+    }
+}
+
 TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
 {
     auto mesh = make_checkerboard_box_mesh();
@@ -637,6 +750,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
     EXPECT_GT(system.matrix->getGlobalNumEntries(), 0U);
     EXPECT_GT(system.pressure_stabilization->getGlobalNumEntries(), 0U);
     EXPECT_GT(system.schur->getGlobalNumEntries(), 0U);
+    EXPECT_DOUBLE_EQ(system.reference_density, 1.0);
 
     typename Pack::vector_type checkerboard(
         mesh->owned_cell_map(), true);
@@ -658,6 +772,75 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
         checkerboard, stabilized);
     EXPECT_GT(stabilized.norm2(), 1.0e-12);
     EXPECT_GT(checkerboard.dot(stabilized), 0.0);
+}
+
+TEST(BoussinesqSolverTest,
+     CoupledKrylovNormalizesPhysicalPressureBoundaryData)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    bcs.pressure["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, 2.5};
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 3.0};
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FVM::face_fluxes(velocity, cache, face_fluxes);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 1.0e-2;
+    options.kinematic_viscosity = 1.0e-2;
+    SimpleFluid::IncompressibleMomentumEquation<Pack>
+        momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack>
+        coupled_solver(mesh);
+
+    auto assemble = [&](double reference_density)
+    {
+        auto scaled_bcs = bcs;
+        scaled_bcs.pressure["xmin"].value *= reference_density;
+        scaled_bcs.pressure["xmax"].value *= reference_density;
+        return coupled_solver.assemble(
+            momentum_equation,
+            velocity,
+            pressure,
+            face_fluxes,
+            cache,
+            scaled_bcs,
+            options,
+            reference_density);
+    };
+
+    const auto unit_density = assemble(1.0);
+    const auto water = assemble(1000.0);
+    const auto unit_rhs = unit_density.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    const auto water_rhs = water.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    ASSERT_EQ(unit_rhs.extent(0), water_rhs.extent(0));
+
+    double maximum_rhs = 0.0;
+    for (size_t row = 0; row < unit_rhs.extent(0); ++row)
+    {
+        maximum_rhs = std::max(maximum_rhs, std::abs(unit_rhs(row, 0)));
+        EXPECT_NEAR(
+            water_rhs(row, 0),
+            unit_rhs(row, 0),
+            std::max(1.0e-12, std::abs(unit_rhs(row, 0)) * 1.0e-12));
+    }
+    EXPECT_GT(maximum_rhs, 0.0);
+    EXPECT_DOUBLE_EQ(water.reference_density, 1000.0);
 }
 
 TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)

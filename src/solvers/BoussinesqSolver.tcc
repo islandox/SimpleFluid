@@ -784,11 +784,13 @@ template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
     FVM::cell_gradient(pressure(), predictor_pressure_gradient());
+    const auto inverse_reference_density =
+        scalar_type{1} / pressure_reference_density();
     auto pressure_source =
         [&](local_ordinal_type cell_lid) -> vec_type
     {
         return predictor_pressure_gradient().value(cell_lid)
-             * scalar_type{-1};
+             * (-inverse_reference_density);
     };
 
     if (d_physical_model_enabled)
@@ -815,6 +817,13 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
         velocity(),
         pressure_source,
         d_problem.linear_options());
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::pressure_reference_density() const noexcept
+    -> scalar_type
+{
+    return d_model_options.reference_density;
 }
 
 template<TpetraTypePack Pack>
@@ -848,7 +857,7 @@ auto BoussinesqSolver<Pack>::assemble_coupled_system()
  * @param direction Unit direction vector for the temperature gradient.
  * @param hot_at_min Temperature at the minimum projection point.
  * @param cold_at_max Temperature at the maximum projection point.
- * @param initial_pressure Uniform initial pressure value.
+ * @param initial_pressure Uniform initial gauge pressure in Pa.
  * @throws std::invalid_argument If direction has zero norm.
  */
 template<TpetraTypePack Pack>
@@ -905,7 +914,7 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
  * @tparam Pack Tpetra type pack.
  * @param hot_temperature Temperature at the hot (xmin) boundary.
  * @param cold_temperature Temperature at the cold (xmax) boundary.
- * @param initial_pressure Uniform initial pressure value.
+ * @param initial_pressure Uniform initial gauge pressure in Pa.
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_heated_box(
@@ -927,7 +936,7 @@ void BoussinesqSolver<Pack>::initialize_heated_box(
  * @tparam Pack Tpetra type pack.
  * @param hot_temperature Temperature at the bottom (zmin) boundary.
  * @param cold_temperature Temperature at the top (zmax) boundary.
- * @param initial_pressure Uniform initial pressure value.
+ * @param initial_pressure Uniform initial gauge pressure in Pa.
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(

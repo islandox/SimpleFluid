@@ -63,7 +63,7 @@ struct BoundaryConditionSet
 {
     BoundaryConditionMap temperature;
     VectorBoundaryConditionMap velocity;
-    BoundaryConditionMap pressure;
+    BoundaryConditionMap pressure; ///< Dirichlet Pa; Neumann Pa/m.
 };
 
 } // namespace SimpleFluid

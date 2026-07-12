@@ -132,7 +132,12 @@ TEST(PressureProjectionMultiRankTest,
 
     constexpr scalar_type time_step = 1.0;
     const auto result = equation.project(
-        pressure, time_step, boundary_cache, velocity, source);
+        pressure,
+        time_step,
+        scalar_type{1},
+        boundary_cache,
+        velocity,
+        source);
 
     EXPECT_TRUE(result.linear_solve.converged);
 

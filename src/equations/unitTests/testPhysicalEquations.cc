@@ -377,10 +377,17 @@ TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
         return cell_lid == 0 ? 0.0 : 4.0;
     };
 
-    equation.project(pressure, 1.0, cache, velocity, source);
+    constexpr double reference_density = 1000.0;
+    equation.project(
+        pressure,
+        1.0,
+        reference_density,
+        cache,
+        velocity,
+        source);
 
     EXPECT_NEAR(pressure.value(0), 0.0, 1.0e-12);
-    EXPECT_NEAR(pressure.value(1), 1.0, 1.0e-10);
+    EXPECT_NEAR(pressure.value(1), reference_density, 1.0e-8);
 }
 
 /**
@@ -421,7 +428,7 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
-    equation.project(pressure, 0.1, cache, velocity);
+    equation.project(pressure, 0.1, 1.0, cache, velocity);
 
     const auto after = divergence_norm();
     EXPECT_LT(after, before);
