@@ -589,6 +589,49 @@ TEST(RadiolyticGasModelTest, PrescribedPressureHistoryInterpolates)
 }
 
 /**
+ * @brief Reconstructed pressure uses the solver's gauge variation in Pa.
+ */
+TEST(RadiolyticGasModelTest,
+     ReconstructedPressureUsesPascalGaugeVariation)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    ASSERT_EQ(mesh->num_owned_cells(), 2U);
+
+    auto options = ideal_options();
+    options.pressure_mode =
+        SimpleFluid::RadiolyticPressureMode::Reconstructed;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    pressure.set_owned_value(0, -1000.0);
+    pressure.set_owned_value(1, 1000.0);
+    pressure.sync_ghosts();
+    FieldType power(mesh, 0.0, "qdot_fission");
+    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    material.initialize_density(800.0);
+    ASSERT_DOUBLE_EQ(material.density.value(0), 800.0);
+
+    model.advance(
+        0.1,
+        0.1,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power,
+        authoritative_alpha,
+        options.alpha_max);
+
+    EXPECT_NEAR(model.absolute_pressure().value(0), 9.9e4, 1.0e-10);
+    EXPECT_NEAR(model.absolute_pressure().value(1), 1.01e5, 1.0e-10);
+}
+
+/**
  * @brief Finite-Courant escape closes step and cumulative inventories.
  */
 TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)

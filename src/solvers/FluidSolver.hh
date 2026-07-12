@@ -71,8 +71,10 @@ public:
     scalar_type time() const noexcept { return d_time; }
     int step_index() const noexcept { return d_step_index; }
 
+    /** @brief Physical gauge-pressure field in Pa. */
     const field_type& pressure() const noexcept;
     const velocity_field_type& velocity() const noexcept;
+    /** @brief Mutable physical gauge-pressure field in Pa. */
     field_type& pressure() noexcept;
     velocity_field_type& velocity() noexcept;
 
@@ -104,6 +106,10 @@ protected:
     virtual IncompressibleMomentumEquation<Pack>& momentum_equation();
     virtual LinearSolveSummary advance_momentum();
     virtual coupled_system_type assemble_coupled_system();
+    virtual scalar_type pressure_reference_density() const noexcept
+    {
+        return scalar_type{1};
+    }
 
     void begin_step();
     void finish_step();

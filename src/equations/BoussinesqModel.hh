@@ -238,7 +238,7 @@ struct BoussinesqUpdateContext
     int step_index{};
     const mesh_type& mesh;
     const field_type& temperature;
-    const field_type& pressure;
+    const field_type& pressure; ///< Gauge pressure in Pa.
     const velocity_field_type& velocity;
 };
 

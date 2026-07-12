@@ -46,6 +46,8 @@ namespace SimpleFluid
  *
  * Stores the block matrix, RHS, momentum sub-block, gradient/divergence
  * operators, pressure stabilization, and Schur complement approximation.
+ * Pressure blocks act on internally normalized pressure p/rho_ref; public
+ * solver fields are converted to and from Pa at the solve boundary.
  *
  * @tparam Pack Tpetra type pack providing matrix, map, and vector types.
  */
@@ -54,6 +56,7 @@ struct CoupledPressureVelocitySystem
 {
     using matrix_type = typename Pack::matrix_type;
     using map_type = typename Pack::map_type;
+    using scalar_type = typename Pack::scalar_type;
     using vector_type = typename Pack::vector_type;
 
     Teuchos::RCP<const map_type> map;
@@ -65,6 +68,7 @@ struct CoupledPressureVelocitySystem
     std::array<Teuchos::RCP<matrix_type>, 3> divergence;
     Teuchos::RCP<matrix_type> pressure_stabilization;
     Teuchos::RCP<matrix_type> schur;
+    scalar_type reference_density = scalar_type{1};
 };
 
 /**
@@ -498,7 +502,8 @@ public:
         const face_flux_field_type& face_fluxes,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions,
-        const TimeStepperOptions& time_options) const
+        const TimeStepperOptions& time_options,
+        scalar_type reference_density = scalar_type{1}) const
     {
         EquationValidation::require_mesh_match(
             *d_mesh, velocity, "CoupledPressureVelocitySolver");
@@ -522,7 +527,8 @@ public:
             pressure,
             velocity_boundary_cache,
             boundary_conditions,
-            time_options);
+            time_options,
+            reference_density);
     }
 
     system_type assemble(
@@ -585,7 +591,8 @@ public:
             pressure,
             velocity_boundary_cache,
             boundary_conditions,
-            time_options);
+            time_options,
+            reference_density);
     }
 
 private:
@@ -595,8 +602,17 @@ private:
         const field_type& pressure,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions,
-        const TimeStepperOptions& time_options) const
+        const TimeStepperOptions& time_options,
+        scalar_type reference_density) const
     {
+        if (!std::isfinite(reference_density)
+            || reference_density <= scalar_type{})
+        {
+            throw std::invalid_argument(
+                "CoupledPressureVelocitySolver requires a finite positive "
+                "reference density.");
+        }
+
         auto [coupled_map, coupled_overlap_map] =
             detail::make_coupled_maps(*d_mesh);
         auto coupled_matrix = Teuchos::rcp(new matrix_type(
@@ -740,6 +756,8 @@ private:
                     pressure_iter == boundary_conditions.pressure.end()
                   ? BoundaryCondition{}
                   : pressure_iter->second;
+                const auto normalized_pressure_value =
+                    pressure_condition.value / reference_density;
 
                 if (pressure_condition.type
                     == BoundaryConditionType::Dirichlet)
@@ -747,7 +765,7 @@ private:
                     for (size_t component = 0; component < 3; ++component)
                     {
                         momentum_boundary_rhs[component] -=
-                            pressure_condition.value
+                            normalized_pressure_value
                             * area_components[component];
                     }
                 }
@@ -759,7 +777,7 @@ private:
                             gradient_rows[component], cell_lid,
                             area_components[component]);
                         momentum_boundary_rhs[component] -=
-                            pressure_condition.value
+                            normalized_pressure_value
                             * d_mesh->cell_to_face_distance(
                                 face_lid, cell_lid)
                             * area_components[component];
@@ -928,7 +946,8 @@ private:
             std::move(gradient),
             std::move(divergence),
             std::move(pressure_stabilization),
-            std::move(schur)};
+            std::move(schur),
+            reference_density};
     }
 
 public:
@@ -949,6 +968,14 @@ public:
                                     multi_vector_type,
                                     operator_type>;
 
+        if (!std::isfinite(system.reference_density)
+            || system.reference_density <= scalar_type{})
+        {
+            throw std::invalid_argument(
+                "Coupled pressure-velocity system requires a finite positive "
+                "reference density.");
+        }
+
         auto solution = Teuchos::rcp(
             new vector_type(system.map, true));
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
@@ -962,7 +989,8 @@ public:
             solution->replaceGlobalValue(4 * cell_gid + 1, value.y);
             solution->replaceGlobalValue(4 * cell_gid + 2, value.z);
             solution->replaceGlobalValue(
-                4 * cell_gid + 3, pressure.value(cell_lid));
+                4 * cell_gid + 3,
+                pressure.value(cell_lid) / system.reference_density);
         }
 
         auto preconditioner = Teuchos::rcp(
@@ -1020,7 +1048,9 @@ public:
                  solution_view(4 * owned + 1, 0),
                  solution_view(4 * owned + 2, 0)});
             pressure.set_owned_value(
-                cell_lid, solution_view(4 * owned + 3, 0));
+                cell_lid,
+                system.reference_density
+                    * solution_view(4 * owned + 3, 0));
         }
         d_mesh->sync_periodic_boundaries(velocity);
         d_mesh->sync_periodic_boundaries(pressure);
