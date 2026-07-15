@@ -102,7 +102,10 @@ For each Boussinesq step:
 6. When selected, advance the two-population model and mirror its reconstructed
    void into the scalar publication field. The mirror derives `S_alpha_total`
    from its actual old/new published state.
-7. Advance scalar source-decay groups on the liquid fraction.
+7. Advance the conserved scalar source-decay inventories
+   `alpha_l * C_i`, apply zero-flux diffusion with coefficient
+   `alpha_l * scalar_group_effective_diffusivity`, and reconstruct `C_i` from
+   the updated liquid fraction.
 8. Refresh feedback material fields for output and the next step.
 
 ## Output Fields
