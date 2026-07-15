@@ -295,6 +295,7 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     const RadiolyticGasOptions& options) -> RadiolyticGasModel<Pack>&
 {
     validate_radiolytic_gas_options(options);
+    bool scalar_void_was_reset = false;
     if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation
         && d_boiling_source_model
         && d_boiling_source_model->enabled())
@@ -323,6 +324,7 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
         {
             d_scalar_void_fraction_model->configure(void_options);
         }
+        scalar_void_was_reset = true;
     }
     else
     {
@@ -355,6 +357,13 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     else
     {
         d_radiolytic_gas_model->configure(options);
+    }
+    if (scalar_void_was_reset
+        && d_precursor_model
+        && d_step_index == 0)
+    {
+        d_precursor_model->initialize_inventory(
+            d_scalar_void_fraction_model->alpha_l());
     }
     return *d_radiolytic_gas_model;
 }
@@ -485,6 +494,11 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
         d_scalar_void_fraction_model->configure(options);
     }
     d_scalar_void_fraction_explicitly_configured = true;
+    if (d_precursor_model && d_step_index == 0)
+    {
+        d_precursor_model->initialize_inventory(
+            d_scalar_void_fraction_model->alpha_l());
+    }
     return *d_scalar_void_fraction_model;
 }
 
@@ -583,6 +597,8 @@ auto BoussinesqSolver<Pack>::configure_precursors(
     {
         d_precursor_model->configure(options);
     }
+    d_precursor_model->initialize_inventory(
+        *active_alpha_l_field());
     return *d_precursor_model;
 }
 
