@@ -805,6 +805,186 @@ TEST(DelayedNeutronPrecursorModelTest, SourceAndDecayAreAnalytic)
         model.concentration(0).value(0),
         4.0 / 2.0 * (1.0 - std::exp(-1.0)),
         1.0e-12);
+
+    options.decay_constants = {1.0e-18};
+    model.configure(options);
+    model.advance(0.5, alpha_l, nullptr);
+    EXPECT_NEAR(model.concentration(0).value(0), 2.0, 1.0e-12);
+}
+
+TEST(DelayedNeutronPrecursorModelTest,
+     ChangingLiquidFractionPreservesInventory)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {4.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 0.8, "alpha_l");
+
+    model.advance(0.25, alpha_l, nullptr);
+    const auto volume = mesh->cell_volume(0);
+    const auto initial_inventory =
+        model.liquid_inventory(0).value(0) * volume;
+    EXPECT_NEAR(model.concentration(0).value(0), 4.0, 1.0e-13);
+    EXPECT_NEAR(initial_inventory, 0.8 * 4.0 * volume, 1.0e-13);
+
+    alpha_l.put_scalar(0.2);
+    model.advance(0.25, alpha_l, nullptr);
+
+    EXPECT_NEAR(model.concentration(0).value(0), 16.0, 1.0e-12);
+    EXPECT_NEAR(
+        model.liquid_inventory(0).value(0) * volume,
+        initial_inventory,
+        1.0e-13);
+    EXPECT_NEAR(
+        alpha_l.value(0) * model.concentration(0).value(0) * volume,
+        initial_inventory,
+        1.0e-13);
+}
+
+TEST(DelayedNeutronPrecursorModelTest,
+     EffectiveDiffusivityConservesLiquidInventory)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.power_yields = {1.0};
+    options.effective_diffusivity = 0.25;
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 0.5, "alpha_l");
+    alpha_l.set_value(1, 0.25);
+    FieldType fission_power(mesh, 0.0, "qdot_fission");
+    fission_power.set_value(0, 5.0);
+
+    model.advance(0.1, alpha_l, &fission_power);
+    const auto old_0 = model.concentration(0).value(0);
+    const auto old_1 = model.concentration(0).value(1);
+    ASSERT_GT(old_0, old_1);
+
+    const auto inventory_before =
+        model.liquid_inventory(0).value(0) * mesh->cell_volume(0)
+      + model.liquid_inventory(0).value(1) * mesh->cell_volume(1);
+    constexpr double time_step = 0.2;
+    model.advance(time_step, alpha_l, nullptr);
+
+    MeshType::local_ordinal_type interior_face = -1;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<MeshType::local_ordinal_type>(face);
+        if (mesh->is_interior_face(face_lid))
+        {
+            interior_face = face_lid;
+            break;
+        }
+    }
+    ASSERT_GE(interior_face, 0);
+    const auto owner = mesh->owner_cell(interior_face);
+    const auto neighbor = mesh->neighbor_cell(interior_face);
+    const auto owner_diffusivity =
+        alpha_l.value(owner) * options.effective_diffusivity;
+    const auto neighbor_diffusivity =
+        alpha_l.value(neighbor) * options.effective_diffusivity;
+    const auto owner_distance =
+        mesh->cell_to_face_distance(interior_face, owner);
+    const auto neighbor_distance =
+        mesh->cell_to_face_distance(interior_face, neighbor);
+    const auto face_diffusivity =
+        (owner_distance + neighbor_distance)
+      / (owner_distance / owner_diffusivity
+         + neighbor_distance / neighbor_diffusivity);
+    const auto face_coefficient =
+        face_diffusivity * mesh->face_area(interior_face)
+      / mesh->face_cell_center_distance(interior_face);
+    const auto weight_0 = alpha_l.value(0) * mesh->cell_volume(0);
+    const auto weight_1 = alpha_l.value(1) * mesh->cell_volume(1);
+    const auto difference =
+        (old_0 - old_1)
+      / (1.0
+         + time_step * face_coefficient
+           * (1.0 / weight_0 + 1.0 / weight_1));
+    const auto weighted_total = weight_0 * old_0 + weight_1 * old_1;
+    const auto expected_0 =
+        (weighted_total + weight_1 * difference)
+      / (weight_0 + weight_1);
+    const auto expected_1 = expected_0 - difference;
+    const auto new_0 = model.concentration(0).value(0);
+    const auto new_1 = model.concentration(0).value(1);
+
+    EXPECT_NEAR(new_0, expected_0, 1.0e-10);
+    EXPECT_NEAR(new_1, expected_1, 1.0e-10);
+    EXPECT_LT(new_0, old_0);
+    EXPECT_GT(new_1, old_1);
+    const auto inventory_after =
+        model.liquid_inventory(0).value(0) * mesh->cell_volume(0)
+      + model.liquid_inventory(0).value(1) * mesh->cell_volume(1);
+    EXPECT_NEAR(inventory_after, inventory_before, 1.0e-11);
+    for (MeshType::local_ordinal_type cell_lid = 0; cell_lid < 2; ++cell_lid)
+    {
+        EXPECT_NEAR(
+            model.liquid_inventory(0).value(cell_lid),
+            alpha_l.value(cell_lid)
+              * model.concentration(0).value(cell_lid),
+            1.0e-12);
+    }
+}
+
+TEST(DelayedNeutronPrecursorModelTest,
+     SolverConfigurationUsesInitialLiquidFraction)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    SimpleFluid::TimeStepperOptions time_options;
+    auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, boundary_conditions, time_options, {}, model_options);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.initial_alpha = 0.25;
+    solver.configure_scalar_void_fraction(void_options);
+    SimpleFluid::DelayedNeutronPrecursorOptions precursor_options;
+    precursor_options.group_count = 1;
+    precursor_options.initial_concentrations = {4.0};
+    const auto& precursors =
+        solver.configure_precursors(precursor_options);
+
+    EXPECT_NEAR(precursors.concentration(0).value(0), 4.0, 1.0e-14);
+    EXPECT_NEAR(
+        precursors.liquid_inventory(0).value(0),
+        0.75 * 4.0,
+        1.0e-14);
+
+    void_options.initial_alpha = 0.5;
+    solver.configure_scalar_void_fraction(void_options);
+    EXPECT_NEAR(precursors.concentration(0).value(0), 4.0, 1.0e-14);
+    EXPECT_NEAR(
+        precursors.liquid_inventory(0).value(0),
+        0.5 * 4.0,
+        1.0e-14);
+
+    auto radiolytic_mesh = make_single_cell_mesh();
+    SimpleFluid::BoussinesqSolver<Pack> radiolytic_solver(
+        radiolytic_mesh,
+        boundary_conditions,
+        time_options,
+        {},
+        model_options);
+    const auto& radiolytic_precursors =
+        radiolytic_solver.configure_precursors(precursor_options);
+    SimpleFluid::RadiolyticGasOptions radiolysis;
+    radiolysis.mode =
+        SimpleFluid::RadiolyticGasMode::IdealGasSource;
+    radiolysis.alpha_min = 0.25;
+    radiolysis.hydrogen_yield_mol_per_j = 1.0e-7;
+    radiolysis.max_source_alpha_rate = 1.0;
+    radiolytic_solver.configure_radiolytic_gas(radiolysis);
+    EXPECT_NEAR(
+        radiolytic_precursors.liquid_inventory(0).value(0),
+        0.75 * 4.0,
+        1.0e-14);
 }
 
 TEST(Phase13PlusDatabaseTest, ParsesFlatKeysAndDefaults)
