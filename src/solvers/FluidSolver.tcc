@@ -154,7 +154,10 @@ FluidSolver<Pack>::FluidSolver(
     pressure_linear_options.preconditioner =
         LinearPreconditioner::MueLu;
     d_problem.template emplace_object<PressureProjectionEquation<Pack>>(
-        "pressure_projection", d_mesh, pressure_linear_options);
+        "pressure_projection",
+        d_mesh,
+        pressure_linear_options,
+        d_problem.boundary_conditions().pressure);
     d_problem.template emplace_object<CoupledPressureVelocitySolver<Pack>>(
         "coupled_pressure_velocity_solver", d_mesh);
     d_problem.template emplace_object<field_type>(
@@ -332,7 +335,10 @@ auto FluidSolver<Pack>::global_sum(
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
-    FVM::cell_gradient(pressure(), predictor_pressure_gradient());
+    FVM::cell_gradient(
+        pressure(),
+        d_problem.boundary_conditions().pressure,
+        predictor_pressure_gradient());
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
     auto pressure_source =
@@ -367,7 +373,9 @@ auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
         velocity(), pressure(),
         d_problem.time_options().time_step
             / pressure_reference_density(),
-        velocity_boundary_cache(), old_face_fluxes());
+        velocity_boundary_cache(),
+        d_problem.boundary_conditions().pressure,
+        old_face_fluxes());
     const auto linear_summary = advance_momentum();
     pressure_velocity_residuals().momentum =
         velocity_update_norm(predictor_velocity(), velocity());
@@ -421,7 +429,9 @@ void FluidSolver<Pack>::solve_coupled_krylov()
         velocity(), pressure(),
         d_problem.time_options().time_step
             / pressure_reference_density(),
-        velocity_boundary_cache(), old_face_fluxes());
+        velocity_boundary_cache(),
+        d_problem.boundary_conditions().pressure,
+        old_face_fluxes());
     const auto system = assemble_coupled_system();
     const auto result =
         coupled_pressure_velocity_solver().solve(
@@ -453,7 +463,9 @@ void FluidSolver<Pack>::solve_coupled_krylov()
         velocity(), pressure(),
         d_problem.time_options().time_step
             / pressure_reference_density(),
-        velocity_boundary_cache(), projected_face_fluxes());
+        velocity_boundary_cache(),
+        d_problem.boundary_conditions().pressure,
+        projected_face_fluxes());
     scalar_type continuity_norm_squared = {};
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -529,7 +541,9 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
         velocity(), pressure(),
         d_problem.time_options().time_step
             / pressure_reference_density(),
-        velocity_boundary_cache(), projected_face_fluxes());
+        velocity_boundary_cache(),
+        d_problem.boundary_conditions().pressure,
+        projected_face_fluxes());
 }
 
 template<TpetraTypePack Pack>

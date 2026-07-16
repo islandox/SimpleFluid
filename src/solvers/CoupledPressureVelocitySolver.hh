@@ -25,6 +25,7 @@
 #include <Ifpack2_Factory.hpp>
 #include <MueLu_CreateTpetraPreconditioner.hpp>
 #include <Teuchos_Array.hpp>
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_ParameterList.hpp>
 #include <Teuchos_RCP.hpp>
 #include <TpetraExt_MatrixMatrix.hpp>
@@ -33,6 +34,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -140,6 +142,170 @@ auto make_coupled_maps(const Mesh<Pack>& mesh)
 }
 
 template<TpetraTypePack Pack>
+struct AffinePressureGradientStencil
+{
+    FVM::detail::LeastSquaresGradientStencil<Mesh<Pack>> entries;
+    typename Mesh<Pack>::Vec3 constant{};
+};
+
+/**
+ * @brief Linearize the boundary-aware least-squares pressure gradient.
+ *
+ * The coupled matrix acts on normalized pressure q = p/rho_ref. Cell
+ * coefficients populate its pressure block, while the constant vector
+ * carries prescribed Dirichlet values and Neumann gradients to the RHS.
+ */
+template<TpetraTypePack Pack>
+auto pressure_gradient_stencils(
+    const Mesh<Pack>& mesh,
+    const BoundaryConditionMap& boundary_conditions,
+    typename Pack::scalar_type reference_density)
+    -> std::vector<AffinePressureGradientStencil<Pack>>
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using mesh_type = Mesh<Pack>;
+
+    std::vector<AffinePressureGradientStencil<Pack>> stencils(
+        mesh.num_owned_cells());
+    const auto boundary_locations =
+        FVM::detail::boundary_face_locations(mesh);
+    auto boundary_condition =
+        [&](local_ordinal_type face_lid)
+            -> std::optional<BoundaryCondition>
+    {
+        if (boundary_conditions.empty()
+            || !mesh.is_boundary_face(face_lid)
+            || static_cast<size_t>(face_lid)
+               >= boundary_locations.size())
+        {
+            return std::nullopt;
+        }
+        const auto location =
+            boundary_locations[static_cast<size_t>(face_lid)];
+        if (!location.active)
+        {
+            return std::nullopt;
+        }
+        const auto iter = boundary_conditions.find(
+            mesh.boundary_batch_name(location.batch_id));
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        std::array<std::array<real_t, 3>, 3> normal{};
+
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            typename mesh_type::Vec3 direction{};
+            if (mesh.is_interior_face(face_lid))
+            {
+                direction =
+                    mesh.cell_center_vector(face_lid, cell_lid);
+            }
+            else if (boundary_condition(face_lid))
+            {
+                direction = mesh.face_centroid(face_lid)
+                          - mesh.cell_centroid(cell_lid);
+            }
+            else
+            {
+                continue;
+            }
+
+            normal[0][0] += direction.x * direction.x;
+            normal[0][1] += direction.x * direction.y;
+            normal[0][2] += direction.x * direction.z;
+            normal[1][1] += direction.y * direction.y;
+            normal[1][2] += direction.y * direction.z;
+            normal[2][2] += direction.z * direction.z;
+        }
+        normal[1][0] = normal[0][1];
+        normal[2][0] = normal[0][2];
+        normal[2][1] = normal[1][2];
+
+        std::unordered_map<local_ordinal_type,
+                           typename mesh_type::Vec3> coefficients;
+        typename mesh_type::Vec3 constant{};
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            typename mesh_type::Vec3 direction{};
+            std::optional<BoundaryCondition> condition;
+            if (mesh.is_interior_face(face_lid))
+            {
+                direction =
+                    mesh.cell_center_vector(face_lid, cell_lid);
+            }
+            else
+            {
+                condition = boundary_condition(face_lid);
+                if (!condition)
+                {
+                    continue;
+                }
+                direction = mesh.face_centroid(face_lid)
+                          - mesh.cell_centroid(cell_lid);
+            }
+
+            auto local_normal = normal;
+            const auto basis =
+                FVM::detail::solve_3x3(local_normal, direction);
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                FVM::detail::add_gradient_coefficient<mesh_type>(
+                    coefficients, other, basis);
+                FVM::detail::add_gradient_coefficient<mesh_type>(
+                    coefficients,
+                    cell_lid,
+                    {-basis.x, -basis.y, -basis.z});
+                continue;
+            }
+
+            if (condition->type == BoundaryConditionType::Dirichlet)
+            {
+                FVM::detail::add_gradient_coefficient<mesh_type>(
+                    coefficients,
+                    cell_lid,
+                    {-basis.x, -basis.y, -basis.z});
+                const auto normalized_value =
+                    condition->value / reference_density;
+                constant = constant + basis * normalized_value;
+            }
+            else if (condition->type
+                     == BoundaryConditionType::Neumann)
+            {
+                const auto normalized_delta =
+                    condition->value / reference_density
+                  * mesh.cell_to_face_distance(face_lid, cell_lid);
+                constant = constant + basis * normalized_delta;
+            }
+            else
+            {
+                throw std::invalid_argument(
+                    "Coupled pressure gradient supports only Dirichlet "
+                    "and Neumann boundary conditions.");
+            }
+        }
+
+        auto& stencil = stencils[owned];
+        stencil.entries.reserve(coefficients.size());
+        for (const auto& [entry_lid, coefficient] : coefficients)
+        {
+            stencil.entries.push_back({entry_lid, coefficient});
+        }
+        stencil.constant = constant;
+    }
+    return stencils;
+}
+
+template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 scaled_gradient_matrix(
     const typename Pack::matrix_type& gradient,
@@ -181,7 +347,9 @@ build_schur_approximation(
     const typename Pack::matrix_type& momentum,
     const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& gradient,
     const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& divergence,
-    const typename Pack::matrix_type& pressure_stabilization)
+    const typename Pack::matrix_type& pressure_stabilization,
+    std::optional<typename Pack::global_ordinal_type>
+        pressure_gauge_gid)
 {
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -236,8 +404,6 @@ build_schur_approximation(
 
     auto schur = Teuchos::rcp(new matrix_type(
         accumulated->getRowMap(), 32));
-    const auto gauge_gid =
-        accumulated->getRowMap()->getMinAllGlobalIndex();
     const auto accumulated_col_map = accumulated->getColMap();
     const auto stabilization_col_map =
         pressure_stabilization.getColMap();
@@ -246,7 +412,8 @@ build_schur_approximation(
         const auto local_row = static_cast<local_ordinal_type>(row);
         const auto global_row =
             accumulated->getRowMap()->getGlobalElement(local_row);
-        if (global_row == gauge_gid)
+        if (pressure_gauge_gid
+            && global_row == *pressure_gauge_gid)
         {
             Teuchos::Array<global_ordinal_type> columns{global_row};
             Teuchos::Array<scalar_type> values{scalar_type{1}};
@@ -638,12 +805,55 @@ private:
         const auto boundary_locations =
             FVM::detail::boundary_face_locations(*d_mesh);
         const auto gradient_stencils =
-            FVM::detail::least_squares_gradient_stencils(*d_mesh);
+            detail::pressure_gradient_stencils<Pack>(
+                *d_mesh,
+                boundary_conditions.pressure,
+                reference_density);
         const auto momentum_rhs = momentum.rhs->getLocalViewHost(
             Tpetra::Access::ReadOnly);
         const auto momentum_col_map = momentum.matrix->getColMap();
-        const auto pressure_gauge_gid =
-            d_mesh->owned_cell_map()->getMinAllGlobalIndex();
+
+        // A physical Dirichlet face fixes the pressure level on every rank.
+        // Otherwise one global cell retains the all-Neumann gauge.
+        int local_has_dirichlet_pressure = 0;
+        for (const auto& [batch_id, boundary_batch] :
+             d_mesh->boundary_batches())
+        {
+            const auto condition_iter =
+                boundary_conditions.pressure.find(
+                    d_mesh->boundary_batch_name(batch_id));
+            if (condition_iter == boundary_conditions.pressure.end()
+                || condition_iter->second.type
+                   != BoundaryConditionType::Dirichlet)
+            {
+                continue;
+            }
+            for (const auto face_lid : boundary_batch.face_lids)
+            {
+                if (d_mesh->is_owned_face(face_lid)
+                    && d_mesh->is_boundary_face(face_lid))
+                {
+                    local_has_dirichlet_pressure = 1;
+                    break;
+                }
+            }
+            if (local_has_dirichlet_pressure != 0)
+            {
+                break;
+            }
+        }
+        int global_has_dirichlet_pressure = 0;
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(),
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_has_dirichlet_pressure,
+            &global_has_dirichlet_pressure);
+        const std::optional<global_ordinal_type> pressure_gauge_gid =
+            global_has_dirichlet_pressure != 0
+          ? std::optional<global_ordinal_type>{}
+          : std::optional<global_ordinal_type>{
+                d_mesh->owned_cell_map()->getMinAllGlobalIndex()};
 
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -722,7 +932,7 @@ private:
                             for (const auto& entry :
                                  gradient_stencils[
                                      static_cast<size_t>(
-                                         gradient_cell)])
+                                         gradient_cell)].entries)
                             {
                                 detail::add_entry(
                                     stabilization_row,
@@ -731,6 +941,12 @@ private:
                                     * time_options.time_step
                                     * entry.coefficient.dot(area));
                             }
+                            continuity_rhs -=
+                                scalar_type{0.5}
+                              * time_options.time_step
+                              * gradient_stencils[
+                                    static_cast<size_t>(
+                                        gradient_cell)].constant.dot(area);
                         };
                         add_gradient_stencil(cell_lid);
                         add_gradient_stencil(other);
@@ -762,12 +978,47 @@ private:
                 if (pressure_condition.type
                     == BoundaryConditionType::Dirichlet)
                 {
+                    // Pressure outlets use the same boundary flux as the
+                    // Rhie-Chow reconstruction:
+                    // u_P.A + dt*k*q_P + dt*grad(q)_P.A - dt*k*q_D.
                     for (size_t component = 0; component < 3; ++component)
                     {
                         momentum_boundary_rhs[component] -=
                             normalized_pressure_value
                             * area_components[component];
+                        detail::add_entry(
+                            divergence_rows[component], cell_lid,
+                            area_components[component]);
                     }
+
+                    const auto boundary_coefficient =
+                        FVM::detail::boundary_diffusion_coefficient(
+                            *d_mesh,
+                            face_lid,
+                            cell_lid,
+                            scalar_type{1});
+                    detail::add_entry(
+                        stabilization_row,
+                        cell_lid,
+                        time_options.time_step
+                            * boundary_coefficient);
+                    const auto& pressure_gradient_stencil =
+                        gradient_stencils[
+                            static_cast<size_t>(cell_lid)];
+                    for (const auto& entry :
+                         pressure_gradient_stencil.entries)
+                    {
+                        detail::add_entry(
+                            stabilization_row,
+                            entry.cell_lid,
+                            time_options.time_step
+                                * entry.coefficient.dot(area));
+                    }
+                    continuity_rhs +=
+                        time_options.time_step
+                      * (boundary_coefficient
+                            * normalized_pressure_value
+                         - pressure_gradient_stencil.constant.dot(area));
                 }
                 else
                 {
@@ -784,15 +1035,20 @@ private:
                     }
                 }
 
-                const auto velocity_type =
-                    velocity_boundary_cache.type.at(location.batch_id);
-                const auto prescribed =
-                    velocity_type == BoundaryConditionType::Slip
-                  ? FVM::detail::slip_face_velocity(
-                        velocity, face_lid)
-                  : velocity_boundary_cache.value.at(
-                        location.batch_id)[location.in_batch_id];
-                continuity_rhs -= prescribed.dot(area);
+                if (pressure_condition.type
+                    != BoundaryConditionType::Dirichlet)
+                {
+                    const auto velocity_type =
+                        velocity_boundary_cache.type.at(
+                            location.batch_id);
+                    const auto prescribed =
+                        velocity_type == BoundaryConditionType::Slip
+                      ? FVM::detail::slip_face_velocity(
+                            velocity, face_lid)
+                      : velocity_boundary_cache.value.at(
+                            location.batch_id)[location.in_batch_id];
+                    continuity_rhs -= prescribed.dot(area);
+                }
             }
 
             for (size_t component = 0; component < 3; ++component)
@@ -884,7 +1140,8 @@ private:
             }
 
             const auto pressure_row = 4 * cell_gid + 3;
-            if (cell_gid == pressure_gauge_gid)
+            if (pressure_gauge_gid
+                && cell_gid == *pressure_gauge_gid)
             {
                 Teuchos::Array<global_ordinal_type> columns{pressure_row};
                 Teuchos::Array<scalar_type> values{scalar_type{1}};
@@ -936,7 +1193,7 @@ private:
 
         auto schur = detail::build_schur_approximation<Pack>(
             *momentum.matrix, gradient, divergence,
-            *pressure_stabilization);
+            *pressure_stabilization, pressure_gauge_gid);
         return {
             coupled_map,
             coupled_overlap_map,

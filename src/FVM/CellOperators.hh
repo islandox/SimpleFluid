@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "equations/BoundaryConditions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/TensorCellField.hh"
@@ -24,18 +25,14 @@
 namespace SimpleFluid::FVM
 {
 
-/**
- * @brief Compute a least-squares cell-centered gradient for every owned
- *        cell.
- *
- * @tparam Pack The Tpetra type pack.
- * @param field Scalar cell field whose gradient is computed.
- * @param[out] gradients Vector cell field to receive the gradient at
- *        each owned cell.
- */
+namespace detail
+{
+
 template<TpetraTypePack Pack>
-void cell_gradient(const CellField<Pack>& field,
-                   VectorCellField<Pack>& gradients)
+void scalar_cell_gradient(
+    const CellField<Pack>& field,
+    const BoundaryConditionMap* boundary_conditions,
+    VectorCellField<Pack>& gradients)
 {
     using mesh_type = Mesh<Pack>;
     using local_ordinal_type = typename mesh_type::local_ordinal_type;
@@ -47,6 +44,10 @@ void cell_gradient(const CellField<Pack>& field,
             "cell_gradient requires input and output fields on one mesh.");
     }
 
+    const auto boundary_locations =
+        boundary_conditions == nullptr
+      ? std::vector<BoundaryFaceLocation<mesh_type>>{}
+      : boundary_face_locations(mesh);
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -57,15 +58,57 @@ void cell_gradient(const CellField<Pack>& field,
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            if (!mesh.is_interior_face(face_lid))
+            typename mesh_type::Vec3 d{};
+            typename Pack::scalar_type phi_delta{};
+            if (mesh.is_interior_face(face_lid))
             {
-                continue;
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                d = mesh.cell_center_vector(face_lid, cell_lid);
+                phi_delta = field.local_value(other) - phi_p;
             }
-
-            const auto other =
-                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-            const auto d = mesh.cell_center_vector(face_lid, cell_lid);
-            const auto phi_delta = field.local_value(other) - phi_p;
+            else
+            {
+                if (boundary_conditions == nullptr
+                    || !mesh.is_boundary_face(face_lid)
+                    || static_cast<size_t>(face_lid)
+                       >= boundary_locations.size())
+                {
+                    continue;
+                }
+                const auto location =
+                    boundary_locations[static_cast<size_t>(face_lid)];
+                if (!location.active)
+                {
+                    continue;
+                }
+                const auto name =
+                    mesh.boundary_batch_name(location.batch_id);
+                const auto iter = boundary_conditions->find(name);
+                const auto condition =
+                    iter == boundary_conditions->end()
+                  ? BoundaryCondition{}
+                  : iter->second;
+                d = mesh.face_centroid(face_lid)
+                  - mesh.cell_centroid(cell_lid);
+                if (condition.type == BoundaryConditionType::Dirichlet)
+                {
+                    phi_delta = condition.value - phi_p;
+                }
+                else if (condition.type == BoundaryConditionType::Neumann)
+                {
+                    phi_delta =
+                        condition.value
+                      * mesh.cell_to_face_distance(face_lid, cell_lid);
+                }
+                else
+                {
+                    throw std::invalid_argument(
+                        "cell_gradient supports only Dirichlet and Neumann "
+                        "scalar boundary conditions.");
+                }
+            }
 
             normal[0][0] += d.x * d.x;
             normal[0][1] += d.x * d.y;
@@ -83,8 +126,49 @@ void cell_gradient(const CellField<Pack>& field,
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
         gradients.set_owned_value(
-            cell_lid, detail::solve_3x3(normal, rhs));
+            cell_lid, solve_3x3(normal, rhs));
     }
+}
+
+} // namespace detail
+
+/**
+ * @brief Compute a least-squares cell-centered gradient for every owned
+ *        cell.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param field Scalar cell field whose gradient is computed.
+ * @param[out] gradients Vector cell field to receive the gradient at
+ *        each owned cell.
+ */
+template<TpetraTypePack Pack>
+void cell_gradient(const CellField<Pack>& field,
+                   VectorCellField<Pack>& gradients)
+{
+    detail::scalar_cell_gradient(field, nullptr, gradients);
+}
+
+/**
+ * @brief Compute a least-squares scalar gradient including boundary data.
+ *
+ * Dirichlet values are sampled at boundary-face centroids. Neumann values
+ * are interpreted as outward normal derivatives.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @param field Scalar cell field whose gradient is computed.
+ * @param boundary_conditions Boundary conditions keyed by mesh batch name.
+ * @param[out] gradients Vector cell field receiving the reconstructed gradient.
+ */
+template<TpetraTypePack Pack>
+void cell_gradient(
+    const CellField<Pack>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellField<Pack>& gradients)
+{
+    detail::scalar_cell_gradient(
+        field,
+        boundary_conditions.empty() ? nullptr : &boundary_conditions,
+        gradients);
 }
 
 /**

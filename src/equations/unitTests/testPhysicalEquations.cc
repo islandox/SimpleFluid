@@ -424,6 +424,52 @@ TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
     EXPECT_NEAR(pressure.value(1), reference_density, 1.0e-8);
 }
 
+TEST(PhysicalEquationsTest,
+     PressureProjectionDirichletBoundaryReplacesGaugeConstraint)
+{
+    auto db = SimpleFluid::test::make_box_database(2, 1, 1, 0.5);
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
+    FieldType pressure(mesh, "pressure");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 37.0};
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(
+        mesh, options, bcs.pressure);
+    auto source =
+        [](MeshType::local_ordinal_type cell_lid) -> Pack::scalar_type
+    {
+        return cell_lid == 0 ? 4.0 : 0.0;
+    };
+
+    constexpr double reference_density = 1000.0;
+    equation.project(
+        pressure,
+        1.0,
+        reference_density,
+        velocity_cache,
+        velocity,
+        source);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto expected =
+            mesh->cell_centroid(cell_lid).x < 0.5
+          ? 1.5 * reference_density
+          : 0.5 * reference_density;
+        EXPECT_NEAR(pressure.value(cell_lid), expected, 1.0e-8);
+    }
+}
+
 /**
  * @brief Ensures pressure projection reduces the divergence of the velocity flux field.
  */

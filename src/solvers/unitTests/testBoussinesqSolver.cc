@@ -752,6 +752,39 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
     EXPECT_GT(system.schur->getGlobalNumEntries(), 0U);
     EXPECT_DOUBLE_EQ(system.reference_density, 1.0);
 
+    const auto gauge_cell_gid =
+        mesh->owned_cell_map()->getMinAllGlobalIndex();
+    const auto coupled_gauge_row_gid = 4 * gauge_cell_gid + 3;
+    const auto coupled_gauge_row_lid =
+        system.matrix->getRowMap()->getLocalElement(
+            coupled_gauge_row_gid);
+    typename Pack::matrix_type::local_inds_host_view_type
+        gauge_columns;
+    typename Pack::matrix_type::values_host_view_type gauge_values;
+    system.matrix->getLocalRowView(
+        coupled_gauge_row_lid, gauge_columns, gauge_values);
+    ASSERT_EQ(gauge_columns.extent(0), 1U);
+    EXPECT_EQ(
+        system.matrix->getColMap()->getGlobalElement(
+            gauge_columns[0]),
+        coupled_gauge_row_gid);
+    EXPECT_DOUBLE_EQ(gauge_values[0], 1.0);
+    const auto coupled_rhs_view = system.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    EXPECT_DOUBLE_EQ(
+        coupled_rhs_view(coupled_gauge_row_lid, 0), 0.0);
+
+    const auto schur_gauge_row_lid =
+        system.schur->getRowMap()->getLocalElement(gauge_cell_gid);
+    system.schur->getLocalRowView(
+        schur_gauge_row_lid, gauge_columns, gauge_values);
+    ASSERT_EQ(gauge_columns.extent(0), 1U);
+    EXPECT_EQ(
+        system.schur->getColMap()->getGlobalElement(
+            gauge_columns[0]),
+        gauge_cell_gid);
+    EXPECT_DOUBLE_EQ(gauge_values[0], 1.0);
+
     typename Pack::vector_type checkerboard(
         mesh->owned_cell_map(), true);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -780,11 +813,13 @@ TEST(BoussinesqSolverTest,
     auto mesh = make_box_mesh();
     SimpleFluid::BoundaryConditionSet bcs;
     for (const auto* name :
-         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+         {"xmin", "ymin", "ymax", "zmin", "zmax"})
     {
         bcs.velocity[name] = {
             SimpleFluid::BoundaryConditionType::NoSlip, {}};
     }
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
     bcs.pressure["xmin"] = {
         SimpleFluid::BoundaryConditionType::Neumann, 2.5};
     bcs.pressure["xmax"] = {
@@ -841,6 +876,273 @@ TEST(BoussinesqSolverTest,
     }
     EXPECT_GT(maximum_rhs, 0.0);
     EXPECT_DOUBLE_EQ(water.reference_density, 1000.0);
+}
+
+TEST(BoussinesqSolverTest,
+     CoupledKrylovDirichletPressurePreservesContinuityAndGaugeShift)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
+
+    constexpr double reference_density = 1000.0;
+    constexpr double base_pressure = 2000.0;
+    constexpr double pressure_shift = 5000.0;
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        base_pressure};
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FVM::face_fluxes(velocity, cache, face_fluxes);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 1.0e-2;
+    options.kinematic_viscosity = 1.0e-2;
+    SimpleFluid::IncompressibleMomentumEquation<Pack>
+        momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack>
+        coupled_solver(mesh);
+
+    auto assemble = [&](double boundary_pressure)
+    {
+        auto shifted_bcs = bcs;
+        shifted_bcs.pressure["xmax"].value = boundary_pressure;
+        return coupled_solver.assemble(
+            momentum_equation,
+            velocity,
+            pressure,
+            face_fluxes,
+            cache,
+            shifted_bcs,
+            options,
+            reference_density);
+    };
+    const auto base = assemble(base_pressure);
+    const auto shifted = assemble(base_pressure + pressure_shift);
+
+    const auto former_gauge_cell_gid =
+        mesh->owned_cell_map()->getMinAllGlobalIndex();
+    const auto former_gauge_row_gid =
+        4 * former_gauge_cell_gid + 3;
+    const auto former_gauge_row_lid =
+        base.matrix->getRowMap()->getLocalElement(
+            former_gauge_row_gid);
+    typename Pack::matrix_type::local_inds_host_view_type
+        former_gauge_columns;
+    typename Pack::matrix_type::values_host_view_type
+        former_gauge_values;
+    base.matrix->getLocalRowView(
+        former_gauge_row_lid,
+        former_gauge_columns,
+        former_gauge_values);
+    bool has_continuity_velocity_entry = false;
+    for (size_t entry = 0;
+         entry < former_gauge_columns.extent(0);
+         ++entry)
+    {
+        const auto column_gid =
+            base.matrix->getColMap()->getGlobalElement(
+                former_gauge_columns[entry]);
+        has_continuity_velocity_entry =
+            has_continuity_velocity_entry
+            || (column_gid % 4 != 3
+                && std::abs(former_gauge_values[entry]) > 1.0e-14);
+    }
+    EXPECT_TRUE(has_continuity_velocity_entry);
+
+    const auto former_schur_row_lid =
+        base.schur->getRowMap()->getLocalElement(
+            former_gauge_cell_gid);
+    typename Pack::matrix_type::local_inds_host_view_type
+        former_schur_columns;
+    typename Pack::matrix_type::values_host_view_type
+        former_schur_values;
+    base.schur->getLocalRowView(
+        former_schur_row_lid,
+        former_schur_columns,
+        former_schur_values);
+    const auto schur_row_is_gauge_identity =
+        former_schur_columns.extent(0) == 1
+        && base.schur->getColMap()->getGlobalElement(
+               former_schur_columns[0]) == former_gauge_cell_gid
+        && former_schur_values[0] == 1.0;
+    EXPECT_FALSE(schur_row_is_gauge_identity);
+
+    typename Pack::vector_type constant_pressure(
+        mesh->owned_cell_map(), true);
+    constant_pressure.putScalar(1.0);
+    typename Pack::vector_type stabilized_pressure(
+        mesh->owned_cell_map(), true);
+    base.pressure_stabilization->apply(
+        constant_pressure, stabilized_pressure);
+    EXPECT_GT(stabilized_pressure.norm2(), 1.0e-12);
+
+    typename Pack::vector_type normalized_pressure_shift(
+        base.map, true);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_gid =
+            mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        normalized_pressure_shift.replaceGlobalValue(
+            4 * cell_gid + 3,
+            pressure_shift / reference_density);
+    }
+    typename Pack::vector_type matrix_shift_response(base.map, true);
+    base.matrix->apply(
+        normalized_pressure_shift,
+        matrix_shift_response);
+
+    const auto response = matrix_shift_response.getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    const auto base_rhs = base.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    const auto shifted_rhs = shifted.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    double maximum_rhs_shift = 0.0;
+    for (size_t row = 0; row < response.extent(0); ++row)
+    {
+        const auto rhs_shift = shifted_rhs(row, 0) - base_rhs(row, 0);
+        maximum_rhs_shift = std::max(
+            maximum_rhs_shift, std::abs(rhs_shift));
+        EXPECT_NEAR(
+            response(row, 0),
+            rhs_shift,
+            std::max(1.0e-12, std::abs(rhs_shift) * 1.0e-12));
+    }
+    EXPECT_GT(maximum_rhs_shift, 0.0);
+}
+
+TEST(BoussinesqSolverTest,
+     CoupledKrylovDirichletContinuityMatchesBoundaryFaceFlux)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
+    bcs.pressure["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, 200.0};
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 3000.0};
+
+    constexpr double reference_density = 1000.0;
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_owned_value(
+            cell_lid,
+            {0.2 + 0.1 * center.x,
+             -0.05 * center.y,
+             0.03 * center.z});
+        pressure.set_owned_value(
+            cell_lid,
+            500.0 + 300.0 * center.x
+                  - 100.0 * center.y
+                  + 50.0 * center.z);
+    }
+    velocity.sync_ghosts();
+    pressure.sync_ghosts();
+
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 1.0e-2;
+    options.kinematic_viscosity = 1.0e-2;
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        options.time_step / reference_density,
+        cache,
+        bcs.pressure,
+        face_fluxes);
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack>
+        momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack>
+        coupled_solver(mesh);
+    const auto system = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        face_fluxes,
+        cache,
+        bcs,
+        options,
+        reference_density);
+
+    typename Pack::vector_type state(system.map, true);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_gid =
+            mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        const auto cell_velocity = velocity.value(cell_lid);
+        state.replaceGlobalValue(4 * cell_gid, cell_velocity.x);
+        state.replaceGlobalValue(4 * cell_gid + 1, cell_velocity.y);
+        state.replaceGlobalValue(4 * cell_gid + 2, cell_velocity.z);
+        state.replaceGlobalValue(
+            4 * cell_gid + 3,
+            pressure.value(cell_lid) / reference_density);
+    }
+    typename Pack::vector_type applied(system.map, true);
+    system.matrix->apply(state, applied);
+    const auto applied_view = applied.getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    const auto rhs_view = system.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+
+    double maximum_face_flux_balance = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_gid =
+            mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        const auto pressure_row_lid =
+            system.map->getLocalElement(4 * cell_gid + 3);
+        const auto coupled_residual =
+            applied_view(pressure_row_lid, 0)
+          - rhs_view(pressure_row_lid, 0);
+        const auto face_flux_balance =
+            SimpleFluid::FVM::cell_flux_balance<Pack>(
+                *mesh, face_fluxes, cell_lid);
+        maximum_face_flux_balance = std::max(
+            maximum_face_flux_balance,
+            std::abs(face_flux_balance));
+        EXPECT_NEAR(
+            coupled_residual,
+            face_flux_balance,
+            std::max(
+                1.0e-12,
+                std::abs(face_flux_balance) * 1.0e-11));
+    }
+    EXPECT_GT(maximum_face_flux_balance, 1.0e-12);
 }
 
 TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
