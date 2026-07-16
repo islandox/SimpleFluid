@@ -7,6 +7,7 @@
 #include "equations/ScalarVoidFractionModel.hh"
 #include "dataclass/Database.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
@@ -929,6 +930,129 @@ TEST(DelayedNeutronPrecursorModelTest,
               * model.concentration(0).value(cell_lid),
             1.0e-12);
     }
+}
+
+TEST(DelayedNeutronPrecursorModelTest,
+     EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.power_yields = {1.0};
+    options.effective_diffusivity = 0.2;
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 0.6, "alpha_l");
+    FieldType fission_power(mesh, "qdot_fission");
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        const auto center = mesh->cell_centroid(cell_lid);
+        fission_power.set_owned_value(
+            cell_lid,
+            1.0 + center.x * center.x + 0.5 * center.y * center.z);
+    }
+    fission_power.sync_ghosts();
+
+    model.advance(0.05, alpha_l, &fission_power);
+
+    FieldType old_concentration(mesh, "precursor_old_concentration");
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        old_concentration.set_owned_value(
+            cell_lid, model.concentration(0).value(cell_lid));
+    }
+    old_concentration.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_flux(
+        mesh, 0.0, "precursor_zero_face_flux");
+    FieldType diffusion_weight(
+        mesh,
+        0.6 * options.effective_diffusivity,
+        "precursor_diffusion_weight");
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    };
+    auto boundary_value =
+        [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    constexpr double time_step = 0.05;
+    const auto corrected_system =
+        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            old_concentration,
+            zero_flux,
+            time_step,
+            alpha_l,
+            alpha_l,
+            diffusion_weight,
+            boundary_condition,
+            boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+            &old_concentration);
+    const auto orthogonal_system =
+        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            old_concentration,
+            zero_flux,
+            time_step,
+            alpha_l,
+            alpha_l,
+            diffusion_weight,
+            boundary_condition,
+            boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    FieldType corrected_solution(mesh, "corrected_solution");
+    FieldType orthogonal_solution(mesh, "orthogonal_solution");
+    SimpleFluid::BelosLinearSolver<Pack> transport_solver;
+    const auto corrected_statistics =
+        transport_solver.solve_with_statistics(
+            corrected_system.matrix,
+            *corrected_system.rhs,
+            corrected_solution.owned_data(),
+            SimpleFluid::LinearSolverOptions{});
+    const auto orthogonal_statistics =
+        transport_solver.solve_with_statistics(
+            orthogonal_system.matrix,
+            *orthogonal_system.rhs,
+            orthogonal_solution.owned_data(),
+            SimpleFluid::LinearSolverOptions{});
+    ASSERT_TRUE(corrected_statistics.converged);
+    ASSERT_TRUE(orthogonal_statistics.converged);
+
+    model.advance(time_step, alpha_l, nullptr);
+
+    double max_non_orthogonal_effect = 0.0;
+    double max_corrected_error = 0.0;
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        max_non_orthogonal_effect = std::max(
+            max_non_orthogonal_effect,
+            std::abs(corrected_solution.value(cell_lid)
+                     - orthogonal_solution.value(cell_lid)));
+        max_corrected_error = std::max(
+            max_corrected_error,
+            std::abs(model.concentration(0).value(cell_lid)
+                     - corrected_solution.value(cell_lid)));
+    }
+    EXPECT_GT(max_non_orthogonal_effect, 1.0e-8);
+    EXPECT_LT(max_corrected_error, 1.0e-11);
 }
 
 TEST(DelayedNeutronPrecursorModelTest,
