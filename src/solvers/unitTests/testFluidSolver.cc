@@ -83,6 +83,18 @@ public:
     }
 };
 
+class WaterPressureFluidSolver : public SimpleFluid::FluidSolver<Pack>
+{
+public:
+    using SimpleFluid::FluidSolver<Pack>::FluidSolver;
+
+protected:
+    Pack::scalar_type pressure_reference_density() const noexcept override
+    {
+        return 1000.0;
+    }
+};
+
 } // namespace
 
 static_assert(std::is_base_of_v<
@@ -159,6 +171,104 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
         EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);
         EXPECT_NEAR(velocity.z, 0.0, 1.0e-12);
     }
+}
+
+TEST(FluidSolverTest,
+     SegregatedModesHonorPhysicalDirichletPressureBoundary)
+{
+    for (const auto coupling : {
+             SimpleFluid::PressureVelocityCoupling::SIMPLE,
+             SimpleFluid::PressureVelocityCoupling::PISO,
+             SimpleFluid::PressureVelocityCoupling::PIMPLE})
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoundaryConditionSet bcs;
+        bcs.pressure["xmax"] = {
+            SimpleFluid::BoundaryConditionType::Dirichlet, 1000.0};
+        bcs.velocity["xmax"] = {
+            SimpleFluid::BoundaryConditionType::Neumann, {}};
+        for (const auto* name :
+             {"xmin", "ymin", "ymax", "zmin", "zmax"})
+        {
+            bcs.velocity[name] = {
+                SimpleFluid::BoundaryConditionType::NoSlip, {}};
+        }
+
+        SimpleFluid::TimeStepperOptions time_options;
+        time_options.time_step = 0.1;
+        time_options.kinematic_viscosity = 0.0;
+        time_options.pressure_velocity_coupling = coupling;
+        time_options.n_pressure_correctors = 2;
+        time_options.n_outer_correctors = 1;
+
+        SimpleFluid::LinearSolverOptions linear_options;
+        linear_options.tolerance = 1.0e-12;
+        WaterPressureFluidSolver solver(
+            mesh, bcs, time_options, linear_options);
+        solver.step();
+
+        const auto corrections =
+            coupling == SimpleFluid::PressureVelocityCoupling::SIMPLE
+          ? 1
+          : time_options.n_pressure_correctors;
+        const auto remaining_fraction =
+            std::pow(0.5, corrections);
+        EXPECT_NEAR(
+            solver.pressure().value(0),
+            1000.0 * (1.0 - remaining_fraction),
+            1.0e-8);
+        const auto velocity = solver.velocity().value(0);
+        EXPECT_NEAR(
+            velocity.x, -0.1 * remaining_fraction, 1.0e-10);
+        EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);
+        EXPECT_NEAR(velocity.z, 0.0, 1.0e-12);
+        EXPECT_NEAR(
+            solver.last_pressure_velocity_residuals().continuity,
+            0.0,
+            1.0e-12);
+        EXPECT_TRUE(solver.last_step_statistics().converged);
+    }
+}
+
+TEST(FluidSolverTest,
+     CoupledKrylovHonorsDirichletPressureOutlet)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
+    for (const auto* name :
+         {"xmin", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.pressure_velocity_coupling =
+        SimpleFluid::PressureVelocityCoupling::CoupledKrylov;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-12;
+    linear_options.max_iterations = 200;
+    SimpleFluid::FluidSolver<Pack> solver(
+        mesh, bcs, time_options, linear_options);
+    solver.step();
+
+    EXPECT_TRUE(solver.last_step_statistics().converged);
+    EXPECT_NEAR(solver.pressure().value(0), 1.0, 1.0e-10);
+    const auto velocity = solver.velocity().value(0);
+    EXPECT_NEAR(velocity.x, 0.0, 1.0e-10);
+    EXPECT_NEAR(velocity.y, 0.0, 1.0e-10);
+    EXPECT_NEAR(velocity.z, 0.0, 1.0e-10);
+    EXPECT_NEAR(
+        solver.last_pressure_velocity_residuals().continuity,
+        0.0,
+        1.0e-10);
 }
 
 /**

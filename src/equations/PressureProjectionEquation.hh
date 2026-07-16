@@ -20,6 +20,7 @@
 #include <Teuchos_RCP.hpp>
 
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -66,7 +67,8 @@ public:
     explicit PressureProjectionEquation(
         SP<const mesh_type> mesh,
         LinearSolverOptions linear_options =
-            pressure_projection_linear_solver_options());
+            pressure_projection_linear_solver_options(),
+        BoundaryConditionMap pressure_boundary_conditions = {});
 
     void set_linear_solver_options(LinearSolverOptions options)
     {
@@ -103,7 +105,10 @@ private:
 
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
-    mutable face_velocity_field_type d_cached_face_velocity;
+    BoundaryConditionMap d_pressure_boundary_conditions;
+    BoundaryConditionMap d_pressure_correction_boundary_conditions;
+    mutable std::optional<typename Pack::global_ordinal_type>
+        d_pressure_gauge_gid;
     mutable face_flux_field_type d_cached_face_fluxes;
     mutable velocity_field_type d_cached_gradient;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;

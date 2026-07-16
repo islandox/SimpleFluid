@@ -25,21 +25,33 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack.
  * @param mesh Shared pointer to the computational mesh.
  * @param linear_options Linear solver configuration.
+ * @param pressure_boundary_conditions Physical pressure boundary data. The
+ *        projection applies the corresponding homogeneous correction types.
  * @throws std::invalid_argument if @p mesh is null.
  * @throws std::runtime_error if the mesh has no owned-cell map.
  */
 template<TpetraTypePack Pack>
 PressureProjectionEquation<Pack>::PressureProjectionEquation(
     SP<const mesh_type> mesh,
-    LinearSolverOptions linear_options)
+    LinearSolverOptions linear_options,
+    BoundaryConditionMap pressure_boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "PressureProjectionEquation")),
       d_linear_options(linear_options),
-      d_cached_face_velocity(d_mesh, "pressure_projection_face_velocity"),
+      d_pressure_boundary_conditions(
+          std::move(pressure_boundary_conditions)),
+      d_pressure_correction_boundary_conditions(
+          d_pressure_boundary_conditions),
       d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"),
       d_cached_gradient(d_mesh, "pressure_projection_gradient")
 {
     require_owned_cell_map(d_mesh);
+    for (auto& [name, condition] :
+         d_pressure_correction_boundary_conditions)
+    {
+        static_cast<void>(name);
+        condition.value = 0.0;
+    }
 }
 
 /**
@@ -72,7 +84,8 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
 /**
  * @brief (Re)build the cached pressure-Poisson matrix.
  *
- * Uses the globally smallest owned-row ID as the gauge-fixing row.
+ * Uses a physical Dirichlet pressure face to remove the nullspace. For an
+ * all-Neumann system, the globally smallest owned-row ID remains the gauge.
  *
  * @tparam Pack Tpetra type pack.
  */
@@ -80,9 +93,58 @@ template<TpetraTypePack Pack>
 void PressureProjectionEquation<Pack>::rebuild_matrix() const
 {
     const auto owned_map = require_owned_cell_map(d_mesh);
-    const auto gauge_gid = owned_map->getMinAllGlobalIndex();
+    int local_has_dirichlet = 0;
+    for (const auto& [batch_id, boundary_batch] :
+         d_mesh->boundary_batches())
+    {
+        const auto condition_iter =
+            d_pressure_boundary_conditions.find(
+                d_mesh->boundary_batch_name(batch_id));
+        if (condition_iter == d_pressure_boundary_conditions.end()
+            || condition_iter->second.type
+               != BoundaryConditionType::Dirichlet)
+        {
+            continue;
+        }
+        for (const auto face_lid : boundary_batch.face_lids)
+        {
+            if (d_mesh->is_owned_face(face_lid)
+                && d_mesh->is_boundary_face(face_lid))
+            {
+                local_has_dirichlet = 1;
+                break;
+            }
+        }
+        if (local_has_dirichlet != 0)
+        {
+            break;
+        }
+    }
+    int global_has_dirichlet = 0;
+    Teuchos::reduceAll(
+        *owned_map->getComm(),
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_has_dirichlet,
+        &global_has_dirichlet);
+    d_pressure_gauge_gid =
+        global_has_dirichlet != 0
+      ? std::optional<typename Pack::global_ordinal_type>{}
+      : std::optional<typename Pack::global_ordinal_type>{
+            owned_map->getMinAllGlobalIndex()};
+    auto boundary_condition =
+        [&](int batch_id, size_t)
+    {
+        const auto iter =
+            d_pressure_correction_boundary_conditions.find(
+                d_mesh->boundary_batch_name(batch_id));
+        return iter == d_pressure_correction_boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
     d_cached_pressure_matrix =
-        FVM::pressure_poisson_matrix<Pack>(*d_mesh, gauge_gid);
+        FVM::pressure_poisson_matrix<Pack>(
+            *d_mesh, d_pressure_gauge_gid, boundary_condition);
 }
 
 /**
@@ -178,12 +240,16 @@ auto PressureProjectionEquation<Pack>::project(
             "PressureProjectionEquation requires a finite positive "
             "reference density.");
     }
-    FVM::face_velocities(velocity, velocity_boundary_cache,
-                         d_cached_face_velocity);
-    FVM::normal_face_fluxes(d_cached_face_velocity,
-                            d_cached_face_fluxes);
+    pressure.owned_data().putScalar(0.0);
+    d_mesh->sync_periodic_boundaries(pressure);
+    FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        time_step,
+        velocity_boundary_cache,
+        d_pressure_correction_boundary_conditions,
+        d_cached_face_fluxes);
     const auto owned_map = require_owned_cell_map(d_mesh);
-    const auto gauge_gid = owned_map->getMinAllGlobalIndex();
     if (d_cached_pressure_matrix.is_null())
     {
         rebuild_matrix();
@@ -202,17 +268,20 @@ auto PressureProjectionEquation<Pack>::project(
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto row_gid = owned_map->getGlobalElement(cell_lid);
-        const auto rhs_value = row_gid == gauge_gid
-                             ? scalar_type{}
-                             : -FVM::cell_flux_balance<Pack>(
-                                   *d_mesh, d_cached_face_fluxes, cell_lid)
-                               / time_step
-                               + d_mesh->cell_volume(cell_lid)
-                               * right_hand_source(cell_lid);
+        const auto is_pressure_gauge =
+            d_pressure_gauge_gid
+            && row_gid == *d_pressure_gauge_gid;
+        const auto rhs_value =
+            is_pressure_gauge
+          ? scalar_type{}
+          : -FVM::cell_flux_balance<Pack>(
+                *d_mesh, d_cached_face_fluxes, cell_lid)
+                / time_step
+            + d_mesh->cell_volume(cell_lid)
+                * right_hand_source(cell_lid);
         d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
-    pressure.owned_data().putScalar(0.0);
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix =
         d_cached_pressure_matrix;
     const auto linear_statistics =
@@ -234,14 +303,21 @@ auto PressureProjectionEquation<Pack>::project(
                                * d_mesh->cell_volume(cell_lid);
     }
 
-    FVM::cell_gradient(pressure, d_cached_gradient);
+    FVM::cell_gradient(
+        pressure,
+        d_pressure_correction_boundary_conditions,
+        d_cached_gradient);
     velocity.owned_data().update(
         -time_step, d_cached_gradient.owned_data(), 1.0);
 
     d_mesh->sync_periodic_boundaries(velocity);
 
     FVM::pressure_weighted_face_fluxes(
-        velocity, pressure, time_step, velocity_boundary_cache,
+        velocity,
+        pressure,
+        time_step,
+        velocity_boundary_cache,
+        d_pressure_correction_boundary_conditions,
         d_cached_face_fluxes);
 
     scalar_type continuity_norm_squared = {};
