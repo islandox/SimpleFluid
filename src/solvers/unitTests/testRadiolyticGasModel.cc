@@ -375,6 +375,66 @@ TEST(RadiolyticGasModelTest, IdealSourceHonorsAlphaAndRateLimits)
 }
 
 /**
+ * @brief Initial Sheng inventories publish derived void without a fake source.
+ */
+TEST(RadiolyticGasModelTest,
+     InitialPopulationsAreReconstructedBeforeFirstKinetics)
+{
+    auto mesh = make_single_cell_mesh();
+    auto options = sheng_options();
+    options.initial_dissolved_hydrogen = 2.5;
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 1.0e-3;
+    options.microbubble_lifetime = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+
+    ASSERT_FALSE(model.initial_state_initialized());
+    model.initialize_state(
+        0.0, temperature, pressure, velocity, material);
+
+    ASSERT_TRUE(model.initial_state_initialized());
+    const auto micro_radius = model_field(model, "r_micro").value(0);
+    const auto expected_raw_void =
+        SimpleFluid::RadiolyticGasPhysics::bubble_void_fraction(
+            options.initial_micro_number_density, micro_radius);
+    const auto expected_void = std::clamp(
+        expected_raw_void, options.alpha_min, options.alpha_max);
+    ASSERT_GT(micro_radius, 0.0);
+    ASSERT_GT(expected_void, options.alpha_min);
+    EXPECT_NEAR(model.alpha_g().value(0), expected_void, 1.0e-14);
+    EXPECT_NEAR(model.alpha_l().value(0), 1.0 - expected_void, 1.0e-14);
+    EXPECT_NEAR(
+        model.dissolved_hydrogen().value(0),
+        options.initial_dissolved_hydrogen,
+        1.0e-14);
+    EXPECT_NEAR(
+        model.dissolved_hydrogen_inventory().value(0),
+        (1.0 - expected_void) * options.initial_dissolved_hydrogen,
+        1.0e-14);
+    EXPECT_DOUBLE_EQ(model.source_alpha_rad().value(0), 0.0);
+
+    constexpr double time_step = 1.0e-6;
+    model.advance(
+        time_step,
+        time_step,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+    EXPECT_NEAR(model.alpha_g().value(0), expected_void, 1.0e-14);
+    EXPECT_NEAR(model.source_alpha_rad().value(0), 0.0, 1.0e-14);
+}
+
+/**
  * @brief Sheng two-population update conserves the produced hydrogen inventory.
  */
 TEST(RadiolyticGasModelTest, TwoPopulationStepConservesHydrogen)
@@ -916,6 +976,8 @@ TEST(RadiolyticGasModelTest, PopulationTransportConservesInventoryWithoutEscape)
         }
     }
     auto material = make_water_properties(mesh);
+    model.initialize_state(
+        0.0, temperature, pressure, velocity, material);
 
     const auto number_before =
         global_integral(model.large_number_density());
@@ -1285,6 +1347,167 @@ TEST(RadiolyticGasModelTest, StateFieldsRemainFiniteNonNegativeAndBoundedAcrossP
             expect_state_fields_finite_bounded(model);
         }
     }
+}
+
+/**
+ * @brief Solver startup publishes Sheng void before precursor initialization.
+ */
+TEST(RadiolyticGasModelTest,
+     SolverPublishesInitialShengStateInEitherConfigurationOrder)
+{
+    auto options = sheng_options();
+    options.initial_dissolved_hydrogen = 2.5;
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 1.0e-3;
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-6;
+    time_options.reference_temperature = 300.0;
+    auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
+            time_options);
+    model_options.reference_density = 1000.0;
+    model_options.density = 1000.0;
+    model_options.specific_heat_capacity = 4200.0;
+    model_options.dynamic_viscosity = 1.0e-3;
+    model_options.thermal_conductivity = 0.6;
+    SimpleFluid::DelayedNeutronPrecursorOptions precursor_options;
+    precursor_options.group_count = 1;
+    precursor_options.initial_concentrations = {4.0};
+
+    const auto expect_published =
+        [&](const auto& radiolysis,
+            const auto& scalar_void,
+            const auto& precursors)
+    {
+        ASSERT_TRUE(radiolysis.initial_state_initialized());
+        const auto alpha_g = radiolysis.alpha_g().value(0);
+        ASSERT_GT(alpha_g, options.alpha_min);
+        EXPECT_NEAR(
+            scalar_void.alpha_g().value(0), alpha_g, 1.0e-14);
+        EXPECT_NEAR(
+            scalar_void.alpha_l().value(0), 1.0 - alpha_g, 1.0e-14);
+        EXPECT_DOUBLE_EQ(
+            radiolysis.source_alpha_rad().value(0), 0.0);
+        EXPECT_DOUBLE_EQ(
+            scalar_void.source_alpha_total().value(0), 0.0);
+        EXPECT_NEAR(
+            radiolysis.dissolved_hydrogen().value(0),
+            options.initial_dissolved_hydrogen,
+            1.0e-14);
+        EXPECT_NEAR(
+            radiolysis.dissolved_hydrogen_inventory().value(0),
+            (1.0 - alpha_g) * options.initial_dissolved_hydrogen,
+            1.0e-14);
+        EXPECT_NEAR(
+            precursors.concentration(0).value(0), 4.0, 1.0e-14);
+        EXPECT_NEAR(
+            precursors.liquid_inventory(0).value(0),
+            (1.0 - alpha_g) * 4.0,
+            1.0e-14);
+    };
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh, {}, time_options, {}, model_options);
+        solver.initialize_heated_box(300.0, 300.0);
+        const auto& radiolysis =
+            solver.configure_radiolytic_gas(options);
+        const auto& precursors =
+            solver.configure_precursors(precursor_options);
+        const auto* scalar_void =
+            solver.find_scalar_void_fraction_model();
+        ASSERT_NE(scalar_void, nullptr);
+        expect_published(radiolysis, *scalar_void, precursors);
+    }
+
+    {
+        auto mesh = make_single_cell_mesh();
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh, {}, time_options, {}, model_options);
+        const auto& radiolysis =
+            solver.configure_radiolytic_gas(options);
+        ASSERT_FALSE(radiolysis.initial_state_initialized());
+        const auto& precursors =
+            solver.configure_precursors(precursor_options);
+
+        solver.initialize_heated_box(300.0, 300.0);
+
+        const auto* scalar_void =
+            solver.find_scalar_void_fraction_model();
+        ASSERT_NE(scalar_void, nullptr);
+        expect_published(radiolysis, *scalar_void, precursors);
+    }
+}
+
+/**
+ * @brief First temperature solve uses feedback from reconstructed initial void.
+ */
+TEST(RadiolyticGasModelTest,
+     FirstPhysicalSolveUsesReconstructedShengVoidFeedback)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-3;
+    time_options.reference_temperature = 300.0;
+    time_options.gravity_x = 0.0;
+    time_options.gravity_y = 0.0;
+    time_options.gravity_z = 0.0;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 1000.0;
+    model_options.density = 1000.0;
+    model_options.specific_heat_capacity = 1.0;
+    model_options.dynamic_viscosity = 1.0e-3;
+    model_options.thermal_conductivity = 0.0;
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.initialize_heated_box(300.0, 300.0);
+
+    SimpleFluid::FissionPowerSourceOptions fission;
+    fission.profile = SimpleFluid::FissionPowerProfile::Constant;
+    fission.power_density = 0.0;
+    solver.configure_fission_power_source(fission);
+    constexpr double power_density = 1.0e6;
+    solver.add_temperature_source("startup_heating", power_density);
+
+    auto options = sheng_options();
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 5.0;
+    options.microbubble_lifetime = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    const auto& radiolysis =
+        solver.configure_radiolytic_gas(options);
+    const auto initial_alpha = radiolysis.alpha_g().value(0);
+    ASSERT_GT(initial_alpha, 0.05);
+
+    SimpleFluid::MaterialFeedbackOptions feedback;
+    feedback.density_mode =
+        SimpleFluid::DensityFeedbackMode::Mixture;
+    feedback.reference_density = 1000.0;
+    feedback.liquid_density = 1000.0;
+    feedback.gas_density = 1.0;
+    feedback.reference_dynamic_viscosity = 1.0e-3;
+    solver.configure_material_feedback(feedback);
+
+    solver.step();
+
+    const auto initial_mixture_density =
+        feedback.liquid_density * (1.0 - initial_alpha)
+      + feedback.gas_density * initial_alpha;
+    const auto expected_temperature =
+        300.0
+      + time_options.time_step * power_density
+        / (initial_mixture_density
+           * model_options.specific_heat_capacity);
+    EXPECT_NEAR(
+        solver.temperature().value(0), expected_temperature, 1.0e-10);
+    EXPECT_GT(
+        solver.temperature().value(0),
+        300.0
+          + time_options.time_step * power_density
+            / (model_options.density
+               * model_options.specific_heat_capacity));
 }
 
 /**

@@ -58,7 +58,8 @@ $$
 
 ### Discretization
 
-- **Collocated** finite-volume method on arbitrary unstructured meshes
+- **Collocated** finite-volume method on supported hexahedral and
+  triangular-prism meshes
 - **First-order upwind** convection (implicit)
 - **Backward Euler** time integration
 - Gradient reconstruction via **least-squares** on extended stencils
@@ -99,7 +100,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   - **Orthogonal Cartesian 3D** — structured hexahedral cells
   - **Orthogonal Cylindrical 3D** — polar-structured hexahedral cells
   - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms
-  - **STK adapter** — arbitrary polyhedral meshes via Exodus II files
+  - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
+    other volume topologies are rejected during assembly
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends
@@ -108,7 +110,7 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 ### Mesh Generation
 
 - Programmatic mesh generation for **box**, **cylinder**, and **sphere** domains
-- External mesh file loading through Trilinos/STK
+- External `HEX_8` and `WEDGE_6` mesh loading through Trilinos/STK
 - Configuration-driven via the built-in typed key-value `Database`
 
 ### Fields
@@ -151,7 +153,7 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 ### I/O
 
 - VTU (VTK Unstructured Grid) output via `VTUWriter` — compatible with ParaView
-- STK Exodus II mesh input via `STKMesh`
+- STK Exodus II `HEX_8` and `WEDGE_6` mesh input via `STKMesh`
 
 ### Parallelism
 

@@ -13,7 +13,7 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] Cartesian 3D mesh
   - [x] Orthogonal cylindrical 3D mesh
   - [x] Semi-structured XY×Z prism mesh
-  - [x] STK/Exodus adapter for arbitrary polyhedral meshes
+  - [x] STK/Exodus adapter for `HEX_8` and `WEDGE_6` meshes
   - [x] Runtime type-erased `MeshHandle`
   - [x] Owned/ghost cell decomposition
   - [x] Zoltan2/ParMETIS partitioning
@@ -50,7 +50,7 @@ The following capabilities are considered complete and should not be re-planned 
   - [x] Natural-convection driver
 - [x] I/O and utilities
   - [x] VTU output for ParaView
-  - [x] STK Exodus II mesh input
+  - [x] STK Exodus II mesh input for `HEX_8` and `WEDGE_6` volume elements
   - [x] Typed key-value `Database`
   - [x] `RandomAccessView`
   - [x] `vec3`

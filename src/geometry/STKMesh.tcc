@@ -13,6 +13,7 @@
 #include "parallel/MeshPartitioner.hh"
 #include "io/VTUWriter.hh"
 
+#include <Teuchos_CommHelpers.hpp>
 #include <stk_io/IossBridge.hpp>
 #include <stk_mesh/base/MeshBuilder.hpp>
 #include <stk_util/parallel/Parallel.hpp>
@@ -231,6 +232,34 @@ void STKMesh<Pack>::build_cell_list()
     d_face_key_to_face.clear();
     d_boundary_id_to_face_batch.clear();
 
+    int local_has_unsupported_topology = 0;
+    const auto& element_buckets =
+        d_stk.bulk->buckets(stk::topology::ELEMENT_RANK);
+    for (const auto* bucket : element_buckets)
+    {
+        if (bucket != nullptr && bucket->size() != 0
+            && !is_supported_volume_topology(bucket->topology()))
+        {
+            local_has_unsupported_topology = 1;
+            break;
+        }
+    }
+
+    int global_has_unsupported_topology = 0;
+    const auto comm = Tpetra::getDefaultComm();
+    Teuchos::reduceAll(
+        *comm,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_has_unsupported_topology,
+        &global_has_unsupported_topology);
+    if (global_has_unsupported_topology != 0)
+    {
+        throw std::runtime_error(
+            "Unsupported STK volume topology: STKMesh supports only HEX_8 "
+            "and WEDGE_6 elements.");
+    }
+
     d_stk.coord_field = nullptr;
     if (const auto* coord_base = d_stk.meta->coordinate_field(); coord_base != nullptr)
     {
@@ -267,10 +296,6 @@ void STKMesh<Pack>::build_cell_list()
             }
 
             const auto topo = bucket->topology();
-            if (!is_supported_volume_topology(topo))
-            {
-                continue;
-            }
 
             for (const auto elem : *bucket)
             {

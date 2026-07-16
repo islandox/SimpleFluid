@@ -95,6 +95,34 @@ public:
     }
 
     /**
+     * @brief Reconstruct and publish the configured initial Sheng state.
+     *
+     * Bubble radii and void require the initial thermodynamic fields and
+     * therefore cannot be completed by the mesh-only constructor.  This call
+     * preserves the configured dissolved concentration by initializing its
+     * conserved inventory as `alpha_l * C_H2`, and seeds the history fields so
+     * the initial reconstructed void is not reported as a timestep source.
+     * Repeated calls are no-ops unless @p force is true; a forced call resets
+     * every radiolytic field to the configured initial state before rebuilding
+     * its derived fields.
+     */
+    void initialize_state(
+        scalar_type time,
+        const field_type& temperature,
+        const field_type& gauge_pressure,
+        const velocity_field_type& velocity,
+        const material_type& material,
+        bool force = false);
+
+    /**
+     * @brief True after the configured initial Sheng state was reconstructed.
+     */
+    bool initial_state_initialized() const noexcept
+    {
+        return d_initial_state_initialized;
+    }
+
+    /**
      * @brief Advance disabled or two-population radiolysis state.
      *
      * Reconstructed pressure mode uses the supplied physical gauge-pressure
@@ -357,6 +385,7 @@ private:
     field_type d_inventory_error;
 
     bool d_history_initialized = false;
+    bool d_initial_state_initialized = false;
     scalar_type d_cumulative_hydrogen_escaped = {};
     scalar_type d_cumulative_escaped_bubble_count = {};
     BelosLinearSolver<Pack> d_transport_solver;

@@ -145,6 +145,11 @@ void RadiolyticGasModel<Pack>::register_output_fields()
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::initialize_fields()
 {
+    d_history_initialized = false;
+    d_initial_state_initialized = false;
+    d_cumulative_hydrogen_escaped = scalar_type{};
+    d_cumulative_escaped_bubble_count = scalar_type{};
+    d_last_statistics = {};
     d_alpha_g.put_scalar(d_options.alpha_min);
     d_alpha_l.put_scalar(1.0 - d_options.alpha_min);
     d_source_alpha_rad.put_scalar(0.0);
@@ -184,6 +189,80 @@ void RadiolyticGasModel<Pack>::initialize_fields()
     d_escape_molar_rate.put_scalar(0.0);
     d_escape_number_rate.put_scalar(0.0);
     d_inventory_error.put_scalar(0.0);
+    sync_all_fields();
+}
+
+template<TpetraTypePack Pack>
+void RadiolyticGasModel<Pack>::initialize_state(
+    scalar_type time,
+    const field_type& temperature,
+    const field_type& gauge_pressure,
+    const velocity_field_type& velocity,
+    const material_type& material,
+    bool force)
+{
+    if (mode() != RadiolyticGasMode::Sheng2024TwoPopulation)
+    {
+        throw std::logic_error(
+            "Only Sheng two-population radiolysis has a derived initial state.");
+    }
+    if (!std::isfinite(time))
+    {
+        throw std::invalid_argument(
+            "Radiolytic gas initialization time must be finite.");
+    }
+    if (&temperature.mesh() != d_mesh.get()
+        || &gauge_pressure.mesh() != d_mesh.get()
+        || &velocity.mesh() != d_mesh.get()
+        || &material.density.mesh() != d_mesh.get())
+    {
+        throw std::invalid_argument(
+            "Radiolytic gas initial fields are on the wrong mesh.");
+    }
+    if (d_initial_state_initialized && !force)
+    {
+        return;
+    }
+    if (force)
+    {
+        initialize_fields();
+    }
+
+    reconstruct_absolute_pressure(time, gauge_pressure);
+    reconstruct_derived_fields(temperature, velocity, material);
+
+    const auto published_concentration = std::min(
+        static_cast<scalar_type>(d_options.initial_dissolved_hydrogen),
+        static_cast<scalar_type>(d_options.max_concentration));
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        const auto liquid_fraction = d_alpha_l.value(cell_lid);
+        const auto dissolved_inventory =
+            liquid_fraction * d_options.initial_dissolved_hydrogen;
+        d_dissolved_hydrogen_inventory.set_owned_value(
+            cell_lid, dissolved_inventory);
+        d_dissolved_hydrogen.set_owned_value(
+            cell_lid, published_concentration);
+        d_excluded_dissolved_inventory.set_owned_value(
+            cell_lid,
+            std::max(
+                dissolved_inventory
+                  - liquid_fraction * published_concentration,
+                scalar_type{}));
+        d_source_alpha_rad.set_owned_value(cell_lid, scalar_type{});
+        d_previous_temperature.set_owned_value(
+            cell_lid, temperature.value(cell_lid));
+        d_previous_density.set_owned_value(
+            cell_lid, material.density.value(cell_lid));
+        d_previous_alpha_g.set_owned_value(
+            cell_lid, d_alpha_g.value(cell_lid));
+    }
+
+    d_history_initialized = true;
+    d_initial_state_initialized = true;
+    d_last_statistics = {};
     sync_all_fields();
 }
 
@@ -1424,6 +1503,16 @@ void RadiolyticGasModel<Pack>::advance(
             "Radiolytic gas timestep must be finite and positive.");
     }
 
+    if (mode() == RadiolyticGasMode::Sheng2024TwoPopulation
+        && !d_initial_state_initialized)
+    {
+        initialize_state(
+            time - time_step,
+            temperature,
+            gauge_pressure,
+            velocity,
+            material);
+    }
     reconstruct_absolute_pressure(time, gauge_pressure);
     if (mode() == RadiolyticGasMode::IdealGasSource)
     {

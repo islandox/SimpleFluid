@@ -105,6 +105,39 @@ void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
 }
 
 /**
+ * @brief Populate the mesh with one unsupported tetrahedral element.
+ *
+ * @param mesh STK mesh to populate.
+ */
+void populate_single_tet(MeshType& mesh)
+{
+    auto& coord_field = declare_coordinate_field(mesh);
+    auto meta = mesh.meta();
+    auto& tet_part = meta->declare_part_with_topology("tets", stk::topology::TET_4);
+
+    auto bulk = mesh.bulk();
+    bulk->modification_begin();
+
+    const stk::mesh::EntityIdVector node_ids{1, 2, 3, 4};
+    stk::mesh::declare_element(*bulk, tet_part, 1, node_ids);
+
+    const std::array<std::array<double, 3>, 4> coords{{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+
+    for (size_t i = 0; i < node_ids.size(); ++i)
+    {
+        const auto node = bulk->get_entity(stk::topology::NODE_RANK, node_ids[i]);
+        set_node_coord(coord_field, node, coords[i]);
+    }
+
+    bulk->modification_end();
+}
+
+/**
  * @brief Populate the mesh with two adjacent hexahedral elements.
  *
  * The function constructs a shared face between the two elements.
@@ -166,6 +199,26 @@ TEST(STKMeshTest, AssembleMeshWithoutThrowing)
     EXPECT_DOUBLE_EQ(mesh.cell_volume(1), 1.0);
     EXPECT_EQ(mesh.global_to_local_cell(1), 0);
     EXPECT_EQ(mesh.global_to_local_cell(2), 1);
+}
+
+/**
+ * @brief Verifies unsupported populated STK element topologies are rejected.
+ */
+TEST(STKMeshTest, AssembleRejectsUnsupportedVolumeTopology)
+{
+    MeshType mesh;
+    populate_single_tet(mesh);
+
+    try
+    {
+        mesh.assemble();
+        FAIL() << "Expected TET_4 assembly to be rejected.";
+    }
+    catch (const std::runtime_error& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("supports only HEX_8 and WEDGE_6"),
+                  std::string::npos);
+    }
 }
 
 /**
