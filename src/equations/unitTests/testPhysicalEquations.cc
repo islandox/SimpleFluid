@@ -330,6 +330,40 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
     EXPECT_NEAR(temperature.value(0), 2.3, 1.0e-12);
 }
 
+TEST(PhysicalEquationsTest,
+     TemperatureSemiImplicitRejectsFiniteUnconvergedSolve)
+{
+    auto mesh = make_2x2x2_mesh();
+    FieldType old_temperature(mesh, 0.0, "old_temperature");
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        const auto index = static_cast<double>(cell_lid + 1);
+        old_temperature.set_value(
+            cell_lid, 1.0 + index * index);
+    }
+    old_temperature.sync_ghosts();
+    FieldType temperature(mesh, 0.0, "temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.max_iterations = 1;
+    options.tolerance = 1.0e-14;
+
+    EXPECT_THROW(
+        equation.advance_semi_implicit(
+            old_temperature,
+            zero_fluxes,
+            1.0,
+            1.0,
+            temperature,
+            options),
+        std::runtime_error);
+}
+
 TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)
 {
     auto mesh = make_single_hex_mesh();
