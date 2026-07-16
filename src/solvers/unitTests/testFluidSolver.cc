@@ -149,7 +149,12 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
     time_options.time_step = 0.1;
     time_options.kinematic_viscosity = 0.0;
 
-    TestFluidSolver solver(mesh, {}, time_options);
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, -1.0};
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, 1.0};
+    TestFluidSolver solver(mesh, bcs, time_options);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
@@ -222,9 +227,24 @@ TEST(FluidSolverTest,
             velocity.x, -0.1 * remaining_fraction, 1.0e-10);
         EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);
         EXPECT_NEAR(velocity.z, 0.0, 1.0e-12);
+        const auto cache =
+            SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+                mesh, bcs);
+        SimpleFluid::FaceField<Pack> final_fluxes(
+            mesh, "final_pressure_weighted_fluxes");
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            solver.velocity(),
+            solver.pressure(),
+            time_options.time_step / 1000.0,
+            cache,
+            bcs.pressure,
+            final_fluxes);
+        const auto final_imbalance = std::abs(
+            SimpleFluid::FVM::cell_flux_balance<Pack>(
+                *mesh, final_fluxes, 0));
         EXPECT_NEAR(
             solver.last_pressure_velocity_residuals().continuity,
-            0.0,
+            final_imbalance,
             1.0e-12);
         EXPECT_TRUE(solver.last_step_statistics().converged);
     }

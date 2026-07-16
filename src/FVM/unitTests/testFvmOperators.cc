@@ -339,6 +339,130 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
     }
 }
 
+TEST(FvmOperatorsTest,
+     PressureGradientUsesNormalDistanceForSkewBoundaryNeumannData)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType pressure(mesh, 0.0, "pressure");
+    constexpr Pack::scalar_type prescribed_normal_gradient = 2.5;
+
+    SimpleFluid::BoundaryConditionMap pressure_boundaries;
+    pressure_boundaries["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann,
+        prescribed_normal_gradient};
+
+    VectorFieldType gradient(mesh, "pressure_gradient");
+    SimpleFluid::FVM::cell_gradient(
+        pressure, pressure_boundaries, gradient);
+
+    const auto target_face = boundary_face_lid(*mesh, "xmin");
+    const auto target_cell = mesh->owner_cell(target_face);
+    const auto boundary_locations =
+        SimpleFluid::FVM::detail::boundary_face_locations(*mesh);
+    auto reconstruct = [&](bool use_normal_distance)
+    {
+        std::array<std::array<SimpleFluid::real_t, 3>, 3> normal{};
+        MeshType::Vec3 rhs{};
+        for (const auto face_lid : mesh->faces(target_cell))
+        {
+            const auto direction =
+                mesh->is_interior_face(face_lid)
+              ? mesh->cell_center_vector(face_lid, target_cell)
+              : mesh->face_centroid(face_lid)
+                    - mesh->cell_centroid(target_cell);
+
+            normal[0][0] += direction.x * direction.x;
+            normal[0][1] += direction.x * direction.y;
+            normal[0][2] += direction.x * direction.z;
+            normal[1][1] += direction.y * direction.y;
+            normal[1][2] += direction.y * direction.z;
+            normal[2][2] += direction.z * direction.z;
+
+            Pack::scalar_type delta = 0.0;
+            if (!mesh->is_interior_face(face_lid))
+            {
+                const auto location =
+                    boundary_locations[static_cast<size_t>(face_lid)];
+                if (location.active
+                    && mesh->boundary_batch_name(location.batch_id)
+                       == "xmin")
+                {
+                    const auto distance =
+                        use_normal_distance
+                      ? direction.dot(mesh->face_normal_outward(
+                            face_lid, target_cell))
+                      : mesh->cell_to_face_distance(
+                            face_lid, target_cell);
+                    delta = prescribed_normal_gradient * distance;
+                }
+            }
+            rhs = rhs + direction * delta;
+        }
+        normal[1][0] = normal[0][1];
+        normal[2][0] = normal[0][2];
+        normal[2][1] = normal[1][2];
+        return SimpleFluid::FVM::detail::solve_3x3(normal, rhs);
+    };
+
+    const auto expected = reconstruct(true);
+    const auto euclidean_result = reconstruct(false);
+    ASSERT_GT((expected - euclidean_result).norm(), 1.0e-6);
+
+    const auto actual = gradient.value(target_cell);
+    EXPECT_NEAR(actual.x, expected.x, 1.0e-12);
+    EXPECT_NEAR(actual.y, expected.y, 1.0e-12);
+    EXPECT_NEAR(actual.z, expected.z, 1.0e-12);
+}
+
+TEST(FvmOperatorsTest,
+     EmptyPressureBoundaryMapDefaultsToHomogeneousNeumann)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType pressure(mesh, "pressure");
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+                   mesh->num_owned_cells());
+         ++lid)
+    {
+        pressure.set_value(
+            lid, nonlinear_scalar(mesh->cell_centroid(lid)));
+    }
+    pressure.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionMap empty_boundaries;
+    SimpleFluid::BoundaryConditionMap partial_boundaries;
+    partial_boundaries["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+
+    VectorFieldType empty_gradient(mesh, "empty_map_gradient");
+    VectorFieldType partial_gradient(mesh, "partial_map_gradient");
+    VectorFieldType cell_only_gradient(mesh, "cell_only_gradient");
+    SimpleFluid::FVM::cell_gradient(
+        pressure, empty_boundaries, empty_gradient);
+    SimpleFluid::FVM::cell_gradient(
+        pressure, partial_boundaries, partial_gradient);
+    SimpleFluid::FVM::cell_gradient(pressure, cell_only_gradient);
+
+    Pack::scalar_type maximum_map_difference = 0.0;
+    Pack::scalar_type maximum_boundary_effect = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        maximum_map_difference = std::max(
+            maximum_map_difference,
+            (empty_gradient.value(cell_lid)
+             - partial_gradient.value(cell_lid)).norm());
+        maximum_boundary_effect = std::max(
+            maximum_boundary_effect,
+            (empty_gradient.value(cell_lid)
+             - cell_only_gradient.value(cell_lid)).norm());
+    }
+
+    EXPECT_NEAR(maximum_map_difference, 0.0, 1.0e-12);
+    EXPECT_GT(maximum_boundary_effect, 1.0e-6);
+}
+
 TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -601,6 +725,35 @@ TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
 
     EXPECT_GT(flux_norm, 1.0e-12);
     EXPECT_GT(pressure_work, 0.0);
+}
+
+TEST(FvmOperatorsTest,
+     DirichletPressureRejectsPrescribedVelocityBoundaryFlux)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {3.0, 0.0, 0.0}};
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
+
+    EXPECT_THROW(
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity,
+            pressure,
+            0.1,
+            cache,
+            bcs.pressure,
+            fluxes),
+        std::invalid_argument);
 }
 
 /**

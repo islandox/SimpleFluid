@@ -466,6 +466,28 @@ inline auto boundary_diffusion_coefficient(
 }
 
 /**
+ * @brief Signed distance from a cell centroid to a boundary-face plane.
+ *
+ * The projection uses the unit normal pointing outward from the query cell.
+ * Unlike the Euclidean cell-to-face-centroid distance, this is the distance
+ * appropriate for converting a prescribed outward normal derivative into a
+ * cell-to-boundary value increment on a skew face.
+ */
+template<class MeshType>
+inline auto boundary_normal_distance(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid)
+    -> typename MeshType::scalar_type
+{
+    const auto face_id = query_face_id(mesh, face_lid);
+    const auto cell_id = query_cell_id(mesh, cell_lid);
+    const auto direction =
+        mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+    return direction.dot(mesh.face_normal_outward(face_id, cell_id));
+}
+
+/**
  * @brief Entry in a least-squares gradient reconstruction stencil.
  *
  * @tparam MeshType The mesh type.

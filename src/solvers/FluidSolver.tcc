@@ -544,6 +544,17 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
         velocity_boundary_cache(),
         d_problem.boundary_conditions().pressure,
         projected_face_fluxes());
+    scalar_type continuity_norm_squared = {};
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto balance =
+            FVM::cell_flux_balance<Pack>(
+                *d_mesh, projected_face_fluxes(), cell_lid);
+        continuity_norm_squared += balance * balance;
+    }
+    pressure_velocity_residuals().continuity =
+        std::sqrt(global_sum(continuity_norm_squared));
 }
 
 template<TpetraTypePack Pack>
