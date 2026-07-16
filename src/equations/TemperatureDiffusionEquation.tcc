@@ -270,6 +270,7 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
  * @param linear_options Linear solver configuration.
  * @throws std::invalid_argument on mesh mismatch, negative time step, or
  *         negative diffusivity.
+ * @throws std::runtime_error if the linear transport solve does not converge.
  */
 template<TpetraTypePack Pack>
 auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
@@ -335,26 +336,20 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     }
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
+    // A warm start can make Belos scale convergence by a cancellation-small
+    // transient residual; use the RHS-scaled zero guess used by the physical path.
+    temperature.owned_data().putScalar(0.0);
     const auto statistics =
         d_linear_solver.solve_with_statistics(
             matrix, *system.rhs,
             temperature.owned_data(), linear_options);
-    auto accepted_statistics = statistics;
     if (!statistics.converged)
     {
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            if (!std::isfinite(temperature.value(cell_lid)))
-            {
-                throw std::runtime_error(
-                    "TemperatureDiffusionEquation transport solve produced a non-finite value.");
-            }
-        }
-        accepted_statistics.converged = true;
+        throw std::runtime_error(
+            "TemperatureDiffusionEquation transport solve did not converge.");
     }
     d_mesh->sync_periodic_boundaries(temperature);
-    return accepted_statistics;
+    return statistics;
 }
 
 template<TpetraTypePack Pack>
