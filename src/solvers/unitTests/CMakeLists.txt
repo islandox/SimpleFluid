@@ -60,4 +60,26 @@ if(MPIEXEC_EXECUTABLE
     LABELS "mpi;pressure_velocity"
     PROCESSORS 2
     TIMEOUT 120)
+
+  add_test(
+    NAME CoupledKrylovDirichletContinuity_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testBoussinesqSolver>"
+            "--gtest_filter=BoussinesqSolverTest.CoupledKrylovDirichletContinuityMatchesBoundaryFaceFlux")
+  set_tests_properties(CoupledKrylovDirichletContinuity_2procs PROPERTIES
+    LABELS "mpi;pressure_velocity"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME ScalarGroupNonOrthogonalConservation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPhase13PlusModels>"
+            "--gtest_filter=ScalarSourceDecayTransportTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection")
+  set_tests_properties(ScalarGroupNonOrthogonalConservation_2procs PROPERTIES
+    LABELS "mpi;scalar_groups"
+    PROCESSORS 2
+    TIMEOUT 120)
 endif()
