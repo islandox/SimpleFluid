@@ -799,7 +799,10 @@ auto BoussinesqSolver<Pack>::momentum_equation()
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
-    FVM::cell_gradient(pressure(), predictor_pressure_gradient());
+    FVM::cell_gradient(
+        pressure(),
+        d_problem.boundary_conditions().pressure,
+        predictor_pressure_gradient());
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
     auto pressure_source =

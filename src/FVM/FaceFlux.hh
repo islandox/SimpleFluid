@@ -408,6 +408,9 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
     normal_face_fluxes(face_velocity, fluxes);
 }
 
+namespace detail
+{
+
 /**
  * @brief Compute Rhie-Chow pressure-weighted face fluxes.
  *
@@ -426,11 +429,12 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
  * @param[out] fluxes Pre-allocated FaceField to receive stabilized fluxes.
  */
 template<TpetraTypePack Pack>
-void pressure_weighted_face_fluxes(
+void pressure_weighted_face_fluxes_impl(
     const VectorCellField<Pack>& velocity,
     const CellField<Pack>& pressure,
     typename Pack::scalar_type pressure_coefficient,
     const VelocityBoundaryCache<Pack>& boundary_cache,
+    const BoundaryConditionMap* pressure_boundary_conditions,
     FaceField<Pack>& fluxes)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -458,15 +462,82 @@ void pressure_weighted_face_fluxes(
     const auto& mesh = velocity.mesh();
     VectorCellField<Pack> pressure_gradient(
         velocity.mesh_ptr(), "rhie_chow_pressure_gradient");
-    cell_gradient(pressure, pressure_gradient);
+    if (pressure_boundary_conditions == nullptr
+        || pressure_boundary_conditions->empty())
+    {
+        cell_gradient(pressure, pressure_gradient);
+    }
+    else
+    {
+        cell_gradient(
+            pressure, *pressure_boundary_conditions, pressure_gradient);
+    }
     pressure_gradient.sync_ghosts();
+    const auto boundary_locations =
+        pressure_boundary_conditions == nullptr
+      ? std::vector<BoundaryFaceLocation<Mesh<Pack>>>{}
+      : boundary_face_locations(mesh);
 
     for (size_t face = 0; face < mesh.num_faces(); ++face)
     {
         const auto face_lid = static_cast<local_ordinal_type>(face);
-        if (!fluxes.is_owned_face(face_lid)
-            || !mesh.is_interior_face(face_lid))
+        if (!fluxes.is_owned_face(face_lid))
         {
+            continue;
+        }
+
+        if (!mesh.is_interior_face(face_lid))
+        {
+            if (pressure_boundary_conditions == nullptr
+                || pressure_boundary_conditions->empty()
+                || !mesh.is_boundary_face(face_lid)
+                || static_cast<size_t>(face_lid)
+                   >= boundary_locations.size())
+            {
+                continue;
+            }
+            const auto location =
+                boundary_locations[static_cast<size_t>(face_lid)];
+            if (!location.active)
+            {
+                continue;
+            }
+            const auto name =
+                mesh.boundary_batch_name(location.batch_id);
+            const auto condition_iter =
+                pressure_boundary_conditions->find(name);
+            if (condition_iter == pressure_boundary_conditions->end()
+                || condition_iter->second.type
+                   == BoundaryConditionType::Neumann)
+            {
+                continue;
+            }
+            if (condition_iter->second.type
+                != BoundaryConditionType::Dirichlet)
+            {
+                throw std::invalid_argument(
+                    "pressure_weighted_face_fluxes supports only Dirichlet "
+                    "and Neumann pressure boundary conditions.");
+            }
+
+            const auto owner = mesh.owner_cell(face_lid);
+            const auto area_vector =
+                mesh.face_area_vector_outward(face_lid, owner);
+            fluxes.set_value(
+                face_lid,
+                velocity.local_value(owner).dot(area_vector));
+            const auto direct_gradient_flux =
+                (condition_iter->second.value
+                 - pressure.local_value(owner))
+              * boundary_diffusion_coefficient(
+                    mesh, face_lid, owner, scalar_type{1});
+            const auto interpolated_gradient_flux =
+                pressure_gradient.local_value(owner).dot(area_vector);
+            fluxes.sum_into_value(
+                face_lid,
+                -pressure_coefficient
+                * (direct_gradient_flux
+                   - interpolated_gradient_flux));
             continue;
         }
 
@@ -498,6 +569,47 @@ void pressure_weighted_face_fluxes(
             -pressure_coefficient
             * (direct_gradient_flux - interpolated_gradient_flux));
     }
+}
+
+} // namespace detail
+
+/**
+ * @brief Compute Rhie-Chow pressure-weighted face fluxes using cell-only
+ *        pressure reconstruction.
+ */
+template<TpetraTypePack Pack>
+void pressure_weighted_face_fluxes(
+    const VectorCellField<Pack>& velocity,
+    const CellField<Pack>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const VelocityBoundaryCache<Pack>& boundary_cache,
+    FaceField<Pack>& fluxes)
+{
+    detail::pressure_weighted_face_fluxes_impl(
+        velocity, pressure, pressure_coefficient,
+        boundary_cache, nullptr, fluxes);
+}
+
+/**
+ * @brief Compute pressure-weighted face fluxes including pressure boundary
+ *        reconstruction.
+ *
+ * A Dirichlet pressure face is treated as an open boundary: owner velocity
+ * is extrapolated to the face, then its pressure-gradient flux is replaced
+ * by the direct owner-to-boundary gradient.
+ */
+template<TpetraTypePack Pack>
+void pressure_weighted_face_fluxes(
+    const VectorCellField<Pack>& velocity,
+    const CellField<Pack>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const VelocityBoundaryCache<Pack>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions,
+    FaceField<Pack>& fluxes)
+{
+    detail::pressure_weighted_face_fluxes_impl(
+        velocity, pressure, pressure_coefficient,
+        boundary_cache, &pressure_boundary_conditions, fluxes);
 }
 
 } // namespace SimpleFluid::FVM
