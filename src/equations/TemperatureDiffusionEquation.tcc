@@ -258,7 +258,9 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
  *        source term.
  *
  * Assembles and solves an advection-diffusion transport system for
- * temperature using the pre-computed face fluxes.
+ * temperature using the pre-computed face fluxes. The converged candidate is
+ * published only after the solve succeeds, so @p old_temperature and
+ * @p temperature may safely refer to the same accepted field.
  *
  * @tparam Pack Tpetra type pack.
  * @param old_temperature Temperature field from the previous time step.
@@ -338,16 +340,21 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     // A warm start can make Belos scale convergence by a cancellation-small
     // transient residual; use the RHS-scaled zero guess used by the physical path.
-    temperature.owned_data().putScalar(0.0);
+    field_type candidate_temperature(
+        d_mesh, "temperature_candidate");
     const auto statistics =
         d_linear_solver.solve_with_statistics(
             matrix, *system.rhs,
-            temperature.owned_data(), linear_options);
+            candidate_temperature.owned_data(), linear_options);
     if (!statistics.converged)
     {
         throw std::runtime_error(
             "TemperatureDiffusionEquation transport solve did not converge.");
     }
+    temperature.owned_data().update(
+        scalar_type{1},
+        candidate_temperature.owned_data(),
+        scalar_type{0});
     d_mesh->sync_periodic_boundaries(temperature);
     return statistics;
 }
@@ -432,20 +439,25 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
             d_cached_transport_matrix);
     d_cached_transport_matrix = system.matrix;
 
-    temperature.owned_data().putScalar(0.0);
+    field_type candidate_temperature(
+        d_mesh, "temperature_candidate");
     Teuchos::RCP<const typename Pack::matrix_type> matrix =
         system.matrix;
     const auto statistics =
         d_linear_solver.solve_with_statistics(
             matrix,
             *system.rhs,
-            temperature.owned_data(),
+            candidate_temperature.owned_data(),
             linear_options);
     if (!statistics.converged)
     {
         throw std::runtime_error(
             "TemperatureDiffusionEquation physical transport solve did not converge.");
     }
+    temperature.owned_data().update(
+        scalar_type{1},
+        candidate_temperature.owned_data(),
+        scalar_type{0});
     d_mesh->sync_periodic_boundaries(temperature);
     return statistics;
 }

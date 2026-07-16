@@ -61,7 +61,7 @@ using VectorBoundaryConditionMap = std::unordered_map<std::string, VectorBoundar
  */
 struct BoundaryConditionSet
 {
-    BoundaryConditionMap temperature;
+    BoundaryConditionMap temperature; ///< Dirichlet K; Neumann K/m.
     VectorBoundaryConditionMap velocity;
     BoundaryConditionMap pressure; ///< Dirichlet Pa; Neumann Pa/m.
 };

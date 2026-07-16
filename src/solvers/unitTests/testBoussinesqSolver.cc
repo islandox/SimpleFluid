@@ -13,6 +13,7 @@
 
 #include "FVM/Operators.hh"
 #include "geometry/MeshFactory.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
@@ -221,11 +222,17 @@ Pack::scalar_type continuity_imbalance_norm(
     const SimpleFluid::VectorCellField<Pack>& velocity,
     const SimpleFluid::CellField<Pack>& pressure,
     Pack::scalar_type pressure_coefficient,
-    const SimpleFluid::FVM::VelocityBoundaryCache<Pack>& cache)
+    const SimpleFluid::FVM::VelocityBoundaryCache<Pack>& cache,
+    const SimpleFluid::BoundaryConditionMap& pressure_boundaries)
 {
     SimpleFluid::FaceField<Pack> face_fluxes(velocity.mesh_ptr(), "face_flux");
     SimpleFluid::FVM::pressure_weighted_face_fluxes(
-        velocity, pressure, pressure_coefficient, cache, face_fluxes);
+        velocity,
+        pressure,
+        pressure_coefficient,
+        cache,
+        pressure_boundaries,
+        face_fluxes);
 
     Pack::scalar_type norm_squared = 0.0;
     for (size_t owned = 0; owned < velocity.mesh().num_owned_cells();
@@ -512,6 +519,9 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 
     for (const auto mode : modes)
     {
+        SCOPED_TRACE(
+            "pressure-velocity coupling mode "
+            + std::to_string(static_cast<int>(mode)));
         auto mesh = make_box_mesh();
 
         SimpleFluid::BoundaryConditionSet bcs;
@@ -549,7 +559,7 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 
         const auto after = continuity_imbalance_norm(
             solver.velocity(), solver.pressure(),
-            time_options.time_step, cache);
+            time_options.time_step, cache, bcs.pressure);
         const auto residuals = solver.last_pressure_velocity_residuals();
         const auto statistics = solver.last_step_statistics();
 
@@ -876,6 +886,148 @@ TEST(BoussinesqSolverTest,
     }
     EXPECT_GT(maximum_rhs, 0.0);
     EXPECT_DOUBLE_EQ(water.reference_density, 1000.0);
+}
+
+TEST(BoussinesqSolverTest,
+     CoupledKrylovUsesNormalDistanceForSkewBoundaryNeumannData)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    constexpr double reference_density = 4.0;
+    constexpr double prescribed_pressure_gradient = 20.0;
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann,
+        prescribed_pressure_gradient};
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FVM::face_fluxes(velocity, cache, face_fluxes);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 1.0e-2;
+    options.kinematic_viscosity = 1.0e-2;
+    SimpleFluid::IncompressibleMomentumEquation<Pack>
+        momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack>
+        coupled_solver(mesh);
+    const auto system = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        face_fluxes,
+        cache,
+        bcs,
+        options,
+        reference_density);
+    const auto rhs = system.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+
+    SimpleFluid::VectorCellField<Pack> reconstructed_gradient(
+        mesh, "reconstructed_gradient");
+    SimpleFluid::FVM::cell_gradient(
+        pressure, bcs.pressure, reconstructed_gradient);
+    const auto coupled_stencils =
+        SimpleFluid::detail::pressure_gradient_stencils<Pack>(
+            *mesh, bcs.pressure, reference_density);
+    ASSERT_EQ(coupled_stencils.size(), mesh->num_owned_cells());
+
+    const auto boundary_locations =
+        SimpleFluid::FVM::detail::boundary_face_locations(*mesh);
+    double maximum_euclidean_error = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto expected_stencil_constant =
+            reconstructed_gradient.value(cell_lid) / reference_density;
+        const auto actual_stencil_constant =
+            coupled_stencils[owned].constant;
+        EXPECT_NEAR(
+            actual_stencil_constant.x,
+            expected_stencil_constant.x,
+            1.0e-12);
+        EXPECT_NEAR(
+            actual_stencil_constant.y,
+            expected_stencil_constant.y,
+            1.0e-12);
+        EXPECT_NEAR(
+            actual_stencil_constant.z,
+            expected_stencil_constant.z,
+            1.0e-12);
+
+        std::array<double, 3> expected_momentum_rhs{};
+        std::array<double, 3> euclidean_momentum_rhs{};
+        for (const auto face_lid : mesh->faces(cell_lid))
+        {
+            if (!mesh->is_boundary_face(face_lid))
+            {
+                continue;
+            }
+            const auto location =
+                boundary_locations[static_cast<size_t>(face_lid)];
+            if (!location.active
+                || mesh->boundary_batch_name(location.batch_id)
+                   != "xmin")
+            {
+                continue;
+            }
+
+            const auto direction =
+                mesh->face_centroid(face_lid)
+              - mesh->cell_centroid(cell_lid);
+            const auto normal_distance = direction.dot(
+                mesh->face_normal_outward(face_lid, cell_lid));
+            const auto euclidean_distance =
+                mesh->cell_to_face_distance(face_lid, cell_lid);
+            const auto area =
+                mesh->face_area_vector_outward(face_lid, cell_lid);
+            const std::array<double, 3> area_components{
+                area.x, area.y, area.z};
+            for (size_t component = 0; component < 3; ++component)
+            {
+                const auto factor =
+                    -prescribed_pressure_gradient
+                    / reference_density
+                    * area_components[component];
+                expected_momentum_rhs[component] +=
+                    factor * normal_distance;
+                euclidean_momentum_rhs[component] +=
+                    factor * euclidean_distance;
+            }
+        }
+
+        const auto cell_gid =
+            mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        for (size_t component = 0; component < 3; ++component)
+        {
+            const auto row_lid = system.map->getLocalElement(
+                4 * cell_gid
+              + static_cast<Pack::global_ordinal_type>(component));
+            ASSERT_NE(
+                row_lid,
+                Teuchos::OrdinalTraits<Pack::local_ordinal_type>::invalid());
+            EXPECT_NEAR(
+                rhs(row_lid, 0),
+                expected_momentum_rhs[component],
+                1.0e-12);
+            maximum_euclidean_error = std::max(
+                maximum_euclidean_error,
+                std::abs(expected_momentum_rhs[component]
+                         - euclidean_momentum_rhs[component]));
+        }
+    }
+    EXPECT_GT(maximum_euclidean_error, 1.0e-6);
 }
 
 TEST(BoussinesqSolverTest,

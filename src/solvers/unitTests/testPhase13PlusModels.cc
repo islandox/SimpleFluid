@@ -337,17 +337,149 @@ TEST(ScalarVoidFractionModelTest, AggregatesAndBoundsSources)
         1.0e-14);
 }
 
-TEST(ScalarVoidFractionModelTest, DisabledSourcesLeaveAlphaUnchanged)
+TEST(ScalarVoidFractionModelTest,
+     ZeroDiffusivityLeavesNonuniformAlphaUnchanged)
 {
-    auto mesh = make_single_cell_mesh();
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
     SimpleFluid::ScalarVoidFractionOptions options;
-    options.initial_alpha = 0.12;
     SimpleFluid::ScalarVoidFractionModel<Pack> model(mesh, options);
+    FieldType initial_alpha(mesh, "initial_alpha_g");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        initial_alpha.set_owned_value(
+            cell_lid,
+            mesh->cell_centroid(cell_lid).x < 1.0 ? 0.12 : 0.34);
+    }
+    initial_alpha.sync_ghosts();
+    model.initialize_from(initial_alpha);
 
     model.update_explicit(10.0, nullptr, nullptr);
-    EXPECT_DOUBLE_EQ(model.alpha_g().value(0), 0.12);
-    EXPECT_DOUBLE_EQ(model.alpha_l().value(0), 0.88);
-    EXPECT_DOUBLE_EQ(model.source_alpha_total().value(0), 0.0);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto expected =
+            mesh->cell_centroid(cell_lid).x < 1.0 ? 0.12 : 0.34;
+        EXPECT_DOUBLE_EQ(model.alpha_g().value(cell_lid), expected);
+        EXPECT_DOUBLE_EQ(model.alpha_l().value(cell_lid), 1.0 - expected);
+        EXPECT_DOUBLE_EQ(
+            model.source_alpha_total().value(cell_lid), 0.0);
+    }
+}
+
+TEST(ScalarVoidFractionModelTest,
+     DiffusionSmoothsAndConservesGlobalVoid)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    SimpleFluid::ScalarVoidFractionOptions options;
+    options.alpha_max = 0.9;
+    options.alpha_diffusivity = 0.1;
+    SimpleFluid::ScalarVoidFractionModel<Pack> model(mesh, options);
+    FieldType initial_alpha(mesh, "initial_alpha_g");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        initial_alpha.set_owned_value(
+            cell_lid,
+            mesh->cell_centroid(cell_lid).x < 0.5 ? 0.8 : 0.1);
+    }
+    initial_alpha.sync_ghosts();
+    model.initialize_from(initial_alpha);
+
+    auto global_integral = [&](const FieldType& field)
+    {
+        double local_integral = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            local_integral +=
+                field.value(cell_lid) * mesh->cell_volume(cell_lid);
+        }
+        double integral = 0.0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_integral,
+            &integral);
+        return integral;
+    };
+    const auto inventory_before = global_integral(model.alpha_g());
+
+    model.update_explicit(0.2, nullptr, nullptr);
+
+    const auto inventory_after = global_integral(model.alpha_g());
+    double local_minimum = std::numeric_limits<double>::max();
+    double local_maximum = std::numeric_limits<double>::lowest();
+    int local_partition_faces = 0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto alpha = model.alpha_g().value(cell_lid);
+        local_minimum = std::min(local_minimum, alpha);
+        local_maximum = std::max(local_maximum, alpha);
+        EXPECT_GE(alpha, options.alpha_min);
+        EXPECT_LE(alpha, options.alpha_max);
+        EXPECT_NEAR(
+            model.alpha_l().value(cell_lid), 1.0 - alpha, 1.0e-14);
+        EXPECT_DOUBLE_EQ(
+            model.source_alpha_total().value(cell_lid), 0.0);
+        for (const auto face_lid : mesh->faces(cell_lid))
+        {
+            if (!mesh->is_interior_face(face_lid))
+            {
+                continue;
+            }
+            const auto other =
+                mesh->opposite_or_periodic_neighbor_cell(
+                    face_lid, cell_lid);
+            if (!mesh->is_owned_cell(other))
+            {
+                ++local_partition_faces;
+            }
+        }
+    }
+    double global_minimum = 0.0;
+    double global_maximum = 0.0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MIN,
+        1,
+        &local_minimum,
+        &global_minimum);
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_maximum,
+        &global_maximum);
+    EXPECT_GT(global_minimum, 0.1);
+    EXPECT_LT(global_maximum, 0.8);
+    EXPECT_NEAR(
+        inventory_after,
+        inventory_before,
+        std::max(1.0e-12, std::abs(inventory_before) * 1.0e-10));
+
+    if (communicator->getSize() > 1)
+    {
+        int global_partition_faces = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_partition_faces,
+            &global_partition_faces);
+        EXPECT_GT(global_partition_faces, 0);
+    }
 }
 
 TEST(ScalarVoidFractionModelTest, MirrorDerivesRealizedRateAndComplement)

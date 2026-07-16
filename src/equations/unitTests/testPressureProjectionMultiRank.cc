@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace
 {
@@ -174,6 +175,7 @@ TEST(PressureProjectionMultiRankTest,
         pressure,
         time_step,
         boundary_cache,
+        boundary_conditions.pressure,
         face_fluxes);
 
     scalar_type local_continuity_norm_squared{};
@@ -196,4 +198,47 @@ TEST(PressureProjectionMultiRankTest,
         expected_continuity_norm,
         1.0e-11 * std::max<scalar_type>(1.0, expected_continuity_norm));
     expect_replicated(*comm, result.continuity);
+}
+
+TEST(PressureProjectionMultiRankTest,
+     EveryRankRejectsIncompatiblePressureVelocityBoundaryPair)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 1, 1, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    boundary_conditions.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {1.0, 0.0, 0.0}};
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+
+    int local_rejected = 0;
+    try
+    {
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity,
+            pressure,
+            scalar_type{1},
+            boundary_cache,
+            boundary_conditions.pressure,
+            face_fluxes);
+    }
+    catch (const std::invalid_argument&)
+    {
+        local_rejected = 1;
+    }
+
+    EXPECT_EQ(global_min(*comm, local_rejected), 1);
 }

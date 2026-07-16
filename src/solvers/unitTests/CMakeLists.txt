@@ -5,6 +5,8 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testRadiolyticGasModelMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFluidSolverMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testFeedbackMapMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
@@ -37,6 +39,15 @@ target_link_libraries(
   SimpleFluid::Solvers
   GTest::gtest_main)
 simplefluid_exe_reuse_precompiled_header(testFluidSolverMultiRank)
+
+add_executable(
+  testFeedbackMapMultiRank
+  testFeedbackMapMultiRank.cc)
+target_link_libraries(
+  testFeedbackMapMultiRank
+  SimpleFluid::Solvers
+  GTest::gtest_main)
+simplefluid_exe_reuse_precompiled_header(testFeedbackMapMultiRank)
 
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
@@ -80,6 +91,27 @@ if(MPIEXEC_EXECUTABLE
             "--gtest_filter=DelayedNeutronPrecursorModelTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection")
   set_tests_properties(PrecursorNonOrthogonalConservation_2procs PROPERTIES
     LABELS "mpi;precursors"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME ScalarVoidDiffusionConservation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPhase13PlusModels>"
+            "--gtest_filter=ScalarVoidFractionModelTest.DiffusionSmoothsAndConservesGlobalVoid")
+  set_tests_properties(ScalarVoidDiffusionConservation_2procs PROPERTIES
+    LABELS "mpi;void_fraction"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME FeedbackMap_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testFeedbackMapMultiRank>")
+  set_tests_properties(FeedbackMap_2procs PROPERTIES
+    LABELS "mpi;feedback_mapping"
     PROCESSORS 2
     TIMEOUT 120)
 endif()

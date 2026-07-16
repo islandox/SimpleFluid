@@ -5,6 +5,8 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
+#include "FVM/TransportSystem.hh"
+#include "solvers/BelosLinearSolver.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -269,6 +271,7 @@ public:
             d_source_alpha_total.set_owned_value(
                 cell_lid, (new_alpha - old_alpha) / time_step);
         }
+        diffuse(time_step);
         sync_fields();
     }
 
@@ -303,6 +306,112 @@ public:
     }
 
 private:
+    /**
+     * @brief Apply conservative bounded backward-Euler void diffusion.
+     *
+     * Homogeneous Neumann boundaries conserve integrated gas void.  The
+     * orthogonal two-point operator is an M-matrix, so a bounded input stays
+     * inside the configured alpha interval.  Diffusion is a redistribution,
+     * not part of the realized reaction source stored in S_alpha_total.
+     */
+    void diffuse(scalar_type time_step)
+    {
+        if (d_options.alpha_diffusivity == scalar_type{})
+        {
+            return;
+        }
+
+        d_alpha_g.sync_ghosts();
+        FaceField<Pack> zero_flux(
+            d_mesh, scalar_type{}, "alpha_zero_face_flux");
+        field_type unit_weight(
+            d_mesh, scalar_type{1}, "alpha_unit_weight");
+        field_type diffusivity(
+            d_mesh,
+            static_cast<scalar_type>(d_options.alpha_diffusivity),
+            "alpha_diffusivity");
+        auto zero_neumann =
+            [](int, size_t)
+        {
+            return BoundaryCondition{
+                BoundaryConditionType::Neumann, scalar_type{}};
+        };
+        auto zero_boundary_value =
+            [](int, size_t) -> scalar_type
+        {
+            return scalar_type{};
+        };
+        auto zero_source =
+            [](local_ordinal_type) -> scalar_type
+        {
+            return scalar_type{};
+        };
+
+        auto system = FVM::weighted_scalar_transport_system<Pack>(
+            d_alpha_g,
+            zero_flux,
+            time_step,
+            unit_weight,
+            unit_weight,
+            diffusivity,
+            zero_neumann,
+            zero_boundary_value,
+            zero_source,
+            FVM::NonOrthogonalTreatment::Explicit);
+        field_type solution(d_mesh, "alpha_diffusion_solution");
+        const auto statistics =
+            d_diffusion_solver.solve_with_statistics(
+                system.matrix,
+                *system.rhs,
+                solution.owned_data(),
+                LinearSolverOptions{});
+        if (!statistics.converged)
+        {
+            throw std::runtime_error(
+                "Scalar void diffusion solve did not converge.");
+        }
+
+        const auto bound_scale = std::max(
+            {scalar_type{1},
+             std::abs(static_cast<scalar_type>(d_options.alpha_min)),
+             std::abs(static_cast<scalar_type>(d_options.alpha_max))});
+        const auto bound_tolerance = std::max(
+            scalar_type{1000}
+              * std::numeric_limits<scalar_type>::epsilon()
+              * bound_scale,
+            scalar_type{10}
+              * static_cast<scalar_type>(LinearSolverOptions{}.tolerance)
+              * bound_scale);
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto solved_alpha = solution.value(cell_lid);
+            if (!std::isfinite(solved_alpha))
+            {
+                throw std::runtime_error(
+                    "Scalar void diffusion produced a non-finite value.");
+            }
+            if (solved_alpha
+                    < static_cast<scalar_type>(d_options.alpha_min)
+                      - bound_tolerance
+                || solved_alpha
+                    > static_cast<scalar_type>(d_options.alpha_max)
+                      + bound_tolerance)
+            {
+                throw std::runtime_error(
+                    "Scalar void diffusion violated configured bounds.");
+            }
+            const auto alpha = std::clamp(
+                solved_alpha,
+                static_cast<scalar_type>(d_options.alpha_min),
+                static_cast<scalar_type>(d_options.alpha_max));
+            d_alpha_g.set_owned_value(cell_lid, alpha);
+            d_alpha_l.set_owned_value(
+                cell_lid, scalar_type{1} - alpha);
+        }
+    }
+
     void register_output_fields()
     {
         d_output_fields = {
@@ -336,6 +445,7 @@ private:
     field_type d_alpha_l;
     field_type d_source_alpha_total;
     std::map<std::string, const field_type*> d_output_fields;
+    BelosLinearSolver<Pack> d_diffusion_solver;
 };
 
 } // namespace SimpleFluid

@@ -43,12 +43,14 @@ struct VelocityBoundaryCache
      * @param mesh The mesh whose boundary faces will be cached.
      */
     explicit VelocityBoundaryCache(SP<const Mesh<Pack>> mesh)
-        : value(), mesh(mesh)
+        : value(), type(), type_by_name(), mesh(mesh)
     {
     }
 
     std::unordered_map<int, Arr<vec_type>> value;
     std::unordered_map<int, BoundaryConditionType> type;
+    /// Configured velocity types replicated by name on every rank.
+    std::unordered_map<std::string, BoundaryConditionType> type_by_name;
     SP<const Mesh<Pack>> mesh;
 };
 
@@ -76,6 +78,10 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
     }
 
     VelocityBoundaryCache<Pack> cache(mesh);
+    for (const auto& [name, condition] : boundary_conditions.velocity)
+    {
+        cache.type_by_name[name] = condition.type;
+    }
 
     for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
     {
@@ -412,6 +418,51 @@ namespace detail
 {
 
 /**
+ * @brief Validate the open-boundary contract used for pressure outlets.
+ *
+ * Dirichlet pressure extrapolates owner-cell velocity to the boundary face.
+ * It therefore requires a Neumann velocity condition; a prescribed velocity
+ * would otherwise be silently discarded by the pressure-flux reconstruction.
+ */
+template<TpetraTypePack Pack>
+void validate_pressure_velocity_boundary_compatibility(
+    const VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions)
+{
+    // Both maps come directly from the globally configured boundary data, so
+    // every rank makes the same decision before a caller enters collectives.
+    for (const auto& [name, pressure_condition] :
+         pressure_boundary_conditions)
+    {
+        if (pressure_condition.type != BoundaryConditionType::Dirichlet
+            && pressure_condition.type != BoundaryConditionType::Neumann)
+        {
+            throw std::invalid_argument(
+                "pressure_weighted_face_fluxes supports only Dirichlet "
+                "and Neumann pressure boundary conditions.");
+        }
+        if (pressure_condition.type != BoundaryConditionType::Dirichlet)
+        {
+            continue;
+        }
+
+        const auto velocity_iter =
+            velocity_boundary_cache.type_by_name.find(name);
+        const auto velocity_type =
+            velocity_iter == velocity_boundary_cache.type_by_name.end()
+          ? BoundaryConditionType::Neumann
+          : velocity_iter->second;
+        if (velocity_type != BoundaryConditionType::Neumann)
+        {
+            throw std::invalid_argument(
+                "Dirichlet pressure boundary '" + name
+                + "' requires a Neumann velocity boundary so owner-cell "
+                  "velocity can be extrapolated to the open face.");
+        }
+    }
+}
+
+/**
  * @brief Compute Rhie-Chow pressure-weighted face fluxes.
  *
  * The correction replaces the interpolated cell pressure gradient in the
@@ -452,6 +503,12 @@ void pressure_weighted_face_fluxes_impl(
             "pressure_weighted_face_fluxes requires a non-negative "
             "pressure coefficient.");
     }
+    if (pressure_boundary_conditions != nullptr)
+    {
+        validate_pressure_velocity_boundary_compatibility(
+            boundary_cache,
+            *pressure_boundary_conditions);
+    }
 
     face_fluxes(velocity, boundary_cache, fluxes);
     if (pressure_coefficient == scalar_type{})
@@ -462,8 +519,7 @@ void pressure_weighted_face_fluxes_impl(
     const auto& mesh = velocity.mesh();
     VectorCellField<Pack> pressure_gradient(
         velocity.mesh_ptr(), "rhie_chow_pressure_gradient");
-    if (pressure_boundary_conditions == nullptr
-        || pressure_boundary_conditions->empty())
+    if (pressure_boundary_conditions == nullptr)
     {
         cell_gradient(pressure, pressure_gradient);
     }
@@ -489,7 +545,6 @@ void pressure_weighted_face_fluxes_impl(
         if (!mesh.is_interior_face(face_lid))
         {
             if (pressure_boundary_conditions == nullptr
-                || pressure_boundary_conditions->empty()
                 || !mesh.is_boundary_face(face_lid)
                 || static_cast<size_t>(face_lid)
                    >= boundary_locations.size())
@@ -506,14 +561,15 @@ void pressure_weighted_face_fluxes_impl(
                 mesh.boundary_batch_name(location.batch_id);
             const auto condition_iter =
                 pressure_boundary_conditions->find(name);
-            if (condition_iter == pressure_boundary_conditions->end()
-                || condition_iter->second.type
-                   == BoundaryConditionType::Neumann)
+            const auto condition =
+                condition_iter == pressure_boundary_conditions->end()
+              ? BoundaryCondition{}
+              : condition_iter->second;
+            if (condition.type == BoundaryConditionType::Neumann)
             {
                 continue;
             }
-            if (condition_iter->second.type
-                != BoundaryConditionType::Dirichlet)
+            if (condition.type != BoundaryConditionType::Dirichlet)
             {
                 throw std::invalid_argument(
                     "pressure_weighted_face_fluxes supports only Dirichlet "
@@ -527,7 +583,7 @@ void pressure_weighted_face_fluxes_impl(
                 face_lid,
                 velocity.local_value(owner).dot(area_vector));
             const auto direct_gradient_flux =
-                (condition_iter->second.value
+                (condition.value
                  - pressure.local_value(owner))
               * boundary_diffusion_coefficient(
                     mesh, face_lid, owner, scalar_type{1});
@@ -596,7 +652,10 @@ void pressure_weighted_face_fluxes(
  *
  * A Dirichlet pressure face is treated as an open boundary: owner velocity
  * is extrapolated to the face, then its pressure-gradient flux is replaced
- * by the direct owner-to-boundary gradient.
+ * by the direct owner-to-boundary gradient. Such a face must have a Neumann
+ * velocity condition; prescribed velocity conditions are rejected. Missing
+ * pressure batch names, including every batch in an empty map, default to
+ * homogeneous Neumann conditions.
  */
 template<TpetraTypePack Pack>
 void pressure_weighted_face_fluxes(

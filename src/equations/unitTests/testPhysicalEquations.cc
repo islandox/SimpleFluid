@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace
@@ -331,21 +332,21 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
 }
 
 TEST(PhysicalEquationsTest,
-     TemperatureSemiImplicitRejectsFiniteUnconvergedSolve)
+     TemperatureSemiImplicitRejectionPreservesAliasedAcceptedField)
 {
     auto mesh = make_2x2x2_mesh();
-    FieldType old_temperature(mesh, 0.0, "old_temperature");
+    FieldType temperature(mesh, 0.0, "temperature");
     for (MeshType::local_ordinal_type cell_lid = 0;
          cell_lid < static_cast<MeshType::local_ordinal_type>(
                         mesh->num_owned_cells());
          ++cell_lid)
     {
         const auto index = static_cast<double>(cell_lid + 1);
-        old_temperature.set_value(
+        temperature.set_value(
             cell_lid, 1.0 + index * index);
     }
-    old_temperature.sync_ghosts();
-    FieldType temperature(mesh, 0.0, "temperature");
+    temperature.sync_ghosts();
+    const auto accepted_temperature = local_values(temperature);
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
@@ -353,15 +354,165 @@ TEST(PhysicalEquationsTest,
     options.max_iterations = 1;
     options.tolerance = 1.0e-14;
 
-    EXPECT_THROW(
+    try
+    {
         equation.advance_semi_implicit(
-            old_temperature,
+            temperature,
             zero_fluxes,
             1.0,
             1.0,
             temperature,
-            options),
-        std::runtime_error);
+            options);
+        FAIL() << "Expected the under-iterated temperature solve to fail.";
+    }
+    catch (const std::runtime_error& error)
+    {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "transport solve did not converge"),
+            std::string::npos);
+    }
+
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_local_cells());
+         ++cell_lid)
+    {
+        EXPECT_DOUBLE_EQ(
+            temperature.local_value(cell_lid),
+            accepted_temperature[static_cast<size_t>(cell_lid)]);
+    }
+}
+
+TEST(PhysicalEquationsTest,
+     TemperaturePhysicalRejectionPreservesAliasedAcceptedField)
+{
+    auto mesh = make_2x2x2_mesh();
+    FieldType temperature(mesh, 0.0, "temperature");
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        const auto index = static_cast<double>(cell_lid + 1);
+        temperature.set_value(
+            cell_lid, 1.0 + index * index);
+    }
+    temperature.sync_ghosts();
+    const auto accepted_temperature = local_values(temperature);
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.thermal_conductivity = 1.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 1;
+    linear_options.tolerance = 1.0e-14;
+    auto zero_power =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    try
+    {
+        equation.advance_physical(
+            temperature,
+            zero_fluxes,
+            1.0,
+            material,
+            temperature,
+            zero_power,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            linear_options);
+        FAIL() << "Expected the under-iterated temperature solve to fail.";
+    }
+    catch (const std::runtime_error& error)
+    {
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "physical transport solve did not converge"),
+            std::string::npos);
+    }
+
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_local_cells());
+         ++cell_lid)
+    {
+        EXPECT_DOUBLE_EQ(
+            temperature.local_value(cell_lid),
+            accepted_temperature[static_cast<size_t>(cell_lid)]);
+    }
+}
+
+TEST(PhysicalEquationsTest,
+     PhysicalTemperatureNeumannGradientAddsPrescribedWallHeatFlux)
+{
+    auto mesh = make_single_hex_mesh();
+    constexpr double initial_temperature = 300.0;
+    constexpr double density = 1000.0;
+    constexpr double heat_capacity = 4200.0;
+    constexpr double conductivity = 0.588;
+    constexpr double wall_heat_flux = 25.0;
+    constexpr double time_step = 1.0;
+
+    FieldType temperature(mesh, initial_temperature, "temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["zmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann,
+        wall_heat_flux / conductivity};
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = density;
+    model_options.density = density;
+    model_options.specific_heat_capacity = heat_capacity;
+    model_options.thermal_conductivity = conductivity;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    auto zero_power =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    equation.advance_physical(
+        temperature,
+        zero_fluxes,
+        time_step,
+        material,
+        temperature,
+        zero_power,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+
+    double heated_area = 0.0;
+    for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
+    {
+        if (mesh->boundary_batch_name(batch_id) != "zmax")
+        {
+            continue;
+        }
+        for (const auto face_lid : boundary_batch.face_lids)
+        {
+            if (mesh->is_owned_face(face_lid))
+            {
+                heated_area += mesh->face_area(face_lid);
+            }
+        }
+    }
+    ASSERT_GT(heated_area, 0.0);
+    const auto expected_temperature =
+        initial_temperature
+      + time_step * wall_heat_flux * heated_area
+      / (density * heat_capacity * mesh->cell_volume(0));
+    EXPECT_NEAR(temperature.value(0), expected_temperature, 1.0e-12);
 }
 
 TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)

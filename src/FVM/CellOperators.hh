@@ -100,7 +100,8 @@ void scalar_cell_gradient(
                 {
                     phi_delta =
                         condition.value
-                      * mesh.cell_to_face_distance(face_lid, cell_lid);
+                      * boundary_normal_distance(
+                            mesh, face_lid, cell_lid);
                 }
                 else
                 {
@@ -152,7 +153,10 @@ void cell_gradient(const CellField<Pack>& field,
  * @brief Compute a least-squares scalar gradient including boundary data.
  *
  * Dirichlet values are sampled at boundary-face centroids. Neumann values
- * are interpreted as outward normal derivatives.
+ * are interpreted as outward normal derivatives. Missing batch names,
+ * including every batch in an empty map, explicitly default to homogeneous
+ * Neumann conditions. Use the overload without a boundary map to omit
+ * boundary samples from the reconstruction.
  *
  * @tparam Pack The Tpetra type pack.
  * @param field Scalar cell field whose gradient is computed.
@@ -167,7 +171,7 @@ void cell_gradient(
 {
     detail::scalar_cell_gradient(
         field,
-        boundary_conditions.empty() ? nullptr : &boundary_conditions,
+        &boundary_conditions,
         gradients);
 }
 
