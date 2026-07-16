@@ -296,6 +296,7 @@ private:
     const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
     void refresh_physical_models();
     void refresh_material_feedback(scalar_type time);
+    void initialize_radiolytic_gas_state(bool force = false);
     void update_void_fraction_models(scalar_type time_step);
     const field_type* active_alpha_g_field() const noexcept;
     const field_type* active_alpha_l_field() const noexcept;
@@ -303,6 +304,7 @@ private:
 
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
+    bool d_primary_fields_initialized = false;
     std::unique_ptr<FissionPowerSource<Pack>> d_fission_power_source;
     std::unique_ptr<RadiolyticGasModel<Pack>> d_radiolytic_gas_model;
     std::unique_ptr<BoilingSourceModel<Pack>> d_boiling_source_model;

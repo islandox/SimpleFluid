@@ -208,6 +208,32 @@ public:
     }
 
     /**
+     * @brief Publish externally owned initial void without creating a rate.
+     *
+     * This is used when a conservative population model reconstructs its
+     * configured initial state.  Unlike mirror(), the publication is an
+     * initialization event rather than a timestep change.
+     */
+    void initialize_from(const field_type& alpha_g)
+    {
+        check_source(&alpha_g, "alpha_g");
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto alpha = std::clamp(
+                alpha_g.value(cell_lid),
+                d_options.alpha_min,
+                d_options.alpha_max);
+            d_alpha_g.set_owned_value(cell_lid, alpha);
+            d_alpha_l.set_owned_value(cell_lid, scalar_type{1} - alpha);
+            d_source_alpha_total.set_owned_value(
+                cell_lid, scalar_type{});
+        }
+        sync_fields();
+    }
+
+    /**
      * @brief Apply explicit radiolysis and boiling alpha sources.
      */
     void update_explicit(

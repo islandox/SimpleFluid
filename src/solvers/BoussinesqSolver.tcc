@@ -358,7 +358,12 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     {
         d_radiolytic_gas_model->configure(options);
     }
-    if (scalar_void_was_reset
+    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation
+        && d_primary_fields_initialized)
+    {
+        initialize_radiolytic_gas_state();
+    }
+    else if (scalar_void_was_reset
         && d_precursor_model
         && d_step_index == 0)
     {
@@ -494,6 +499,13 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
         d_scalar_void_fraction_model->configure(options);
     }
     d_scalar_void_fraction_explicitly_configured = true;
+    if (d_radiolytic_gas_model
+        && d_radiolytic_gas_model->supplies_void_fraction()
+        && d_radiolytic_gas_model->initial_state_initialized())
+    {
+        d_scalar_void_fraction_model->initialize_from(
+            d_radiolytic_gas_model->alpha_g());
+    }
     if (d_precursor_model && d_step_index == 0)
     {
         d_precursor_model->initialize_inventory(
@@ -586,6 +598,10 @@ auto BoussinesqSolver<Pack>::configure_precursors(
 {
     validate_delayed_neutron_precursor_options(options);
     d_physical_model_enabled = true;
+    if (d_primary_fields_initialized)
+    {
+        initialize_radiolytic_gas_state();
+    }
     ensure_scalar_void_fraction_model();
     if (!d_precursor_model)
     {
@@ -681,8 +697,40 @@ void BoussinesqSolver<Pack>::refresh_physical_models()
         pressure(),
         velocity()};
     stored_material_properties().update(context);
+    initialize_radiolytic_gas_state(d_step_index == 0);
     refresh_material_feedback(d_time);
     stored_temperature_sources().update(context);
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::initialize_radiolytic_gas_state(
+    bool force)
+{
+    if (!d_radiolytic_gas_model
+        || !d_radiolytic_gas_model->supplies_void_fraction()
+        || (!force
+            && d_radiolytic_gas_model->initial_state_initialized()))
+    {
+        return;
+    }
+
+    d_radiolytic_gas_model->initialize_state(
+        d_time,
+        temperature(),
+        pressure(),
+        velocity(),
+        stored_material_properties(),
+        force);
+    if (d_scalar_void_fraction_model)
+    {
+        d_scalar_void_fraction_model->initialize_from(
+            d_radiolytic_gas_model->alpha_g());
+    }
+    if (d_precursor_model && d_step_index == 0)
+    {
+        d_precursor_model->initialize_inventory(
+            *active_alpha_l_field());
+    }
 }
 
 template<TpetraTypePack Pack>
@@ -890,39 +938,41 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
     {
         throw std::invalid_argument("BoussinesqSolver requires a nonzero initialization direction.");
     }
-    if (d_mesh->num_owned_cells() == 0)
+    if (d_mesh->num_owned_cells() > 0)
     {
-        return;
-    }
+        auto min_projected = d_mesh->cell_centroid(0).dot(direction);
+        auto max_projected = min_projected;
+        for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(cell);
+            const auto projected =
+                d_mesh->cell_centroid(cell_lid).dot(direction);
+            min_projected = std::min(min_projected, projected);
+            max_projected = std::max(max_projected, projected);
+        }
 
-    auto min_projected = d_mesh->cell_centroid(0).dot(direction);
-    auto max_projected = min_projected;
-    for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(cell);
-        const auto projected = d_mesh->cell_centroid(cell_lid).dot(direction);
-        min_projected = std::min(min_projected, projected);
-        max_projected = std::max(max_projected, projected);
-    }
-
-    const auto width = max_projected > min_projected
-                     ? max_projected - min_projected
-                     : 1.0;
-    for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(cell);
-        const auto projected = d_mesh->cell_centroid(cell_lid).dot(direction);
-        const auto blend = (projected - min_projected) / width;
-        temperature().set_value(cell_lid,
-                                hot_at_min * (1.0 - blend)
-                              + cold_at_max * blend);
-        pressure().set_value(cell_lid, initial_pressure);
-        velocity().set_value(cell_lid, {});
+        const auto width = max_projected > min_projected
+                         ? max_projected - min_projected
+                         : 1.0;
+        for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(cell);
+            const auto projected =
+                d_mesh->cell_centroid(cell_lid).dot(direction);
+            const auto blend = (projected - min_projected) / width;
+            temperature().set_value(
+                cell_lid,
+                hot_at_min * (1.0 - blend) + cold_at_max * blend);
+            pressure().set_value(cell_lid, initial_pressure);
+            velocity().set_value(cell_lid, {});
+        }
     }
 
     d_mesh->sync_periodic_boundaries(temperature());
     d_mesh->sync_periodic_boundaries(pressure());
     d_mesh->sync_periodic_boundaries(velocity());
+    d_primary_fields_initialized = true;
+    initialize_radiolytic_gas_state(true);
 }
 
 /**

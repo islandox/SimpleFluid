@@ -142,7 +142,9 @@ TEST(FluidSolverMultiRankTest, CoupledContinuityResidualIsGlobal)
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 300;
-    linear_options.tolerance = 1.0e-10;
+    // Retain a measurable converged residual so the global reduction check
+    // cannot become vacuous when the coupled discretization is exact.
+    linear_options.tolerance = 1.0e-6;
 
     SimpleFluid::FluidSolver<Pack> solver(
         mesh, boundary_conditions, time_options, linear_options);

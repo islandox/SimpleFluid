@@ -66,19 +66,15 @@ void add_explicit_non_orthogonal_correction(
     VectorCellField<Pack> gradients(
         correction_field.mesh_ptr(), "non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
+    gradients.sync_ghosts();
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        auto gradient = gradients.value(cell_lid);
-        if (mesh.is_owned_cell(other_lid))
-        {
-            gradient = (gradient
-                      + gradients.value(other_lid))
-                     / 2.0;
-        }
-        return gradient;
+        return (gradients.local_value(cell_lid)
+                + gradients.local_value(other_lid))
+             / scalar_type{2};
     };
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
@@ -181,23 +177,22 @@ void add_explicit_non_orthogonal_correction(
     TensorCellField<Pack> gradients(
         correction_field.mesh_ptr(), "vector_non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
+    gradients.sync_ghosts();
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid)
             -> typename TensorCellField<Pack>::tensor_type
     {
-        auto gradient = gradients.value(cell_lid);
-        if (mesh.is_owned_cell(other_lid))
+        auto gradient = gradients.local_value(cell_lid);
+        const auto other_gradient = gradients.local_value(other_lid);
+        for (size_t component = 0;
+             component < num_components;
+             ++component)
         {
-            const auto other_gradient = gradients.value(other_lid);
-            for (size_t component = 0;
-                 component < num_components;
-                 ++component)
-            {
-                gradient[component] =
-                    (gradient[component] + other_gradient[component]) / 2.0;
-            }
+            gradient[component] =
+                (gradient[component] + other_gradient[component])
+              / scalar_type{2};
         }
         return gradient;
     };
@@ -296,6 +291,7 @@ void add_variable_explicit_non_orthogonal_correction(
     VectorCellField<Pack> gradients(
         correction_field.mesh_ptr(), "variable_non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
+    gradients.sync_ghosts();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -310,13 +306,10 @@ void add_variable_explicit_non_orthogonal_correction(
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(
                     face_lid, cell_lid);
-            auto gradient = gradients.value(cell_lid);
-            if (mesh.is_owned_cell(other))
-            {
-                gradient =
-                    (gradient + gradients.value(other))
-                  / scalar_type{2};
-            }
+            const auto gradient =
+                (gradients.local_value(cell_lid)
+                 + gradients.local_value(other))
+              / scalar_type{2};
             const auto face_coefficient =
                 detail::harmonic_face_value(
                     mesh, face_lid, cell_lid, other,
@@ -396,6 +389,7 @@ void add_variable_explicit_non_orthogonal_correction(
         correction_field.mesh_ptr(),
         "variable_vector_non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
+    gradients.sync_ghosts();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -412,7 +406,7 @@ void add_variable_explicit_non_orthogonal_correction(
 
             scalar_type face_coefficient =
                 coefficient_field.local_value(cell_lid);
-            auto gradient = gradients.value(cell_lid);
+            auto gradient = gradients.local_value(cell_lid);
             if (mesh.is_interior_face(face_lid))
             {
                 const auto other =
@@ -422,18 +416,15 @@ void add_variable_explicit_non_orthogonal_correction(
                     detail::harmonic_face_value(
                         mesh, face_lid, cell_lid, other,
                         coefficient_field);
-                if (mesh.is_owned_cell(other))
+                const auto other_gradient = gradients.local_value(other);
+                for (size_t component = 0;
+                     component < components;
+                     ++component)
                 {
-                    const auto other_gradient = gradients.value(other);
-                    for (size_t component = 0;
-                         component < components;
-                         ++component)
-                    {
-                        gradient[component] =
-                            (gradient[component]
-                             + other_gradient[component])
-                          / scalar_type{2};
-                    }
+                    gradient[component] =
+                        (gradient[component]
+                         + other_gradient[component])
+                      / scalar_type{2};
                 }
             }
 
@@ -788,20 +779,15 @@ full_diffusion_residual(
     VectorCellField<Pack> gradients(
         field.mesh_ptr(), "full_diffusion_gradient");
     cell_gradient(field, gradients);
+    gradients.sync_ghosts();
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        auto gradient = gradients.value(cell_lid);
-        if (mesh.is_owned_cell(other_lid))
-        {
-            const auto other_gradient = gradients.value(other_lid);
-            gradient = {(gradient.x + other_gradient.x) / 2.0,
-                        (gradient.y + other_gradient.y) / 2.0,
-                        (gradient.z + other_gradient.z) / 2.0};
-        }
-        return gradient;
+        return (gradients.local_value(cell_lid)
+                + gradients.local_value(other_lid))
+             / scalar_type{2};
     };
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)

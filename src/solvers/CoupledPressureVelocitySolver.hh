@@ -98,12 +98,10 @@ void add_entry(std::unordered_map<Column, Scalar>& row,
 }
 
 template<TpetraTypePack Pack>
-auto make_coupled_maps(const Mesh<Pack>& mesh)
-    -> std::pair<Teuchos::RCP<const typename Pack::map_type>,
-                 Teuchos::RCP<const typename Pack::map_type>>
+auto make_coupled_map(const Mesh<Pack>& mesh)
+    -> Teuchos::RCP<const typename Pack::map_type>
 {
     using global_ordinal_type = typename Pack::global_ordinal_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
     using map_type = typename Pack::map_type;
 
     constexpr global_ordinal_type block_size = 4;
@@ -111,34 +109,11 @@ auto make_coupled_maps(const Mesh<Pack>& mesh)
         Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
     const auto comm = mesh.owned_cell_map()->getComm();
 
-    auto owned = Teuchos::rcp(new map_type(
+    return Teuchos::rcp(new map_type(
         invalid_global_size,
         block_size * mesh.num_owned_cells(),
         global_ordinal_type{0},
         comm));
-
-    std::vector<global_ordinal_type> overlap_gids;
-    overlap_gids.reserve(block_size * mesh.num_local_cells());
-    for (size_t cell = 0; cell < mesh.num_local_cells(); ++cell)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(cell);
-        const auto cell_gid =
-            mesh.overlap_cell_map()->getGlobalElement(cell_lid);
-        for (global_ordinal_type component = 0;
-             component < block_size;
-             ++component)
-        {
-            overlap_gids.push_back(block_size * cell_gid + component);
-        }
-    }
-
-    auto overlap = Teuchos::rcp(new map_type(
-        invalid_global_size,
-        overlap_gids.data(),
-        static_cast<local_ordinal_type>(overlap_gids.size()),
-        global_ordinal_type{0},
-        comm));
-    return {owned, overlap};
 }
 
 template<TpetraTypePack Pack>
@@ -780,10 +755,9 @@ private:
                 "reference density.");
         }
 
-        auto [coupled_map, coupled_overlap_map] =
-            detail::make_coupled_maps(*d_mesh);
+        auto coupled_map = detail::make_coupled_map(*d_mesh);
         auto coupled_matrix = Teuchos::rcp(new matrix_type(
-            coupled_map, coupled_overlap_map, 64));
+            coupled_map, 128));
         auto coupled_rhs = Teuchos::rcp(
             new vector_type(coupled_map, true));
 
@@ -809,6 +783,54 @@ private:
                 *d_mesh,
                 boundary_conditions.pressure,
                 reference_density);
+
+        // Store the affine least-squares reconstruction grad(q) = G*q + c
+        // on its owning rank. Distributed products below import remote rows
+        // instead of approximating a ghost cell's stencil from local geometry.
+        std::array<Teuchos::RCP<matrix_type>, 3>
+            pressure_gradient_operators;
+        std::array<Teuchos::RCP<vector_type>, 3>
+            pressure_gradient_constants;
+        for (size_t component = 0; component < 3; ++component)
+        {
+            pressure_gradient_operators[component] = Teuchos::rcp(
+                new matrix_type(
+                    d_mesh->owned_cell_map(),
+                    d_mesh->overlap_cell_map(),
+                    16));
+            pressure_gradient_constants[component] = Teuchos::rcp(
+                new vector_type(d_mesh->owned_cell_map(), true));
+        }
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto& stencil = gradient_stencils[owned];
+            for (size_t component = 0; component < 3; ++component)
+            {
+                Teuchos::Array<local_ordinal_type> columns;
+                Teuchos::Array<scalar_type> values;
+                columns.reserve(stencil.entries.size());
+                values.reserve(stencil.entries.size());
+                for (const auto& entry : stencil.entries)
+                {
+                    columns.push_back(entry.cell_lid);
+                    values.push_back(
+                        entry.coefficient.component(component));
+                }
+                pressure_gradient_operators[component]
+                    ->insertLocalValues(cell_lid, columns(), values());
+                pressure_gradient_constants[component]
+                    ->replaceLocalValue(
+                        cell_lid,
+                        stencil.constant.component(component));
+            }
+        }
+        for (auto& pressure_gradient_operator :
+             pressure_gradient_operators)
+        {
+            pressure_gradient_operator->fillComplete();
+        }
         const auto momentum_rhs = momentum.rhs->getLocalViewHost(
             Tpetra::Access::ReadOnly);
         const auto momentum_col_map = momentum.matrix->getColMap();
@@ -854,6 +876,9 @@ private:
           ? std::optional<global_ordinal_type>{}
           : std::optional<global_ordinal_type>{
                 d_mesh->owned_cell_map()->getMinAllGlobalIndex()};
+
+        std::vector<scalar_type> continuity_rhs_values(
+            d_mesh->num_owned_cells(), scalar_type{});
 
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -919,37 +944,6 @@ private:
                         detail::add_entry(
                             stabilization_row, other,
                             -time_options.time_step * direct_weight);
-
-                        auto add_gradient_stencil =
-                            [&](local_ordinal_type gradient_cell)
-                        {
-                            if (!d_mesh->is_owned_cell(gradient_cell)
-                                || static_cast<size_t>(gradient_cell)
-                                   >= gradient_stencils.size())
-                            {
-                                return;
-                            }
-                            for (const auto& entry :
-                                 gradient_stencils[
-                                     static_cast<size_t>(
-                                         gradient_cell)].entries)
-                            {
-                                detail::add_entry(
-                                    stabilization_row,
-                                    entry.cell_lid,
-                                    scalar_type{0.5}
-                                    * time_options.time_step
-                                    * entry.coefficient.dot(area));
-                            }
-                            continuity_rhs -=
-                                scalar_type{0.5}
-                              * time_options.time_step
-                              * gradient_stencils[
-                                    static_cast<size_t>(
-                                        gradient_cell)].constant.dot(area);
-                        };
-                        add_gradient_stencil(cell_lid);
-                        add_gradient_stencil(other);
                     }
                     continue;
                 }
@@ -1002,23 +996,10 @@ private:
                         cell_lid,
                         time_options.time_step
                             * boundary_coefficient);
-                    const auto& pressure_gradient_stencil =
-                        gradient_stencils[
-                            static_cast<size_t>(cell_lid)];
-                    for (const auto& entry :
-                         pressure_gradient_stencil.entries)
-                    {
-                        detail::add_entry(
-                            stabilization_row,
-                            entry.cell_lid,
-                            time_options.time_step
-                                * entry.coefficient.dot(area));
-                    }
                     continuity_rhs +=
                         time_options.time_step
-                      * (boundary_coefficient
-                            * normalized_pressure_value
-                         - pressure_gradient_stencil.constant.dot(area));
+                      * boundary_coefficient
+                      * normalized_pressure_value;
                 }
                 else
                 {
@@ -1050,6 +1031,7 @@ private:
                     continuity_rhs -= prescribed.dot(area);
                 }
             }
+            continuity_rhs_values[owned] = continuity_rhs;
 
             for (size_t component = 0; component < 3; ++component)
             {
@@ -1138,7 +1120,68 @@ private:
                     momentum_rhs(cell_lid, component)
                     + momentum_boundary_rhs[component]);
             }
+        }
 
+        for (size_t component = 0; component < 3; ++component)
+        {
+            gradient[component]->fillComplete();
+            divergence[component]->fillComplete();
+        }
+        pressure_stabilization->fillComplete();
+
+        // The divergence matrices contain the face interpolation weights.
+        // D*G therefore assembles the same owner-neighbor gradient average
+        // used by pressure_weighted_face_fluxes, including partition faces.
+        for (size_t component = 0; component < 3; ++component)
+        {
+            vector_type constant_divergence(
+                d_mesh->owned_cell_map(), true);
+            divergence[component]->apply(
+                *pressure_gradient_constants[component],
+                constant_divergence);
+            const auto constant_divergence_data =
+                constant_divergence.getData();
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells();
+                 ++owned)
+            {
+                continuity_rhs_values[owned] -=
+                    time_options.time_step
+                  * constant_divergence_data[owned];
+            }
+
+            auto gradient_stabilization = Teuchos::rcp(
+                new matrix_type(
+                    divergence[component]->getRowMap(), 32));
+            Tpetra::MatrixMatrix::Multiply(
+                *divergence[component], false,
+                *pressure_gradient_operators[component], false,
+                *gradient_stabilization, true);
+            Teuchos::RCP<matrix_type> accumulated_stabilization;
+            Tpetra::MatrixMatrix::Add(
+                *pressure_stabilization,
+                false,
+                scalar_type{1},
+                *gradient_stabilization,
+                false,
+                time_options.time_step,
+                accumulated_stabilization);
+            if (!accumulated_stabilization->isFillComplete())
+            {
+                accumulated_stabilization->fillComplete();
+            }
+            pressure_stabilization =
+                std::move(accumulated_stabilization);
+        }
+
+        const auto stabilization_col_map =
+            pressure_stabilization->getColMap();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto cell_gid =
+                d_mesh->owned_cell_map()->getGlobalElement(cell_lid);
             const auto pressure_row = 4 * cell_gid + 3;
             if (pressure_gauge_gid
                 && cell_gid == *pressure_gauge_gid)
@@ -1149,47 +1192,57 @@ private:
                     pressure_row, columns(), values());
                 coupled_rhs->replaceGlobalValue(
                     pressure_row, scalar_type{});
+                continue;
             }
-            else
+
+            Teuchos::Array<global_ordinal_type> columns;
+            Teuchos::Array<scalar_type> values;
+            for (size_t component = 0; component < 3; ++component)
             {
-                Teuchos::Array<global_ordinal_type> columns;
-                Teuchos::Array<scalar_type> values;
-                for (size_t component = 0; component < 3; ++component)
-                {
-                    for (const auto& [column, value] :
-                         divergence_rows[component])
-                    {
-                        const auto column_cell_gid =
-                            d_mesh->overlap_cell_map()->getGlobalElement(
-                                static_cast<local_ordinal_type>(column));
-                        columns.push_back(
-                            4 * column_cell_gid
-                            + static_cast<global_ordinal_type>(component));
-                        values.push_back(value);
-                    }
-                }
-                for (const auto& [column, value] : stabilization_row)
+                typename matrix_type::local_inds_host_view_type
+                    local_columns;
+                typename matrix_type::values_host_view_type local_values;
+                divergence[component]->getLocalRowView(
+                    cell_lid, local_columns, local_values);
+                const auto divergence_col_map =
+                    divergence[component]->getColMap();
+                for (size_t entry = 0;
+                     entry < local_columns.extent(0);
+                     ++entry)
                 {
                     const auto column_cell_gid =
-                        d_mesh->overlap_cell_map()->getGlobalElement(
-                            column);
-                    columns.push_back(4 * column_cell_gid + 3);
-                    values.push_back(value);
+                        divergence_col_map->getGlobalElement(
+                            local_columns[entry]);
+                    columns.push_back(
+                        4 * column_cell_gid
+                      + static_cast<global_ordinal_type>(component));
+                    values.push_back(local_values[entry]);
                 }
-                coupled_matrix->insertGlobalValues(
-                    pressure_row, columns(), values());
-                coupled_rhs->replaceGlobalValue(
-                    pressure_row, continuity_rhs);
             }
+
+            typename matrix_type::local_inds_host_view_type
+                local_columns;
+            typename matrix_type::values_host_view_type local_values;
+            pressure_stabilization->getLocalRowView(
+                cell_lid, local_columns, local_values);
+            for (size_t entry = 0;
+                 entry < local_columns.extent(0);
+                 ++entry)
+            {
+                const auto column_cell_gid =
+                    stabilization_col_map->getGlobalElement(
+                        local_columns[entry]);
+                columns.push_back(4 * column_cell_gid + 3);
+                values.push_back(local_values[entry]);
+            }
+            coupled_matrix->insertGlobalValues(
+                pressure_row, columns(), values());
+            coupled_rhs->replaceGlobalValue(
+                pressure_row, continuity_rhs_values[owned]);
         }
 
-        for (size_t component = 0; component < 3; ++component)
-        {
-            gradient[component]->fillComplete();
-            divergence[component]->fillComplete();
-        }
-        pressure_stabilization->fillComplete();
         coupled_matrix->fillComplete(coupled_map, coupled_map);
+        const auto coupled_overlap_map = coupled_matrix->getColMap();
 
         auto schur = detail::build_schur_approximation<Pack>(
             *momentum.matrix, gradient, divergence,

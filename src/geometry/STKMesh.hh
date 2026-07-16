@@ -73,7 +73,11 @@ struct STKMeshContainer
 };
 
 /**
- * @brief Cell-centered finite-volume mesh for a hybrid triangular-prism / hexahedral mesh.
+ * @brief Cell-centered finite-volume mesh for triangular-prism and hexahedral
+ *        STK meshes.
+ *
+ * Only STK `WEDGE_6` and `HEX_8` volume elements are supported. Assembly
+ * rejects any other populated element topology instead of omitting it.
  *
  * Designed for Trilinos/Tpetra assembly:
  *

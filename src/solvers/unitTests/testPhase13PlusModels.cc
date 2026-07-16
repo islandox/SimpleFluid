@@ -11,6 +11,8 @@
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -364,7 +366,7 @@ TEST(ScalarVoidFractionModelTest, MirrorDerivesRealizedRateAndComplement)
 }
 
 TEST(Phase13PlusCouplingTest,
-     AdvancedMirrorAggregatesItsActualScalarStateChange)
+     AdvancedMirrorDoesNotReportInitialPublicationAsAStateChange)
 {
     auto mesh = make_single_cell_mesh();
     SimpleFluid::BoussinesqSolver<Pack> solver(
@@ -393,7 +395,7 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_DOUBLE_EQ(radiolysis.source_alpha_rad().value(0), 0.0);
     EXPECT_DOUBLE_EQ(void_model.alpha_g().value(0), 0.0);
     EXPECT_DOUBLE_EQ(void_model.alpha_l().value(0), 1.0);
-    EXPECT_NEAR(void_model.source_alpha_total().value(0), -1.0, 1.0e-13);
+    EXPECT_DOUBLE_EQ(void_model.source_alpha_total().value(0), 0.0);
 }
 
 TEST(Phase13PlusCouplingTest,
@@ -968,6 +970,78 @@ TEST(DelayedNeutronPrecursorModelTest,
     }
     old_concentration.sync_ghosts();
 
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() > 1)
+    {
+        int local_partition_faces = 0;
+        double local_partition_non_orthogonality = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            for (const auto face_lid : mesh->faces(cell_lid))
+            {
+                if (!mesh->is_interior_face(face_lid))
+                {
+                    continue;
+                }
+                const auto other =
+                    mesh->opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                if (mesh->is_owned_cell(other))
+                {
+                    continue;
+                }
+                ++local_partition_faces;
+                const auto tangential_area =
+                    SimpleFluid::FVM::detail::non_orthogonal_area_vector(
+                        mesh->face_area_vector_outward(face_lid, cell_lid),
+                        mesh->cell_center_vector(face_lid, cell_lid));
+                local_partition_non_orthogonality = std::max(
+                    local_partition_non_orthogonality,
+                    std::sqrt(tangential_area.dot(tangential_area)));
+            }
+        }
+        int global_partition_faces = 0;
+        double global_partition_non_orthogonality = 0.0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_partition_faces,
+            &global_partition_faces);
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_partition_non_orthogonality,
+            &global_partition_non_orthogonality);
+        ASSERT_GT(global_partition_faces, 0);
+        ASSERT_GT(global_partition_non_orthogonality, 1.0e-8);
+    }
+
+    auto global_inventory = [&]()
+    {
+        double local_inventory = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            local_inventory +=
+                model.liquid_inventory(0).value(cell_lid)
+              * mesh->cell_volume(cell_lid);
+        }
+        double inventory = 0.0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_inventory,
+            &inventory);
+        return inventory;
+    };
+    const auto inventory_before = global_inventory();
+
     SimpleFluid::FaceField<Pack> zero_flux(
         mesh, 0.0, "precursor_zero_face_flux");
     FieldType diffusion_weight(
@@ -1034,6 +1108,7 @@ TEST(DelayedNeutronPrecursorModelTest,
     ASSERT_TRUE(orthogonal_statistics.converged);
 
     model.advance(time_step, alpha_l, nullptr);
+    const auto inventory_after = global_inventory();
 
     double max_non_orthogonal_effect = 0.0;
     double max_corrected_error = 0.0;
@@ -1053,6 +1128,10 @@ TEST(DelayedNeutronPrecursorModelTest,
     }
     EXPECT_GT(max_non_orthogonal_effect, 1.0e-8);
     EXPECT_LT(max_corrected_error, 1.0e-11);
+    EXPECT_NEAR(
+        inventory_after,
+        inventory_before,
+        std::max(1.0e-12, std::abs(inventory_before) * 1.0e-11));
 }
 
 TEST(DelayedNeutronPrecursorModelTest,
