@@ -16,6 +16,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/FaceFlux.hh"
 #include "FVM/OperatorDetails.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -148,8 +149,7 @@ auto pressure_gradient_stencils(
         [&](local_ordinal_type face_lid)
             -> std::optional<BoundaryCondition>
     {
-        if (boundary_conditions.empty()
-            || !mesh.is_boundary_face(face_lid)
+        if (!mesh.is_boundary_face(face_lid)
             || static_cast<size_t>(face_lid)
                >= boundary_locations.size())
         {
@@ -258,7 +258,8 @@ auto pressure_gradient_stencils(
             {
                 const auto normalized_delta =
                     condition->value / reference_density
-                  * mesh.cell_to_face_distance(face_lid, cell_lid);
+                  * FVM::detail::boundary_normal_distance(
+                        mesh, face_lid, cell_lid);
                 constant = constant + basis * normalized_delta;
             }
             else
@@ -754,6 +755,9 @@ private:
                 "CoupledPressureVelocitySolver requires a finite positive "
                 "reference density.");
         }
+        FVM::detail::validate_pressure_velocity_boundary_compatibility(
+            velocity_boundary_cache,
+            boundary_conditions.pressure);
 
         auto coupled_map = detail::make_coupled_map(*d_mesh);
         auto coupled_matrix = Teuchos::rcp(new matrix_type(
@@ -1010,8 +1014,8 @@ private:
                             area_components[component]);
                         momentum_boundary_rhs[component] -=
                             normalized_pressure_value
-                            * d_mesh->cell_to_face_distance(
-                                face_lid, cell_lid)
+                            * FVM::detail::boundary_normal_distance(
+                                *d_mesh, face_lid, cell_lid)
                             * area_components[component];
                     }
                 }

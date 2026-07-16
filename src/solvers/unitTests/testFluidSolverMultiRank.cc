@@ -160,6 +160,7 @@ TEST(FluidSolverMultiRankTest, CoupledContinuityResidualIsGlobal)
         solver.pressure(),
         time_options.time_step,
         boundary_cache,
+        boundary_conditions.pressure,
         face_fluxes);
 
     double local_squared_norm = 0.0;
