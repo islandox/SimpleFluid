@@ -494,7 +494,8 @@ private:
                 boundary_condition,
                 boundary_value,
                 zero_source,
-                FVM::NonOrthogonalTreatment::Explicit);
+                FVM::NonOrthogonalTreatment::Explicit,
+                &old_concentration);
             field_type solution(d_mesh, "precursor_diffusion_solution");
             const auto statistics =
                 d_transport_solver.solve_with_statistics(
