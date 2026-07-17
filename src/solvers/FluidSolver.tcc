@@ -590,6 +590,14 @@ void FluidSolver<Pack>::step()
 }
 
 template<TpetraTypePack Pack>
+void FluidSolver<Pack>::step(ProgressStream& progress_output)
+{
+    step();
+    write_step_progress(
+        progress_output, d_problem.time_options().steps);
+}
+
+template<TpetraTypePack Pack>
 void FluidSolver<Pack>::run(int steps)
 {
     if (steps < 0)
@@ -601,6 +609,37 @@ void FluidSolver<Pack>::run(int steps)
     for (int step_id = 0; step_id < steps; ++step_id)
     {
         step();
+    }
+}
+
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::run(
+    int steps,
+    ProgressStream& progress_output)
+{
+    if (steps < 0)
+    {
+        throw std::invalid_argument(
+            "FluidSolver::run steps cannot be negative.");
+    }
+
+    const int final_step = d_step_index + steps;
+    for (int step_id = 0; step_id < steps; ++step_id)
+    {
+        step();
+        write_step_progress(progress_output, final_step);
+    }
+}
+
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::write_step_progress(
+    ProgressStream& progress_output,
+    int total_steps) const
+{
+    if (d_mesh->owned_cell_map()->getComm()->getRank() == 0)
+    {
+        progress_output.write(
+            step_index(), total_steps, time(), d_last_step_statistics);
     }
 }
 

@@ -6,6 +6,7 @@
 #include "dataclass/Database.hh"
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/SolverProgress.hh"
 
 #include <Tpetra_Core.hpp>
 
@@ -211,7 +212,8 @@ int main(int argc, char** argv)
     SimpleFluid::BoussinesqSolver<Pack> solver(
         mesh, bcs, time_options, linear_options, model_options);
     solver.initialize_heated_box(290.0, 290.0);
-    solver.run();
+    SimpleFluid::ProgressStream progress(std::cout);
+    solver.run(steps, progress);
 
     const auto comm = Tpetra::getDefaultComm();
     const int rank = comm->getRank();

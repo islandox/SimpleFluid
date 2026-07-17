@@ -45,6 +45,9 @@ SIMPLEFLUID_SHIRI_DT=0.002 \
 ```
 
 Results are written under `profiles/` as one VTU and one cell CSV per rank.
+During the SimpleFluid solve, MPI rank zero prints one flushed convergence
+summary per physical step by wrapping `std::cout` in a `ProgressStream` and
+passing it through the solver's `run(steps, progress)` interface.
 OpenFOAM samples `T` and `U` on an axial line at `r=0.080 m`. The comparison
 script selects the nearest SimpleFluid radial cell layer, averages its sector
 theta cells, interpolates the OpenFOAM profile to the SimpleFluid axial cell

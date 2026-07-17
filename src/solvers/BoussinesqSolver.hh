@@ -89,6 +89,7 @@ public:
                                         scalar_type cold_temperature,
                                         scalar_type initial_pressure = 0.0);
 
+    using base_type::step;
     void step() override;
 
     const field_type& temperature() const noexcept;
