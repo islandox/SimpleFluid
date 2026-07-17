@@ -15,6 +15,7 @@
 #include "utils/testing_environment.hh"
 
 #include <cstddef>
+#include <numbers>
 #include <string>
 #include <unordered_map>
 
@@ -132,6 +133,43 @@ SimpleFluid::SP<const SimpleFluid::Database> make_cylinder_database()
     db->set("domain_exterior_face_types",
             SimpleFluid::ArrString{"radial", "zmin", "zmax"});
 
+    return db;
+}
+
+SimpleFluid::SP<const SimpleFluid::Database> make_annulus_database()
+{
+    auto db = std::make_shared<SimpleFluid::Database>();
+    db->set("dimension", 3);
+    db->set("mesh_size", SimpleFluid::real_t{1.0});
+    db->set(
+        "domain_type",
+        static_cast<int>(SimpleFluid::MeshFactory::DomainType::ANNULUS));
+    db->set("R", SimpleFluid::ArrReal{0.5, 0.75, 1.0});
+    db->set(
+        "Theta",
+        SimpleFluid::ArrReal{
+            0.0, 0.5 * std::numbers::pi, std::numbers::pi,
+            1.5 * std::numbers::pi, 2.0 * std::numbers::pi});
+    db->set("Z", SimpleFluid::ArrReal{0.0, 1.0, 2.0});
+    db->set(
+        "domain_exterior_face_types",
+        SimpleFluid::ArrString{"rmin", "rmax", "zmin", "zmax"});
+    return db;
+}
+
+SimpleFluid::SP<const SimpleFluid::Database> make_annulus_sector_database()
+{
+    auto db = std::const_pointer_cast<SimpleFluid::Database>(
+        make_annulus_database());
+    db->set(
+        "Theta",
+        SimpleFluid::ArrReal{
+            0.0, std::numbers::pi / 12.0, std::numbers::pi / 6.0,
+            std::numbers::pi / 4.0});
+    db->set(
+        "domain_exterior_face_types",
+        SimpleFluid::ArrString{
+            "rmin", "rmax", "thetamin", "thetamax", "zmin", "zmax"});
     return db;
 }
 
@@ -308,6 +346,59 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
     EXPECT_EQ(boundary_counts["zmax"], 7u);
 }
 
+TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
+{
+    SimpleFluid::MeshFactory factory(make_annulus_database());
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_EQ(mesh->num_owned_cells(), 16u);
+    std::unordered_map<std::string, size_t> boundary_counts;
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::HEXAHEDRON);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+    }
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+            ++boundary_counts[mesh->boundary_name(fid)];
+    }
+    EXPECT_EQ(boundary_counts.size(), 4u);
+    EXPECT_EQ(boundary_counts["rmin"], 8u);
+    EXPECT_EQ(boundary_counts["rmax"], 8u);
+    EXPECT_EQ(boundary_counts["zmin"], 8u);
+    EXPECT_EQ(boundary_counts["zmax"], 8u);
+}
+
+TEST(MeshFactoryTest, AnnulusSectorBuildsThetaBoundaryPlanes)
+{
+    SimpleFluid::MeshFactory factory(make_annulus_sector_database());
+    auto mesh = factory.template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    EXPECT_EQ(mesh->num_owned_cells(), 12u);
+    std::unordered_map<std::string, size_t> boundary_counts;
+    for (MeshType::local_ordinal_type fid = 0;
+         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+         ++fid)
+    {
+        if (mesh->is_boundary_face(fid))
+            ++boundary_counts[mesh->boundary_name(fid)];
+    }
+    EXPECT_EQ(boundary_counts.size(), 6u);
+    EXPECT_EQ(boundary_counts["rmin"], 6u);
+    EXPECT_EQ(boundary_counts["rmax"], 6u);
+    EXPECT_EQ(boundary_counts["thetamin"], 4u);
+    EXPECT_EQ(boundary_counts["thetamax"], 4u);
+    EXPECT_EQ(boundary_counts["zmin"], 6u);
+    EXPECT_EQ(boundary_counts["zmax"], 6u);
+}
+
 /**
  * @brief Verifies boundary layer refinement on a cylinder mesh produces all wedge cells with positive volumes.
  */
@@ -319,7 +410,9 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
     auto mesh = factory.template build<>();
 
     ASSERT_TRUE(mesh != nullptr);
-    EXPECT_EQ(mesh->num_local_cells(), 108u);
+    // Circular point fronts follow physical arc length, giving 37 Delaunay
+    // triangles per XY plane across four axial layers.
+    EXPECT_EQ(mesh->num_local_cells(), 148u);
     for (MeshType::local_ordinal_type lid = 0;
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)

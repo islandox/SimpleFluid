@@ -4,10 +4,12 @@
  */
 
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/mesh/FrontalDelaunay2D.hh"
 
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::Meshes
 {
@@ -100,6 +102,34 @@ SemiStructuredXY_Z::SemiStructuredXY_Z(
     Base::d_num_faces = indexer.total_faces();
     Base::d_num_owned_faces = Base::d_num_faces;
     Base::d_num_nodes = indexer.total_nodes();
+}
+
+SemiStructuredXY_Z SemiStructuredXY_Z::from_frontal_delaunay(
+    const Arr<Vec3>& xy_boundary,
+    const Arr<real_t>& z_edges,
+    real_t target_edge_length,
+    const std::string& side_batch_name)
+{
+    auto xy_mesh = FrontalDelaunay2D::triangulate(
+        xy_boundary, target_edge_length, side_batch_name);
+
+    Arr<Arr<unsigned>> cells;
+    cells.reserve(xy_mesh.triangles.size());
+    for (const auto& triangle : xy_mesh.triangles)
+    {
+        cells.push_back({triangle[0], triangle[1], triangle[2]});
+    }
+
+    Arr<BoundaryEdge> boundary_edges;
+    boundary_edges.reserve(xy_mesh.boundary_edges.size());
+    for (auto& edge : xy_mesh.boundary_edges)
+    {
+        boundary_edges.push_back(
+            {edge.node0, edge.node1, std::move(edge.batch_name)});
+    }
+
+    return SemiStructuredXY_Z(
+        xy_mesh.nodes, cells, z_edges, boundary_edges);
 }
 
 void SemiStructuredXY_Z::initialize_xy_geometry()

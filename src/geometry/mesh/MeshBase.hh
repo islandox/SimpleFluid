@@ -358,7 +358,7 @@ public:
 protected:
     constexpr MeshBase() = default;
 
-    const uint8_t d_dim = 3;
+    static constexpr uint8_t d_dim = 3;
     size_t d_num_local_cells = 0;
     size_t d_num_owned_cells = 0;
     size_t d_num_cells = 0;

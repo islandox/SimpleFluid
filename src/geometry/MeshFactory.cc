@@ -11,6 +11,7 @@
 
 #include "MeshFactory.hh"
 #include "STKMesh.hh"
+#include "geometry/mesh/FrontalDelaunay2D.hh"
 
 #include <stk_io/IossBridge.hpp>
 #include <stk_mesh/base/FEMHelpers.hpp>
@@ -19,6 +20,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,12 +37,10 @@ namespace
 /**
  * @brief Internal tag used during structured mesh construction.
  *
- * Records the topological ring, layer, and surface flag for mesh nodes
- * during the hexahedral element generation loop.
+ * Records the axial layer and exterior-surface flag for generated mesh nodes.
  */
 struct FactoryNodeTag
 {
-    size_t ring = 0;
     size_t layer = 0;
     bool surface = false;
 };
@@ -302,6 +303,14 @@ MeshFactory::MeshFactory(SP<const Database> db)
         d_radius = db->get<real_t>("radius");
         d_cylinder_height = db->get<real_t>("height");
     }
+    else if (d_domain_type == DomainType::ANNULUS)
+    {
+        d_annulus_cell_edges = {
+            db->get<ArrReal>("R"),
+            db->get<ArrReal>("Theta"),
+            db->get<ArrReal>("Z")
+        };
+    }
     else if (d_domain_type == DomainType::SPHERE)
     {
         d_radius = db->get<real_t>("radius");
@@ -441,6 +450,10 @@ SP<Mesh<Pack>> MeshFactory::build()
     else if (d_domain_type == DomainType::CYLINDER)
     {
         build_cylinder_mesh(mesh);
+    }
+    else if (d_domain_type == DomainType::ANNULUS)
+    {
+        build_annulus_mesh(mesh);
     }
     else if (d_domain_type == DomainType::SPHERE)
     {
@@ -651,7 +664,7 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
 }
 
 /**
- * @brief Build a triangular-prism mesh for a cylindrical domain.
+ * @brief Build a frontal-Delaunay triangular-prism mesh for a cylinder.
  *
  * Boundary part order is {radial, zmin, zmax}.
  */
@@ -671,7 +684,6 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         throw std::runtime_error("CYLINDER MeshFactory requires boundary names {radial,zmin,zmax}.");
     }
 
-    constexpr real_t pi = 3.141592653589793238462643383279502884;
     const auto base_radial_count = positive_count_from_size(d_radius, d_mesh_size);
     const auto base_height_count = positive_count_from_size(d_cylinder_height, d_mesh_size);
     ArrReal radial_edges =
@@ -706,97 +718,13 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
         }
     }
 
-    const auto radial_count = radial_edges.size() - 1;
     const auto height_count = z_edges.size() - 1;
 
-    // Increase sector count by ring so circumferential and radial edge lengths
-    // stay comparable without forcing tiny sectors near the cylinder center.
-    auto ring_node_count = [=](size_t ring) -> size_t
-    {
-        if (ring == 0)
-        {
-            return 1;
-        }
-
-        return std::max<size_t>(
-            6, static_cast<size_t>(
-                std::ceil(2.0 * pi * static_cast<real_t>(ring))));
-    };
-
-    std::vector<size_t> ring_offsets(radial_count + 1, 0);
-    size_t nodes_per_layer = 0;
-    for (size_t ring = 0; ring <= radial_count; ++ring)
-    {
-        ring_offsets[ring] = nodes_per_layer;
-        nodes_per_layer += ring_node_count(ring);
-    }
-
-    auto layer_node_index = [&](size_t ring,
-                                size_t sector) -> size_t
-    {
-        if (ring == 0)
-        {
-            return ring_offsets[ring];
-        }
-
-        return ring_offsets[ring] + sector % ring_node_count(ring);
-    };
-
-    std::vector<std::array<size_t, 3>> disk_triangles;
-    if (radial_count > 0)
-    {
-        const auto first_ring_count = ring_node_count(1);
-        disk_triangles.reserve(6 * radial_count * radial_count);
-        for (size_t sector = 0; sector < first_ring_count; ++sector)
-        {
-            disk_triangles.push_back(
-                {layer_node_index(0, 0),
-                 layer_node_index(1, sector),
-                 layer_node_index(1, sector + 1)});
-        }
-    }
-
-    for (size_t ring = 2; ring <= radial_count; ++ring)
-    {
-        // Zip adjacent rings by angle; each step consumes one inner or outer
-        // edge, giving a non-crossing triangular annulus for unequal counts.
-        const auto inner_ring = ring - 1;
-        const auto inner_count = ring_node_count(inner_ring);
-        const auto outer_count = ring_node_count(ring);
-        size_t inner = 0;
-        size_t outer = 0;
-
-        while (inner < inner_count || outer < outer_count)
-        {
-            const auto next_inner_angle =
-                inner < inner_count
-              ? 2.0 * pi * static_cast<real_t>(inner + 1)
-                    / static_cast<real_t>(inner_count)
-              : 4.0 * pi;
-            const auto next_outer_angle =
-                outer < outer_count
-              ? 2.0 * pi * static_cast<real_t>(outer + 1)
-                    / static_cast<real_t>(outer_count)
-              : 4.0 * pi;
-
-            if (next_inner_angle <= next_outer_angle)
-            {
-                disk_triangles.push_back(
-                    {layer_node_index(inner_ring, inner),
-                     layer_node_index(ring, outer),
-                     layer_node_index(inner_ring, inner + 1)});
-                ++inner;
-            }
-            else
-            {
-                disk_triangles.push_back(
-                    {layer_node_index(inner_ring, inner),
-                     layer_node_index(ring, outer),
-                     layer_node_index(ring, outer + 1)});
-                ++outer;
-            }
-        }
-    }
+    // Place nodes on circular fronts (including prescribed radial boundary
+    // layers), then let the shared XY Delaunay kernel determine connectivity.
+    const auto xy_mesh = Meshes::FrontalDelaunay2D::triangulate_disk(
+        radial_edges, d_mesh_size, d_domain_exterior_face_types[0]);
+    const auto nodes_per_layer = xy_mesh.nodes.size();
 
     auto meta = mesh->meta();
     auto bulk = mesh->bulk();
@@ -825,21 +753,21 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
             1 + layer * nodes_per_layer + node_index);
     };
 
-    auto node_id = [=](size_t layer,
-                       size_t ring,
-                       size_t sector) -> stk::mesh::EntityId
-    {
-        return node_id_from_layer_index(layer, layer_node_index(ring, sector));
-    };
-
     std::unordered_map<stk::mesh::EntityId, FactoryNodeTag> node_tags;
     node_tags.reserve((height_count + 1) * nodes_per_layer);
+
+    ArrBool is_radial_boundary(nodes_per_layer, false);
+    for (const auto& edge : xy_mesh.boundary_edges)
+    {
+        is_radial_boundary[edge.node0] = true;
+        is_radial_boundary[edge.node1] = true;
+    }
 
     bulk->modification_begin();
 
     stk::mesh::EntityId next_element_id = 1;
     auto declare_wedge = [&](size_t layer,
-                             const std::array<size_t, 3>& bottom_nodes)
+                             const Meshes::FrontalDelaunay2D::Triangle& bottom_nodes)
     {
         const stk::mesh::EntityIdVector wedge_nodes{
             node_id_from_layer_index(layer, bottom_nodes[0]),
@@ -863,38 +791,33 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
                                        [=](const FactoryNodeTag& tag)
                                        { return tag.layer == layer_id; });
                 };
-                const auto all_ring = [&](size_t ring_id)
+                const auto all_surface = [&]()
                 {
                     return std::all_of(tags.begin(), tags.end(),
-                                       [=](const FactoryNodeTag& tag)
-                                       { return tag.ring == ring_id; });
+                                       [](const FactoryNodeTag& tag)
+                                       { return tag.surface; });
                 };
 
                 if (all_layer(0)) return zmin_part;
                 if (all_layer(height_count)) return zmax_part;
-                if (all_ring(radial_count)) return radial_part;
+                if (all_surface()) return radial_part;
                 return nullptr;
             });
     };
 
     for (size_t layer = 0; layer <= height_count; ++layer)
     {
-        node_tags.emplace(node_id(layer, 0, 0), FactoryNodeTag{0, layer, false});
-        for (size_t ring = 1; ring <= radial_count; ++ring)
+        for (size_t node = 0; node < nodes_per_layer; ++node)
         {
-            const auto sector_count = ring_node_count(ring);
-            for (size_t sector = 0; sector < sector_count; ++sector)
-            {
-                node_tags.emplace(node_id(layer, ring, sector),
-                                  FactoryNodeTag{ring, layer,
-                                                 ring == radial_count});
-            }
+            node_tags.emplace(
+                node_id_from_layer_index(layer, node),
+                FactoryNodeTag{layer, is_radial_boundary[node]});
         }
     }
 
     for (size_t layer = 0; layer < height_count; ++layer)
     {
-        for (const auto& triangle : disk_triangles)
+        for (const auto& triangle : xy_mesh.triangles)
         {
             declare_wedge(layer, triangle);
         }
@@ -903,30 +826,186 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     for (size_t layer = 0; layer <= height_count; ++layer)
     {
         const auto z = z_edges[layer];
-        for (size_t ring = 0; ring <= radial_count; ++ring)
+        for (size_t node_index = 0;
+             node_index < nodes_per_layer; ++node_index)
         {
-            const auto radius = radial_edges[ring];
-            const auto sector_count = ring_node_count(ring);
-            for (size_t sector = 0; sector < sector_count; ++sector)
+            const auto node = bulk->get_entity(
+                stk::topology::NODE_RANK,
+                node_id_from_layer_index(layer, node_index));
+            double* coord = stk::mesh::field_data(coord_field, node);
+            if (coord == nullptr)
             {
-                const auto theta = 2.0 * pi
-                                 * static_cast<real_t>(sector)
-                                 / static_cast<real_t>(sector_count);
-                const auto node = bulk->get_entity(stk::topology::NODE_RANK,
-                                                   node_id(layer, ring, sector));
-                double* coord = stk::mesh::field_data(coord_field, node);
-                if (coord == nullptr)
-                {
-                    throw std::runtime_error("CYLINDER MeshFactory failed to write node coordinates.");
-                }
+                throw std::runtime_error(
+                    "CYLINDER MeshFactory failed to write node coordinates.");
+            }
 
-                coord[0] = radius * std::cos(theta);
-                coord[1] = radius * std::sin(theta);
-                coord[2] = z;
+            coord[0] = xy_mesh.nodes[node_index].x;
+            coord[1] = xy_mesh.nodes[node_index].y;
+            coord[2] = z;
+        }
+    }
+
+    bulk->modification_end();
+    mesh->assemble();
+}
+
+/**
+ * @brief Build a structured HEX_8 annulus or annular sector.
+ *
+ * A 2 pi span identifies the first and final angular edges and creates a
+ * conforming periodic seam. Smaller spans retain physical theta faces.
+ */
+template <TpetraTypePack Pack>
+void MeshFactory::build_annulus_mesh(SP<STKMesh<Pack>>& mesh)
+{
+    if (d_dimension != 3)
+    {
+        throw std::runtime_error(
+            "ANNULUS MeshFactory currently constructs only 3D HEX_8 meshes.");
+    }
+    const auto& radial_edges = d_annulus_cell_edges[0];
+    const auto& theta_edges = d_annulus_cell_edges[1];
+    const auto& z_edges = d_annulus_cell_edges[2];
+    auto validate_edges = [](const ArrReal& edges, const char* name)
+    {
+        if (edges.size() < 2)
+            throw std::runtime_error(
+                std::string("ANNULUS ") + name + " requires at least two edges.");
+        for (size_t edge = 0; edge < edges.size(); ++edge)
+        {
+            if (!std::isfinite(edges[edge])
+                || (edge > 0 && edges[edge] <= edges[edge - 1]))
+            {
+                throw std::runtime_error(
+                    std::string("ANNULUS ") + name
+                    + " edges must be finite and strictly increasing.");
+            }
+        }
+    };
+    validate_edges(radial_edges, "R");
+    validate_edges(theta_edges, "Theta");
+    validate_edges(z_edges, "Z");
+    if (radial_edges.front() <= 0.0)
+        throw std::runtime_error("ANNULUS inner radius must be positive.");
+
+    constexpr real_t two_pi = 2.0 * std::numbers::pi_v<real_t>;
+    const auto theta_span = theta_edges.back() - theta_edges.front();
+    const auto angular_tolerance =
+        64.0 * std::numeric_limits<real_t>::epsilon() * two_pi;
+    if (theta_span > two_pi + angular_tolerance)
+    {
+        throw std::runtime_error("ANNULUS Theta span cannot exceed 2 pi.");
+    }
+    const bool periodic =
+        std::abs(theta_span - two_pi) <= angular_tolerance;
+    const size_t required_boundaries = periodic ? 4 : 6;
+    if (d_domain_exterior_face_types.size() < required_boundaries)
+    {
+        throw std::runtime_error(
+            periodic
+                ? "Periodic ANNULUS requires {rmin,rmax,zmin,zmax}."
+                : "ANNULUS sector requires "
+                  "{rmin,rmax,thetamin,thetamax,zmin,zmax}.");
+    }
+    const size_t nr = radial_edges.size() - 1;
+    const size_t nt = theta_edges.size() - 1;
+    const size_t nz = z_edges.size() - 1;
+    if (periodic && nt < 3)
+        throw std::runtime_error(
+            "Periodic ANNULUS requires at least three theta cells.");
+
+    auto meta = mesh->meta();
+    auto bulk = mesh->bulk();
+    auto& coord_field =
+        meta->template declare_field<double>(stk::topology::NODE_RANK,
+                                             "coordinates");
+    stk::mesh::put_field_on_mesh(
+        coord_field, meta->universal_part(), 3, nullptr);
+    meta->set_coordinate_field(&coord_field);
+    auto& hex_part =
+        meta->declare_part_with_topology("annulus_hexes", stk::topology::HEX_8);
+    stk::io::put_io_part_attribute(hex_part);
+    std::array<stk::mesh::Part*, 6> boundary_parts{};
+    for (size_t boundary = 0; boundary < required_boundaries; ++boundary)
+    {
+        boundary_parts[boundary] = declare_io_part(
+            *meta, d_domain_exterior_face_types[boundary], meta->side_rank());
+    }
+
+    const size_t theta_nodes = periodic ? nt : nt + 1;
+    auto node_id = [=](size_t i, size_t j, size_t k)
+        -> stk::mesh::EntityId
+    {
+        return static_cast<stk::mesh::EntityId>(
+            1 + i + (nr + 1) * (j + theta_nodes * k));
+    };
+    auto element_id = [=](size_t i, size_t j, size_t k)
+        -> stk::mesh::EntityId
+    {
+        return static_cast<stk::mesh::EntityId>(
+            1 + i + nr * (j + nt * k));
+    };
+    auto declare_side = [&](stk::mesh::Entity element,
+                            unsigned ordinal,
+                            stk::mesh::Part* part)
+    {
+        bulk->declare_element_side(
+            element, ordinal, stk::mesh::PartVector{part});
+    };
+
+    bulk->modification_begin();
+    for (size_t k = 0; k < nz; ++k)
+    {
+        for (size_t j = 0; j < nt; ++j)
+        {
+            const size_t next_j = (j + 1) % theta_nodes;
+            for (size_t i = 0; i < nr; ++i)
+            {
+                const stk::mesh::EntityIdVector nodes{
+                    node_id(i, j, k), node_id(i + 1, j, k),
+                    node_id(i + 1, next_j, k), node_id(i, next_j, k),
+                    node_id(i, j, k + 1), node_id(i + 1, j, k + 1),
+                    node_id(i + 1, next_j, k + 1),
+                    node_id(i, next_j, k + 1)};
+                const auto element = stk::mesh::declare_element(
+                    *bulk, hex_part, element_id(i, j, k), nodes);
+                if (i == 0) declare_side(element, 3, boundary_parts[0]);
+                if (i + 1 == nr) declare_side(element, 1, boundary_parts[1]);
+                if (!periodic && j == 0)
+                    declare_side(element, 0, boundary_parts[2]);
+                if (!periodic && j + 1 == nt)
+                    declare_side(element, 2, boundary_parts[3]);
+                const size_t zmin_part = periodic ? 2 : 4;
+                const size_t zmax_part = periodic ? 3 : 5;
+                if (k == 0)
+                    declare_side(element, 4, boundary_parts[zmin_part]);
+                if (k + 1 == nz)
+                    declare_side(element, 5, boundary_parts[zmax_part]);
             }
         }
     }
 
+    for (size_t k = 0; k <= nz; ++k)
+    {
+        for (size_t j = 0; j < theta_nodes; ++j)
+        {
+            const auto cosine = std::cos(theta_edges[j]);
+            const auto sine = std::sin(theta_edges[j]);
+            for (size_t i = 0; i <= nr; ++i)
+            {
+                const auto node = bulk->get_entity(
+                    stk::topology::NODE_RANK, node_id(i, j, k));
+                double* coordinates =
+                    stk::mesh::field_data(coord_field, node);
+                if (coordinates == nullptr)
+                    throw std::runtime_error(
+                        "ANNULUS MeshFactory failed to write node coordinates.");
+                coordinates[0] = radial_edges[i] * cosine;
+                coordinates[1] = radial_edges[i] * sine;
+                coordinates[2] = z_edges[k];
+            }
+        }
+    }
     bulk->modification_end();
     mesh->assemble();
 }
@@ -1039,7 +1118,7 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
                 const bool surface = i == 0 || i == cell_count
                                   || j == 0 || j == cell_count
                                   || k == 0 || k == cell_count;
-                node_tags.emplace(node_id(i, j, k), FactoryNodeTag{0, k, surface});
+                node_tags.emplace(node_id(i, j, k), FactoryNodeTag{k, surface});
             }
         }
     }
