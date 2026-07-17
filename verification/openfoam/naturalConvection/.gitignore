@@ -1,0 +1,6 @@
+/profiles/
+/openfoam/[1-9]*/
+/openfoam/processor*/
+/openfoam/postProcessing/
+/openfoam/log.*
+*.pdf

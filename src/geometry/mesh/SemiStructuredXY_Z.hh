@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace SimpleFluid::Meshes
@@ -62,6 +63,22 @@ public:
         const Arr<Arr<unsigned>>& xy_cell_nodes,
         const Arr<real_t>& z_edges,
         const Arr<BoundaryEdge>& boundary_edges = {});
+
+    /**
+     * @brief Generate a triangular XY mesh with frontal-Delaunay placement,
+     *        then extrude it through the supplied Z edges.
+     *
+     * @param xy_boundary Convex, counter-clockwise polygon on the XY plane.
+     * @param z_edges Strictly increasing axial edge coordinates.
+     * @param target_edge_length Requested XY edge length.
+     * @param side_batch_name Boundary batch assigned to the polygon sides.
+     * @return Complete serial triangular-prism mesh.
+     */
+    static SemiStructuredXY_Z from_frontal_delaunay(
+        const Arr<Vec3>& xy_boundary,
+        const Arr<real_t>& z_edges,
+        real_t target_edge_length,
+        const std::string& side_batch_name = "side");
 
     const Arr<Vec3>& xy_nodes() const noexcept { return d_xy_nodes; }
     const Arr<Arr<unsigned>>& xy_cell_nodes() const noexcept

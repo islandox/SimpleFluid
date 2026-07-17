@@ -86,6 +86,33 @@ TEST(SemiStructuredXY_ZTest, AssignsDefaultSideBatch)
     EXPECT_EQ(mesh.boundary_face_batch(2).face_lids.size(), 3U);
 }
 
+TEST(SemiStructuredXY_ZTest, BuildsFromFrontalDelaunayXYPlane)
+{
+    const auto mesh = Mesh::from_frontal_delaunay(
+        {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0},
+         {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}},
+        {0.0, 0.5, 1.5}, 0.4, "outer_wall");
+
+    ASSERT_GT(mesh.xy_cell_nodes().size(), 2U);
+    EXPECT_EQ(mesh.num_cells(), 2U * mesh.xy_cell_nodes().size());
+    EXPECT_EQ(mesh.num_nodes(), 3U * mesh.xy_nodes().size());
+    for (const auto& cell : mesh.xy_cell_nodes())
+    {
+        EXPECT_EQ(cell.size(), 3U);
+    }
+
+    bool found_wall_batch = false;
+    for (const auto batch_id : mesh.boundary_batch_ids())
+    {
+        if (mesh.boundary_batch_name(batch_id) == "outer_wall")
+        {
+            found_wall_batch = true;
+            EXPECT_EQ(mesh.boundary_face_batch(batch_id).face_lids.size(), 24U);
+        }
+    }
+    EXPECT_TRUE(found_wall_batch);
+}
+
 TEST(SemiStructuredXY_ZTest, ReportsCountsAndCellGeometry)
 {
     const auto mesh = make_mesh();
