@@ -21,6 +21,7 @@
 #include "io/VTUWriter.hh"
 #include "problems/Problem.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
+#include "solvers/SolverProgress.hh"
 
 #include <cstdint>
 #include <string>
@@ -65,8 +66,16 @@ public:
     virtual ~FluidSolver() = default;
 
     virtual void step();
+    /** @brief Advance one step and print rank-zero convergence progress. */
+    void step(ProgressStream& progress_output);
     void run(int steps);
+    /** @brief Advance @p steps and print one rank-zero line per step. */
+    void run(int steps, ProgressStream& progress_output);
     void run() { run(d_problem.time_options().steps); }
+    void run(ProgressStream& progress_output)
+    {
+        run(d_problem.time_options().steps, progress_output);
+    }
 
     scalar_type time() const noexcept { return d_time; }
     int step_index() const noexcept { return d_step_index; }
@@ -148,6 +157,9 @@ private:
 
     LinearSolveSummary run_momentum_predictor();
     scalar_type global_sum(scalar_type local_value) const;
+    void write_step_progress(
+        ProgressStream& progress_output,
+        int total_steps) const;
     typename PressureProjectionEquation<Pack>::ProjectionResult
     run_pressure_correction();
     void solve_coupled_krylov();
