@@ -36,7 +36,8 @@ public:
         BOX = 0,
         CYLINDER = 1,
         SPHERE = 2,
-        EXTERNAL = 3
+        EXTERNAL = 3,
+        ANNULUS = 4
     };
 
 public:
@@ -70,6 +71,9 @@ private:
     void build_cylinder_mesh(SP<STKMesh<Pack>>& mesh);
 
     template <TpetraTypePack Pack>
+    void build_annulus_mesh(SP<STKMesh<Pack>>& mesh);
+
+    template <TpetraTypePack Pack>
     void build_sphere_mesh(SP<STKMesh<Pack>>& mesh);
 
     const BoundaryLayerSpec* boundary_layer_spec(
@@ -81,6 +85,7 @@ private:
     DomainType d_domain_type;
     int d_dimension;
     Vec3D<ArrReal> d_box_cell_edges;
+    Vec3D<ArrReal> d_annulus_cell_edges;
     real_t d_mesh_size;
     real_t d_radius;
     real_t d_cylinder_height;
@@ -89,6 +94,9 @@ private:
     // types of exterior faces for each boundary part, used for setting BCs in assembly
     // Face orders are: - BOX: {X-, X+, Y-, Y+, Z-, Z+}
     //                   - CYLINDER: {radial, top, bottom}
+    //                   - periodic ANNULUS: {rmin, rmax, zmin, zmax}
+    //                   - sector ANNULUS:
+    //                     {rmin, rmax, thetamin, thetamax, zmin, zmax}
     Arr<std::string> d_domain_exterior_face_types;
     Arr<BoundaryLayerSpec> d_boundary_layer_specs;
 };

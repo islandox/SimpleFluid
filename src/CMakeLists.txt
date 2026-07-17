@@ -41,6 +41,7 @@ set_target_properties(SimpleFluidCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Mesh owns geometry, partitioning, and mesh output. These implementations are
 # kept together because STKMesh and MeshHandle directly use both facilities.
 add_library(SimpleFluidMesh STATIC
+    geometry/BoundaryLayerMeshFactory.cc
     geometry/Mesh.cc
     geometry/MeshHandle.cc
     geometry/STKMesh.cc
@@ -52,6 +53,7 @@ add_library(SimpleFluidMesh STATIC
     geometry/mesh/OrthoMeshTopo.cc
     geometry/mesh/OrthogonalCartesian3D.cc
     geometry/mesh/OrthogonalCylindrial3D.cc
+    geometry/mesh/FrontalDelaunay2D.cc
     geometry/mesh/SemiStructMeshTopo.cc
     geometry/mesh/SemiStructuredXY_Z.cc
     geometry/mesh/UnstructuredMesh.cc
@@ -159,6 +161,10 @@ add_executable(natural_convection_boundary_layer_box examples/natural_convection
 target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(natural_convection_boundary_layer_box)
 
+add_executable(natural_convection_shiri examples/natural_convection_shiri.cc)
+target_link_libraries(natural_convection_shiri PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(natural_convection_shiri)
+
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
 target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
@@ -174,6 +180,7 @@ foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_cylinder
     natural_convection_sphere
     natural_convection_boundary_layer_box
+    natural_convection_shiri
     fissile_solution_tank_demo
     constant_power_cylinder_vessel)
   add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
@@ -181,3 +188,7 @@ foreach(EXAMPLE_TARGET IN ITEMS
       LABELS integration
       WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
+
+set_tests_properties(natural_convection_shiri_smoke PROPERTIES
+    ENVIRONMENT
+        "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
