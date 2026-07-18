@@ -43,7 +43,7 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
       d_pressure_correction_boundary_conditions(
           d_pressure_boundary_conditions),
       d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"),
-      d_cached_gradient(d_mesh, "pressure_projection_gradient")
+      d_face_flux_workspace(d_mesh)
 {
     require_owned_cell_map(d_mesh);
     for (auto& [name, condition] :
@@ -248,6 +248,7 @@ auto PressureProjectionEquation<Pack>::project(
         time_step,
         velocity_boundary_cache,
         d_pressure_correction_boundary_conditions,
+        d_face_flux_workspace,
         d_cached_face_fluxes);
     const auto owned_map = require_owned_cell_map(d_mesh);
     if (d_cached_pressure_matrix.is_null())
@@ -306,9 +307,11 @@ auto PressureProjectionEquation<Pack>::project(
     FVM::cell_gradient(
         pressure,
         d_pressure_correction_boundary_conditions,
-        d_cached_gradient);
+        d_face_flux_workspace.pressure_gradient());
     velocity.owned_data().update(
-        -time_step, d_cached_gradient.owned_data(), 1.0);
+        -time_step,
+        d_face_flux_workspace.pressure_gradient().owned_data(),
+        1.0);
 
     d_mesh->sync_periodic_boundaries(velocity);
 
@@ -318,6 +321,7 @@ auto PressureProjectionEquation<Pack>::project(
         time_step,
         velocity_boundary_cache,
         d_pressure_correction_boundary_conditions,
+        d_face_flux_workspace,
         d_cached_face_fluxes);
 
     scalar_type continuity_norm_squared = {};

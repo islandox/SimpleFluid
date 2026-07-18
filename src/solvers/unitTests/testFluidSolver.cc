@@ -81,6 +81,12 @@ public:
     {
         return advance_momentum();
     }
+
+    bool pressure_preconditioner_reuse_enabled()
+    {
+        return pressure_projection()
+            .linear_solver_options().reuse_preconditioner;
+    }
 };
 
 class WaterPressureFluidSolver : public SimpleFluid::FluidSolver<Pack>
@@ -117,8 +123,9 @@ TEST(FluidSolverTest, AdvancesPressureVelocityWithoutThermalFields)
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
 
-    SimpleFluid::FluidSolver<Pack> solver(
+    TestFluidSolver solver(
         mesh, {}, time_options, linear_options);
+    EXPECT_TRUE(solver.pressure_preconditioner_reuse_enabled());
     solver.run();
 
     EXPECT_EQ(solver.step_index(), 2);

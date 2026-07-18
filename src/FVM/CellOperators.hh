@@ -32,7 +32,9 @@ template<TpetraTypePack Pack>
 void scalar_cell_gradient(
     const CellField<Pack>& field,
     const BoundaryConditionMap* boundary_conditions,
-    VectorCellField<Pack>& gradients)
+    VectorCellField<Pack>& gradients,
+    const std::vector<BoundaryFaceLocation<Mesh<Pack>>>*
+        cached_boundary_locations = nullptr)
 {
     using mesh_type = Mesh<Pack>;
     using local_ordinal_type = typename mesh_type::local_ordinal_type;
@@ -44,10 +46,19 @@ void scalar_cell_gradient(
             "cell_gradient requires input and output fields on one mesh.");
     }
 
-    const auto boundary_locations =
-        boundary_conditions == nullptr
-      ? std::vector<BoundaryFaceLocation<mesh_type>>{}
-      : boundary_face_locations(mesh);
+    std::vector<BoundaryFaceLocation<mesh_type>> local_boundary_locations;
+    auto boundary_locations = cached_boundary_locations;
+    if (boundary_conditions != nullptr && boundary_locations == nullptr)
+    {
+        local_boundary_locations = boundary_face_locations(mesh);
+        boundary_locations = &local_boundary_locations;
+    }
+    if (boundary_locations != nullptr
+        && boundary_locations->size() != mesh.num_faces())
+    {
+        throw std::invalid_argument(
+            "cell_gradient received boundary locations for another mesh.");
+    }
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -73,12 +84,12 @@ void scalar_cell_gradient(
                 if (boundary_conditions == nullptr
                     || !mesh.is_boundary_face(face_lid)
                     || static_cast<size_t>(face_lid)
-                       >= boundary_locations.size())
+                       >= boundary_locations->size())
                 {
                     continue;
                 }
                 const auto location =
-                    boundary_locations[static_cast<size_t>(face_lid)];
+                    (*boundary_locations)[static_cast<size_t>(face_lid)];
                 if (!location.active)
                 {
                     continue;
