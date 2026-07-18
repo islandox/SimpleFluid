@@ -21,6 +21,7 @@
 #include <Teuchos_RCP.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <string_view>
 
@@ -77,7 +78,25 @@ struct LinearSolverOptions
     real_t tolerance = 1.0e-10;
     int verbosity = Belos::Errors + Belos::Warnings;
     LinearPreconditioner preconditioner = LinearPreconditioner::None;
+    /**
+     * @brief Reuse a preconditioner for consecutive solves with the exact
+     *        same operator object.
+     *
+     * This is opt-in because an operator may be updated in place without its
+     * identity changing. Enable reuse only when the operator's numerical
+     * values remain unchanged between solves. A different operator object
+     * always triggers a rebuild.
+     */
+    bool reuse_preconditioner = false;
 };
+
+namespace detail
+{
+
+template<TpetraTypePack Pack>
+struct BelosLinearSolverTestAccess;
+
+} // namespace detail
 
 /**
  * @brief Reusable Belos GMRES solver for systems with stable maps.
@@ -121,6 +140,10 @@ public:
 
         if (!has_compatible_maps(matrix))
         {
+            // A newly created Belos problem must never inherit a hierarchy
+            // prepared for the previous problem, even if an operator address
+            // were to be recycled.
+            invalidate_preconditioner();
             d_problem = Teuchos::rcp(
                 new problem_type(matrix, x, b));
             d_parameters = Teuchos::rcp(new Teuchos::ParameterList());
@@ -204,14 +227,23 @@ private:
         d_parameters->set("Verbosity", options.verbosity);
     }
 
+    void invalidate_preconditioner()
+    {
+        d_preconditioner = Teuchos::null;
+        d_preconditioner_operator = Teuchos::null;
+        if (!d_problem.is_null())
+        {
+            d_problem->setRightPrec(Teuchos::null);
+        }
+    }
+
     void configure_preconditioner(
         const Teuchos::RCP<const operator_type>& matrix,
         const LinearSolverOptions& options)
     {
         if (options.preconditioner == LinearPreconditioner::None)
         {
-            d_preconditioner = Teuchos::null;
-            d_problem->setRightPrec(Teuchos::null);
+            invalidate_preconditioner();
             return;
         }
         if (options.preconditioner != LinearPreconditioner::MueLu)
@@ -226,6 +258,17 @@ private:
         {
             throw std::invalid_argument(
                 "MueLu preconditioning requires a Tpetra::CrsMatrix operator.");
+        }
+
+        const auto can_reuse =
+            options.reuse_preconditioner
+            && !d_preconditioner.is_null()
+            && !d_preconditioner_operator.is_null()
+            && d_preconditioner_operator.getRawPtr() == matrix.getRawPtr();
+        if (can_reuse)
+        {
+            d_problem->setRightPrec(d_preconditioner);
+            return;
         }
 
         Teuchos::ParameterList parameters;
@@ -246,13 +289,19 @@ private:
         d_preconditioner =
             MueLu::CreateTpetraPreconditioner(
                 mutable_operator, parameters);
+        d_preconditioner_operator = matrix;
+        ++d_preconditioner_setup_count;
         d_problem->setRightPrec(d_preconditioner);
     }
+
+    friend struct detail::BelosLinearSolverTestAccess<Pack>;
 
     Teuchos::RCP<problem_type> d_problem;
     Teuchos::RCP<Teuchos::ParameterList> d_parameters;
     Teuchos::RCP<solver_type> d_solver;
     Teuchos::RCP<const operator_type> d_preconditioner;
+    Teuchos::RCP<const operator_type> d_preconditioner_operator;
+    std::size_t d_preconditioner_setup_count = 0;
 };
 
 /**

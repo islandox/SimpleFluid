@@ -66,3 +66,27 @@ established.
 The OpenFOAM dictionaries target releases that still ship
 `buoyantBoussinesqSimpleFoam`; newer modular OpenFOAM releases may require
 solver-dictionary migration.
+
+## Profile the SimpleFluid solve
+
+The `RelWithDebInfo` build retains debug symbols and frame pointers. With
+Valgrind installed, collect a serial Callgrind profile with:
+
+```sh
+verification/openfoam/naturalConvection/profile_simplefluid.sh
+```
+
+The profiling launcher defaults to a `6 x 3 x 12` mesh and two steps so it
+finishes quickly while exercising repeated pressure corrections. It toggles
+collection only while `BoussinesqSolver::step()` is running, excluding mesh
+construction and result output from the instruction counts. The usual
+`SIMPLEFLUID_SHIRI_NR`, `SIMPLEFLUID_SHIRI_NTHETA`,
+`SIMPLEFLUID_SHIRI_NZ`, `SIMPLEFLUID_SHIRI_STEPS`, and
+`SIMPLEFLUID_SHIRI_DT` overrides select a larger workload.
+
+The raw data and an inclusive text report are written to
+`profiles/callgrind/callgrind.out` and
+`profiles/callgrind/callgrind.annotated.txt`. Open the raw data in a Callgrind
+viewer, or regenerate the report with `callgrind_annotate`. Callgrind measures
+executed instructions rather than elapsed time, so confirm an optimization
+with a normal `RelWithDebInfo` run as well.

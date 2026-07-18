@@ -45,6 +45,8 @@ public:
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
     using face_flux_field_type = FaceField<Pack>;
+    using face_flux_workspace_type =
+        FVM::PressureWeightedFaceFluxWorkspace<Pack>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -127,6 +129,7 @@ protected:
     PressureProjectionEquation<Pack>& pressure_projection();
     CoupledPressureVelocitySolver<Pack>& coupled_pressure_velocity_solver();
     FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache();
+    face_flux_workspace_type& pressure_face_flux_workspace();
     field_type& pressure_correction();
     velocity_field_type& predictor_pressure_gradient();
     velocity_field_type& predictor_velocity();

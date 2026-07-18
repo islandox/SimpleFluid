@@ -18,6 +18,21 @@
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Tpetra_Core.hpp>
 
+namespace SimpleFluid::detail
+{
+
+template<TpetraTypePack Pack>
+struct BelosLinearSolverTestAccess
+{
+    static std::size_t preconditioner_setup_count(
+        const BelosLinearSolver<Pack>& solver) noexcept
+    {
+        return solver.d_preconditioner_setup_count;
+    }
+};
+
+} // namespace SimpleFluid::detail
+
 namespace
 {
 
@@ -27,6 +42,14 @@ using utils_test::KokkosEnvironment;
 
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
+
+std::size_t preconditioner_setup_count(
+    const SimpleFluid::BelosLinearSolver<Pack>& solver)
+{
+    using Access =
+        SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+    return Access::preconditioner_setup_count(solver);
+}
 
 class IdentityOperator final : public Pack::operator_type
 {
@@ -221,6 +244,83 @@ TEST(BelosLinearSolverTest, SupportsMueLuForCrsMatrices)
 
     EXPECT_TRUE(statistics.converged);
     EXPECT_GE(statistics.iterations, 0);
+}
+
+TEST(BelosLinearSolverTest, RebuildsMueLuByDefault)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 8, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(3.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner =
+        SimpleFluid::LinearPreconditioner::MueLu;
+    ASSERT_FALSE(options.reuse_preconditioner);
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+
+    EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+}
+
+TEST(BelosLinearSolverTest,
+     ReusesMueLuOnlyForSameOperatorAndInvalidatesWhenDisabled)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 8, 0, Tpetra::getDefaultComm()));
+    auto first_matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto second_matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto first_op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(first_matrix);
+    auto second_op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(second_matrix);
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(3.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner =
+        SimpleFluid::LinearPreconditioner::MueLu;
+    options.reuse_preconditioner = true;
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    ASSERT_TRUE(solver.solve(first_op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+
+    rhs.putScalar(5.0);
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(first_op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+    for (const auto value : solution.getData())
+    {
+        EXPECT_DOUBLE_EQ(value, 5.0);
+    }
+
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(second_op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(second_op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+
+    options.preconditioner =
+        SimpleFluid::LinearPreconditioner::MueLu;
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(second_op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 3U);
 }
 
 TEST(BelosLinearSolverTest, RejectsMueLuForNonCrsOperators)

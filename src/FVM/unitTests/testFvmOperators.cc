@@ -24,6 +24,7 @@
 #include <cmath>
 #include <memory>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -34,6 +35,13 @@ using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using TensorFieldType = SimpleFluid::TensorCellField<Pack>;
+using FaceFluxWorkspace =
+    SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace<Pack>;
+
+static_assert(!std::is_copy_constructible_v<FaceFluxWorkspace>);
+static_assert(!std::is_copy_assignable_v<FaceFluxWorkspace>);
+static_assert(std::is_move_constructible_v<FaceFluxWorkspace>);
+static_assert(std::is_move_assignable_v<FaceFluxWorkspace>);
 
 using utils_test::KokkosEnvironment;
 
@@ -725,6 +733,218 @@ TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
 
     EXPECT_GT(flux_norm, 1.0e-12);
     EXPECT_GT(pressure_work, 0.0);
+}
+
+TEST(FvmOperatorsTest,
+     PressureWeightedFluxWorkspaceReusesStorageAndOverwritesValues)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 2.5};
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace<Pack>
+        workspace(mesh);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, "reused_workspace_flux");
+
+    auto storage_pointers = [&]()
+    {
+        std::array<const Pack::scalar_type*, 9> pointers{};
+        for (size_t component = 0; component < 3; ++component)
+        {
+            pointers[component] =
+                workspace.face_velocity().data().getData(component)
+                    .getRawPtr();
+            pointers[3 + component] =
+                workspace.pressure_gradient().owned_data()
+                    .getData(component).getRawPtr();
+            pointers[6 + component] =
+                workspace.pressure_gradient().overlap_data()
+                    .getData(component).getRawPtr();
+        }
+        return pointers;
+    };
+    const auto initial_storage = storage_pointers();
+    const auto* const initial_boundary_locations =
+        workspace.boundary_locations().data();
+    ASSERT_EQ(workspace.boundary_locations().size(), mesh->num_faces());
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_owned_value(
+            cell_lid,
+            {0.1 + center.x,
+             -0.2 + 0.5 * center.y,
+             0.3 - 0.25 * center.z});
+        pressure.set_owned_value(
+            cell_lid, nonlinear_scalar(center));
+    }
+    velocity.sync_ghosts();
+    pressure.sync_ghosts();
+
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        0.2,
+        velocity_cache,
+        bcs.pressure,
+        workspace,
+        fluxes);
+    EXPECT_EQ(storage_pointers(), initial_storage);
+    EXPECT_EQ(
+        workspace.boundary_locations().data(),
+        initial_boundary_locations);
+
+    std::vector<SimpleFluid::vec3<Pack::scalar_type>> first_face_velocity(
+        mesh->num_faces());
+    for (MeshType::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_faces());
+         ++face_lid)
+    {
+        if (workspace.face_velocity().is_owned_face(face_lid))
+        {
+            first_face_velocity[static_cast<size_t>(face_lid)] =
+                workspace.face_velocity().value(face_lid);
+        }
+    }
+    std::vector<SimpleFluid::vec3<Pack::scalar_type>> first_gradient(
+        mesh->num_local_cells());
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_local_cells());
+         ++cell_lid)
+    {
+        first_gradient[static_cast<size_t>(cell_lid)] =
+            workspace.pressure_gradient().local_value(cell_lid);
+    }
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_owned_value(
+            cell_lid,
+            {1.0 + 2.0 * center.x,
+             0.75 - 1.5 * center.y,
+             -0.5 + center.z});
+        pressure.set_owned_value(
+            cell_lid,
+            4.0 + 1.7 * nonlinear_scalar(center)
+                + 0.4 * center.x * center.x);
+    }
+    velocity.sync_ghosts();
+    pressure.sync_ghosts();
+    bcs.pressure["xmax"].value = 8.0;
+
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        0.2,
+        velocity_cache,
+        bcs.pressure,
+        workspace,
+        fluxes);
+    EXPECT_EQ(storage_pointers(), initial_storage);
+    EXPECT_EQ(
+        workspace.boundary_locations().data(),
+        initial_boundary_locations);
+
+    SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace<Pack>
+        fresh_workspace(mesh);
+    SimpleFluid::FaceField<Pack> fresh_fluxes(
+        mesh, "fresh_workspace_flux");
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        0.2,
+        velocity_cache,
+        bcs.pressure,
+        fresh_workspace,
+        fresh_fluxes);
+
+    bool face_velocity_changed = false;
+    for (MeshType::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_faces());
+         ++face_lid)
+    {
+        if (!fluxes.is_owned_face(face_lid))
+        {
+            continue;
+        }
+        EXPECT_DOUBLE_EQ(
+            fluxes.value(face_lid), fresh_fluxes.value(face_lid));
+        const auto reused_face_velocity =
+            workspace.face_velocity().value(face_lid);
+        const auto fresh_face_velocity =
+            fresh_workspace.face_velocity().value(face_lid);
+        EXPECT_EQ(reused_face_velocity, fresh_face_velocity);
+        const auto face_velocity_delta =
+            reused_face_velocity
+          - first_face_velocity[static_cast<size_t>(face_lid)];
+        face_velocity_changed = face_velocity_changed
+                             || face_velocity_delta.dot(
+                                    face_velocity_delta) > 1.0e-20;
+    }
+    EXPECT_TRUE(face_velocity_changed);
+
+    bool pressure_gradient_changed = false;
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_local_cells());
+         ++cell_lid)
+    {
+        const auto reused_gradient =
+            workspace.pressure_gradient().local_value(cell_lid);
+        const auto fresh_gradient =
+            fresh_workspace.pressure_gradient().local_value(cell_lid);
+        EXPECT_EQ(reused_gradient, fresh_gradient);
+        const auto gradient_delta =
+            reused_gradient
+          - first_gradient[static_cast<size_t>(cell_lid)];
+        pressure_gradient_changed = pressure_gradient_changed
+                                 || gradient_delta.dot(gradient_delta)
+                                        > 1.0e-20;
+    }
+    EXPECT_TRUE(pressure_gradient_changed);
+}
+
+TEST(FvmOperatorsTest,
+     PressureWeightedFluxWorkspaceRejectsAnotherMesh)
+{
+    auto workspace_mesh = make_mesh();
+    auto field_mesh = make_mesh();
+    SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace<Pack>
+        workspace(workspace_mesh);
+    VectorFieldType velocity(field_mesh, "velocity");
+    FieldType pressure(field_mesh, "pressure");
+    SimpleFluid::BoundaryConditionSet bcs;
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            field_mesh, bcs);
+    SimpleFluid::FaceField<Pack> fluxes(field_mesh, "face_flux");
+
+    EXPECT_THROW(
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity,
+            pressure,
+            0.1,
+            velocity_cache,
+            workspace,
+            fluxes),
+        std::invalid_argument);
 }
 
 TEST(FvmOperatorsTest,

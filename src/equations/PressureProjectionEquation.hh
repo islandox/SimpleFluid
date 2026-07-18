@@ -27,6 +27,14 @@
 namespace SimpleFluid
 {
 
+namespace detail
+{
+
+template<TpetraTypePack Pack>
+struct PressureProjectionEquationTestAccess;
+
+} // namespace detail
+
 inline LinearSolverOptions pressure_projection_linear_solver_options()
 {
     LinearSolverOptions options;
@@ -53,6 +61,8 @@ public:
     using velocity_field_type = VectorCellField<Pack>;
     using face_flux_field_type = FaceField<Pack>;
     using face_velocity_field_type = VectorFaceField<Pack>;
+    using face_flux_workspace_type =
+        FVM::PressureWeightedFaceFluxWorkspace<Pack>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -100,6 +110,8 @@ public:
         const source_type& right_hand_source);
 
 private:
+    friend struct detail::PressureProjectionEquationTestAccess<Pack>;
+
     static Teuchos::RCP<const map_type> require_owned_cell_map(
         const SP<const mesh_type>& mesh);
 
@@ -110,7 +122,7 @@ private:
     mutable std::optional<typename Pack::global_ordinal_type>
         d_pressure_gauge_gid;
     mutable face_flux_field_type d_cached_face_fluxes;
-    mutable velocity_field_type d_cached_gradient;
+    mutable face_flux_workspace_type d_face_flux_workspace;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
     BelosLinearSolver<Pack> d_linear_solver;
