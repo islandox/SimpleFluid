@@ -57,9 +57,9 @@ struct VelocityBoundaryCache
 /**
  * @brief Reusable scratch storage for Rhie-Chow face-flux reconstruction.
  *
- * The workspace owns only temporary numerical values. Every invocation of
- * pressure_weighted_face_fluxes overwrites the values needed by that call;
- * no pressure- or velocity-derived result is reused. Boundary-face locations
+ * The workspace owns only temporary pressure-gradient values. Every
+ * invocation of pressure_weighted_face_fluxes overwrites the values needed by
+ * that call; no pressure-derived result is reused. Boundary-face locations
  * depend only on the immutable mesh topology and are cached at construction.
  *
  * A workspace is tied to one exact mesh instance. It is move-only to prevent
@@ -83,8 +83,6 @@ public:
      */
     explicit PressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh)
         : d_mesh(require_mesh(std::move(mesh))),
-          d_face_velocity(
-              d_mesh, "rhie_chow_face_velocity_workspace", false),
           d_pressure_gradient(
               d_mesh, "rhie_chow_pressure_gradient_workspace", false),
           d_boundary_locations(
@@ -102,16 +100,6 @@ public:
         PressureWeightedFaceFluxWorkspace&&) = default;
 
     const SP<const mesh_type>& mesh_ptr() const noexcept { return d_mesh; }
-
-    VectorFaceField<Pack>& face_velocity() noexcept
-    {
-        return d_face_velocity;
-    }
-
-    const VectorFaceField<Pack>& face_velocity() const noexcept
-    {
-        return d_face_velocity;
-    }
 
     VectorCellField<Pack>& pressure_gradient() noexcept
     {
@@ -142,7 +130,6 @@ private:
     }
 
     SP<const mesh_type> d_mesh;
-    VectorFaceField<Pack> d_face_velocity;
     VectorCellField<Pack> d_pressure_gradient;
     std::vector<boundary_location_type> d_boundary_locations;
 };
@@ -403,6 +390,92 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
     load_boundary_face_velocity(boundary_cache, velocity, face_velocity);
 }
 
+/**
+ * @brief Assemble normal face fluxes directly from cell velocities.
+ *
+ * This is algebraically equivalent to assemble_face_velocities followed by
+ * normal_face_fluxes, but avoids materializing and rereading a three-component
+ * face-velocity field.
+ */
+template<TpetraTypePack Pack>
+void assemble_normal_face_fluxes(
+    const VectorCellField<Pack>& velocity,
+    const VelocityBoundaryCache<Pack>* boundary_cache,
+    FaceField<Pack>& fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    validate_face_flux_inputs(velocity, boundary_cache);
+    if (&fluxes.mesh() != &velocity.mesh())
+    {
+        throw std::invalid_argument(
+            "face_fluxes requires output on the velocity mesh.");
+    }
+
+    const auto& mesh = velocity.mesh();
+    fluxes.put_scalar(scalar_type{});
+
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<local_ordinal_type>(face);
+        if (!fluxes.is_owned_face(face_lid)
+            || !mesh.is_interior_face(face_lid))
+        {
+            continue;
+        }
+
+        const auto owner = mesh.owner_cell(face_lid);
+        const auto neighbor =
+            mesh.opposite_or_periodic_neighbor_cell(face_lid, owner);
+        const auto face_velocity =
+            (velocity.local_value(owner)
+             + velocity.local_value(neighbor)) / 2.0;
+        fluxes.set_value(
+            face_lid,
+            face_velocity.dot(mesh.face_normal(face_lid))
+          * mesh.face_area(face_lid));
+    }
+
+    if (boundary_cache == nullptr)
+    {
+        return;
+    }
+
+    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
+    {
+        const auto value_iter = boundary_cache->value.find(batch_id);
+        if (value_iter == boundary_cache->value.end())
+        {
+            continue;
+        }
+        const auto type_iter = boundary_cache->type.find(batch_id);
+        const auto boundary_type =
+            type_iter == boundary_cache->type.end()
+          ? BoundaryConditionType::Neumann
+          : type_iter->second;
+
+        for (size_t i = 0; i < boundary_batch.face_lids.size(); ++i)
+        {
+            const auto face_lid = boundary_batch.face_lids[i];
+            if (!fluxes.is_owned_face(face_lid)
+                || !mesh.is_boundary_face(face_lid))
+            {
+                continue;
+            }
+
+            const auto face_velocity =
+                boundary_type == BoundaryConditionType::Slip
+              ? slip_face_velocity(velocity, face_lid)
+              : value_iter->second[i];
+            fluxes.set_value(
+                face_lid,
+                face_velocity.dot(mesh.face_normal(face_lid))
+              * mesh.face_area(face_lid));
+        }
+    }
+}
+
 } // namespace detail
 
 /**
@@ -483,9 +556,7 @@ template<TpetraTypePack Pack>
 inline void face_fluxes(const VectorCellField<Pack>& velocity,
                         FaceField<Pack>& fluxes)
 {
-    VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
-    face_velocities(velocity, face_velocity);
-    normal_face_fluxes(face_velocity, fluxes);
+    detail::assemble_normal_face_fluxes<Pack>(velocity, nullptr, fluxes);
 }
 
 /**
@@ -502,9 +573,8 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
                         const VelocityBoundaryCache<Pack>& boundary_cache,
                         FaceField<Pack>& fluxes)
 {
-    VectorFaceField<Pack> face_velocity(velocity.mesh_ptr(), "face_velocity");
-    face_velocities(velocity, boundary_cache, face_velocity);
-    normal_face_fluxes(face_velocity, fluxes);
+    detail::assemble_normal_face_fluxes(
+        velocity, &boundary_cache, fluxes);
 }
 
 namespace detail
@@ -612,9 +682,8 @@ void pressure_weighted_face_fluxes_impl(
             *pressure_boundary_conditions);
     }
 
-    face_velocities(
-        velocity, boundary_cache, workspace.face_velocity());
-    normal_face_fluxes(workspace.face_velocity(), fluxes);
+    assemble_normal_face_fluxes(
+        velocity, &boundary_cache, fluxes);
     if (pressure_coefficient == scalar_type{})
     {
         return;
