@@ -756,16 +756,13 @@ TEST(FvmOperatorsTest,
 
     auto storage_pointers = [&]()
     {
-        std::array<const Pack::scalar_type*, 9> pointers{};
+        std::array<const Pack::scalar_type*, 6> pointers{};
         for (size_t component = 0; component < 3; ++component)
         {
             pointers[component] =
-                workspace.face_velocity().data().getData(component)
-                    .getRawPtr();
-            pointers[3 + component] =
                 workspace.pressure_gradient().owned_data()
                     .getData(component).getRawPtr();
-            pointers[6 + component] =
+            pointers[3 + component] =
                 workspace.pressure_gradient().overlap_data()
                     .getData(component).getRawPtr();
         }
@@ -805,17 +802,16 @@ TEST(FvmOperatorsTest,
         workspace.boundary_locations().data(),
         initial_boundary_locations);
 
-    std::vector<SimpleFluid::vec3<Pack::scalar_type>> first_face_velocity(
-        mesh->num_faces());
+    std::vector<Pack::scalar_type> first_fluxes(mesh->num_faces());
     for (MeshType::local_ordinal_type face_lid = 0;
          face_lid < static_cast<MeshType::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
-        if (workspace.face_velocity().is_owned_face(face_lid))
+        if (fluxes.is_owned_face(face_lid))
         {
-            first_face_velocity[static_cast<size_t>(face_lid)] =
-                workspace.face_velocity().value(face_lid);
+            first_fluxes[static_cast<size_t>(face_lid)] =
+                fluxes.value(face_lid);
         }
     }
     std::vector<SimpleFluid::vec3<Pack::scalar_type>> first_gradient(
@@ -874,7 +870,7 @@ TEST(FvmOperatorsTest,
         fresh_workspace,
         fresh_fluxes);
 
-    bool face_velocity_changed = false;
+    bool face_flux_changed = false;
     for (MeshType::local_ordinal_type face_lid = 0;
          face_lid < static_cast<MeshType::local_ordinal_type>(
                         mesh->num_faces());
@@ -886,19 +882,11 @@ TEST(FvmOperatorsTest,
         }
         EXPECT_DOUBLE_EQ(
             fluxes.value(face_lid), fresh_fluxes.value(face_lid));
-        const auto reused_face_velocity =
-            workspace.face_velocity().value(face_lid);
-        const auto fresh_face_velocity =
-            fresh_workspace.face_velocity().value(face_lid);
-        EXPECT_EQ(reused_face_velocity, fresh_face_velocity);
-        const auto face_velocity_delta =
-            reused_face_velocity
-          - first_face_velocity[static_cast<size_t>(face_lid)];
-        face_velocity_changed = face_velocity_changed
-                             || face_velocity_delta.dot(
-                                    face_velocity_delta) > 1.0e-20;
+        face_flux_changed = face_flux_changed
+                         || fluxes.value(face_lid)
+                            != first_fluxes[static_cast<size_t>(face_lid)];
     }
-    EXPECT_TRUE(face_velocity_changed);
+    EXPECT_TRUE(face_flux_changed);
 
     bool pressure_gradient_changed = false;
     for (MeshType::local_ordinal_type cell_lid = 0;
@@ -945,6 +933,130 @@ TEST(FvmOperatorsTest,
             workspace,
             fluxes),
         std::invalid_argument);
+}
+
+TEST(FvmOperatorsTest,
+     FusedFaceFluxMatchesFaceVelocityComposition)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+    FaceFluxWorkspace workspace(mesh);
+    SimpleFluid::VectorFaceField<Pack> reference_face_velocity(
+        mesh, "reference_face_velocity");
+    SimpleFluid::FaceField<Pack> reference_fluxes(
+        mesh, "reference_face_flux");
+    SimpleFluid::FaceField<Pack> fused_fluxes(
+        mesh, "fused_face_flux");
+    SimpleFluid::FaceField<Pack> pressure_weighted_fluxes(
+        mesh, "pressure_weighted_face_flux");
+
+    const auto set_velocity = [&](Pack::scalar_type offset)
+    {
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            const auto center = mesh->cell_centroid(cell_lid);
+            velocity.set_owned_value(
+                cell_lid,
+                {offset + 0.75 + 1.5 * center.x - 0.2 * center.y,
+                 -0.4 + 0.3 * center.x + 2.0 * center.y,
+                 0.6 - 0.5 * center.y + 1.25 * center.z});
+        }
+        velocity.sync_ghosts();
+    };
+
+    const auto make_uniform_boundaries = [](
+        SimpleFluid::BoundaryConditionType type)
+    {
+        SimpleFluid::BoundaryConditionSet conditions;
+        for (const auto* name :
+             {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+        {
+            conditions.velocity[name] = {type, {}};
+        }
+        return conditions;
+    };
+
+    SimpleFluid::BoundaryConditionSet default_boundaries;
+    const auto neumann_boundaries = make_uniform_boundaries(
+        SimpleFluid::BoundaryConditionType::Neumann);
+    const auto no_slip_boundaries = make_uniform_boundaries(
+        SimpleFluid::BoundaryConditionType::NoSlip);
+    const auto slip_boundaries = make_uniform_boundaries(
+        SimpleFluid::BoundaryConditionType::Slip);
+    auto dirichlet_boundaries = make_uniform_boundaries(
+        SimpleFluid::BoundaryConditionType::Dirichlet);
+    for (auto& entry : dirichlet_boundaries.velocity)
+    {
+        entry.second.value = {1.25, -0.75, 2.5};
+    }
+    const std::array<std::pair<const char*,
+                              const SimpleFluid::BoundaryConditionSet*>, 5>
+        cases{{
+            {"default", &default_boundaries},
+            {"explicit Neumann", &neumann_boundaries},
+            {"no-slip", &no_slip_boundaries},
+            {"slip", &slip_boundaries},
+            {"Dirichlet", &dirichlet_boundaries},
+        }};
+
+    const auto compare = [&](const char* input_name)
+    {
+        for (const auto& [boundary_name, boundaries] : cases)
+        {
+            SCOPED_TRACE(input_name);
+            SCOPED_TRACE(boundary_name);
+            const auto cache =
+                SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+                    mesh, *boundaries);
+
+            SimpleFluid::FVM::face_velocities(
+                velocity, cache, reference_face_velocity);
+            SimpleFluid::FVM::normal_face_fluxes(
+                reference_face_velocity, reference_fluxes);
+            SimpleFluid::FVM::face_fluxes(
+                velocity, cache, fused_fluxes);
+            SimpleFluid::FVM::pressure_weighted_face_fluxes(
+                velocity,
+                pressure,
+                0.0,
+                cache,
+                workspace,
+                pressure_weighted_fluxes);
+
+            bool saw_interior_face = false;
+            bool saw_boundary_face = false;
+            for (MeshType::local_ordinal_type face_lid = 0;
+                 face_lid < static_cast<MeshType::local_ordinal_type>(
+                                mesh->num_faces());
+                 ++face_lid)
+            {
+                if (!fused_fluxes.is_owned_face(face_lid))
+                {
+                    continue;
+                }
+                saw_interior_face = saw_interior_face
+                                 || mesh->is_interior_face(face_lid);
+                saw_boundary_face = saw_boundary_face
+                                 || mesh->is_boundary_face(face_lid);
+                EXPECT_DOUBLE_EQ(
+                    fused_fluxes.value(face_lid),
+                    reference_fluxes.value(face_lid));
+                EXPECT_DOUBLE_EQ(
+                    pressure_weighted_fluxes.value(face_lid),
+                    reference_fluxes.value(face_lid));
+            }
+            EXPECT_TRUE(saw_interior_face);
+            EXPECT_TRUE(saw_boundary_face);
+        }
+    };
+
+    set_velocity(0.0);
+    compare("initial velocity");
+    set_velocity(4.0);
+    compare("changed velocity");
 }
 
 TEST(FvmOperatorsTest,
@@ -1520,6 +1632,90 @@ SimpleFluid::SP<MeshType> make_periodic_box_mesh()
     mesh->set_periodic_face(xmax_face, owner0);
 
     return mesh;
+}
+
+TEST(FvmOperatorsTest,
+     FusedFaceFluxMatchesFaceVelocityCompositionOnPeriodicMesh)
+{
+    auto mesh = make_periodic_box_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Periodic, {}};
+    boundaries.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Periodic, {}};
+    for (const auto* name : {"ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundaries);
+
+    SimpleFluid::VectorFaceField<Pack> reference_face_velocity(
+        mesh, "periodic_reference_face_velocity");
+    SimpleFluid::FaceField<Pack> reference_fluxes(
+        mesh, "periodic_reference_flux");
+    SimpleFluid::FaceField<Pack> fused_fluxes(
+        mesh, "periodic_fused_flux");
+    SimpleFluid::FaceField<Pack> pressure_weighted_fluxes(
+        mesh, "periodic_pressure_weighted_flux");
+    FaceFluxWorkspace workspace(mesh);
+
+    const auto compare = [&](const char* input_name)
+    {
+        SCOPED_TRACE(input_name);
+        SimpleFluid::FVM::face_velocities(
+            velocity, cache, reference_face_velocity);
+        SimpleFluid::FVM::normal_face_fluxes(
+            reference_face_velocity, reference_fluxes);
+        SimpleFluid::FVM::face_fluxes(
+            velocity, cache, fused_fluxes);
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity,
+            pressure,
+            0.0,
+            cache,
+            workspace,
+            pressure_weighted_fluxes);
+
+        for (MeshType::local_ordinal_type face_lid = 0;
+             face_lid < static_cast<MeshType::local_ordinal_type>(
+                            mesh->num_faces());
+             ++face_lid)
+        {
+            if (!fused_fluxes.is_owned_face(face_lid))
+            {
+                continue;
+            }
+            EXPECT_DOUBLE_EQ(
+                fused_fluxes.value(face_lid),
+                reference_fluxes.value(face_lid));
+            EXPECT_DOUBLE_EQ(
+                pressure_weighted_fluxes.value(face_lid),
+                reference_fluxes.value(face_lid));
+        }
+
+        const auto xmin_face = boundary_face_lid(*mesh, "xmin");
+        const auto xmax_face = boundary_face_lid(*mesh, "xmax");
+        EXPECT_TRUE(mesh->is_interior_face(xmin_face));
+        EXPECT_TRUE(mesh->is_interior_face(xmax_face));
+        EXPECT_NE(reference_fluxes.value(xmin_face), 0.0);
+        EXPECT_NE(reference_fluxes.value(xmax_face), 0.0);
+    };
+
+    velocity.set_owned_value(0, {1.0, -0.5, 0.25});
+    velocity.set_owned_value(1, {3.0, 1.5, -0.75});
+    velocity.sync_ghosts();
+    compare("initial velocity");
+
+    velocity.set_owned_value(0, {-2.0, 0.75, 1.25});
+    velocity.set_owned_value(1, {0.5, -1.0, 2.0});
+    velocity.sync_ghosts();
+    compare("changed velocity");
 }
 
 /**
