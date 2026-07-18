@@ -28,6 +28,32 @@
 #include <string>
 #include <vector>
 
+namespace SimpleFluid::detail
+{
+
+template<TpetraTypePack Pack>
+struct BelosLinearSolverTestAccess
+{
+    static std::size_t preconditioner_setup_count(
+        const BelosLinearSolver<Pack>& solver) noexcept
+    {
+        return solver.d_preconditioner_setup_count;
+    }
+};
+
+template<TpetraTypePack Pack>
+struct PressureProjectionEquationTestAccess
+{
+    static std::size_t preconditioner_setup_count(
+        const PressureProjectionEquation<Pack>& equation) noexcept
+    {
+        return BelosLinearSolverTestAccess<Pack>::
+            preconditioner_setup_count(equation.d_linear_solver);
+    }
+};
+
+} // namespace SimpleFluid::detail
+
 namespace
 {
 
@@ -539,6 +565,40 @@ TEST(PhysicalEquationsTest, PressureProjectionUsesMueLuByDefault)
     EXPECT_EQ(
         equation.linear_solver_options().preconditioner,
         SimpleFluid::LinearPreconditioner::MueLu);
+}
+
+TEST(PhysicalEquationsTest,
+     PressureProjectionReusesMueLuUntilMatrixIsRebuilt)
+{
+    auto mesh = make_2x2x2_mesh();
+    FieldType pressure(mesh, "pressure");
+    VectorFieldType velocity(
+        mesh, SimpleFluid::vec3{1.0, 0.0, 0.0}, "velocity");
+    SimpleFluid::BoundaryConditionSet bcs;
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
+    options.reuse_preconditioner = true;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh, options);
+    const auto setup_count = [&]()
+    {
+        return SimpleFluid::detail::
+            PressureProjectionEquationTestAccess<Pack>::
+                preconditioner_setup_count(equation);
+    };
+
+    equation.project(pressure, 0.1, 1.0, cache, velocity);
+    EXPECT_EQ(setup_count(), 1U);
+    equation.project(pressure, 0.1, 1.0, cache, velocity);
+    EXPECT_EQ(setup_count(), 1U);
+
+    equation.rebuild_matrix();
+    equation.project(pressure, 0.1, 1.0, cache, velocity);
+    EXPECT_EQ(setup_count(), 2U);
 }
 
 /**
