@@ -11,10 +11,38 @@
 
 #include "BoussinesqMomentumEquation.hh"
 
+#include <cmath>
 #include <utility>
 
 namespace SimpleFluid
 {
+
+template<TpetraTypePack Pack>
+auto BoussinesqMomentumEquation<Pack>::select_dynamic_viscosity(
+    const MaterialPropertyFields<Pack>& material,
+    const field_type* dynamic_viscosity_override) const -> const field_type&
+{
+    if (dynamic_viscosity_override == nullptr)
+    {
+        return material.dynamic_viscosity;
+    }
+
+    EquationValidation::require_mesh_match(
+        this->mesh(), *dynamic_viscosity_override,
+        "BoussinesqMomentumEquation");
+    for (size_t owned = 0; owned < this->mesh().num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto value = dynamic_viscosity_override->value(cell_lid);
+        if (!std::isfinite(value) || value < scalar_type{})
+        {
+            throw std::invalid_argument(
+                "BoussinesqMomentumEquation dynamic-viscosity override "
+                "must contain finite non-negative values.");
+        }
+    }
+    return *dynamic_viscosity_override;
+}
 
 template<TpetraTypePack Pack>
 BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
@@ -134,12 +162,15 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
     scalar_type reference_density,
     bool density_feedback_enabled,
     const source_type& right_hand_source,
-    const velocity_field_type* correction_field) const -> system_type
+    const velocity_field_type* correction_field,
+    const field_type* dynamic_viscosity_override) const -> system_type
 {
     EquationValidation::require_mesh_match(
         this->mesh(), temperature, "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(
         this->mesh(), material.density, "BoussinesqMomentumEquation");
+    const auto& dynamic_viscosity = select_dynamic_viscosity(
+        material, dynamic_viscosity_override);
 
     const auto gravity = options.gravity_vector();
     auto acceleration =
@@ -167,7 +198,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
 
     return base_type::assemble_physical_system(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
-        material.dynamic_viscosity, reference_density, acceleration,
+        dynamic_viscosity, reference_density, acceleration,
         correction_field);
 }
 
@@ -183,12 +214,15 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
     bool density_feedback_enabled,
     velocity_field_type& velocity,
     const source_type& right_hand_source,
-    const LinearSolverOptions& linear_options) const -> LinearSolveSummary
+    const LinearSolverOptions& linear_options,
+    const field_type* dynamic_viscosity_override) const -> LinearSolveSummary
 {
     EquationValidation::require_mesh_match(
         this->mesh(), temperature, "BoussinesqMomentumEquation");
     EquationValidation::require_mesh_match(
         this->mesh(), material.density, "BoussinesqMomentumEquation");
+    const auto& dynamic_viscosity = select_dynamic_viscosity(
+        material, dynamic_viscosity_override);
 
     const auto gravity = options.gravity_vector();
     auto acceleration =
@@ -216,7 +250,7 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
 
     return base_type::advance_velocity_physical(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
-        material.dynamic_viscosity, reference_density, velocity,
+        dynamic_viscosity, reference_density, velocity,
         acceleration, linear_options);
 }
 

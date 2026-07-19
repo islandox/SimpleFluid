@@ -685,7 +685,9 @@ public:
         const TimeStepperOptions& time_options,
         const MaterialPropertyFields<Pack>* material = nullptr,
         scalar_type reference_density = scalar_type{1},
-        bool density_feedback_enabled = false) const
+        bool density_feedback_enabled = false,
+        const field_type* dynamic_viscosity_override = nullptr,
+        const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr) const
     {
         EquationValidation::require_mesh_match(
             *d_mesh, velocity, "CoupledPressureVelocitySolver");
@@ -693,21 +695,37 @@ public:
             *d_mesh, pressure, "CoupledPressureVelocitySolver");
         EquationValidation::require_mesh_match(
             *d_mesh, temperature, "CoupledPressureVelocitySolver");
+        if (dynamic_viscosity_override != nullptr && material == nullptr)
+        {
+            throw std::invalid_argument(
+                "CoupledPressureVelocitySolver requires material fields "
+                "when a dynamic-viscosity override is supplied.");
+        }
+        if (turbulent_kinetic_energy_gradient != nullptr)
+        {
+            EquationValidation::require_mesh_match(
+                *d_mesh,
+                *turbulent_kinetic_energy_gradient,
+                "CoupledPressureVelocitySolver");
+        }
 
         const auto* correction_field =
             time_options.non_orthogonal_treatment
                 == FVM::NonOrthogonalTreatment::Implicit
           ? nullptr
           : &velocity;
+        auto turbulence_source =
+            [&](local_ordinal_type cell_lid)
+                -> typename velocity_field_type::vec_type
+        {
+            return turbulent_kinetic_energy_gradient == nullptr
+                ? typename velocity_field_type::vec_type{}
+                : turbulent_kinetic_energy_gradient->value(cell_lid)
+                    * scalar_type{-2.0 / 3.0};
+        };
         typename BoussinesqMomentumEquation<Pack>::system_type momentum;
         if (material != nullptr)
         {
-            auto zero_source =
-                [](local_ordinal_type)
-                    -> typename velocity_field_type::vec_type
-            {
-                return {};
-            };
             momentum = momentum_equation.assemble_physical_system(
                 velocity,
                 face_fluxes,
@@ -717,7 +735,19 @@ public:
                 *material,
                 reference_density,
                 density_feedback_enabled,
-                zero_source,
+                turbulence_source,
+                correction_field,
+                dynamic_viscosity_override);
+        }
+        else if (turbulent_kinetic_energy_gradient != nullptr)
+        {
+            momentum = momentum_equation.assemble_system(
+                velocity,
+                face_fluxes,
+                temperature,
+                velocity_boundary_cache,
+                time_options,
+                turbulence_source,
                 correction_field);
         }
         else

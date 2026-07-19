@@ -18,6 +18,7 @@
 #include "equations/RadiolyticGasModel.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
+#include "equations/turbulence/TurbulenceModel.hh"
 #include "solvers/FluidSolver.hh"
 
 #include <algorithm>
@@ -97,6 +98,21 @@ public:
 
     MaterialPropertyFields<Pack>& material_properties() noexcept;
     const MaterialPropertyFields<Pack>& material_properties() const noexcept;
+
+    /** Configure a Problem-owned two-equation turbulence model. */
+    TurbulenceModel<Pack>& configure_turbulence(
+        const TurbulenceModelOptions& options);
+    /** Configure turbulence from flat database keys. */
+    TurbulenceModel<Pack>& configure_turbulence(const Database& database);
+    /**
+     * Disable the active turbulence model and restore laminar transport.
+     * @note Invoke consistently on every mesh rank.
+     */
+    bool remove_turbulence_model() noexcept;
+    /** Return the active turbulence model, or nullptr in laminar mode. */
+    TurbulenceModel<Pack>* find_turbulence_model() noexcept;
+    /** Return the active turbulence model, or nullptr in laminar mode. */
+    const TurbulenceModel<Pack>* find_turbulence_model() const noexcept;
 
     VolumetricScalarSource<Pack>& add_temperature_source(
         std::string name,
@@ -293,6 +309,9 @@ private:
     scalar_type pressure_reference_density() const noexcept override;
     MaterialPropertyFields<Pack>& stored_material_properties();
     const MaterialPropertyFields<Pack>& stored_material_properties() const;
+    TurbulenceModel<Pack>& stored_turbulence_model();
+    const TurbulenceModel<Pack>& stored_turbulence_model() const;
+    bool physical_transport_enabled() const noexcept;
     TemperatureSourceRegistry<Pack>& stored_temperature_sources();
     const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
     void refresh_physical_models();

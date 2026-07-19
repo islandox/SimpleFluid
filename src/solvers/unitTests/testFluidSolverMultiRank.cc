@@ -252,7 +252,10 @@ TEST(FluidSolverMultiRankTest,
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 400;
-    linear_options.tolerance = 1.0e-10;
+    // The traction-free velocity outlet leaves pressure accuracy controlled
+    // directly by the coupled Krylov solve. Keep the solve tolerance one
+    // decade below the asserted boundary-pressure error.
+    linear_options.tolerance = 1.0e-11;
     SimpleFluid::FluidSolver<Pack> solver(
         mesh,
         boundary_conditions,

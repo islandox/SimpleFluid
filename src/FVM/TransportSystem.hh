@@ -20,8 +20,10 @@
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <functional>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -1076,7 +1078,8 @@ non_orthogonal_transport_system(
     if (correction_field != nullptr && explicit_weight > scalar_type{0})
     {
         add_explicit_non_orthogonal_correction<Pack>(
-            *correction_field, diffusivity, *rhs, explicit_weight);
+            *correction_field, diffusivity, *rhs, explicit_weight,
+            boundary_diffusion);
     }
 
     matrix->fillComplete();
@@ -1091,7 +1094,7 @@ non_orthogonal_transport_system(
  *
  *   d(storage_weight * phi)/dt
  * + div(face_flux * advection_weight * phi)
- * = div(diffusivity * grad(phi)) + source.
+ * = div(diffusivity * grad(phi)) + source - implicit_sink * phi.
  *
  * Boundary diffusion honors the supplied boundary-condition type, while
  * advection remains first-order upwind and outflow conservative.
@@ -1113,7 +1116,9 @@ weighted_scalar_transport_system(
     SourceProvider source,
     NonOrthogonalTreatment treatment,
     const CellField<Pack>* correction_field = nullptr,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    std::function<typename Pack::scalar_type(
+        typename Pack::local_ordinal_type)> implicit_sink = {})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1181,6 +1186,9 @@ weighted_scalar_transport_system(
             advection_weight.local_value(cell_lid);
         const auto transient =
             cell_storage * volume / time_step;
+        const auto sink = implicit_sink
+                        ? implicit_sink(cell_lid)
+                        : scalar_type{};
         if (!std::isfinite(cell_storage)
             || !std::isfinite(cell_advection)
             || cell_storage <= scalar_type{}
@@ -1190,10 +1198,16 @@ weighted_scalar_transport_system(
                 "weighted scalar transport requires positive storage "
                 "and non-negative advection weights.");
         }
+        if (!std::isfinite(sink) || sink < scalar_type{})
+        {
+            throw std::invalid_argument(
+                "weighted scalar transport requires a finite, "
+                "non-negative implicit sink.");
+        }
 
         row_values.clear();
         detail::add_matrix_entry(
-            row_values, cell_lid, transient);
+            row_values, cell_lid, transient + volume * sink);
         rhs->replaceLocalValue(
             cell_lid,
             transient * old_values.value(cell_lid)
@@ -2017,8 +2031,17 @@ physical_momentum_transport_system(
             *correction_field,
             dynamic_viscosity,
             *rhs,
-            explicit_weight / reference_density);
+            explicit_weight / reference_density,
+            boundary_diffusion);
     }
+
+    add_explicit_deviatoric_transpose_gradient_stress<Pack>(
+        old_velocity,
+        dynamic_viscosity,
+        reference_density,
+        boundary_value,
+        *rhs,
+        boundary_diffusion);
 
     matrix->fillComplete();
     return {matrix, rhs};

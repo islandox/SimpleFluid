@@ -368,7 +368,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     field_type& temperature,
     const source_type& power_density,
     FVM::NonOrthogonalTreatment treatment,
-    const LinearSolverOptions& linear_options) const
+    const LinearSolverOptions& linear_options,
+    const field_type* thermal_conductivity_override) const
     -> LinearSolveStatistics
 {
     EquationValidation::require_mesh_match(
@@ -383,6 +384,26 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     EquationValidation::require_mesh_match(
         *d_mesh, material.thermal_conductivity,
         "TemperatureDiffusionEquation");
+    const auto& thermal_conductivity = thermal_conductivity_override == nullptr
+        ? material.thermal_conductivity
+        : *thermal_conductivity_override;
+    if (thermal_conductivity_override != nullptr)
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, thermal_conductivity,
+            "TemperatureDiffusionEquation");
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto value = thermal_conductivity.value(cell_lid);
+            if (!std::isfinite(value) || value < scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "TemperatureDiffusionEquation thermal-conductivity "
+                    "override must contain finite non-negative values.");
+            }
+        }
+    }
     if (time_step <= scalar_type{})
     {
         throw std::invalid_argument(
@@ -419,10 +440,24 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
         return old_temperature.local_value(owner);
     };
 
+    bool all_conductivities_positive = true;
+    for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(local);
+        all_conductivities_positive = all_conductivities_positive
+            && thermal_conductivity.local_value(cell_lid) > scalar_type{};
+    }
     const auto* correction_field =
         treatment == FVM::NonOrthogonalTreatment::Implicit
       ? nullptr
       : &old_temperature;
+    const auto requires_non_orthogonal_graph =
+        treatment != FVM::NonOrthogonalTreatment::Explicit;
+    if (requires_non_orthogonal_graph
+        && !d_cached_physical_graph_supports_non_orthogonal_correction)
+    {
+        d_cached_physical_transport_matrix = Teuchos::null;
+    }
     auto system =
         FVM::physical_temperature_transport_system<Pack>(
             old_temperature,
@@ -430,14 +465,18 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
             time_step,
             material.density,
             material.specific_heat_capacity,
-            material.thermal_conductivity,
+            thermal_conductivity,
             boundary_condition,
             boundary_value,
             power_density,
             treatment,
             correction_field,
-            d_cached_transport_matrix);
-    d_cached_transport_matrix = system.matrix;
+            d_cached_physical_transport_matrix);
+    d_cached_physical_transport_matrix = system.matrix;
+    if (requires_non_orthogonal_graph && all_conductivities_positive)
+    {
+        d_cached_physical_graph_supports_non_orthogonal_correction = true;
+    }
 
     field_type candidate_temperature(
         d_mesh, "temperature_candidate");

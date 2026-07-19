@@ -18,6 +18,7 @@
 #include "FVM/OperatorDetails.hh"
 #include "solvers/BelosLinearSolver.hh"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace SimpleFluid::FVM
@@ -145,12 +146,15 @@ void add_explicit_non_orthogonal_correction(
  * gradient reconstruction. Boundary faces are treated as prescribed-value
  * diffusion faces, matching vector transport-system assembly.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack,
+         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary>
 void add_explicit_non_orthogonal_correction(
     const VectorCellField<Pack>& correction_field,
     typename Pack::scalar_type diffusivity,
     typename Pack::multi_vector_type& rhs,
-    typename Pack::scalar_type correction_weight = 1.0)
+    typename Pack::scalar_type correction_weight = 1.0,
+    BoundaryDiffusionProvider boundary_diffusion =
+        BoundaryDiffusionProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -230,10 +234,16 @@ void add_explicit_non_orthogonal_correction(
 
     for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
     {
-        (void)batch_id;
-        for (const auto face_lid : boundary_batch.face_lids)
+        for (size_t in_batch_id = 0;
+             in_batch_id < boundary_batch.face_lids.size();
+             ++in_batch_id)
         {
+            const auto face_lid = boundary_batch.face_lids[in_batch_id];
             if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
+            {
+                continue;
+            }
+            if (!boundary_diffusion(batch_id, in_batch_id))
             {
                 continue;
             }
@@ -359,12 +369,15 @@ void add_variable_explicit_non_orthogonal_correction(
  * @brief Add a vector explicit non-orthogonal correction using a
  *        cell-centered variable diffusion coefficient.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack,
+         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary>
 void add_variable_explicit_non_orthogonal_correction(
     const VectorCellField<Pack>& correction_field,
     const CellField<Pack>& coefficient_field,
     typename Pack::multi_vector_type& rhs,
-    typename Pack::scalar_type correction_weight = 1.0)
+    typename Pack::scalar_type correction_weight = 1.0,
+    BoundaryDiffusionProvider boundary_diffusion =
+        BoundaryDiffusionProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -391,11 +404,24 @@ void add_variable_explicit_non_orthogonal_correction(
     cell_gradient(correction_field, gradients);
     gradients.sync_ghosts();
 
+    const auto boundary_locations =
+        detail::boundary_face_locations(mesh);
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         for (const auto face_lid : mesh.faces(cell_lid))
         {
+            if (mesh.is_boundary_face(face_lid))
+            {
+                const auto location =
+                    boundary_locations.at(static_cast<size_t>(face_lid));
+                if (!location.active
+                    || !boundary_diffusion(
+                        location.batch_id, location.in_batch_id))
+                {
+                    continue;
+                }
+            }
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(
                     mesh.face_area_vector_outward(face_lid, cell_lid),
@@ -436,6 +462,169 @@ void add_variable_explicit_non_orthogonal_correction(
                     cell_lid, component,
                     correction_weight * face_coefficient
                   * gradient[component].dot(tangential_area));
+            }
+        }
+    }
+}
+
+/**
+ * @brief Add the explicit deviatoric transpose-gradient part of a symmetric
+ *        viscous stress to a momentum RHS.
+ *
+ * The component Laplacian in physical_momentum_transport_system() supplies
+ * @f$\nabla\cdot(\mu\nabla\mathbf{u})/\rho@f$ implicitly.  A Newtonian/RANS
+ * stress is symmetric and deviatoric, so this routine adds the remaining
+ * lagged term
+ * @f$\nabla\cdot[\mu((\nabla\mathbf{u})^T
+ * - 2/3\,\nabla\cdot\mathbf{u}\,I)]/\rho@f$ as face tractions. Cell gradients
+ * are reconstructed from @p old_velocity and the supplied boundary values,
+ * then interpolated to interior faces. The contribution is integrated over
+ * each control volume because @p rhs stores integrated momentum balances.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @tparam BoundaryValueProvider Callable returning the velocity value at a
+ *         boundary face.
+ * @tparam BoundaryStressProvider Callable selecting boundary faces on which
+ *         viscous stress is applied (for example, excluding slip faces).
+ * @param old_velocity Lagged velocity used by the explicit stress term.
+ * @param dynamic_viscosity Molecular or effective dynamic-viscosity field.
+ * @param reference_density Constant reference density.
+ * @param boundary_value Boundary-face velocity provider.
+ * @param[in,out] rhs Three-component owned-cell momentum RHS.
+ * @param boundary_stress Boundary-face stress selector.
+ */
+template<TpetraTypePack Pack,
+         class BoundaryValueProvider,
+         class BoundaryStressProvider = detail::AlwaysDiffuseBoundary>
+void add_explicit_deviatoric_transpose_gradient_stress(
+    const VectorCellField<Pack>& old_velocity,
+    const CellField<Pack>& dynamic_viscosity,
+    typename Pack::scalar_type reference_density,
+    BoundaryValueProvider boundary_value,
+    typename Pack::multi_vector_type& rhs,
+    BoundaryStressProvider boundary_stress = BoundaryStressProvider{})
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    constexpr size_t components = VectorCellField<Pack>::num_components;
+
+    const auto& mesh = old_velocity.mesh();
+    if (&dynamic_viscosity.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "Explicit transpose-gradient stress requires velocity and "
+            "viscosity fields on the same mesh.");
+    }
+    if (!std::isfinite(reference_density)
+        || reference_density <= scalar_type{})
+    {
+        throw std::invalid_argument(
+            "Explicit transpose-gradient stress requires a finite positive "
+            "reference density.");
+    }
+    if (rhs.getMap().get() != mesh.owned_cell_map().get()
+        || rhs.getNumVectors() != components)
+    {
+        throw std::invalid_argument(
+            "Explicit transpose-gradient stress received an incompatible "
+            "momentum RHS.");
+    }
+
+    TensorCellField<Pack> gradients(
+        old_velocity.mesh_ptr(), "transpose_gradient_stress_velocity_gradient");
+    cell_gradient(old_velocity, boundary_value, gradients);
+    gradients.sync_ghosts();
+
+    const auto boundary_locations =
+        detail::boundary_face_locations(mesh);
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            auto face_gradient = gradients.local_value(cell_lid);
+            auto face_viscosity =
+                dynamic_viscosity.local_value(cell_lid);
+
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                const auto other_gradient =
+                    gradients.local_value(other);
+                for (size_t component = 0;
+                     component < components;
+                     ++component)
+                {
+                    face_gradient[component] =
+                        (face_gradient[component]
+                         + other_gradient[component])
+                      / scalar_type{2};
+                }
+                face_viscosity = detail::harmonic_face_value(
+                    mesh, face_lid, cell_lid, other,
+                    dynamic_viscosity);
+            }
+            else
+            {
+                if (!mesh.is_boundary_face(face_lid)
+                    || static_cast<size_t>(face_lid)
+                       >= boundary_locations.size())
+                {
+                    continue;
+                }
+                const auto location =
+                    boundary_locations[static_cast<size_t>(face_lid)];
+                if (!location.active
+                    || !boundary_stress(
+                        location.batch_id, location.in_batch_id))
+                {
+                    continue;
+                }
+            }
+
+            if (!std::isfinite(face_viscosity)
+                || face_viscosity < scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "Explicit transpose-gradient stress requires finite "
+                    "non-negative dynamic viscosity.");
+            }
+
+            const auto area =
+                mesh.face_area_vector_outward(face_lid, cell_lid);
+            const auto scale = face_viscosity / reference_density;
+
+            // Tensor rows are grad(u_i).  Thus ((grad U)^T A)_i is the
+            // area-weighted i-th column of the stored gradient tensor.
+            const auto velocity_divergence =
+                face_gradient[0].x
+              + face_gradient[1].y
+              + face_gradient[2].z;
+            const auto isotropic_scale =
+                scalar_type{2.0 / 3.0} * velocity_divergence;
+            const typename VectorCellField<Pack>::vec_type traction{
+                face_gradient[0].x * area.x
+                    + face_gradient[1].x * area.y
+                    + face_gradient[2].x * area.z
+                    - isotropic_scale * area.x,
+                face_gradient[0].y * area.x
+                    + face_gradient[1].y * area.y
+                    + face_gradient[2].y * area.z
+                    - isotropic_scale * area.y,
+                face_gradient[0].z * area.x
+                    + face_gradient[1].z * area.y
+                    + face_gradient[2].z * area.z
+                    - isotropic_scale * area.z};
+            for (size_t component = 0;
+                 component < components;
+                 ++component)
+            {
+                rhs.sumIntoLocalValue(
+                    cell_lid,
+                    component,
+                    scale * traction.component(component));
             }
         }
     }

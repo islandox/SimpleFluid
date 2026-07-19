@@ -88,13 +88,18 @@ public:
         field_type& temperature,
         const source_type& power_density,
         FVM::NonOrthogonalTreatment treatment,
-        const LinearSolverOptions& linear_options = {}) const;
+        const LinearSolverOptions& linear_options = {},
+        const field_type* thermal_conductivity_override = nullptr) const;
 
 private:
     SP<const mesh_type> d_mesh;
     BoundaryCache<Pack> d_face_boundary_temperature;
     SP<BoundaryConditionMap>  d_boundary_condition;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
+    mutable Teuchos::RCP<typename Pack::matrix_type>
+        d_cached_physical_transport_matrix;
+    mutable bool
+        d_cached_physical_graph_supports_non_orthogonal_correction = false;
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 

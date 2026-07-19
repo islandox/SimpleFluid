@@ -117,6 +117,10 @@ private:
 
     SP<const mesh_type> d_mesh;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
+    mutable Teuchos::RCP<typename Pack::matrix_type>
+        d_cached_physical_transport_matrix;
+    mutable bool
+        d_cached_physical_graph_supports_non_orthogonal_correction = false;
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 

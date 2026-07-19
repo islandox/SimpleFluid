@@ -18,6 +18,8 @@
 #include "FVM/OperatorDetails.hh"
 
 #include <array>
+#include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <stdexcept>
 #include <vector>
@@ -233,6 +235,123 @@ void cell_gradient(const VectorCellField<Pack>& field,
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
             const auto d = mesh.cell_center_vector(face_lid, cell_lid);
             const auto value_delta = field.local_value(other) - value_p;
+
+            normal[0][0] += d.x * d.x;
+            normal[0][1] += d.x * d.y;
+            normal[0][2] += d.x * d.z;
+            normal[1][1] += d.y * d.y;
+            normal[1][2] += d.y * d.z;
+            normal[2][2] += d.z * d.z;
+
+            for (size_t component = 0;
+                 component < VectorCellField<Pack>::num_components;
+                 ++component)
+            {
+                const auto delta = value_delta.component(component);
+                rhs[component].x += d.x * delta;
+                rhs[component].y += d.y * delta;
+                rhs[component].z += d.z * delta;
+            }
+        }
+
+        normal[1][0] = normal[0][1];
+        normal[2][0] = normal[0][2];
+        normal[2][1] = normal[1][2];
+        tensor_type gradient{};
+        for (size_t component = 0;
+             component < VectorCellField<Pack>::num_components;
+             ++component)
+        {
+            auto component_normal = normal;
+            gradient[component] =
+                detail::solve_3x3(component_normal, rhs[component]);
+        }
+        gradients.set_owned_value(cell_lid, gradient);
+    }
+}
+
+/**
+ * @brief Compute least-squares vector gradients including boundary values.
+ *
+ * Boundary values are sampled at boundary-face centroids. The callback is
+ * indexed by boundary-batch ID and the face index within that batch. Use the
+ * overload without a callback to omit boundary samples from reconstruction.
+ *
+ * @tparam Pack The Tpetra type pack.
+ * @tparam BoundaryValueProvider Callback returning a vector boundary value.
+ * @param field Vector cell field whose component gradients are computed.
+ * @param boundary_value Boundary-face value provider.
+ * @param[out] gradients Tensor cell field receiving the reconstructed gradient.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+    requires requires(BoundaryValueProvider provider,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { provider(batch_id, in_batch_id) }
+            -> std::convertible_to<
+                typename VectorCellField<Pack>::vec_type>;
+    }
+void cell_gradient(const VectorCellField<Pack>& field,
+                   BoundaryValueProvider boundary_value,
+                   TensorCellField<Pack>& gradients)
+{
+    using mesh_type = Mesh<Pack>;
+    using local_ordinal_type = typename mesh_type::local_ordinal_type;
+    using tensor_type = typename TensorCellField<Pack>::tensor_type;
+    using vec_type = typename VectorCellField<Pack>::vec_type;
+
+    const auto& mesh = field.mesh();
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_gradient requires input and output fields on one mesh.");
+    }
+
+    const auto boundary_locations =
+        detail::boundary_face_locations(mesh);
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto value_p = field.value(cell_lid);
+
+        std::array<std::array<real_t, 3>, 3> normal{};
+        tensor_type rhs{};
+
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            typename mesh_type::Vec3 d{};
+            vec_type value_delta{};
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                d = mesh.cell_center_vector(face_lid, cell_lid);
+                value_delta = field.local_value(other) - value_p;
+            }
+            else
+            {
+                if (!mesh.is_boundary_face(face_lid)
+                    || static_cast<size_t>(face_lid)
+                       >= boundary_locations.size())
+                {
+                    continue;
+                }
+                const auto location =
+                    boundary_locations[static_cast<size_t>(face_lid)];
+                if (!location.active)
+                {
+                    continue;
+                }
+                d = mesh.face_centroid(face_lid)
+                  - mesh.cell_centroid(cell_lid);
+                value_delta =
+                    static_cast<vec_type>(boundary_value(
+                        location.batch_id,
+                        location.in_batch_id))
+                  - value_p;
+            }
 
             normal[0][0] += d.x * d.x;
             normal[0][1] += d.x * d.y;
