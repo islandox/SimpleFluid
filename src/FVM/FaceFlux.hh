@@ -142,8 +142,8 @@ private:
  * @param mesh Shared pointer to the computational mesh.
  * @param boundary_conditions The boundary-condition set to evaluate.
  * @return VelocityBoundaryCache populated with prescribed non-periodic
- *         boundary values. Periodic faces are left to the paired-cell
- *         interpolation path.
+ *         boundary values. Velocity Neumann data must be homogeneous;
+ *         periodic faces are left to the paired-cell interpolation path.
  * @throws std::invalid_argument if @p mesh is null.
  */
 template<TpetraTypePack Pack>
@@ -184,6 +184,15 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
             else if (boundary_type == BoundaryConditionType::Dirichlet)
             {
                 prescribed_value = iter->second.value;
+            }
+            else if (boundary_type == BoundaryConditionType::Neumann
+                     && (iter->second.value.x != 0.0
+                         || iter->second.value.y != 0.0
+                         || iter->second.value.z != 0.0))
+            {
+                throw std::invalid_argument(
+                    "Cache-based incompressible velocity transport supports "
+                    "homogeneous Neumann outlet conditions only.");
             }
         }
 

@@ -22,6 +22,8 @@
 
 #include <array>
 #include <cmath>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
@@ -270,6 +272,51 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
         EXPECT_NEAR(gradient[2].y, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient[2].z, 1.0, 1.0e-12);
     }
+}
+
+TEST(FvmOperatorsTest,
+     RecoversAffineVectorGradientFromBoundaryFaceSamples)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto affine_value = [](const MeshType::Vec3& point)
+    {
+        return MeshType::Vec3{
+            1.0 + 2.0 * point.x - 3.0 * point.y + 4.0 * point.z,
+            -2.0 + point.x + 0.5 * point.y - 1.5 * point.z,
+            3.0 - 4.0 * point.x + 2.0 * point.y + point.z};
+    };
+
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_value(0, affine_value(mesh->cell_centroid(0)));
+
+    TensorFieldType cell_only_gradients(mesh, "cell_only_gradient");
+    SimpleFluid::FVM::cell_gradient(velocity, cell_only_gradients);
+    for (const auto& component : cell_only_gradients.value(0))
+    {
+        EXPECT_EQ(component, MeshType::Vec3{});
+    }
+
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        return affine_value(mesh->face_centroid(face_lid));
+    };
+    TensorFieldType boundary_gradients(mesh, "boundary_gradient");
+    SimpleFluid::FVM::cell_gradient(
+        velocity, boundary_value, boundary_gradients);
+
+    const auto gradient = boundary_gradients.value(0);
+    EXPECT_NEAR(gradient[0].x, 2.0, 1.0e-12);
+    EXPECT_NEAR(gradient[0].y, -3.0, 1.0e-12);
+    EXPECT_NEAR(gradient[0].z, 4.0, 1.0e-12);
+    EXPECT_NEAR(gradient[1].x, 1.0, 1.0e-12);
+    EXPECT_NEAR(gradient[1].y, 0.5, 1.0e-12);
+    EXPECT_NEAR(gradient[1].z, -1.5, 1.0e-12);
+    EXPECT_NEAR(gradient[2].x, -4.0, 1.0e-12);
+    EXPECT_NEAR(gradient[2].y, 2.0, 1.0e-12);
+    EXPECT_NEAR(gradient[2].z, 1.0, 1.0e-12);
 }
 
 TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
@@ -1798,6 +1845,20 @@ TEST(FvmOperatorsTest, PeriodicVelocityCacheDoesNotOverwritePairedFaceVelocity)
     EXPECT_NEAR(face_vel.value(xmax_face).x, 2.0, 1.0e-12);
 }
 
+TEST(FvmOperatorsTest, VelocityBoundaryCacheRejectsNonzeroNeumannDerivative)
+{
+    auto mesh = make_mesh();
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann,
+        {1.0, 0.0, 0.0}};
+
+    EXPECT_THROW(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundaries),
+        std::invalid_argument);
+}
+
 /**
  * @brief Verifies that periodic face fluxes are computed correctly,
  *        treating the periodic boundary like an interior face.
@@ -2086,6 +2147,77 @@ TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
     }
 }
 
+TEST(FvmOperatorsTest,
+     WeightedScalarTransportAddsAndValidatesImplicitSink)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    FieldType scalar(mesh, 5.0, "scalar");
+    FieldType storage(mesh, 2.0, "storage");
+    FieldType advection(mesh, 0.0, "advection");
+    FieldType diffusivity(mesh, 0.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    };
+    auto boundary_value = [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto source = [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 1.0;
+    };
+    using SinkProvider = std::function<Pack::scalar_type(
+        MeshType::local_ordinal_type)>;
+    auto assemble = [&](Pack::scalar_type sink)
+    {
+        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar,
+            zero_fluxes,
+            0.5,
+            storage,
+            advection,
+            diffusivity,
+            boundary_condition,
+            boundary_value,
+            source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr,
+            Teuchos::null,
+            SinkProvider{[sink](MeshType::local_ordinal_type)
+            {
+                return sink;
+            }});
+    };
+
+    const auto system = assemble(3.0);
+    const auto volume = mesh->cell_volume(0);
+    const auto expected_diagonal = volume * (2.0 / 0.5 + 3.0);
+    const auto expected_rhs = volume * (2.0 / 0.5 * 5.0 + 1.0);
+    EXPECT_NEAR(
+        local_matrix_entry(*system.matrix, 0, 0),
+        expected_diagonal,
+        1.0e-12);
+    EXPECT_NEAR(system.rhs->getData()[0], expected_rhs, 1.0e-12);
+
+    FieldType expected_solution(mesh, expected_rhs / expected_diagonal,
+                                "expected_solution");
+    const auto matrix_action =
+        local_matrix_action(*system.matrix, expected_solution);
+    ASSERT_EQ(matrix_action.size(), 1U);
+    EXPECT_NEAR(matrix_action[0], expected_rhs, 1.0e-12);
+    EXPECT_NEAR(expected_solution.value(0), 3.0, 1.0e-12);
+
+    EXPECT_THROW(assemble(-1.0), std::invalid_argument);
+    EXPECT_THROW(
+        assemble(std::numeric_limits<Pack::scalar_type>::infinity()),
+        std::invalid_argument);
+}
+
 TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
@@ -2259,4 +2391,138 @@ TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
             -1.6,
             1.0e-12);
     }
+}
+
+TEST(FvmOperatorsTest,
+     PhysicalMomentumAddsLaggedVariableViscosityTransposeStress)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(2, 2, 1, 0.5));
+    VectorFieldType velocity(mesh, "shear_velocity");
+    FieldType variable_viscosity(mesh, "variable_viscosity");
+    FieldType constant_viscosity(mesh, 2.0, "constant_viscosity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        // Divergence-free simple shear: grad(u_y) = e_x.  A viscosity
+        // gradient in y therefore drives the x component only through
+        // div(mu * grad(U)^T).
+        velocity.set_owned_value(cell_lid, {0.0, center.x, 0.0});
+        variable_viscosity.set_owned_value(
+            cell_lid, center.y < 0.5 ? 1.0 : 3.0);
+    }
+    velocity.sync_ghosts();
+    variable_viscosity.sync_ghosts();
+    constant_viscosity.sync_ghosts();
+
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        return MeshType::Vec3{0.0, mesh->face_centroid(face_lid).x, 0.0};
+    };
+    auto zero_acceleration = [](MeshType::local_ordinal_type)
+    {
+        return MeshType::Vec3{};
+    };
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "zero_fluxes");
+    constexpr Pack::scalar_type reference_density = 2.0;
+    auto assemble = [&](const FieldType& viscosity)
+    {
+        return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+            velocity,
+            zero_fluxes,
+            1.0,
+            viscosity,
+            reference_density,
+            boundary_value,
+            zero_acceleration,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    };
+
+    const auto variable = assemble(variable_viscosity);
+    const auto constant = assemble(constant_viscosity);
+    const auto variable_x = variable.rhs->getData(0);
+    const auto constant_x = constant.rhs->getData(0);
+
+    double maximum_transpose_stress = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        Pack::scalar_type expected_integrated_stress = 0.0;
+        for (const auto face_lid : mesh->faces(cell_lid))
+        {
+            auto face_viscosity =
+                variable_viscosity.local_value(cell_lid);
+            if (mesh->is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh->opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                face_viscosity =
+                    SimpleFluid::FVM::detail::harmonic_face_value(
+                        *mesh,
+                        face_lid,
+                        cell_lid,
+                        other,
+                        variable_viscosity);
+            }
+            expected_integrated_stress +=
+                face_viscosity
+              * mesh->face_area_vector_outward(face_lid, cell_lid).y
+              / reference_density;
+        }
+
+        EXPECT_NEAR(
+            variable_x[cell_lid], expected_integrated_stress, 1.0e-12);
+        EXPECT_NEAR(constant_x[cell_lid], 0.0, 1.0e-12);
+        maximum_transpose_stress = std::max(
+            maximum_transpose_stress,
+            std::abs(variable_x[cell_lid]));
+    }
+    EXPECT_GT(maximum_transpose_stress, 1.0e-6);
+}
+
+TEST(FvmOperatorsTest,
+     ExplicitTransposeStressRemovesTwoThirdsDivergenceTrace)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    VectorFieldType velocity(mesh, "expansion_velocity");
+    FieldType viscosity(mesh, "variable_viscosity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        velocity.set_owned_value(
+            cell_lid,
+            {mesh->cell_centroid(cell_lid).x, 0.0, 0.0});
+        viscosity.set_owned_value(cell_lid, owned == 0 ? 1.0 : 3.0);
+    }
+    velocity.sync_ghosts();
+    viscosity.sync_ghosts();
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        return MeshType::Vec3{
+            mesh->face_centroid(face_lid).x, 0.0, 0.0};
+    };
+    Pack::multi_vector_type rhs(mesh->owned_cell_map(), 3, true);
+
+    SimpleFluid::FVM::add_explicit_deviatoric_transpose_gradient_stress<Pack>(
+        velocity, viscosity, 1.0, boundary_value, rhs);
+
+    // grad(U)=diag(1,0,0), so the explicit tensor is
+    // diag(1/3,-2/3,-2/3). Harmonic interior viscosity is 1.5.
+    EXPECT_NEAR(rhs.getData(0)[0], 1.0 / 6.0, 1.0e-12);
+    EXPECT_NEAR(rhs.getData(0)[1], 0.5, 1.0e-12);
+    EXPECT_NEAR(rhs.getData(1)[0], 0.0, 1.0e-12);
+    EXPECT_NEAR(rhs.getData(1)[1], 0.0, 1.0e-12);
+    EXPECT_NEAR(rhs.getData(2)[0], 0.0, 1.0e-12);
+    EXPECT_NEAR(rhs.getData(2)[1], 0.0, 1.0e-12);
 }

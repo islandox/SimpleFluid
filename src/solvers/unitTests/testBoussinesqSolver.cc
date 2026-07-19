@@ -818,6 +818,321 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
 }
 
 TEST(BoussinesqSolverTest,
+     CoupledKrylovUsesDynamicViscosityOverride)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::CellField<Pack> temperature(
+        mesh, 0.5, "temperature");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, 0.0, "face_fluxes");
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.dynamic_viscosity = 0.1;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    SimpleFluid::CellField<Pack> effective_viscosity(
+        mesh, 1.0, "effective_viscosity");
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack> coupled_solver(mesh);
+    EXPECT_THROW(
+        coupled_solver.assemble(
+            momentum_equation,
+            velocity,
+            pressure,
+            temperature,
+            face_fluxes,
+            cache,
+            bcs,
+            time_options,
+            nullptr,
+            1.0,
+            false,
+            &effective_viscosity),
+        std::invalid_argument);
+    const auto molecular = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        face_fluxes,
+        cache,
+        bcs,
+        time_options,
+        &material,
+        1.0,
+        false);
+    const auto effective = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        face_fluxes,
+        cache,
+        bcs,
+        time_options,
+        &material,
+        1.0,
+        false,
+        &effective_viscosity);
+
+    const auto cell_gid =
+        mesh->owned_cell_map()->getMinAllGlobalIndex();
+    const auto velocity_row_gid = 4 * cell_gid;
+    auto velocity_diagonal =
+        [velocity_row_gid](const auto& system)
+    {
+        const auto row_lid =
+            system.matrix->getRowMap()->getLocalElement(
+                velocity_row_gid);
+        typename Pack::matrix_type::local_inds_host_view_type columns;
+        typename Pack::matrix_type::values_host_view_type values;
+        system.matrix->getLocalRowView(row_lid, columns, values);
+        for (size_t entry = 0; entry < columns.extent(0); ++entry)
+        {
+            const auto column_gid =
+                system.matrix->getColMap()->getGlobalElement(
+                    columns[entry]);
+            if (column_gid == velocity_row_gid)
+            {
+                return values[entry];
+            }
+        }
+        return std::numeric_limits<Pack::scalar_type>::quiet_NaN();
+    };
+
+    const auto molecular_diagonal = velocity_diagonal(molecular);
+    const auto effective_diagonal = velocity_diagonal(effective);
+    ASSERT_TRUE(std::isfinite(molecular_diagonal));
+    ASSERT_TRUE(std::isfinite(effective_diagonal));
+    EXPECT_GT(effective_diagonal, molecular_diagonal);
+}
+
+TEST(BoussinesqSolverTest,
+     CoupledKrylovIncludesIsotropicTurbulentKineticEnergyStress)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet boundaries;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundaries);
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::CellField<Pack> temperature(mesh, 0.5, "temperature");
+    SimpleFluid::FaceField<Pack> face_fluxes(mesh, 0.0, "face_fluxes");
+    const SimpleFluid::VectorCellField<Pack>::vec_type uniform_k_gradient{
+        3.0, -6.0, 9.0};
+    SimpleFluid::VectorCellField<Pack> k_gradient(
+        mesh, uniform_k_gradient, "k_gradient");
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    SimpleFluid::BoussinesqMomentumEquation<Pack> momentum_equation(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack> coupled_solver(mesh);
+
+    const auto base = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        face_fluxes,
+        boundary_cache,
+        boundaries,
+        time_options,
+        &material,
+        1.0,
+        false);
+    const auto turbulent = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        face_fluxes,
+        boundary_cache,
+        boundaries,
+        time_options,
+        &material,
+        1.0,
+        false,
+        nullptr,
+        &k_gradient);
+
+    const auto base_rhs = base.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    const auto turbulent_rhs = turbulent.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_gid =
+            mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        for (size_t component = 0; component < 3; ++component)
+        {
+            const auto row_lid = base.map->getLocalElement(
+                4 * cell_gid + static_cast<Pack::global_ordinal_type>(component));
+            const auto expected =
+                mesh->cell_volume(cell_lid)
+                * Pack::scalar_type{-2.0 / 3.0}
+                * uniform_k_gradient.component(component);
+            EXPECT_NEAR(
+                turbulent_rhs(row_lid, 0) - base_rhs(row_lid, 0),
+                expected,
+                1.0e-12);
+        }
+    }
+}
+
+TEST(BoussinesqSolverTest,
+     SegregatedAndCoupledMomentumCarryEffectiveTransposeStress)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "shear_velocity");
+    SimpleFluid::CellField<Pack> effective_viscosity(
+        mesh, "effective_viscosity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_owned_value(cell_lid, {0.0, center.x, 0.0});
+        effective_viscosity.set_owned_value(
+            cell_lid, center.y < 0.5 ? 1.0 : 3.0);
+    }
+    velocity.sync_ghosts();
+    effective_viscosity.sync_ghosts();
+
+    auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    for (auto& [batch_id, values] : boundary_cache.value)
+    {
+        const auto& batch = mesh->boundary_face_batch(batch_id);
+        for (size_t in_batch = 0; in_batch < values.size(); ++in_batch)
+        {
+            const auto face_lid = batch.face_lids[in_batch];
+            values[in_batch] = {
+                0.0, mesh->face_centroid(face_lid).x, 0.0};
+        }
+    }
+
+    SimpleFluid::CellField<Pack> pressure(mesh, 0.0, "pressure");
+    SimpleFluid::CellField<Pack> temperature(mesh, 0.5, "temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "zero_fluxes");
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.1;
+    time_options.thermal_expansion = 0.0;
+    time_options.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 1.0;
+    model_options.density = 1.0;
+    model_options.dynamic_viscosity = 2.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+
+    auto zero_source = [](MeshType::local_ordinal_type)
+    {
+        return SimpleFluid::VectorCellField<Pack>::vec_type{};
+    };
+    SimpleFluid::BoussinesqMomentumEquation<Pack> momentum_equation(mesh);
+    const auto segregated = momentum_equation.assemble_physical_system(
+        velocity,
+        zero_fluxes,
+        temperature,
+        boundary_cache,
+        time_options,
+        material,
+        1.0,
+        false,
+        zero_source,
+        &velocity,
+        &effective_viscosity);
+
+    SimpleFluid::CoupledPressureVelocitySolver<Pack> coupled_solver(mesh);
+    const auto molecular = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        zero_fluxes,
+        boundary_cache,
+        bcs,
+        time_options,
+        &material,
+        1.0,
+        false);
+    const auto effective = coupled_solver.assemble(
+        momentum_equation,
+        velocity,
+        pressure,
+        temperature,
+        zero_fluxes,
+        boundary_cache,
+        bcs,
+        time_options,
+        &material,
+        1.0,
+        false,
+        &effective_viscosity);
+
+    const auto segregated_x = segregated.rhs->getData(0);
+    const auto molecular_rhs = molecular.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    const auto effective_rhs = effective.rhs->getLocalViewHost(
+        Tpetra::Access::ReadOnly);
+    double maximum_transpose_stress = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto coupled_x_row = 4 * owned;
+        EXPECT_NEAR(molecular_rhs(coupled_x_row, 0), 0.0, 1.0e-12);
+        EXPECT_NEAR(
+            effective_rhs(coupled_x_row, 0),
+            segregated_x[owned],
+            1.0e-12);
+        maximum_transpose_stress = std::max(
+            maximum_transpose_stress,
+            std::abs(effective_rhs(coupled_x_row, 0)));
+    }
+    EXPECT_GT(maximum_transpose_stress, 1.0e-6);
+}
+
+TEST(BoussinesqSolverTest,
      CoupledKrylovNormalizesPhysicalPressureBoundaryData)
 {
     auto mesh = make_box_mesh();

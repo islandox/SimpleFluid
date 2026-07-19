@@ -545,6 +545,12 @@ private:
             "specific_heat_capacity",
             "dynamic_viscosity",
             "thermal_conductivity",
+            "k",
+            "epsilon",
+            "omega",
+            "nu_t",
+            "mu_eff",
+            "lambda_eff",
             "qdot_external"};
         return reserved.contains(name);
     }
@@ -785,6 +791,7 @@ struct SolutionOutputOptions
     bool include_material_properties = false;
     bool include_reacting_gas_fields = false;
     bool include_scalar_group_fields = false;
+    bool include_turbulence_fields = false;
 };
 
 } // namespace SimpleFluid

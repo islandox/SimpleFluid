@@ -541,6 +541,88 @@ TEST(PhysicalEquationsTest,
     EXPECT_NEAR(temperature.value(0), expected_temperature, 1.0e-12);
 }
 
+TEST(PhysicalEquationsTest,
+     PhysicalTemperatureUsesValidatedConductivityOverride)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType molecular_temperature(mesh, 0.0, "molecular_temperature");
+    FieldType effective_temperature(mesh, 0.0, "effective_temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
+    SimpleFluid::TemperatureDiffusionEquation<Pack> molecular_equation(
+        mesh, bcs);
+    SimpleFluid::TemperatureDiffusionEquation<Pack> effective_equation(
+        mesh, bcs);
+
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.thermal_conductivity = 0.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    FieldType effective_conductivity(mesh, 1.0, "effective_conductivity");
+    auto zero_power =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    molecular_equation.advance_physical(
+        molecular_temperature,
+        zero_fluxes,
+        0.1,
+        material,
+        molecular_temperature,
+        zero_power,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+    effective_equation.advance_physical(
+        effective_temperature,
+        zero_fluxes,
+        0.1,
+        material,
+        effective_temperature,
+        zero_power,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+        {},
+        &effective_conductivity);
+
+    EXPECT_DOUBLE_EQ(molecular_temperature.value(0), 0.0);
+    EXPECT_GT(effective_temperature.value(0), 0.0);
+    EXPECT_LT(effective_temperature.value(0), 1.0);
+
+    FieldType negative_conductivity(
+        mesh, -1.0, "negative_effective_conductivity");
+    EXPECT_THROW(
+        effective_equation.advance_physical(
+            effective_temperature,
+            zero_fluxes,
+            0.1,
+            material,
+            effective_temperature,
+            zero_power,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            {},
+            &negative_conductivity),
+        std::invalid_argument);
+
+    auto other_mesh = make_single_hex_mesh();
+    FieldType wrong_mesh_conductivity(
+        other_mesh, 1.0, "wrong_mesh_conductivity");
+    EXPECT_THROW(
+        effective_equation.advance_physical(
+            effective_temperature,
+            zero_fluxes,
+            0.1,
+            material,
+            effective_temperature,
+            zero_power,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            {},
+            &wrong_mesh_conductivity),
+        std::invalid_argument);
+}
+
 TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)
 {
     auto mesh = make_single_hex_mesh();
@@ -1117,6 +1199,183 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
         EXPECT_TRUE(std::isfinite(v.y)) << "Non-finite v.y at cell " << lid;
         EXPECT_TRUE(std::isfinite(v.z)) << "Non-finite v.z at cell " << lid;
     }
+}
+
+TEST(PhysicalEquationsTest,
+     PhysicalMomentumPreservesUniformVelocityAtHomogeneousNeumannOutlet)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 1, 1, 0.25));
+    FieldType temperature(mesh, 0.5, "temperature");
+    const VectorFieldType::vec_type uniform_velocity{0.75, -0.5, 0.25};
+    VectorFieldType velocity(mesh, uniform_velocity, "velocity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
+
+    SimpleFluid::BoundaryConditionSet boundaries;
+    for (const auto* name : {
+             "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::Neumann, {}};
+    }
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundaries);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.1;
+    options.thermal_expansion = 0.0;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.dynamic_viscosity = 2.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, options);
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        return {};
+    };
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-12;
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
+    equation.advance_velocity_physical(
+        velocity,
+        zero_fluxes,
+        temperature,
+        boundary_cache,
+        options,
+        material,
+        1.0,
+        false,
+        velocity,
+        zero_source,
+        linear_options);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto actual = velocity.value(cell_lid);
+        EXPECT_NEAR(actual.x, uniform_velocity.x, 1.0e-11);
+        EXPECT_NEAR(actual.y, uniform_velocity.y, 1.0e-11);
+        EXPECT_NEAR(actual.z, uniform_velocity.z, 1.0e-11);
+    }
+}
+
+TEST(PhysicalEquationsTest,
+     PhysicalMomentumUsesValidatedDynamicViscosityOverride)
+{
+    constexpr int n_cells = 4;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(
+            n_cells, 1, 1, 1.0 / n_cells));
+    FieldType temperature(mesh, 0.5, "temperature");
+    VectorFieldType molecular_velocity(mesh, "molecular_velocity");
+    VectorFieldType effective_velocity(mesh, "effective_velocity");
+    std::vector<VectorFieldType::vec_type> initial_velocity(
+        mesh->num_owned_cells());
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto value = VectorFieldType::vec_type{
+            std::sin(M_PI * mesh->cell_centroid(cell_lid).x), 0.0, 0.0};
+        initial_velocity[owned] = value;
+        molecular_velocity.set_owned_value(cell_lid, value);
+        effective_velocity.set_owned_value(cell_lid, value);
+    }
+    molecular_velocity.sync_ghosts();
+    effective_velocity.sync_ghosts();
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    for (const auto* name : {
+             "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        bcs.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.1;
+    options.thermal_expansion = 0.0;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.dynamic_viscosity = 0.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, options);
+    FieldType effective_viscosity(mesh, 1.0, "effective_viscosity");
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        return {};
+    };
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-12;
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> molecular_equation(mesh);
+    molecular_equation.advance_velocity_physical(
+        molecular_velocity,
+        zero_fluxes,
+        temperature,
+        cache,
+        options,
+        material,
+        1.0,
+        false,
+        molecular_velocity,
+        zero_source,
+        linear_options);
+    SimpleFluid::BoussinesqMomentumEquation<Pack> effective_equation(mesh);
+    effective_equation.advance_velocity_physical(
+        effective_velocity,
+        zero_fluxes,
+        temperature,
+        cache,
+        options,
+        material,
+        1.0,
+        false,
+        effective_velocity,
+        zero_source,
+        linear_options,
+        &effective_viscosity);
+
+    double maximum_override_change = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_NEAR(
+            molecular_velocity.value(cell_lid).x,
+            initial_velocity[owned].x,
+            1.0e-11);
+        maximum_override_change = std::max(
+            maximum_override_change,
+            std::abs(
+                effective_velocity.value(cell_lid).x
+              - initial_velocity[owned].x));
+    }
+    EXPECT_GT(maximum_override_change, 1.0e-6);
+
+    FieldType negative_viscosity(mesh, -1.0, "negative_viscosity");
+    EXPECT_THROW(
+        effective_equation.advance_velocity_physical(
+            effective_velocity,
+            zero_fluxes,
+            temperature,
+            cache,
+            options,
+            material,
+            1.0,
+            false,
+            effective_velocity,
+            zero_source,
+            linear_options,
+            &negative_viscosity),
+        std::invalid_argument);
 }
 
 TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewedMesh)

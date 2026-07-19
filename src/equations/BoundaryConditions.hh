@@ -57,13 +57,27 @@ using BoundaryConditionMap = std::unordered_map<std::string, BoundaryCondition>;
 using VectorBoundaryConditionMap = std::unordered_map<std::string, VectorBoundaryCondition>;
 
 /**
- * @brief Collection of boundary conditions for temperature, velocity, and pressure.
+ * @brief Scalar boundary conditions used by two-equation turbulence models.
+ *
+ * Missing entries use the transport-equation default of homogeneous Neumann.
+ * Turbulence scalar equations accept Dirichlet and Neumann conditions only.
+ */
+struct TurbulenceBoundaryConditionSet
+{
+    BoundaryConditionMap turbulent_kinetic_energy;
+    BoundaryConditionMap dissipation_rate;
+    BoundaryConditionMap specific_dissipation_rate;
+};
+
+/**
+ * @brief Collection of boundary conditions for all fluid unknowns.
  */
 struct BoundaryConditionSet
 {
     BoundaryConditionMap temperature; ///< Dirichlet K; Neumann K/m.
     VectorBoundaryConditionMap velocity;
     BoundaryConditionMap pressure; ///< Dirichlet Pa; Neumann Pa/m.
+    TurbulenceBoundaryConditionSet turbulence;
 };
 
 } // namespace SimpleFluid
