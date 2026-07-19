@@ -174,11 +174,12 @@ short-running physical smoke cases:
 | Skewed diffusion | Non-orthogonal mesh convergence with all three treatments |
 | Natural convection cavity | Differentially heated square cavity |
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
+| OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
 
 The cavity smoke tests do not currently assert agreement with Ghia et al. or
 with bundled OpenFOAM profile data. See
-`verification/openfoam/cavityFlow/README.md` for the external comparison
-workflow.
+`verification/openfoam/cavityFlow/README.md` for the cavity workflow and
+`verification/openfoam/pitzDaily/README.md` for the pitzDaily workflow.
 
 ## Examples
 
@@ -190,6 +191,7 @@ Pre-built example executables:
 | `natural_convection_cylinder` | Cylindrical domain natural convection |
 | `natural_convection_sphere` | Spherical domain natural convection |
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
+| `pitz_daily` | OpenFOAM pitzDaily geometry with transient standard k-epsilon transport |
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 
