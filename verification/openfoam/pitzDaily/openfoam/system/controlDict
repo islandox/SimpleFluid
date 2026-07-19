@@ -1,0 +1,65 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+
+application         simpleFoam;
+startFrom           startTime;
+startTime           0;
+stopAt              endTime;
+endTime             2000;
+deltaT              1;
+writeControl        timeStep;
+writeInterval       100;
+purgeWrite          0;
+writeFormat         ascii;
+writePrecision      12;
+writeCompression    off;
+timeFormat          general;
+timePrecision       6;
+runTimeModifiable   true;
+
+functions
+{
+    #includeFunc streamlines
+
+    profiles
+    {
+        type                sets;
+        libs                ("libsampling.so");
+        writeControl        writeTime;
+        setFormat           raw;
+        interpolationScheme cellPoint;
+        fields              (U);
+        sets
+        (
+            x050
+            {
+                type        uniform;
+                axis        y;
+                start       (0.050 -0.0253 0);
+                end         (0.050  0.0253 0);
+                nPoints     129;
+            }
+            x100
+            {
+                type        uniform;
+                axis        y;
+                start       (0.100 -0.0253 0);
+                end         (0.100  0.0253 0);
+                nPoints     129;
+            }
+            x200
+            {
+                type        uniform;
+                axis        y;
+                start       (0.200 -0.0253 0);
+                end         (0.200  0.0253 0);
+                nPoints     129;
+            }
+        );
+    }
+}
