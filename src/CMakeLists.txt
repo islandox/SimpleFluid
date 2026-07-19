@@ -167,6 +167,10 @@ add_executable(natural_convection_shiri examples/natural_convection_shiri.cc)
 target_link_libraries(natural_convection_shiri PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(natural_convection_shiri)
 
+add_executable(pitz_daily examples/pitz_daily.cc)
+target_link_libraries(pitz_daily PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(pitz_daily)
+
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
 target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
@@ -183,6 +187,7 @@ foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_sphere
     natural_convection_boundary_layer_box
     natural_convection_shiri
+    pitz_daily
     fissile_solution_tank_demo
     constant_power_cylinder_vessel)
   add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
@@ -194,3 +199,7 @@ endforeach()
 set_tests_properties(natural_convection_shiri_smoke PROPERTIES
     ENVIRONMENT
         "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
+
+set_tests_properties(pitz_daily_smoke PROPERTIES
+    ENVIRONMENT
+        "SIMPLEFLUID_PITZ_MESH_DIVISOR=40;SIMPLEFLUID_PITZ_STEPS=1;SIMPLEFLUID_PITZ_DT=1e-6")

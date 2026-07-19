@@ -1,0 +1,8 @@
+// Canonical pitzDaily streamline seeds from the v2606 tutorial.
+nLines  10;
+start   (-0.0205 0.001  0.00001);
+end     (-0.0205 0.0251 0.00001);
+fields  (p k U);
+U       U;
+
+#includeEtc "caseDicts/postProcessing/visualization/streamlines.cfg"
