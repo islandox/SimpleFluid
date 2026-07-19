@@ -98,21 +98,31 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         [&](int boundary_id, local_ordinal_type boundary_face_id)
     {
         const auto face = static_cast<size_t>(boundary_face_id);
-        if (velocity_boundary_cache.type.at(boundary_id)
-            == BoundaryConditionType::Slip)
+        const auto type = velocity_boundary_cache.type.at(boundary_id);
+        if (type == BoundaryConditionType::Slip)
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
             return FVM::detail::slip_face_velocity(
                 old_velocity, face_lid);
         }
+        if (type == BoundaryConditionType::Neumann)
+        {
+            const auto face_lid =
+                d_mesh->boundary_face_batch(boundary_id).face_lids[face];
+            return old_velocity.local_value(
+                d_mesh->owner_cell(face_lid));
+        }
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
     auto boundary_diffusion =
         [&](int boundary_id, local_ordinal_type)
     {
-        return velocity_boundary_cache.type.at(boundary_id)
-            != BoundaryConditionType::Slip;
+        const auto type = velocity_boundary_cache.type.at(boundary_id);
+        // Homogeneous velocity Neumann is the open zero-gradient contract,
+        // so it contributes no component-Laplacian boundary diagonal.
+        return type != BoundaryConditionType::Slip
+            && type != BoundaryConditionType::Neumann;
     };
 
     auto system = FVM::non_orthogonal_transport_system<Pack>(
@@ -273,29 +283,60 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         [&](int boundary_id, local_ordinal_type boundary_face_id)
     {
         const auto face = static_cast<size_t>(boundary_face_id);
-        if (velocity_boundary_cache.type.at(boundary_id)
-            == BoundaryConditionType::Slip)
+        const auto type = velocity_boundary_cache.type.at(boundary_id);
+        if (type == BoundaryConditionType::Slip)
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
             return FVM::detail::slip_face_velocity(
                 old_velocity, face_lid);
         }
+        if (type == BoundaryConditionType::Neumann)
+        {
+            const auto face_lid =
+                d_mesh->boundary_face_batch(boundary_id).face_lids[face];
+            return old_velocity.local_value(
+                d_mesh->owner_cell(face_lid));
+        }
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
     auto boundary_diffusion =
         [&](int boundary_id, local_ordinal_type)
     {
-        return velocity_boundary_cache.type.at(boundary_id)
-            != BoundaryConditionType::Slip;
+        const auto type = velocity_boundary_cache.type.at(boundary_id);
+        // Homogeneous velocity Neumann is the open/traction-free outlet
+        // contract. It contributes neither a component-Laplacian boundary
+        // diagonal nor a lagged transpose-stress traction.
+        return type != BoundaryConditionType::Slip
+            && type != BoundaryConditionType::Neumann;
     };
+
+    const auto requires_non_orthogonal_graph =
+        options.non_orthogonal_treatment
+            != FVM::NonOrthogonalTreatment::Explicit;
+    bool all_viscosities_positive = true;
+    for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(local);
+        all_viscosities_positive = all_viscosities_positive
+            && dynamic_viscosity.local_value(cell_lid) > scalar_type{};
+    }
+    if (requires_non_orthogonal_graph
+        && !d_cached_physical_graph_supports_non_orthogonal_correction)
+    {
+        d_cached_physical_transport_matrix = Teuchos::null;
+    }
 
     auto system = FVM::physical_momentum_transport_system<Pack>(
         old_velocity, face_fluxes, options.time_step, dynamic_viscosity,
         reference_density, boundary_value, acceleration_source,
         options.non_orthogonal_treatment, correction_field,
-        d_cached_transport_matrix, boundary_diffusion);
-    d_cached_transport_matrix = system.matrix;
+        d_cached_physical_transport_matrix, boundary_diffusion);
+    d_cached_physical_transport_matrix = system.matrix;
+    if (requires_non_orthogonal_graph && all_viscosities_positive)
+    {
+        d_cached_physical_graph_supports_non_orthogonal_correction = true;
+    }
     return system;
 }
 

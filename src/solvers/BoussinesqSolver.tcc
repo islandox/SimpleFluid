@@ -132,6 +132,10 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
         d_mesh,
         d_model_options,
         d_problem.time_options());
+    d_problem.template emplace_object<TurbulenceModel<Pack>>(
+        "turbulence_model",
+        d_mesh,
+        d_problem.boundary_conditions());
     auto& sources =
         d_problem.template emplace_object<
             TemperatureSourceRegistry<Pack>>(
@@ -188,6 +192,74 @@ auto BoussinesqSolver<Pack>::material_properties() const noexcept
     -> const MaterialPropertyFields<Pack>&
 {
     return stored_material_properties();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::stored_turbulence_model()
+    -> TurbulenceModel<Pack>&
+{
+    return d_problem.template object<TurbulenceModel<Pack>>(
+        "turbulence_model");
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::stored_turbulence_model() const
+    -> const TurbulenceModel<Pack>&
+{
+    return d_problem.template object<TurbulenceModel<Pack>>(
+        "turbulence_model");
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::physical_transport_enabled() const noexcept
+{
+    return d_physical_model_enabled || stored_turbulence_model().enabled();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_turbulence(
+    const TurbulenceModelOptions& options) -> TurbulenceModel<Pack>&
+{
+    auto& model = stored_turbulence_model();
+    model.configure(
+        options,
+        stored_material_properties(),
+        d_model_options.reference_density);
+    return model;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::configure_turbulence(
+    const Database& database) -> TurbulenceModel<Pack>&
+{
+    auto& model = stored_turbulence_model();
+    model.configure(
+        database,
+        stored_material_properties(),
+        d_model_options.reference_density);
+    return model;
+}
+
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::remove_turbulence_model() noexcept
+{
+    return stored_turbulence_model().disable();
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_turbulence_model() noexcept
+    -> TurbulenceModel<Pack>*
+{
+    auto& model = stored_turbulence_model();
+    return model.enabled() ? &model : nullptr;
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::find_turbulence_model() const noexcept
+    -> const TurbulenceModel<Pack>*
+{
+    const auto& model = stored_turbulence_model();
+    return model.enabled() ? &model : nullptr;
 }
 
 template<TpetraTypePack Pack>
@@ -853,14 +925,22 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
         predictor_pressure_gradient());
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
+    const auto* turbulence = find_turbulence_model();
     auto pressure_source =
         [&](local_ordinal_type cell_lid) -> vec_type
     {
-        return predictor_pressure_gradient().value(cell_lid)
-             * (-inverse_reference_density);
+        auto acceleration = predictor_pressure_gradient().value(cell_lid)
+                          * (-inverse_reference_density);
+        if (turbulence != nullptr)
+        {
+            acceleration = acceleration +
+                turbulence->turbulent_kinetic_energy_gradient().value(cell_lid)
+                * scalar_type{-2.0 / 3.0};
+        }
+        return acceleration;
     };
 
-    if (d_physical_model_enabled)
+    if (physical_transport_enabled())
     {
         return momentum_equation().advance_velocity_physical(
             velocity(),
@@ -873,7 +953,10 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
             d_model_options.density_feedback_enabled,
             velocity(),
             pressure_source,
-            d_problem.linear_options());
+            d_problem.linear_options(),
+            turbulence != nullptr
+                ? &turbulence->effective_dynamic_viscosity()
+                : nullptr);
     }
     return momentum_equation().advance_velocity(
         velocity(),
@@ -897,6 +980,7 @@ template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::assemble_coupled_system()
     -> coupled_system_type
 {
+    const auto* turbulence = find_turbulence_model();
     return coupled_pressure_velocity_solver().assemble(
         momentum_equation(),
         velocity(),
@@ -906,11 +990,17 @@ auto BoussinesqSolver<Pack>::assemble_coupled_system()
         velocity_boundary_cache(),
         d_problem.boundary_conditions(),
         d_problem.time_options(),
-        d_physical_model_enabled
+        physical_transport_enabled()
             ? &stored_material_properties()
             : nullptr,
         d_model_options.reference_density,
-        d_model_options.density_feedback_enabled);
+        d_model_options.density_feedback_enabled,
+        turbulence != nullptr
+            ? &turbulence->effective_dynamic_viscosity()
+            : nullptr,
+        turbulence != nullptr
+            ? &turbulence->turbulent_kinetic_energy_gradient()
+            : nullptr);
 }
 
 /**
@@ -1077,9 +1167,28 @@ void BoussinesqSolver<Pack>::step()
     {
         refresh_physical_models();
     }
+    if (auto* turbulence = find_turbulence_model())
+    {
+        turbulence->refresh_effective_properties(
+            stored_material_properties(),
+            d_model_options.reference_density);
+    }
 
     solve_pressure_velocity_coupling();
     const auto time_step = d_problem.time_options().time_step;
+    if (auto* turbulence = find_turbulence_model())
+    {
+        const auto turbulence_statistics = turbulence->advance(
+            velocity(),
+            projected_face_fluxes(),
+            velocity_boundary_cache(),
+            time_step,
+            stored_material_properties(),
+            d_model_options.reference_density,
+            d_problem.time_options().non_orthogonal_treatment,
+            d_problem.linear_options());
+        d_last_step_statistics.add(turbulence_statistics);
+    }
     const auto advanced_radiolysis =
         d_radiolytic_gas_model
         && d_radiolytic_gas_model->enabled()
@@ -1132,8 +1241,9 @@ void BoussinesqSolver<Pack>::step()
     }
 
     LinearSolveStatistics temperature_statistics;
-    if (d_physical_model_enabled)
+    if (physical_transport_enabled())
     {
+        const auto* turbulence = find_turbulence_model();
         auto total_power_density =
             [&](local_ordinal_type cell_lid)
         {
@@ -1155,7 +1265,10 @@ void BoussinesqSolver<Pack>::step()
                 temperature(),
                 total_power_density,
                 d_problem.time_options().non_orthogonal_treatment,
-                d_problem.linear_options());
+                d_problem.linear_options(),
+                turbulence != nullptr
+                    ? &turbulence->effective_thermal_conductivity()
+                    : nullptr);
     }
     else
     {
@@ -1209,6 +1322,12 @@ void BoussinesqSolver<Pack>::step()
 
     refresh_material_feedback(
         d_time + time_step);
+    if (auto* turbulence = find_turbulence_model())
+    {
+        turbulence->refresh_effective_properties(
+            stored_material_properties(),
+            d_model_options.reference_density);
+    }
 
     finish_step();
 }
@@ -1255,6 +1374,17 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
         {
             for (const auto& [name, field] :
                  d_material_feedback_model->output_fields())
+            {
+                writer.add_scalar_cell_data(
+                    name, collect_scalar_field(*field));
+            }
+        }
+    }
+    if (output_options.include_turbulence_fields)
+    {
+        if (const auto* turbulence = find_turbulence_model())
+        {
+            for (const auto& [name, field] : turbulence->output_fields())
             {
                 writer.add_scalar_cell_data(
                     name, collect_scalar_field(*field));

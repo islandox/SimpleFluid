@@ -84,6 +84,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME TurbulentBoussinesq_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testTurbulentBoussinesqSolver>"
+            "--gtest_filter=TurbulentBoussinesqSolverTest.AdvancesTurbulenceThroughSegregatedAndCoupledPressureVelocitySolves")
+  set_tests_properties(TurbulentBoussinesq_2procs PROPERTIES
+    LABELS "mpi;turbulence;pressure_velocity"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME PrecursorNonOrthogonalConservation_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"

@@ -92,7 +92,8 @@ public:
         bool density_feedback_enabled,
         velocity_field_type& velocity,
         const source_type& right_hand_source,
-        const LinearSolverOptions& linear_options = {}) const;
+        const LinearSolverOptions& linear_options = {},
+        const field_type* dynamic_viscosity_override = nullptr) const;
 
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
@@ -104,7 +105,13 @@ public:
         scalar_type reference_density,
         bool density_feedback_enabled,
         const source_type& right_hand_source,
-        const velocity_field_type* correction_field = nullptr) const;
+        const velocity_field_type* correction_field = nullptr,
+        const field_type* dynamic_viscosity_override = nullptr) const;
+
+private:
+    const field_type& select_dynamic_viscosity(
+        const MaterialPropertyFields<Pack>& material,
+        const field_type* dynamic_viscosity_override) const;
 };
 
 } // namespace SimpleFluid

@@ -87,6 +87,8 @@ add_library(SimpleFluidEquations SHARED
     equations/PressureProjectionEquation.cc
     equations/RadiolyticGasProperties.cc
     equations/TemperatureDiffusionEquation.cc
+    equations/turbulence/TurbulenceModel.cc
+    equations/turbulence/TurbulenceScalarTransportEquation.cc
 )
 add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
 simplefluid_configure_library(SimpleFluidEquations)

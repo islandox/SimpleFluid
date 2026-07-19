@@ -5,6 +5,8 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFissionPowerSourceMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testPressureProjectionMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testTurbulenceModelMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
@@ -37,6 +39,15 @@ target_link_libraries(
   GTest::gtest_main)
 simplefluid_exe_reuse_precompiled_header(testPressureProjectionMultiRank)
 
+add_executable(
+  testTurbulenceModelMultiRank
+  testTurbulenceModelMultiRank.cc)
+target_link_libraries(
+  testTurbulenceModelMultiRank
+  SimpleFluid::Equations
+  GTest::gtest_main)
+simplefluid_exe_reuse_precompiled_header(testTurbulenceModelMultiRank)
+
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
         OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
@@ -57,6 +68,16 @@ if(MPIEXEC_EXECUTABLE
             "$<TARGET_FILE:testPressureProjectionMultiRank>")
   set_tests_properties(PressureProjection_2procs PROPERTIES
     LABELS "mpi;pressure_projection"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME TurbulenceModel_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testTurbulenceModelMultiRank>")
+  set_tests_properties(TurbulenceModel_2procs PROPERTIES
+    LABELS "mpi;turbulence"
     PROCESSORS 2
     TIMEOUT 120)
 endif()
