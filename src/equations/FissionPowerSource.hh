@@ -11,8 +11,7 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
-
-#include <Teuchos_CommHelpers.hpp>
+#include "modules/Teuchos.hh"
 
 #include <algorithm>
 #include <cctype>

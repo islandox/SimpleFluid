@@ -15,9 +15,7 @@
 #include "FVM/OperatorDetails.hh"
 #include "fields/FaceField.hh"
 #include "geometry/Mesh.hh"
-
-#include <Teuchos_Array.hpp>
-#include <Teuchos_RCP.hpp>
+#include "modules/Teuchos.hh"
 
 #include <cstddef>
 #include <optional>

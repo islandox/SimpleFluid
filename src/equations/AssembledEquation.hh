@@ -12,8 +12,7 @@
 #pragma once
 
 #include "solvers/BelosLinearSolver.hh"
-
-#include <Teuchos_RCP.hpp>
+#include "modules/Teuchos.hh"
 
 #include <stdexcept>
 #include <utility>

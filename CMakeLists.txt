@@ -62,9 +62,6 @@ endif()
 simplefluid_configure_profile_guided_optimization()
 
 set(SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT ON)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT OFF)
-endif()
 option(SIMPLEFLUID_ENABLE_CXX_MODULES
        "Build C++ module interfaces for module-capable toolchains"
        ${SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT})

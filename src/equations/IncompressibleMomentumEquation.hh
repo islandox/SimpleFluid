@@ -20,8 +20,7 @@
 #include "FVM/BoundaryCache.hh"
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
-
-#include <Teuchos_RCP.hpp>
+#include "modules/Teuchos.hh"
 
 #include <functional>
 #include <utility>

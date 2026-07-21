@@ -22,9 +22,8 @@
 #include "geometry/mesh/UnstructuredMesh.hh"
 #include "io/VTUWriter.hh"
 #include "utils/debug_check.hh"
-
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_Core.hpp>
+#include "modules/Teuchos.hh"
+#include "modules/Tpetra.hh"
 
 #include <algorithm>
 #include <limits>

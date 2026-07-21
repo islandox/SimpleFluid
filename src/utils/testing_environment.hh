@@ -12,8 +12,8 @@
 #pragma once
 
 #include <gtest/gtest.h>
-#include <Kokkos_Core.hpp>
-#include <Tpetra_Core.hpp>
+#include "modules/Kokkos.hh"
+#include "modules/Tpetra.hh"
 #include <cstdlib>
 #include "parallel/MPI_interface.hh"
 #include "DEBUG_MACROS.h"

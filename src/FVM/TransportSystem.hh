@@ -18,9 +18,7 @@
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "geometry/Mesh.hh"
-
-#include <Teuchos_Array.hpp>
-#include <Teuchos_RCP.hpp>
+#include "modules/Teuchos.hh"
 
 #include <cstddef>
 #include <functional>

@@ -19,14 +19,8 @@
 #include "solvers/BelosLinearSolver.hh"
 #include "FVM/OperatorDetails.hh"
 #include "utils/testing_environment.hh"
-
-#include <Tpetra_CrsMatrix.hpp>
-#include <Tpetra_Map.hpp>
-#include <Tpetra_MultiVector.hpp>
-#include <Tpetra_Vector.hpp>
-#include <Teuchos_Array.hpp>
-#include <Teuchos_Comm.hpp>
-#include <Teuchos_RCP.hpp>
+#include "modules/Tpetra.hh"
+#include "modules/Teuchos.hh"
 
 #include <cmath>
 #include <chrono>

@@ -15,10 +15,8 @@
  */
 
 #include "geometry/mesh/PartitionedMeshBase.hh"
-
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_Core.hpp>
-#include <Tpetra_Map.hpp>
+#include "modules/Teuchos.hh"
+#include "modules/Tpetra.hh"
 
 namespace SimpleFluid::Meshes
 {

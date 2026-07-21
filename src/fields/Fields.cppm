@@ -1,5 +1,7 @@
 module;
 
+#include "cmake/StandardHeaders.hh"
+
 #include "fields/BoundaryFaceField.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -47,4 +49,12 @@ using ::SimpleFluid::VectorFaceFieldDescriptor;
 using ::SimpleFluid::VectorFaceFieldStored;
 using ::SimpleFluid::real_t;
 using ::SimpleFluid::vec3;
+}
+
+// Keep the dependencies of exported CrsMatrix specializations reachable when
+// Clang instantiates them through the Fields and FVM module boundary.
+export namespace Tpetra::MMdetails
+{
+using ::Tpetra::MMdetails::KernelWrappers;
+using ::Tpetra::MMdetails::KernelWrappers2;
 }

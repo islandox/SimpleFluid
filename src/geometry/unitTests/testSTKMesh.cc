@@ -13,9 +13,7 @@
 #include "geometry/STKMesh.hh"
 
 #include "utils/testing_environment.hh"
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
-#include <stk_mesh/base/MetaData.hpp>
+#include "modules/STK.hh"
 
 #include <algorithm>
 #include <array>

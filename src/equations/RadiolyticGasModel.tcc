@@ -13,8 +13,7 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
-
-#include <Teuchos_CommHelpers.hpp>
+#include "modules/Teuchos.hh"
 
 #include <algorithm>
 #include <cmath>

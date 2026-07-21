@@ -11,9 +11,7 @@
 #pragma once
 
 #include "geometry/STKMesh.hh"
-
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
+#include "modules/STK.hh"
 
 #include <array>
 #include <cstddef>

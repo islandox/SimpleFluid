@@ -13,9 +13,8 @@
 
 #include "fields/Field.hh"
 #include "geometry/MeshHandle.hh"
-
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_CombineMode.hpp>
+#include "modules/Teuchos.hh"
+#include "modules/Tpetra.hh"
 
 #include <concepts>
 #include <cstddef>
