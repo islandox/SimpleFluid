@@ -2077,7 +2077,7 @@ TEST(FvmOperatorsTest, HarmonicFaceValueRejectsNegativeCellValues)
 TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
-    FieldType scalar(mesh, 0.0, "scalar");
+    FieldType scalar(mesh, "scalar");
     FieldType storage(mesh, 1.0, "storage");
     FieldType advection(mesh, 0.0, "advection");
     FieldType diffusivity(mesh, 2.0, "diffusivity");
@@ -2216,6 +2216,294 @@ TEST(FvmOperatorsTest,
     EXPECT_THROW(
         assemble(std::numeric_limits<Pack::scalar_type>::infinity()),
         std::invalid_argument);
+}
+
+TEST(FvmOperatorsTest,
+     WeightedScalarTransportFixedCellIsExactIdentityWithExplicitCorrection)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType scalar(mesh, "scalar");
+    FieldType storage(mesh, 1.0, "storage");
+    FieldType advection(mesh, 1.0, "advection");
+    FieldType diffusivity(mesh, 2.0, "diffusivity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        scalar.set_owned_value(
+            static_cast<MeshType::local_ordinal_type>(owned),
+            1.0 + static_cast<double>(owned));
+    }
+    scalar.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto boundary_value = [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto source = [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 3.0;
+    };
+    using FixedProvider = std::function<std::optional<Pack::scalar_type>(
+        MeshType::local_ordinal_type)>;
+    constexpr Pack::scalar_type fixed_value = 7.25;
+    FixedProvider fixed = [fixed_value](MeshType::local_ordinal_type cell_lid)
+        -> std::optional<Pack::scalar_type>
+    {
+        return cell_lid == 0
+             ? std::optional<Pack::scalar_type>{fixed_value}
+             : std::nullopt;
+    };
+
+    const auto system =
+        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar,
+            zero_fluxes,
+            0.5,
+            storage,
+            advection,
+            diffusivity,
+            boundary_condition,
+            boundary_value,
+            source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+            &scalar,
+            Teuchos::null,
+            {},
+            fixed);
+
+    EXPECT_NEAR(system.rhs->getData()[0], fixed_value, 1.0e-14);
+    const auto row_entries = system.matrix->getNumEntriesInLocalRow(0);
+    typename Pack::matrix_type::nonconst_local_inds_host_view_type columns(
+        "columns", row_entries);
+    typename Pack::matrix_type::nonconst_values_host_view_type values(
+        "values", row_entries);
+    size_t num_entries = 0;
+    system.matrix->getLocalRowCopy(
+        0, columns, values, num_entries);
+    for (size_t entry = 0; entry < num_entries; ++entry)
+    {
+        EXPECT_NEAR(
+            values(entry),
+            columns(entry) == 0 ? 1.0 : 0.0,
+            1.0e-14);
+    }
+
+    FixedProvider non_finite = [](MeshType::local_ordinal_type)
+        -> std::optional<Pack::scalar_type>
+    {
+        return std::numeric_limits<Pack::scalar_type>::infinity();
+    };
+    EXPECT_THROW(
+        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar, zero_fluxes, 0.5, storage, advection, diffusivity,
+            boundary_condition, boundary_value, source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+            &scalar, Teuchos::null, {}, non_finite),
+        std::invalid_argument);
+}
+
+TEST(FvmOperatorsTest,
+     ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType scalar(mesh, 0.0, "scalar");
+    FieldType unit_weight(mesh, 1.0, "unit_weight");
+    FieldType diffusivity(mesh, 2.0, "diffusivity");
+    VectorFieldType velocity(mesh, "velocity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto centroid = mesh->cell_centroid(cell_lid);
+        scalar.set_owned_value(
+            cell_lid,
+            0.3 + centroid.x * centroid.y - 0.2 * centroid.z);
+        velocity.set_owned_value(
+            cell_lid,
+            {centroid.y + 0.1, centroid.x * centroid.z, -0.3 * centroid.z});
+    }
+    scalar.sync_ghosts();
+    velocity.sync_ghosts();
+
+    const auto& [cached_batch_id, cached_batch] =
+        *mesh->boundary_batches().begin();
+    SimpleFluid::FVM::BoundaryCache<Pack> cache{{}, mesh};
+    cache.value[cached_batch_id] = SimpleFluid::Arr<Pack::scalar_type>(
+        cached_batch.face_lids.size(), 6.0);
+    auto boundary_coefficient =
+        [&](int batch_id, size_t in_batch_id,
+            Pack::scalar_type owner_value)
+    {
+        return SimpleFluid::FVM::boundary_coefficient<Pack>(
+            &cache, batch_id, in_batch_id, owner_value);
+    };
+
+    auto boundary_condition = [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto scalar_boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_batches().at(batch_id).face_lids.at(in_batch_id);
+        const auto centroid = mesh->face_centroid(face_lid);
+        return 1.0 + centroid.x + 2.0 * centroid.y - centroid.z;
+    };
+    auto zero_source = [](MeshType::local_ordinal_type)
+    {
+        return Pack::scalar_type{};
+    };
+    auto assemble_scalar =
+        [&](SimpleFluid::FVM::NonOrthogonalTreatment treatment,
+            const FieldType* correction_field)
+    {
+        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar, zero_fluxes, 1.0, unit_weight, unit_weight, diffusivity,
+            boundary_condition, scalar_boundary_value, zero_source,
+            treatment, correction_field, Teuchos::null, {}, {}, &cache);
+    };
+    const auto scalar_base = assemble_scalar(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, nullptr);
+    const auto scalar_corrected = assemble_scalar(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, &scalar);
+    Pack::vector_type expected_scalar(mesh->owned_cell_map(), true);
+    SimpleFluid::FVM::add_variable_explicit_non_orthogonal_correction<Pack>(
+        scalar, diffusivity, boundary_condition, scalar_boundary_value,
+        expected_scalar, 1.0, boundary_coefficient);
+
+    Pack::scalar_type scalar_correction_norm{};
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto actual = scalar_corrected.rhs->getData()[owned]
+                          - scalar_base.rhs->getData()[owned];
+        const auto expected = expected_scalar.getData()[owned];
+        EXPECT_NEAR(actual, expected, 1.0e-11);
+        scalar_correction_norm += std::abs(expected);
+    }
+    EXPECT_GT(scalar_correction_norm, 1.0e-8);
+
+    const auto scalar_implicit = assemble_scalar(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, nullptr);
+    const auto scalar_hybrid = assemble_scalar(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, &scalar);
+    const auto scalar_explicit_action =
+        local_matrix_action(*scalar_corrected.matrix, scalar);
+    const auto scalar_implicit_action =
+        local_matrix_action(*scalar_implicit.matrix, scalar);
+    const auto scalar_hybrid_action =
+        local_matrix_action(*scalar_hybrid.matrix, scalar);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto explicit_residual = scalar_explicit_action[owned]
+            - scalar_corrected.rhs->getData()[owned];
+        const auto implicit_residual = scalar_implicit_action[owned]
+            - scalar_implicit.rhs->getData()[owned];
+        const auto hybrid_residual = scalar_hybrid_action[owned]
+            - scalar_hybrid.rhs->getData()[owned];
+        EXPECT_NEAR(implicit_residual, explicit_residual, 1.0e-11);
+        EXPECT_NEAR(hybrid_residual, explicit_residual, 1.0e-11);
+    }
+
+    auto vector_boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_batches().at(batch_id).face_lids.at(in_batch_id);
+        const auto centroid = mesh->face_centroid(face_lid);
+        return MeshType::Vec3{
+            1.0 + centroid.x, 2.0 * centroid.y, 0.5 - centroid.z};
+    };
+    auto zero_acceleration = [](MeshType::local_ordinal_type)
+    {
+        return MeshType::Vec3{};
+    };
+    constexpr Pack::scalar_type reference_density = 2.0;
+    auto assemble_vector =
+        [&](SimpleFluid::FVM::NonOrthogonalTreatment treatment,
+            const VectorFieldType* correction_field)
+    {
+        return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+            velocity, zero_fluxes, 1.0, diffusivity, reference_density,
+            vector_boundary_value, zero_acceleration, treatment,
+            correction_field, Teuchos::null,
+            SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, &cache);
+    };
+    const auto vector_base = assemble_vector(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, nullptr);
+    const auto vector_corrected = assemble_vector(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, &velocity);
+    Pack::multi_vector_type expected_vector(
+        mesh->owned_cell_map(), 3, true);
+    SimpleFluid::FVM::add_variable_explicit_non_orthogonal_correction<Pack>(
+        velocity, diffusivity, vector_boundary_value, expected_vector,
+        1.0 / reference_density,
+        SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{},
+        boundary_coefficient);
+
+    Pack::scalar_type vector_correction_norm{};
+    for (size_t component = 0; component < 3; ++component)
+    {
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto actual =
+                vector_corrected.rhs->getData(component)[owned]
+              - vector_base.rhs->getData(component)[owned];
+            const auto expected = expected_vector.getData(component)[owned];
+            EXPECT_NEAR(actual, expected, 1.0e-11);
+            vector_correction_norm += std::abs(expected);
+        }
+    }
+    EXPECT_GT(vector_correction_norm, 1.0e-8);
+
+    const auto vector_implicit = assemble_vector(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, nullptr);
+    const auto vector_hybrid = assemble_vector(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, &velocity);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto row =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        for (size_t component = 0; component < 3; ++component)
+        {
+            auto matrix_action =
+                [&](const Pack::matrix_type& matrix)
+            {
+                const auto entries = matrix.getNumEntriesInLocalRow(row);
+                typename Pack::matrix_type::nonconst_local_inds_host_view_type
+                    local_columns("local_columns", entries);
+                typename Pack::matrix_type::nonconst_values_host_view_type
+                    local_values("local_values", entries);
+                size_t local_entries = 0;
+                matrix.getLocalRowCopy(
+                    row, local_columns, local_values, local_entries);
+                Pack::scalar_type result{};
+                for (size_t entry = 0; entry < local_entries; ++entry)
+                {
+                    result += local_values(entry)
+                        * velocity.local_value(local_columns(entry))
+                              .component(component);
+                }
+                return result;
+            };
+            const auto explicit_residual =
+                matrix_action(*vector_corrected.matrix)
+              - vector_corrected.rhs->getData(component)[owned];
+            const auto implicit_residual =
+                matrix_action(*vector_implicit.matrix)
+              - vector_implicit.rhs->getData(component)[owned];
+            const auto hybrid_residual =
+                matrix_action(*vector_hybrid.matrix)
+              - vector_hybrid.rhs->getData(component)[owned];
+            EXPECT_NEAR(implicit_residual, explicit_residual, 1.0e-11);
+            EXPECT_NEAR(hybrid_residual, explicit_residual, 1.0e-11);
+        }
+    }
 }
 
 TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
@@ -2391,6 +2679,126 @@ TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
             -1.6,
             1.0e-12);
     }
+}
+
+TEST(FvmOperatorsTest,
+     PhysicalTransportUsesSparseBoundaryCoefficientCaches)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(1, 1, 1, 1.0));
+    FieldType temperature(mesh, 0.0, "temperature");
+    FieldType density(mesh, 1.0, "density");
+    FieldType heat_capacity(mesh, 1.0, "heat_capacity");
+    FieldType conductivity(mesh, 2.0, "conductivity");
+    FieldType dynamic_viscosity(mesh, 2.0, "dynamic_viscosity");
+    VectorFieldType velocity(mesh, "velocity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "zero_fluxes");
+
+    const auto& [batch_id, batch] = *mesh->boundary_batches().begin();
+    constexpr Pack::scalar_type cached_coefficient = 6.0;
+    SimpleFluid::FVM::BoundaryCache<Pack> cache{{}, mesh};
+    cache.value[batch_id] = SimpleFluid::Arr<Pack::scalar_type>(
+        batch.face_lids.size(), cached_coefficient);
+
+    auto boundary_condition = [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto scalar_boundary_value = [](int, size_t)
+    {
+        return Pack::scalar_type{};
+    };
+    auto zero_source = [](MeshType::local_ordinal_type)
+    {
+        return Pack::scalar_type{};
+    };
+    auto assemble_temperature =
+        [&](const SimpleFluid::FVM::BoundaryCache<Pack>* boundary_cache)
+    {
+        return SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+            temperature,
+            zero_fluxes,
+            1.0,
+            density,
+            heat_capacity,
+            conductivity,
+            boundary_condition,
+            scalar_boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr,
+            Teuchos::null,
+            boundary_cache);
+    };
+
+    const auto temperature_without_cache = assemble_temperature(nullptr);
+    const auto temperature_with_cache = assemble_temperature(&cache);
+    Pack::scalar_type expected_temperature_delta{};
+    for (const auto face_lid : batch.face_lids)
+    {
+        if (!mesh->is_boundary_face(face_lid)
+            || !mesh->is_owned_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        expected_temperature_delta +=
+            SimpleFluid::FVM::detail::boundary_diffusion_coefficient(
+                *mesh,
+                face_lid,
+                owner,
+                cached_coefficient - conductivity.value(owner));
+    }
+    EXPECT_NEAR(
+        local_matrix_entry(*temperature_with_cache.matrix, 0, 0)
+      - local_matrix_entry(*temperature_without_cache.matrix, 0, 0),
+        expected_temperature_delta,
+        1.0e-12);
+
+    auto vector_boundary_value = [](int, size_t)
+    {
+        return MeshType::Vec3{};
+    };
+    auto zero_acceleration = [](MeshType::local_ordinal_type)
+    {
+        return MeshType::Vec3{};
+    };
+    auto assemble_momentum =
+        [&](const SimpleFluid::FVM::BoundaryCache<Pack>* boundary_cache)
+    {
+        return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+            velocity,
+            zero_fluxes,
+            1.0,
+            dynamic_viscosity,
+            2.0,
+            vector_boundary_value,
+            zero_acceleration,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr,
+            Teuchos::null,
+            SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{},
+            boundary_cache);
+    };
+    const auto momentum_without_cache = assemble_momentum(nullptr);
+    const auto momentum_with_cache = assemble_momentum(&cache);
+    EXPECT_NEAR(
+        local_matrix_entry(*momentum_with_cache.matrix, 0, 0)
+      - local_matrix_entry(*momentum_without_cache.matrix, 0, 0),
+        expected_temperature_delta / 2.0,
+        1.0e-12);
+
+    auto invalid_cache = cache;
+    invalid_cache.value[batch_id][0] = -1.0;
+    EXPECT_THROW(assemble_temperature(&invalid_cache), std::invalid_argument);
+
+    auto other_mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(1, 1, 1, 1.0));
+    invalid_cache.value.clear();
+    invalid_cache.mesh = other_mesh;
+    EXPECT_THROW(assemble_momentum(&invalid_cache), std::invalid_argument);
 }
 
 TEST(FvmOperatorsTest,

@@ -956,6 +956,9 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
             d_problem.linear_options(),
             turbulence != nullptr
                 ? &turbulence->effective_dynamic_viscosity()
+                : nullptr,
+            turbulence != nullptr
+                ? turbulence->effective_dynamic_viscosity_boundary_cache()
                 : nullptr);
     }
     return momentum_equation().advance_velocity(
@@ -1000,6 +1003,9 @@ auto BoussinesqSolver<Pack>::assemble_coupled_system()
             : nullptr,
         turbulence != nullptr
             ? &turbulence->turbulent_kinetic_energy_gradient()
+            : nullptr,
+        turbulence != nullptr
+            ? turbulence->effective_dynamic_viscosity_boundary_cache()
             : nullptr);
 }
 
@@ -1268,6 +1274,9 @@ void BoussinesqSolver<Pack>::step()
                 d_problem.linear_options(),
                 turbulence != nullptr
                     ? &turbulence->effective_thermal_conductivity()
+                    : nullptr,
+                turbulence != nullptr
+                    ? turbulence->effective_thermal_conductivity_boundary_cache()
                     : nullptr);
     }
     else

@@ -5,7 +5,8 @@
  * Closure classes evaluate coefficients and local PDE terms. The scalar
  * transport class assembles one positive transported variable. Runtime model
  * ownership and momentum/temperature coupling live in TurbulenceModel.hh.
- * Wall functions are not provided by this layer.
+ * TurbulenceWallTreatment.hh provides the policy-based wall data used by the
+ * runtime model.
  */
 
 #pragma once
@@ -17,3 +18,4 @@
 #include "equations/turbulence/StandardKEpsilonEquation.hh"
 #include "equations/turbulence/StandardKOmegaEquation.hh"
 #include "equations/turbulence/TurbulenceScalarTransportEquation.hh"
+#include "equations/turbulence/TurbulenceWallTreatment.hh"

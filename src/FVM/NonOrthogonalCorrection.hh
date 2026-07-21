@@ -20,9 +20,29 @@
 
 #include <cmath>
 #include <stdexcept>
+#include <type_traits>
 
 namespace SimpleFluid::FVM
 {
+
+namespace detail
+{
+
+/** @brief Default boundary policy for a cell-centered coefficient field. */
+struct OwnerCellBoundaryCoefficient
+{
+    template<class Scalar>
+    Scalar operator()(int, size_t, Scalar owner_cell_value) const noexcept
+    {
+        return owner_cell_value;
+    }
+};
+
+/** @brief Tag retaining the legacy interior-only gradient reconstruction. */
+struct OmitBoundaryGradientSamples
+{};
+
+} // namespace detail
 
 /**
  * @brief Add the explicit non-orthogonal diffusion correction to an RHS.
@@ -272,15 +292,22 @@ void add_explicit_non_orthogonal_correction(
 
 /**
  * @brief Add a scalar explicit non-orthogonal correction using a
- *        cell-centered variable diffusion coefficient.
+ *        cell-centered variable diffusion coefficient and boundary samples.
  */
-template<TpetraTypePack Pack, class BoundaryConditionProvider>
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider,
+         class BoundaryCoefficientProvider =
+             detail::OwnerCellBoundaryCoefficient>
 void add_variable_explicit_non_orthogonal_correction(
     const CellField<Pack>& correction_field,
     const CellField<Pack>& coefficient_field,
     BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value,
     typename Pack::vector_type& rhs,
-    typename Pack::scalar_type correction_weight = 1.0)
+    typename Pack::scalar_type correction_weight = 1.0,
+    BoundaryCoefficientProvider boundary_coefficient =
+        BoundaryCoefficientProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -300,7 +327,17 @@ void add_variable_explicit_non_orthogonal_correction(
 
     VectorCellField<Pack> gradients(
         correction_field.mesh_ptr(), "variable_non_orthogonal_gradient");
-    cell_gradient(correction_field, gradients);
+    if constexpr (std::is_same_v<
+                      std::remove_cvref_t<BoundaryValueProvider>,
+                      detail::OmitBoundaryGradientSamples>)
+    {
+        cell_gradient(correction_field, gradients);
+    }
+    else
+    {
+        cell_gradient(
+            correction_field, boundary_condition, boundary_value, gradients);
+    }
     gradients.sync_ghosts();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
@@ -359,25 +396,54 @@ void add_variable_explicit_non_orthogonal_correction(
             rhs.sumIntoLocalValue(
                 owner,
                 correction_weight
-              * coefficient_field.local_value(owner)
+              * boundary_coefficient(
+                    batch_id,
+                    in_batch_id,
+                    coefficient_field.local_value(owner))
               * gradients.value(owner).dot(tangential_area));
         }
     }
 }
 
+/** @brief Backward-compatible scalar overload omitting boundary samples. */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryCoefficientProvider =
+             detail::OwnerCellBoundaryCoefficient>
+void add_variable_explicit_non_orthogonal_correction(
+    const CellField<Pack>& correction_field,
+    const CellField<Pack>& coefficient_field,
+    BoundaryConditionProvider boundary_condition,
+    typename Pack::vector_type& rhs,
+    typename Pack::scalar_type correction_weight = 1.0,
+    BoundaryCoefficientProvider boundary_coefficient =
+        BoundaryCoefficientProvider{})
+{
+    add_variable_explicit_non_orthogonal_correction<Pack>(
+        correction_field, coefficient_field, boundary_condition,
+        detail::OmitBoundaryGradientSamples{}, rhs, correction_weight,
+        boundary_coefficient);
+}
+
 /**
  * @brief Add a vector explicit non-orthogonal correction using a
- *        cell-centered variable diffusion coefficient.
+ *        cell-centered variable diffusion coefficient and boundary samples.
  */
 template<TpetraTypePack Pack,
-         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary>
+         class BoundaryValueProvider,
+         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary,
+         class BoundaryCoefficientProvider =
+             detail::OwnerCellBoundaryCoefficient>
 void add_variable_explicit_non_orthogonal_correction(
     const VectorCellField<Pack>& correction_field,
     const CellField<Pack>& coefficient_field,
+    BoundaryValueProvider boundary_value,
     typename Pack::multi_vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0,
     BoundaryDiffusionProvider boundary_diffusion =
-        BoundaryDiffusionProvider{})
+        BoundaryDiffusionProvider{},
+    BoundaryCoefficientProvider boundary_coefficient =
+        BoundaryCoefficientProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -401,7 +467,16 @@ void add_variable_explicit_non_orthogonal_correction(
     TensorCellField<Pack> gradients(
         correction_field.mesh_ptr(),
         "variable_vector_non_orthogonal_gradient");
-    cell_gradient(correction_field, gradients);
+    if constexpr (std::is_same_v<
+                      std::remove_cvref_t<BoundaryValueProvider>,
+                      detail::OmitBoundaryGradientSamples>)
+    {
+        cell_gradient(correction_field, gradients);
+    }
+    else
+    {
+        cell_gradient(correction_field, boundary_value, gradients);
+    }
     gradients.sync_ghosts();
 
     const auto boundary_locations =
@@ -453,6 +528,15 @@ void add_variable_explicit_non_orthogonal_correction(
                       / scalar_type{2};
                 }
             }
+            else if (mesh.is_boundary_face(face_lid))
+            {
+                const auto location =
+                    boundary_locations.at(static_cast<size_t>(face_lid));
+                face_coefficient = boundary_coefficient(
+                    location.batch_id,
+                    location.in_batch_id,
+                    face_coefficient);
+            }
 
             for (size_t component = 0;
                  component < components;
@@ -465,6 +549,27 @@ void add_variable_explicit_non_orthogonal_correction(
             }
         }
     }
+}
+
+/** @brief Backward-compatible vector overload omitting boundary samples. */
+template<TpetraTypePack Pack,
+         class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary,
+         class BoundaryCoefficientProvider =
+             detail::OwnerCellBoundaryCoefficient>
+void add_variable_explicit_non_orthogonal_correction(
+    const VectorCellField<Pack>& correction_field,
+    const CellField<Pack>& coefficient_field,
+    typename Pack::multi_vector_type& rhs,
+    typename Pack::scalar_type correction_weight = 1.0,
+    BoundaryDiffusionProvider boundary_diffusion =
+        BoundaryDiffusionProvider{},
+    BoundaryCoefficientProvider boundary_coefficient =
+        BoundaryCoefficientProvider{})
+{
+    add_variable_explicit_non_orthogonal_correction<Pack>(
+        correction_field, coefficient_field,
+        detail::OmitBoundaryGradientSamples{}, rhs, correction_weight,
+        boundary_diffusion, boundary_coefficient);
 }
 
 /**
@@ -495,14 +600,18 @@ void add_variable_explicit_non_orthogonal_correction(
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,
-         class BoundaryStressProvider = detail::AlwaysDiffuseBoundary>
+         class BoundaryStressProvider = detail::AlwaysDiffuseBoundary,
+         class BoundaryCoefficientProvider =
+             detail::OwnerCellBoundaryCoefficient>
 void add_explicit_deviatoric_transpose_gradient_stress(
     const VectorCellField<Pack>& old_velocity,
     const CellField<Pack>& dynamic_viscosity,
     typename Pack::scalar_type reference_density,
     BoundaryValueProvider boundary_value,
     typename Pack::multi_vector_type& rhs,
-    BoundaryStressProvider boundary_stress = BoundaryStressProvider{})
+    BoundaryStressProvider boundary_stress = BoundaryStressProvider{},
+    BoundaryCoefficientProvider boundary_coefficient =
+        BoundaryCoefficientProvider{})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -582,6 +691,10 @@ void add_explicit_deviatoric_transpose_gradient_stress(
                 {
                     continue;
                 }
+                face_viscosity = boundary_coefficient(
+                    location.batch_id,
+                    location.in_batch_id,
+                    face_viscosity);
             }
 
             if (!std::isfinite(face_viscosity)
