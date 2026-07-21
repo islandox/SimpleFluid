@@ -273,6 +273,13 @@ inline MeshUtils::Vec3 non_orthogonal_area_vector(
          - orthogonal_area_vector(area_vector, cell_center_vector);
 }
 
+/**
+ * @brief Convert a packed cell LID to the mesh's native cell identifier.
+ * @tparam MeshType Mesh interface type.
+ * @param mesh Mesh that owns the identifier mapping.
+ * @param cell_lid Packed local cell identifier.
+ * @return Native cell identifier when available, otherwise @p cell_lid.
+ */
 template<class MeshType>
 auto query_cell_id(
     const MeshType& mesh,
@@ -288,6 +295,13 @@ auto query_cell_id(
     }
 }
 
+/**
+ * @brief Convert a packed face LID to the mesh's native face identifier.
+ * @tparam MeshType Mesh interface type.
+ * @param mesh Mesh that owns the identifier mapping.
+ * @param face_lid Packed local face identifier.
+ * @return Native face identifier when available, otherwise @p face_lid.
+ */
 template<class MeshType>
 auto query_face_id(
     const MeshType& mesh,
@@ -303,6 +317,14 @@ auto query_face_id(
     }
 }
 
+/**
+ * @brief Convert a native cell identifier to its packed local identifier.
+ * @tparam MeshType Mesh interface type.
+ * @tparam CellID Native cell identifier type.
+ * @param mesh Mesh that owns the identifier mapping.
+ * @param cell_id Native or already-packed cell identifier.
+ * @return Packed local cell identifier.
+ */
 template<class MeshType, class CellID>
 auto packed_cell_local_id(const MeshType& mesh, CellID cell_id)
     -> typename MeshType::local_ordinal_type
@@ -509,7 +531,10 @@ template<class MeshType>
 using LeastSquaresGradientStencil =
     std::vector<LeastSquaresGradientStencilEntry<MeshType>>;
 
-/** @brief Cell coefficients plus the boundary-data constant of a gradient. */
+/**
+ * @brief Cell coefficients plus the boundary-data constant of a gradient.
+ * @tparam MeshType Mesh interface type.
+ */
 template<class MeshType>
 struct AffineLeastSquaresGradientStencil
 {
@@ -517,7 +542,10 @@ struct AffineLeastSquaresGradientStencil
     typename MeshType::Vec3 constant{};
 };
 
-/** @brief Component-wise boundary constants for a vector gradient. */
+/**
+ * @brief Component-wise boundary constants for a vector gradient.
+ * @tparam MeshType Mesh interface type.
+ */
 template<class MeshType>
 struct VectorAffineLeastSquaresGradientStencil
 {
@@ -642,6 +670,7 @@ struct BoundaryFaceLocation
     size_t in_batch_id = 0;
 };
 
+/** @brief Boundary policy that enables diffusion on every queried face. */
 struct AlwaysDiffuseBoundary
 {
     template<class... Args>
@@ -651,6 +680,14 @@ struct AlwaysDiffuseBoundary
     }
 };
 
+/**
+ * @brief Convert a native face identifier to its packed local identifier.
+ * @tparam MeshType Mesh interface type.
+ * @tparam FaceID Native face identifier type.
+ * @param mesh Mesh that owns the identifier mapping.
+ * @param face_id Native or already-packed face identifier.
+ * @return Packed local face identifier.
+ */
 template<class MeshType, class FaceID>
 size_t packed_face_local_id(const MeshType& mesh, FaceID face_id)
 {

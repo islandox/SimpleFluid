@@ -49,6 +49,7 @@ public:
     using Vec3 = typename Base::Vec3;
     using BoundaryFaceBatch = typename Base::BoundaryFaceBatch;
 
+    /** @brief Cylindrical coordinate aliases for the generic I/J/K axes. */
     enum Coordinate : int
     {
         R = I,
@@ -56,6 +57,7 @@ public:
         AXIAL = K
     };
 
+    /** @brief Cylindrical aliases for coordinate-normal face orientations. */
     enum FaceOrientation : int
     {
         R_FACE = I_FACE,
@@ -65,6 +67,13 @@ public:
 
     static constexpr cell_id_t invalid_cell_id() noexcept { return {}; }
 
+    /**
+     * @brief Construct a cylindrical mesh from radial, angular, and axial edges.
+     * @param cell_edges Strictly increasing R, theta, and Z edge coordinates.
+     * @throws std::invalid_argument If coordinates are invalid, the inner
+     *         radius is not positive, or the angular span is unsupported.
+     * @throws std::overflow_error If entity counts exceed supported ID ranges.
+     */
     explicit OrthogonalCylindrial3D(
         const Vec3D<Arr<real_t>>& cell_edges);
 

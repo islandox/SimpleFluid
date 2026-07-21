@@ -1,6 +1,12 @@
 /**
  * @file testBoundaryLayerMeshFactory.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for same-family in-place boundary-layer mesh refinement.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -48,6 +54,10 @@ static_assert(std::is_move_assignable_v<Cartesian>);
 static_assert(std::is_move_assignable_v<Cylindrical>);
 static_assert(std::is_move_assignable_v<SemiStructured>);
 
+/**
+ * @brief Verifies Cartesian boundary layers refine the mesh in place while
+ * preserving orthogonal geometry and repeat-build stability.
+ */
 TEST(BoundaryLayerMeshFactoryTest,
      CartesianBuildsInPlaceFromDatabaseAndPreservesOrthogonality)
 {
@@ -92,6 +102,10 @@ TEST(BoundaryLayerMeshFactoryTest,
     EXPECT_EQ(mesh->cell_edges(), refined_edges);
 }
 
+/**
+ * @brief Verifies radial and axial grading preserve a cylindrical mesh's
+ * periodic angular topology.
+ */
 TEST(BoundaryLayerMeshFactoryTest,
      CylindricalPreservesPeriodicOrthogonalTopology)
 {
@@ -121,6 +135,10 @@ TEST(BoundaryLayerMeshFactoryTest,
     EXPECT_EQ(mesh.boundary_batch_name(5), "zmax");
 }
 
+/**
+ * @brief Verifies angular boundary layers on a cylindrical sector use radian
+ * coordinates and preserve physical angular boundaries.
+ */
 TEST(BoundaryLayerMeshFactoryTest,
      CylindricalSectorSupportsAngularBoundaryLayersInRadians)
 {
@@ -140,6 +158,10 @@ TEST(BoundaryLayerMeshFactoryTest,
     EXPECT_EQ(mesh.boundary_batch_name(2), "thetamin");
 }
 
+/**
+ * @brief Verifies axial refinement of a semi-structured mesh leaves its XY
+ * topology and side boundary batches unchanged.
+ */
 TEST(BoundaryLayerMeshFactoryTest,
      SemiStructuredPreservesXYTopologyWhileRefiningZ)
 {
@@ -171,6 +193,10 @@ TEST(BoundaryLayerMeshFactoryTest,
     EXPECT_TRUE(found_outer);
 }
 
+/**
+ * @brief Verifies unsupported, overlapping, and periodic-seam layer requests
+ * fail without mutating the input mesh.
+ */
 TEST(BoundaryLayerMeshFactoryTest,
      RejectsUnsupportedOrOverlappingLayersWithoutChangingInput)
 {
@@ -205,6 +231,10 @@ TEST(BoundaryLayerMeshFactoryTest,
     EXPECT_EQ(periodic.cell_edges(), periodic_edges);
 }
 
+/**
+ * @brief Verifies invalid layer specifications, null meshes, incomplete
+ * databases, and empty configurations are handled correctly.
+ */
 TEST(BoundaryLayerMeshFactoryTest, ValidatesConfigurationAndNullInputs)
 {
     EXPECT_THROW(

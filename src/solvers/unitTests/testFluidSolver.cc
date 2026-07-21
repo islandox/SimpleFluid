@@ -36,6 +36,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build a single-cell box mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_single_cell_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
@@ -54,6 +55,7 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
     return SimpleFluid::MeshFactory(database).template build<Pack>();
 }
 
+/** @brief Build a two-cell line mesh along x. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_two_cell_line_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
@@ -72,6 +74,7 @@ SimpleFluid::SP<MeshType> make_two_cell_line_mesh()
     return SimpleFluid::MeshFactory(database).template build<Pack>();
 }
 
+/** @brief Expose protected FluidSolver hooks for focused unit tests. */
 class TestFluidSolver : public SimpleFluid::FluidSolver<Pack>
 {
 public:
@@ -89,6 +92,7 @@ public:
     }
 };
 
+/** @brief Override pressure normalization to represent water-density scaling. */
 class WaterPressureFluidSolver : public SimpleFluid::FluidSolver<Pack>
 {
 public:
@@ -185,6 +189,7 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
     }
 }
 
+/** @brief Verify segregated coupling modes enforce physical outlet pressure. */
 TEST(FluidSolverTest,
      SegregatedModesHonorPhysicalDirichletPressureBoundary)
 {
@@ -257,6 +262,7 @@ TEST(FluidSolverTest,
     }
 }
 
+/** @brief Verify coupled Krylov enforces a Dirichlet pressure outlet. */
 TEST(FluidSolverTest,
      CoupledKrylovHonorsDirichletPressureOutlet)
 {

@@ -1,6 +1,12 @@
 /**
  * @file testMPIInterface.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Multi-rank tests for the lightweight MPI wrapper.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -30,6 +36,10 @@ std::pair<int, int> rank_and_size()
 
 } // namespace
 
+/**
+ * @brief Verifies communicator management, rank/size queries, datatype
+ * mappings, and MPI timing helpers.
+ */
 TEST(MPIInterfaceTest, ExposesCommunicatorAndDatatypeHelpers)
 {
     const auto [rank, size] = rank_and_size();
@@ -56,6 +66,10 @@ TEST(MPIInterfaceTest, ExposesCommunicatorAndDatatypeHelpers)
     EXPECT_GE(my_mpi::wtime(), 0.0);
 }
 
+/**
+ * @brief Verifies blocking and nonblocking point-to-point transfers between
+ * two ranks, including request completion.
+ */
 TEST(MPIInterfaceTest, SupportsBlockingAndNonBlockingPointToPoint)
 {
     const auto [rank, size] = rank_and_size();
@@ -114,6 +128,10 @@ TEST(MPIInterfaceTest, SupportsBlockingAndNonBlockingPointToPoint)
     EXPECT_EQ(my_mpi::barrier(), MPI_SUCCESS);
 }
 
+/**
+ * @brief Verifies broadcast, gather, variable gather, barrier, and scalar
+ * reduction wrappers across the test communicator.
+ */
 TEST(MPIInterfaceTest, SupportsCollectivesAndReductions)
 {
     const auto [rank, size] = rank_and_size();

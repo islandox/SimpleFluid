@@ -21,6 +21,14 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Validate and return a legacy mesh pointer.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Candidate mesh pointer.
+ * @return Validated non-null mesh.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
     -> SP<const mesh_type>
@@ -29,6 +37,16 @@ auto FluidSolver<Pack>::require_mesh(SP<const mesh_type> mesh)
         std::move(mesh), "FluidSolver");
 }
 
+/**
+ * @brief Obtain a legacy mesh from a type-erased mesh handle.
+ *
+ * Cartesian handles are rebuilt through the legacy structured-mesh path.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Candidate mesh handle.
+ * @return Legacy mesh used by the current equation stack.
+ * @throws std::invalid_argument if the handle is null, unsupported, or distributed Cartesian.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::require_legacy_mesh(
     const SP<const MeshHandle<Pack>>& mesh) -> SP<const mesh_type>
@@ -75,6 +93,16 @@ auto FluidSolver<Pack>::require_legacy_mesh(
     return MeshFactory(database).template build<Pack>();
 }
 
+/**
+ * @brief Construct a fluid solver from a legacy mesh.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Computational mesh.
+ * @param boundary_conditions Velocity and pressure boundary conditions.
+ * @param time_options Time-stepping and coupling options.
+ * @param linear_options Linear solver options.
+ * @throws std::invalid_argument if the mesh or time-step options are invalid.
+ */
 template<TpetraTypePack Pack>
 FluidSolver<Pack>::FluidSolver(
     SP<const mesh_type> mesh,
@@ -90,6 +118,16 @@ FluidSolver<Pack>::FluidSolver(
 {
 }
 
+/**
+ * @brief Construct a fluid solver from a type-erased mesh handle.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Computational mesh handle.
+ * @param boundary_conditions Velocity and pressure boundary conditions.
+ * @param time_options Time-stepping and coupling options.
+ * @param linear_options Linear solver options.
+ * @throws std::invalid_argument if the mesh or time-step options are invalid.
+ */
 template<TpetraTypePack Pack>
 FluidSolver<Pack>::FluidSolver(
     SP<const MeshHandle<Pack>> mesh,
@@ -105,6 +143,17 @@ FluidSolver<Pack>::FluidSolver(
 {
 }
 
+/**
+ * @brief Construct a derived solver while deferring momentum-equation registration.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Computational mesh handle.
+ * @param boundary_conditions Velocity and pressure boundary conditions.
+ * @param time_options Time-stepping and coupling options.
+ * @param linear_options Linear solver options.
+ * @param tag Deferred-registration dispatch tag.
+ * @throws std::invalid_argument if the mesh or time-step options are invalid.
+ */
 template<TpetraTypePack Pack>
 FluidSolver<Pack>::FluidSolver(
     SP<const MeshHandle<Pack>> mesh,
@@ -121,6 +170,17 @@ FluidSolver<Pack>::FluidSolver(
 {
 }
 
+/**
+ * @brief Initialize common fields, equations, and pressure-coupling workspaces.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Computational mesh handle.
+ * @param boundary_conditions Velocity and pressure boundary conditions.
+ * @param time_options Time-stepping and coupling options.
+ * @param linear_options Linear solver options.
+ * @param register_momentum_equation Whether to register the base momentum equation.
+ * @throws std::invalid_argument if the time step is non-positive.
+ */
 template<TpetraTypePack Pack>
 FluidSolver<Pack>::FluidSolver(
     SP<const MeshHandle<Pack>> mesh,
@@ -187,12 +247,24 @@ FluidSolver<Pack>::FluidSolver(
         "pressure_velocity_residuals");
 }
 
+/**
+ * @brief Return the immutable physical gauge-pressure field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned pressure field in Pa.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure() const noexcept -> const field_type&
 {
     return d_problem.template object<field_type>("pressure");
 }
 
+/**
+ * @brief Return the immutable cell-centered velocity field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned velocity field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::velocity() const noexcept
     -> const velocity_field_type&
@@ -200,18 +272,36 @@ auto FluidSolver<Pack>::velocity() const noexcept
     return d_problem.template object<velocity_field_type>("velocity");
 }
 
+/**
+ * @brief Return the mutable physical gauge-pressure field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned pressure field in Pa.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure() noexcept -> field_type&
 {
     return d_problem.template object<field_type>("pressure");
 }
 
+/**
+ * @brief Return the mutable cell-centered velocity field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned velocity field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::velocity() noexcept -> velocity_field_type&
 {
     return d_problem.template object<velocity_field_type>("velocity");
 }
 
+/**
+ * @brief Return the latest pressure-velocity residual summary.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Residuals recorded by the most recent coupling solve.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::last_pressure_velocity_residuals() const noexcept
     -> const residual_type&
@@ -219,6 +309,12 @@ auto FluidSolver<Pack>::last_pressure_velocity_residuals() const noexcept
     return pressure_velocity_residuals();
 }
 
+/**
+ * @brief Return the Problem-owned base momentum equation.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Stored incompressible momentum equation.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::momentum_equation()
     -> IncompressibleMomentumEquation<Pack>&
@@ -227,6 +323,12 @@ auto FluidSolver<Pack>::momentum_equation()
         IncompressibleMomentumEquation<Pack>>("momentum_equation");
 }
 
+/**
+ * @brief Return the Problem-owned pressure projection equation.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Stored pressure projection equation.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure_projection()
     -> PressureProjectionEquation<Pack>&
@@ -235,6 +337,12 @@ auto FluidSolver<Pack>::pressure_projection()
         PressureProjectionEquation<Pack>>("pressure_projection");
 }
 
+/**
+ * @brief Return the monolithic pressure-velocity solver.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned coupled solver.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::coupled_pressure_velocity_solver()
     -> CoupledPressureVelocitySolver<Pack>&
@@ -244,6 +352,12 @@ auto FluidSolver<Pack>::coupled_pressure_velocity_solver()
             "coupled_pressure_velocity_solver");
 }
 
+/**
+ * @brief Return cached velocity boundary values and metadata.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned velocity boundary cache.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::velocity_boundary_cache()
     -> FVM::VelocityBoundaryCache<Pack>&
@@ -252,6 +366,12 @@ auto FluidSolver<Pack>::velocity_boundary_cache()
         FVM::VelocityBoundaryCache<Pack>>("velocity_boundary_cache");
 }
 
+/**
+ * @brief Return reusable pressure-weighted face-flux workspace.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned face-flux workspace.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure_face_flux_workspace()
     -> face_flux_workspace_type&
@@ -260,12 +380,24 @@ auto FluidSolver<Pack>::pressure_face_flux_workspace()
         "pressure_face_flux_workspace");
 }
 
+/**
+ * @brief Return the mutable pressure-correction field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned pressure-correction field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure_correction() -> field_type&
 {
     return d_problem.template object<field_type>("pressure_correction");
 }
 
+/**
+ * @brief Return the cached pressure gradient used by the momentum predictor.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned pressure-gradient field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::predictor_pressure_gradient()
     -> velocity_field_type&
@@ -274,6 +406,12 @@ auto FluidSolver<Pack>::predictor_pressure_gradient()
         "predictor_pressure_gradient");
 }
 
+/**
+ * @brief Return the velocity snapshot used to measure predictor updates.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned predictor velocity field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::predictor_velocity() -> velocity_field_type&
 {
@@ -281,12 +419,24 @@ auto FluidSolver<Pack>::predictor_velocity() -> velocity_field_type&
         "pressure_velocity_predictor");
 }
 
+/**
+ * @brief Return face fluxes evaluated before the current correction.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned old face-flux field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::old_face_fluxes() -> face_flux_field_type&
 {
     return d_problem.template object<face_flux_field_type>("old_face_flux");
 }
 
+/**
+ * @brief Return pressure-corrected face fluxes.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned projected face-flux field.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::projected_face_fluxes() -> face_flux_field_type&
 {
@@ -294,6 +444,12 @@ auto FluidSolver<Pack>::projected_face_fluxes() -> face_flux_field_type&
         "projected_face_flux");
 }
 
+/**
+ * @brief Return mutable pressure-velocity residual storage.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned residual summary.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure_velocity_residuals() -> residual_type&
 {
@@ -301,6 +457,12 @@ auto FluidSolver<Pack>::pressure_velocity_residuals() -> residual_type&
         "pressure_velocity_residuals");
 }
 
+/**
+ * @brief Return immutable pressure-velocity residual storage.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned residual summary.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure_velocity_residuals() const
     -> const residual_type&
@@ -309,6 +471,14 @@ auto FluidSolver<Pack>::pressure_velocity_residuals() const
         "pressure_velocity_residuals");
 }
 
+/**
+ * @brief Compute the global volume-weighted norm of a velocity update.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param before Velocity field before the update.
+ * @param after Velocity field after the update.
+ * @return Global L2-like update norm.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::velocity_update_norm(
     const velocity_field_type& before,
@@ -331,6 +501,13 @@ auto FluidSolver<Pack>::velocity_update_norm(
     return sqrt(global_sum(norm_squared));
 }
 
+/**
+ * @brief Sum a scalar contribution across the mesh communicator.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param local_value Local rank contribution.
+ * @return Global sum across ranks.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::global_sum(
     scalar_type local_value) const -> scalar_type
@@ -345,6 +522,12 @@ auto FluidSolver<Pack>::global_sum(
     return global_value;
 }
 
+/**
+ * @brief Advance the base momentum equation using the old pressure gradient.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Aggregated momentum linear-solve summary.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
@@ -371,6 +554,12 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
         d_problem.linear_options());
 }
 
+/**
+ * @brief Run one momentum predictor and record its velocity residual.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Aggregated predictor linear-solve summary.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
 {
@@ -396,6 +585,12 @@ auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
     return linear_summary;
 }
 
+/**
+ * @brief Project velocity, update pressure, and return correction statistics.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Pressure projection result for the current corrector.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::run_pressure_correction()
     -> typename PressureProjectionEquation<Pack>::ProjectionResult
@@ -413,6 +608,12 @@ auto FluidSolver<Pack>::run_pressure_correction()
     return result;
 }
 
+/**
+ * @brief Assemble the base monolithic velocity-pressure system.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Coupled system assembled from current fields and options.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::assemble_coupled_system()
     -> coupled_system_type
@@ -428,6 +629,12 @@ auto FluidSolver<Pack>::assemble_coupled_system()
         pressure_reference_density());
 }
 
+/**
+ * @brief Solve one monolithic velocity-pressure Krylov system.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @throws std::runtime_error if the coupled linear solve does not converge.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_coupled_krylov()
 {
@@ -496,6 +703,12 @@ void FluidSolver<Pack>::solve_coupled_krylov()
         sqrt(global_sum(continuity_norm_squared));
 }
 
+/**
+ * @brief Execute the configured SIMPLE, PISO, PIMPLE, or coupled loop.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @throws std::invalid_argument if a segregated loop has no required correctors.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_pressure_velocity_coupling()
 {
@@ -574,6 +787,11 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
         std::sqrt(global_sum(continuity_norm_squared));
 }
 
+/**
+ * @brief Reset per-step statistics and synchronize initial velocity ghosts.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::begin_step()
 {
@@ -584,6 +802,11 @@ void FluidSolver<Pack>::begin_step()
     }
 }
 
+/**
+ * @brief Finalize residual statistics, synchronization, time, and step index.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::finish_step()
 {
@@ -598,6 +821,11 @@ void FluidSolver<Pack>::finish_step()
     ++d_step_index;
 }
 
+/**
+ * @brief Advance the base fluid solver by one physical time step.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::step()
 {
@@ -606,6 +834,12 @@ void FluidSolver<Pack>::step()
     finish_step();
 }
 
+/**
+ * @brief Advance one step and emit rank-zero progress.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param progress_output Progress stream receiving the summary.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::step(ProgressStream& progress_output)
 {
@@ -614,6 +848,13 @@ void FluidSolver<Pack>::step(ProgressStream& progress_output)
         progress_output, d_problem.time_options().steps);
 }
 
+/**
+ * @brief Advance a requested number of physical steps.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param steps Number of steps to execute.
+ * @throws std::invalid_argument if @p steps is negative.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::run(int steps)
 {
@@ -629,6 +870,14 @@ void FluidSolver<Pack>::run(int steps)
     }
 }
 
+/**
+ * @brief Advance several steps and emit one rank-zero progress line per step.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param steps Number of steps to execute.
+ * @param progress_output Progress stream receiving summaries.
+ * @throws std::invalid_argument if @p steps is negative.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::run(
     int steps,
@@ -648,6 +897,13 @@ void FluidSolver<Pack>::run(
     }
 }
 
+/**
+ * @brief Write the latest step statistics on communicator rank zero.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param progress_output Progress stream receiving the summary.
+ * @param total_steps Final absolute step index for the current run.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::write_step_progress(
     ProgressStream& progress_output,
@@ -660,6 +916,13 @@ void FluidSolver<Pack>::write_step_progress(
     }
 }
 
+/**
+ * @brief Gather one local scalar field into VTU cell-data order.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param field Cell field to collect.
+ * @return Scalar values ordered by local cell identifier.
+ */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::collect_scalar_field(
     const field_type& field) const -> VTUWriter::ScalarData
@@ -675,6 +938,12 @@ auto FluidSolver<Pack>::collect_scalar_field(
     return values;
 }
 
+/**
+ * @brief Build a VTU writer containing mesh, pressure, and velocity data.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured in-memory VTU writer.
+ */
 template<TpetraTypePack Pack>
 VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
 {
@@ -734,6 +1003,12 @@ VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
     return writer;
 }
 
+/**
+ * @brief Write core pressure and velocity fields to a VTU file.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param filename Output VTU path.
+ */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::write_solution_vtu(
     const std::string& filename) const

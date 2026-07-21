@@ -21,11 +21,13 @@ namespace
 static_assert(SimpleFluid::TpetraTypePack<SimpleFluid::DefaultTpetraTypes>);
 static_assert(SimpleFluid::TpetraTypePack<SimpleFluid::TpetraTypes<float, int, long>>);
 
+/** @brief Confirms the default Trilinos aliases satisfy `TpetraTypePack`. */
 TEST(TpetraTypesTest, DefaultTypePackSatisfiesConcept)
 {
     EXPECT_TRUE(SimpleFluid::TpetraTypePack<SimpleFluid::DefaultTpetraTypes>);
 }
 
+/** @brief Checks snake-case public aliases match their canonical Tpetra types. */
 TEST(TpetraTypesTest, PublicAliasesMatchCamelCaseTypes)
 {
     using Pack = SimpleFluid::DefaultTpetraTypes;
@@ -39,6 +41,7 @@ TEST(TpetraTypesTest, PublicAliasesMatchCamelCaseTypes)
     EXPECT_TRUE((std::is_same_v<typename Pack::import_type, typename Pack::Import>));
 }
 
+/** @brief Verifies custom scalar and ordinal types propagate through the pack. */
 TEST(TpetraTypesTest, CustomScalarAndOrdinalsPropagate)
 {
     using Pack = SimpleFluid::TpetraTypes<float, int, long>;

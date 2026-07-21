@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceWallTreatment.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Template implementation of policy-based turbulence wall treatment.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
@@ -26,11 +32,24 @@ template <class Policy>
 inline constexpr bool supported_policy_v = std::is_same_v<Policy, ResolvedLowReSSTWallPolicy> ||
                                            std::is_same_v<Policy, StandardHighReKEpsilonWallPolicy>;
 
+/**
+ * @brief Test whether every component of a vector is finite.
+ * @tparam Scalar Vector scalar type.
+ * @param value Vector to inspect.
+ * @return True when all components are finite.
+ */
 template <class Scalar> bool finite_vector(const vec3<Scalar>& value)
 {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
 
+/**
+ * @brief Require one configuration string to be identical on every rank.
+ * @tparam Pack Tpetra type pack used by the mesh communicator.
+ * @param mesh Distributed mesh.
+ * @param value Rank-local string value.
+ * @param context Diagnostic label.
+ */
 template <TpetraTypePack Pack>
 void require_uniform_string(const Mesh<Pack>& mesh, const std::string& value,
                             const std::string& context)
@@ -44,6 +63,11 @@ void require_uniform_string(const Mesh<Pack>& mesh, const std::string& value,
     }
 }
 
+/**
+ * @brief Physical inputs needed to evaluate one wall face.
+ * @tparam Scalar Floating-point scalar type.
+ * @tparam Vec Three-component vector type.
+ */
 template <class Scalar, class Vec> struct FaceInputs
 {
     Scalar k{};
@@ -54,6 +78,14 @@ template <class Scalar, class Vec> struct FaceInputs
     Vec outward_normal{};
 };
 
+/**
+ * @brief Evaluate integration-to-the-wall SST boundary data.
+ * @tparam Scalar Floating-point scalar type.
+ * @tparam Vec Three-component vector type.
+ * @param input Validated physical face inputs.
+ * @param options Wall-treatment constants.
+ * @return Staged resolved-SST wall values.
+ */
 template <class Scalar, class Vec>
 TurbulenceWallFaceEvaluation<Scalar>
 evaluate_resolved_sst_face(const FaceInputs<Scalar, Vec>& input,
@@ -79,6 +111,15 @@ evaluate_resolved_sst_face(const FaceInputs<Scalar, Vec>& input,
     return result;
 }
 
+/**
+ * @brief Evaluate the standard high-Re k-epsilon wall function.
+ * @tparam Scalar Floating-point scalar type.
+ * @tparam Vec Three-component vector type.
+ * @param input Validated physical face inputs.
+ * @param options Wall-treatment constants.
+ * @param y_plus_lam Viscous/log-layer intersection.
+ * @return Staged k-epsilon wall values and cell constraints.
+ */
 template <class Scalar, class Vec>
 TurbulenceWallFaceEvaluation<Scalar>
 evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
@@ -150,6 +191,12 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
 
 } // namespace turbulence_wall_detail
 
+/**
+ * @brief Construct empty staged wall data tied to a mesh.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param mesh Computational mesh retained by the result.
+ */
 template <TpetraTypePack Pack, class Policy>
 TurbulenceWallTreatment<Pack, Policy>::Evaluation::Evaluation(SP<const mesh_type> mesh)
     : d_mesh(std::move(mesh)), d_secondary_constraints(d_mesh ? d_mesh->num_owned_cells() : 0),
@@ -160,6 +207,15 @@ TurbulenceWallTreatment<Pack, Policy>::Evaluation::Evaluation(SP<const mesh_type
 {
 }
 
+/**
+ * @brief Return staged data for one configured local wall face.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param batch_id Boundary batch identifier.
+ * @param in_batch_id Face index within the batch.
+ * @return Staged evaluation for the requested face.
+ * @throws std::out_of_range if the batch or face is absent.
+ */
 template <TpetraTypePack Pack, class Policy>
 const auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::face(int batch_id,
                                                                    size_t in_batch_id) const
@@ -174,6 +230,14 @@ const auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::face(int batch_id,
     return iter->second.at(in_batch_id);
 }
 
+/**
+ * @brief Test whether staged data contains a boundary face.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param batch_id Boundary batch identifier.
+ * @param in_batch_id Face index within the batch.
+ * @return True when the face has staged data on this rank.
+ */
 template <TpetraTypePack Pack, class Policy>
 bool TurbulenceWallTreatment<Pack, Policy>::Evaluation::contains_face(
     int batch_id, size_t in_batch_id) const noexcept
@@ -182,6 +246,13 @@ bool TurbulenceWallTreatment<Pack, Policy>::Evaluation::contains_face(
     return iter != d_faces.end() && in_batch_id < iter->second.size();
 }
 
+/**
+ * @brief Require an owned local cell identifier for staged cell data.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param cell_lid Cell identifier to validate.
+ * @throws std::out_of_range if the mesh is absent or the cell is not owned.
+ */
 template <TpetraTypePack Pack, class Policy>
 void TurbulenceWallTreatment<Pack, Policy>::Evaluation::check_owned_cell(
     local_ordinal_type cell_lid) const
@@ -192,6 +263,14 @@ void TurbulenceWallTreatment<Pack, Policy>::Evaluation::check_owned_cell(
     }
 }
 
+/**
+ * @brief Return the averaged secondary-variable wall constraint for a cell.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param cell_lid Owned local cell identifier.
+ * @return Constraint when a configured wall contributes to the cell.
+ * @throws std::out_of_range if @p cell_lid is not owned.
+ */
 template <TpetraTypePack Pack, class Policy>
 auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::secondary_constraint(
     local_ordinal_type cell_lid) const -> std::optional<scalar_type>
@@ -200,6 +279,14 @@ auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::secondary_constraint(
     return d_secondary_constraints.at(static_cast<size_t>(cell_lid));
 }
 
+/**
+ * @brief Return the averaged wall-production override for a cell.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param cell_lid Owned local cell identifier.
+ * @return Production override when a configured wall contributes.
+ * @throws std::out_of_range if @p cell_lid is not owned.
+ */
 template <TpetraTypePack Pack, class Policy>
 auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::production_override(
     local_ordinal_type cell_lid) const -> std::optional<scalar_type>
@@ -208,6 +295,14 @@ auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::production_override(
     return d_production_overrides.at(static_cast<size_t>(cell_lid));
 }
 
+/**
+ * @brief Return the maximum staged y+ incident on an owned cell.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param cell_lid Owned local cell identifier.
+ * @return Maximum y+ when a configured wall contributes.
+ * @throws std::out_of_range if @p cell_lid is not owned.
+ */
 template <TpetraTypePack Pack, class Policy>
 auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::cell_y_plus(
     local_ordinal_type cell_lid) const -> std::optional<scalar_type>
@@ -216,6 +311,15 @@ auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::cell_y_plus(
     return d_cell_y_plus.at(static_cast<size_t>(cell_lid));
 }
 
+/**
+ * @brief Construct wall treatment from configured velocity conditions.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param mesh Distributed computational mesh.
+ * @param options Wall patches and model constants.
+ * @param velocity_boundary_conditions Configured velocity conditions by name.
+ * @throws std::invalid_argument if mesh, options, or patches are invalid.
+ */
 template <TpetraTypePack Pack, class Policy>
 TurbulenceWallTreatment<Pack, Policy>::TurbulenceWallTreatment(
     SP<const mesh_type> mesh, TurbulenceWallTreatmentOptions options,
@@ -231,6 +335,15 @@ TurbulenceWallTreatment<Pack, Policy>::TurbulenceWallTreatment(
     initialize(boundary_types);
 }
 
+/**
+ * @brief Construct wall treatment from a validated velocity boundary cache.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param mesh Distributed computational mesh.
+ * @param options Wall patches and model constants.
+ * @param velocity_boundary_cache Cached velocity conditions by boundary.
+ * @throws std::invalid_argument if mesh, options, patches, or cache are invalid.
+ */
 template <TpetraTypePack Pack, class Policy>
 TurbulenceWallTreatment<Pack, Policy>::TurbulenceWallTreatment(
     SP<const mesh_type> mesh, TurbulenceWallTreatmentOptions options,
@@ -250,6 +363,13 @@ TurbulenceWallTreatment<Pack, Policy>::TurbulenceWallTreatment(
         });
 }
 
+/**
+ * @brief Validate collective configuration and discover rank-local wall batches.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param boundary_types Velocity condition type indexed by boundary name.
+ * @throws std::invalid_argument if configuration or mesh patches are invalid.
+ */
 template <TpetraTypePack Pack, class Policy>
 void TurbulenceWallTreatment<Pack, Policy>::initialize(
     const std::unordered_map<std::string, BoundaryConditionType>& boundary_types)
@@ -323,6 +443,13 @@ void TurbulenceWallTreatment<Pack, Policy>::initialize(
     d_y_plus_lam = openfoam_y_plus_lam(d_options.kappa, d_options.log_layer_e);
 }
 
+/**
+ * @brief Validate mesh identity and completeness of cached wall velocities.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param velocity_boundary_cache Boundary cache to validate.
+ * @throws std::invalid_argument if a selected wall cache is invalid.
+ */
 template <TpetraTypePack Pack, class Policy>
 void TurbulenceWallTreatment<Pack, Policy>::validate_velocity_cache(
     const velocity_boundary_cache_type& velocity_boundary_cache) const
@@ -361,6 +488,20 @@ void TurbulenceWallTreatment<Pack, Policy>::validate_velocity_cache(
         });
 }
 
+/**
+ * @brief Evaluate and aggregate all configured local wall faces.
+ * @tparam Pack Tpetra type pack used by the treatment.
+ * @tparam Policy Wall-treatment policy tag.
+ * @param turbulent_kinetic_energy Accepted k field.
+ * @param velocity Accepted liquid velocity field.
+ * @param velocity_boundary_cache Cached no-slip wall velocities.
+ * @param material Physical material-property fields.
+ * @param reference_density Momentum reference density.
+ * @param turbulent_prandtl_number Turbulent Prandtl number for heat flux.
+ * @return Independent staged wall evaluation.
+ * @throws std::invalid_argument if a field, cache, or physical input is invalid.
+ * @throws std::overflow_error if a wall formula produces invalid data.
+ */
 template <TpetraTypePack Pack, class Policy>
 auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
     const field_type& turbulent_kinetic_energy, const velocity_field_type& velocity,

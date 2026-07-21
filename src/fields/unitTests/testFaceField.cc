@@ -30,6 +30,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the assembled two-cell mesh shared by face-field tests. */
 SimpleFluid::SP<MeshType> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
@@ -160,6 +161,7 @@ TEST(FaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 
 #include "geometry/STKMesh.hh"
 
+/** @brief Ensures construction rejects a mesh without assembled maps. */
 TEST(FaceFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::STKMesh<>>();

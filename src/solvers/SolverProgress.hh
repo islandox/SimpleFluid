@@ -1,6 +1,12 @@
 /**
  * @file SolverProgress.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Reusable formatting and streaming for solver progress lines.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -18,6 +24,16 @@ namespace SimpleFluid
 class ProgressLineFormatter
 {
 public:
+    /**
+     * @brief Format one physical-step convergence summary.
+     *
+     * @tparam Scalar Scalar type used for time and residual values.
+     * @param step Current absolute step index.
+     * @param total_steps Final step index for this run.
+     * @param time Current physical time.
+     * @param statistics Aggregated convergence statistics.
+     * @return Single-line progress message.
+     */
     template<class Scalar>
     std::string format(
         int step,
@@ -48,11 +64,25 @@ public:
 class ProgressStream
 {
 public:
+    /**
+     * @brief Construct a progress sink around an existing output stream.
+     *
+     * @param output Stream that receives formatted progress lines.
+     */
     explicit ProgressStream(std::ostream& output)
         : d_output(output)
     {
     }
 
+    /**
+     * @brief Format, write, and flush one progress line.
+     *
+     * @tparam Scalar Scalar type used for time and residual values.
+     * @param step Current absolute step index.
+     * @param total_steps Final step index for this run.
+     * @param time Current physical time.
+     * @param statistics Aggregated convergence statistics.
+     */
     template<class Scalar>
     void write(
         int step,

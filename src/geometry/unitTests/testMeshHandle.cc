@@ -36,6 +36,10 @@ testing::Environment* const kokkos_environment =
 
 } // namespace
 
+/**
+ * @brief Verifies variant visitation dispatches correctly for every concrete
+ * mesh alternative supported by MeshHandle.
+ */
 TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
 {
     const auto cartesian = std::make_shared<Cartesian>(
@@ -119,6 +123,10 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
     }
 }
 
+/**
+ * @brief Verifies wrapping a legacy STK mesh preserves maps, connectivity,
+ * and geometric queries.
+ */
 TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
 {
     auto legacy = SimpleFluid::test::build_mesh<Pack>(
@@ -139,6 +147,10 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
     EXPECT_EQ(handle.faces(0).size(), legacy->faces(0).size());
 }
 
+/**
+ * @brief Verifies repeated connectivity requests reuse the materialized
+ * cell-to-face cache when available.
+ */
 TEST(MeshHandleTest, ReusesMaterializedCellFaceConnectivity)
 {
     const auto mesh = std::make_shared<Cartesian>(
@@ -162,6 +174,10 @@ TEST(MeshHandleTest, ReusesMaterializedCellFaceConnectivity)
 #endif
 }
 
+/**
+ * @brief Verifies orthogonal slab partitioning constructs consistent owned
+ * and ghost entity maps through MeshHandle.
+ */
 TEST(MeshHandleTest, BuildsOrthogonalSlabOwnershipAndGhostMaps)
 {
     const auto mesh = std::make_shared<Cartesian>(
@@ -193,6 +209,10 @@ TEST(MeshHandleTest, BuildsOrthogonalSlabOwnershipAndGhostMaps)
     }
 }
 
+/**
+ * @brief Verifies every CRTP mesh alternative can be exported through the
+ * type-erased MeshHandle interface.
+ */
 TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
 {
     const auto cartesian_file = "mesh_handle_cartesian.vtu";

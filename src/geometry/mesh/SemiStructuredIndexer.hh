@@ -33,18 +33,21 @@ struct SemiStructuredIndexer
 {
     using Ordinal = unsigned;
 
+    /** @brief Base-topology and axial logical dimensions. */
     enum Dimension : std::uint8_t
     {
         IJ = 0,
         K = 1
     };
 
+    /** @brief Axial-plane and extruded-side face orientations. */
     enum FaceOrientation : std::uint8_t
     {
         AXIAL = 0,
         SIDE = 1
     };
 
+    /** @brief Base-cell ordinal and axial cell layer. */
     struct CellID
     {
         Ordinal ij = -1;
@@ -53,6 +56,7 @@ struct SemiStructuredIndexer
         constexpr auto operator<=>(const CellID&) const = default;
     };
 
+    /** @brief Base-entity ordinal, axial layer, and face orientation. */
     struct FaceID
     {
         Ordinal ij = -1;
@@ -62,6 +66,7 @@ struct SemiStructuredIndexer
         constexpr auto operator<=>(const FaceID&) const = default;
     };
 
+    /** @brief Base-node ordinal and axial node layer. */
     struct NodeID
     {
         Ordinal ij = -1;

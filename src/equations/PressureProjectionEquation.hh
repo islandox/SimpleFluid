@@ -30,11 +30,19 @@ namespace SimpleFluid
 namespace detail
 {
 
+/**
+ * @brief Test-only accessor for pressure-projection implementation state.
+ * @tparam Pack Tpetra type pack used by the equation.
+ */
 template<TpetraTypePack Pack>
 struct PressureProjectionEquationTestAccess;
 
 } // namespace detail
 
+/**
+ * @brief Build the default linear-solver options for pressure projection.
+ * @return Options selecting the MueLu preconditioner.
+ */
 inline LinearSolverOptions pressure_projection_linear_solver_options()
 {
     LinearSolverOptions options;
@@ -67,6 +75,7 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using source_type = std::function<scalar_type(local_ordinal_type)>;
+    /** @brief Pressure solve statistics and corrected face-flux field. */
     struct ProjectionResult
     {
         scalar_type pressure_correction = {}; ///< L2 norm of the Pa update.

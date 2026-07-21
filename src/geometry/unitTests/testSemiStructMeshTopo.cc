@@ -56,6 +56,10 @@ Topology make_topology_with_interior_cell(
 
 } // namespace
 
+/**
+ * @brief Verifies base polygon connectivity is converted into unique edges,
+ * side faces, and cell-edge incidence.
+ */
 TEST(SemiStructMeshTopoTest, BuildsBaseConnectivity)
 {
     const auto topology = make_topology();
@@ -86,6 +90,10 @@ TEST(SemiStructMeshTopoTest, BuildsBaseConnectivity)
         (SimpleFluid::Arr<unsigned>{3, 4, 1}));
 }
 
+/**
+ * @brief Verifies cell-face lists and owner/neighbor adjacency for side and
+ * axial faces.
+ */
 TEST(SemiStructMeshTopoTest, QueriesCellFacesAndAdjacency)
 {
     const auto topology = make_topology();
@@ -107,6 +115,7 @@ TEST(SemiStructMeshTopoTest, QueriesCellFacesAndAdjacency)
     EXPECT_EQ(topology.neighbor_cell(axial), (CellID{0, 1}));
 }
 
+/** @brief Verifies side and axial physical faces form the expected batches. */
 TEST(SemiStructMeshTopoTest, BuildsBoundaryBatches)
 {
     const auto topology = make_topology();
@@ -127,6 +136,10 @@ TEST(SemiStructMeshTopoTest, BuildsBoundaryBatches)
     EXPECT_THROW(topology.boundary_face_batch(6), std::out_of_range);
 }
 
+/**
+ * @brief Verifies interior-face and cell-neighbor batches are cached with
+ * expected semi-structured connectivity.
+ */
 TEST(SemiStructMeshTopoTest, CachesInteriorBatchAndCellNeighbors)
 {
     const auto topology = make_topology_with_interior_cell();
@@ -150,6 +163,7 @@ TEST(SemiStructMeshTopoTest, CachesInteriorBatchAndCellNeighbors)
             {0, 0}}));
 }
 
+/** @brief Verifies axial faces connect across a periodic seam. */
 TEST(SemiStructMeshTopoTest, WrapsAxialFacesPeriodically)
 {
     const Topology topology(
@@ -176,6 +190,10 @@ TEST(SemiStructMeshTopoTest, WrapsAxialFacesPeriodically)
         (Topology::NeighborCells{{0, 1}, {0, 1}}));
 }
 
+/**
+ * @brief Verifies a single axial layer retains valid physical and periodic
+ * face topology.
+ */
 TEST(SemiStructMeshTopoTest, HandlesSingleAxialLayer)
 {
     const Topology non_periodic(
@@ -218,6 +236,10 @@ TEST(SemiStructMeshTopoTest, HandlesSingleAxialLayer)
         (CellID{0, 0}));
 }
 
+/**
+ * @brief Verifies malformed polygon connectivity and boundary-edge metadata
+ * are rejected.
+ */
 TEST(SemiStructMeshTopoTest, RejectsInvalidBaseTopology)
 {
     EXPECT_THROW(

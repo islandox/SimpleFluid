@@ -48,6 +48,7 @@ SimpleFluid::SP<MeshType> make_2x2x2_mesh()
 
 } // namespace
 
+/** @brief Verifies invalid mesh IDs and VTK cell-type mappings. */
 TEST(MeshTest, InvalidIdAndVtuCellType)
 {
     // invalid_id
@@ -73,6 +74,7 @@ TEST(MeshTest, InvalidIdAndVtuCellType)
 // Mesh class method tests — uses MeshFactory to build a concrete mesh
 // ===========================================================================
 
+/** @brief Fixture providing a built 2-by-2-by-2 legacy mesh. */
 class MeshMethodTest : public ::testing::Test
 {
 protected:
@@ -85,6 +87,7 @@ protected:
     SimpleFluid::SP<MeshType> mesh_;
 };
 
+/** @brief Verifies the fixture mesh exposes its expected entity counts and maps. */
 TEST_F(MeshMethodTest, BasicMeshProperties)
 {
     EXPECT_EQ(mesh_->spatial_dimension(), 3UL);
@@ -93,6 +96,10 @@ TEST_F(MeshMethodTest, BasicMeshProperties)
     EXPECT_GT(mesh_->num_faces(), 0UL);
 }
 
+/**
+ * @brief Verifies cell/face connectivity accessors and invalid-identifier
+ * checks on the fixture mesh.
+ */
 TEST_F(MeshMethodTest, CellAndFaceAccess)
 {
     using lid_t = SimpleFluid::local_index_t;
@@ -247,6 +254,7 @@ TEST_F(MeshMethodTest, FaceTopology)
     }
 }
 
+/** @brief Verifies mesh-local and global cell, face, and node ID mappings. */
 TEST_F(MeshMethodTest, IdentifierMapping)
 {
     using lid_t = SimpleFluid::local_index_t;
@@ -269,6 +277,7 @@ TEST_F(MeshMethodTest, IdentifierMapping)
     EXPECT_NO_THROW(static_cast<void>(views.cell_volume.extent(0)));
 }
 
+/** @brief Verifies cell-to-face and cell-to-cell distance calculations. */
 TEST_F(MeshMethodTest, DistanceComputations)
 {
     using lid_t = SimpleFluid::local_index_t;
@@ -344,6 +353,7 @@ TEST(MeshUtilsTest, VolumeComputations)
     }
 }
 
+/** @brief Verifies polygon area vectors have the expected magnitude and orientation. */
 TEST(MeshUtilsTest, FaceAreaVector)
 {
     using Vec3 = SimpleFluid::MeshUtils::Vec3;
@@ -366,6 +376,7 @@ TEST(MeshUtilsTest, FaceAreaVector)
     }
 }
 
+/** @brief Verifies invalid polygon vertex counts are rejected in debug builds. */
 TEST(MeshUtilsTest, FaceAreaVectorThrowsForWrongSize)
 {
     using Vec3 = SimpleFluid::MeshUtils::Vec3;

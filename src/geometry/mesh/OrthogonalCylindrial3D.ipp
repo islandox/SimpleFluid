@@ -1,6 +1,12 @@
 /**
  * @file OrthogonalCylindrial3D.ipp
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Inline entity-query implementations for OrthogonalCylindrial3D.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -10,6 +16,10 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Check that a cylindrical cell ID lies inside the mesh.
+ * @param id Cell ID to validate.
+ */
 inline void OrthogonalCylindrial3D::check_cell_id(cell_id_t id) const
 {
     CHECK_BOUNDS(id.i, 0, d_indexer.num_cells_per_dim[R]);
@@ -17,6 +27,10 @@ inline void OrthogonalCylindrial3D::check_cell_id(cell_id_t id) const
     CHECK_BOUNDS(id.k, 0, d_indexer.num_cells_per_dim[AXIAL]);
 }
 
+/**
+ * @brief Check a cylindrical face orientation and coordinates.
+ * @param id Face ID to validate.
+ */
 inline void OrthogonalCylindrial3D::check_face_id(face_id_t id) const
 {
     CHECK(id.orientation == R_FACE || id.orientation == THETA_FACE || id.orientation == Z_FACE);
@@ -34,6 +48,10 @@ inline void OrthogonalCylindrial3D::check_face_id(face_id_t id) const
         d_indexer.num_faces_per_dim_per_orientation[id.orientation][AXIAL]);
 }
 
+/**
+ * @brief Check that a cylindrical node ID lies inside the mesh.
+ * @param id Node ID to validate.
+ */
 inline void OrthogonalCylindrial3D::check_node_id(node_id_t id) const
 {
     CHECK_BOUNDS(id.i, 0, d_indexer.num_nodes_per_dim[R]);
@@ -41,6 +59,13 @@ inline void OrthogonalCylindrial3D::check_node_id(node_id_t id) const
     CHECK_BOUNDS(id.k, 0, d_indexer.num_nodes_per_dim[AXIAL]);
 }
 
+/**
+ * @brief Convert cylindrical coordinates to a Cartesian point.
+ * @param radius Radial coordinate.
+ * @param theta Angular coordinate in radians.
+ * @param z Axial coordinate.
+ * @return Cartesian coordinates.
+ */
 inline auto OrthogonalCylindrial3D::cylindrical_point(
     real_t radius,
     real_t theta,
@@ -49,6 +74,12 @@ inline auto OrthogonalCylindrial3D::cylindrical_point(
     return {radius * std::cos(theta), radius * std::sin(theta), z};
 }
 
+/**
+ * @brief Compute the radial coordinate of an annular-sector centroid.
+ * @param radial_cell Radial cell index.
+ * @param theta_cell Angular cell index.
+ * @return Exact centroid radius for the sector.
+ */
 inline real_t OrthogonalCylindrial3D::sector_centroid_radius(
     size_t radial_cell,
     size_t theta_cell) const
@@ -63,6 +94,11 @@ inline real_t OrthogonalCylindrial3D::sector_centroid_radius(
     return radial_average * std::sin(half_angle) / half_angle;
 }
 
+/**
+ * @brief Compute an annular-sector cell volume.
+ * @param id Cell identifier.
+ * @return Cell volume.
+ */
 inline real_t
 OrthogonalCylindrial3D::cell_volume_impl(cell_id_t id) const
 {
@@ -74,6 +110,11 @@ OrthogonalCylindrial3D::cell_volume_impl(cell_id_t id) const
          * d_cell_widths[AXIAL][k];
 }
 
+/**
+ * @brief Compute the exact centroid of an annular-sector cell.
+ * @param id Cell identifier.
+ * @return Cartesian cell centroid.
+ */
 inline auto
 OrthogonalCylindrial3D::cell_centroid_impl(cell_id_t id) const -> Vec3
 {
@@ -86,6 +127,11 @@ OrthogonalCylindrial3D::cell_centroid_impl(cell_id_t id) const -> Vec3
         d_cell_midpoints[AXIAL][k]);
 }
 
+/**
+ * @brief Enumerate the six coordinate-normal faces of a cylindrical cell.
+ * @param id Cell identifier.
+ * @return Lower and upper radial, angular, and axial face IDs.
+ */
 inline auto
 OrthogonalCylindrial3D::cell_faces_impl(cell_id_t id) const
     -> std::array<face_id_t, 6>
@@ -118,6 +164,11 @@ OrthogonalCylindrial3D::neighbor_cell_impl(face_id_t id) const -> cell_id_t
     return d_topology.neighbor_cell(id);
 }
 
+/**
+ * @brief Return the precomputed area of a cylindrical face.
+ * @param id Face identifier.
+ * @return Face area.
+ */
 inline real_t
 OrthogonalCylindrial3D::face_area_impl(face_id_t id) const
 {
@@ -131,6 +182,11 @@ OrthogonalCylindrial3D::face_area_impl(face_id_t id) const
          * d_face_area_magnitudes[O][AXIAL][k];
 }
 
+/**
+ * @brief Compute the Cartesian centroid of a cylindrical face.
+ * @param id Face identifier.
+ * @return Face centroid.
+ */
 inline auto
 OrthogonalCylindrial3D::face_centroid_impl(face_id_t id) const -> Vec3
 {
@@ -161,6 +217,11 @@ OrthogonalCylindrial3D::face_centroid_impl(face_id_t id) const -> Vec3
         d_cell_edges[AXIAL][k]);
 }
 
+/**
+ * @brief Compute the owner-oriented unit normal of a cylindrical face.
+ * @param id Face identifier.
+ * @return Cartesian unit normal.
+ */
 inline auto
 OrthogonalCylindrial3D::face_normal_impl(face_id_t id) const -> Vec3
 {
@@ -184,6 +245,11 @@ OrthogonalCylindrial3D::face_normal_impl(face_id_t id) const -> Vec3
     return {0.0, 0.0, id.k == 0 ? -1.0 : 1.0};
 }
 
+/**
+ * @brief Convert a structured node ID to Cartesian coordinates.
+ * @param id Node identifier.
+ * @return Node coordinates.
+ */
 inline auto
 OrthogonalCylindrial3D::node_coordinates_impl(node_id_t id) const -> Vec3
 {

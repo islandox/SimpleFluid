@@ -1,6 +1,9 @@
 /**
  * @file LocalGlobalIndexer.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Explicit template instantiations for LocalGlobalIndexer.
+ * @version 0.1
+ * @date 2026-07-21
  *
  * @details Builds the common integral-ID indexers into SimpleFluidMesh so
  * callers using those packs do not need to instantiate the out-of-line
@@ -8,6 +11,9 @@
  *
  * The compiled specializations cover the library default index pack and the
  * local/global ordinal combinations used by UnstructuredMesh.
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/LocalGlobalIndexer.tcc"

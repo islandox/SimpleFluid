@@ -1,6 +1,12 @@
 /**
  * @file MaterialFeedbackModel.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Temperature- and void-dependent material feedback model.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 

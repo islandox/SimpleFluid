@@ -19,10 +19,12 @@
 namespace
 {
 
+/** @brief Minimal mesh token used by pointer-validation tests. */
 struct DummyMesh
 {
 };
 
+/** @brief Minimal field exposing the mesh-reference validation contract. */
 struct DummyField
 {
     const DummyMesh& mesh() const noexcept { return *mesh_ptr; }
@@ -30,6 +32,7 @@ struct DummyField
     const DummyMesh* mesh_ptr = nullptr;
 };
 
+/** @brief Verifies that non-null mesh validation returns the supplied pointer. */
 TEST(EquationValidationTest, RequireNonNullMeshReturnsPointer)
 {
     auto mesh = std::make_shared<DummyMesh>();
@@ -38,6 +41,7 @@ TEST(EquationValidationTest, RequireNonNullMeshReturnsPointer)
               mesh);
 }
 
+/** @brief Verifies that non-null mesh validation rejects a null pointer. */
 TEST(EquationValidationTest, RequireNonNullMeshThrowsForNull)
 {
     std::shared_ptr<DummyMesh> mesh;
@@ -46,6 +50,7 @@ TEST(EquationValidationTest, RequireNonNullMeshThrowsForNull)
                  std::invalid_argument);
 }
 
+/** @brief Verifies that mesh matching accepts a field on the expected mesh. */
 TEST(EquationValidationTest, RequireMeshMatchAcceptsSameMesh)
 {
     DummyMesh mesh;
@@ -55,6 +60,7 @@ TEST(EquationValidationTest, RequireMeshMatchAcceptsSameMesh)
         mesh, field, "TestEquation"));
 }
 
+/** @brief Verifies that mesh matching rejects a field on a different mesh. */
 TEST(EquationValidationTest, RequireMeshMatchRejectsDifferentMesh)
 {
     DummyMesh expected;
@@ -66,6 +72,7 @@ TEST(EquationValidationTest, RequireMeshMatchRejectsDifferentMesh)
                  std::invalid_argument);
 }
 
+/** @brief Verifies that non-negative validation accepts zero and rejects negatives. */
 TEST(EquationValidationTest, RequireNonNegativeRejectsNegative)
 {
     EXPECT_NO_THROW(SimpleFluid::EquationValidation::require_non_negative(
@@ -77,6 +84,7 @@ TEST(EquationValidationTest, RequireNonNegativeRejectsNegative)
                  std::invalid_argument);
 }
 
+/** @brief Verifies that cache-size validation accepts sufficient storage. */
 TEST(EquationValidationTest, AssertSufficientCacheSizeAllowsLargeEnoughCache)
 {
     EXPECT_NO_THROW(SimpleFluid::EquationValidation::assert_sufficient_cache_size(

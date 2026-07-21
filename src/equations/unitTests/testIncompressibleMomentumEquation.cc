@@ -128,6 +128,7 @@ TEST(IncompressibleMomentumEquationTest, AdvancesPhysicalMomentum)
     EXPECT_NEAR(velocity.value(0).z, 0.1, 1.0e-12);
 }
 
+/** @brief Verifies that slip boundaries add no diffusive momentum diagonal. */
 TEST(IncompressibleMomentumEquationTest,
      SlipBoundariesDoNotAddDiffusiveMomentumDiagonal)
 {

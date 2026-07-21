@@ -165,6 +165,13 @@ inline Vec3 face_area_vector(const std::vector<Vec3>& x)
           + (x[2] - x[0]).cross(x[3] - x[0])) * 0.5;
 }
 
+/**
+ * @brief Compute consecutive differences in an ordered value array.
+ * @tparam T Arithmetic value type.
+ * @param arr Input values.
+ * @return Array containing `arr[i + 1] - arr[i]`, or empty for fewer than
+ *         two values.
+ */
 template <class T>
 inline Arr<T> consec_diff(const Arr<T>& arr)
 {
@@ -181,6 +188,13 @@ inline Arr<T> consec_diff(const Arr<T>& arr)
     return result;
 }
 
+/**
+ * @brief Compute midpoints of consecutive values in an ordered array.
+ * @tparam T Arithmetic value type.
+ * @param arr Input values.
+ * @return Array containing consecutive arithmetic midpoints, or empty for
+ *         fewer than two values.
+ */
 template <class T>
 inline Arr<T> consec_mid(const Arr<T>& arr)
 {

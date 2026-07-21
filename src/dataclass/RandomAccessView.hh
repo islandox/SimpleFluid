@@ -34,6 +34,11 @@ public:
     using const_reference = const T&;
     using size_type = size_t;
 
+    /**
+     * @brief Random-access iterator over the viewed contiguous storage.
+     *
+     * @tparam IsConst Whether dereferencing yields a const reference.
+     */
     template<bool IsConst>
     class IteratorImpl
     {

@@ -1,6 +1,12 @@
 /**
  * @file testOrthogonalCylindrial3D.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for the structured cylindrical mesh.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -46,6 +52,7 @@ static_assert(std::is_same_v<
               SimpleFluid::Meshes::OrthogonalCylindrical3D,
               SimpleFluid::Meshes::OrthogonalCylindrial3D>);
 
+/** @brief Verifies malformed radial, angular, and axial coordinates are rejected. */
 TEST(OrthogonalCylindrial3DTest, RejectsInvalidCoordinates)
 {
     EXPECT_THROW(
@@ -62,6 +69,10 @@ TEST(OrthogonalCylindrial3DTest, RejectsInvalidCoordinates)
         std::invalid_argument);
 }
 
+/**
+ * @brief Verifies sector entity counts, cell centroids, volumes, and
+ * cell-face connectivity.
+ */
 TEST(OrthogonalCylindrial3DTest, ReportsSectorCountsAndCellGeometry)
 {
     const auto mesh = make_sector_mesh();
@@ -89,6 +100,10 @@ TEST(OrthogonalCylindrial3DTest, ReportsSectorCountsAndCellGeometry)
     EXPECT_EQ(faces[3], (FaceID{0, 1, 0, Mesh::THETA_FACE}));
 }
 
+/**
+ * @brief Verifies radial, angular, and axial face geometry and owner-neighbor
+ * topology.
+ */
 TEST(OrthogonalCylindrial3DTest, ComputesFaceGeometryAndTopology)
 {
     const auto mesh = make_sector_mesh();
@@ -120,6 +135,10 @@ TEST(OrthogonalCylindrial3DTest, ComputesFaceGeometryAndTopology)
     EXPECT_DOUBLE_EQ(mesh.face_centroid(axial).z, 2.0);
 }
 
+/**
+ * @brief Verifies a cylindrical sector builds named radial, angular, and
+ * axial boundary batches.
+ */
 TEST(OrthogonalCylindrial3DTest, BuildsSectorBoundaryBatches)
 {
     const auto mesh = make_sector_mesh();
@@ -144,6 +163,10 @@ TEST(OrthogonalCylindrial3DTest, BuildsSectorBoundaryBatches)
     EXPECT_EQ(mesh.face_normal(theta_min), (Vec3{0.0, -1.0, 0.0}));
 }
 
+/**
+ * @brief Verifies a full-circle mesh connects the angular seam periodically
+ * instead of exposing theta boundaries.
+ */
 TEST(OrthogonalCylindrial3DTest, ConnectsFullCirclePeriodically)
 {
     const auto mesh = make_periodic_mesh();
@@ -166,6 +189,10 @@ TEST(OrthogonalCylindrial3DTest, ConnectsFullCirclePeriodically)
     EXPECT_EQ(mesh.face_normal(seam), (Vec3{0.0, 1.0, 0.0}));
 }
 
+/**
+ * @brief Verifies cylindrical structured IDs map consistently to local
+ * entity ordinals and node coordinates.
+ */
 TEST(OrthogonalCylindrial3DTest, MapsStructuredAndLocalIdentifiers)
 {
     const auto sector = make_sector_mesh();

@@ -69,12 +69,17 @@ std::string read_file(const std::filesystem::path& path)
 
 } // namespace
 
+/** @brief Verifies the unstructured mesh and indexer satisfy the mesh concepts. */
 TEST(UnstructuredMeshTest, SatisfiesMeshBaseConcept)
 {
     static_assert(SimpleFluid::MeshIndexer<Mesh::Indexer>);
     static_assert(SimpleFluid::MeshClass<Mesh>);
 }
 
+/**
+ * @brief Verifies an unstructured mesh builds connectivity, geometry, local
+ * indexing, and boundary batches from explicit definitions.
+ */
 TEST(UnstructuredMeshTest, BuildsConnectivityGeometryAndBoundaryBatches)
 {
     const auto mesh = make_two_hex_mesh();
@@ -99,6 +104,7 @@ TEST(UnstructuredMeshTest, BuildsConnectivityGeometryAndBoundaryBatches)
     EXPECT_EQ(mesh.boundary_face_batch(7).face_lids.size(), 1U);
 }
 
+/** @brief Verifies boundary tags cannot be assigned to interior faces. */
 TEST(UnstructuredMeshTest, RejectsBoundaryTagsOnInteriorFaces)
 {
     EXPECT_THROW(
@@ -127,6 +133,10 @@ TEST(UnstructuredMeshTest, RejectsBoundaryTagsOnInteriorFaces)
         std::invalid_argument);
 }
 
+/**
+ * @brief Verifies MeshHandle wraps an unstructured mesh and exports its
+ * geometry and fields to VTU.
+ */
 TEST(UnstructuredMeshTest, MeshHandleWrapsAndExportsUnstructuredMesh)
 {
     const auto mesh = std::make_shared<Mesh>(make_two_hex_mesh());

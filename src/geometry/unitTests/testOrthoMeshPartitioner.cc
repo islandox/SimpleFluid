@@ -1,6 +1,12 @@
 /**
  * @file testOrthoMeshPartitioner.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for coordinate-based orthogonal mesh partitioning.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -53,6 +59,7 @@ std::vector<size_t> local_ids(
 
 } // namespace
 
+/** @brief Verifies coordinate slabs are balanced across requested partitions. */
 TEST(OrthoMeshPartitionerTest, BalancesCoordinateSlabs)
 {
     const auto topology = make_topology(10, 2, 1);
@@ -78,6 +85,7 @@ TEST(OrthoMeshPartitionerTest, BalancesCoordinateSlabs)
         (std::vector<size_t>{4, 5, 6, 14, 15, 16}));
 }
 
+/** @brief Verifies nonperiodic partitions acquire the expected ghost layers. */
 TEST(OrthoMeshPartitionerTest, BuildsNonPeriodicGhostLayers)
 {
     const auto topology = make_topology(2, 7, 1);
@@ -100,6 +108,7 @@ TEST(OrthoMeshPartitionerTest, BuildsNonPeriodicGhostLayers)
     EXPECT_FALSE(partitioner.is_local_cell(1, CellID{0, 0, 0}));
 }
 
+/** @brief Verifies a partition may request and build multiple ghost layers. */
 TEST(OrthoMeshPartitionerTest, SupportsMultipleGhostLayers)
 {
     const auto topology = make_topology(1, 1, 8);
@@ -117,6 +126,10 @@ TEST(OrthoMeshPartitionerTest, SupportsMultipleGhostLayers)
         (std::vector<size_t>{2, 3}));
 }
 
+/**
+ * @brief Verifies periodic ghost cells wrap across the seam and interface
+ * faces retain deterministic owners.
+ */
 TEST(OrthoMeshPartitionerTest, WrapsGhostsAndFaceOwnershipPeriodically)
 {
     const auto topology = make_topology(6, 1, 1, true);
@@ -136,6 +149,10 @@ TEST(OrthoMeshPartitionerTest, WrapsGhostsAndFaceOwnershipPeriodically)
     EXPECT_EQ(partitioner.owner_partition(first_partition_interface), 0U);
 }
 
+/**
+ * @brief Verifies every global cell and face is assigned to exactly one
+ * owning partition.
+ */
 TEST(OrthoMeshPartitionerTest, AssignsEveryCellAndFaceExactlyOnce)
 {
     const auto topology = make_topology(5, 4, 3, false, true, false);
@@ -184,6 +201,7 @@ TEST(OrthoMeshPartitionerTest, AssignsEveryCellAndFaceExactlyOnce)
     }
 }
 
+/** @brief Verifies invalid partition counts, ranks, and ghost depths are rejected. */
 TEST(OrthoMeshPartitionerTest, RejectsInvalidRequests)
 {
     const auto topology = make_topology(3, 2, 1);

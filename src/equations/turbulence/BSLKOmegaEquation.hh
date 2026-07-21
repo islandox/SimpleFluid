@@ -1,6 +1,12 @@
 /**
  * @file BSLKOmegaEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Original Menter-1994 baseline k-omega closure equation terms.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -22,6 +28,7 @@ namespace SimpleFluid
 class BSLKOmegaEquation
 {
 public:
+    /** @brief Coefficients controlling the BSL k-omega closure. */
     struct Coefficients
     {
         real_t beta_star = 0.09;

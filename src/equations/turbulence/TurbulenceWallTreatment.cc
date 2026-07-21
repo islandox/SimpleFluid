@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceWallTreatment.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Validation and explicit instantiation for turbulence wall treatment.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
@@ -13,6 +19,11 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Validate selected wall patches and policy-independent constants.
+ * @param options Wall-treatment options to validate.
+ * @throws std::invalid_argument if a name or constant is invalid.
+ */
 void validate_turbulence_wall_treatment_options(const TurbulenceWallTreatmentOptions& options)
 {
     if (options.boundary_names.empty())
@@ -44,6 +55,14 @@ void validate_turbulence_wall_treatment_options(const TurbulenceWallTreatmentOpt
     }
 }
 
+/**
+ * @brief Compute the OpenFOAM.com log-layer intersection by fixed iteration.
+ * @param kappa Von Karman constant.
+ * @param log_layer_e Log-law roughness constant.
+ * @return Positive sublayer intersection y+.
+ * @throws std::invalid_argument if an input is not finite and positive.
+ * @throws std::overflow_error if the iteration produces an invalid value.
+ */
 real_t openfoam_y_plus_lam(real_t kappa, real_t log_layer_e)
 {
     if (!std::isfinite(kappa) || kappa <= 0.0 || !std::isfinite(log_layer_e) || log_layer_e <= 0.0)

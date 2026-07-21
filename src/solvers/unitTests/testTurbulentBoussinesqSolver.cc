@@ -1,6 +1,12 @@
 /**
  * @file testTurbulentBoussinesqSolver.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief End-to-end tests for Problem-owned turbulence in BoussinesqSolver.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -29,6 +35,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build slip velocity conditions on every box wall. @return Boundary set. */
 SimpleFluid::BoundaryConditionSet slip_box_boundaries()
 {
     SimpleFluid::BoundaryConditionSet boundaries;
@@ -39,6 +46,7 @@ SimpleFluid::BoundaryConditionSet slip_box_boundaries()
     return boundaries;
 }
 
+/** @brief Build a box with one no-slip wall and five slip walls. @return Boundary set. */
 SimpleFluid::BoundaryConditionSet single_wall_box_boundaries()
 {
     auto boundaries = slip_box_boundaries();
@@ -47,6 +55,12 @@ SimpleFluid::BoundaryConditionSet single_wall_box_boundaries()
     return boundaries;
 }
 
+/**
+ * @brief Build stable one-step options for a coupling mode.
+ *
+ * @param coupling Pressure-velocity coupling algorithm.
+ * @return Configured time-step options.
+ */
 SimpleFluid::TimeStepperOptions stable_time_options(SimpleFluid::PressureVelocityCoupling coupling)
 {
     SimpleFluid::TimeStepperOptions options;
@@ -65,6 +79,7 @@ SimpleFluid::TimeStepperOptions stable_time_options(SimpleFluid::PressureVelocit
     return options;
 }
 
+/** @brief Build baseline standard k-epsilon options. @return Turbulence options. */
 SimpleFluid::TurbulenceModelOptions standard_k_epsilon_options()
 {
     SimpleFluid::TurbulenceModelOptions options;
@@ -76,6 +91,11 @@ SimpleFluid::TurbulenceModelOptions standard_k_epsilon_options()
     return options;
 }
 
+/**
+ * @brief Initialize a checkerboard shear field in a Boussinesq solver.
+ *
+ * @param solver Solver whose velocity field is initialized.
+ */
 void initialize_shear(SimpleFluid::BoussinesqSolver<Pack>& solver)
 {
     solver.initialize_heated_box(1.0, 1.0);
@@ -91,6 +111,11 @@ void initialize_shear(SimpleFluid::BoussinesqSolver<Pack>& solver)
     solver.velocity().sync_ghosts();
 }
 
+/**
+ * @brief Assert positive finite turbulence and effective-transport fields.
+ *
+ * @param model Turbulence model to inspect.
+ */
 void expect_positive_turbulence_fields(const SimpleFluid::TurbulenceModel<Pack>& model)
 {
     ASSERT_NE(model.dissipation_rate(), nullptr);
@@ -118,6 +143,7 @@ void expect_positive_turbulence_fields(const SimpleFluid::TurbulenceModel<Pack>&
 
 } // namespace
 
+/** @brief Verify turbulence is Problem-owned and laminar mode can be restored. */
 TEST(TurbulentBoussinesqSolverTest, ConfiguresProblemOwnedModelAndRestoresLaminarMode)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
@@ -136,6 +162,7 @@ TEST(TurbulentBoussinesqSolverTest, ConfiguresProblemOwnedModelAndRestoresLamina
     EXPECT_FALSE(solver.remove_turbulence_model());
 }
 
+/** @brief Advance turbulence through segregated and coupled pressure-velocity solves. */
 TEST(TurbulentBoussinesqSolverTest,
      AdvancesTurbulenceThroughSegregatedAndCoupledPressureVelocitySolves)
 {
@@ -173,6 +200,7 @@ TEST(TurbulentBoussinesqSolverTest,
     }
 }
 
+/** @brief Enable turbulence after a laminar implicit non-orthogonal step. */
 TEST(TurbulentBoussinesqSolverTest,
      EnablesTurbulenceAfterLaminarStepWithImplicitNonOrthogonalAssembly)
 {
@@ -195,6 +223,7 @@ TEST(TurbulentBoussinesqSolverTest,
     expect_positive_turbulence_fields(turbulence);
 }
 
+/** @brief Verify turbulence expands zero-diffusivity physical matrix graphs. */
 TEST(TurbulentBoussinesqSolverTest, ExpandsZeroDiffusivityPhysicalGraphsWhenTurbulenceIsEnabled)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
@@ -217,9 +246,11 @@ TEST(TurbulentBoussinesqSolverTest, ExpandsZeroDiffusivityPhysicalGraphsWhenTurb
     expect_positive_turbulence_fields(turbulence);
 }
 
+/** @brief Exercise both wall treatments through segregated and coupled solvers. */
 TEST(TurbulentBoussinesqSolverTest,
      AdvancesBothWallTreatmentsThroughSegregatedAndCoupledSolvers)
 {
+    /** @brief Turbulence model and compatible wall treatment under test. */
     struct WallCase
     {
         SimpleFluid::TurbulenceModelType model;
@@ -288,6 +319,7 @@ TEST(TurbulentBoussinesqSolverTest,
     }
 }
 
+/** @brief Verify turbulence fields are emitted only when VTU output requests them. */
 TEST(TurbulentBoussinesqSolverTest, TurbulenceFieldsAreOptInForSolutionOutput)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());

@@ -1086,6 +1086,13 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
     return record;
 }
 
+/**
+ * @brief Write and print a completed benchmark record on rank zero.
+ *
+ * @param record Benchmark result to emit.
+ * @param writer Rank-zero CSV writer.
+ * @param rank Calling MPI rank.
+ */
 void emit_record(const SimpleFluid::Benchmark::Record& record,
                  SimpleFluid::Benchmark::CsvWriter* writer,
                  int rank)
@@ -1106,6 +1113,13 @@ void emit_record(const SimpleFluid::Benchmark::Record& record,
         << '\n';
 }
 
+/**
+ * @brief Test whether a solver configuration matches the CLI selection.
+ *
+ * @param options Parsed benchmark options.
+ * @param configuration Candidate solver configuration.
+ * @return true when the candidate should be executed.
+ */
 bool selected_configuration(
     const Options& options,
     const SolverConfiguration& configuration)
@@ -1130,6 +1144,13 @@ bool selected_configuration(
 
 } // namespace
 
+/**
+ * @brief Run the selected SimpleFluid benchmark cases and write CSV results.
+ *
+ * @param argc Command-line argument count.
+ * @param argv Command-line argument vector.
+ * @return Process exit code, zero on success.
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard scope(&argc, &argv);

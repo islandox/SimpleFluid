@@ -1,6 +1,12 @@
 /**
  * @file OrthogonalCartesian3D.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief OrthogonalCartesian3D implementation.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -15,6 +21,14 @@ namespace SimpleFluid::Meshes
 namespace
 {
 
+/**
+ * @brief Validate one Cartesian coordinate-edge array.
+ * @param edges Edge coordinates to validate.
+ * @param axis_name Axis label used in diagnostics.
+ * @throws std::invalid_argument If the array is too short, non-finite, or not
+ *         strictly increasing.
+ * @throws std::overflow_error If its cell count exceeds the mesh ID type.
+ */
 void validate_edges(const Arr<real_t>& edges, const char* axis_name)
 {
     if (edges.size() < 2)
@@ -48,6 +62,12 @@ void validate_edges(const Arr<real_t>& edges, const char* axis_name)
     }
 }
 
+/**
+ * @brief Narrow a size-based coordinate count to the mesh index type.
+ * @param index Value to convert.
+ * @return Converted non-negative index.
+ * @throws std::overflow_error If @p index exceeds the integer ID type.
+ */
 int checked_index(size_t index)
 {
     if (index > static_cast<size_t>(std::numeric_limits<int>::max()))
@@ -60,6 +80,12 @@ int checked_index(size_t index)
 
 } // namespace
 
+/**
+ * @brief Construct and precompute Cartesian geometry and topology.
+ * @param cell_edges Strictly increasing X, Y, and Z edge coordinates.
+ * @throws std::invalid_argument If any coordinate array is invalid.
+ * @throws std::overflow_error If entity counts exceed supported ID ranges.
+ */
 OrthogonalCartesian3D::OrthogonalCartesian3D(
     const Vec3D<Arr<real_t>>& cell_edges)
     : d_cell_edges(cell_edges)
@@ -102,6 +128,12 @@ OrthogonalCartesian3D::OrthogonalCartesian3D(
         {{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"}});
 }
 
+/**
+ * @brief Return a physical boundary batch name.
+ * @param batch_id Boundary batch identifier.
+ * @return Configured lower or upper axis name.
+ * @throws std::out_of_range If @p batch_id is invalid.
+ */
 const std::string&
 OrthogonalCartesian3D::boundary_batch_name_impl(int batch_id) const
 {

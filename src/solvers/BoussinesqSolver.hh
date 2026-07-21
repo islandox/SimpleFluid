@@ -292,6 +292,7 @@ private:
     using base_type::solve_pressure_velocity_coupling;
     using base_type::velocity_boundary_cache;
 
+    /** @brief Tag selecting the physical-model constructor implementation. */
     struct PhysicalModelTag {};
 
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,

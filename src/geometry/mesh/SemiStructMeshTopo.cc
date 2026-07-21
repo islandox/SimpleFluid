@@ -24,6 +24,7 @@ namespace
 
 using EdgeKey = std::array<SemiStructMeshTopo::Ordinal, 2>;
 
+/** @brief Hash an ordered base-topology edge key. */
 struct EdgeKeyHash
 {
     size_t operator()(const EdgeKey& key) const noexcept
@@ -279,6 +280,7 @@ int SemiStructMeshTopo::num_boundary_batches() const noexcept
     return static_cast<int>(d_boundary_batches.size());
 }
 
+/** @brief Precompute owner and neighbor cells for axial and side faces. */
 void SemiStructMeshTopo::initialize_face_adjacency()
 {
     auto& axial_faces =
@@ -319,6 +321,7 @@ void SemiStructMeshTopo::initialize_face_adjacency()
     }
 }
 
+/** @brief Precompute base and axial cell neighbors and interior cells. */
 void SemiStructMeshTopo::initialize_cell_adjacency()
 {
     d_base_neighbor_cells.resize(d_indexer.num_cells_per_layer);
@@ -396,6 +399,14 @@ void SemiStructMeshTopo::initialize_cell_adjacency()
     }
 }
 
+/**
+ * @brief Derive unique base edges, adjacency, and side-boundary IDs.
+ * @param nodes_per_layer Number of nodes in the base topology.
+ * @param cell_nodes Counter-clockwise node loop for each base cell.
+ * @param boundary_edges Optional named exterior base edges.
+ * @throws std::invalid_argument If connectivity, orientation, manifoldness,
+ *         or boundary tags are invalid.
+ */
 void SemiStructMeshTopo::build_base_topology(
     Ordinal nodes_per_layer,
     const Arr<Arr<Ordinal>>& cell_nodes,
@@ -535,6 +546,7 @@ void SemiStructMeshTopo::build_base_topology(
     }
 }
 
+/** @brief Materialize axial and side boundary-face batches for all layers. */
 void SemiStructMeshTopo::initialize_boundary_batches()
 {
     for (const auto& [batch_id, name] : d_boundary_names)

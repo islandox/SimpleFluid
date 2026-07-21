@@ -67,6 +67,7 @@ public:
     }
 
 private:
+    /** @brief Identifies the typed node that owns a database key. */
     enum class NodeKind : uint8_t
     {
         Int,
@@ -146,6 +147,12 @@ const T& Database::get(const std::string& key) const
     return node<T>().get(key);
 }
 
+/**
+ * @brief Select the mutable typed node used to store @p T values.
+ *
+ * @tparam T Supported database value type.
+ * @return Mutable node for @p T.
+ */
 template<class T>
 DBNode<T>& Database::node()
 {
@@ -169,12 +176,24 @@ DBNode<T>& Database::node()
             "Unsupported Database value type");
 }
 
+/**
+ * @brief Select the const typed node used to store @p T values.
+ *
+ * @tparam T Supported database value type.
+ * @return Const node for @p T.
+ */
 template<class T>
 const DBNode<T>& Database::node() const
 {
     return const_cast<Database*>(this)->node<T>();
 }
 
+/**
+ * @brief Return the runtime node tag corresponding to @p T.
+ *
+ * @tparam T Supported database value type.
+ * @return Node kind used by the key-type registry.
+ */
 template<class T>
 consteval auto Database::node_kind() -> NodeKind
 {

@@ -1,6 +1,12 @@
 /**
  * @file Problem.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Lifetime owner and typed registry for a finite-volume problem.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -27,6 +33,8 @@ namespace SimpleFluid
  * A problem keeps the mesh, physical options, fields, equations, and assembled
  * systems alive under unique names. Retrieval verifies the exact registered
  * C++ type before returning an object.
+ *
+ * @tparam Pack Tpetra type pack used by registered fields and equations.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class Problem
@@ -217,6 +225,7 @@ public:
     }
 
 private:
+    /** @brief Type-erased registry entry with exact runtime type metadata. */
     struct ObjectEntry
     {
         std::type_index type;

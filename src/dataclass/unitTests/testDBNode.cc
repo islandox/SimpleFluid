@@ -19,6 +19,7 @@
 namespace
 {
 
+/** @brief Verifies a default node has no keys or values. */
 TEST(DBNodeTest, StartsEmpty)
 {
     const SimpleFluid::DBNode<int> node;
@@ -27,6 +28,7 @@ TEST(DBNodeTest, StartsEmpty)
     EXPECT_FALSE(node.contains("missing"));
 }
 
+/** @brief Exercises insertion, lookup, containment, and size reporting. */
 TEST(DBNodeTest, SetAndGetValues)
 {
     SimpleFluid::DBNode<std::string> node;
@@ -42,6 +44,7 @@ TEST(DBNodeTest, SetAndGetValues)
     EXPECT_EQ(const_node.get("name"), "fluid");
 }
 
+/** @brief Confirms assigning an existing key replaces its stored value. */
 TEST(DBNodeTest, SetReplacesExistingValue)
 {
     SimpleFluid::DBNode<int> node;
@@ -52,6 +55,7 @@ TEST(DBNodeTest, SetReplacesExistingValue)
     EXPECT_EQ(node.get("count"), 2);
 }
 
+/** @brief Verifies individual erasure and full-node clearing semantics. */
 TEST(DBNodeTest, EraseAndClear)
 {
     SimpleFluid::DBNode<int> node;
@@ -67,6 +71,7 @@ TEST(DBNodeTest, EraseAndClear)
     EXPECT_TRUE(node.empty());
 }
 
+/** @brief Ensures mutable and const lookup reject a missing key. */
 TEST(DBNodeTest, GetMissingThrows)
 {
     SimpleFluid::DBNode<int> node;

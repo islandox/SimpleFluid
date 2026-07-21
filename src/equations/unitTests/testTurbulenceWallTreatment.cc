@@ -1,6 +1,12 @@
 /**
  * @file testTurbulenceWallTreatment.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Formula and aggregation tests for policy-based turbulence walls.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -76,6 +82,7 @@ SimpleFluid::SP<Mesh> rectangular_single_cell_mesh()
 
 } // namespace
 
+/** @brief Verifies Menter face values and molecular transport for resolved SST walls. */
 TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesMenterFaceValueAndMolecularWallTransport)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -117,6 +124,7 @@ TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesMenterFaceValueAndMolecularWall
                 1.0e-6, 1.0e-18);
 }
 
+/** @brief Verifies resolved SST treatment with skewed STK wall geometry. */
 TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesSkewedSTKWallGeometry)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -172,6 +180,7 @@ TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesSkewedSTKWallGeometry)
     }
 }
 
+/** @brief Verifies high-Re k-epsilon wall values against OpenFOAM log-layer formulas. */
 TEST(TurbulenceWallTreatmentTest, HighReKEpsilonMatchesOpenFOAMLogLayerFormulas)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -218,6 +227,7 @@ TEST(TurbulenceWallTreatmentTest, HighReKEpsilonMatchesOpenFOAMLogLayerFormulas)
     EXPECT_NEAR(*evaluation.production_override(0), production, 1.0e-12);
 }
 
+/** @brief Verifies OpenFOAM v2606 high-Re defaults and the optional low-Re correction. */
 TEST(TurbulenceWallTreatmentTest,
      HighReDefaultsToOpenFOAMV2606AndOffersLowReCorrection)
 {
@@ -288,6 +298,7 @@ TEST(TurbulenceWallTreatmentTest,
     EXPECT_GT(*logarithmic.production_override(0), 0.0);
 }
 
+/** @brief Verifies equal face-count averaging for high-Re corner cells. */
 TEST(TurbulenceWallTreatmentTest, HighReCornerCellsUseEqualFaceCountAveraging)
 {
     auto mesh = rectangular_single_cell_mesh();
@@ -325,6 +336,7 @@ TEST(TurbulenceWallTreatmentTest, HighReCornerCellsUseEqualFaceCountAveraging)
                      std::max(xface.y_plus, yface.y_plus));
 }
 
+/** @brief Verifies rejection of missing, duplicate, and non-wall patches. */
 TEST(TurbulenceWallTreatmentTest, RejectsMissingDuplicateAndNonWallPatches)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(

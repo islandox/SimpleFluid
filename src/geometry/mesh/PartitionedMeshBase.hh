@@ -67,6 +67,7 @@ public:
         global_ordinal_type>;
     using Vec3 = typename mesh_type::Vec3;
 
+    /** @brief Rank-local faces associated with one boundary identifier. */
     struct BoundaryFaceBatch
     {
         int id = -1;
@@ -216,6 +217,10 @@ private:
 };
 
 
+/**
+ * @brief Identify distributed mesh wrappers built on PartitionedMesh.
+ * @tparam T Candidate distributed mesh type.
+ */
 template<class T>
 concept PartitionedMeshClass = requires {
     typename T::partitioned_mesh_base_tag;

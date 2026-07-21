@@ -26,6 +26,7 @@ testing::Environment* const kokkos_environment =
 
 } // namespace
 
+/** @brief Verifies the cache stores only configured Dirichlet boundary batches. */
 TEST(BoundaryCacheTest, CachesOnlyConfiguredDirichletBatches)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -60,6 +61,7 @@ TEST(BoundaryCacheTest, CachesOnlyConfiguredDirichletBatches)
     }
 }
 
+/** @brief Verifies boundary-condition caching rejects a null mesh. */
 TEST(BoundaryCacheTest, RejectsNullMesh)
 {
     EXPECT_THROW(

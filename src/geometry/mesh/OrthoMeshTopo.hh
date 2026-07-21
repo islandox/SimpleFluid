@@ -47,6 +47,7 @@ public:
     static constexpr Ordinal invalid_ordinal =
         static_cast<Ordinal>(-1);
 
+    /** @brief Fixed-capacity list of face-adjacent cells. */
     struct NeighborCells
     {
         unsigned num{};
@@ -167,12 +168,14 @@ public:
     int num_boundary_batches() const noexcept;
 
 private:
+    /** @brief Owner and neighbor coordinates for one face plane. */
     struct FaceCells
     {
         Ordinal owner = invalid_ordinal;
         Ordinal neighbor = invalid_ordinal;
     };
 
+    /** @brief Neighbor coordinates available along one mesh dimension. */
     struct DimensionNeighbors
     {
         unsigned num{};
