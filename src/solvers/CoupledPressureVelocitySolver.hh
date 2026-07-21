@@ -687,7 +687,8 @@ public:
         scalar_type reference_density = scalar_type{1},
         bool density_feedback_enabled = false,
         const field_type* dynamic_viscosity_override = nullptr,
-        const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr) const
+        const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr,
+        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const
     {
         EquationValidation::require_mesh_match(
             *d_mesh, velocity, "CoupledPressureVelocitySolver");
@@ -737,7 +738,8 @@ public:
                 density_feedback_enabled,
                 turbulence_source,
                 correction_field,
-                dynamic_viscosity_override);
+                dynamic_viscosity_override,
+                boundary_dynamic_viscosity);
         }
         else if (turbulent_kinetic_energy_gradient != nullptr)
         {

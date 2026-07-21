@@ -42,21 +42,25 @@ The comparison script selects the SimpleFluid cell layer nearest each OpenFOAM
 sampling station, interpolates the OpenFOAM profile to the SimpleFluid cell
 centres, and reports RMS and maximum errors for `ux` and `uy`. Optional
 `--max-l2` and `--max-linf` arguments turn those metrics into pass/fail checks.
-No default tolerance is imposed because the model differences below prevent
+No default tolerance is imposed because the numerical differences below keep
 this fixture from serving as a validated reference solution.
 
 ## Interpretation
 
 OpenFOAM solves a steady SIMPLE RANS problem and applies `kqRWallFunction`,
 `epsilonWallFunction`, and `nutkWallFunction` at the walls. SimpleFluid advances
-the same standard k-epsilon coefficients transiently with SIMPLE coupling, but
-its current turbulence coupling layer does not implement wall functions; this
-case therefore uses homogeneous Neumann conditions for `k` and `epsilon` at
-no-slip walls. The front/back `empty` planes are represented as slip planes in
-the one-cell-thick SimpleFluid mesh.
+the same standard k-epsilon coefficients transiently with SIMPLE coupling and
+selects its coordinated `standardHighReKEpsilon` treatment on `upperWall` and
+`lowerWall`. That treatment supplies zero-gradient `k`, OpenFOAM.com v2606
+stepwise `nutkWallFunction` face viscosity, and the `epsilonWallFunction`
+adjacent-cell epsilon and production constraints with the v2606 default
+`lowReCorrection false`. The front/back `empty` planes are
+represented as slip planes in the one-cell-thick SimpleFluid mesh.
 
-Consequently, this is an end-to-end geometry, boundary-condition, and
-post-processing comparison—not a claim of model-equivalent agreement. The
-OpenFOAM pressure is kinematic pressure. SimpleFluid uses a reference density
-of `1 kg/m3`, making its pressure numerically comparable, but the automated
-profile comparison intentionally evaluates velocity only.
+The wall model is now aligned, but the cases still differ in mesh spacing,
+time integration versus a steady solve, pressure-velocity iteration, and
+discretization details. This remains an end-to-end comparison rather than a
+claim of identical numerical solutions. OpenFOAM pressure is kinematic;
+SimpleFluid uses a reference density of `1 kg/m3`, making pressure numerically
+comparable, while the automated profile comparison intentionally evaluates
+velocity only.

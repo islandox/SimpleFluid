@@ -13,9 +13,41 @@
 #include "solvers/BelosLinearSolver.hh"
 
 #include <functional>
+#include <optional>
 
 namespace SimpleFluid
 {
+
+/**
+ * @brief Dynamic boundary and adjacent-cell data for a turbulence scalar.
+ *
+ * A provider returns std::nullopt when a face or cell keeps the equation's
+ * configured behavior. This lets a wall treatment override only selected
+ * wall batches while inlet, outlet, and symmetry data continue to come from
+ * the ordinary boundary-condition map.
+ */
+template <TpetraTypePack Pack = DefaultTpetraTypes>
+struct TurbulenceScalarBoundaryOverrides
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using boundary_condition_provider_type =
+        std::function<std::optional<BoundaryCondition>(int, size_t)>;
+    using boundary_value_provider_type =
+        std::function<std::optional<scalar_type>(int, size_t)>;
+    using fixed_cell_value_provider_type =
+        std::function<std::optional<scalar_type>(local_ordinal_type)>;
+
+    boundary_condition_provider_type boundary_condition;
+    boundary_value_provider_type boundary_value;
+    fixed_cell_value_provider_type fixed_cell_value;
+
+    /** Sparse per-face diffusivity; omitted faces use the owner-cell value. */
+    const FVM::BoundaryCache<Pack>* boundary_diffusivity = nullptr;
+
+    /** Permit an overridden Dirichlet face to be exactly zero (wall k). */
+    bool allow_zero_dirichlet = false;
+};
 
 /**
  * @brief Semi-implicit transport equation for a positive turbulence scalar.
@@ -36,6 +68,7 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using scalar_provider_type = std::function<scalar_type(local_ordinal_type)>;
+    using boundary_overrides_type = TurbulenceScalarBoundaryOverrides<Pack>;
 
     /**
      * @brief Construct an equation on @p mesh with scalar boundary data.
@@ -63,7 +96,8 @@ public:
             const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
             scalar_type positive_floor,
             FVM::NonOrthogonalTreatment treatment = FVM::NonOrthogonalTreatment::Explicit,
-            const LinearSolverOptions& linear_options = {}) const;
+            const LinearSolverOptions& linear_options = {},
+            const boundary_overrides_type* boundary_overrides = nullptr) const;
 
     /** @brief Return the configured scalar boundary conditions. */
     const BoundaryConditionMap& boundary_conditions() const noexcept

@@ -89,6 +89,7 @@ add_library(SimpleFluidEquations SHARED
     equations/TemperatureDiffusionEquation.cc
     equations/turbulence/TurbulenceModel.cc
     equations/turbulence/TurbulenceScalarTransportEquation.cc
+    equations/turbulence/TurbulenceWallTreatment.cc
 )
 add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
 simplefluid_configure_library(SimpleFluidEquations)

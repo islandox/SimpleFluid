@@ -95,6 +95,13 @@ ModelOptions make_model_options(ModelType type)
     return options;
 }
 
+TEST(TurbulenceModelTest, RejectsNullMeshBeforeBuildingBoundaryCaches)
+{
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    EXPECT_THROW((Model(SimpleFluid::SP<const MeshType>{}, boundary_conditions)),
+                 std::invalid_argument);
+}
+
 TEST(TurbulenceModelTest, ConfiguresEveryClosureExposesFamilyFieldsAndDisablesCleanly)
 {
     auto mesh = make_single_cell_mesh();
@@ -482,6 +489,191 @@ TEST(TurbulenceModelTest, StandardKEpsilonAdvanceUsesBoundaryAwareShearAndReport
                   options.initial_turbulent_kinetic_energy);
         EXPECT_GT(epsilon->value(cell_lid), options.initial_dissipation_rate);
     }
+}
+
+TEST(TurbulenceModelTest, HighReWallTreatmentConstrainsEpsilonAndPublishesFaceProperties)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+    auto options = make_model_options(ModelType::StandardKEpsilon);
+    options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    options.wall_options.boundary_names = {"xmin"};
+    Model model(mesh, boundary_conditions);
+    model.configure(options, material, reference_density);
+
+    ASSERT_NE(model.wall_y_plus(), nullptr);
+    EXPECT_EQ(model.output_fields().at("wall_y_plus"), model.wall_y_plus());
+    const auto* initial_mu_cache =
+        model.effective_dynamic_viscosity_boundary_cache();
+    const auto* initial_lambda_cache =
+        model.effective_thermal_conductivity_boundary_cache();
+    ASSERT_NE(initial_mu_cache, nullptr);
+    ASSERT_NE(initial_lambda_cache, nullptr);
+    ASSERT_EQ(initial_mu_cache->value.size(), 1U);
+
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {0.0, 2.0, 0.0});
+    velocity.sync_ghosts();
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "projected_face_fluxes");
+
+    const auto initial_k = options.initial_turbulent_kinetic_energy;
+    const auto expected_epsilon =
+        std::pow(options.wall_options.c_mu, 0.75) *
+        initial_k * std::sqrt(initial_k) /
+        (options.wall_options.kappa * 0.5);
+    const auto summary = model.advance(
+        velocity, zero_fluxes, velocity_cache, 1.0e-4, material,
+        reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+
+    ASSERT_TRUE(summary.converged);
+    ASSERT_NE(model.dissipation_rate(), nullptr);
+    EXPECT_NEAR(model.dissipation_rate()->value(0), expected_epsilon, 1.0e-11);
+    ASSERT_NE(model.wall_y_plus(), nullptr);
+    EXPECT_GT(model.wall_y_plus()->value(0), 0.0);
+    const auto* wall_mu = model.effective_dynamic_viscosity_boundary_cache();
+    ASSERT_NE(wall_mu, nullptr);
+    ASSERT_EQ(wall_mu->value.size(), 1U);
+    EXPECT_GT(wall_mu->value.begin()->second.at(0), molecular_viscosity);
+
+    const auto k_before_second = model.turbulent_kinetic_energy().value(0);
+    const auto y_plus_before_second = model.wall_y_plus()->value(0);
+    const auto mu_before_second = wall_mu->value.begin()->second.at(0);
+    const auto lambda_before_second =
+        model.effective_thermal_conductivity_boundary_cache()
+            ->value.begin()->second.at(0);
+    velocity.set_owned_value(0, {0.0, 4.0, 0.0});
+    velocity.sync_ghosts();
+    const auto expected_second_epsilon =
+        std::pow(options.wall_options.c_mu, 0.75) *
+        k_before_second * std::sqrt(k_before_second) /
+        (options.wall_options.kappa * 0.5);
+    const auto second_summary = model.advance(
+        velocity, zero_fluxes, velocity_cache, 1.0e-4, material,
+        reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+
+    ASSERT_TRUE(second_summary.converged);
+    EXPECT_NEAR(model.dissipation_rate()->value(0), expected_second_epsilon,
+                1.0e-11);
+    EXPECT_NE(model.turbulent_kinetic_energy().value(0), k_before_second);
+    EXPECT_NE(model.wall_y_plus()->value(0), y_plus_before_second);
+    EXPECT_NE(model.effective_dynamic_viscosity_boundary_cache()
+                  ->value.begin()->second.at(0),
+              mu_before_second);
+    EXPECT_NE(model.effective_thermal_conductivity_boundary_cache()
+                  ->value.begin()->second.at(0),
+              lambda_before_second);
+
+    EXPECT_TRUE(model.disable());
+    EXPECT_EQ(model.options().wall_treatment,
+              SimpleFluid::TurbulenceWallTreatmentType::None);
+    EXPECT_TRUE(model.options().wall_options.boundary_names.empty());
+    EXPECT_EQ(model.wall_y_plus(), nullptr);
+    EXPECT_EQ(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
+}
+
+TEST(TurbulenceModelTest, HighReWallCmuAlsoConfiguresItsStandardKEpsilonClosure)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+    auto options = make_model_options(ModelType::StandardKEpsilon);
+    options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    options.wall_options.boundary_names = {"xmin"};
+    options.wall_options.c_mu = 0.08;
+
+    Model model(mesh, boundary_conditions);
+    model.configure(options, material, reference_density);
+
+    const auto expected_nu_t =
+        options.wall_options.c_mu *
+        options.initial_turbulent_kinetic_energy *
+        options.initial_turbulent_kinetic_energy /
+        options.initial_dissipation_rate;
+    EXPECT_DOUBLE_EQ(model.turbulent_kinematic_viscosity().value(0),
+                     expected_nu_t);
+}
+
+TEST(TurbulenceModelTest, ResolvedSSTWallTreatmentKeepsWallTransportMolecular)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    boundary_conditions.turbulence.turbulent_kinetic_energy["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST;
+    options.wall_options.boundary_names = {"xmin"};
+    Model model(mesh, boundary_conditions);
+    model.configure(options, material, reference_density);
+
+    const auto* wall_mu = model.effective_dynamic_viscosity_boundary_cache();
+    const auto* wall_lambda = model.effective_thermal_conductivity_boundary_cache();
+    ASSERT_NE(wall_mu, nullptr);
+    ASSERT_NE(wall_lambda, nullptr);
+    EXPECT_NEAR(wall_mu->value.begin()->second.at(0), molecular_viscosity, 1.0e-15);
+    EXPECT_NEAR(wall_lambda->value.begin()->second.at(0), molecular_conductivity, 1.0e-15);
+
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {0.0, 1.0, 0.0});
+    velocity.sync_ghosts();
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "projected_face_fluxes");
+    const auto summary = model.advance(
+        velocity, zero_fluxes, velocity_cache, 1.0e-6, material,
+        reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+
+    ASSERT_TRUE(summary.converged);
+    ASSERT_NE(model.specific_dissipation_rate(), nullptr);
+    EXPECT_GT(model.turbulent_kinetic_energy().value(0), 0.0);
+    EXPECT_GT(model.specific_dissipation_rate()->value(0), 0.0);
+    ASSERT_NE(model.wall_y_plus(), nullptr);
+    EXPECT_GT(model.wall_y_plus()->value(0), 0.0);
+    wall_mu = model.effective_dynamic_viscosity_boundary_cache();
+    wall_lambda = model.effective_thermal_conductivity_boundary_cache();
+    EXPECT_NEAR(wall_mu->value.begin()->second.at(0), molecular_viscosity, 1.0e-15);
+    EXPECT_NEAR(wall_lambda->value.begin()->second.at(0), molecular_conductivity, 1.0e-15);
+}
+
+TEST(TurbulenceModelTest, WallTreatmentRejectsUnknownAndNonNoSlipBoundaries)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    auto options = make_model_options(ModelType::StandardKEpsilon);
+    options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    options.wall_options.boundary_names = {"xmin"};
+
+    SimpleFluid::BoundaryConditionSet slip;
+    slip.velocity["xmin"] = {SimpleFluid::BoundaryConditionType::Slip, {}};
+    Model slip_model(mesh, slip);
+    EXPECT_THROW(slip_model.configure(options, material, reference_density),
+                 std::invalid_argument);
+
+    options.wall_options.boundary_names = {"notAPatch"};
+    SimpleFluid::BoundaryConditionSet missing;
+    missing.velocity["notAPatch"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    Model missing_model(mesh, missing);
+    EXPECT_THROW(missing_model.configure(options, material, reference_density),
+                 std::invalid_argument);
 }
 
 } // namespace

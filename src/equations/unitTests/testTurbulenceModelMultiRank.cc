@@ -136,6 +136,51 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentModelSelectionBeforeSt
     EXPECT_FALSE(model.enabled());
 }
 
+TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallTreatmentBeforeStateAllocation)
+{
+    auto mesh = make_distributed_mesh();
+    require_multiple_ranks(*mesh);
+    auto material = make_material(mesh);
+    const auto rank = mesh->owned_cell_map()->getComm()->getRank();
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    Model model(mesh, boundaries);
+    SimpleFluid::TurbulenceModelOptions options;
+    options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
+    if (rank == 0)
+    {
+        options.wall_treatment =
+            SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+        options.wall_options.boundary_names = {"xmin"};
+    }
+
+    EXPECT_ANY_THROW(model.configure(options, material, 1.0));
+    EXPECT_FALSE(model.enabled());
+}
+
+TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallConstantsBeforeStateAllocation)
+{
+    auto mesh = make_distributed_mesh();
+    require_multiple_ranks(*mesh);
+    auto material = make_material(mesh);
+    const auto rank = mesh->owned_cell_map()->getComm()->getRank();
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    Model model(mesh, boundaries);
+    SimpleFluid::TurbulenceModelOptions options;
+    options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
+    options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    options.wall_options.boundary_names = {"xmin"};
+    if (rank == 0)
+        options.wall_options.c_mu = 0.08;
+
+    EXPECT_ANY_THROW(model.configure(options, material, 1.0));
+    EXPECT_FALSE(model.enabled());
+}
+
 TEST(TurbulenceModelMultiRankTest, RankLocalDatabaseParseFailureThrowsCoherently)
 {
     auto mesh = make_distributed_mesh();
@@ -191,6 +236,74 @@ TEST(TurbulenceModelMultiRankTest, StandardKEpsilonAndSSTAdvanceUniformDistribut
         ASSERT_NE(secondary, nullptr);
         expect_positive_finite_and_uniform(*secondary);
         expect_positive_finite_and_uniform(model.turbulent_kinematic_viscosity());
+    }
+}
+
+TEST(TurbulenceModelMultiRankTest, BothWallTreatmentsAdvanceAcrossPartitionedWallBatches)
+{
+    struct WallCase
+    {
+        SimpleFluid::TurbulenceModelType model;
+        SimpleFluid::TurbulenceWallTreatmentType wall;
+    };
+    const WallCase cases[] = {
+        {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
+         SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon},
+        {SimpleFluid::TurbulenceModelType::SSTKOmega,
+         SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST}};
+
+    for (const auto wall_case : cases)
+    {
+        auto mesh = make_distributed_mesh();
+        require_multiple_ranks(*mesh);
+        auto material = make_material(mesh);
+        SimpleFluid::BoundaryConditionSet boundaries;
+        boundaries.velocity["xmin"] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+        Model model(mesh, boundaries);
+        SimpleFluid::TurbulenceModelOptions options;
+        options.model = wall_case.model;
+        options.initial_turbulent_kinetic_energy = 0.1;
+        options.initial_dissipation_rate = 0.01;
+        options.initial_specific_dissipation_rate = 1.0;
+        options.wall_treatment = wall_case.wall;
+        options.wall_options.boundary_names = {"xmin"};
+        if (wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega)
+            options.initial_wall_distance = 0.25;
+        model.configure(options, material, 1.0);
+
+        SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            velocity.set_owned_value(
+                static_cast<Pack::local_ordinal_type>(owned), {0.0, 1.0, 0.0});
+        }
+        velocity.sync_ghosts();
+        SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "projected_face_flux");
+        const auto boundary_cache =
+            SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+        const auto summary = model.advance(
+            velocity, zero_flux, boundary_cache, 1.0e-4, material, 1.0,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+
+        EXPECT_TRUE(summary.converged);
+        ASSERT_NE(model.wall_y_plus(), nullptr);
+        ASSERT_NE(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
+        double local_max_y_plus = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto lid = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_TRUE(std::isfinite(model.turbulent_kinetic_energy().value(lid)));
+            EXPECT_GT(model.turbulent_kinetic_energy().value(lid), 0.0);
+            EXPECT_TRUE(std::isfinite(model.wall_y_plus()->value(lid)));
+            EXPECT_GE(model.wall_y_plus()->value(lid), 0.0);
+            local_max_y_plus = std::max(
+                local_max_y_plus, model.wall_y_plus()->value(lid));
+        }
+        double global_max_y_plus = 0.0;
+        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                           1, &local_max_y_plus, &global_max_y_plus);
+        EXPECT_GT(global_max_y_plus, 0.0);
     }
 }
 

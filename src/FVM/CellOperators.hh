@@ -21,7 +21,9 @@
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <functional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace SimpleFluid::FVM
@@ -33,7 +35,10 @@ namespace detail
 template<TpetraTypePack Pack>
 void scalar_cell_gradient(
     const CellField<Pack>& field,
-    const BoundaryConditionMap* boundary_conditions,
+    const std::function<BoundaryCondition(int, size_t)>*
+        boundary_condition,
+    const std::function<typename Pack::scalar_type(int, size_t)>*
+        boundary_value,
     VectorCellField<Pack>& gradients,
     const std::vector<BoundaryFaceLocation<Mesh<Pack>>>*
         cached_boundary_locations = nullptr)
@@ -50,7 +55,7 @@ void scalar_cell_gradient(
 
     std::vector<BoundaryFaceLocation<mesh_type>> local_boundary_locations;
     auto boundary_locations = cached_boundary_locations;
-    if (boundary_conditions != nullptr && boundary_locations == nullptr)
+    if (boundary_condition != nullptr && boundary_locations == nullptr)
     {
         local_boundary_locations = boundary_face_locations(mesh);
         boundary_locations = &local_boundary_locations;
@@ -83,7 +88,8 @@ void scalar_cell_gradient(
             }
             else
             {
-                if (boundary_conditions == nullptr
+                if (boundary_condition == nullptr
+                    || boundary_value == nullptr
                     || !mesh.is_boundary_face(face_lid)
                     || static_cast<size_t>(face_lid)
                        >= boundary_locations->size())
@@ -96,18 +102,16 @@ void scalar_cell_gradient(
                 {
                     continue;
                 }
-                const auto name =
-                    mesh.boundary_batch_name(location.batch_id);
-                const auto iter = boundary_conditions->find(name);
-                const auto condition =
-                    iter == boundary_conditions->end()
-                  ? BoundaryCondition{}
-                  : iter->second;
+                const auto condition = (*boundary_condition)(
+                    location.batch_id, location.in_batch_id);
                 d = mesh.face_centroid(face_lid)
                   - mesh.cell_centroid(cell_lid);
                 if (condition.type == BoundaryConditionType::Dirichlet)
                 {
-                    phi_delta = condition.value - phi_p;
+                    phi_delta = (*boundary_value)(
+                                    location.batch_id,
+                                    location.in_batch_id)
+                              - phi_p;
                 }
                 else if (condition.type == BoundaryConditionType::Neumann)
                 {
@@ -144,6 +148,42 @@ void scalar_cell_gradient(
     }
 }
 
+/** Preserve the cached map-based reconstruction path used by face fluxes. */
+template<TpetraTypePack Pack>
+void scalar_cell_gradient(
+    const CellField<Pack>& field,
+    const BoundaryConditionMap* boundary_conditions,
+    VectorCellField<Pack>& gradients,
+    const std::vector<BoundaryFaceLocation<Mesh<Pack>>>*
+        cached_boundary_locations = nullptr)
+{
+    if (boundary_conditions == nullptr)
+    {
+        scalar_cell_gradient(
+            field, nullptr, nullptr, gradients,
+            cached_boundary_locations);
+        return;
+    }
+
+    std::function<BoundaryCondition(int, size_t)> boundary_condition =
+        [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions->find(name);
+        return iter == boundary_conditions->end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    std::function<typename Pack::scalar_type(int, size_t)> boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_condition(batch_id, in_batch_id).value;
+    };
+    scalar_cell_gradient(
+        field, &boundary_condition, &boundary_value, gradients,
+        cached_boundary_locations);
+}
+
 } // namespace detail
 
 /**
@@ -159,7 +199,7 @@ template<TpetraTypePack Pack>
 void cell_gradient(const CellField<Pack>& field,
                    VectorCellField<Pack>& gradients)
 {
-    detail::scalar_cell_gradient(field, nullptr, gradients);
+    detail::scalar_cell_gradient(field, nullptr, nullptr, gradients);
 }
 
 /**
@@ -182,10 +222,58 @@ void cell_gradient(
     const BoundaryConditionMap& boundary_conditions,
     VectorCellField<Pack>& gradients)
 {
+    std::function<BoundaryCondition(int, size_t)> boundary_condition =
+        [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    std::function<typename Pack::scalar_type(int, size_t)> boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_condition(batch_id, in_batch_id).value;
+    };
     detail::scalar_cell_gradient(
         field,
-        &boundary_conditions,
+        &boundary_condition,
+        &boundary_value,
         gradients);
+}
+
+/**
+ * @brief Compute a scalar gradient using dynamic per-face boundary data.
+ *
+ * Dirichlet values are supplied independently from the condition object so
+ * wall treatments can update face values without rebuilding a boundary map.
+ * Neumann derivatives continue to use BoundaryCondition::value.
+ */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+    requires requires(BoundaryConditionProvider condition,
+                      BoundaryValueProvider value,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { condition(batch_id, in_batch_id) }
+            -> std::convertible_to<BoundaryCondition>;
+        { value(batch_id, in_batch_id) }
+            -> std::convertible_to<typename Pack::scalar_type>;
+    }
+void cell_gradient(const CellField<Pack>& field,
+                   BoundaryConditionProvider boundary_condition,
+                   BoundaryValueProvider boundary_value,
+                   VectorCellField<Pack>& gradients)
+{
+    std::function<BoundaryCondition(int, size_t)> condition =
+        std::move(boundary_condition);
+    std::function<typename Pack::scalar_type(int, size_t)> value =
+        std::move(boundary_value);
+    detail::scalar_cell_gradient(
+        field, &condition, &value, gradients);
 }
 
 /**

@@ -15,6 +15,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/BoundaryCache.hh"
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -95,7 +96,8 @@ public:
         scalar_type reference_density,
         velocity_field_type& velocity,
         const source_type& acceleration_source,
-        const LinearSolverOptions& linear_options = {}) const;
+        const LinearSolverOptions& linear_options = {},
+        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
@@ -105,7 +107,8 @@ public:
         const field_type& dynamic_viscosity,
         scalar_type reference_density,
         const source_type& acceleration_source,
-        const velocity_field_type* correction_field = nullptr) const;
+        const velocity_field_type* correction_field = nullptr,
+        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
 private:
     void validate_transport_inputs(

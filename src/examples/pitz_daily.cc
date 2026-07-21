@@ -430,6 +430,10 @@ int main(int argc, char** argv)
         SimpleFluid::TurbulenceModelType::StandardKEpsilon;
     turbulence_options.initial_turbulent_kinetic_energy = 0.375;
     turbulence_options.initial_dissipation_rate = 14.855;
+    turbulence_options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    turbulence_options.wall_options.boundary_names = {
+        "upperWall", "lowerWall"};
     auto& turbulence = solver.configure_turbulence(turbulence_options);
 
     SimpleFluid::ProgressStream progress(std::cout);

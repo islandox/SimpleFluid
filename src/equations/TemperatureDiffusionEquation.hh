@@ -89,7 +89,8 @@ public:
         const source_type& power_density,
         FVM::NonOrthogonalTreatment treatment,
         const LinearSolverOptions& linear_options = {},
-        const field_type* thermal_conductivity_override = nullptr) const;
+        const field_type* thermal_conductivity_override = nullptr,
+        const FVM::BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr) const;
 
 private:
     SP<const mesh_type> d_mesh;

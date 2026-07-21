@@ -11,6 +11,7 @@
 #include "equations/BoussinesqModel.hh"
 #include "equations/turbulence/TurbulenceEquations.hh"
 #include "equations/turbulence/TurbulenceScalarTransportEquation.hh"
+#include "equations/turbulence/TurbulenceWallTreatment.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
@@ -49,6 +50,21 @@ std::string_view to_string(TurbulenceModelType model) noexcept;
  */
 TurbulenceModelType parse_turbulence_model_type(const std::string& value);
 
+/** @brief Runtime selection of the wall treatment paired with a closure. */
+enum class TurbulenceWallTreatmentType
+{
+    None,
+    ResolvedLowReSST,
+    StandardHighReKEpsilon
+};
+
+/** @brief Return the canonical database name of a wall treatment. */
+std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept;
+
+/** @brief Parse `none`, `resolvedLowReSST`, or `standardHighReKEpsilon`. */
+TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
+    const std::string& value);
+
 /** @brief Initial conditions, floors, and turbulent heat-flux controls. */
 struct TurbulenceModelOptions
 {
@@ -62,6 +78,10 @@ struct TurbulenceModelOptions
     real_t turbulent_prandtl_number = 0.9;
     /** Required by BSL and SST until a distributed wall-distance solver exists. */
     std::optional<real_t> initial_wall_distance;
+    TurbulenceWallTreatmentType wall_treatment =
+        TurbulenceWallTreatmentType::None;
+    /** Wall patches/constants; overlapping closure constants are coordinated. */
+    TurbulenceWallTreatmentOptions wall_options;
 };
 
 /** @brief Validate a turbulence configuration before allocating model state. */
@@ -76,8 +96,10 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
  * Molecular fields remain authoritative in MaterialPropertyFields. This model
  * publishes separate effective viscosity and conductivity fields for the
  * momentum and temperature equations. The implemented closures use shear
- * production and a gradient-diffusion turbulent heat flux. Wall functions and
- * buoyancy production are deliberately outside this first coupling layer.
+ * production and a gradient-diffusion turbulent heat flux. Optional resolved
+ * SST and high-Re standard-k-epsilon wall treatments provide dynamic scalar
+ * data and face transport coefficients. Buoyancy production remains outside
+ * this coupling layer.
  * The isotropic Reynolds stress is supplied explicitly as
  * @f$-2/3\,\nabla k@f$, so the solver pressure remains mechanical pressure.
  */
@@ -156,6 +178,17 @@ public:
     const field_type& effective_dynamic_viscosity() const;
     const field_type& effective_thermal_conductivity() const;
 
+    /** Sparse face viscosities supplied by an active wall treatment. */
+    const FVM::BoundaryCache<Pack>*
+    effective_dynamic_viscosity_boundary_cache() const noexcept;
+
+    /** Sparse face conductivities supplied by an active wall treatment. */
+    const FVM::BoundaryCache<Pack>*
+    effective_thermal_conductivity_boundary_cache() const noexcept;
+
+    /** Cell diagnostic containing the maximum incident-wall y+ when active. */
+    const field_type* wall_y_plus() const noexcept;
+
     /** Active fields suitable for opt-in solution output. */
     const std::map<std::string, const field_type*>& output_fields() const noexcept;
 
@@ -171,6 +204,7 @@ private:
 
     SP<const mesh_type> d_mesh;
     VectorBoundaryConditionMap d_velocity_boundary_conditions;
+    FVM::VelocityBoundaryCache<Pack> d_wall_velocity_boundary_cache;
     TurbulenceBoundaryConditionSet d_boundary_conditions;
     TurbulenceModelOptions d_options;
     std::unique_ptr<State> d_state;

@@ -369,7 +369,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     const source_type& power_density,
     FVM::NonOrthogonalTreatment treatment,
     const LinearSolverOptions& linear_options,
-    const field_type* thermal_conductivity_override) const
+    const field_type* thermal_conductivity_override,
+    const FVM::BoundaryCache<Pack>* boundary_thermal_conductivity) const
     -> LinearSolveStatistics
 {
     EquationValidation::require_mesh_match(
@@ -471,7 +472,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
             power_density,
             treatment,
             correction_field,
-            d_cached_physical_transport_matrix);
+            d_cached_physical_transport_matrix,
+            boundary_thermal_conductivity);
     d_cached_physical_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_conductivities_positive)
     {

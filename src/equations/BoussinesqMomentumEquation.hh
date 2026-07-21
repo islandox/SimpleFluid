@@ -93,7 +93,8 @@ public:
         velocity_field_type& velocity,
         const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {},
-        const field_type* dynamic_viscosity_override = nullptr) const;
+        const field_type* dynamic_viscosity_override = nullptr,
+        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
@@ -106,7 +107,8 @@ public:
         bool density_feedback_enabled,
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr,
-        const field_type* dynamic_viscosity_override = nullptr) const;
+        const field_type* dynamic_viscosity_override = nullptr,
+        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
 private:
     const field_type& select_dynamic_viscosity(

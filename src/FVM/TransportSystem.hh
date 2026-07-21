@@ -13,6 +13,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/BoundaryCache.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/OperatorDetails.hh"
 #include "geometry/Mesh.hh"
@@ -24,9 +25,11 @@
 #include <concepts>
 #include <cstddef>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 namespace SimpleFluid::FVM
 {
@@ -1118,7 +1121,10 @@ weighted_scalar_transport_system(
     const CellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     std::function<typename Pack::scalar_type(
-        typename Pack::local_ordinal_type)> implicit_sink = {})
+        typename Pack::local_ordinal_type)> implicit_sink = {},
+    std::function<std::optional<typename Pack::scalar_type>(
+        typename Pack::local_ordinal_type)> fixed_cell_value = {},
+    const BoundaryCache<Pack>* boundary_diffusivity = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1141,6 +1147,36 @@ weighted_scalar_transport_system(
             "weighted_scalar_transport_system requires a positive "
             "time step.");
     }
+    validate_boundary_coefficient_cache(
+        mesh, boundary_diffusivity,
+        "weighted_scalar_transport_system");
+    auto boundary_face_diffusivity =
+        [&](int batch_id, size_t in_batch_id,
+            scalar_type owner_cell_value)
+    {
+        return boundary_coefficient<Pack>(
+            boundary_diffusivity, batch_id, in_batch_id,
+            owner_cell_value);
+    };
+
+    std::vector<std::optional<scalar_type>> fixed_cell_values(
+        mesh.num_owned_cells());
+    if (fixed_cell_value)
+    {
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            auto value = fixed_cell_value(cell_lid);
+            if (value.has_value() && !std::isfinite(*value))
+            {
+                throw std::invalid_argument(
+                    "weighted scalar transport requires finite fixed-cell "
+                    "values.");
+            }
+            fixed_cell_values[owned] = value;
+        }
+    }
 
     scalar_type implicit_weight{};
     scalar_type explicit_weight{};
@@ -1159,7 +1195,8 @@ weighted_scalar_transport_system(
     }
 
     const auto gradient_stencils =
-        detail::least_squares_gradient_stencils(mesh);
+        detail::scalar_affine_gradient_stencils(
+            mesh, boundary_condition, boundary_value);
     const auto boundary_locations =
         detail::boundary_face_locations(mesh);
     const auto prepared = detail::prepare_transport_matrix<Pack>(
@@ -1231,9 +1268,12 @@ weighted_scalar_transport_system(
                 -implicit_weight
               * face_diffusivity
               * gradient_weight;
-            for (const auto& entry :
-                 gradient_stencils[
-                     static_cast<size_t>(gradient_cell_lid)])
+            const auto& stencil = gradient_stencils[
+                static_cast<size_t>(gradient_cell_lid)];
+            rhs->sumIntoLocalValue(
+                cell_lid,
+                -scale * stencil.constant.dot(tangential_area));
+            for (const auto& entry : stencil.entries)
             {
                 detail::add_matrix_entry(
                     row_values,
@@ -1349,13 +1389,15 @@ weighted_scalar_transport_system(
             const auto condition =
                 boundary_condition(
                     location.batch_id, location.in_batch_id);
-            const auto cell_diffusivity =
-                diffusivity.local_value(cell_lid);
+            const auto face_diffusivity =
+                boundary_face_diffusivity(
+                    location.batch_id, location.in_batch_id,
+                    diffusivity.local_value(cell_lid));
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coefficient =
                     detail::boundary_diffusion_coefficient(
-                        mesh, face_lid, cell_lid, cell_diffusivity);
+                        mesh, face_lid, cell_lid, face_diffusivity);
                 if (coefficient > scalar_type{})
                 {
                     detail::add_matrix_entry(
@@ -1375,13 +1417,13 @@ weighted_scalar_transport_system(
                             - mesh.cell_centroid(cell_lid));
                 add_non_orthogonal_stencil(
                     cell_lid, scalar_type{1},
-                    cell_diffusivity, tangential_area);
+                    face_diffusivity, tangential_area);
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
                 rhs->sumIntoLocalValue(
                     cell_lid,
-                    cell_diffusivity * condition.value
+                    face_diffusivity * condition.value
                   * mesh.face_area(face_lid));
             }
             else if (condition.type == BoundaryConditionType::Robin)
@@ -1389,6 +1431,21 @@ weighted_scalar_transport_system(
                 throw std::runtime_error(
                     "Robin boundary conditions are not yet implemented in weighted_scalar_transport_system.");
             }
+        }
+
+        if (fixed_cell_values[owned].has_value())
+        {
+            // Retain the assembled graph (including non-orthogonal stencil
+            // entries) so a cached matrix remains reusable if constraints
+            // change between calls, but make the constrained equation an
+            // exact identity row.
+            for (auto& [column, value] : row_values)
+            {
+                static_cast<void>(column);
+                value = scalar_type{};
+            }
+            row_values[cell_lid] = scalar_type{1};
+            rhs->replaceLocalValue(cell_lid, *fixed_cell_values[owned]);
         }
 
         columns.clear();
@@ -1409,8 +1466,21 @@ weighted_scalar_transport_system(
             *correction_field,
             diffusivity,
             boundary_condition,
+            boundary_value,
             *rhs,
-            explicit_weight);
+            explicit_weight,
+            boundary_face_diffusivity);
+    }
+    // An explicit correction is an RHS update, so restore constrained values
+    // after it to keep fixed rows exactly equal to phi = phi_fixed.
+    for (size_t owned = 0; owned < fixed_cell_values.size(); ++owned)
+    {
+        if (fixed_cell_values[owned].has_value())
+        {
+            rhs->replaceLocalValue(
+                static_cast<local_ordinal_type>(owned),
+                *fixed_cell_values[owned]);
+        }
     }
 
     matrix->fillComplete();
@@ -1441,7 +1511,8 @@ physical_temperature_transport_system(
     SourceProvider power_density,
     NonOrthogonalTreatment treatment,
     const CellField<Pack>* correction_field = nullptr,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    const BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1464,6 +1535,22 @@ physical_temperature_transport_system(
             "physical_temperature_transport_system requires a positive "
             "time step.");
     }
+    validate_boundary_coefficient_cache(
+        mesh,
+        boundary_thermal_conductivity,
+        "physical_temperature_transport_system");
+
+    auto boundary_conductivity =
+        [&](int batch_id,
+            size_t in_batch_id,
+            scalar_type owner_cell_value)
+    {
+        return boundary_coefficient<Pack>(
+            boundary_thermal_conductivity,
+            batch_id,
+            in_batch_id,
+            owner_cell_value);
+    };
 
     scalar_type implicit_weight{};
     scalar_type explicit_weight{};
@@ -1482,7 +1569,8 @@ physical_temperature_transport_system(
     }
 
     const auto gradient_stencils =
-        detail::least_squares_gradient_stencils(mesh);
+        detail::scalar_affine_gradient_stencils(
+            mesh, boundary_condition, boundary_value);
     const auto boundary_locations =
         detail::boundary_face_locations(mesh);
     const auto prepared = detail::prepare_transport_matrix<Pack>(
@@ -1535,9 +1623,12 @@ physical_temperature_transport_system(
                 -implicit_weight
               * face_conductivity
               * gradient_weight;
-            for (const auto& entry :
-                 gradient_stencils[
-                     static_cast<size_t>(gradient_cell_lid)])
+            const auto& stencil = gradient_stencils[
+                static_cast<size_t>(gradient_cell_lid)];
+            rhs->sumIntoLocalValue(
+                cell_lid,
+                -scale * stencil.constant.dot(tangential_area));
+            for (const auto& entry : stencil.entries)
             {
                 detail::add_matrix_entry(
                     row_values,
@@ -1658,7 +1749,10 @@ physical_temperature_transport_system(
                 boundary_condition(
                     location.batch_id, location.in_batch_id);
             const auto face_conductivity =
-                thermal_conductivity.local_value(cell_lid);
+                boundary_conductivity(
+                    location.batch_id,
+                    location.in_batch_id,
+                    thermal_conductivity.local_value(cell_lid));
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coefficient =
@@ -1719,8 +1813,10 @@ physical_temperature_transport_system(
             *correction_field,
             thermal_conductivity,
             boundary_condition,
+            boundary_value,
             *rhs,
-            explicit_weight);
+            explicit_weight,
+            boundary_conductivity);
     }
 
     matrix->fillComplete();
@@ -1748,7 +1844,8 @@ physical_momentum_transport_system(
     const VectorCellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     BoundaryDiffusionProvider boundary_diffusion =
-        BoundaryDiffusionProvider{})
+        BoundaryDiffusionProvider{},
+    const BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1772,6 +1869,22 @@ physical_momentum_transport_system(
             "physical_momentum_transport_system requires positive time step "
             "and reference density.");
     }
+    validate_boundary_coefficient_cache(
+        mesh,
+        boundary_dynamic_viscosity,
+        "physical_momentum_transport_system");
+
+    auto boundary_viscosity =
+        [&](int batch_id,
+            size_t in_batch_id,
+            scalar_type owner_cell_value)
+    {
+        return boundary_coefficient<Pack>(
+            boundary_dynamic_viscosity,
+            batch_id,
+            in_batch_id,
+            owner_cell_value);
+    };
 
     scalar_type implicit_weight{};
     scalar_type explicit_weight{};
@@ -1790,7 +1903,7 @@ physical_momentum_transport_system(
     }
 
     const auto gradient_stencils =
-        detail::least_squares_gradient_stencils(mesh);
+        detail::vector_affine_gradient_stencils(mesh, boundary_value);
     const auto boundary_locations =
         detail::boundary_face_locations(mesh);
     const auto prepared = detail::prepare_transport_matrix<Pack>(
@@ -1848,9 +1961,16 @@ physical_momentum_transport_system(
                 -implicit_weight
               * face_kinematic_viscosity
               * gradient_weight;
-            for (const auto& entry :
-                 gradient_stencils[
-                     static_cast<size_t>(gradient_cell_lid)])
+            const auto& stencil = gradient_stencils[
+                static_cast<size_t>(gradient_cell_lid)];
+            for (size_t component = 0; component < components; ++component)
+            {
+                rhs->sumIntoLocalValue(
+                    cell_lid, component,
+                    -scale
+                  * stencil.constants[component].dot(tangential_area));
+            }
+            for (const auto& entry : stencil.entries)
             {
                 detail::add_matrix_entry(
                     row_values,
@@ -1976,7 +2096,10 @@ physical_momentum_transport_system(
                 continue;
             }
             const auto face_kinematic_viscosity =
-                dynamic_viscosity.local_value(cell_lid)
+                boundary_viscosity(
+                    location.batch_id,
+                    location.in_batch_id,
+                    dynamic_viscosity.local_value(cell_lid))
               / reference_density;
             const auto coefficient =
                 detail::boundary_diffusion_coefficient(
@@ -2030,9 +2153,11 @@ physical_momentum_transport_system(
         add_variable_explicit_non_orthogonal_correction<Pack>(
             *correction_field,
             dynamic_viscosity,
+            boundary_value,
             *rhs,
             explicit_weight / reference_density,
-            boundary_diffusion);
+            boundary_diffusion,
+            boundary_viscosity);
     }
 
     add_explicit_deviatoric_transpose_gradient_stress<Pack>(
@@ -2041,7 +2166,8 @@ physical_momentum_transport_system(
         reference_density,
         boundary_value,
         *rhs,
-        boundary_diffusion);
+        boundary_diffusion,
+        boundary_viscosity);
 
     matrix->fillComplete();
     return {matrix, rhs};
