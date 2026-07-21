@@ -1,5 +1,5 @@
 /**
- * @file View.hh
+ * @file RandomAccessView.hh
  * @author islandox (59904740+islandox@users.noreply.github.com)
  * @brief random accessible view of a contiguous data array, with random access iterators
  * @version 0.1
@@ -23,6 +23,11 @@ namespace SimpleFluid
 
 /**
  * @brief A random accessible view from a pointer and size, with random access iterators.
+ *
+ * The view is non-owning. The caller must keep the viewed storage alive and
+ * must not invalidate its address while this object or any iterator obtained
+ * from it is in use.
+ * Element access is unchecked; indices must be less than size().
  * 
  * @tparam T data type
  */
@@ -117,11 +122,19 @@ public:
     {
     }
 
+    /**
+     * @pre @p data addresses at least @p size live elements (or is null when
+     *      @p size is zero).
+     */
     RandomAccessView(T* data, size_type size)
         : d_data(data), d_size(size)
     {
     }
 
+    /**
+     * @warning Destruction or any operation that reallocates @p data
+     *          invalidates the view and its iterators.
+     */
     RandomAccessView(std::vector<T>& data)
         : d_data(data.data()), d_size(data.size())
     {

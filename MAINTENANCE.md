@@ -243,7 +243,9 @@ implementation. C++ files use Doxygen comments:
   affect correct use;
 - test comments explain behavior and regression intent, not line-by-line setup.
 
-Do not restate an identifier in prose or add speculative `@throws` tags.
+Leave self-explanatory variables, aliases, trivial inline accessors, and simple
+forwarders uncommented. Do not restate an identifier in prose or add
+speculative `@throws` tags.
 Update comments in the same change as an interface or invariant.
 
 Generate the API reference with Doxygen installed:
@@ -254,9 +256,11 @@ cmake -S . -B build -DSIMPLEFLUID_BUILD_DOCS=ON \
 cmake --build build --target docs
 ```
 
-The HTML entry point is `build/docs/doxygen/html/index.html`. Review Doxygen
-warnings, especially missing parameter documentation and unresolved links,
-before merging interface changes.
+The HTML entry point is `build/docs/doxygen/html/index.html`. Review warnings
+for malformed commands, stale parameter tags, and unresolved links. Missing
+documentation alone is not a reason to narrate an otherwise obvious API.
+The documentation target filters GitHub-style inline and display math into
+Doxygen formulas; keep Markdown math in GitHub-compatible syntax.
 
 ## Review and handoff checklist
 

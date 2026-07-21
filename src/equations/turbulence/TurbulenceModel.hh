@@ -40,9 +40,9 @@ enum class TurbulenceModelType
     StandardKEpsilon,
     RNGKEpsilon,
     RealizableKEpsilon,
-    StandardKOmega,
-    BSLKOmega,
-    SSTKOmega
+    StandardKOmega,     ///< Standard k-omega closure.
+    BSLKOmega,          ///< Baseline blended k-omega closure.
+    SSTKOmega           ///< Shear-stress-transport k-omega closure.
 };
 
 /** @brief Return the canonical database name of a turbulence closure. */
@@ -60,8 +60,8 @@ TurbulenceModelType parse_turbulence_model_type(const std::string& value);
 enum class TurbulenceWallTreatmentType
 {
     None,
-    ResolvedLowReSST,
-    StandardHighReKEpsilon
+    ResolvedLowReSST,           ///< Resolve SST through the viscous sublayer.
+    StandardHighReKEpsilon      ///< Apply high-Re k-epsilon wall functions.
 };
 
 /** @brief Return the canonical database name of a wall treatment. */
@@ -78,9 +78,9 @@ struct TurbulenceModelOptions
     real_t initial_turbulent_kinetic_energy = 1.0e-6;
     real_t initial_dissipation_rate = 1.0e-6;
     real_t initial_specific_dissipation_rate = 1.0;
-    real_t min_turbulent_kinetic_energy = 1.0e-12;
-    real_t min_dissipation_rate = 1.0e-12;
-    real_t min_specific_dissipation_rate = 1.0e-12;
+    real_t min_turbulent_kinetic_energy = 1.0e-12; ///< Positive @f$k@f$ floor.
+    real_t min_dissipation_rate = 1.0e-12; ///< Positive @f$\epsilon@f$ floor.
+    real_t min_specific_dissipation_rate = 1.0e-12; ///< Positive @f$\omega@f$ floor.
     real_t turbulent_prandtl_number = 0.9;
     /** Required by BSL and SST until a distributed wall-distance solver exists. */
     std::optional<real_t> initial_wall_distance;
@@ -130,21 +130,21 @@ public:
     TurbulenceModel& operator=(TurbulenceModel&&) = delete;
 
     /**
-     * Replace the active closure and reset its transported fields.
+     * @brief Replace the active closure and reset its transported fields.
      * @note This is collective over the mesh communicator.
      */
     void configure(const TurbulenceModelOptions& options, const material_type& material,
                    scalar_type reference_density);
 
     /**
-     * Parse and replace the active closure from flat database keys.
+     * @brief Parse and replace the active closure from flat database keys.
      * @note Parsing and configuration are collective over the mesh communicator.
      */
     void configure(const Database& database, const material_type& material,
                    scalar_type reference_density);
 
     /**
-     * Disable turbulence and release its lazily allocated state.
+     * @brief Disable turbulence and release its lazily allocated state.
      * @note Invoke consistently on every mesh rank.
      */
     bool disable() noexcept;
@@ -171,7 +171,7 @@ public:
     void refresh_effective_properties(const material_type& material, scalar_type reference_density);
 
     /**
-     * Replace the positive BSL/SST wall-distance field.
+     * @brief Replace the positive BSL/SST wall-distance field.
      * @note This is collective over the mesh communicator.
      */
     void set_wall_distance(const field_type& wall_distance);

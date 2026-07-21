@@ -47,7 +47,7 @@ public:
      * @brief One graded layer stack attached to a named mesh boundary.
      *
      * The first cell starts at the boundary and subsequent widths are
-     * multiplied by @ref growth_ratio.
+     * multiplied by `growth_ratio`.
      */
     struct BoundaryLayerSpec
     {

@@ -31,15 +31,15 @@ public:
     /** @brief Coefficients controlling the BSL k-omega closure. */
     struct Coefficients
     {
-        real_t beta_star = 0.09;
-        real_t kappa = 0.41;
-        real_t sigma_k_1 = 0.5;
-        real_t sigma_omega_1 = 0.5;
-        real_t beta_1 = 0.075;
-        real_t sigma_k_2 = 1.0;
-        real_t sigma_omega_2 = 0.856;
-        real_t beta_2 = 0.0828;
-        real_t production_limit_factor = 20.0;
+        real_t beta_star = 0.09; ///< Kinetic-energy destruction coefficient.
+        real_t kappa = 0.41; ///< von Karman constant.
+        real_t sigma_k_1 = 0.5; ///< Inner @f$k@f$ diffusion coefficient.
+        real_t sigma_omega_1 = 0.5; ///< Inner @f$\omega@f$ diffusion coefficient.
+        real_t beta_1 = 0.075; ///< Inner omega destruction coefficient.
+        real_t sigma_k_2 = 1.0; ///< Outer @f$k@f$ diffusion coefficient.
+        real_t sigma_omega_2 = 0.856; ///< Outer @f$\omega@f$ diffusion coefficient.
+        real_t beta_2 = 0.0828; ///< Outer omega destruction coefficient.
+        real_t production_limit_factor = 20.0; ///< Kinetic-energy production cap factor.
         /** @brief Dimensional @f$CD_{k\omega}@f$ floor, in 1/s2. */
         real_t cross_diffusion_floor = 1.0e-20;
     };

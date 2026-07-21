@@ -20,6 +20,9 @@ namespace SimpleFluid::Benchmark
 
 /**
  * @brief Snapshot of process memory usage from /proc/self/status.
+ *
+ * Values are in KiB; `resident_kib` is current usage and
+ * `peak_resident_kib` is the process high-water mark.
  */
 struct ProcessMemory
 {
@@ -36,6 +39,11 @@ std::string csv_escape(std::string_view value);
  * @brief Benchmark record containing timing, convergence, and resource metrics.
  *
  * All fields are populated from a solver run and written as a CSV row.
+ *
+ * Field suffixes encode units: `_seconds`, `_kib`, and `_deg` denote seconds,
+ * KiB, and degrees. `rss_max_rank_kib`/`rss_sum_ranks_kib` are respectively
+ * the maximum and sum across ranks; the `peak_rss_` variants aggregate each
+ * process high-water mark. `linear_tolerance` is relative.
  */
 struct Record
 {

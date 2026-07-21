@@ -33,8 +33,8 @@ struct BoilingSourceOptions
     real_t boiling_activation_delta_t = 0.0;
     real_t boiling_time_scale = 1.0;
     real_t latent_heat = 2.256e6;
-    real_t gas_density = 1.0;
-    real_t wall_evaporation_fraction = 0.0;
+    real_t gas_density = 1.0; ///< Density used to convert vapor mass to void.
+    real_t wall_evaporation_fraction = 0.0; ///< Fraction of wall heat used for evaporation.
     real_t wall_heat_flux = 0.0;
     ArrString wall_boiling_patches;
 };
@@ -219,6 +219,7 @@ public:
 
     /**
      * @brief Temperature-equation source contribution for one cell.
+     * @return Negative latent-heat source for the temperature equation.
      */
     scalar_type temperature_source(local_ordinal_type cell_lid) const
     {

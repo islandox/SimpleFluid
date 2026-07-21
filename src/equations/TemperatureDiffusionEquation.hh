@@ -80,6 +80,10 @@ public:
         const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {}) const;
 
+    /**
+     * @brief Advance conservative temperature with rho-cp storage,
+     *        conductivity diffusion, and volumetric power density.
+     */
     LinearSolveStatistics advance_physical(
         const field_type& old_temperature,
         const FaceField<Pack>& face_fluxes,

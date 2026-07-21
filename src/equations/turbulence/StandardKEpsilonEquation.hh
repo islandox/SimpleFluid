@@ -28,11 +28,11 @@ public:
     /** @brief Coefficients controlling the standard k-epsilon closure. */
     struct Coefficients
     {
-        real_t c_mu = 0.09;
-        real_t c_epsilon_1 = 1.44;
-        real_t c_epsilon_2 = 1.92;
-        real_t sigma_k = 1.0;
-        real_t sigma_epsilon = 1.3;
+        real_t c_mu = 0.09; ///< Eddy-viscosity coefficient.
+        real_t c_epsilon_1 = 1.44; ///< Epsilon production coefficient.
+        real_t c_epsilon_2 = 1.92; ///< Epsilon destruction coefficient.
+        real_t sigma_k = 1.0; ///< Turbulent Prandtl number for @f$k@f$.
+        real_t sigma_epsilon = 1.3; ///< Turbulent Prandtl number for @f$\epsilon@f$.
     };
 
     StandardKEpsilonEquation() : StandardKEpsilonEquation(Coefficients{}) {}

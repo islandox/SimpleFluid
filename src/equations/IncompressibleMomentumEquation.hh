@@ -87,6 +87,7 @@ public:
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
 
+    /** @brief Advance using dynamic viscosity divided by reference density. */
     LinearSolveSummary advance_velocity_physical(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
@@ -99,6 +100,7 @@ public:
         const LinearSolverOptions& linear_options = {},
         const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
+    /** @brief Assemble using dynamic viscosity divided by reference density. */
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,

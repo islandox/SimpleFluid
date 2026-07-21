@@ -60,6 +60,7 @@ struct OmitBoundaryGradientSamples
  * @param diffusivity Constant scalar diffusivity coefficient.
  * @param boundary_condition Boundary-condition provider.
  * @param[in,out] rhs Owned-cell RHS vector; receives the correction.
+ * @param correction_weight Fraction of the correction added to @p rhs.
  * @throws std::invalid_argument if @p rhs is not on the owned-cell map.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider>
@@ -165,6 +166,10 @@ void add_explicit_non_orthogonal_correction(
  * The correction is applied component-wise using the vector least-squares
  * gradient reconstruction. Boundary faces are treated as prescribed-value
  * diffusion faces, matching vector transport-system assembly.
+ *
+ * @param correction_weight Fraction of the correction added to @p rhs.
+ * @throws std::invalid_argument if @p rhs is incompatible with the mesh or
+ *         does not contain three component vectors.
  */
 template<TpetraTypePack Pack,
          class BoundaryDiffusionProvider = detail::AlwaysDiffuseBoundary>
@@ -293,6 +298,13 @@ void add_explicit_non_orthogonal_correction(
 /**
  * @brief Add a scalar explicit non-orthogonal correction using a
  *        cell-centered variable diffusion coefficient and boundary samples.
+ *
+ * @param boundary_value Boundary-value provider used by gradient reconstruction.
+ * @param correction_weight Fraction of the correction added to @p rhs.
+ * @param boundary_coefficient Boundary-face coefficient provider receiving
+ *        the owner-cell value as its fallback.
+ * @throws std::invalid_argument if fields use different meshes, @p rhs uses
+ *         an incompatible map, or a cell coefficient is negative.
  */
 template<TpetraTypePack Pack,
          class BoundaryConditionProvider,
@@ -428,6 +440,13 @@ void add_variable_explicit_non_orthogonal_correction(
 /**
  * @brief Add a vector explicit non-orthogonal correction using a
  *        cell-centered variable diffusion coefficient and boundary samples.
+ *
+ * @param boundary_value Boundary-value provider used by gradient reconstruction.
+ * @param correction_weight Fraction of the correction added to @p rhs.
+ * @param boundary_coefficient Boundary-face coefficient provider receiving
+ *        the owner-cell value as its fallback.
+ * @throws std::invalid_argument if fields use different meshes, @p rhs is
+ *         incompatible, or a cell coefficient is negative.
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,
@@ -591,6 +610,8 @@ void add_variable_explicit_non_orthogonal_correction(
  *         boundary face.
  * @tparam BoundaryStressProvider Callable selecting boundary faces on which
  *         viscous stress is applied (for example, excluding slip faces).
+ * @tparam BoundaryCoefficientProvider Callable providing boundary-face
+ *         dynamic viscosity from its owner-cell fallback.
  * @param old_velocity Lagged velocity used by the explicit stress term.
  * @param dynamic_viscosity Molecular or effective dynamic-viscosity field.
  * @param reference_density Constant reference density.
@@ -794,6 +815,8 @@ explicit_non_orthogonal_diffusion_system(
  * @param non_orthogonal_implicit_weight Fraction of the tangential term to
  *        place in the matrix. Use 1.0 for a fully implicit operator and
  *        0.5 for the built-in hybrid treatment.
+ * @throws std::invalid_argument if diffusivity is negative or the implicit
+ *         weight is outside `[0, 1]`.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack>
@@ -998,6 +1021,9 @@ fully_implicit_non_orthogonal_diffusion_system(
  * fraction when it is supplied. If no correction field is provided,
  * `explicit` falls back to the orthogonal matrix and `hybrid` assembles only
  * its implicit half.
+ *
+ * @throws std::invalid_argument if @p correction_field uses another mesh or
+ *         @p treatment is invalid.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack>
@@ -1056,6 +1082,8 @@ non_orthogonal_diffusion_system(
  * @f$-\nabla\cdot(\Gamma\nabla\phi)@f$ using the orthogonal two-point
  * stencil plus the least-squares tangential correction. The input field's
  * overlap values must be synchronized before calling.
+ *
+ * @throws std::invalid_argument if @p diffusivity is negative.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider>
 Teuchos::RCP<typename Pack::vector_type>
@@ -1246,6 +1274,10 @@ bool solve_explicit_non_orthogonal_diffusion(
  * implicit solve is performed. For `hybrid`, an initial half-implicit solve
  * is followed by @p nNonOrthogonalCorrectors correction solves that put the
  * remaining half of the tangential term on the RHS.
+ *
+ * @return `true` if every linear solve converged; otherwise `false`.
+ * @throws std::invalid_argument if @p solution uses another mesh, the
+ *         corrector count is negative, or @p treatment is invalid.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider, class SourceProvider>
 bool solve_non_orthogonal_diffusion(

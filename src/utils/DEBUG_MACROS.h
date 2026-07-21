@@ -2,6 +2,10 @@
  * @file DEBUG_MACROS.h
  * @author islandox (59904740+islandox@users.noreply.github.com)
  * @brief Preprocessor macro utilities for argument counting and dispatch for debug checks.
+ *
+ * `CHECK` and overflow checks compile out when `NDEBUG` is defined.
+ * `CHECK_BOUNDS` does likewise unless
+ * `SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS` is enabled explicitly.
  * @version 0.1
  * @date 2026-05-27
  * 

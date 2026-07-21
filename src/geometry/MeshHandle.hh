@@ -145,6 +145,9 @@ public:
         UnstructuredPtr mesh,
         const unstructured_indexer_type& indexer);
 
+    /**
+     * @brief Adapt an existing unstructured partition without repartitioning.
+     */
     template<class Partitioned>
         requires Meshes::PartitionedMeshClass<
             std::remove_const_t<Partitioned>>

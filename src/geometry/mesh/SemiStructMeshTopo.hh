@@ -28,6 +28,10 @@ namespace SimpleFluid::Meshes
  *
  * Base cells are supplied as consistently oriented node loops. Their edges
  * are deduplicated into side faces, then repeated through every axial layer.
+ * `cell_side_faces()` follows each base cell's node-loop order, and both
+ * ordinal accessors are bounds checked. `interior_cell_batch()` contains only
+ * cells with a neighbor across every face. `neighbor_cells()` returns axial
+ * neighbors before base-topology neighbors.
  */
 class SemiStructMeshTopo
 {
