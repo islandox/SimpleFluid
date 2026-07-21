@@ -1,3 +1,14 @@
+/**
+ * @file RadiolyticGasProperties.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Implements radiolytic gas option parsing and property calculations.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #include "equations/RadiolyticGasProperties.hh"
 
 #include <algorithm>
@@ -9,6 +20,11 @@ namespace SimpleFluid
 namespace
 {
 
+/**
+ * @brief Convert an option token to lower case for case-insensitive parsing.
+ * @param value Token to normalize.
+ * @return Lower-case copy of @p value.
+ */
 std::string normalized(std::string value)
 {
     std::ranges::transform(
@@ -21,6 +37,15 @@ std::string normalized(std::string value)
     return value;
 }
 
+/**
+ * @brief Read an optional database value while normalizing type errors.
+ * @tparam T Requested database value type.
+ * @param database Source database.
+ * @param key Option key.
+ * @param fallback Value used when @p key is absent.
+ * @return Parsed value or @p fallback.
+ * @throws std::invalid_argument if the stored value has the wrong type.
+ */
 template<class T>
 T value_or(
     const Database& database,
@@ -40,6 +65,12 @@ T value_or(
     }
 }
 
+/**
+ * @brief Parse the configured radiolytic gas model.
+ * @param value Model name.
+ * @return Parsed model mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 RadiolyticGasMode parse_mode(std::string value)
 {
     value = normalized(std::move(value));
@@ -57,6 +88,12 @@ RadiolyticGasMode parse_mode(std::string value)
         "idealGasSource, or sheng2024TwoPopulation.");
 }
 
+/**
+ * @brief Parse the absolute-pressure closure used by the gas model.
+ * @param value Pressure-mode name.
+ * @return Parsed pressure mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 RadiolyticPressureMode parse_pressure_mode(std::string value)
 {
     value = normalized(std::move(value));
@@ -73,6 +110,12 @@ RadiolyticPressureMode parse_pressure_mode(std::string value)
         "prescribedHistory, reconstructed, or inertial.");
 }
 
+/**
+ * @brief Parse the dissolved-hydrogen transport mode.
+ * @param value Transport-mode name.
+ * @return Parsed dissolved transport mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 RadiolyticTransportMode parse_dissolved_transport(std::string value)
 {
     value = normalized(std::move(value));
@@ -85,6 +128,12 @@ RadiolyticTransportMode parse_dissolved_transport(std::string value)
         "noAdvection or advective.");
 }
 
+/**
+ * @brief Parse the bubble transport direction model.
+ * @param value Transport-mode name.
+ * @return Parsed bubble transport mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 BubbleTransportMode parse_bubble_transport(std::string value)
 {
     value = normalized(std::move(value));
@@ -96,6 +145,12 @@ BubbleTransportMode parse_bubble_transport(std::string value)
         "Unknown bubble_transport_mode; expected general or axial.");
 }
 
+/**
+ * @brief Parse the switching function used by population kinetics.
+ * @param value Heaviside-mode name.
+ * @return Parsed Heaviside mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 RadiolyticHeavisideMode parse_heaviside(std::string value)
 {
     value = normalized(std::move(value));
@@ -107,6 +162,12 @@ RadiolyticHeavisideMode parse_heaviside(std::string value)
         "Unknown radiolytic_heaviside_mode; expected exact or smoothed.");
 }
 
+/**
+ * @brief Parse the bubble rise-velocity correlation.
+ * @param value Correlation name.
+ * @return Parsed rise-velocity mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 BubbleRiseVelocityMode parse_rise_velocity(std::string value)
 {
     value = normalized(std::move(value));
@@ -121,6 +182,12 @@ BubbleRiseVelocityMode parse_rise_velocity(std::string value)
         "constantSlip, or celata2007.");
 }
 
+/**
+ * @brief Parse the surface-tension property model.
+ * @param value Property-model name.
+ * @return Parsed surface-tension mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 SurfaceTensionMode parse_surface_tension(std::string value)
 {
     value = normalized(std::move(value));
@@ -132,6 +199,12 @@ SurfaceTensionMode parse_surface_tension(std::string value)
         "Unknown surface_tension_model; expected constant or sheng2024.");
 }
 
+/**
+ * @brief Parse the dissolved-hydrogen diffusivity model.
+ * @param value Property-model name.
+ * @return Parsed diffusivity mode.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 HydrogenDiffusivityMode parse_diffusivity(std::string value)
 {
     value = normalized(std::move(value));
@@ -144,6 +217,11 @@ HydrogenDiffusivityMode parse_diffusivity(std::string value)
         "sheng2024.");
 }
 
+/**
+ * @brief Validate a prescribed absolute-pressure history.
+ * @param options Options containing the history arrays and pressure floor.
+ * @throws std::invalid_argument if the arrays are inconsistent or invalid.
+ */
 void require_history(const RadiolyticGasOptions& options)
 {
     const auto size = options.pressure_history_times.size();
@@ -177,6 +255,12 @@ void require_history(const RadiolyticGasOptions& options)
 
 } // namespace
 
+/**
+ * @brief Parse and validate radiolytic gas options from a database.
+ * @param database Source configuration database.
+ * @return Validated radiolytic gas options.
+ * @throws std::invalid_argument if an option is ill-typed or invalid.
+ */
 RadiolyticGasOptions radiolytic_gas_options_from_database(
     const Database& database)
 {
@@ -314,6 +398,11 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
     return options;
 }
 
+/**
+ * @brief Validate radiolytic gas options for the selected model modes.
+ * @param options Options to validate.
+ * @throws std::invalid_argument if any active option is inconsistent.
+ */
 void validate_radiolytic_gas_options(
     const RadiolyticGasOptions& options)
 {

@@ -28,12 +28,20 @@
 namespace SimpleFluid
 {
 
+/** @brief Available right-preconditioning strategies for Belos solves. */
 enum class LinearPreconditioner
 {
     None,
     MueLu
 };
 
+/**
+ * @brief Convert a preconditioner selection to its configuration name.
+ *
+ * @param preconditioner Preconditioner selection to convert.
+ * @return Stable human-readable name.
+ * @throws std::invalid_argument if @p preconditioner is not recognized.
+ */
 inline std::string_view to_string(LinearPreconditioner preconditioner)
 {
     switch (preconditioner)
@@ -45,6 +53,7 @@ inline std::string_view to_string(LinearPreconditioner preconditioner)
     throw std::invalid_argument("Unknown LinearPreconditioner value.");
 }
 
+/** @brief Convergence statistics for one linear solve. */
 struct LinearSolveStatistics
 {
     bool converged = false;
@@ -52,6 +61,7 @@ struct LinearSolveStatistics
     real_t achieved_tolerance = {};
 };
 
+/** @brief Aggregate convergence statistics across several linear solves. */
 struct LinearSolveSummary
 {
     bool converged = true;
@@ -93,6 +103,11 @@ struct LinearSolverOptions
 namespace detail
 {
 
+/**
+ * @brief Test-only access to retained Belos solver state.
+ *
+ * @tparam Pack Tpetra type pack used by the solver under test.
+ */
 template<TpetraTypePack Pack>
 struct BelosLinearSolverTestAccess;
 
@@ -103,6 +118,8 @@ struct BelosLinearSolverTestAccess;
  *
  * The solver manager and its Krylov workspace are retained between solves.
  * A new manager is created only when the operator domain or range map changes.
+ *
+ * @tparam Pack Tpetra type pack defining vectors, maps, and operators.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class BelosLinearSolver

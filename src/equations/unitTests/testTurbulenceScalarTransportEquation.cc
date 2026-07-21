@@ -1,6 +1,12 @@
 /**
  * @file testTurbulenceScalarTransportEquation.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for positive semi-implicit turbulence scalar transport.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -48,6 +54,7 @@ Equation::scalar_provider_type zero_provider()
     return [](MeshType::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
 }
 
+/** @brief Verifies accepted-state advance with an explicit source and implicit sink. */
 TEST(TurbulenceScalarTransportEquationTest, AdvancesAcceptedStateWithExplicitSourceAndImplicitSink)
 {
     auto mesh = make_single_cell_mesh();
@@ -70,6 +77,7 @@ TEST(TurbulenceScalarTransportEquationTest, AdvancesAcceptedStateWithExplicitSou
     EXPECT_NEAR(state.value(0), 7.0 / 6.0, 1.0e-12);
 }
 
+/** @brief Verifies variable diffusion and conservation under zero-flux boundaries. */
 TEST(TurbulenceScalarTransportEquationTest,
      UsesVariableDiffusivityAndConservesWithZeroFluxBoundaries)
 {
@@ -97,6 +105,7 @@ TEST(TurbulenceScalarTransportEquationTest,
     EXPECT_NEAR(state.value(0) + state.value(1), 4.0, 1.0e-12);
 }
 
+/** @brief Verifies positive flooring after strong implicit destruction. */
 TEST(TurbulenceScalarTransportEquationTest, AppliesPositiveFloorAfterStrongImplicitDestruction)
 {
     auto mesh = make_single_cell_mesh();
@@ -113,6 +122,7 @@ TEST(TurbulenceScalarTransportEquationTest, AppliesPositiveFloorAfterStrongImpli
     EXPECT_DOUBLE_EQ(state.value(0), 1.0e-6);
 }
 
+/** @brief Verifies invalid-input rejection without overwriting accepted state. */
 TEST(TurbulenceScalarTransportEquationTest, RejectsInvalidInputsWithoutPublishingOverAcceptedState)
 {
     auto mesh = make_single_cell_mesh();
@@ -156,6 +166,7 @@ TEST(TurbulenceScalarTransportEquationTest, RejectsInvalidInputsWithoutPublishin
     EXPECT_DOUBLE_EQ(accepted_state.value(0), 7.0);
 }
 
+/** @brief Verifies aliased accepted-state preservation after linear-solve rejection. */
 TEST(TurbulenceScalarTransportEquationTest, LinearSolveRejectionPreservesAliasedAcceptedState)
 {
     auto mesh = make_2x2x2_mesh();
@@ -199,6 +210,7 @@ TEST(TurbulenceScalarTransportEquationTest, LinearSolveRejectionPreservesAliased
     }
 }
 
+/** @brief Verifies graph-cache rebuilding when the non-orthogonal stencil expands. */
 TEST(TurbulenceScalarTransportEquationTest, RebuildsCachedGraphWhenNonOrthogonalStencilExpands)
 {
     auto mesh = make_2x2x2_mesh();
@@ -224,6 +236,7 @@ TEST(TurbulenceScalarTransportEquationTest, RebuildsCachedGraphWhenNonOrthogonal
     EXPECT_TRUE(implicit_statistics.converged);
 }
 
+/** @brief Verifies enforcement of the configured Dirichlet boundary value. */
 TEST(TurbulenceScalarTransportEquationTest, HonorsConfiguredDirichletBoundaryValue)
 {
     auto mesh = make_single_cell_mesh();
@@ -242,6 +255,7 @@ TEST(TurbulenceScalarTransportEquationTest, HonorsConfiguredDirichletBoundaryVal
     EXPECT_NEAR(state.value(0), 3.0, 1.0e-10);
 }
 
+/** @brief Verifies Neumann-data extrapolation for advective boundary inflow. */
 TEST(TurbulenceScalarTransportEquationTest, ExtrapolatesNeumannDataForAdvectiveBoundaryInflow)
 {
     auto mesh = make_single_cell_mesh();
@@ -275,6 +289,7 @@ TEST(TurbulenceScalarTransportEquationTest, ExtrapolatesNeumannDataForAdvectiveB
     EXPECT_NEAR(state.value(0), 1.5, 1.0e-10);
 }
 
+/** @brief Verifies dynamic zero-wall values together with a fixed-cell constraint. */
 TEST(TurbulenceScalarTransportEquationTest,
      AppliesDynamicZeroWallValueAndFixedCellConstraint)
 {
@@ -325,6 +340,7 @@ TEST(TurbulenceScalarTransportEquationTest,
     EXPECT_NEAR(state.value(0), 2.5, 1.0e-12);
 }
 
+/** @brief Verifies that dynamic providers preserve configuration on unselected faces. */
 TEST(TurbulenceScalarTransportEquationTest,
      DynamicBoundaryProvidersLeaveUnselectedFacesConfigured)
 {

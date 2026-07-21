@@ -58,6 +58,10 @@ struct is_plus : std::false_type
 {
 };
 
+/**
+ * @brief Positive specialization for `std::plus<T>`.
+ * @tparam T Operand type accepted by the addition functor.
+ */
 template <class T>
 struct is_plus<std::plus<T>> : std::true_type
 {
@@ -73,6 +77,10 @@ struct is_multiplies : std::false_type
 {
 };
 
+/**
+ * @brief Positive specialization for `std::multiplies<T>`.
+ * @tparam T Operand type accepted by the multiplication functor.
+ */
 template <class T>
 struct is_multiplies<std::multiplies<T>> : std::true_type
 {

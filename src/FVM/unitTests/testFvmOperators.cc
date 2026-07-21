@@ -172,6 +172,7 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     }
 }
 
+/** @brief Verifies in-plane gradients are recovered on a one-cell-thick box. */
 TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -201,6 +202,7 @@ TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
     }
 }
 
+/** @brief Verifies the normal-system solver handles a rank-deficient oblique plane. */
 TEST(FvmOperatorsTest, SolvesRankDeficientNormalSystemInObliquePlane)
 {
     const MeshType::Vec3 first_direction{1.0, 0.0, 1.0};
@@ -274,6 +276,7 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
     }
 }
 
+/** @brief Verifies boundary face samples recover an affine vector gradient. */
 TEST(FvmOperatorsTest,
      RecoversAffineVectorGradientFromBoundaryFaceSamples)
 {
@@ -319,6 +322,7 @@ TEST(FvmOperatorsTest,
     EXPECT_NEAR(gradient[2].z, 1.0, 1.0e-12);
 }
 
+/** @brief Verifies face-area vectors decompose into orthogonal and tangential parts. */
 TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
 {
     const SimpleFluid::vec3<> area_vector{2.0, 3.0, -1.0};
@@ -338,6 +342,7 @@ TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
     EXPECT_NEAR(tangential.dot(cell_center_vector), 0.0, 1.0e-12);
 }
 
+/** @brief Verifies non-orthogonal treatment strings parse and format correctly. */
 TEST(FvmOperatorsTest, ParsesNonOrthogonalTreatmentSwitch)
 {
     EXPECT_EQ(
@@ -359,6 +364,7 @@ TEST(FvmOperatorsTest, ParsesNonOrthogonalTreatmentSwitch)
         std::invalid_argument);
 }
 
+/** @brief Verifies least-squares gradient stencils reproduce cell gradients. */
 TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -394,6 +400,7 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
     }
 }
 
+/** @brief Verifies skew-boundary Neumann gradients use the normal distance. */
 TEST(FvmOperatorsTest,
      PressureGradientUsesNormalDistanceForSkewBoundaryNeumannData)
 {
@@ -469,6 +476,7 @@ TEST(FvmOperatorsTest,
     EXPECT_NEAR(actual.z, expected.z, 1.0e-12);
 }
 
+/** @brief Verifies an empty pressure boundary map implies homogeneous Neumann data. */
 TEST(FvmOperatorsTest,
      EmptyPressureBoundaryMapDefaultsToHomogeneousNeumann)
 {
@@ -518,6 +526,7 @@ TEST(FvmOperatorsTest,
     EXPECT_GT(maximum_boundary_effect, 1.0e-6);
 }
 
+/** @brief Verifies implicit non-orthogonal diffusion expands the gradient graph. */
 TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -554,6 +563,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
     EXPECT_TRUE(saw_expanded_row);
 }
 
+/** @brief Verifies implicit non-orthogonal vector transport expands the gradient graph. */
 TEST(FvmOperatorsTest, VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -594,6 +604,7 @@ TEST(FvmOperatorsTest, VectorTransportImplicitNonOrthogonalDiffusionExpandsGradi
     EXPECT_TRUE(saw_expanded_row);
 }
 
+/** @brief Verifies the implicit non-orthogonal matrix matches the full residual. */
 TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
 {
     constexpr double diffusivity = 0.7;
@@ -638,6 +649,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     }
 }
 
+/** @brief Verifies identity and diffusion matrix construction. */
 TEST(FvmOperatorsTest, BuildsIdentityAndDiffusionMatrices)
 {
     auto mesh = make_mesh();
@@ -699,6 +711,7 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     EXPECT_TRUE(saw_z_face);
 }
 
+/** @brief Verifies pressure-weighted fluxes preserve a linear pressure field. */
 TEST(FvmOperatorsTest, PressureWeightedFluxPreservesLinearPressure)
 {
     auto mesh = make_mesh();
@@ -736,6 +749,7 @@ TEST(FvmOperatorsTest, PressureWeightedFluxPreservesLinearPressure)
     }
 }
 
+/** @brief Verifies pressure-weighted fluxes suppress a checkerboard pressure mode. */
 TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -782,6 +796,7 @@ TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
     EXPECT_GT(pressure_work, 0.0);
 }
 
+/** @brief Verifies pressure-weighted flux workspaces reuse storage and overwrite stale values. */
 TEST(FvmOperatorsTest,
      PressureWeightedFluxWorkspaceReusesStorageAndOverwritesValues)
 {
@@ -956,6 +971,7 @@ TEST(FvmOperatorsTest,
     EXPECT_TRUE(pressure_gradient_changed);
 }
 
+/** @brief Verifies a pressure-weighted flux workspace rejects a different mesh. */
 TEST(FvmOperatorsTest,
      PressureWeightedFluxWorkspaceRejectsAnotherMesh)
 {
@@ -982,6 +998,7 @@ TEST(FvmOperatorsTest,
         std::invalid_argument);
 }
 
+/** @brief Verifies fused face fluxes match the face-velocity composition. */
 TEST(FvmOperatorsTest,
      FusedFaceFluxMatchesFaceVelocityComposition)
 {
@@ -1106,6 +1123,7 @@ TEST(FvmOperatorsTest,
     compare("changed velocity");
 }
 
+/** @brief Verifies Dirichlet pressure rejects a prescribed velocity boundary flux. */
 TEST(FvmOperatorsTest,
      DirichletPressureRejectsPrescribedVelocityBoundaryFlux)
 {
@@ -1183,6 +1201,7 @@ TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
     EXPECT_TRUE(saw_interior_face);
 }
 
+/** @brief Verifies no-slip boundaries produce zero face velocity. */
 TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroFaceVelocity)
 {
     auto mesh = make_mesh();
@@ -1211,6 +1230,7 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroFaceVelocity)
     }
 }
 
+/** @brief Verifies no-slip boundaries produce zero exterior flux. */
 TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
 {
     auto mesh = make_mesh();
@@ -1300,6 +1320,7 @@ TEST(FvmOperatorsTest, SlipBoundaryRemovesNormalVelocityAndFlux)
     EXPECT_TRUE(saw_boundary_face);
 }
 
+/** @brief Verifies upwind and pressure-Poisson matrix construction. */
 TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
 {
     auto mesh = make_mesh();
@@ -1417,6 +1438,7 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
     }
 }
 
+/** @brief Verifies scalar transport treats Neumann boundary data as flux. */
 TEST(FvmOperatorsTest, ScalarTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
@@ -1516,6 +1538,7 @@ TEST(FvmOperatorsTest, ScalarTransportTreatsNeumannBoundaryAsFlux)
     }
 }
 
+/** @brief Verifies vector transport treats Neumann boundary data as flux. */
 TEST(FvmOperatorsTest, VectorTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
@@ -1596,6 +1619,7 @@ TEST(FvmOperatorsTest, VectorTransportTreatsNeumannBoundaryAsFlux)
     }
 }
 
+/** @brief Verifies scalar and vector transport systems reuse supplied matrices. */
 TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
 {
     auto mesh = make_mesh();
@@ -1681,6 +1705,7 @@ SimpleFluid::SP<MeshType> make_periodic_box_mesh()
     return mesh;
 }
 
+/** @brief Verifies fused periodic face fluxes match the face-velocity composition. */
 TEST(FvmOperatorsTest,
      FusedFaceFluxMatchesFaceVelocityCompositionOnPeriodicMesh)
 {
@@ -1813,6 +1838,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
     EXPECT_NEAR(v_xmax.x, 2.0, 1.0e-12);  // (3 + 1) / 2
 }
 
+/** @brief Verifies the periodic velocity cache preserves paired-face values. */
 TEST(FvmOperatorsTest, PeriodicVelocityCacheDoesNotOverwritePairedFaceVelocity)
 {
     auto mesh = make_periodic_box_mesh();
@@ -1845,6 +1871,7 @@ TEST(FvmOperatorsTest, PeriodicVelocityCacheDoesNotOverwritePairedFaceVelocity)
     EXPECT_NEAR(face_vel.value(xmax_face).x, 2.0, 1.0e-12);
 }
 
+/** @brief Verifies the velocity boundary cache rejects nonzero Neumann derivatives. */
 TEST(FvmOperatorsTest, VelocityBoundaryCacheRejectsNonzeroNeumannDerivative)
 {
     auto mesh = make_mesh();
@@ -1939,6 +1966,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryExplicitDiffusionTransfersHeat)
     EXPECT_NEAR(temperature.value(1), 0.8, 1.0e-12);
 }
 
+/** @brief Verifies periodic scalar transport couples to the paired cell. */
 TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
 {
     auto mesh = make_periodic_box_mesh();
@@ -1967,6 +1995,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 0), -1.0, 1.0e-12);
 }
 
+/** @brief Verifies periodic upwind transport couples to the paired cell. */
 TEST(FvmOperatorsTest, PeriodicBoundaryUpwindMatrixUsesPairedCell)
 {
     auto mesh = make_periodic_box_mesh();
@@ -1987,6 +2016,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryUpwindMatrixUsesPairedCell)
     EXPECT_NEAR(local_matrix_entry(*matrix, 1, 0), -0.5, 1.0e-12);
 }
 
+/** @brief Verifies periodic vector transport couples to the paired cell. */
 TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
 {
     auto mesh = make_periodic_box_mesh();
@@ -2015,6 +2045,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
     EXPECT_NEAR(local_matrix_entry(*system.matrix, 1, 0), -1.0, 1.0e-12);
 }
 
+/** @brief Verifies harmonic face interpolation uses cell-to-face distances. */
 TEST(FvmOperatorsTest, HarmonicFaceValueUsesCellToFaceDistances)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -2045,6 +2076,7 @@ TEST(FvmOperatorsTest, HarmonicFaceValueUsesCellToFaceDistances)
         1.0e-12);
 }
 
+/** @brief Verifies harmonic face interpolation rejects negative cell values. */
 TEST(FvmOperatorsTest, HarmonicFaceValueRejectsNegativeCellValues)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -2074,6 +2106,7 @@ TEST(FvmOperatorsTest, HarmonicFaceValueRejectsNegativeCellValues)
         std::invalid_argument);
 }
 
+/** @brief Verifies weighted scalar transport treats Neumann data as flux. */
 TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
@@ -2147,6 +2180,7 @@ TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
     }
 }
 
+/** @brief Verifies weighted scalar transport adds and validates an implicit sink. */
 TEST(FvmOperatorsTest,
      WeightedScalarTransportAddsAndValidatesImplicitSink)
 {
@@ -2218,6 +2252,7 @@ TEST(FvmOperatorsTest,
         std::invalid_argument);
 }
 
+/** @brief Verifies fixed weighted-scalar cells remain exact under explicit correction. */
 TEST(FvmOperatorsTest,
      WeightedScalarTransportFixedCellIsExactIdentityWithExplicitCorrection)
 {
@@ -2307,6 +2342,7 @@ TEST(FvmOperatorsTest,
         std::invalid_argument);
 }
 
+/** @brief Verifies explicit variable diffusion uses boundary values and sparse coefficients. */
 TEST(FvmOperatorsTest,
      ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients)
 {
@@ -2506,6 +2542,7 @@ TEST(FvmOperatorsTest,
     }
 }
 
+/** @brief Verifies physical temperature transport treats Neumann data as flux. */
 TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
@@ -2579,6 +2616,7 @@ TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
     }
 }
 
+/** @brief Verifies physical transport harmonically interpolates material coefficients. */
 TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -2681,6 +2719,7 @@ TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
     }
 }
 
+/** @brief Verifies physical transport consumes sparse boundary coefficient caches. */
 TEST(FvmOperatorsTest,
      PhysicalTransportUsesSparseBoundaryCoefficientCaches)
 {
@@ -2801,6 +2840,7 @@ TEST(FvmOperatorsTest,
     EXPECT_THROW(assemble_momentum(&invalid_cache), std::invalid_argument);
 }
 
+/** @brief Verifies physical momentum adds lagged variable-viscosity transpose stress. */
 TEST(FvmOperatorsTest,
      PhysicalMomentumAddsLaggedVariableViscosityTransposeStress)
 {
@@ -2895,6 +2935,7 @@ TEST(FvmOperatorsTest,
     EXPECT_GT(maximum_transpose_stress, 1.0e-6);
 }
 
+/** @brief Verifies explicit transpose stress removes two-thirds of the divergence trace. */
 TEST(FvmOperatorsTest,
      ExplicitTransposeStressRemovesTwoThirdsDivergenceTrace)
 {

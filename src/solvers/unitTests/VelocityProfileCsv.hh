@@ -1,6 +1,12 @@
 /**
  * @file VelocityProfileCsv.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Test-only centerline sampling and CSV output for CFD comparisons.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -18,6 +24,11 @@
 namespace SimpleFluid::test
 {
 
+/**
+ * @brief Sample serial cell-centered velocity profiles and write comparison CSV files.
+ *
+ * @tparam Pack Tpetra type pack used by the velocity field.
+ */
 template<TpetraTypePack Pack>
 class VelocityProfileCsv
 {
@@ -27,6 +38,7 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using vec_type = typename field_type::vec_type;
 
+    /** @brief One axial coordinate and its volume-averaged velocity. */
     struct Sample
     {
         scalar_type coordinate = {};
@@ -100,6 +112,7 @@ public:
             scalar_type{1.0e-12}
             * std::max(scalar_type{1}, minimum_distance_squared);
 
+        /** @brief Candidate cell-center sample before axial aggregation. */
         struct Candidate
         {
             scalar_type coordinate = {};
@@ -161,6 +174,13 @@ public:
         return samples;
     }
 
+    /**
+     * @brief Write ordered velocity samples using the comparison CSV schema.
+     *
+     * @param path Output CSV path.
+     * @param samples Samples to write.
+     * @throws std::runtime_error if the file cannot be opened or written.
+     */
     static void write(
         const std::filesystem::path& path,
         const std::vector<Sample>& samples)
@@ -187,6 +207,14 @@ public:
         }
     }
 
+    /**
+     * @brief Sample the nearest line and write it directly to CSV.
+     *
+     * @param path Output CSV path.
+     * @param velocity Cell-centered velocity field to sample.
+     * @param axis Coordinate axis parallel to the requested line.
+     * @param line_point Point locating the requested line transversely.
+     */
     static void write_nearest_line(
         const std::filesystem::path& path,
         const field_type& velocity,

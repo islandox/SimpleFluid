@@ -1,6 +1,12 @@
 /**
  * @file testTurbulenceModelOptions.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for turbulence model configuration and parsing.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -20,6 +26,7 @@ using SimpleFluid::TurbulenceModelOptions;
 using SimpleFluid::TurbulenceModelType;
 using SimpleFluid::TurbulenceWallTreatmentType;
 
+/** @brief Database spelling and expected runtime turbulence model type. */
 struct ModelCase
 {
     const char* name;
@@ -36,6 +43,7 @@ constexpr std::array canonical_models{
     ModelCase{"BSLKOmega", TurbulenceModelType::BSLKOmega, true},
     ModelCase{"SSTKOmega", TurbulenceModelType::SSTKOmega, true}};
 
+/** @brief Verifies parsing and formatting of canonical turbulence-model names. */
 TEST(TurbulenceModelOptionsTest, ParsesAndFormatsCanonicalNames)
 {
     for (const auto& entry : canonical_models)
@@ -46,6 +54,7 @@ TEST(TurbulenceModelOptionsTest, ParsesAndFormatsCanonicalNames)
     }
 }
 
+/** @brief Verifies model aliases and rejection of unknown names. */
 TEST(TurbulenceModelOptionsTest, ParsesAliasesAndRejectsUnknownNames)
 {
     const std::pair<const char*, TurbulenceModelType> aliases[] = {
@@ -68,6 +77,7 @@ TEST(TurbulenceModelOptionsTest, ParsesAliasesAndRejectsUnknownNames)
     }
 }
 
+/** @brief Verifies parsing and formatting of wall-treatment names. */
 TEST(TurbulenceModelOptionsTest, ParsesAndFormatsWallTreatmentNames)
 {
     const std::pair<const char*, TurbulenceWallTreatmentType> treatments[] = {
@@ -88,6 +98,7 @@ TEST(TurbulenceModelOptionsTest, ParsesAndFormatsWallTreatmentNames)
                  std::invalid_argument);
 }
 
+/** @brief Verifies laminar defaults for an empty database. */
 TEST(TurbulenceModelOptionsTest, EmptyDatabaseSelectsLaminarDefaults)
 {
     const SimpleFluid::Database database;
@@ -109,6 +120,7 @@ TEST(TurbulenceModelOptionsTest, EmptyDatabaseSelectsLaminarDefaults)
     EXPECT_TRUE(options.wall_options.boundary_names.empty());
 }
 
+/** @brief Verifies database selection of every active turbulence model. */
 TEST(TurbulenceModelOptionsTest, DatabaseSelectsEveryActiveModel)
 {
     for (const auto& entry : canonical_models)
@@ -131,6 +143,7 @@ TEST(TurbulenceModelOptionsTest, DatabaseSelectsEveryActiveModel)
     }
 }
 
+/** @brief Verifies parsing of positive scalar turbulence controls. */
 TEST(TurbulenceModelOptionsTest, DatabaseReadsPositiveScalarControls)
 {
     SimpleFluid::Database database;
@@ -157,6 +170,7 @@ TEST(TurbulenceModelOptionsTest, DatabaseReadsPositiveScalarControls)
     EXPECT_DOUBLE_EQ(*options.initial_wall_distance, 0.4);
 }
 
+/** @brief Verifies rejection of non-positive values for positive database controls. */
 TEST(TurbulenceModelOptionsTest, RejectsInvalidPositiveDatabaseValues)
 {
     constexpr std::array positive_keys{"initial_turbulent_kinetic_energy",
@@ -183,6 +197,7 @@ TEST(TurbulenceModelOptionsTest, RejectsInvalidPositiveDatabaseValues)
     }
 }
 
+/** @brief Verifies rejection of incorrectly typed database values. */
 TEST(TurbulenceModelOptionsTest, RejectsWrongDatabaseTypes)
 {
     SimpleFluid::Database wrong_model_type;
@@ -206,6 +221,7 @@ TEST(TurbulenceModelOptionsTest, RejectsWrongDatabaseTypes)
     }
 }
 
+/** @brief Verifies rejection of initial turbulence values below configured floors. */
 TEST(TurbulenceModelOptionsTest, RejectsInitialValuesBelowTheirFloors)
 {
     const std::pair<const char*, const char*> key_pairs[] = {
@@ -226,6 +242,7 @@ TEST(TurbulenceModelOptionsTest, RejectsInitialValuesBelowTheirFloors)
     }
 }
 
+/** @brief Verifies the positive wall-distance requirement for BSL and SST. */
 TEST(TurbulenceModelOptionsTest, BSLAndSSTRequirePositiveWallDistance)
 {
     for (const auto& entry : canonical_models)
@@ -254,6 +271,7 @@ TEST(TurbulenceModelOptionsTest, BSLAndSSTRequirePositiveWallDistance)
     }
 }
 
+/** @brief Verifies parsing of the wall set, treatment, and associated constants. */
 TEST(TurbulenceModelOptionsTest, DatabaseReadsWallTreatmentSetAndConstants)
 {
     SimpleFluid::Database database;
@@ -280,6 +298,7 @@ TEST(TurbulenceModelOptionsTest, DatabaseReadsWallTreatmentSetAndConstants)
     EXPECT_DOUBLE_EQ(options.wall_options.sst_omega_wall_coefficient, 60.0);
 }
 
+/** @brief Verifies that wall treatment requires a compatible closure and explicit walls. */
 TEST(TurbulenceModelOptionsTest, WallTreatmentRequiresCompatibleClosureAndExplicitWalls)
 {
     TurbulenceModelOptions options;

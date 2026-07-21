@@ -1,6 +1,12 @@
 /**
  * @file BoundaryLayerMeshFactory.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief In-place boundary-layer mesh refinement implementation.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/BoundaryLayerMeshFactory.hh"
@@ -20,6 +26,12 @@ namespace
 
 using Spec = BoundaryLayerMeshFactory::BoundaryLayerSpec;
 
+/**
+ * @brief Sum the cell widths in a geometric boundary-layer stack.
+ * @param spec Layer specification, or null when no stack is requested.
+ * @return Total stack thickness, or zero for a null specification.
+ * @throws std::invalid_argument If the accumulated thickness is not finite.
+ */
 long double layer_thickness(const Spec* spec)
 {
     if (spec == nullptr)
@@ -92,6 +104,14 @@ BoundaryLayerMeshFactory::BoundaryLayerMeshFactory(
 {
 }
 
+/**
+ * @brief Read parallel boundary-layer configuration arrays from a database.
+ * @param database Configuration database.
+ * @return Parsed boundary-layer specifications, or an empty array when none
+ *         of the boundary-layer keys is present.
+ * @throws std::invalid_argument If the database is null, configuration keys
+ *         are incomplete, array sizes differ, or a count is not positive.
+ */
 Arr<BoundaryLayerMeshFactory::BoundaryLayerSpec>
 BoundaryLayerMeshFactory::read_specs(const SP<const Database>& database)
 {
@@ -153,6 +173,11 @@ BoundaryLayerMeshFactory::read_specs(const SP<const Database>& database)
     return specs;
 }
 
+/**
+ * @brief Find the layer specification attached to a boundary name.
+ * @param boundary_name Boundary batch name to search for.
+ * @return Matching specification, or null when the boundary has no stack.
+ */
 const BoundaryLayerMeshFactory::BoundaryLayerSpec*
 BoundaryLayerMeshFactory::find_spec(
     const std::string& boundary_name) const noexcept
@@ -166,6 +191,11 @@ BoundaryLayerMeshFactory::find_spec(
     return iter == d_layer_specs.end() ? nullptr : &*iter;
 }
 
+/**
+ * @brief Verify that every configured stack names an available boundary.
+ * @param boundary_names Boundary names supported by the target mesh family.
+ * @throws std::invalid_argument If a configured boundary is unavailable.
+ */
 void BoundaryLayerMeshFactory::validate_supported_boundaries(
     const ArrString& boundary_names) const
 {
@@ -181,6 +211,16 @@ void BoundaryLayerMeshFactory::validate_supported_boundaries(
     }
 }
 
+/**
+ * @brief Replace lower and upper coordinate intervals with graded layers.
+ * @param input_edges Original strictly ordered coordinate edges.
+ * @param lower Optional layer stack at the lower coordinate boundary.
+ * @param upper Optional layer stack at the upper coordinate boundary.
+ * @param coordinate_name Coordinate label used in diagnostics.
+ * @return Refined, strictly increasing coordinate edges.
+ * @throws std::invalid_argument If the input is invalid, the stacks overlap,
+ *         or generated coordinates are not finite and distinct.
+ */
 ArrReal BoundaryLayerMeshFactory::refine_edges(
     const ArrReal& input_edges,
     const BoundaryLayerSpec* lower,

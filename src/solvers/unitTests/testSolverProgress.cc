@@ -1,6 +1,12 @@
 /**
  * @file testSolverProgress.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for member-based solver progress reporting.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -26,6 +32,7 @@ using Pack = SimpleFluid::TpetraTypes<>;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
+/** @brief Build a single-cell progress-test mesh. @return Assembled mesh. */
 SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_single_cell_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
@@ -44,6 +51,12 @@ SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_single_cell_mesh()
     return SimpleFluid::MeshFactory(database).build<Pack>();
 }
 
+/**
+ * @brief Construct a deterministic fluid solver for progress tests.
+ *
+ * @param configured_steps Total step count stored in solver options.
+ * @return Configured single-cell solver.
+ */
 SimpleFluid::FluidSolver<Pack> make_solver(int configured_steps = 2)
 {
     SimpleFluid::TimeStepperOptions time_options;
@@ -59,6 +72,7 @@ SimpleFluid::FluidSolver<Pack> make_solver(int configured_steps = 2)
 
 } // namespace
 
+/** @brief Verify the formatter includes all convergence and residual fields. */
 TEST(ProgressLineFormatterTest, FormatsCompleteStepSummary)
 {
     SimpleFluid::FluidStepStatistics<double> statistics;
@@ -82,6 +96,7 @@ TEST(ProgressLineFormatterTest, FormatsCompleteStepSummary)
         "temperature=4.500000e-06,continuity=5.500000e-07)");
 }
 
+/** @brief Verify a run emits exactly one progress line per completed step. */
 TEST(SolverProgressTest, RunWritesExactlyOneLinePerStep)
 {
     auto solver = make_solver();
@@ -101,6 +116,7 @@ TEST(SolverProgressTest, RunWritesExactlyOneLinePerStep)
     EXPECT_NE(text.find("residuals(momentum="), std::string::npos);
 }
 
+/** @brief Verify step progress uses configured totals without altering stream state. */
 TEST(SolverProgressTest, StepUsesConfiguredTotalAndPreservesStreamFormatting)
 {
     auto solver = make_solver(3);
@@ -117,6 +133,7 @@ TEST(SolverProgressTest, StepUsesConfiguredTotalAndPreservesStreamFormatting)
     EXPECT_EQ(output.precision(), precision);
 }
 
+/** @brief Verify progress-enabled runs reject a negative step count. */
 TEST(SolverProgressTest, RunRejectsNegativeStepCount)
 {
     auto solver = make_solver();
@@ -125,6 +142,7 @@ TEST(SolverProgressTest, RunRejectsNegativeStepCount)
     EXPECT_THROW(solver.run(-1, progress), std::invalid_argument);
 }
 
+/** @brief Verify continued runs report an absolute final step index. */
 TEST(SolverProgressTest, ContinuedRunUsesAbsoluteFinalStep)
 {
     auto solver = make_solver();
@@ -139,6 +157,7 @@ TEST(SolverProgressTest, ContinuedRunUsesAbsoluteFinalStep)
     EXPECT_EQ(output.str().find("step=3/2"), std::string::npos);
 }
 
+/** @brief Verify BoussinesqSolver exposes the progress-reporting step overload. */
 TEST(SolverProgressTest, BoussinesqExposesProgressStepOverload)
 {
     SimpleFluid::TimeStepperOptions time_options;

@@ -79,6 +79,7 @@ to_string(PressureVelocityCoupling coupling)
 
 /**
  * @brief Last-step residual norms and linear statistics for pressure-velocity coupling.
+ * @tparam Scalar Floating-point scalar type used for residuals.
  */
 template<class Scalar>
 struct PressureVelocityResiduals
@@ -90,6 +91,10 @@ struct PressureVelocityResiduals
     int linear_iterations = 0;
 };
 
+/**
+ * @brief Aggregated physical-step diagnostics and convergence state.
+ * @tparam Scalar Floating-point scalar type used for residuals.
+ */
 template<class Scalar>
 struct FluidStepStatistics
 {

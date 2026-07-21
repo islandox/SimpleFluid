@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceScalarTransportEquation.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Template implementation of positive turbulence scalar transport.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "TurbulenceCollectiveValidation.hh"
@@ -14,6 +20,13 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Construct a positive scalar transport equation on a mesh.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param mesh Computational mesh.
+ * @param boundary_conditions Configured scalar boundary conditions.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template <TpetraTypePack Pack>
 TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
     SP<const mesh_type> mesh, BoundaryConditionMap boundary_conditions)
@@ -24,6 +37,24 @@ TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
 {
 }
 
+/**
+ * @brief Validate, assemble, and solve one positive scalar transport step.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_state Accepted scalar state from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param time_step Positive physical time step.
+ * @param effective_diffusivity Cell effective diffusivity.
+ * @param[out] state Accepted updated scalar state.
+ * @param explicit_source Non-negative explicit source provider.
+ * @param implicit_sink Non-negative linearized sink provider.
+ * @param positive_floor Strict positive lower bound for accepted values.
+ * @param treatment Non-orthogonal diffusion treatment.
+ * @param linear_options Linear-solver configuration.
+ * @param boundary_overrides Optional dynamic face and cell overrides.
+ * @return Linear-solver convergence statistics.
+ * @throws std::invalid_argument if any transport input is invalid.
+ * @throws std::runtime_error if the solve fails or produces non-finite data.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceScalarTransportEquation<Pack>::advance(
     const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
@@ -34,6 +65,7 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     const boundary_overrides_type* boundary_overrides) const -> LinearSolveStatistics
 {
     constexpr const char* class_name = "TurbulenceScalarTransportEquation";
+    /** @brief Validated boundary condition prepared for transport assembly. */
     struct PreparedBoundaryData
     {
         BoundaryCondition condition{};

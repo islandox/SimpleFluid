@@ -1,6 +1,12 @@
 /**
  * @file test_skewed_prism_mesh_helpers.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Shared test helper for structured skewed triangular-prism meshes.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -41,6 +47,7 @@ inline vec3<> skewed_prism_coord(double x, double y, double z)
             z};
 }
 
+/** @brief Integer coordinates of a node in the source structured grid. */
 struct LogicalNode
 {
     size_t i = 0;

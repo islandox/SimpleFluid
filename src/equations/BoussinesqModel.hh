@@ -1,6 +1,12 @@
 /**
  * @file BoussinesqModel.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Physical material fields and volumetric heat-source infrastructure.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -22,6 +28,10 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Forward declaration of the specialized fission heat source.
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ */
 template<TpetraTypePack Pack>
 class FissionPowerSource;
 
@@ -58,6 +68,15 @@ struct BoussinesqModelOptions
 namespace detail
 {
 
+/**
+ * @brief Read an optional Boussinesq database value.
+ * @tparam T Requested database value type.
+ * @param database Source database.
+ * @param key Option key.
+ * @param fallback Value used when @p key is absent.
+ * @return Parsed value or @p fallback.
+ * @throws std::invalid_argument if the stored value has the wrong type.
+ */
 template<class T>
 T database_value_or(
     const Database& database,
@@ -80,6 +99,12 @@ T database_value_or(
     }
 }
 
+/**
+ * @brief Require a finite model option.
+ * @param value Value to validate.
+ * @param name Option name used in diagnostics.
+ * @throws std::invalid_argument if @p value is not finite.
+ */
 inline void require_finite(
     real_t value,
     const std::string& name)
@@ -91,6 +116,12 @@ inline void require_finite(
     }
 }
 
+/**
+ * @brief Validate material defaults and configured temperature sources.
+ * @param options Boussinesq material and source options.
+ * @param time_options Time-stepper values used for legacy defaults.
+ * @throws std::invalid_argument if an option is physically inconsistent.
+ */
 inline void validate_model_options(
     const BoussinesqModelOptions& options,
     const TimeStepperOptions& time_options)
@@ -171,6 +202,10 @@ inline void validate_model_options(
 
 /**
  * @brief Parse and validate physical Boussinesq options from a flat database.
+ * @param database Source configuration database.
+ * @param time_options Time-stepper values used for legacy defaults.
+ * @return Validated Boussinesq model options.
+ * @throws std::invalid_argument if an option is ill-typed or invalid.
  */
 inline BoussinesqModelOptions boussinesq_model_options_from_database(
     const Database& database,
@@ -223,9 +258,17 @@ inline BoussinesqModelOptions boussinesq_model_options_from_database(
     return options;
 }
 
+/**
+ * @brief Forward declaration of updateable material-property fields.
+ * @tparam Pack Tpetra type pack used for field storage.
+ */
 template<TpetraTypePack Pack>
 struct MaterialPropertyFields;
 
+/**
+ * @brief Read-only physical state passed to material and source updaters.
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ */
 template<TpetraTypePack Pack>
 struct BoussinesqUpdateContext
 {
@@ -244,6 +287,14 @@ struct BoussinesqUpdateContext
 
 /**
  * @brief Initialize a scalar cell field from a centroid-based provider.
+ * @tparam Pack Tpetra type pack used by the field.
+ * @tparam Provider Callable returning a value from a cell centroid.
+ * @tparam Validator Callable validating each initialized value.
+ * @param[out] field Field to initialize and synchronize.
+ * @param provider Centroid-based value provider.
+ * @param validator Per-value validator.
+ * @param label Field label used in diagnostics.
+ * @throws std::invalid_argument if a provider result is not finite.
  */
 template<TpetraTypePack Pack, class Provider, class Validator>
 void initialize_cell_field(
@@ -270,6 +321,16 @@ void initialize_cell_field(
     field.sync_ghosts();
 }
 
+/**
+ * @brief Initialize a scalar cell field to one validated value.
+ * @tparam Pack Tpetra type pack used by the field.
+ * @tparam Validator Callable validating the initial value.
+ * @param[out] field Field to initialize and synchronize.
+ * @param value Uniform initial value.
+ * @param validator Per-value validator.
+ * @param label Field label used in diagnostics.
+ * @throws std::invalid_argument if @p value is not finite.
+ */
 template<TpetraTypePack Pack, class Validator>
 void initialize_cell_field(
     CellField<Pack>& field,
@@ -286,6 +347,7 @@ void initialize_cell_field(
 
 /**
  * @brief Named physical heat-source field in W/m^3.
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class VolumetricScalarSource
@@ -390,6 +452,7 @@ private:
 
 /**
  * @brief Deterministic registry of named temperature heat-source fields.
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class TemperatureSourceRegistry
@@ -561,6 +624,7 @@ private:
 
 /**
  * @brief Updateable physical material-property fields.
+ * @tparam Pack Tpetra type pack used for field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 struct MaterialPropertyFields
@@ -785,6 +849,7 @@ private:
     updater_type updater;
 };
 
+/** @brief Selects optional field groups written with the primary solution. */
 struct SolutionOutputOptions
 {
     bool include_sources = false;

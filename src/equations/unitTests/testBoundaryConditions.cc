@@ -18,6 +18,7 @@ namespace
 
 using namespace SimpleFluid;
 
+/** @brief Verifies that scalar boundary conditions retain their type and value. */
 TEST(BoundaryConditionTest, ScalarConditionStoresTypeAndValue)
 {
     const BoundaryCondition dirichlet{BoundaryConditionType::Dirichlet, 0.75};
@@ -29,6 +30,7 @@ TEST(BoundaryConditionTest, ScalarConditionStoresTypeAndValue)
     EXPECT_DOUBLE_EQ(neumann.value, 2.5);
 }
 
+/** @brief Verifies that vector boundary conditions retain their type and value. */
 TEST(BoundaryConditionTest, VectorConditionStoresTypeAndValue)
 {
     const VectorBoundaryCondition no_slip{BoundaryConditionType::NoSlip};
@@ -45,6 +47,7 @@ TEST(BoundaryConditionTest, VectorConditionStoresTypeAndValue)
     EXPECT_EQ(moving.value, (vec3<real_t>{1.0, 2.0, 3.0}));
 }
 
+/** @brief Verifies that a boundary-condition set keeps each physics map independent. */
 TEST(BoundaryConditionTest, SetStoresSeparatePhysicsMaps)
 {
     BoundaryConditionSet bcs;
@@ -80,6 +83,7 @@ TEST(BoundaryConditionTest, SetStoresSeparatePhysicsMaps)
         BoundaryConditionType::Neumann);
 }
 
+/** @brief Verifies scalar defaults for turbulent kinetic-energy and dissipation maps. */
 TEST(BoundaryConditionTest, TurbulenceScalarMapsUseScalarDefaults)
 {
     TurbulenceBoundaryConditionSet turbulence;

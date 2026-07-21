@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceScalarTransportEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Positive scalar transport used by two-equation turbulence models.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -25,6 +31,7 @@ namespace SimpleFluid
  * configured behavior. This lets a wall treatment override only selected
  * wall batches while inlet, outlet, and symmetry data continue to come from
  * the ordinary boundary-condition map.
+ * @tparam Pack Tpetra type pack used for field and boundary-cache storage.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes>
 struct TurbulenceScalarBoundaryOverrides

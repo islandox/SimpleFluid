@@ -32,6 +32,7 @@ struct OrthogonalIndexer
     Vec3D<size_t> face_offsets; /**< Starting local ID for each face orientation. */
     Vec3D<Vec3D<size_t>> face_strides; /**< Strides for each face orientation and dimension. */
 
+    /** @brief Logical coordinate dimensions used by structured entity IDs. */
     enum Dimension : uint8_t
     {
         I = 0,
@@ -39,6 +40,7 @@ struct OrthogonalIndexer
         K = 2
     };
 
+    /** @brief Coordinate-normal face orientations. */
     enum FaceOrientation : uint8_t
     {
         I_FACE = I,
@@ -46,6 +48,7 @@ struct OrthogonalIndexer
         K_FACE = K
     };
 
+    /** @brief Structured cell coordinates. */
     struct CellID
     {
         Ordinal i = -1;
@@ -55,6 +58,7 @@ struct OrthogonalIndexer
         constexpr auto operator<=>(const CellID&) const = default;
     };
 
+    /** @brief Structured face coordinates plus normal orientation. */
     struct FaceID
     {
         Ordinal i = -1;
@@ -65,6 +69,7 @@ struct OrthogonalIndexer
         constexpr auto operator<=>(const FaceID&) const = default;
     };
 
+    /** @brief Structured node coordinates. */
     struct NodeID
     {
         Ordinal i = -1;
@@ -272,6 +277,11 @@ struct OrthogonalIndexer
     }
 };
 
+/**
+ * @brief Mesh index type pack specialized for orthogonal structured IDs.
+ * @tparam LocalOrdinal Rank-local ordinal type.
+ * @tparam GlobalOrdinal Global ordinal type.
+ */
 template<class LocalOrdinal = size_t,
          class GlobalOrdinal = uint64_t>
 struct OrthogonalMeshIndexTypePack

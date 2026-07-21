@@ -1,6 +1,12 @@
 /**
  * @file testRadiolyticGasModel.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for ideal and Sheng-style radiolytic gas models.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -41,6 +47,8 @@ testing::Environment* const kokkos_environment =
 
 /**
  * @brief Build the one-cell mesh used by local radiolysis checks.
+ *
+ * @return Assembled single-cell mesh.
  */
 SimpleFluid::SP<MeshType> make_single_cell_mesh()
 {
@@ -50,6 +58,9 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
 
 /**
  * @brief Create water-like material fields for the radiolysis tests.
+ *
+ * @param mesh Mesh owning the material fields.
+ * @return Initialized water-property fields.
  */
 SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
     const SimpleFluid::SP<MeshType>& mesh)
@@ -66,6 +77,8 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
 
 /**
  * @brief Baseline ideal-gas radiolysis options with bounded alpha source.
+ *
+ * @return Configured ideal-gas source options.
  */
 SimpleFluid::RadiolyticGasOptions ideal_options()
 {
@@ -79,6 +92,8 @@ SimpleFluid::RadiolyticGasOptions ideal_options()
 
 /**
  * @brief Sheng two-population options with finite correlation bounds.
+ *
+ * @return Configured Sheng-model options.
  */
 SimpleFluid::RadiolyticGasOptions sheng_options()
 {
@@ -99,6 +114,10 @@ SimpleFluid::RadiolyticGasOptions sheng_options()
 
 /**
  * @brief Sum a scalar diagnostic across the mesh communicator.
+ *
+ * @param mesh Mesh providing the communicator.
+ * @param local_value Local rank contribution.
+ * @return Global sum across ranks.
  */
 double global_sum(const MeshType& mesh, double local_value)
 {
@@ -114,6 +133,9 @@ double global_sum(const MeshType& mesh, double local_value)
 
 /**
  * @brief Compute the distributed cell-volume integral of a cell field.
+ *
+ * @param field Cell field to integrate.
+ * @return Global volume integral.
  */
 double global_integral(const FieldType& field)
 {
@@ -131,6 +153,11 @@ double global_integral(const FieldType& field)
 
 /**
  * @brief Return a named radiolytic output field or fail the test helper.
+ *
+ * @param model Model publishing diagnostic fields.
+ * @param name Requested field name.
+ * @return Published field reference.
+ * @throws std::runtime_error if the field is absent or null.
  */
 const FieldType& model_field(
     const RadiolyticModelType& model,
@@ -148,6 +175,9 @@ const FieldType& model_field(
 
 /**
  * @brief Expect every owned field value to be finite.
+ *
+ * @param field Field to inspect.
+ * @param name Diagnostic name included in assertion messages.
  */
 void expect_field_finite(
     const FieldType& field,
@@ -165,6 +195,9 @@ void expect_field_finite(
 
 /**
  * @brief Expect every owned field value to be finite and non-negative.
+ *
+ * @param field Field to inspect.
+ * @param name Diagnostic name included in assertion messages.
  */
 void expect_field_finite_non_negative(
     const FieldType& field,
@@ -184,6 +217,8 @@ void expect_field_finite_non_negative(
 
 /**
  * @brief Check all published Sheng-model state and diagnostic bounds.
+ *
+ * @param model Model whose published state is inspected.
  */
 void expect_state_fields_finite_bounded(
     const RadiolyticModelType& model)
@@ -243,6 +278,11 @@ void expect_state_fields_finite_bounded(
 
 /**
  * @brief Evaluate the pressure-dependent critical H2 concentration.
+ *
+ * @param options Radiolysis correlation options.
+ * @param pressure Absolute pressure.
+ * @param temperature Liquid temperature.
+ * @return Critical dissolved-hydrogen concentration.
  */
 double critical_concentration(
     const SimpleFluid::RadiolyticGasOptions& options,
@@ -266,6 +306,17 @@ double critical_concentration(
 
 /**
  * @brief Advance the model and assert that the primary void field stays finite.
+ *
+ * @param model Model to advance.
+ * @param mesh Mesh defining owned cells.
+ * @param time End-of-step time.
+ * @param time_step Physical time-step size.
+ * @param temperature Temperature field.
+ * @param pressure Gauge-pressure field.
+ * @param power Fission power-density field.
+ * @param velocity Liquid velocity field.
+ * @param flux Liquid face-flux field.
+ * @param material Material-property fields.
  */
 void advance_model(
     RadiolyticModelType& model,
@@ -771,6 +822,7 @@ TEST(RadiolyticGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
         1.0e-2);
 }
 
+/** @brief Verify escape-rate diagnostics are localized to free-surface cells. */
 TEST(RadiolyticGasModelTest, EscapeRateFieldsAreBoundaryLocalized)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(

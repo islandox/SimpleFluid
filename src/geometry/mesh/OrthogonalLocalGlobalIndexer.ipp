@@ -1,11 +1,17 @@
 /**
  * @file OrthogonalLocalGlobalIndexer.ipp
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Inline methods for the arithmetic LocalGlobalIndexer specialization.
+ * @version 0.1
+ * @date 2026-07-21
  *
  * @details Contains inexpensive accessors, ordinal conversion wrappers, and
  * validation helpers included automatically by
  * OrthogonalLocalGlobalIndexer.hh. Block construction and coordinate mapping
  * are defined in OrthogonalLocalGlobalIndexer.tcc.
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -382,6 +388,13 @@ LocalGlobalIndexer<Pack>::global_to_local_node(
 
 // Private helper methods
 
+/**
+ * @brief Extract I, J, and K coordinates from a structured entity ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @tparam ID Structured cell, face, or node ID type.
+ * @param id Entity ID to unpack.
+ * @return Three logical coordinates.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -393,6 +406,13 @@ LocalGlobalIndexer<Pack>::coordinates(const ID& id) noexcept
     return {id.i, id.j, id.k};
 }
 
+/**
+ * @brief Check three coordinates against their dimension extents.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param coordinates Coordinates to test.
+ * @param dimensions Exclusive upper bounds for the coordinates.
+ * @return True when every coordinate lies in range.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -411,6 +431,14 @@ inline bool LocalGlobalIndexer<Pack>::valid_coordinates(
     return true;
 }
 
+/**
+ * @brief Validate a cell ID against an indexer.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param indexer Indexer supplying the valid dimensions.
+ * @param id Cell ID to validate.
+ * @param scope Label distinguishing local and global diagnostics.
+ * @throws std::out_of_range If @p id is outside the indexer.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -429,6 +457,14 @@ inline void LocalGlobalIndexer<Pack>::check_cell_id(
     }
 }
 
+/**
+ * @brief Validate a face orientation and coordinates against an indexer.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param indexer Indexer supplying orientation-specific dimensions.
+ * @param id Face ID to validate.
+ * @param scope Label distinguishing local and global diagnostics.
+ * @throws std::out_of_range If @p id is outside the indexer.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -450,6 +486,14 @@ inline void LocalGlobalIndexer<Pack>::check_face_id(
     }
 }
 
+/**
+ * @brief Validate a node ID against an indexer.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param indexer Indexer supplying the valid dimensions.
+ * @param id Node ID to validate.
+ * @param scope Label distinguishing local and global diagnostics.
+ * @throws std::out_of_range If @p id is outside the indexer.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -468,6 +512,14 @@ inline void LocalGlobalIndexer<Pack>::check_node_id(
     }
 }
 
+/**
+ * @brief Validate a possibly signed local ordinal against an entity count.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_ordinal Ordinal to validate.
+ * @param count Exclusive upper bound.
+ * @param entity Entity label used in diagnostics.
+ * @throws std::out_of_range If @p local_ordinal is invalid.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -494,6 +546,15 @@ inline void LocalGlobalIndexer<Pack>::check_local_ordinal(
     }
 }
 
+/**
+ * @brief Validate and convert a local ordinal for geometry indexing.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_ordinal Ordinal to validate.
+ * @param count Exclusive upper bound.
+ * @param entity Entity label used in diagnostics.
+ * @return Size-based geometry ordinal.
+ * @throws std::out_of_range If @p local_ordinal is invalid.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -507,6 +568,12 @@ inline size_t LocalGlobalIndexer<Pack>::checked_geometry_ordinal(
     return static_cast<size_t>(local_ordinal);
 }
 
+/**
+ * @brief Narrow a known-valid geometry ordinal to the local ordinal type.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param ordinal Geometry ordinal known to fit.
+ * @return Local ordinal.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -517,6 +584,13 @@ LocalGlobalIndexer<Pack>::checked_local(size_t ordinal) noexcept
     return static_cast<local_ordinal_type>(ordinal);
 }
 
+/**
+ * @brief Convert a geometry ordinal to the configured global ordinal type.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param ordinal Geometry ordinal to convert.
+ * @return Global ordinal.
+ * @throws std::overflow_error If @p ordinal does not fit.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -532,6 +606,13 @@ LocalGlobalIndexer<Pack>::checked_global(size_t ordinal)
     return static_cast<global_ordinal_type>(ordinal);
 }
 
+/**
+ * @brief Validate and convert a global ordinal for geometry indexing.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param ordinal Global ordinal to validate.
+ * @param count Exclusive upper bound.
+ * @return Size-based ordinal, or no value when invalid.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;

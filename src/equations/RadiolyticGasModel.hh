@@ -1,6 +1,12 @@
 /**
  * @file RadiolyticGasModel.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Runtime-selectable ideal-gas and two-population radiolysis model.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -252,6 +258,7 @@ public:
     }
 
 private:
+    /** @brief Per-cell conserved inventories advanced by local kinetics. */
     struct CellKineticsState
     {
         scalar_type dissolved_inventory = {};
@@ -261,6 +268,7 @@ private:
         scalar_type large_moles = {};
     };
 
+    /** @brief Thermophysical inputs derived for one local kinetics solve. */
     struct CellProperties
     {
         scalar_type pressure = {};

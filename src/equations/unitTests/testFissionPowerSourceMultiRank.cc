@@ -1,3 +1,14 @@
+/**
+ * @file testFissionPowerSourceMultiRank.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Distributed normalization tests for prescribed fission power.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #include <gtest/gtest.h>
 
 #include "equations/FissionPowerSource.hh"
@@ -17,6 +28,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Verifies global fission-power normalization across a distributed mesh. */
 TEST(FissionPowerSourceMultiRankTest, NormalizesAcrossDistributedMesh)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(

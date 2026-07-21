@@ -32,6 +32,9 @@ namespace utils_test
 
 inline my_mpi::ErrorCode error_code;
 
+/**
+ * @brief Prefer OpenMPI transports that are reliable in local test runners.
+ */
 inline void configure_openmpi_local_test_backend()
 {
 #if defined(OMPI_MAJOR_VERSION)

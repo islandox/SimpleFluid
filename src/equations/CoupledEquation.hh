@@ -1,6 +1,12 @@
 /**
  * @file CoupledEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Structural coupled-equation containers and solver backends.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -19,7 +25,10 @@
 namespace SimpleFluid
 {
 
-/** @brief Type-erased interface for an assembled diagonal equation block. */
+/**
+ * @brief Type-erased interface for an assembled diagonal equation block.
+ * @tparam Pack Tpetra type pack used by block matrices and vectors.
+ */
 template<TpetraTypePack Pack>
 class AssembledEquationConcept
 {
@@ -31,7 +40,11 @@ public:
     virtual bool solve() = 0;
 };
 
-/** @brief Type-erased owner for a concrete assembled equation. */
+/**
+ * @brief Type-erased owner for a concrete assembled equation.
+ * @tparam EquationType Concrete assembled-equation type.
+ * @tparam Pack Tpetra type pack used by the equation.
+ */
 template<class EquationType, TpetraTypePack Pack>
 class AssembledEquationModel final
     : public AssembledEquationConcept<Pack>
@@ -61,10 +74,17 @@ private:
     EquationType d_equation;
 };
 
+/**
+ * @brief Forward declaration of an assembled block equation system.
+ * @tparam Pack Tpetra type pack used by block matrices and vectors.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class AssembledCoupledEquation;
 
-/** @brief Strategy interface for solving an assembled block system. */
+/**
+ * @brief Strategy interface for solving an assembled block system.
+ * @tparam Pack Tpetra type pack used by block matrices and vectors.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class CoupledSolverBackend
 {
@@ -77,6 +97,7 @@ public:
  * @brief Solve uncoupled diagonal blocks independently.
  *
  * This backend rejects systems containing off-diagonal matrices.
+ * @tparam Pack Tpetra type pack used by block matrices and vectors.
  */
 template<TpetraTypePack Pack>
 class IndependentBlockSolver final : public CoupledSolverBackend<Pack>
@@ -105,6 +126,7 @@ public:
  * Diagonal blocks are type-erased assembled equations. Off-diagonal blocks
  * describe row-to-column coupling matrices interpreted by the selected
  * CoupledSolverBackend.
+ * @tparam Pack Tpetra type pack used by block matrices and vectors.
  */
 template<TpetraTypePack Pack>
 class AssembledCoupledEquation
@@ -221,6 +243,7 @@ private:
  *
  * Diagonal builders are invoked by assemble(), allowing each equation to
  * produce its matrix and right-hand side at assembly time.
+ * @tparam Pack Tpetra type pack used by block matrices and vectors.
  */
 template<TpetraTypePack Pack>
 class CoupledEquation

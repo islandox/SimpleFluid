@@ -51,6 +51,7 @@ Mesh make_mesh()
 static_assert(SimpleFluid::MeshClass<Mesh>);
 static_assert(std::is_same_v<SimpleFluid::Meshes::SemiStructuredXYZ3D, Mesh>);
 
+/** @brief Verifies malformed planar topology and axial coordinates are rejected. */
 TEST(SemiStructuredXY_ZTest, RejectsInvalidInput)
 {
     EXPECT_THROW(
@@ -74,6 +75,7 @@ TEST(SemiStructuredXY_ZTest, RejectsInvalidInput)
         std::invalid_argument);
 }
 
+/** @brief Verifies default side-batch assignment for an unlabeled extrusion. */
 TEST(SemiStructuredXY_ZTest, AssignsDefaultSideBatch)
 {
     const Mesh mesh(
@@ -86,6 +88,10 @@ TEST(SemiStructuredXY_ZTest, AssignsDefaultSideBatch)
     EXPECT_EQ(mesh.boundary_face_batch(2).face_lids.size(), 3U);
 }
 
+/**
+ * @brief Verifies a Delaunay-generated XY plane extrudes into a valid
+ * semi-structured mesh with propagated boundary markers.
+ */
 TEST(SemiStructuredXY_ZTest, BuildsFromFrontalDelaunayXYPlane)
 {
     const auto mesh = Mesh::from_frontal_delaunay(
@@ -113,6 +119,10 @@ TEST(SemiStructuredXY_ZTest, BuildsFromFrontalDelaunayXYPlane)
     EXPECT_TRUE(found_wall_batch);
 }
 
+/**
+ * @brief Verifies entity counts, cell centroids, volumes, and face lists for
+ * an extruded planar mesh.
+ */
 TEST(SemiStructuredXY_ZTest, ReportsCountsAndCellGeometry)
 {
     const auto mesh = make_mesh();
@@ -140,6 +150,10 @@ TEST(SemiStructuredXY_ZTest, ReportsCountsAndCellGeometry)
     EXPECT_EQ(faces[4], (FaceID{2, 1, Mesh::SIDE_FACE}));
 }
 
+/**
+ * @brief Verifies side and axial interior-face connectivity and geometric
+ * quantities.
+ */
 TEST(SemiStructuredXY_ZTest, ComputesInteriorFaceTopologyAndGeometry)
 {
     const auto mesh = make_mesh();
@@ -170,6 +184,7 @@ TEST(SemiStructuredXY_ZTest, ComputesInteriorFaceTopologyAndGeometry)
     EXPECT_EQ(mesh.face_normal(axial), (Vec3{0.0, 0.0, 1.0}));
 }
 
+/** @brief Verifies planar-edge and axial-end faces form named boundary batches. */
 TEST(SemiStructuredXY_ZTest, BuildsBoundaryBatches)
 {
     const auto mesh = make_mesh();
@@ -192,6 +207,10 @@ TEST(SemiStructuredXY_ZTest, BuildsBoundaryBatches)
     EXPECT_EQ(mesh.boundary_batch_name(1), "zmax");
 }
 
+/**
+ * @brief Verifies semi-structured entity IDs map consistently to local
+ * ordinals and three-dimensional node coordinates.
+ */
 TEST(SemiStructuredXY_ZTest, MapsIdentifiersAndNodeCoordinates)
 {
     const auto mesh = make_mesh();

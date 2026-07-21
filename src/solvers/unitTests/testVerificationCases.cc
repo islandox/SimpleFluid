@@ -1,6 +1,12 @@
 /**
  * @file testVerificationCases.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Named CFD verification cases from TODO Phase 8.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -46,6 +52,12 @@ testing::Environment* const kokkos_environment =
 
 constexpr double pi = 3.141592653589793238462643383279502884;
 
+/**
+ * @brief Read the cavity resolution override from the environment.
+ *
+ * @return Configured cells per resolved direction, or eight by default.
+ * @throws std::invalid_argument if the override is not an integer of at least two.
+ */
 int cavity_mesh_cells()
 {
     const auto* value = std::getenv("SIMPLEFLUID_CAVITY_MESH_CELLS");
@@ -67,6 +79,12 @@ int cavity_mesh_cells()
     return result;
 }
 
+/**
+ * @brief Read the cavity linear-iteration limit from the environment.
+ *
+ * @return Configured positive iteration limit, or 300 by default.
+ * @throws std::invalid_argument if the override is not a positive integer.
+ */
 int cavity_max_linear_iterations()
 {
     const auto* value =
@@ -90,6 +108,14 @@ int cavity_max_linear_iterations()
     return result;
 }
 
+/**
+ * @brief Build a structured STK box mesh for verification.
+ *
+ * @param nx Cells along x.
+ * @param ny Cells along y.
+ * @param nz Cells along z.
+ * @return Assembled mesh.
+ */
 SimpleFluid::SP<MeshType> make_box_mesh(int nx, int ny, int nz)
 {
     return SimpleFluid::test::build_mesh<Pack>(
@@ -97,6 +123,14 @@ SimpleFluid::SP<MeshType> make_box_mesh(int nx, int ny, int nz)
             nx, ny, nz, 1.0 / static_cast<double>(nx)));
 }
 
+/**
+ * @brief Build an orthogonal Cartesian cavity mesh handle.
+ *
+ * @param nx Cells along x.
+ * @param ny Cells along y.
+ * @param nz Cells along z.
+ * @return Type-erased Cartesian mesh handle.
+ */
 SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
 make_cartesian_cavity_mesh(int nx, int ny, int nz)
 {
@@ -120,6 +154,11 @@ make_cartesian_cavity_mesh(int nx, int ny, int nz)
         std::move(cartesian));
 }
 
+/**
+ * @brief Construct moving-lid cavity velocity boundary conditions.
+ *
+ * @return Boundary conditions for a unit-speed top lid.
+ */
 SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
 {
     SimpleFluid::BoundaryConditionSet bcs;
@@ -138,6 +177,15 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
     return bcs;
 }
 
+/**
+ * @brief Compute the pressure-weighted continuity imbalance norm.
+ *
+ * @param velocity Cell-centered velocity field.
+ * @param pressure Cell-centered pressure field.
+ * @param time_step Pressure-flux coefficient.
+ * @param cache Cached velocity boundary conditions.
+ * @return Square-root sum of squared cell flux balances.
+ */
 double stabilized_continuity_norm(
     const VectorFieldType& velocity,
     const FieldType& pressure,
@@ -164,6 +212,12 @@ double stabilized_continuity_norm(
     return std::sqrt(norm_squared);
 }
 
+/**
+ * @brief Run and validate a lid-driven cavity verification case.
+ *
+ * @param reynolds_number Target Reynolds number.
+ * @param use_orthogonal_cartesian Whether to exercise the Cartesian backend.
+ */
 void verify_lid_driven_cavity(
     double reynolds_number,
     bool use_orthogonal_cartesian = false)
@@ -300,6 +354,12 @@ void verify_lid_driven_cavity(
     }
 }
 
+/**
+ * @brief Evaluate the Taylor-Green manufactured velocity.
+ *
+ * @param point Spatial coordinate.
+ * @return Exact manufactured velocity.
+ */
 SimpleFluid::vec3<> taylor_green_velocity(
     const SimpleFluid::vec3<>& point)
 {
@@ -309,6 +369,13 @@ SimpleFluid::vec3<> taylor_green_velocity(
         0.0};
 }
 
+/**
+ * @brief Evaluate the Taylor-Green manufactured momentum source.
+ *
+ * @param point Spatial coordinate.
+ * @param viscosity Kinematic viscosity.
+ * @return Manufactured source vector.
+ */
 SimpleFluid::vec3<> taylor_green_source(
     const SimpleFluid::vec3<>& point,
     double viscosity)
@@ -322,6 +389,12 @@ SimpleFluid::vec3<> taylor_green_source(
         0.0};
 }
 
+/**
+ * @brief Solve one Taylor-Green refinement level and compute its L2 error.
+ *
+ * @param n_cells Cells per resolved direction.
+ * @return Velocity L2 error.
+ */
 double solve_taylor_green_error(int n_cells)
 {
     const auto h = 2.0 * pi / static_cast<double>(n_cells);
@@ -392,6 +465,12 @@ double solve_taylor_green_error(int n_cells)
         numerical, taylor_green_velocity);
 }
 
+/**
+ * @brief Solve manufactured diffusion on a skewed prism mesh.
+ *
+ * @param n_cells Cells per direction.
+ * @return Scalar L2 error.
+ */
 double solve_skewed_diffusion_error(size_t n_cells)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>(
@@ -432,21 +511,25 @@ double solve_skewed_diffusion_error(size_t n_cells)
 
 } // namespace
 
+/** @brief Run the lid-driven cavity verification at Reynolds number 100. */
 TEST(VerificationCasesTest, LidDrivenCavityRe100)
 {
     verify_lid_driven_cavity(100.0);
 }
 
+/** @brief Run the lid-driven cavity verification at Reynolds number 1000. */
 TEST(VerificationCasesTest, LidDrivenCavityRe1000)
 {
     verify_lid_driven_cavity(1000.0);
 }
 
+/** @brief Run the Reynolds-1000 cavity on the Cartesian mesh backend. */
 TEST(VerificationCasesTest, LidDrivenCavityRe1000OrthogonalCartesian3D)
 {
     verify_lid_driven_cavity(1000.0, true);
 }
 
+/** @brief Verify centerline sampling and comparison CSV serialization. */
 TEST(VerificationCasesTest, WritesSimpleFluidVelocityProfileCsv)
 {
     auto mesh = make_box_mesh(4, 4, 1);
@@ -496,6 +579,7 @@ TEST(VerificationCasesTest, WritesSimpleFluidVelocityProfileCsv)
     std::filesystem::remove(output_path);
 }
 
+/** @brief Compare numerical Poiseuille flow with its parabolic profile. */
 TEST(VerificationCasesTest, PoiseuilleFlowMatchesParabolicProfile)
 {
     constexpr int n_cells = 32;
@@ -548,6 +632,7 @@ TEST(VerificationCasesTest, PoiseuilleFlowMatchesParabolicProfile)
     EXPECT_LT(SimpleFluid::linf_error(velocity, exact), 2.0e-3);
 }
 
+/** @brief Verify Taylor-Green manufactured momentum error decreases on refinement. */
 TEST(VerificationCasesTest, ManufacturedIncompressibleNavierStokesConverges)
 {
     const auto coarse_error = solve_taylor_green_error(8);
@@ -557,6 +642,7 @@ TEST(VerificationCasesTest, ManufacturedIncompressibleNavierStokesConverges)
     EXPECT_LT(fine_error, 1.0e-1);
 }
 
+/** @brief Verify manufactured skewed-mesh diffusion error decreases on refinement. */
 TEST(VerificationCasesTest, SkewedMeshDiffusionConverges)
 {
     const auto coarse_error = solve_skewed_diffusion_error(3);
@@ -566,6 +652,7 @@ TEST(VerificationCasesTest, SkewedMeshDiffusionConverges)
     EXPECT_LT(fine_error, 1.0e-1);
 }
 
+/** @brief Verify a square-cavity natural-convection solution remains bounded. */
 TEST(VerificationCasesTest, NaturalConvectionSquareCavityRemainsBounded)
 {
     auto mesh = make_box_mesh(8, 8, 1);
@@ -633,6 +720,7 @@ TEST(VerificationCasesTest, NaturalConvectionSquareCavityRemainsBounded)
     EXPECT_GT(kinetic_energy, 1.0e-12);
 }
 
+/** @brief Verify the documented OpenFOAM cavity constants and boundaries. */
 TEST(VerificationCasesTest, MatchesDocumentedOpenFoamCavityConfiguration)
 {
     constexpr int openfoam_cells_x = 100;

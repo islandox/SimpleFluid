@@ -334,6 +334,10 @@ TEST(MeshPartitionerTest, FaceConnectivityPreserved)
     }
 }
 
+/**
+ * @brief Verifies partitioning preserves boundary metadata and face
+ * centroids, areas, and normals.
+ */
 TEST(MeshPartitionerTest, PreservesBoundaryAndFaceGeometry)
 {
     auto mesh = make_4x4x4_box_mesh();
@@ -457,6 +461,7 @@ TEST(MeshPartitionerTest, PartitioningIsDeterministic)
 // ---------------------------------------------------------------------------
 //  Test 6: Partitioning handles single-rank case gracefully
 // ---------------------------------------------------------------------------
+/** @brief Verifies single-rank partitioning preserves the complete mesh. */
 TEST(MeshPartitionerTest, SingleRankCase)
 {
     auto mesh = make_2x2x2_box_mesh();
@@ -478,6 +483,7 @@ TEST(MeshPartitionerTest, SingleRankCase)
 // ---------------------------------------------------------------------------
 //  Test 7: Repeated partitioning does not change the mesh
 // ---------------------------------------------------------------------------
+/** @brief Verifies repeated partitioning leaves the owned entity set unchanged. */
 TEST(MeshPartitionerTest, RepeatedPartitioning)
 {
     auto mesh = make_4x4x4_box_mesh();
@@ -497,6 +503,10 @@ TEST(MeshPartitionerTest, RepeatedPartitioning)
     EXPECT_EQ(all_gids_after_second, all_gids_after_first);
 }
 
+/**
+ * @brief Verifies MeshHandle dispatches unstructured partitioning and exposes
+ * the resulting local mesh consistently.
+ */
 TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
 {
     constexpr unsigned cell_count = 8;

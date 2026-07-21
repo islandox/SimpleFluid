@@ -480,6 +480,11 @@ void MeshHandle<Pack>::initialize_faces(
         checked_global_ids(std::move(overlap)));
 }
 
+/**
+ * @brief Replace the handle's local/global indexer with a prepared layout.
+ * @tparam Pack Tpetra type pack.
+ * @param indexer Complete owned-first indexer to store.
+ */
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_indexer(indexer_type indexer)
 {

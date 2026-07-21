@@ -1,6 +1,12 @@
 /**
  * @file StandardKEpsilonEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Standard high-Reynolds-number k-epsilon closure equation terms.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -19,6 +25,7 @@ namespace SimpleFluid
 class StandardKEpsilonEquation
 {
 public:
+    /** @brief Coefficients controlling the standard k-epsilon closure. */
     struct Coefficients
     {
         real_t c_mu = 0.09;

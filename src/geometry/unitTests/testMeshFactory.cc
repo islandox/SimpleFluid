@@ -297,6 +297,10 @@ TEST(MeshFactoryTest, BoxBoundaryLayersRegenerateSelectedAxisEdges)
     EXPECT_DOUBLE_EQ(mesh->cell_volume(3), 0.2);
 }
 
+/**
+ * @brief Verifies boundary layers on opposite box sides are rejected when
+ * their requested thicknesses overlap.
+ */
 TEST(MeshFactoryTest, BoundaryLayersRejectOverlappingOppositeSides)
 {
     auto db = std::const_pointer_cast<SimpleFluid::Database>(
@@ -346,6 +350,10 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
     EXPECT_EQ(boundary_counts["zmax"], 7u);
 }
 
+/**
+ * @brief Verifies a full annulus is meshed periodically while retaining its
+ * radial and axial physical boundary parts.
+ */
 TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
 {
     SimpleFluid::MeshFactory factory(make_annulus_database());
@@ -375,6 +383,10 @@ TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
     EXPECT_EQ(boundary_counts["zmax"], 8u);
 }
 
+/**
+ * @brief Verifies an annular sector creates distinct minimum- and
+ * maximum-angle boundary planes.
+ */
 TEST(MeshFactoryTest, AnnulusSectorBuildsThetaBoundaryPlanes)
 {
     SimpleFluid::MeshFactory factory(make_annulus_sector_database());

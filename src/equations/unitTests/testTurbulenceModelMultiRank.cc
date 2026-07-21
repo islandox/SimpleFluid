@@ -1,6 +1,12 @@
 /**
  * @file testTurbulenceModelMultiRank.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief MPI regressions for rank-coherent turbulence validation and advance.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -79,6 +85,7 @@ template <class Field> void expect_positive_finite_and_uniform(const Field& fiel
     EXPECT_NEAR(global_minimum, global_maximum, 1.0e-11);
 }
 
+/** @brief Verifies coherent model rollback after a rank-local material failure. */
 TEST(TurbulenceModelMultiRankTest, RankLocalMaterialFailureThrowsCoherentlyWithoutEnablingModel)
 {
     auto mesh = make_distributed_mesh();
@@ -99,6 +106,7 @@ TEST(TurbulenceModelMultiRankTest, RankLocalMaterialFailureThrowsCoherentlyWitho
     EXPECT_FALSE(model.enabled());
 }
 
+/** @brief Verifies global accepted-state preservation after a rank-local source failure. */
 TEST(TurbulenceModelMultiRankTest, RankLocalScalarSourceFailurePreservesAcceptedStateOnEveryRank)
 {
     auto mesh = make_distributed_mesh();
@@ -120,6 +128,7 @@ TEST(TurbulenceModelMultiRankTest, RankLocalScalarSourceFailurePreservesAccepted
     }
 }
 
+/** @brief Verifies rejection of rank-inconsistent model selection before allocation. */
 TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentModelSelectionBeforeStateAllocation)
 {
     auto mesh = make_distributed_mesh();
@@ -136,6 +145,7 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentModelSelectionBeforeSt
     EXPECT_FALSE(model.enabled());
 }
 
+/** @brief Verifies rejection of rank-inconsistent wall treatment before allocation. */
 TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallTreatmentBeforeStateAllocation)
 {
     auto mesh = make_distributed_mesh();
@@ -159,6 +169,7 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallTreatmentBeforeSta
     EXPECT_FALSE(model.enabled());
 }
 
+/** @brief Verifies rejection of rank-inconsistent wall constants before allocation. */
 TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallConstantsBeforeStateAllocation)
 {
     auto mesh = make_distributed_mesh();
@@ -181,6 +192,7 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallConstantsBeforeSta
     EXPECT_FALSE(model.enabled());
 }
 
+/** @brief Verifies coherent failure propagation after a rank-local database parse error. */
 TEST(TurbulenceModelMultiRankTest, RankLocalDatabaseParseFailureThrowsCoherently)
 {
     auto mesh = make_distributed_mesh();
@@ -199,6 +211,7 @@ TEST(TurbulenceModelMultiRankTest, RankLocalDatabaseParseFailureThrowsCoherently
     EXPECT_FALSE(model.enabled());
 }
 
+/** @brief Verifies uniform distributed advances for standard k-epsilon and SST. */
 TEST(TurbulenceModelMultiRankTest, StandardKEpsilonAndSSTAdvanceUniformDistributedState)
 {
     for (const auto type : {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
@@ -239,8 +252,10 @@ TEST(TurbulenceModelMultiRankTest, StandardKEpsilonAndSSTAdvanceUniformDistribut
     }
 }
 
+/** @brief Verifies both wall treatments across partitioned wall batches. */
 TEST(TurbulenceModelMultiRankTest, BothWallTreatmentsAdvanceAcrossPartitionedWallBatches)
 {
+    /** @brief Wall-treatment case and the closure used to exercise it. */
     struct WallCase
     {
         SimpleFluid::TurbulenceModelType model;

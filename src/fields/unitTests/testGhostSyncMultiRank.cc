@@ -33,18 +33,26 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the 64-cell distributed synchronization fixture. */
 SimpleFluid::SP<MeshType> make_4x4x4_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_4x4x4_database());
 }
 
+/** @brief Build the larger 1000-cell distributed synchronization fixture. */
 SimpleFluid::SP<MeshType> make_10x10x10_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_10x10x10_database());
 }
 
+/**
+ * @brief Assert that every rank owns cells and that the partition has ghosts.
+ *
+ * @param mesh Distributed mesh to inspect collectively.
+ * @param expected_global_cells Expected sum of owned cells across ranks.
+ */
 void expect_partitioned_mesh(const MeshType& mesh,
                              size_t expected_global_cells)
 {

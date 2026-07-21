@@ -1,11 +1,17 @@
 /**
  * @file OrthogonalLocalGlobalIndexer.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Out-of-line methods for the arithmetic indexer specialization.
+ * @version 0.1
+ * @date 2026-07-21
  *
  * @details OrthogonalLocalGlobalIndexer.cc includes this file for the common
  * explicit instantiations. A translation unit using another orthogonal index
  * pack may include it to instantiate block construction and coordinate
  * mapping for that pack.
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/OrthogonalLocalGlobalIndexer.hh"
@@ -13,6 +19,16 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Build the balanced local block selected from a global orthogonal mesh.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_indexer Global structured dimensions and periodicity.
+ * @param block_counts Number of blocks along each dimension.
+ * @param block_coordinates Selected block coordinate along each dimension.
+ * @throws std::invalid_argument If a dimension or block count is invalid.
+ * @throws std::out_of_range If a block coordinate is outside its block grid.
+ * @throws std::overflow_error If local or global ordinals cannot hold the mesh.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -75,6 +91,13 @@ LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     validate_ordinal_capacity();
 }
 
+/**
+ * @brief Translate a block-local cell ID to global coordinates.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_id Block-local cell ID.
+ * @return Global cell ID.
+ * @throws std::out_of_range If @p local_id is outside the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -90,6 +113,13 @@ LocalGlobalIndexer<Pack>::local_to_global_cell_id(
         static_cast<Ordinal>(local_id.k + d_block_begin[2])};
 }
 
+/**
+ * @brief Translate a block-local face ID to wrapped global coordinates.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_id Block-local face ID.
+ * @return Global face ID.
+ * @throws std::out_of_range If @p local_id is outside the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -108,6 +138,13 @@ LocalGlobalIndexer<Pack>::local_to_global_face_id(
     return global_id;
 }
 
+/**
+ * @brief Translate a block-local node ID to wrapped global coordinates.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_id Block-local node ID.
+ * @return Global node ID.
+ * @throws std::out_of_range If @p local_id is outside the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -125,6 +162,13 @@ LocalGlobalIndexer<Pack>::local_to_global_node_id(
     return global_id;
 }
 
+/**
+ * @brief Translate a global cell ID into this block's local coordinates.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global cell ID.
+ * @return Block-local cell ID.
+ * @throws std::out_of_range If @p global_id is outside the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -142,6 +186,13 @@ LocalGlobalIndexer<Pack>::global_to_local_cell_id(
     return local_id;
 }
 
+/**
+ * @brief Translate a global face ID into this block's local coordinates.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global face ID.
+ * @return Block-local face ID.
+ * @throws std::out_of_range If @p global_id is outside the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -159,6 +210,13 @@ LocalGlobalIndexer<Pack>::global_to_local_face_id(
     return local_id;
 }
 
+/**
+ * @brief Translate a global node ID into this block's local coordinates.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global node ID.
+ * @return Block-local node ID.
+ * @throws std::out_of_range If @p global_id is outside the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -176,6 +234,13 @@ LocalGlobalIndexer<Pack>::global_to_local_node_id(
     return local_id;
 }
 
+/**
+ * @brief Resolve a local cell ordinal to its global structured ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_ordinal Block-local cell ordinal.
+ * @return Global cell ID.
+ * @throws std::out_of_range If @p local_ordinal is invalid.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -188,6 +253,13 @@ LocalGlobalIndexer<Pack>::cell_id(ordinal_t local_ordinal) const
             local_ordinal, num_local_cells(), "cell")));
 }
 
+/**
+ * @brief Resolve a local face ordinal to its global structured ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_ordinal Block-local face ordinal.
+ * @return Global face ID.
+ * @throws std::out_of_range If @p local_ordinal is invalid.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -200,6 +272,13 @@ LocalGlobalIndexer<Pack>::face_id(ordinal_t local_ordinal) const
             local_ordinal, num_local_faces(), "face")));
 }
 
+/**
+ * @brief Resolve a local node ordinal to its global structured ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param local_ordinal Block-local node ordinal.
+ * @return Global node ID.
+ * @throws std::out_of_range If @p local_ordinal is invalid.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -212,6 +291,12 @@ LocalGlobalIndexer<Pack>::node_id(ordinal_t local_ordinal) const
             local_ordinal, num_local_nodes(), "node")));
 }
 
+/**
+ * @brief Find the local ordinal of a global cell ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global cell ID.
+ * @return Local ordinal, or @ref invalid_local_id when the cell is not local.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -226,6 +311,12 @@ LocalGlobalIndexer<Pack>::cell_ordinal(
          : invalid_local_id();
 }
 
+/**
+ * @brief Find the local ordinal of a global face ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global face ID.
+ * @return Local ordinal, or @ref invalid_local_id when the face is not local.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -240,6 +331,12 @@ LocalGlobalIndexer<Pack>::face_ordinal(
          : invalid_local_id();
 }
 
+/**
+ * @brief Find the local ordinal of a global node ID.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global node ID.
+ * @return Local ordinal, or @ref invalid_local_id when the node is not local.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -254,6 +351,11 @@ LocalGlobalIndexer<Pack>::node_ordinal(
          : invalid_local_id();
 }
 
+/**
+ * @brief Wrap face coordinates that cross a periodic global seam.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param id Global face ID to update in place.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -279,6 +381,11 @@ void LocalGlobalIndexer<Pack>::wrap_global_face(
     id.k = values[2];
 }
 
+/**
+ * @brief Wrap node coordinates that cross a periodic global seam.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param id Global node ID to update in place.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -303,6 +410,17 @@ void LocalGlobalIndexer<Pack>::wrap_global_node(
     id.k = values[2];
 }
 
+/**
+ * @brief Convert one global coordinate into a block-local coordinate.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_coordinate Coordinate to map.
+ * @param begin Global coordinate at the start of the block.
+ * @param local_extent Number of locally represented coordinates.
+ * @param global_extent Number of global coordinates.
+ * @param periodic Whether coordinates may wrap across the global seam.
+ * @param local_coordinate Receives the mapped coordinate on success.
+ * @return True when the global coordinate is represented by the block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -330,6 +448,13 @@ bool LocalGlobalIndexer<Pack>::unmap_coordinate(
     return true;
 }
 
+/**
+ * @brief Attempt to map a global cell ID into this block.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global cell ID.
+ * @param local_id Receives the block-local ID on success.
+ * @return True when the cell belongs to this block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -363,6 +488,13 @@ bool LocalGlobalIndexer<Pack>::try_global_to_local_cell_id(
     return true;
 }
 
+/**
+ * @brief Attempt to map a global face ID into this block.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global face ID.
+ * @param local_id Receives the block-local ID on success.
+ * @return True when the face is represented by this block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -406,6 +538,13 @@ bool LocalGlobalIndexer<Pack>::try_global_to_local_face_id(
     return true;
 }
 
+/**
+ * @brief Attempt to map a global node ID into this block.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @param global_id Global node ID.
+ * @param local_id Receives the block-local ID on success.
+ * @return True when the node is represented by this block.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;
@@ -439,6 +578,11 @@ bool LocalGlobalIndexer<Pack>::try_global_to_local_node_id(
     return true;
 }
 
+/**
+ * @brief Verify that configured ordinal types can represent all entities.
+ * @tparam Pack Orthogonal entity-ID and ordinal types.
+ * @throws std::overflow_error If a local or global entity count is too large.
+ */
 template<MeshIndexTypePack Pack>
     requires requires {
         typename Pack::orthogonal_index_type_pack_tag;

@@ -27,6 +27,7 @@ namespace
 using Ordinal = UnstructuredMesh::Ordinal;
 using FaceKey = Arr<Ordinal>;
 
+/** @brief Hash a sorted variable-length face-node key. */
 struct FaceKeyHash
 {
     size_t operator()(const FaceKey& key) const noexcept
@@ -41,6 +42,7 @@ struct FaceKeyHash
     }
 };
 
+/** @brief Boundary identifier and name recovered from input definitions. */
 struct BoundaryTag
 {
     int id = UnstructuredMesh::invalid_boundary_id;
@@ -277,6 +279,11 @@ UnstructuredMesh::UnstructuredMesh(
     Base::d_num_owned_faces = num_owned_faces;
 }
 
+/**
+ * @brief Move geometry, topology, and cached counts from another mesh.
+ * @param other Mesh whose storage is transferred.
+ * @return This mesh after assignment.
+ */
 UnstructuredMesh& UnstructuredMesh::operator=(
     UnstructuredMesh&& other) noexcept
 {
@@ -524,6 +531,10 @@ void UnstructuredMesh::build_faces(
     }
 }
 
+/**
+ * @brief Compute face centroids, areas, and owner-oriented unit normals.
+ * @throws std::invalid_argument If a face is degenerate or non-finite.
+ */
 void UnstructuredMesh::compute_face_geometry()
 {
     for (auto& face : d_faces)
@@ -555,6 +566,7 @@ void UnstructuredMesh::compute_face_geometry()
     }
 }
 
+/** @brief Synchronize the identity indexer and base-class entity counts. */
 void UnstructuredMesh::update_counts()
 {
     d_indexer = {

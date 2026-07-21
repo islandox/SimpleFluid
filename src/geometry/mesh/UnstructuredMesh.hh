@@ -62,12 +62,14 @@ public:
         return invalid_ordinal;
     }
 
+    /** @brief Input cell topology and ordered node connectivity. */
     struct CellDefinition
     {
         CellType type = CellType::INVALID;
         Arr<NodeID> node_ids;
     };
 
+    /** @brief Input boundary face connectivity, ID, and display name. */
     struct BoundaryFaceDefinition
     {
         Arr<NodeID> node_ids;
@@ -75,6 +77,7 @@ public:
         std::string name;
     };
 
+    /** @brief Identity mapping between compact IDs and local ordinals. */
     struct Indexer
     {
         using cell_id_t = CellID;
@@ -156,6 +159,7 @@ public:
 private:
     friend Base;
 
+    /** @brief Derived connectivity and geometry for one cell. */
     struct CellInfo
     {
         CellType type = CellType::INVALID;
@@ -165,6 +169,7 @@ private:
         real_t volume = 0.0;
     };
 
+    /** @brief Derived connectivity, adjacency, and geometry for one face. */
     struct FaceInfo
     {
         FaceType type = FaceType::INVALID;

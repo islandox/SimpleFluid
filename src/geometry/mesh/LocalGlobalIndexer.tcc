@@ -19,6 +19,17 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Build mappings from raw cell, face, and combined node IDs.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned_cells Owned cell IDs.
+ * @param ghost_cells Ghost cell IDs.
+ * @param owned_faces Owned face IDs.
+ * @param overlap_faces Overlap face IDs.
+ * @param nodes Locally visible node IDs, all treated as owned.
+ * @throws std::invalid_argument If IDs are duplicated.
+ * @throws std::overflow_error If IDs or counts exceed configured ordinals.
+ */
 template<MeshIndexTypePack Pack>
 LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     std::vector<cell_id_t> owned_cells,
@@ -32,6 +43,18 @@ LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     set_nodes(std::move(nodes));
 }
 
+/**
+ * @brief Build mappings from raw IDs with explicit owned and overlap nodes.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned_cells Owned cell IDs.
+ * @param ghost_cells Ghost cell IDs.
+ * @param owned_faces Owned face IDs.
+ * @param overlap_faces Overlap face IDs.
+ * @param owned_nodes Owned node IDs.
+ * @param overlap_nodes Overlap node IDs.
+ * @throws std::invalid_argument If IDs are duplicated.
+ * @throws std::overflow_error If IDs or counts exceed configured ordinals.
+ */
 template<MeshIndexTypePack Pack>
 LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     std::vector<cell_id_t> owned_cells,
@@ -46,6 +69,17 @@ LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     set_nodes(std::move(owned_nodes), std::move(overlap_nodes));
 }
 
+/**
+ * @brief Build mappings from explicit cell, face, and combined node records.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned_cells Owned cell mappings.
+ * @param ghost_cells Ghost cell mappings.
+ * @param owned_faces Owned face mappings.
+ * @param overlap_faces Overlap face mappings.
+ * @param nodes Locally visible node mappings, all treated as owned.
+ * @throws std::invalid_argument If IDs or global ordinals are duplicated.
+ * @throws std::overflow_error If the local count exceeds its ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     std::vector<CellMapping> owned_cells,
@@ -59,6 +93,18 @@ LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     set_nodes(std::move(nodes));
 }
 
+/**
+ * @brief Build mappings from explicit records for every ownership category.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned_cells Owned cell mappings.
+ * @param ghost_cells Ghost cell mappings.
+ * @param owned_faces Owned face mappings.
+ * @param overlap_faces Overlap face mappings.
+ * @param owned_nodes Owned node mappings.
+ * @param overlap_nodes Overlap node mappings.
+ * @throws std::invalid_argument If IDs or global ordinals are duplicated.
+ * @throws std::overflow_error If the local count exceeds its ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     std::vector<CellMapping> owned_cells,
@@ -73,6 +119,14 @@ LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
     set_nodes(std::move(owned_nodes), std::move(overlap_nodes));
 }
 
+/**
+ * @brief Replace cell mappings from raw owned and ghost IDs.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned Owned cell IDs.
+ * @param ghost Ghost cell IDs.
+ * @throws std::invalid_argument If IDs are duplicated.
+ * @throws std::overflow_error If IDs or counts exceed configured ordinals.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_cells(
     std::vector<cell_id_t> owned,
@@ -81,6 +135,14 @@ void LocalGlobalIndexer<Pack>::set_cells(
     assign(d_cells, std::move(owned), std::move(ghost), "cell");
 }
 
+/**
+ * @brief Replace face mappings from raw owned and overlap IDs.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned Owned face IDs.
+ * @param overlap Overlap face IDs.
+ * @throws std::invalid_argument If IDs are duplicated.
+ * @throws std::overflow_error If IDs or counts exceed configured ordinals.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_faces(
     std::vector<face_id_t> owned,
@@ -89,12 +151,27 @@ void LocalGlobalIndexer<Pack>::set_faces(
     assign(d_faces, std::move(owned), std::move(overlap), "face");
 }
 
+/**
+ * @brief Replace node mappings from one raw locally visible ID list.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param nodes Node IDs, all treated as owned.
+ * @throws std::invalid_argument If IDs are duplicated.
+ * @throws std::overflow_error If IDs or counts exceed configured ordinals.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_nodes(std::vector<node_id_t> nodes)
 {
     assign(d_nodes, std::move(nodes), {}, "node");
 }
 
+/**
+ * @brief Replace node mappings from raw owned and overlap ID lists.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned Owned node IDs.
+ * @param overlap Overlap node IDs.
+ * @throws std::invalid_argument If IDs are duplicated.
+ * @throws std::overflow_error If IDs or counts exceed configured ordinals.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_nodes(
     std::vector<node_id_t> owned,
@@ -103,6 +180,14 @@ void LocalGlobalIndexer<Pack>::set_nodes(
     assign(d_nodes, std::move(owned), std::move(overlap), "node");
 }
 
+/**
+ * @brief Replace cell mappings from explicit owned and ghost records.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned Owned cell mappings.
+ * @param ghost Ghost cell mappings.
+ * @throws std::invalid_argument If IDs or global ordinals are duplicated.
+ * @throws std::overflow_error If the local count exceeds its ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_cells(
     std::vector<CellMapping> owned,
@@ -112,6 +197,14 @@ void LocalGlobalIndexer<Pack>::set_cells(
         d_cells, std::move(owned), std::move(ghost), "cell");
 }
 
+/**
+ * @brief Replace face mappings from explicit owned and overlap records.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned Owned face mappings.
+ * @param overlap Overlap face mappings.
+ * @throws std::invalid_argument If IDs or global ordinals are duplicated.
+ * @throws std::overflow_error If the local count exceeds its ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_faces(
     std::vector<FaceMapping> owned,
@@ -121,12 +214,27 @@ void LocalGlobalIndexer<Pack>::set_faces(
         d_faces, std::move(owned), std::move(overlap), "face");
 }
 
+/**
+ * @brief Replace node mappings from one explicit locally visible list.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param nodes Node mappings, all treated as owned.
+ * @throws std::invalid_argument If IDs or global ordinals are duplicated.
+ * @throws std::overflow_error If the local count exceeds its ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_nodes(std::vector<NodeMapping> nodes)
 {
     assign_mappings(d_nodes, std::move(nodes), {}, "node");
 }
 
+/**
+ * @brief Replace node mappings from explicit owned and overlap records.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @param owned Owned node mappings.
+ * @param overlap Overlap node mappings.
+ * @throws std::invalid_argument If IDs or global ordinals are duplicated.
+ * @throws std::overflow_error If the local count exceeds its ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 void LocalGlobalIndexer<Pack>::set_nodes(
     std::vector<NodeMapping> owned,
@@ -136,6 +244,18 @@ void LocalGlobalIndexer<Pack>::set_nodes(
         d_nodes, std::move(owned), std::move(overlap), "node");
 }
 
+/**
+ * @brief Infer explicit mappings from raw global entity IDs.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Destination entity index.
+ * @param owned Owned global IDs.
+ * @param overlap Ghost or overlap global IDs.
+ * @param entity Entity label used in diagnostics.
+ * @throws std::invalid_argument If generated mappings are duplicated.
+ * @throws std::overflow_error If inferred IDs or ordinals do not fit.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 void LocalGlobalIndexer<Pack>::assign(
@@ -168,6 +288,19 @@ void LocalGlobalIndexer<Pack>::assign(
         entity);
 }
 
+/**
+ * @brief Validate and install explicit owned-first entity mappings.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Destination entity index.
+ * @param owned Owned mappings.
+ * @param overlap Ghost or overlap mappings.
+ * @param entity Entity label used in diagnostics.
+ * @throws std::invalid_argument If any local ID, global ID, or global ordinal
+ *         is duplicated.
+ * @throws std::overflow_error If the total count exceeds the local ordinal.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 void LocalGlobalIndexer<Pack>::assign_mappings(
@@ -225,6 +358,16 @@ void LocalGlobalIndexer<Pack>::assign_mappings(
     index = std::move(rebuilt);
 }
 
+/**
+ * @brief Infer a local entity ID for a raw global-ID input.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param global_id Global ID used when local and global ID types coincide.
+ * @param local_ordinal Position in the owned-first local ordering.
+ * @return Inferred local ID.
+ * @throws std::overflow_error If an integral local ID cannot hold the ordinal.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 LocalID
@@ -250,6 +393,15 @@ LocalGlobalIndexer<Pack>::infer_local_id(
     }
 }
 
+/**
+ * @brief Infer a global ordinal from an integral global entity ID.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam GlobalID Global entity identifier type.
+ * @param global_id Global ID to convert.
+ * @param local_ordinal Local position, retained for non-integral specializations.
+ * @return Inferred global ordinal.
+ * @throws std::overflow_error If @p global_id does not fit the ordinal type.
+ */
 template<MeshIndexTypePack Pack>
 template<class GlobalID>
 typename LocalGlobalIndexer<Pack>::global_ordinal_type

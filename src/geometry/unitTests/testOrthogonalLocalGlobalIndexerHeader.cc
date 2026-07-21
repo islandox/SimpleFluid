@@ -1,6 +1,12 @@
 /**
  * @file testOrthogonalLocalGlobalIndexerHeader.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Verifies the public orthogonal local/global indexer header links.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -18,6 +24,10 @@ using LocalGlobalIndexer =
 
 static_assert(SimpleFluid::MeshIndexer<LocalGlobalIndexer>);
 
+/**
+ * @brief Verifies the public header exposes and links the supported
+ * orthogonal local/global indexer specialization.
+ */
 TEST(OrthogonalLocalGlobalIndexerHeaderTest, PublicHeaderLinksPrebuiltSpecialization)
 {
     const OrthogonalIndexer global_indexer(4, 3, 2);

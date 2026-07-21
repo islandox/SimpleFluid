@@ -1,6 +1,12 @@
 /**
  * @file BoundaryLayerMeshFactory.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief In-place, topology-family-preserving boundary-layer mesh refinement.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -37,6 +43,12 @@ namespace SimpleFluid
 class BoundaryLayerMeshFactory
 {
 public:
+    /**
+     * @brief One graded layer stack attached to a named mesh boundary.
+     *
+     * The first cell starts at the boundary and subsequent widths are
+     * multiplied by @ref growth_ratio.
+     */
     struct BoundaryLayerSpec
     {
         std::string boundary_name;
@@ -45,7 +57,12 @@ public:
         real_t growth_ratio = 1.0;
     };
 
-    /** @brief Construct from explicit boundary-layer specifications. */
+    /**
+     * @brief Construct from explicit boundary-layer specifications.
+     * @param layer_specs Named layer stacks to validate and retain.
+     * @throws std::invalid_argument If names are empty or duplicated, counts
+     *         or first-cell heights are not positive, or ratios are below one.
+     */
     explicit BoundaryLayerMeshFactory(
         Arr<BoundaryLayerSpec> layer_specs);
 
@@ -55,13 +72,22 @@ public:
      * Reads `boundary_layer_boundary_names`, `boundary_layer_counts`,
      * `boundary_layer_first_cell_heights`, and
      * `boundary_layer_growth_ratios`.
+     *
+     * @param database Configuration database containing the parallel arrays.
+     * @throws std::invalid_argument If the database or configuration is invalid.
      */
     explicit BoundaryLayerMeshFactory(SP<const Database> database);
 
-    /** @brief Refine a Cartesian mesh while retaining orthogonal topology. */
+    /**
+     * @brief Refine a Cartesian mesh while retaining orthogonal topology.
+     * @param mesh Mesh to rebuild in place.
+     */
     void build(Meshes::OrthogonalCartesian3D& mesh) const;
 
-    /** @brief Refine a cylindrical mesh while retaining orthogonal topology. */
+    /**
+     * @brief Refine a cylindrical mesh while retaining orthogonal topology.
+     * @param mesh Mesh to rebuild in place.
+     */
     void build(Meshes::OrthogonalCylindrial3D& mesh) const;
 
     /**
@@ -69,10 +95,18 @@ public:
      *
      * Side-layer generation is rejected because it would require changing the
      * supplied XY topology rather than preserving it.
+     *
+     * @param mesh Mesh to rebuild in place.
+     * @throws std::invalid_argument If a configured boundary is not zmin or zmax.
      */
     void build(Meshes::SemiStructuredXY_Z& mesh) const;
 
-    /** @brief Shared-pointer convenience overload preserving object identity. */
+    /**
+     * @brief Shared-pointer convenience overload preserving object identity.
+     * @tparam MeshType Supported concrete mesh family.
+     * @param mesh Mesh to rebuild in place.
+     * @throws std::invalid_argument If @p mesh is null.
+     */
     template<class MeshType>
     void build(const SP<MeshType>& mesh) const
     {

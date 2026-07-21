@@ -1,6 +1,12 @@
 /**
  * @file natural_convection_shiri.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief MPI-capable Boussinesq counterpart to NC_Tutorial_Shiri.pdf.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "dataclass/Database.hh"
@@ -23,6 +29,15 @@
 namespace
 {
 
+/**
+ * @brief Read a positive integer from an environment variable.
+ *
+ * @param name Environment-variable name.
+ * @param fallback Value used when the variable is unset.
+ * @return Parsed positive value or @p fallback.
+ * @throws std::invalid_argument if the configured value is invalid or non-positive.
+ * @throws std::out_of_range if the configured value exceeds the integer range.
+ */
 int positive_environment_integer(const char* name, int fallback)
 {
     const char* text = std::getenv(name);
@@ -35,6 +50,15 @@ int positive_environment_integer(const char* name, int fallback)
     return value;
 }
 
+/**
+ * @brief Read a finite positive floating-point value from the environment.
+ *
+ * @param name Environment-variable name.
+ * @param fallback Value used when the variable is unset.
+ * @return Parsed positive value or @p fallback.
+ * @throws std::invalid_argument if the configured value is invalid, non-finite, or non-positive.
+ * @throws std::out_of_range if the configured value exceeds the floating-point range.
+ */
 double positive_environment_real(const char* name, double fallback)
 {
     const char* text = std::getenv(name);
@@ -48,6 +72,14 @@ double positive_environment_real(const char* name, double fallback)
     return value;
 }
 
+/**
+ * @brief Generate uniformly spaced coordinates over an interval.
+ *
+ * @param lower Lower interval endpoint.
+ * @param upper Upper interval endpoint.
+ * @param cells Number of cells.
+ * @return Coordinate vector containing @p cells plus one edges.
+ */
 SimpleFluid::ArrReal uniform_edges(double lower, double upper, int cells)
 {
     SimpleFluid::ArrReal edges;
@@ -61,6 +93,12 @@ SimpleFluid::ArrReal uniform_edges(double lower, double upper, int cells)
     return edges;
 }
 
+/**
+ * @brief Generate radially graded annulus edges concentrated near the wall.
+ *
+ * @param cells Number of radial cells.
+ * @return Radial edge coordinates from the inner to outer cylinder.
+ */
 SimpleFluid::ArrReal wall_graded_radial_edges(int cells)
 {
     constexpr double inner_radius = 0.075;
@@ -89,6 +127,15 @@ SimpleFluid::ArrReal wall_graded_radial_edges(int cells)
     return edges;
 }
 
+/**
+ * @brief Write rank-local cylindrical solution profiles for comparison.
+ *
+ * @tparam Pack Tpetra type pack used by the mesh and solver.
+ * @param mesh Mesh providing owned cell centers.
+ * @param solver Solver providing temperature, velocity, and pressure fields.
+ * @param rank MPI rank used in the output filename.
+ * @throws std::runtime_error if the output file cannot be opened.
+ */
 template<class Pack>
 void write_profile_cells(
     const SimpleFluid::MeshHandle<Pack>& mesh,
@@ -126,6 +173,13 @@ void write_profile_cells(
 
 } // namespace
 
+/**
+ * @brief Run the configurable MPI annulus natural-convection case.
+ *
+ * @param argc Argument count passed to Tpetra.
+ * @param argv Argument vector passed to Tpetra.
+ * @return Process exit code, zero on normal completion.
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

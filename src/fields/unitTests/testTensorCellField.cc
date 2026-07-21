@@ -31,12 +31,19 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the assembled two-cell mesh shared by tensor-field tests. */
 SimpleFluid::SP<MeshType> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
 }
 
+/**
+ * @brief Create a row-major tensor with distinct, optionally shifted values.
+ *
+ * @param offset Value added to all nine components.
+ * @return Tensor containing consecutive component values.
+ */
 TensorType sample_tensor(double offset = 0.0)
 {
     return {
@@ -48,6 +55,7 @@ TensorType sample_tensor(double offset = 0.0)
 
 } // namespace
 
+/** @brief Verifies row-major component storage and indexed updates. */
 TEST(TensorCellFieldTest, StoresNineComponentsInRowMajorOrder)
 {
     auto mesh = make_two_hex_mesh();
@@ -66,6 +74,7 @@ TEST(TensorCellFieldTest, StoresNineComponentsInRowMajorOrder)
     EXPECT_DOUBLE_EQ(gradient.component_value(1, 2, 1), 42.0);
 }
 
+/** @brief Confirms uniform construction fills owned and overlap entries. */
 TEST(TensorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
 {
     auto mesh = make_two_hex_mesh();
@@ -75,6 +84,7 @@ TEST(TensorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
     EXPECT_EQ(gradient.local_value(1), sample_tensor(10.0));
 }
 
+/** @brief Verifies periodic synchronization copies all tensor components. */
 TEST(TensorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
 {
     auto mesh = make_two_hex_mesh();
@@ -89,6 +99,7 @@ TEST(TensorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
     EXPECT_EQ(gradient.local_value(1), sample_tensor(10.0));
 }
 
+/** @brief Ensures flat and row-column indices are bounds checked. */
 TEST(TensorCellFieldTest, RejectsOutOfRangeComponents)
 {
     auto mesh = make_two_hex_mesh();
@@ -100,6 +111,7 @@ TEST(TensorCellFieldTest, RejectsOutOfRangeComponents)
                  std::out_of_range);
 }
 
+/** @brief Ensures construction rejects a mesh without assembled maps. */
 TEST(TensorCellFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh =

@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceModel.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Explicit template instantiation for TurbulenceModel.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "equations/turbulence/TurbulenceModel.hh"
@@ -12,6 +18,11 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Return the canonical database name of a turbulence model.
+ * @param model Runtime model identifier.
+ * @return Canonical model name, or `unknown` for an invalid enumerator.
+ */
 std::string_view to_string(TurbulenceModelType model) noexcept
 {
     switch (model)
@@ -34,6 +45,12 @@ std::string_view to_string(TurbulenceModelType model) noexcept
     return "unknown";
 }
 
+/**
+ * @brief Parse a turbulence model name or supported alias.
+ * @param value Configured model name.
+ * @return Parsed turbulence model identifier.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 TurbulenceModelType parse_turbulence_model_type(const std::string& value)
 {
     if (value == "laminar" || value == "none")
@@ -53,6 +70,11 @@ TurbulenceModelType parse_turbulence_model_type(const std::string& value)
     throw std::invalid_argument("Unknown turbulence model '" + value + "'.");
 }
 
+/**
+ * @brief Return the canonical database name of a wall treatment.
+ * @param treatment Runtime wall-treatment identifier.
+ * @return Canonical treatment name, or `unknown` for an invalid enumerator.
+ */
 std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept
 {
     switch (treatment)
@@ -67,6 +89,12 @@ std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept
     return "unknown";
 }
 
+/**
+ * @brief Parse a turbulence wall-treatment name or supported alias.
+ * @param value Configured wall-treatment name.
+ * @return Parsed wall-treatment identifier.
+ * @throws std::invalid_argument if @p value is unknown.
+ */
 TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
     const std::string& value)
 {
@@ -80,6 +108,11 @@ TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
         "Unknown turbulence wall treatment '" + value + "'.");
 }
 
+/**
+ * @brief Validate model floors, wall distance, and closure-policy pairing.
+ * @param options Turbulence model options to validate.
+ * @throws std::invalid_argument if any active option is inconsistent.
+ */
 void validate_turbulence_model_options(const TurbulenceModelOptions& options)
 {
     const real_t positive_values[] = {options.initial_turbulent_kinetic_energy,
@@ -151,6 +184,12 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
     }
 }
 
+/**
+ * @brief Parse and validate turbulence model options from a database.
+ * @param database Source configuration database.
+ * @return Validated turbulence model options.
+ * @throws std::invalid_argument if an option is ill-typed or invalid.
+ */
 TurbulenceModelOptions turbulence_model_options_from_database(const Database& database)
 {
     TurbulenceModelOptions options;

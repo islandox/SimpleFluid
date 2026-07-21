@@ -68,6 +68,8 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
  * MeshHandle normalizes structured, semi-structured, and legacy STK meshes
  * into one FVM-facing API. It builds owned/overlap maps and translates compact
  * local IDs to each concrete mesh's geometry IDs.
+ *
+ * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class MeshHandle

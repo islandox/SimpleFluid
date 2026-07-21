@@ -1,6 +1,12 @@
 /**
  * @file testTurbulenceEquations.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Formula and validation tests for two-equation turbulence closures.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -27,6 +33,7 @@ using SimpleFluid::StandardKOmegaEquation;
 
 } // namespace
 
+/** @brief Verifies kinematic scaling and validation of strain production. */
 TEST(TurbulenceEquationCommonTest, StrainProductionHasKinematicUnits)
 {
     EXPECT_DOUBLE_EQ(SimpleFluid::turbulence_strain_production(0.25, 2.0), 1.0);
@@ -36,6 +43,7 @@ TEST(TurbulenceEquationCommonTest, StrainProductionHasKinematicUnits)
         std::invalid_argument);
 }
 
+/** @brief Verifies canonical standard k-epsilon closure values. */
 TEST(StandardKEpsilonEquationTest, EvaluatesCanonicalClosure)
 {
     const StandardKEpsilonEquation equation;
@@ -54,6 +62,7 @@ TEST(StandardKEpsilonEquationTest, EvaluatesCanonicalClosure)
     EXPECT_NEAR(sources.epsilon, 0.048, 1.0e-14);
 }
 
+/** @brief Verifies the signed rapid-strain correction in the RNG k-epsilon closure. */
 TEST(RNGKEpsilonEquationTest, AppliesSignedRapidStrainCorrection)
 {
     const RNGKEpsilonEquation equation;
@@ -84,6 +93,7 @@ TEST(RNGKEpsilonEquationTest, AppliesSignedRapidStrainCorrection)
     EXPECT_NEAR(diffusivities.epsilon, diffusivities.k, 1.0e-14);
 }
 
+/** @brief Verifies variable C-mu and epsilon-source evaluation for realizable k-epsilon. */
 TEST(RealizableKEpsilonEquationTest, ComputesVariableCmuAndEpsilonSource)
 {
     const RealizableKEpsilonEquation equation;
@@ -117,6 +127,7 @@ TEST(RealizableKEpsilonEquationTest, ComputesVariableCmuAndEpsilonSource)
     EXPECT_DOUBLE_EQ(equation.epsilon_production_coefficient(state, 0.1), 0.43);
 }
 
+/** @brief Verifies realizable k-epsilon evaluation with a nonzero third invariant. */
 TEST(RealizableKEpsilonEquationTest, EvaluatesPhysicalNonzeroThirdInvariant)
 {
     const RealizableKEpsilonEquation equation;
@@ -130,6 +141,7 @@ TEST(RealizableKEpsilonEquationTest, EvaluatesPhysicalNonzeroThirdInvariant)
     EXPECT_NEAR(equation.a_s(invariants), expected, 1.0e-14);
 }
 
+/** @brief Verifies clamping of the third invariant before inverse-cosine evaluation. */
 TEST(RealizableKEpsilonEquationTest, ClampsThirdInvariantForAcos)
 {
     const RealizableKEpsilonEquation equation;
@@ -143,6 +155,7 @@ TEST(RealizableKEpsilonEquationTest, ClampsThirdInvariantForAcos)
     EXPECT_NEAR(equation.a_s(invariants), std::sqrt(1.5), 1.0e-14);
 }
 
+/** @brief Verifies canonical Wilcox 1988 k-omega closure values. */
 TEST(StandardKOmegaEquationTest, EvaluatesWilcox1988Closure)
 {
     const StandardKOmegaEquation equation;
@@ -161,6 +174,7 @@ TEST(StandardKOmegaEquationTest, EvaluatesWilcox1988Closure)
     EXPECT_NEAR(sources.omega, (5.0 / 9.0) * 0.8 * 4.0 / 2.0 - 0.075 * 16.0, 1.0e-14);
 }
 
+/** @brief Verifies blending of inner and outer Menter coefficients. */
 TEST(BSLKOmegaEquationTest, BlendsInnerAndOuterMenterCoefficients)
 {
     const BSLKOmegaEquation equation;
@@ -179,6 +193,7 @@ TEST(BSLKOmegaEquationTest, BlendsInnerAndOuterMenterCoefficients)
     EXPECT_NEAR(outer.gamma, 0.4403546666666667, 1.0e-14);
 }
 
+/** @brief Verifies blended BSL k-omega source and diffusivity values. */
 TEST(BSLKOmegaEquationTest, EvaluatesBlendedSourcesAndDiffusivities)
 {
     const BSLKOmegaEquation equation;
@@ -226,6 +241,7 @@ TEST(BSLKOmegaEquationTest, EvaluatesBlendedSourcesAndDiffusivities)
                      equation.coefficients().cross_diffusion_floor);
 }
 
+/** @brief Verifies the viscous and cross-diffusion limit branches of F1. */
 TEST(BSLKOmegaEquationTest, ExercisesViscousAndCrossLimitF1Branches)
 {
     const BSLKOmegaEquation equation;
@@ -252,6 +268,7 @@ TEST(BSLKOmegaEquationTest, ExercisesViscousAndCrossLimitF1Branches)
                 std::tanh(std::pow(cross_argument, 4)), 1.0e-14);
 }
 
+/** @brief Verifies original SST vorticity and production limiters. */
 TEST(SSTKOmegaEquationTest, AppliesOriginalVorticityAndProductionLimiters)
 {
     const SSTKOmegaEquation equation;
@@ -301,6 +318,7 @@ TEST(SSTKOmegaEquationTest, AppliesOriginalVorticityAndProductionLimiters)
     EXPECT_NEAR(uncapped_sources.k, 0.8 - 0.09 * 2.0 * 4.0, 1.0e-14);
 }
 
+/** @brief Verifies the viscous-limit branch of the SST F2 function. */
 TEST(SSTKOmegaEquationTest, ExercisesViscousF2Branch)
 {
     const SSTKOmegaEquation equation;
@@ -316,6 +334,7 @@ TEST(SSTKOmegaEquationTest, ExercisesViscousF2Branch)
                 std::tanh(viscous_argument * viscous_argument), 1.0e-14);
 }
 
+/** @brief Verifies that Menter cross diffusion depends only on required invariants. */
 TEST(TurbulenceEquationCommonTest, MenterCrossDiffusionUsesOnlyRequiredInvariants)
 {
     auto invariants = MenterKOmegaInvariants{};
@@ -324,6 +343,7 @@ TEST(TurbulenceEquationCommonTest, MenterCrossDiffusionUsesOnlyRequiredInvariant
                 1.0e-14);
 }
 
+/** @brief Verifies rejection of invalid turbulence states and closure coefficients. */
 TEST(TurbulenceEquationCommonTest, RejectsInvalidStatesAndCoefficients)
 {
     EXPECT_THROW(StandardKEpsilonEquation(StandardKEpsilonEquation::Coefficients{.sigma_k = 0.0}),

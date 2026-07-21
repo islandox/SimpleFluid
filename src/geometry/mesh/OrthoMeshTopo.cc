@@ -1,6 +1,12 @@
 /**
  * @file OrthoMeshTopo.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Topology queries for three-dimensional orthogonal meshes.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/OrthoMeshTopo.hh"
@@ -12,6 +18,11 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Build topology queries around an existing structured indexer.
+ * @param indexer Structured dimensions and periodicity.
+ * @param boundary_names Names in lower/upper I, J, K order.
+ */
 OrthoMeshTopo::OrthoMeshTopo(
     const Indexer& indexer,
     BoundaryNames boundary_names)
@@ -22,6 +33,16 @@ OrthoMeshTopo::OrthoMeshTopo(
     initialize_cell_adjacency();
 }
 
+/**
+ * @brief Build topology queries directly from dimensions and periodicity.
+ * @param ni Cell count along I.
+ * @param nj Cell count along J.
+ * @param nk Cell count along K.
+ * @param periodic_i Whether I wraps periodically.
+ * @param periodic_j Whether J wraps periodically.
+ * @param periodic_k Whether K wraps periodically.
+ * @param boundary_names Names in lower/upper I, J, K order.
+ */
 OrthoMeshTopo::OrthoMeshTopo(Ordinal ni, Ordinal nj, Ordinal nk,
     bool periodic_i,
     bool periodic_j,
@@ -34,6 +55,11 @@ OrthoMeshTopo::OrthoMeshTopo(Ordinal ni, Ordinal nj, Ordinal nk,
     initialize_cell_adjacency();
 }
 
+/**
+ * @brief Return the owner cell on the lower-coordinate side of a face.
+ * @param id Structured face identifier.
+ * @return Owner cell identifier.
+ */
 auto OrthoMeshTopo::owner_cell(FaceID id) const noexcept -> CellID
 {
     std::array<Ordinal, 3> coordinates{id.i, id.j, id.k};
@@ -46,6 +72,11 @@ auto OrthoMeshTopo::owner_cell(FaceID id) const noexcept -> CellID
             coordinates[Indexer::K]};
 }
 
+/**
+ * @brief Return the adjacent neighbor cell of a face.
+ * @param id Structured face identifier.
+ * @return Neighbor cell, or an invalid ID for an exterior face.
+ */
 auto OrthoMeshTopo::neighbor_cell(FaceID id) const noexcept -> CellID
 {
     std::array<Ordinal, 3> coordinates{id.i, id.j, id.k};
@@ -63,11 +94,21 @@ auto OrthoMeshTopo::neighbor_cell(FaceID id) const noexcept -> CellID
             coordinates[Indexer::K]};
 }
 
+/**
+ * @brief Test whether a face belongs to a non-periodic exterior boundary.
+ * @param face_id Structured face identifier.
+ * @return True for physical boundary faces.
+ */
 bool OrthoMeshTopo::is_boundary_face(FaceID face_id) const noexcept
 {
     return boundary_id(face_id) != invalid_boundary_id;
 }
 
+/**
+ * @brief Map an exterior face to its lower or upper boundary batch.
+ * @param id Structured face identifier.
+ * @return Boundary batch ID, or @ref invalid_boundary_id for other faces.
+ */
 int OrthoMeshTopo::boundary_id(FaceID id) const noexcept
 {
     const auto orientation = id.orientation;
@@ -97,6 +138,12 @@ int OrthoMeshTopo::boundary_id(FaceID id) const noexcept
     return invalid_boundary_id;
 }
 
+/**
+ * @brief Return the configured name of a boundary batch.
+ * @param batch_id Boundary batch ID.
+ * @return Boundary name.
+ * @throws std::out_of_range If @p batch_id is outside the name table.
+ */
 const std::string&
 OrthoMeshTopo::boundary_batch_name(int batch_id) const
 {
@@ -108,6 +155,11 @@ OrthoMeshTopo::boundary_batch_name(int batch_id) const
     return d_boundary_names[static_cast<size_t>(batch_id)];
 }
 
+/**
+ * @brief Validate that a boundary batch exists and is not periodic.
+ * @param batch_id Boundary batch ID.
+ * @throws std::out_of_range If the ID is invalid or belongs to a periodic axis.
+ */
 void OrthoMeshTopo::validate_boundary_batch(int batch_id) const
 {
     if (batch_id < 0 || batch_id >= 6)
@@ -122,6 +174,10 @@ void OrthoMeshTopo::validate_boundary_batch(int batch_id) const
     }
 }
 
+/**
+ * @brief Enumerate boundary batches for non-periodic dimensions.
+ * @return Available boundary batch IDs in dimension order.
+ */
 std::vector<int> OrthoMeshTopo::boundary_batch_ids() const
 {
     std::vector<int> ids;
@@ -137,6 +193,10 @@ std::vector<int> OrthoMeshTopo::boundary_batch_ids() const
     return ids;
 }
 
+/**
+ * @brief Count boundary batches from non-periodic dimensions.
+ * @return Number of available lower and upper batches.
+ */
 int OrthoMeshTopo::num_boundary_batches() const noexcept
 {
     int count = 0;
@@ -150,6 +210,7 @@ int OrthoMeshTopo::num_boundary_batches() const noexcept
     return count;
 }
 
+/** @brief Precompute owner and neighbor coordinates for every face plane. */
 void OrthoMeshTopo::initialize_face_adjacency()
 {
     using enum Indexer::Dimension;
@@ -185,6 +246,7 @@ void OrthoMeshTopo::initialize_face_adjacency()
     init_dim(K);
 }
 
+/** @brief Precompute neighboring cell coordinates along every dimension. */
 void OrthoMeshTopo::initialize_cell_adjacency()
 {
     using enum Indexer::Dimension;

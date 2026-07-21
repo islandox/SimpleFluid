@@ -14,6 +14,11 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Validate a compact cell ID.
+ * @param id Cell ID to validate.
+ * @throws std::out_of_range If @p id is outside local cells.
+ */
 inline void UnstructuredMesh::check_cell_id(CellID id) const
 {
     if (id >= d_cells.size())
@@ -23,6 +28,11 @@ inline void UnstructuredMesh::check_cell_id(CellID id) const
     }
 }
 
+/**
+ * @brief Validate a compact face ID.
+ * @param id Face ID to validate.
+ * @throws std::out_of_range If @p id is outside local faces.
+ */
 inline void UnstructuredMesh::check_face_id(FaceID id) const
 {
     if (id >= d_faces.size())
@@ -32,6 +42,11 @@ inline void UnstructuredMesh::check_face_id(FaceID id) const
     }
 }
 
+/**
+ * @brief Validate a compact node ID.
+ * @param id Node ID to validate.
+ * @throws std::out_of_range If @p id is outside local nodes.
+ */
 inline void UnstructuredMesh::check_node_id(NodeID id) const
 {
     if (id >= d_nodes.size())
@@ -41,6 +56,12 @@ inline void UnstructuredMesh::check_node_id(NodeID id) const
     }
 }
 
+/**
+ * @brief Return ordered node connectivity for a cell.
+ * @param id Cell ID.
+ * @return Cell node IDs.
+ * @throws std::out_of_range If @p id is invalid.
+ */
 inline const Arr<UnstructuredMesh::NodeID>&
 UnstructuredMesh::cell_nodes(CellID id) const
 {
@@ -48,6 +69,12 @@ UnstructuredMesh::cell_nodes(CellID id) const
     return d_cells[id].node_ids;
 }
 
+/**
+ * @brief Return ordered node connectivity for a face.
+ * @param id Face ID.
+ * @return Face node IDs.
+ * @throws std::out_of_range If @p id is invalid.
+ */
 inline const Arr<UnstructuredMesh::NodeID>&
 UnstructuredMesh::face_nodes(FaceID id) const
 {
@@ -55,6 +82,12 @@ UnstructuredMesh::face_nodes(FaceID id) const
     return d_faces[id].node_ids;
 }
 
+/**
+ * @brief Return the topology type of a cell.
+ * @param id Cell ID.
+ * @return Cell topology type.
+ * @throws std::out_of_range If @p id is invalid.
+ */
 inline auto UnstructuredMesh::cell_type(CellID id) const -> CellType
 {
     check_cell_id(id);
@@ -118,6 +151,12 @@ inline int UnstructuredMesh::boundary_id_impl(FaceID id) const
     return d_faces[id].boundary_id;
 }
 
+/**
+ * @brief Return the name associated with a boundary batch.
+ * @param batch_id Boundary batch ID.
+ * @return Boundary name.
+ * @throws std::out_of_range If @p batch_id is unavailable.
+ */
 inline const std::string&
 UnstructuredMesh::boundary_batch_name_impl(int batch_id) const
 {
@@ -130,6 +169,12 @@ UnstructuredMesh::boundary_batch_name_impl(int batch_id) const
     return iter->second;
 }
 
+/**
+ * @brief Return locally visible faces in a boundary batch.
+ * @param batch_id Boundary batch ID.
+ * @return Boundary-face batch.
+ * @throws std::out_of_range If @p batch_id is unavailable.
+ */
 inline const UnstructuredMesh::BoundaryFaceBatch&
 UnstructuredMesh::boundary_face_batch_impl(int batch_id) const
 {
@@ -142,6 +187,10 @@ UnstructuredMesh::boundary_face_batch_impl(int batch_id) const
     return iter->second;
 }
 
+/**
+ * @brief Enumerate available boundary batch IDs.
+ * @return Boundary IDs in the map's iteration order.
+ */
 inline std::vector<int> UnstructuredMesh::boundary_batch_ids_impl() const
 {
     std::vector<int> ids;

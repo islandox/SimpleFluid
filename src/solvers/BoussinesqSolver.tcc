@@ -44,6 +44,17 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
 {
 }
 
+/**
+ * @brief Construct a legacy-mesh solver with explicit physical model options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Computational mesh.
+ * @param boundary_conditions Velocity and temperature boundary conditions.
+ * @param time_options Time-stepping and transport options.
+ * @param linear_options Linear solver options.
+ * @param model_options Physical material model options.
+ * @throws std::invalid_argument if the mesh or model options are invalid.
+ */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(
     SP<const mesh_type> mesh,
@@ -63,6 +74,16 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
 {
 }
 
+/**
+ * @brief Construct a mesh-handle solver with legacy transport properties.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Type-erased computational mesh handle.
+ * @param boundary_conditions Velocity and temperature boundary conditions.
+ * @param time_options Time-stepping and transport options.
+ * @param linear_options Linear solver options.
+ * @throws std::invalid_argument if the mesh or time-step options are invalid.
+ */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(
     SP<const MeshHandle<Pack>> mesh,
@@ -80,6 +101,17 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
 {
 }
 
+/**
+ * @brief Construct a mesh-handle solver with explicit physical model options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Type-erased computational mesh handle.
+ * @param boundary_conditions Velocity and temperature boundary conditions.
+ * @param time_options Time-stepping and transport options.
+ * @param linear_options Linear solver options.
+ * @param model_options Physical material model options.
+ * @throws std::invalid_argument if the mesh or model options are invalid.
+ */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(
     SP<const MeshHandle<Pack>> mesh,
@@ -98,6 +130,19 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
 {
 }
 
+/**
+ * @brief Initialize the common Boussinesq fields, equations, and model registry.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Type-erased computational mesh handle.
+ * @param boundary_conditions Velocity and temperature boundary conditions.
+ * @param time_options Time-stepping and transport options.
+ * @param linear_options Linear solver options.
+ * @param model_options Physical material model options.
+ * @param physical_model_enabled Whether dimensional physical transport is active.
+ * @param tag Constructor-dispatch tag.
+ * @throws std::invalid_argument if model options or configured sources are invalid.
+ */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(
     SP<const MeshHandle<Pack>> mesh,
@@ -150,6 +195,12 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
     }
 }
 
+/**
+ * @brief Return the immutable temperature field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Stored cell-centered temperature field.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::temperature() const noexcept
     -> const field_type&
@@ -157,12 +208,24 @@ auto BoussinesqSolver<Pack>::temperature() const noexcept
     return d_problem.template object<field_type>("temperature");
 }
 
+/**
+ * @brief Return the mutable temperature field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Stored cell-centered temperature field.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::temperature() noexcept -> field_type&
 {
     return d_problem.template object<field_type>("temperature");
 }
 
+/**
+ * @brief Return the internally stored mutable material-property fields.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned material-property fields.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::stored_material_properties()
     -> MaterialPropertyFields<Pack>&
@@ -171,6 +234,12 @@ auto BoussinesqSolver<Pack>::stored_material_properties()
         MaterialPropertyFields<Pack>>("material_properties");
 }
 
+/**
+ * @brief Return the internally stored immutable material-property fields.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned material-property fields.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::stored_material_properties() const
     -> const MaterialPropertyFields<Pack>&
@@ -179,6 +248,12 @@ auto BoussinesqSolver<Pack>::stored_material_properties() const
         MaterialPropertyFields<Pack>>("material_properties");
 }
 
+/**
+ * @brief Enable physical transport and return mutable material properties.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned material-property fields.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::material_properties() noexcept
     -> MaterialPropertyFields<Pack>&
@@ -187,6 +262,12 @@ auto BoussinesqSolver<Pack>::material_properties() noexcept
     return stored_material_properties();
 }
 
+/**
+ * @brief Return the immutable material-property fields.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned material-property fields.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::material_properties() const noexcept
     -> const MaterialPropertyFields<Pack>&
@@ -194,6 +275,12 @@ auto BoussinesqSolver<Pack>::material_properties() const noexcept
     return stored_material_properties();
 }
 
+/**
+ * @brief Return the internally stored mutable turbulence model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned turbulence model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::stored_turbulence_model()
     -> TurbulenceModel<Pack>&
@@ -202,6 +289,12 @@ auto BoussinesqSolver<Pack>::stored_turbulence_model()
         "turbulence_model");
 }
 
+/**
+ * @brief Return the internally stored immutable turbulence model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned turbulence model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::stored_turbulence_model() const
     -> const TurbulenceModel<Pack>&
@@ -210,12 +303,25 @@ auto BoussinesqSolver<Pack>::stored_turbulence_model() const
         "turbulence_model");
 }
 
+/**
+ * @brief Report whether dimensional or turbulent transport is active.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true when a physical transport path must be used.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::physical_transport_enabled() const noexcept
 {
     return d_physical_model_enabled || stored_turbulence_model().enabled();
 }
 
+/**
+ * @brief Configure the Problem-owned turbulence model from explicit options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Turbulence model configuration.
+ * @return Configured turbulence model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_turbulence(
     const TurbulenceModelOptions& options) -> TurbulenceModel<Pack>&
@@ -228,6 +334,13 @@ auto BoussinesqSolver<Pack>::configure_turbulence(
     return model;
 }
 
+/**
+ * @brief Configure the Problem-owned turbulence model from database keys.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param database Database containing turbulence options.
+ * @return Configured turbulence model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_turbulence(
     const Database& database) -> TurbulenceModel<Pack>&
@@ -240,12 +353,24 @@ auto BoussinesqSolver<Pack>::configure_turbulence(
     return model;
 }
 
+/**
+ * @brief Disable the active turbulence model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true if an enabled model was disabled.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_turbulence_model() noexcept
 {
     return stored_turbulence_model().disable();
 }
 
+/**
+ * @brief Find the mutable active turbulence model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Active model, or nullptr in laminar mode.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_turbulence_model() noexcept
     -> TurbulenceModel<Pack>*
@@ -254,6 +379,12 @@ auto BoussinesqSolver<Pack>::find_turbulence_model() noexcept
     return model.enabled() ? &model : nullptr;
 }
 
+/**
+ * @brief Find the immutable active turbulence model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Active model, or nullptr in laminar mode.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_turbulence_model() const noexcept
     -> const TurbulenceModel<Pack>*
@@ -262,6 +393,12 @@ auto BoussinesqSolver<Pack>::find_turbulence_model() const noexcept
     return model.enabled() ? &model : nullptr;
 }
 
+/**
+ * @brief Return the internally stored mutable temperature-source registry.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned source registry.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::stored_temperature_sources()
     -> TemperatureSourceRegistry<Pack>&
@@ -270,6 +407,12 @@ auto BoussinesqSolver<Pack>::stored_temperature_sources()
         TemperatureSourceRegistry<Pack>>("temperature_sources");
 }
 
+/**
+ * @brief Return the internally stored immutable temperature-source registry.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned source registry.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::stored_temperature_sources() const
     -> const TemperatureSourceRegistry<Pack>&
@@ -278,6 +421,12 @@ auto BoussinesqSolver<Pack>::stored_temperature_sources() const
         TemperatureSourceRegistry<Pack>>("temperature_sources");
 }
 
+/**
+ * @brief Enable physical transport and return mutable temperature sources.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned source registry.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::temperature_sources() noexcept
     -> TemperatureSourceRegistry<Pack>&
@@ -286,6 +435,12 @@ auto BoussinesqSolver<Pack>::temperature_sources() noexcept
     return stored_temperature_sources();
 }
 
+/**
+ * @brief Return the immutable temperature-source registry.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Problem-owned source registry.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::temperature_sources() const noexcept
     -> const TemperatureSourceRegistry<Pack>&
@@ -293,6 +448,14 @@ auto BoussinesqSolver<Pack>::temperature_sources() const noexcept
     return stored_temperature_sources();
 }
 
+/**
+ * @brief Add a named volumetric temperature source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param name Unique source name.
+ * @param initial_power_density Initial source power density.
+ * @return Newly registered source.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::add_temperature_source(
     std::string name,
@@ -304,6 +467,13 @@ auto BoussinesqSolver<Pack>::add_temperature_source(
         std::move(name), initial_power_density);
 }
 
+/**
+ * @brief Create the reserved fission power source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Newly created fission source.
+ * @throws std::invalid_argument if a fission source already exists.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::add_fission_power_source()
     -> FissionPowerSource<Pack>&
@@ -320,6 +490,12 @@ auto BoussinesqSolver<Pack>::add_fission_power_source()
     return *d_fission_power_source;
 }
 
+/**
+ * @brief Configure or disable the reserved fission power source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Fission source profile and normalization options.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::configure_fission_power_source(
     const FissionPowerSourceOptions& options)
@@ -337,6 +513,12 @@ void BoussinesqSolver<Pack>::configure_fission_power_source(
     source.configure(options);
 }
 
+/**
+ * @brief Remove the reserved fission power source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true if a source was removed.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_fission_power_source() noexcept
 {
@@ -348,6 +530,12 @@ bool BoussinesqSolver<Pack>::remove_fission_power_source() noexcept
     return true;
 }
 
+/**
+ * @brief Find the mutable fission power source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured source, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_fission_power_source() noexcept
     -> FissionPowerSource<Pack>*
@@ -355,6 +543,12 @@ auto BoussinesqSolver<Pack>::find_fission_power_source() noexcept
     return d_fission_power_source.get();
 }
 
+/**
+ * @brief Find the immutable fission power source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured source, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept
     -> const FissionPowerSource<Pack>*
@@ -362,6 +556,14 @@ auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept
     return d_fission_power_source.get();
 }
 
+/**
+ * @brief Configure the optional radiolytic-gas model from explicit options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Radiolysis mode, kinetics, and void-fraction bounds.
+ * @return Configured radiolytic-gas model.
+ * @throws std::invalid_argument if options or coupled-model combinations are invalid.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     const RadiolyticGasOptions& options) -> RadiolyticGasModel<Pack>&
@@ -445,6 +647,13 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     return *d_radiolytic_gas_model;
 }
 
+/**
+ * @brief Configure the optional radiolytic-gas model from database keys.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param database Database containing radiolysis options.
+ * @return Configured radiolytic-gas model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     const Database& database) -> RadiolyticGasModel<Pack>&
@@ -453,6 +662,12 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
         radiolytic_gas_options_from_database(database));
 }
 
+/**
+ * @brief Remove the optional radiolytic-gas model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true if a model was removed.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
 {
@@ -462,6 +677,12 @@ bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
     return true;
 }
 
+/**
+ * @brief Find the mutable radiolytic-gas model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() noexcept
     -> RadiolyticGasModel<Pack>*
@@ -469,6 +690,12 @@ auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() noexcept
     return d_radiolytic_gas_model.get();
 }
 
+/**
+ * @brief Find the immutable radiolytic-gas model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept
     -> const RadiolyticGasModel<Pack>*
@@ -476,6 +703,14 @@ auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept
     return d_radiolytic_gas_model.get();
 }
 
+/**
+ * @brief Configure the optional boiling source from explicit options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Bulk and wall boiling configuration.
+ * @return Configured boiling source model.
+ * @throws std::invalid_argument if options conflict with active radiolysis.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_boiling_source(
     const BoilingSourceOptions& options) -> BoilingSourceModel<Pack>&
@@ -504,6 +739,13 @@ auto BoussinesqSolver<Pack>::configure_boiling_source(
     return *d_boiling_source_model;
 }
 
+/**
+ * @brief Configure the optional boiling source from database keys.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param database Database containing boiling options.
+ * @return Configured boiling source model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_boiling_source(
     const Database& database) -> BoilingSourceModel<Pack>&
@@ -512,6 +754,12 @@ auto BoussinesqSolver<Pack>::configure_boiling_source(
         boiling_source_options_from_database(database));
 }
 
+/**
+ * @brief Remove the optional boiling source model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true if a model was removed.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
 {
@@ -521,6 +769,12 @@ bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
     return true;
 }
 
+/**
+ * @brief Find the mutable boiling source model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_boiling_source_model() noexcept
     -> BoilingSourceModel<Pack>*
@@ -528,6 +782,12 @@ auto BoussinesqSolver<Pack>::find_boiling_source_model() noexcept
     return d_boiling_source_model.get();
 }
 
+/**
+ * @brief Find the immutable boiling source model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_boiling_source_model() const noexcept
     -> const BoilingSourceModel<Pack>*
@@ -535,6 +795,14 @@ auto BoussinesqSolver<Pack>::find_boiling_source_model() const noexcept
     return d_boiling_source_model.get();
 }
 
+/**
+ * @brief Configure the authoritative scalar void-fraction model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Void bounds, initial value, and collapse options.
+ * @return Configured scalar void-fraction model.
+ * @throws std::invalid_argument if options conflict with Sheng radiolysis.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
     const ScalarVoidFractionOptions& options)
@@ -586,6 +854,13 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
     return *d_scalar_void_fraction_model;
 }
 
+/**
+ * @brief Configure the scalar void-fraction model from database keys.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param database Database containing void-fraction options.
+ * @return Configured scalar void-fraction model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
     const Database& database) -> ScalarVoidFractionModel<Pack>&
@@ -594,6 +869,12 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
         scalar_void_fraction_options_from_database(database));
 }
 
+/**
+ * @brief Find the mutable scalar void-fraction model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() noexcept
     -> ScalarVoidFractionModel<Pack>*
@@ -601,6 +882,12 @@ auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() noexcept
     return d_scalar_void_fraction_model.get();
 }
 
+/**
+ * @brief Find the immutable scalar void-fraction model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() const noexcept
     -> const ScalarVoidFractionModel<Pack>*
@@ -608,6 +895,13 @@ auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() const noexcept
     return d_scalar_void_fraction_model.get();
 }
 
+/**
+ * @brief Configure material-property feedback from explicit options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Density and viscosity feedback configuration.
+ * @return Configured feedback model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_material_feedback(
     const MaterialFeedbackOptions& options)
@@ -630,6 +924,13 @@ auto BoussinesqSolver<Pack>::configure_material_feedback(
     return *d_material_feedback_model;
 }
 
+/**
+ * @brief Configure material-property feedback from database keys.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param database Database containing feedback options.
+ * @return Configured feedback model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_material_feedback(
     const Database& database) -> MaterialFeedbackModel<Pack>&
@@ -639,6 +940,12 @@ auto BoussinesqSolver<Pack>::configure_material_feedback(
             database, d_model_options, d_problem.time_options()));
 }
 
+/**
+ * @brief Remove the optional material-feedback model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true if a model was removed.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
 {
@@ -649,6 +956,12 @@ bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
     return true;
 }
 
+/**
+ * @brief Find the mutable material-feedback model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_material_feedback_model() noexcept
     -> MaterialFeedbackModel<Pack>*
@@ -656,6 +969,12 @@ auto BoussinesqSolver<Pack>::find_material_feedback_model() noexcept
     return d_material_feedback_model.get();
 }
 
+/**
+ * @brief Find the immutable material-feedback model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_material_feedback_model() const noexcept
     -> const MaterialFeedbackModel<Pack>*
@@ -663,6 +982,13 @@ auto BoussinesqSolver<Pack>::find_material_feedback_model() const noexcept
     return d_material_feedback_model.get();
 }
 
+/**
+ * @brief Configure delayed-neutron precursor groups from explicit options.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param options Precursor group and transport configuration.
+ * @return Configured precursor model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_precursors(
     const DelayedNeutronPrecursorOptions& options)
@@ -690,6 +1016,13 @@ auto BoussinesqSolver<Pack>::configure_precursors(
     return *d_precursor_model;
 }
 
+/**
+ * @brief Configure delayed-neutron precursor groups from database keys.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param database Database containing precursor options.
+ * @return Configured precursor model.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_precursors(
     const Database& database) -> DelayedNeutronPrecursorModel<Pack>&
@@ -698,6 +1031,12 @@ auto BoussinesqSolver<Pack>::configure_precursors(
         delayed_neutron_precursor_options_from_database(database));
 }
 
+/**
+ * @brief Remove the optional precursor model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return true if a model was removed.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_precursor_model() noexcept
 {
@@ -707,6 +1046,12 @@ bool BoussinesqSolver<Pack>::remove_precursor_model() noexcept
     return true;
 }
 
+/**
+ * @brief Find the mutable precursor model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_precursor_model() noexcept
     -> DelayedNeutronPrecursorModel<Pack>*
@@ -714,6 +1059,12 @@ auto BoussinesqSolver<Pack>::find_precursor_model() noexcept
     return d_precursor_model.get();
 }
 
+/**
+ * @brief Find the immutable precursor model.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Configured model, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept
     -> const DelayedNeutronPrecursorModel<Pack>*
@@ -721,6 +1072,13 @@ auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept
     return d_precursor_model.get();
 }
 
+/**
+ * @brief Remove a named volumetric temperature source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param name Registered source name.
+ * @return true if a source was removed.
+ */
 template<TpetraTypePack Pack>
 bool BoussinesqSolver<Pack>::remove_temperature_source(
     const std::string& name)
@@ -728,6 +1086,13 @@ bool BoussinesqSolver<Pack>::remove_temperature_source(
     return stored_temperature_sources().remove(name);
 }
 
+/**
+ * @brief Find a mutable named temperature source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param name Registered source name.
+ * @return Source pointer, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_temperature_source(
     const std::string& name) noexcept
@@ -736,6 +1101,13 @@ auto BoussinesqSolver<Pack>::find_temperature_source(
     return stored_temperature_sources().find(name);
 }
 
+/**
+ * @brief Find an immutable named temperature source.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param name Registered source name.
+ * @return Source pointer, or nullptr when absent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::find_temperature_source(
     const std::string& name) const noexcept
@@ -744,6 +1116,12 @@ auto BoussinesqSolver<Pack>::find_temperature_source(
     return stored_temperature_sources().find(name);
 }
 
+/**
+ * @brief Install a per-step material-property updater.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param updater Callable that updates material fields from solver context.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::set_material_updater(
     typename MaterialPropertyFields<Pack>::updater_type updater)
@@ -752,12 +1130,22 @@ void BoussinesqSolver<Pack>::set_material_updater(
     stored_material_properties().set_updater(std::move(updater));
 }
 
+/**
+ * @brief Remove the custom material-property updater.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::clear_material_updater() noexcept
 {
     stored_material_properties().clear_updater();
 }
 
+/**
+ * @brief Refresh material properties, feedback, and registered heat sources.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::refresh_physical_models()
 {
@@ -774,6 +1162,12 @@ void BoussinesqSolver<Pack>::refresh_physical_models()
     stored_temperature_sources().update(context);
 }
 
+/**
+ * @brief Initialize Sheng radiolysis inventories and dependent liquid fractions.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param force Whether to reinitialize an already initialized model.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_radiolytic_gas_state(
     bool force)
@@ -805,6 +1199,12 @@ void BoussinesqSolver<Pack>::initialize_radiolytic_gas_state(
     }
 }
 
+/**
+ * @brief Apply material feedback for the supplied physical time.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time Physical time passed to feedback callbacks.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::refresh_material_feedback(scalar_type time)
 {
@@ -823,6 +1223,11 @@ void BoussinesqSolver<Pack>::refresh_material_feedback(scalar_type time)
         context, active_alpha_g_field(), stored_material_properties());
 }
 
+/**
+ * @brief Create the default scalar void-fraction model when absent.
+ *
+ * @tparam Pack Tpetra type pack.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
 {
@@ -834,6 +1239,12 @@ void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
     }
 }
 
+/**
+ * @brief Select the authoritative gas void-fraction field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Active gas fraction field, or nullptr when no model supplies one.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::active_alpha_g_field() const noexcept
     -> const field_type*
@@ -849,6 +1260,12 @@ auto BoussinesqSolver<Pack>::active_alpha_g_field() const noexcept
     return nullptr;
 }
 
+/**
+ * @brief Select the authoritative liquid fraction field.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Active liquid fraction field, or nullptr when no model supplies one.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::active_alpha_l_field() const noexcept
     -> const field_type*
@@ -864,6 +1281,12 @@ auto BoussinesqSolver<Pack>::active_alpha_l_field() const noexcept
     return nullptr;
 }
 
+/**
+ * @brief Advance or mirror the scalar void-fraction model for one step.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time_step Physical time-step size.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::update_void_fraction_models(
     scalar_type time_step)
@@ -900,6 +1323,12 @@ void BoussinesqSolver<Pack>::update_void_fraction_models(
     }
 }
 
+/**
+ * @brief Return the Problem-owned temperature equation.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Stored temperature diffusion equation.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::temperature_equation()
     -> TemperatureDiffusionEquation<Pack>&
@@ -908,6 +1337,12 @@ auto BoussinesqSolver<Pack>::temperature_equation()
         TemperatureDiffusionEquation<Pack>>("temperature_equation");
 }
 
+/**
+ * @brief Return the Problem-owned Boussinesq momentum equation.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Stored momentum equation.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::momentum_equation()
     -> BoussinesqMomentumEquation<Pack>&
@@ -916,6 +1351,12 @@ auto BoussinesqSolver<Pack>::momentum_equation()
         BoussinesqMomentumEquation<Pack>>("momentum_equation");
 }
 
+/**
+ * @brief Advance momentum with buoyancy and optional physical transport.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Aggregated linear solve summary.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
@@ -972,6 +1413,12 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
         d_problem.linear_options());
 }
 
+/**
+ * @brief Return the density used to normalize pressure operators.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Positive reference density.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::pressure_reference_density() const noexcept
     -> scalar_type
@@ -979,6 +1426,12 @@ auto BoussinesqSolver<Pack>::pressure_reference_density() const noexcept
     return d_model_options.reference_density;
 }
 
+/**
+ * @brief Assemble the coupled Boussinesq velocity-pressure system.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Monolithic coupled system with optional material and turbulence terms.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::assemble_coupled_system()
     -> coupled_system_type
@@ -1124,6 +1577,8 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
  * after the updates.
  *
  * @tparam Pack Tpetra type pack.
+ * @throws std::logic_error if incompatible Sheng radiolysis coupling is active.
+ * @throws std::runtime_error if an enabled model lacks its required fraction field.
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::step()
@@ -1356,6 +1811,13 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
     write_solution_vtu(filename, {});
 }
 
+/**
+ * @brief Write selected primary and optional multiphysics fields to VTU.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param filename Output VTU path.
+ * @param output_options Field-selection controls for optional model data.
+ */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::write_solution_vtu(
     const std::string& filename,

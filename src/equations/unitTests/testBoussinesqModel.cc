@@ -1,3 +1,14 @@
+/**
+ * @file testBoussinesqModel.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Tests physical material fields and temperature-source registration.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #include <gtest/gtest.h>
 
 #include "equations/BoussinesqModel.hh"
@@ -18,6 +29,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Verifies default parsing and derivation of Boussinesq physical coefficients. */
 TEST(BoussinesqModelTest, ParsesDefaultsAndDerivesPhysicalCoefficients)
 {
     SimpleFluid::TimeStepperOptions time_options;
@@ -54,6 +66,7 @@ TEST(BoussinesqModelTest, ParsesDefaultsAndDerivesPhysicalCoefficients)
         (SimpleFluid::ArrString{"decay", "fission"}));
 }
 
+/** @brief Verifies that invalid Boussinesq database values are rejected. */
 TEST(BoussinesqModelTest, RejectsInvalidDatabaseValues)
 {
     const SimpleFluid::TimeStepperOptions time_options;
@@ -139,6 +152,7 @@ TEST(BoussinesqModelTest, RejectsInvalidDatabaseValues)
         std::invalid_argument);
 }
 
+/** @brief Verifies ordered source registration and spatial field initialization. */
 TEST(BoussinesqModelTest, RegistryIsOrderedAndSupportsSpatialInitialization)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -185,6 +199,7 @@ TEST(BoussinesqModelTest, RegistryIsOrderedAndSupportsSpatialInitialization)
     EXPECT_EQ(registry.find("zeta"), nullptr);
 }
 
+/** @brief Verifies that material validation rejects non-finite field updates. */
 TEST(BoussinesqModelTest, MaterialValidationRejectsNonFiniteUpdates)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -202,6 +217,7 @@ TEST(BoussinesqModelTest, MaterialValidationRejectsNonFiniteUpdates)
         material.validate_and_sync(), std::invalid_argument);
 }
 
+/** @brief Verifies validated initialization of spatially varying material fields. */
 TEST(BoussinesqModelTest, MaterialFieldsSupportValidatedInitialization)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(

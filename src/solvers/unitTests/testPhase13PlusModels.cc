@@ -1,3 +1,14 @@
+/**
+ * @file testPhase13PlusModels.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Unit and integration tests for Phase 13 and later multiphysics models.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #include <gtest/gtest.h>
 
 #include "equations/BoilingSourceModel.hh"
@@ -33,12 +44,19 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the shared single-cell fixture mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
 }
 
+/**
+ * @brief Construct water-like material fields on a mesh.
+ *
+ * @param mesh Mesh owning the material fields.
+ * @return Initialized water-property fields.
+ */
 SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
     const SimpleFluid::SP<MeshType>& mesh)
 {
@@ -52,6 +70,7 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
     return {mesh, options, time_options};
 }
 
+/** @brief Build deterministic material options for energy tests. @return Model options. */
 SimpleFluid::BoussinesqModelOptions make_energy_test_model_options()
 {
     SimpleFluid::BoussinesqModelOptions options;
@@ -63,6 +82,12 @@ SimpleFluid::BoussinesqModelOptions make_energy_test_model_options()
     return options;
 }
 
+/**
+ * @brief Build transport-free time options for energy tests.
+ *
+ * @param time_step Requested physical time step.
+ * @return Configured time options.
+ */
 SimpleFluid::TimeStepperOptions make_energy_test_time_options(
     double time_step)
 {
@@ -77,6 +102,7 @@ SimpleFluid::TimeStepperOptions make_energy_test_time_options(
     return options;
 }
 
+/** @brief Build stable Sheng two-population test options. @return Radiolysis options. */
 SimpleFluid::RadiolyticGasOptions make_sheng_test_options()
 {
     SimpleFluid::RadiolyticGasOptions options;
@@ -100,6 +126,7 @@ SimpleFluid::RadiolyticGasOptions make_sheng_test_options()
 
 } // namespace
 
+/** @brief Verify bulk boiling activation and latent heat remain consistent. */
 TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
 {
     auto mesh = make_single_cell_mesh();
@@ -136,6 +163,7 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
         1.0e-12);
 }
 
+/** @brief Verify wall boiling power is distributed to the owning cell. */
 TEST(BoilingSourceModelTest, WallSourceDistributesToOwnerCell)
 {
     auto mesh = make_single_cell_mesh();
@@ -182,6 +210,7 @@ TEST(BoilingSourceModelTest, WallSourceDistributesToOwnerCell)
         1.0e-12);
 }
 
+/** @brief Verify active boiling modes reject nonphysical parameters. */
 TEST(BoilingSourceModelTest, RejectsInvalidActiveParameters)
 {
     auto mesh = make_single_cell_mesh();
@@ -207,6 +236,7 @@ TEST(BoilingSourceModelTest, RejectsInvalidActiveParameters)
         std::invalid_argument);
 }
 
+/** @brief Verify boiling updates reject a non-positive time step. */
 TEST(BoilingSourceModelTest, RejectsInvalidTimeStep)
 {
     auto mesh = make_single_cell_mesh();
@@ -222,6 +252,7 @@ TEST(BoilingSourceModelTest, RejectsInvalidTimeStep)
         std::invalid_argument);
 }
 
+/** @brief Verify boiling reserves shared void capacity for radiolysis. */
 TEST(BoilingSourceModelTest,
      ReservesCanonicalVoidCapacityForRadiolysis)
 {
@@ -273,6 +304,7 @@ TEST(BoilingSourceModelTest,
     EXPECT_DOUBLE_EQ(boiling_model.latent_heat_sink().value(0), 0.0);
 }
 
+/** @brief Verify collapse-created void capacity is bounded by the time step. */
 TEST(BoilingSourceModelTest, CollapseCapacityIsTimestepBounded)
 {
     auto mesh = make_single_cell_mesh();
@@ -312,6 +344,7 @@ TEST(BoilingSourceModelTest, CollapseCapacityIsTimestepBounded)
         void_model.source_alpha_total().value(0), 0.0, 1.0e-14);
 }
 
+/** @brief Verify radiolysis and boiling sources aggregate within void bounds. */
 TEST(ScalarVoidFractionModelTest, AggregatesAndBoundsSources)
 {
     auto mesh = make_single_cell_mesh();
@@ -337,6 +370,7 @@ TEST(ScalarVoidFractionModelTest, AggregatesAndBoundsSources)
         1.0e-14);
 }
 
+/** @brief Verify zero diffusivity preserves a nonuniform void field. */
 TEST(ScalarVoidFractionModelTest,
      ZeroDiffusivityLeavesNonuniformAlphaUnchanged)
 {
@@ -371,6 +405,7 @@ TEST(ScalarVoidFractionModelTest,
     }
 }
 
+/** @brief Verify void diffusion smooths locally while conserving global inventory. */
 TEST(ScalarVoidFractionModelTest,
      DiffusionSmoothsAndConservesGlobalVoid)
 {
@@ -482,6 +517,7 @@ TEST(ScalarVoidFractionModelTest,
     }
 }
 
+/** @brief Verify mirroring derives the realized rate and liquid complement. */
 TEST(ScalarVoidFractionModelTest, MirrorDerivesRealizedRateAndComplement)
 {
     auto mesh = make_single_cell_mesh();
@@ -497,6 +533,7 @@ TEST(ScalarVoidFractionModelTest, MirrorDerivesRealizedRateAndComplement)
     EXPECT_NEAR(model.source_alpha_total().value(0), -0.4, 1.0e-14);
 }
 
+/** @brief Verify initial Sheng state publication is not reported as evolution. */
 TEST(Phase13PlusCouplingTest,
      AdvancedMirrorDoesNotReportInitialPublicationAsAStateChange)
 {
@@ -530,6 +567,7 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_DOUBLE_EQ(void_model.source_alpha_total().value(0), 0.0);
 }
 
+/** @brief Verify ideal radiolysis seeds only implicit pre-step void models. */
 TEST(Phase13PlusCouplingTest,
      IdealRadiolysisSeedsOnlyImplicitPreStepVoidConfiguration)
 {
@@ -581,6 +619,7 @@ TEST(Phase13PlusCouplingTest,
     }
 }
 
+/** @brief Verify late radiolysis configuration preserves evolved implicit void. */
 TEST(Phase13PlusCouplingTest,
      RadiolysisConfigurationPreservesEvolvedImplicitVoid)
 {
@@ -618,6 +657,7 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_DOUBLE_EQ(void_model->alpha_g().value(0), evolved_alpha);
 }
 
+/** @brief Verify ideal radiolysis honors the authoritative scalar void limit. */
 TEST(Phase13PlusCouplingTest,
      IdealRadiolysisUsesAuthoritativeScalarVoidLimit)
 {
@@ -679,6 +719,7 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_DOUBLE_EQ(void_model.source_alpha_total().value(0), 0.0);
 }
 
+/** @brief Verify boiling energy matches void admitted at the scalar limit. */
 TEST(Phase13PlusCouplingTest,
      BoilingEnergyMatchesVoidAdmittedAtScalarLimit)
 {
@@ -733,6 +774,7 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_NEAR(solver.temperature().value(0), 382.99, 1.0e-10);
 }
 
+/** @brief Verify bulk boiling cannot consume more than step sensible heat. */
 TEST(Phase13PlusCouplingTest,
      BulkBoilingCannotConsumeMoreThanStepSensibleSuperheat)
 {
@@ -772,6 +814,7 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_NEAR(solver.temperature().value(0), 373.0, 1.0e-10);
 }
 
+/** @brief Verify Sheng radiolysis rejects unconserved boiling combinations. */
 TEST(Phase13PlusCouplingTest,
      RejectsUnconservedShengBoilingCombinationInEitherOrder)
 {
@@ -827,6 +870,7 @@ TEST(Phase13PlusCouplingTest,
     }
 }
 
+/** @brief Verify Sheng radiolysis rejects unconserved void collapse. */
 TEST(Phase13PlusCouplingTest,
      RejectsUnconservedShengCollapseCombinationInEitherOrder)
 {
@@ -879,6 +923,7 @@ TEST(Phase13PlusCouplingTest,
     }
 }
 
+/** @brief Verify Boussinesq-void density feedback and material floors. */
 TEST(MaterialFeedbackModelTest, BoussinesqVoidDensityAndFloors)
 {
     auto mesh = make_single_cell_mesh();
@@ -910,6 +955,7 @@ TEST(MaterialFeedbackModelTest, BoussinesqVoidDensityAndFloors)
     EXPECT_DOUBLE_EQ(model.density_feedback().value(0), expected_density);
 }
 
+/** @brief Compare precursor source and decay integration with analytic values. */
 TEST(DelayedNeutronPrecursorModelTest, SourceAndDecayAreAnalytic)
 {
     auto mesh = make_single_cell_mesh();
@@ -947,6 +993,7 @@ TEST(DelayedNeutronPrecursorModelTest, SourceAndDecayAreAnalytic)
     EXPECT_NEAR(model.concentration(0).value(0), 2.0, 1.0e-12);
 }
 
+/** @brief Verify precursor inventory survives a changing liquid fraction. */
 TEST(DelayedNeutronPrecursorModelTest,
      ChangingLiquidFractionPreservesInventory)
 {
@@ -978,6 +1025,7 @@ TEST(DelayedNeutronPrecursorModelTest,
         1.0e-13);
 }
 
+/** @brief Verify effective precursor diffusion conserves liquid inventory. */
 TEST(DelayedNeutronPrecursorModelTest,
      EffectiveDiffusivityConservesLiquidInventory)
 {
@@ -1066,6 +1114,7 @@ TEST(DelayedNeutronPrecursorModelTest,
     }
 }
 
+/** @brief Verify precursor diffusion includes explicit non-orthogonal correction. */
 TEST(DelayedNeutronPrecursorModelTest,
      EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection)
 {
@@ -1266,6 +1315,7 @@ TEST(DelayedNeutronPrecursorModelTest,
         std::max(1.0e-12, std::abs(inventory_before) * 1.0e-11));
 }
 
+/** @brief Verify solver precursor configuration uses the initial liquid fraction. */
 TEST(DelayedNeutronPrecursorModelTest,
      SolverConfigurationUsesInitialLiquidFraction)
 {
@@ -1322,6 +1372,7 @@ TEST(DelayedNeutronPrecursorModelTest,
         1.0e-14);
 }
 
+/** @brief Verify Phase 13 model options parse flat database keys and defaults. */
 TEST(Phase13PlusDatabaseTest, ParsesFlatKeysAndDefaults)
 {
     SimpleFluid::Database database;
@@ -1379,6 +1430,7 @@ TEST(Phase13PlusDatabaseTest, ParsesFlatKeysAndDefaults)
         (SimpleFluid::ArrReal{0.1, 0.2}));
 }
 
+/** @brief Verify feedback mapping preserves a constant field average. */
 TEST(FeedbackMapTest, PreservesConstantFieldAverage)
 {
     auto mesh = make_single_cell_mesh();
@@ -1396,6 +1448,7 @@ TEST(FeedbackMapTest, PreservesConstantFieldAverage)
     EXPECT_DOUBLE_EQ(field.value(0), 12.0);
 }
 
+/** @brief Verify coarse feedback mapping preserves the source volume integral. */
 TEST(FeedbackMapTest, PreservesVolumeIntegralForCoarsenedField)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -1420,6 +1473,7 @@ TEST(FeedbackMapTest, PreservesVolumeIntegralForCoarsenedField)
         averages[0] * mapped_volume, source_integral, 1.0e-14);
 }
 
+/** @brief Verify configured multiphysics fields are published to VTU output. */
 TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
 {
     auto mesh = make_single_cell_mesh();

@@ -1,10 +1,16 @@
 /**
  * @file StructuredBatchView.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Cartesian-product views for structured mesh batches.
+ * @version 0.1
+ * @date 2026-07-21
  *
  * Delegates to `std::views::cartesian_product` when the standard library
  * provides it; falls back to a minimal forward-range implementation on
  * toolchains that lack the C++23 feature (e.g. Apple Clang / LLVM libc++).
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -22,6 +28,12 @@ namespace SimpleFluid::Meshes
 
 /**
  * @brief Create a cartesian-product view over two iota ranges.
+ * @tparam T Coordinate value type.
+ * @param a_beg Inclusive beginning of the first range.
+ * @param a_end Exclusive end of the first range.
+ * @param b_beg Inclusive beginning of the second range.
+ * @param b_end Exclusive end of the second range.
+ * @return Lazy view of `(a, b)` tuples in lexicographic order.
  */
 template <class T>
 auto cartesian_product_2d(T a_beg, T a_end, T b_beg, T b_end)
@@ -33,6 +45,14 @@ auto cartesian_product_2d(T a_beg, T a_end, T b_beg, T b_end)
 
 /**
  * @brief Create a cartesian-product view over three iota ranges.
+ * @tparam T Coordinate value type.
+ * @param a_beg Inclusive beginning of the first range.
+ * @param a_end Exclusive end of the first range.
+ * @param b_beg Inclusive beginning of the second range.
+ * @param b_end Exclusive end of the second range.
+ * @param c_beg Inclusive beginning of the third range.
+ * @param c_end Exclusive end of the third range.
+ * @return Lazy view of `(a, b, c)` tuples in lexicographic order.
  */
 template <class T>
 auto cartesian_product_3d(T a_beg, T a_end,
@@ -59,6 +79,7 @@ namespace detail
 
 /**
  * @brief Iterator over the cartesian product of 2 iota ranges.
+ * @tparam T Coordinate value type.
  */
 template <class T>
 class CartesianProduct2DIterator
@@ -139,6 +160,7 @@ private:
 
 /**
  * @brief Iterator over the cartesian product of 3 iota ranges.
+ * @tparam T Coordinate value type.
  */
 template <class T>
 class CartesianProduct3DIterator
@@ -230,6 +252,7 @@ private:
 
 /**
  * @brief Sized view over the cartesian product of 2 iota ranges.
+ * @tparam T Coordinate value type.
  */
 template <class T>
 class CartesianProductView2D : public std::ranges::view_interface<CartesianProductView2D<T>>
@@ -270,6 +293,7 @@ private:
 
 /**
  * @brief Sized view over the cartesian product of 3 iota ranges.
+ * @tparam T Coordinate value type.
  */
 template <class T>
 class CartesianProductView3D : public std::ranges::view_interface<CartesianProductView3D<T>>
@@ -323,6 +347,12 @@ private:
 
 /**
  * @brief Create a cartesian-product view over two iota ranges.
+ * @tparam T Coordinate value type.
+ * @param a_beg Inclusive beginning of the first range.
+ * @param a_end Exclusive end of the first range.
+ * @param b_beg Inclusive beginning of the second range.
+ * @param b_end Exclusive end of the second range.
+ * @return Portable lazy view of `(a, b)` tuples.
  */
 template <class T>
 auto cartesian_product_2d(T a_beg, T a_end, T b_beg, T b_end)
@@ -332,6 +362,14 @@ auto cartesian_product_2d(T a_beg, T a_end, T b_beg, T b_end)
 
 /**
  * @brief Create a cartesian-product view over three iota ranges.
+ * @tparam T Coordinate value type.
+ * @param a_beg Inclusive beginning of the first range.
+ * @param a_end Exclusive end of the first range.
+ * @param b_beg Inclusive beginning of the second range.
+ * @param b_end Exclusive end of the second range.
+ * @param c_beg Inclusive beginning of the third range.
+ * @param c_end Exclusive end of the third range.
+ * @return Portable lazy view of `(a, b, c)` tuples.
  */
 template <class T>
 auto cartesian_product_3d(T a_beg, T a_end,

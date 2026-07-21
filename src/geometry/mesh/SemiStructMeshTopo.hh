@@ -46,6 +46,7 @@ public:
     static constexpr Ordinal invalid_ordinal =
         static_cast<Ordinal>(-1);
 
+    /** @brief Base-topology edge assigned to a named side boundary. */
     struct BoundaryEdge
     {
         Ordinal node0 = invalid_ordinal;
@@ -53,6 +54,7 @@ public:
         std::string batch_name = "side";
     };
 
+    /** @brief Base edge connectivity and adjacency for an extruded side face. */
     struct SideFace
     {
         std::array<Ordinal, 2> nodes{};
@@ -121,12 +123,14 @@ public:
     int num_boundary_batches() const noexcept;
 
 private:
+    /** @brief Owner and neighbor ordinals for one face. */
     struct FaceCells
     {
         Ordinal owner = invalid_ordinal;
         Ordinal neighbor = invalid_ordinal;
     };
 
+    /** @brief Neighbor layer indices available for one axial layer. */
     struct AxialNeighbors
     {
         unsigned num{};

@@ -28,6 +28,14 @@ namespace utils
 namespace detail
 {
 
+/**
+ * @brief Determine whether adding two same-type integers would overflow.
+ *
+ * @tparam T Integral operand type.
+ * @param lhs Left operand.
+ * @param rhs Right operand.
+ * @return `true` if `lhs + rhs` is not representable by @p T.
+ */
 template <std::integral T>
 constexpr bool addition_overflows(T lhs, T rhs) noexcept
 {
@@ -42,6 +50,14 @@ constexpr bool addition_overflows(T lhs, T rhs) noexcept
     }
 }
 
+/**
+ * @brief Determine whether multiplying two same-type integers would overflow.
+ *
+ * @tparam T Integral operand type.
+ * @param lhs Left operand.
+ * @param rhs Right operand.
+ * @return `true` if `lhs * rhs` is not representable by @p T.
+ */
 template <std::integral T>
 constexpr bool multiplication_overflows(T lhs, T rhs) noexcept
 {
@@ -88,10 +104,15 @@ inline void check(bool condition, std::string message = "Debug check failed")
 /**
  * @brief Check whether applying an arithmetic operation would overflow.
  *
+ * @tparam T1 Left operand integral type.
+ * @tparam T2 Right operand integral type.
+ * @tparam Op Supported arithmetic functor type.
  * @param v1 Left operand.
  * @param v2 Right operand.
  * @param op Binary operation to check for overflow (e.g., std::multiplies<>()).
  * @param message Error message used when the check fails.
+ * @throws std::overflow_error If the requested operation would overflow its
+ *         result type.
  */
 template <std::integral T1, std::integral T2, class Op>
 requires std::invocable<Op, T1, T2>
@@ -133,6 +154,18 @@ inline void check_overflow(
 
 /**
  * @brief Check a left-associative operation involving three values.
+ *
+ * @tparam T1 First operand integral type.
+ * @tparam T2 Second operand integral type.
+ * @tparam T3 Third operand integral type.
+ * @tparam Op Supported arithmetic functor type.
+ * @param v1 First operand.
+ * @param v2 Second operand.
+ * @param v3 Third operand.
+ * @param op Binary operation applied from left to right.
+ * @param message Error message used when either operation overflows.
+ * @throws std::overflow_error If either left-associative operation would
+ *         overflow its result type.
  */
 template <std::integral T1, std::integral T2, std::integral T3, class Op>
 requires std::invocable<Op&, T1, T2>
