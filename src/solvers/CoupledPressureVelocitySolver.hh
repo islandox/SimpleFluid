@@ -559,6 +559,11 @@ public:
         return d_coupled_map;
     }
 
+    /**
+     * @brief Apply @f$Y \leftarrow \beta Y + \alpha M^{-1}X@f$.
+     * @param mode Transpose mode; only `Teuchos::NO_TRANS` is supported.
+     * @throws std::invalid_argument If a transpose application is requested.
+     */
     void apply(
         const multi_vector_type& input,
         multi_vector_type& output,
@@ -690,12 +695,20 @@ public:
     using system_type = CoupledPressureVelocitySystem<Pack>;
     using result_type = CoupledPressureVelocityResult<scalar_type>;
 
+    /**
+     * @throws std::invalid_argument If @p mesh is null.
+     */
     explicit CoupledPressureVelocitySolver(SP<const mesh_type> mesh)
         : d_mesh(EquationValidation::require_non_null_mesh(
               std::move(mesh), "CoupledPressureVelocitySolver"))
     {
     }
 
+    /**
+     * @brief Assemble an isothermal incompressible coupled system.
+     * @param pressure Current physical pressure in Pa.
+     * @param reference_density Positive density used to normalize pressure.
+     */
     system_type assemble(
         const IncompressibleMomentumEquation<Pack>& momentum_equation,
         const velocity_field_type& velocity,
@@ -732,6 +745,12 @@ public:
             reference_density);
     }
 
+    /**
+     * @brief Assemble a thermally buoyant coupled system.
+     * @param pressure Current physical pressure in Pa.
+     * @param reference_density Positive density used to normalize pressure.
+     * @throws std::invalid_argument If supplied fields are incompatible.
+     */
     system_type assemble(
         const BoussinesqMomentumEquation<Pack>& momentum_equation,
         const velocity_field_type& velocity,
@@ -1355,6 +1374,14 @@ private:
     }
 
 public:
+    /**
+     * @brief Solve a coupled system and update velocity and physical pressure.
+     * @param velocity Velocity field updated on convergence or termination.
+     * @param pressure Physical pressure field updated in Pa.
+     * @return Convergence status and Krylov statistics.
+     * @throws std::invalid_argument If the pressure normalization is invalid.
+     * @throws std::runtime_error If the Belos problem cannot be initialized.
+     */
     result_type solve(
         const system_type& system,
         velocity_field_type& velocity,

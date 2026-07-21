@@ -32,6 +32,8 @@ enum class NonOrthogonalTreatment
  *
  * Accepted values match the input-file spelling:
  * `explicit`, `implicit`, and `hybrid`.
+ *
+ * @throws std::invalid_argument if @p value is not a supported spelling.
  */
 inline NonOrthogonalTreatment
 non_orthogonal_treatment_from_string(std::string_view value)
@@ -55,6 +57,7 @@ non_orthogonal_treatment_from_string(std::string_view value)
 
 /**
  * @brief Return the input-file spelling for a non-orthogonal treatment.
+ * @throws std::invalid_argument if @p treatment is outside the enumerators.
  */
 inline std::string_view
 to_string(NonOrthogonalTreatment treatment)

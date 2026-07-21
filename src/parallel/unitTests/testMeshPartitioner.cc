@@ -1,7 +1,7 @@
 /**
- * @file testMetisPartitioner.cc
+ * @file testMeshPartitioner.cc
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Multi-rank unit tests for MetisPartitioner domain decomposition.
+ * @brief Multi-rank unit tests for MeshPartitioner domain decomposition.
  * @version 0.1
  * @date 2026-05-28
  *

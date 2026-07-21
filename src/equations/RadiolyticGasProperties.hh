@@ -31,8 +31,8 @@ namespace SimpleFluid
 enum class RadiolyticGasMode
 {
     Disabled,
-    IdealGasSource,
-    Sheng2024TwoPopulation
+    IdealGasSource,         ///< Convert hydrogen production directly to void source.
+    Sheng2024TwoPopulation  ///< Evolve dissolved, micro-, and large-bubble inventories.
 };
 
 /**
@@ -40,10 +40,10 @@ enum class RadiolyticGasMode
  */
 enum class RadiolyticPressureMode
 {
-    Constant,
-    PrescribedHistory,
-    Reconstructed,
-    Inertial
+    Constant,          ///< Use a constant reference pressure.
+    PrescribedHistory,///< Interpolate pressure from a supplied time history.
+    Reconstructed,     ///< Add solver gauge pressure to the reference pressure.
+    Inertial           ///< Include transient inertial pressure corrections.
 };
 
 /**
@@ -51,8 +51,8 @@ enum class RadiolyticPressureMode
  */
 enum class RadiolyticTransportMode
 {
-    NoAdvection,
-    Advective
+    NoAdvection, ///< Keep dissolved inventory cell-local.
+    Advective    ///< Transport dissolved inventory with liquid flux.
 };
 
 /**
@@ -60,8 +60,8 @@ enum class RadiolyticTransportMode
  */
 enum class BubbleTransportMode
 {
-    General,
-    Axial
+    General, ///< Transport bubbles with vector rise velocity.
+    Axial    ///< Restrict bubble rise to the configured axial direction.
 };
 
 /**
@@ -69,8 +69,8 @@ enum class BubbleTransportMode
  */
 enum class RadiolyticHeavisideMode
 {
-    Exact,
-    Smoothed
+    Exact,   ///< Use a discontinuous threshold switch.
+    Smoothed ///< Use a hyperbolic-tangent transition.
 };
 
 /**
@@ -78,9 +78,9 @@ enum class RadiolyticHeavisideMode
  */
 enum class BubbleRiseVelocityMode
 {
-    ZeroSlip,
-    ConstantSlip,
-    Celata2007
+    ZeroSlip,     ///< Advect bubbles with liquid velocity.
+    ConstantSlip, ///< Apply a prescribed slip speed.
+    Celata2007    ///< Solve the Celata drag relation.
 };
 
 /**
@@ -89,7 +89,7 @@ enum class BubbleRiseVelocityMode
 enum class SurfaceTensionMode
 {
     Constant,
-    Sheng2024
+    Sheng2024 ///< Evaluate the Sheng temperature/concentration correlation.
 };
 
 /**
@@ -98,7 +98,7 @@ enum class SurfaceTensionMode
 enum class HydrogenDiffusivityMode
 {
     Constant,
-    Sheng2024
+    Sheng2024 ///< Evaluate the Sheng temperature correlation.
 };
 
 /**
@@ -123,21 +123,21 @@ struct RadiolyticGasOptions
         HydrogenDiffusivityMode::Constant;
 
     real_t hydrogen_yield_mol_per_j = 0.0;
-    real_t gas_release_efficiency = 1.0;
-    real_t reference_pressure = 101325.0;
+    real_t gas_release_efficiency = 1.0; ///< Fraction of generated hydrogen released to gas.
+    real_t reference_pressure = 101325.0; ///< Reference absolute pressure.
     real_t gas_constant = 8.31446261815324;
-    real_t alpha_min = 0.0;
-    real_t alpha_max = 0.95;
+    real_t alpha_min = 0.0; ///< Lower gas void-fraction bound.
+    real_t alpha_max = 0.95; ///< Upper gas void-fraction bound.
     real_t max_source_alpha_rate =
-        std::numeric_limits<real_t>::infinity();
+        std::numeric_limits<real_t>::infinity(); ///< Ideal-mode void-source cap.
 
     // H = C/p in mol/(m^3 Pa), matching Sheng et al. Eq. (9).
     real_t henry_coefficient = 0.0;
-    real_t surface_tension = 0.0;
-    real_t hydrogen_diffusivity = 0.0;
-    real_t atmospheric_pressure = 101325.0;
+    real_t surface_tension = 0.0; ///< Constant gas-liquid surface tension.
+    real_t hydrogen_diffusivity = 0.0; ///< Constant dissolved-hydrogen diffusivity.
+    real_t atmospheric_pressure = 101325.0; ///< Pressure reference for nucleation correction.
     real_t uranium_concentration_mol_per_m3 = 0.0;
-    real_t hydrogen_yield_molecules_per_100_ev = 0.0;
+    real_t hydrogen_yield_molecules_per_100_ev = 0.0; ///< Radiation yield used by nucleation correlation.
 
     real_t microbubble_lifetime = 10.0e-6;
     real_t large_bubble_dissolution_time = 50.0e-6;
@@ -145,8 +145,8 @@ struct RadiolyticGasOptions
     real_t smooth_heaviside_width = 0.0;
     real_t constant_slip_velocity = 0.0;
     real_t bubble_gas_density = 0.0;
-    real_t bubble_gravity = 9.80665;
-    real_t rise_velocity_tolerance = 1.0e-10;
+    real_t bubble_gravity = 9.80665; ///< Gravity magnitude in rise correlations.
+    real_t rise_velocity_tolerance = 1.0e-10; ///< Relative terminal-speed solver tolerance.
     int max_rise_velocity_iterations = 100;
 
     real_t initial_dissolved_hydrogen = 0.0;
@@ -160,7 +160,7 @@ struct RadiolyticGasOptions
     real_t min_population = 1.0e-30;
     real_t max_population = 1.0e30;
     real_t max_concentration = 1.0e6;
-    real_t local_ode_tolerance = 1.0e-8;
+    real_t local_ode_tolerance = 1.0e-8; ///< Local kinetics relative tolerance.
     int max_subcycles = 10000;
     int max_radius_iterations = 100;
 
@@ -169,8 +169,8 @@ struct RadiolyticGasOptions
     real_t minimum_absolute_pressure = 1.0;
 
     std::vector<real_t> pressure_history_times;
-    std::vector<real_t> pressure_history_values;
-    std::vector<std::string> free_surface_patches;
+    std::vector<real_t> pressure_history_values; ///< Absolute pressures corresponding to history times.
+    std::vector<std::string> free_surface_patches; ///< Patches through which bubbles may escape.
 };
 
 /**
@@ -476,6 +476,15 @@ struct BubbleRiseVelocityResult
  * Winter et al. (2022) Eq. (15), using the Celata et al. (2007) drag
  * relation. The bracketed solve avoids the zero-velocity root introduced by
  * rearranging the terminal-velocity equation.
+ *
+ * @param radius Bubble radius; non-positive radii return a zero result.
+ * @param liquid_density Positive liquid mass density.
+ * @param gas_density Non-negative gas density below liquid density.
+ * @param dynamic_viscosity Positive liquid dynamic viscosity.
+ * @param surface_tension Positive gas-liquid surface tension.
+ * @param gravity Positive gravity magnitude.
+ * @param max_iterations Positive bisection iteration limit.
+ * @param relative_tolerance Positive relative residual tolerance.
  */
 inline BubbleRiseVelocityResult celata2007_bubble_rise_velocity(
     real_t radius,
@@ -593,6 +602,15 @@ struct BubbleRadiusResult
 
 /**
  * @brief Solve bubble radius from moles per bubble and capillary pressure.
+ * @param moles_per_bubble Hydrogen content of one bubble.
+ * @param liquid_pressure Positive absolute liquid pressure.
+ * @param surface_tension Non-negative gas-liquid surface tension.
+ * @param gas_constant Positive universal gas constant.
+ * @param temperature Positive absolute temperature.
+ * @param min_radius Positive lower radius bound.
+ * @param max_radius Upper radius bound greater than @p min_radius.
+ * @param max_iterations Positive bisection iteration limit.
+ * @param relative_tolerance Positive relative residual tolerance.
  */
 inline BubbleRadiusResult solve_bubble_radius(
     real_t moles_per_bubble,

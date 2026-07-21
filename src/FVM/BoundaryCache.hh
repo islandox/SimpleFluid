@@ -101,7 +101,11 @@ using BoundaryCache = ::SimpleFluid::BoundaryCache<Pack>;
  *
  * A cache may omit boundary batches; omitted batches retain the owner-cell
  * coefficient.  Every supplied batch must belong to @p mesh, contain one
- * value per batch face, and contain only finite non-negative coefficients.
+ * value per batch face, and contain only finite non-negative coefficients. A
+ * null @p cache is accepted; @p context prefixes validation errors.
+ *
+ * @throws std::invalid_argument if the cache references another mesh or
+ *         contains an invalid batch, size, or coefficient.
  */
 template<TpetraTypePack Pack>
 void validate_boundary_coefficient_cache(

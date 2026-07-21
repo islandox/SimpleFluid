@@ -35,6 +35,11 @@ namespace SimpleFluid::Meshes
  * Mapping-record constructors support distinct local/global entity ID types
  * and explicit global ordinals. Legacy constructors infer compact integral
  * local IDs and integral global ordinals from their input order and IDs.
+ * Construction and replacement reject duplicate IDs or ordinals and values
+ * that overflow the configured ordinal types. A single node-list overload
+ * treats every supplied node as owned. Checked forward lookups throw when an
+ * entity is unavailable; `noexcept` reverse lookups return
+ * `invalid_local_id()` instead.
  *
  * @par Template instantiation
  * SimpleFluid provides compiled definitions for the index packs instantiated

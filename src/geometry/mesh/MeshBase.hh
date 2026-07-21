@@ -33,6 +33,17 @@ namespace SimpleFluid
  * Derived meshes provide the primitive geometry and connectivity operations
  * through private `*_impl` methods. MeshBase supplies the topology predicates,
  * outward geometry, and distance queries shared by finite-volume operators.
+ * Local-ordinal conversions reject out-of-range values; ID-based queries
+ * delegate validation to the derived mesh. The invalid cell sentinel maps to
+ * `invalid_local_id` in `cell_local_id()`.
+ *
+ * Face normals point away from the owner; outward variants flip them for the
+ * neighbor. Exterior faces use the derived invalid-cell sentinel as their
+ * neighbor and report zero owner-neighbor distance; `cell_center_vector()`
+ * throws `std::invalid_argument` for them. Outward and opposite-cell queries
+ * likewise reject cells that are not incident to the requested face.
+ * A face without a physical boundary uses `invalid_boundary_id`, and asking
+ * such a face for a boundary name throws `std::out_of_range`.
  *
  * @tparam DerivedMesh Concrete mesh implementing the primitive operations.
  * @tparam Pack Mesh entity-ID and ordinal type pack.
@@ -153,6 +164,7 @@ public:
         return cell_faces(cell_id);
     }
 
+    /** @return Distances in the same order as `faces(cell_id)`. */
     auto face_distances(cell_id_t cell_id) const
     {
         const auto cell_face_ids = faces(cell_id);

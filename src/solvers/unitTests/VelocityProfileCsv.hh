@@ -51,6 +51,9 @@ public:
      * Cells tied at the same transverse distance and axial coordinate are
      * volume averaged. This gives a symmetric centerline on even structured
      * grids where the requested line falls between two cell-center rows.
+     *
+     * @return Samples ordered by their axial coordinate.
+     * @throws std::invalid_argument If @p axis is invalid or the mesh is not serial.
      */
     static std::vector<Sample> sample_nearest_line(
         const field_type& velocity,

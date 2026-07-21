@@ -26,6 +26,7 @@ namespace SimpleFluid
  *
  * A key stores T. Inserting a value with an existing
  * key replaces the previous value, including values of the other kind.
+ * `get()` throws `std::out_of_range` when the requested key is absent.
  *
  * @tparam T Type of values stored by the database.
  */

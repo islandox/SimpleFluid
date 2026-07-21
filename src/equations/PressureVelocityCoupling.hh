@@ -24,10 +24,10 @@ namespace SimpleFluid
  */
 enum class PressureVelocityCoupling
 {
-    SIMPLE,
-    PISO,
-    PIMPLE,
-    CoupledKrylov
+    SIMPLE,        ///< Steady segregated SIMPLE iterations.
+    PISO,          ///< Transient PISO pressure corrections.
+    PIMPLE,        ///< Outer PIMPLE iterations with pressure corrections.
+    CoupledKrylov  ///< Monolithic coupled Krylov solve.
 };
 
 /**
@@ -87,7 +87,7 @@ struct PressureVelocityResiduals
     Scalar momentum = {};
     Scalar pressure = {};
     Scalar continuity = {};
-    Scalar achieved_tolerance = {};
+    Scalar achieved_tolerance = {}; ///< Worst achieved linear tolerance.
     int linear_iterations = 0;
 };
 
@@ -102,7 +102,7 @@ struct FluidStepStatistics
     int nonlinear_iterations = 0;
     int linear_solves = 0;
     int krylov_iterations = 0;
-    Scalar achieved_tolerance = {};
+    Scalar achieved_tolerance = {}; ///< Worst achieved linear tolerance.
     Scalar momentum = {};
     Scalar pressure = {};
     Scalar temperature = {};

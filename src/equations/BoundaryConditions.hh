@@ -25,12 +25,12 @@ namespace SimpleFluid
  */
 enum class BoundaryConditionType : std::uint8_t
 {
-    Dirichlet = 0,
-    Neumann   = 1,
-    NoSlip    = 2,
-    Robin     = 3,
-    Periodic  = 4,
-    Slip      = 5
+    Dirichlet = 0, ///< Prescribed field value.
+    Neumann   = 1, ///< Prescribed outward-normal gradient.
+    NoSlip    = 2, ///< Zero velocity at a solid wall.
+    Robin     = 3, ///< Mixed value/gradient condition.
+    Periodic  = 4, ///< Periodically paired boundary.
+    Slip      = 5  ///< Zero normal velocity with free tangential motion.
 };
 
 /**

@@ -81,6 +81,10 @@ public:
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
 
+    /**
+     * @brief Advance with physical viscosity and material-density buoyancy
+     *        when density feedback is enabled.
+     */
     LinearSolveSummary advance_velocity_physical(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
@@ -96,6 +100,10 @@ public:
         const field_type* dynamic_viscosity_override = nullptr,
         const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
+    /**
+     * @brief Assemble with physical viscosity and material-density buoyancy
+     *        when density feedback is enabled.
+     */
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,

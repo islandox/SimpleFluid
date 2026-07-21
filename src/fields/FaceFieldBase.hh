@@ -125,7 +125,7 @@ protected:
     /**
      * @brief Construct the base with a name and mesh pointer.
      *
-     * The derived class is responsible for constructing @ref d_data after
+     * The derived class is responsible for constructing `d_data` after
      * calling make_owned_face_map().
      *
      * @param name Field name.

@@ -38,7 +38,7 @@ struct TurbulenceWallTreatmentOptions
     real_t c_mu = 0.09;
     /** Wall-law kappa, also shared with the resolved SST closure. */
     real_t kappa = 0.41;
-    real_t log_layer_e = 9.8;
+    real_t log_layer_e = 9.8; ///< Wall-law logarithmic-layer constant.
     /** Match OpenFOAM.com's optional epsilonWallFunction low-Re correction. */
     bool epsilon_low_re_correction = false;
     /** SST inner beta coefficient, shared with the paired closure. */
@@ -75,7 +75,7 @@ struct StandardHighReKEpsilonWallPolicy
 template <class Scalar> struct TurbulenceWallFaceEvaluation
 {
     BoundaryCondition turbulent_kinetic_energy{};
-    BoundaryCondition secondary{};
+    BoundaryCondition secondary{}; ///< Wall condition for @f$\epsilon@f$ or @f$\omega@f$.
     Scalar wall_distance{};
     Scalar y_plus{};
     Scalar turbulent_kinematic_viscosity{};

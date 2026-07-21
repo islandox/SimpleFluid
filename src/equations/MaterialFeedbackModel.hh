@@ -26,10 +26,10 @@ namespace SimpleFluid
  */
 enum class DensityFeedbackMode
 {
-    Constant,
-    BoussinesqTemperatureOnly,
-    BoussinesqVoid,
-    Mixture
+    Constant,                  ///< Preserve the reference density.
+    BoussinesqTemperatureOnly, ///< Apply temperature-dependent liquid density.
+    BoussinesqVoid,            ///< Blend Boussinesq liquid and gas densities.
+    Mixture                    ///< Blend constant liquid and gas densities.
 };
 
 /**
@@ -37,7 +37,7 @@ enum class DensityFeedbackMode
  */
 enum class ViscosityFeedbackMode
 {
-    Constant
+    Constant ///< Preserve the reference dynamic viscosity.
 };
 
 /**
@@ -48,13 +48,13 @@ struct MaterialFeedbackOptions
     DensityFeedbackMode density_mode = DensityFeedbackMode::Constant;
     ViscosityFeedbackMode viscosity_mode = ViscosityFeedbackMode::Constant;
     real_t reference_density = 1.0;
-    real_t liquid_density = 1.0;
-    real_t gas_density = 1.0;
+    real_t liquid_density = 1.0; ///< Constant liquid density for mixture mode.
+    real_t gas_density = 1.0; ///< Gas density used by void-aware modes.
     real_t reference_temperature = 0.0;
     real_t thermal_expansion = 0.0;
     real_t reference_dynamic_viscosity = 1.0;
-    real_t min_density = 1.0e-12;
-    real_t min_viscosity = 0.0;
+    real_t min_density = 1.0e-12; ///< Positive density floor.
+    real_t min_viscosity = 0.0; ///< Non-negative viscosity floor.
 };
 
 /**

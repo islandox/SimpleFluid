@@ -79,7 +79,7 @@ public:
     struct ProjectionResult
     {
         scalar_type pressure_correction = {}; ///< L2 norm of the Pa update.
-        scalar_type continuity = {};
+        scalar_type continuity = {}; ///< L2 continuity residual after projection.
         LinearSolveStatistics linear_solve;
     };
 

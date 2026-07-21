@@ -32,8 +32,8 @@ namespace SimpleFluid
 enum class FissionPowerProfile
 {
     Disabled,
-    Constant,
-    Gaussian
+    Constant, ///< Apply a spatially uniform power density.
+    Gaussian  ///< Apply a Gaussian profile normalized to total power.
 };
 
 /**
@@ -68,10 +68,10 @@ fission_power_profile_from_string(std::string_view value)
 struct FissionPowerSourceOptions
 {
     FissionPowerProfile profile = FissionPowerProfile::Disabled;
-    real_t power_density = 0.0;
-    real_t total_power = 0.0;
+    real_t power_density = 0.0; ///< Uniform power density for the constant profile.
+    real_t total_power = 0.0; ///< Integrated power for the Gaussian profile.
     vec3<real_t> center{};
-    vec3<real_t> standard_deviation{1.0, 1.0, 1.0};
+    vec3<real_t> standard_deviation{1.0, 1.0, 1.0}; ///< Gaussian widths by axis.
 };
 
 namespace detail
@@ -564,6 +564,7 @@ private:
         d_base_profile.sync_ghosts();
     }
 
+    /** @brief Compute the globally reduced volume integral of a cell field. */
     scalar_type integrate(const field_type& field) const
     {
         scalar_type local_power{};
@@ -581,6 +582,7 @@ private:
         return global_sum(local_power);
     }
 
+    /** @brief Sum a rank-local scalar and replicate the result on every rank. */
     scalar_type global_sum(scalar_type local_value) const
     {
         scalar_type global_value{};
@@ -647,8 +649,8 @@ private:
 
     SP<const Mesh<Pack>> d_mesh;
     field_type d_base_profile;
-    TemperatureSourceRegistry<Pack>* d_registry;
-    VolumetricScalarSource<Pack>* d_source;
+    TemperatureSourceRegistry<Pack>* d_registry; ///< Non-owning source registry.
+    VolumetricScalarSource<Pack>* d_source; ///< Non-owning registry entry.
     multiplier_type d_time_multiplier;
 };
 

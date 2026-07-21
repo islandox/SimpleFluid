@@ -1,5 +1,5 @@
 /**
- * @file FvmFaceFlux.hh
+ * @file FaceFlux.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Face-flux assembly and velocity-boundary cache helpers.
  * @version 0.1
@@ -404,7 +404,7 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
  *
  * This is algebraically equivalent to assemble_face_velocities followed by
  * normal_face_fluxes, but avoids materializing and rereading a three-component
- * face-velocity field.
+ * face-velocity field. A null @p boundary_cache skips boundary treatment.
  */
 template<TpetraTypePack Pack>
 void assemble_normal_face_fluxes(
@@ -595,6 +595,9 @@ namespace detail
  * Dirichlet pressure extrapolates owner-cell velocity to the boundary face.
  * It therefore requires a Neumann velocity condition; a prescribed velocity
  * would otherwise be silently discarded by the pressure-flux reconstruction.
+ *
+ * @throws std::invalid_argument if a pressure condition is unsupported or a
+ *         Dirichlet pressure boundary has a non-Neumann velocity condition.
  */
 template<TpetraTypePack Pack>
 void validate_pressure_velocity_boundary_compatibility(
@@ -649,6 +652,7 @@ void validate_pressure_velocity_boundary_compatibility(
  *        stored in Pa, this is normally the time step divided by the
  *        reference density.
  * @param boundary_cache Pre-computed velocity-boundary cache.
+ * @param[in,out] workspace Scratch storage tied to the field mesh.
  * @param[out] fluxes Pre-allocated FaceField to receive stabilized fluxes.
  */
 template<TpetraTypePack Pack>

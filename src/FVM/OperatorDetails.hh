@@ -347,6 +347,7 @@ auto packed_cell_local_id(const MeshType& mesh, CellID cell_id)
  * values are invalid because they would hide a material-property bug by
  * silently removing diffusion at the face. If geometric cell-to-face distances
  * are unavailable, the ordinary harmonic mean is used.
+ * @throws std::invalid_argument if either cell coefficient is negative.
  */
 template<class MeshType, class FieldType>
 inline auto harmonic_face_value(

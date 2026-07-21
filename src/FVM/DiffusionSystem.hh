@@ -1,5 +1,5 @@
 /**
- * @file FvmDiffusionSystem.hh
+ * @file DiffusionSystem.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Scalar and vector diffusion system assembly (orthogonal two-point flux).
  * @version 0.1

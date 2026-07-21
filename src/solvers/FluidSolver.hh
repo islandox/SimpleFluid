@@ -120,6 +120,7 @@ protected:
     virtual IncompressibleMomentumEquation<Pack>& momentum_equation();
     virtual LinearSolveSummary advance_momentum();
     virtual coupled_system_type assemble_coupled_system();
+    /** @return Pressure normalization density in kg/m^3. */
     virtual scalar_type pressure_reference_density() const noexcept
     {
         return scalar_type{1};
@@ -141,10 +142,17 @@ protected:
     residual_type& pressure_velocity_residuals();
     const residual_type& pressure_velocity_residuals() const;
 
+    /**
+     * @brief Compute a global relative velocity update norm.
+     * @return Communicator-wide relative L2 update norm.
+     */
     scalar_type velocity_update_norm(
         const velocity_field_type& before,
         const velocity_field_type& after) const;
     VTUWriter fluid_solution_writer() const;
+    /**
+     * @return Owned scalar values in mesh order.
+     */
     VTUWriter::ScalarData collect_scalar_field(
         const field_type& field) const;
 
@@ -162,6 +170,9 @@ private:
                 bool register_momentum_equation);
 
     LinearSolveSummary run_momentum_predictor();
+    /**
+     * @return Communicator-wide sum.
+     */
     scalar_type global_sum(scalar_type local_value) const;
     void write_step_progress(
         ProgressStream& progress_output,

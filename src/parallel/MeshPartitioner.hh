@@ -30,6 +30,8 @@ namespace partition_detail {
  * @brief Serialisable packet carrying the geometry and connectivity of a single cell.
  *
  * Used to redistribute cells across MPI ranks after partitioning.
+ * `node_gids` and `node_coords` are parallel arrays. Face node IDs are sorted
+ * to form stable keys, and `face_boundary_ids` is parallel to those keys.
  *
  * @tparam Pack Tpetra type pack providing GO, LO, map, and graph types.
  */
@@ -89,7 +91,8 @@ struct CellPacket {
      * @brief Deserialise a flat byte buffer back into a vector of cell packets.
      *
      * @param data Pointer to the byte buffer received via MPI.
-     * @param size Unused; size is encoded in the buffer header.
+     * The unnamed buffer-size argument is unused because the packet count and
+     * nested array sizes are encoded in the buffer.
      * @return Reconstructed vector of cell packets.
      */
     static std::vector<CellPacket> deserialize_packets(const char* data, size_t /*size*/) {
@@ -165,7 +168,8 @@ public:
      *
      * The input mesh is rebuilt to contain only entities visible on this
      * rank. The indexer maps its compact local IDs to IDs in the original
-     * replicated mesh. Owned entities precede overlap entities.
+     * replicated mesh. Owned entities precede overlap entities, and
+     * `cell_owner_ranks` is indexed by rebuilt local cell ordinal.
      */
     struct UnstructuredPartition
     {
@@ -188,6 +192,7 @@ public:
      * 5. **Mesh rebuild** — reconstruct the per-rank d_cells, d_faces,
      *    node tables, and face geometry from owned + ghost packets.
      *
+     * @pre Every rank in @p comm calls this function collectively.
      * @param mesh The replicated mesh to partition (modified in place).
      * @param comm Teuchos MPI communicator.
      * @return true if partitioning occurred, false if single-rank or
@@ -202,6 +207,7 @@ public:
      * is replaced by rank-local geometry and the returned partition
      * contains its rebuilt local/global cell, face, and node indexer.
      *
+     * @pre Every rank in @p comm calls this function collectively.
      * @param mesh Replicated geometry, rebuilt in place for the local rank.
      * @param comm Teuchos MPI communicator.
      * @return Global indexing and ownership metadata for the rebuilt mesh.
@@ -211,7 +217,12 @@ public:
         const Teuchos::RCP<const comm_type>& comm);
 
 private:
-    /** @brief Distributed graph rows and referenced column cell IDs. */
+    /**
+     * @brief Distributed graph rows and referenced column cell IDs.
+     *
+     * Rows are owned by this rank; adjacency is parallel to `row_gids`, while
+     * `column_gids` is the unique set of local and remote referenced cells.
+     */
     struct PartitionGraph
     {
         std::vector<GO> row_gids;
@@ -219,7 +230,12 @@ private:
         std::vector<GO> column_gids;
     };
 
-    /** @brief Owned-first ordering of rebuilt local mesh entities. */
+    /**
+     * @brief Owned-first ordering of source entity ordinals.
+     *
+     * Cells are divided into owned and ghost sets; faces and nodes are divided
+     * into owned and overlap sets before the rank-local mesh is rebuilt.
+     */
     struct LocalEntityOrder
     {
         std::vector<size_t> owned_cells;
@@ -238,6 +254,10 @@ private:
         const Meshes::UnstructuredMesh& mesh,
         const Teuchos::RCP<const comm_type>& comm);
 
+    /**
+     * @brief Collectively partition a distributed adjacency graph with Zoltan2.
+     * @return Destination rank indexed by global cell identifier.
+     */
     static std::unordered_map<GO, int> solve_partition_graph(
         const PartitionGraph& graph,
         const Teuchos::RCP<const comm_type>& comm);
@@ -266,10 +286,18 @@ private:
     static std::unordered_map<GO, int> compute_gid_to_rank_map(
         const Mesh<Pack>& mesh, const Teuchos::RCP<const comm_type>& comm);
 
+    /**
+     * @brief Collectively assign every unstructured cell to an owner rank.
+     * @return Owner rank indexed by source cell ordinal.
+     */
     static std::vector<int> compute_unstructured_owner_ranks(
         const Meshes::UnstructuredMesh& mesh,
         const Teuchos::RCP<const comm_type>& comm);
 
+    /**
+     * @brief Replace replicated geometry with this rank's owned-first subset.
+     * @return Rebuilt local/global indexer and local cell owners.
+     */
     static UnstructuredPartition rebuild(
         Meshes::UnstructuredMesh& mesh,
         std::vector<int> cell_owner_ranks,

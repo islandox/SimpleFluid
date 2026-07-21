@@ -30,13 +30,13 @@ public:
     /** @brief Coefficients controlling the RNG k-epsilon closure. */
     struct Coefficients
     {
-        real_t c_mu = 0.0845;
-        real_t c_epsilon_1 = 1.42;
-        real_t c_epsilon_2 = 1.68;
-        real_t sigma_k = 0.71942;
-        real_t sigma_epsilon = 0.71942;
-        real_t eta_zero = 4.38;
-        real_t beta = 0.012;
+        real_t c_mu = 0.0845; ///< Eddy-viscosity coefficient.
+        real_t c_epsilon_1 = 1.42; ///< Epsilon production coefficient.
+        real_t c_epsilon_2 = 1.68; ///< Epsilon destruction coefficient.
+        real_t sigma_k = 0.71942; ///< Turbulent Prandtl number for @f$k@f$.
+        real_t sigma_epsilon = 0.71942; ///< Turbulent Prandtl number for @f$\epsilon@f$.
+        real_t eta_zero = 4.38; ///< Reference strain parameter.
+        real_t beta = 0.012; ///< RNG correction denominator coefficient.
     };
 
     RNGKEpsilonEquation() : RNGKEpsilonEquation(Coefficients{}) {}
