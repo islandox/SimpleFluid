@@ -265,7 +265,9 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
     const field_type& dynamic_viscosity,
     scalar_type reference_density,
     const source_type& acceleration_source,
-    const velocity_field_type* correction_field) const -> system_type
+    const velocity_field_type* correction_field,
+    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+    -> system_type
 {
     validate_transport_inputs(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
@@ -331,7 +333,8 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         old_velocity, face_fluxes, options.time_step, dynamic_viscosity,
         reference_density, boundary_value, acceleration_source,
         options.non_orthogonal_treatment, correction_field,
-        d_cached_physical_transport_matrix, boundary_diffusion);
+        d_cached_physical_transport_matrix, boundary_diffusion,
+        boundary_dynamic_viscosity);
     d_cached_physical_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_viscosities_positive)
     {
@@ -350,7 +353,9 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
     scalar_type reference_density,
     velocity_field_type& velocity,
     const source_type& acceleration_source,
-    const LinearSolverOptions& linear_options) const -> LinearSolveSummary
+    const LinearSolverOptions& linear_options,
+    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+    -> LinearSolveSummary
 {
     EquationValidation::require_mesh_match(
         *d_mesh, velocity, "IncompressibleMomentumEquation");
@@ -380,7 +385,7 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
         const auto system = assemble_physical_system(
             *transport_old, face_fluxes, velocity_boundary_cache, options,
             dynamic_viscosity, reference_density, acceleration_source,
-            correction_field);
+            correction_field, boundary_dynamic_viscosity);
         velocity.owned_data().putScalar(0.0);
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto statistics =

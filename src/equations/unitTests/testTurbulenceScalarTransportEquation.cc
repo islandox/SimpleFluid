@@ -275,4 +275,107 @@ TEST(TurbulenceScalarTransportEquationTest, ExtrapolatesNeumannDataForAdvectiveB
     EXPECT_NEAR(state.value(0), 1.5, 1.0e-10);
 }
 
+TEST(TurbulenceScalarTransportEquationTest,
+     AppliesDynamicZeroWallValueAndFixedCellConstraint)
+{
+    auto mesh = make_single_cell_mesh();
+    FieldType state(mesh, 1.0, "state");
+    FieldType diffusivity(mesh, 1.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
+    Equation equation(mesh);
+
+    Equation::boundary_overrides_type wall;
+    wall.boundary_condition =
+        [&](int batch_id, size_t)
+            -> std::optional<SimpleFluid::BoundaryCondition>
+    {
+        if (mesh->boundary_batch_name(batch_id) == "xmin")
+        {
+            return SimpleFluid::BoundaryCondition{
+                SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+        }
+        return std::nullopt;
+    };
+    wall.boundary_value =
+        [&](int batch_id, size_t) -> std::optional<Pack::scalar_type>
+    {
+        return mesh->boundary_batch_name(batch_id) == "xmin"
+             ? std::optional<Pack::scalar_type>{0.0}
+             : std::nullopt;
+    };
+    EXPECT_THROW(
+        equation.advance(
+            state, zero_flux, 1.0, diffusivity, state, zero_provider(),
+            zero_provider(), 1.0e-12,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, {}, &wall),
+        std::invalid_argument);
+
+    wall.allow_zero_dirichlet = true;
+    wall.fixed_cell_value = [](MeshType::local_ordinal_type)
+        -> std::optional<Pack::scalar_type>
+    {
+        return 2.5;
+    };
+    const auto statistics = equation.advance(
+        state, zero_flux, 1.0, diffusivity, state, zero_provider(),
+        zero_provider(), 1.0e-12,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, {}, &wall);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_NEAR(state.value(0), 2.5, 1.0e-12);
+}
+
+TEST(TurbulenceScalarTransportEquationTest,
+     DynamicBoundaryProvidersLeaveUnselectedFacesConfigured)
+{
+    auto mesh = make_single_cell_mesh();
+    FieldType state(mesh, 1.0, "state");
+    FieldType diffusivity(mesh, 1.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
+    SimpleFluid::BoundaryConditionMap boundaries;
+    boundaries["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 4.0};
+    Equation equation(mesh, boundaries);
+
+    Equation::boundary_overrides_type wall;
+    wall.boundary_condition =
+        [&](int batch_id, size_t)
+            -> std::optional<SimpleFluid::BoundaryCondition>
+    {
+        if (mesh->boundary_batch_name(batch_id) == "xmin")
+        {
+            return SimpleFluid::BoundaryCondition{
+                SimpleFluid::BoundaryConditionType::Dirichlet, 2.0};
+        }
+        return std::nullopt;
+    };
+    wall.boundary_value =
+        [&](int batch_id, size_t) -> std::optional<Pack::scalar_type>
+    {
+        return mesh->boundary_batch_name(batch_id) == "xmin"
+             ? std::optional<Pack::scalar_type>{2.0}
+             : std::nullopt;
+    };
+    SimpleFluid::FVM::BoundaryCache<Pack> wall_diffusivity{{}, mesh};
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        if (mesh->boundary_batch_name(batch_id) == "xmin")
+        {
+            wall_diffusivity.value[batch_id] =
+                SimpleFluid::Arr<Pack::scalar_type>(batch.face_lids.size(), 0.5);
+        }
+    }
+    wall.boundary_diffusivity = &wall_diffusivity;
+
+    const auto statistics = equation.advance(
+        state, zero_flux, 1.0, diffusivity, state, zero_provider(),
+        zero_provider(), 1.0e-12,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, {}, &wall);
+
+    ASSERT_TRUE(statistics.converged);
+    // Transient 1, overridden xmin coefficient 1, and fallback xmax
+    // coefficient 2: (1 + 1*2 + 2*4) / (1 + 1 + 2) = 11/4.
+    EXPECT_NEAR(state.value(0), 11.0 / 4.0, 1.0e-10);
+}
+
 } // namespace

@@ -30,11 +30,23 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     const field_type& effective_diffusivity, field_type& state,
     const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
     scalar_type positive_floor, FVM::NonOrthogonalTreatment treatment,
-    const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
+    const LinearSolverOptions& linear_options,
+    const boundary_overrides_type* boundary_overrides) const -> LinearSolveStatistics
 {
     constexpr const char* class_name = "TurbulenceScalarTransportEquation";
+    struct PreparedBoundaryData
+    {
+        BoundaryCondition condition{};
+        scalar_type value{};
+        bool active = false;
+    };
+
     std::vector<scalar_type> source_values(d_mesh->num_owned_cells());
     std::vector<scalar_type> sink_values(d_mesh->num_owned_cells());
+    std::vector<std::optional<scalar_type>> fixed_cell_values(
+        d_mesh->num_owned_cells());
+    std::vector<PreparedBoundaryData> prepared_boundaries(
+        d_mesh->num_faces());
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence scalar transport input validation",
         [&]
@@ -73,12 +85,6 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
                 {
                     throw std::invalid_argument("Turbulence scalar boundary '" + name +
                                                 "' must be Dirichlet or Neumann.");
-                }
-                if (condition.type == BoundaryConditionType::Dirichlet &&
-                    condition.value < positive_floor)
-                {
-                    throw std::invalid_argument("Turbulence scalar Dirichlet boundary '" + name +
-                                                "' lies below the positive floor.");
                 }
             }
 
@@ -128,6 +134,135 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
                 }
                 source_values[owned] = source;
                 sink_values[owned] = sink;
+
+                if (boundary_overrides != nullptr &&
+                    boundary_overrides->fixed_cell_value)
+                {
+                    auto fixed_value =
+                        boundary_overrides->fixed_cell_value(cell_lid);
+                    if (fixed_value.has_value() &&
+                        (!std::isfinite(*fixed_value) ||
+                         *fixed_value < positive_floor))
+                    {
+                        throw std::invalid_argument(
+                            "TurbulenceScalarTransportEquation fixed-cell "
+                            "values must be finite and at or above the "
+                            "positive floor.");
+                    }
+                    fixed_cell_values[owned] = fixed_value;
+                }
+            }
+
+            for (const auto& [batch_id, batch] :
+                 d_mesh->boundary_batches())
+            {
+                const auto& name =
+                    d_mesh->boundary_batch_name(batch_id);
+                const auto configured = d_boundary_conditions.find(name);
+                const auto configured_condition =
+                    configured == d_boundary_conditions.end()
+                        ? BoundaryCondition{}
+                        : configured->second;
+
+                for (size_t in_batch_id = 0;
+                     in_batch_id < batch.face_lids.size();
+                     ++in_batch_id)
+                {
+                    const auto face_lid = batch.face_lids[in_batch_id];
+                    if (!d_mesh->is_boundary_face(face_lid))
+                    {
+                        continue;
+                    }
+
+                    auto condition = configured_condition;
+                    bool condition_overridden = false;
+                    if (boundary_overrides != nullptr &&
+                        boundary_overrides->boundary_condition)
+                    {
+                        auto override_condition =
+                            boundary_overrides->boundary_condition(
+                                batch_id, in_batch_id);
+                        if (override_condition.has_value())
+                        {
+                            condition = *override_condition;
+                            condition_overridden = true;
+                        }
+                    }
+                    if (!std::isfinite(condition.value) ||
+                        !std::isfinite(condition.robin_coefficient))
+                    {
+                        throw std::invalid_argument(
+                            "Turbulence scalar boundary '" + name +
+                            "' contains non-finite dynamic data.");
+                    }
+                    if (condition.type !=
+                            BoundaryConditionType::Dirichlet &&
+                        condition.type != BoundaryConditionType::Neumann)
+                    {
+                        throw std::invalid_argument(
+                            "Turbulence scalar boundary '" + name +
+                            "' must be Dirichlet or Neumann.");
+                    }
+
+                    std::optional<scalar_type> override_value;
+                    if (boundary_overrides != nullptr &&
+                        boundary_overrides->boundary_value)
+                    {
+                        override_value =
+                            boundary_overrides->boundary_value(
+                                batch_id, in_batch_id);
+                    }
+
+                    scalar_type value{};
+                    if (override_value.has_value())
+                    {
+                        value = *override_value;
+                    }
+                    else if (condition.type ==
+                             BoundaryConditionType::Dirichlet)
+                    {
+                        value = condition.value;
+                    }
+                    else
+                    {
+                        const auto owner =
+                            d_mesh->owner_cell(face_lid);
+                        value = old_state.local_value(owner) +
+                                condition.value * static_cast<scalar_type>(
+                                    FVM::detail::boundary_normal_distance(
+                                        *d_mesh, face_lid, owner));
+                    }
+                    if (!std::isfinite(value))
+                    {
+                        throw std::invalid_argument(
+                            "Turbulence scalar boundary '" + name +
+                            "' produced a non-finite face value.");
+                    }
+                    if (condition.type ==
+                            BoundaryConditionType::Dirichlet &&
+                        value < positive_floor)
+                    {
+                        const bool zero_override_allowed =
+                            value == scalar_type{} &&
+                            boundary_overrides != nullptr &&
+                            boundary_overrides->allow_zero_dirichlet &&
+                            (condition_overridden ||
+                             override_value.has_value());
+                        if (!zero_override_allowed)
+                        {
+                            throw std::invalid_argument(
+                                "Turbulence scalar Dirichlet boundary '" +
+                                name +
+                                "' lies below the positive floor.");
+                        }
+                    }
+
+                    auto& prepared = prepared_boundaries.at(
+                        static_cast<size_t>(face_lid));
+                    prepared.condition = condition;
+                    prepared.value = value;
+                    prepared.active = true;
+                }
             }
         });
 
@@ -139,31 +274,35 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
                                      effective_diffusivity.local_value(cell_lid) > scalar_type{};
     }
 
-    auto boundary_condition = [&](int batch_id, size_t)
+    auto boundary_condition = [&](int batch_id, size_t in_batch_id)
     {
-        const auto& name = d_mesh->boundary_batch_name(batch_id);
-        const auto iter = d_boundary_conditions.find(name);
-        return iter == d_boundary_conditions.end() ? BoundaryCondition{} : iter->second;
+        const auto face_lid =
+            d_mesh->boundary_batches().at(batch_id).face_lids.at(
+                in_batch_id);
+        const auto& prepared = prepared_boundaries.at(
+            static_cast<size_t>(face_lid));
+        return prepared.active ? prepared.condition
+                               : BoundaryCondition{};
     };
     auto boundary_value = [&](int batch_id, size_t in_batch_id) -> scalar_type
     {
-        const auto condition = boundary_condition(batch_id, in_batch_id);
-        if (condition.type == BoundaryConditionType::Dirichlet)
-        {
-            return condition.value;
-        }
-
-        const auto& batch = d_mesh->boundary_batches().at(batch_id);
-        const auto face_lid = batch.face_lids.at(in_batch_id);
-        const auto owner = d_mesh->owner_cell(face_lid);
-        return old_state.local_value(owner) +
-               condition.value * static_cast<scalar_type>(FVM::detail::boundary_normal_distance(
-                                     *d_mesh, face_lid, owner));
+        const auto face_lid =
+            d_mesh->boundary_batches().at(batch_id).face_lids.at(
+                in_batch_id);
+        return prepared_boundaries.at(
+            static_cast<size_t>(face_lid)).value;
     };
     auto source = [&](local_ordinal_type cell_lid) -> scalar_type
     { return source_values[static_cast<size_t>(cell_lid)]; };
     scalar_provider_type sink = [&](local_ordinal_type cell_lid) -> scalar_type
     { return sink_values[static_cast<size_t>(cell_lid)]; };
+    typename boundary_overrides_type::fixed_cell_value_provider_type
+        fixed_cell_value =
+            [&](local_ordinal_type cell_lid)
+                -> std::optional<scalar_type>
+    {
+        return fixed_cell_values.at(static_cast<size_t>(cell_lid));
+    };
     const auto* correction_field =
         treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &old_state;
     const auto requires_non_orthogonal_graph = treatment != FVM::NonOrthogonalTreatment::Explicit;
@@ -175,7 +314,11 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     auto system = FVM::weighted_scalar_transport_system<Pack>(
         old_state, face_fluxes, time_step, d_unit_weight, d_unit_weight, effective_diffusivity,
         boundary_condition, boundary_value, source, treatment, correction_field,
-        d_cached_transport_matrix, std::move(sink));
+        d_cached_transport_matrix, std::move(sink),
+        std::move(fixed_cell_value),
+        boundary_overrides != nullptr
+            ? boundary_overrides->boundary_diffusivity
+            : nullptr);
     d_cached_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_diffusivities_positive)
     {

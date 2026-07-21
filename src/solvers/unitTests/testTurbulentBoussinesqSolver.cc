@@ -39,6 +39,14 @@ SimpleFluid::BoundaryConditionSet slip_box_boundaries()
     return boundaries;
 }
 
+SimpleFluid::BoundaryConditionSet single_wall_box_boundaries()
+{
+    auto boundaries = slip_box_boundaries();
+    boundaries.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    return boundaries;
+}
+
 SimpleFluid::TimeStepperOptions stable_time_options(SimpleFluid::PressureVelocityCoupling coupling)
 {
     SimpleFluid::TimeStepperOptions options;
@@ -207,6 +215,77 @@ TEST(TurbulentBoussinesqSolverTest, ExpandsZeroDiffusivityPhysicalGraphsWhenTurb
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_EQ(solver.find_turbulence_model(), &turbulence);
     expect_positive_turbulence_fields(turbulence);
+}
+
+TEST(TurbulentBoussinesqSolverTest,
+     AdvancesBothWallTreatmentsThroughSegregatedAndCoupledSolvers)
+{
+    struct WallCase
+    {
+        SimpleFluid::TurbulenceModelType model;
+        SimpleFluid::TurbulenceWallTreatmentType treatment;
+    };
+    const WallCase wall_cases[] = {
+        {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
+         SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon},
+        {SimpleFluid::TurbulenceModelType::SSTKOmega,
+         SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST}};
+
+    for (const auto coupling : {SimpleFluid::PressureVelocityCoupling::PISO,
+                                SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
+    {
+        for (const auto wall_case : wall_cases)
+        {
+            SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)) +
+                         ", wall=" +
+                         std::string(SimpleFluid::to_string(wall_case.treatment)));
+            auto mesh = SimpleFluid::test::build_mesh<Pack>(
+                SimpleFluid::test::make_2x2x2_database());
+            auto time_options = stable_time_options(coupling);
+            time_options.time_step = 1.0e-5;
+            SimpleFluid::LinearSolverOptions linear_options;
+            linear_options.tolerance = 1.0e-10;
+            linear_options.max_iterations = 400;
+            SimpleFluid::BoussinesqSolver<Pack> solver(
+                mesh, single_wall_box_boundaries(), time_options,
+                linear_options);
+            initialize_shear(solver);
+
+            SimpleFluid::TurbulenceModelOptions options;
+            options.model = wall_case.model;
+            options.initial_turbulent_kinetic_energy = 0.1;
+            options.initial_dissipation_rate = 0.009;
+            options.initial_specific_dissipation_rate = 2.0;
+            options.min_turbulent_kinetic_energy = 1.0e-10;
+            options.min_dissipation_rate = 1.0e-10;
+            options.min_specific_dissipation_rate = 1.0e-10;
+            options.wall_treatment = wall_case.treatment;
+            options.wall_options.boundary_names = {"xmin"};
+            if (wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega)
+                options.initial_wall_distance = 0.5;
+
+            auto& model = solver.configure_turbulence(options);
+            EXPECT_NO_THROW(solver.step());
+            EXPECT_TRUE(solver.last_step_statistics().converged);
+            EXPECT_EQ(solver.step_index(), 1);
+            ASSERT_NE(model.wall_y_plus(), nullptr);
+            ASSERT_NE(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
+            ASSERT_NE(model.effective_thermal_conductivity_boundary_cache(), nullptr);
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto lid = static_cast<MeshType::local_ordinal_type>(owned);
+                EXPECT_TRUE(std::isfinite(model.turbulent_kinetic_energy().value(lid)));
+                EXPECT_GT(model.turbulent_kinetic_energy().value(lid), 0.0);
+                const auto* secondary = wall_case.model ==
+                                                SimpleFluid::TurbulenceModelType::SSTKOmega
+                                          ? model.specific_dissipation_rate()
+                                          : model.dissipation_rate();
+                ASSERT_NE(secondary, nullptr);
+                EXPECT_TRUE(std::isfinite(secondary->value(lid)));
+                EXPECT_GT(secondary->value(lid), 0.0);
+            }
+        }
+    }
 }
 
 TEST(TurbulentBoussinesqSolverTest, TurbulenceFieldsAreOptInForSolutionOutput)

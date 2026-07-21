@@ -18,6 +18,7 @@ namespace
 
 using SimpleFluid::TurbulenceModelOptions;
 using SimpleFluid::TurbulenceModelType;
+using SimpleFluid::TurbulenceWallTreatmentType;
 
 struct ModelCase
 {
@@ -67,6 +68,26 @@ TEST(TurbulenceModelOptionsTest, ParsesAliasesAndRejectsUnknownNames)
     }
 }
 
+TEST(TurbulenceModelOptionsTest, ParsesAndFormatsWallTreatmentNames)
+{
+    const std::pair<const char*, TurbulenceWallTreatmentType> treatments[] = {
+        {"none", TurbulenceWallTreatmentType::None},
+        {"resolvedLowReSST", TurbulenceWallTreatmentType::ResolvedLowReSST},
+        {"standardHighReKEpsilon",
+         TurbulenceWallTreatmentType::StandardHighReKEpsilon}};
+    for (const auto& [name, treatment] : treatments)
+    {
+        EXPECT_EQ(SimpleFluid::parse_turbulence_wall_treatment_type(name), treatment);
+        EXPECT_EQ(SimpleFluid::to_string(treatment), name);
+    }
+    EXPECT_EQ(SimpleFluid::parse_turbulence_wall_treatment_type("resolvedSST"),
+              TurbulenceWallTreatmentType::ResolvedLowReSST);
+    EXPECT_EQ(SimpleFluid::parse_turbulence_wall_treatment_type("OpenFOAMKEpsilon"),
+              TurbulenceWallTreatmentType::StandardHighReKEpsilon);
+    EXPECT_THROW(SimpleFluid::parse_turbulence_wall_treatment_type("automatic"),
+                 std::invalid_argument);
+}
+
 TEST(TurbulenceModelOptionsTest, EmptyDatabaseSelectsLaminarDefaults)
 {
     const SimpleFluid::Database database;
@@ -84,6 +105,8 @@ TEST(TurbulenceModelOptionsTest, EmptyDatabaseSelectsLaminarDefaults)
     EXPECT_DOUBLE_EQ(options.min_specific_dissipation_rate, defaults.min_specific_dissipation_rate);
     EXPECT_DOUBLE_EQ(options.turbulent_prandtl_number, defaults.turbulent_prandtl_number);
     EXPECT_FALSE(options.initial_wall_distance.has_value());
+    EXPECT_EQ(options.wall_treatment, TurbulenceWallTreatmentType::None);
+    EXPECT_TRUE(options.wall_options.boundary_names.empty());
 }
 
 TEST(TurbulenceModelOptionsTest, DatabaseSelectsEveryActiveModel)
@@ -229,6 +252,68 @@ TEST(TurbulenceModelOptionsTest, BSLAndSSTRequirePositiveWallDistance)
         database.set("wall_distance", SimpleFluid::real_t{0.25});
         EXPECT_NO_THROW(SimpleFluid::turbulence_model_options_from_database(database));
     }
+}
+
+TEST(TurbulenceModelOptionsTest, DatabaseReadsWallTreatmentSetAndConstants)
+{
+    SimpleFluid::Database database;
+    database.set("turbulence_model", std::string{"standardKEpsilon"});
+    database.set("wall_treatment", std::string{"standardHighReKEpsilon"});
+    database.set("wall_boundaries", SimpleFluid::ArrString{"lowerWall", "upperWall"});
+    database.set("wall_c_mu", SimpleFluid::real_t{0.08});
+    database.set("wall_kappa", SimpleFluid::real_t{0.42});
+    database.set("wall_e", SimpleFluid::real_t{9.7});
+    database.set("wall_epsilon_low_re_correction", true);
+    database.set("wall_beta_1", SimpleFluid::real_t{0.076});
+    database.set("wall_sst_omega_face_coefficient", SimpleFluid::real_t{60.0});
+
+    const auto options = SimpleFluid::turbulence_model_options_from_database(database);
+    EXPECT_EQ(options.wall_treatment,
+              TurbulenceWallTreatmentType::StandardHighReKEpsilon);
+    EXPECT_EQ(options.wall_options.boundary_names,
+              (SimpleFluid::ArrString{"lowerWall", "upperWall"}));
+    EXPECT_DOUBLE_EQ(options.wall_options.c_mu, 0.08);
+    EXPECT_DOUBLE_EQ(options.wall_options.kappa, 0.42);
+    EXPECT_DOUBLE_EQ(options.wall_options.log_layer_e, 9.7);
+    EXPECT_TRUE(options.wall_options.epsilon_low_re_correction);
+    EXPECT_DOUBLE_EQ(options.wall_options.sst_beta_1, 0.076);
+    EXPECT_DOUBLE_EQ(options.wall_options.sst_omega_wall_coefficient, 60.0);
+}
+
+TEST(TurbulenceModelOptionsTest, WallTreatmentRequiresCompatibleClosureAndExplicitWalls)
+{
+    TurbulenceModelOptions options;
+    options.model = TurbulenceModelType::StandardKEpsilon;
+    options.wall_treatment = TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
+                 std::invalid_argument);
+
+    options.wall_options.boundary_names = {"wall"};
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
+
+    options.model = TurbulenceModelType::RNGKEpsilon;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
+                 std::invalid_argument);
+
+    options.model = TurbulenceModelType::SSTKOmega;
+    options.initial_wall_distance = 0.1;
+    options.wall_treatment = TurbulenceWallTreatmentType::ResolvedLowReSST;
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
+
+    options.wall_options.kappa = 10.0;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
+                 std::invalid_argument);
+    options.wall_options.kappa = 0.42;
+    options.wall_options.sst_beta_1 = 0.076;
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
+
+    options.model = TurbulenceModelType::StandardKOmega;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
+                 std::invalid_argument);
+
+    options.wall_treatment = TurbulenceWallTreatmentType::None;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
+                 std::invalid_argument);
 }
 
 } // namespace

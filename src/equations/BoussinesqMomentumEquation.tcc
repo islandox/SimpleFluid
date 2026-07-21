@@ -163,7 +163,9 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
     bool density_feedback_enabled,
     const source_type& right_hand_source,
     const velocity_field_type* correction_field,
-    const field_type* dynamic_viscosity_override) const -> system_type
+    const field_type* dynamic_viscosity_override,
+    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+    -> system_type
 {
     EquationValidation::require_mesh_match(
         this->mesh(), temperature, "BoussinesqMomentumEquation");
@@ -199,7 +201,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
     return base_type::assemble_physical_system(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
         dynamic_viscosity, reference_density, acceleration,
-        correction_field);
+        correction_field, boundary_dynamic_viscosity);
 }
 
 template<TpetraTypePack Pack>
@@ -215,7 +217,9 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
     velocity_field_type& velocity,
     const source_type& right_hand_source,
     const LinearSolverOptions& linear_options,
-    const field_type* dynamic_viscosity_override) const -> LinearSolveSummary
+    const field_type* dynamic_viscosity_override,
+    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+    -> LinearSolveSummary
 {
     EquationValidation::require_mesh_match(
         this->mesh(), temperature, "BoussinesqMomentumEquation");
@@ -251,7 +255,7 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
     return base_type::advance_velocity_physical(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
         dynamic_viscosity, reference_density, velocity,
-        acceleration, linear_options);
+        acceleration, linear_options, boundary_dynamic_viscosity);
 }
 
 } // namespace SimpleFluid

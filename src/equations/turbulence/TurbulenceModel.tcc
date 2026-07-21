@@ -13,6 +13,7 @@
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -24,15 +25,24 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
     using closure_type =
         std::variant<StandardKEpsilonEquation, RNGKEpsilonEquation, RealizableKEpsilonEquation,
                      StandardKOmegaEquation, BSLKOmegaEquation, SSTKOmegaEquation>;
+    using resolved_wall_type = ResolvedLowReSSTWallTreatment<Pack>;
+    using high_re_wall_type = StandardHighReKEpsilonWallTreatment<Pack>;
+    using wall_treatment_type =
+        std::variant<std::monostate, resolved_wall_type, high_re_wall_type>;
+    using wall_evaluation_type =
+        std::variant<std::monostate, typename resolved_wall_type::Evaluation,
+                     typename high_re_wall_type::Evaluation>;
 
     State(SP<const mesh_type> mesh, const TurbulenceBoundaryConditionSet& boundary_conditions,
+          const VectorBoundaryConditionMap& velocity_boundary_conditions,
           const TurbulenceModelOptions& options)
         : epsilon_family(options.model == TurbulenceModelType::StandardKEpsilon ||
                          options.model == TurbulenceModelType::RNGKEpsilon ||
                          options.model == TurbulenceModelType::RealizableKEpsilon),
           menter_family(options.model == TurbulenceModelType::BSLKOmega ||
                         options.model == TurbulenceModelType::SSTKOmega),
-          closure(make_closure(options.model)),
+          closure(make_closure(options)),
+          wall_treatment(make_wall_treatment(mesh, options, velocity_boundary_conditions)),
           k(mesh, static_cast<scalar_type>(options.initial_turbulent_kinetic_energy), "k"),
           secondary(mesh,
                     static_cast<scalar_type>(epsilon_family
@@ -58,6 +68,8 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
           secondary_sink(mesh, "turbulence_secondary_implicit_sink"),
           wall_distance(mesh, static_cast<scalar_type>(options.initial_wall_distance.value_or(1.0)),
                         "wall_distance"),
+          wall_y_plus(mesh, scalar_type{}, "wall_y_plus"),
+          wall_velocity(mesh, "turbulence_wall_velocity"),
           velocity_gradient(mesh, "velocity_gradient"), k_gradient(mesh, "k_gradient"),
           secondary_gradient(mesh, "turbulence_secondary_gradient"),
           candidate_k_gradient(mesh, "k_candidate_gradient"),
@@ -110,14 +122,26 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
                          {"nu_t", &nu_t},
                          {"mu_eff", &effective_dynamic_viscosity},
                          {"lambda_eff", &effective_thermal_conductivity}};
+        if (options.wall_treatment != TurbulenceWallTreatmentType::None)
+        {
+            output_fields.emplace("wall_y_plus", &wall_y_plus);
+        }
     }
 
-    static closure_type make_closure(TurbulenceModelType model)
+    static closure_type make_closure(const TurbulenceModelOptions& options)
     {
-        switch (model)
+        switch (options.model)
         {
         case TurbulenceModelType::StandardKEpsilon:
-            return StandardKEpsilonEquation{};
+        {
+            auto coefficients = StandardKEpsilonEquation::Coefficients{};
+            if (options.wall_treatment ==
+                TurbulenceWallTreatmentType::StandardHighReKEpsilon)
+            {
+                coefficients.c_mu = options.wall_options.c_mu;
+            }
+            return StandardKEpsilonEquation{coefficients};
+        }
         case TurbulenceModelType::RNGKEpsilon:
             return RNGKEpsilonEquation{};
         case TurbulenceModelType::RealizableKEpsilon:
@@ -127,16 +151,190 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
         case TurbulenceModelType::BSLKOmega:
             return BSLKOmegaEquation{};
         case TurbulenceModelType::SSTKOmega:
-            return SSTKOmegaEquation{};
+        {
+            auto coefficients = SSTKOmegaEquation::Coefficients{};
+            if (options.wall_treatment ==
+                TurbulenceWallTreatmentType::ResolvedLowReSST)
+            {
+                coefficients.beta_1 = options.wall_options.sst_beta_1;
+                coefficients.kappa = options.wall_options.kappa;
+            }
+            return SSTKOmegaEquation{coefficients};
+        }
         case TurbulenceModelType::Laminar:
             break;
         }
         throw std::logic_error("Laminar mode does not have a turbulence closure.");
     }
 
+    static wall_treatment_type make_wall_treatment(
+        const SP<const mesh_type>& mesh, const TurbulenceModelOptions& options,
+        const VectorBoundaryConditionMap& velocity_boundary_conditions)
+    {
+        switch (options.wall_treatment)
+        {
+        case TurbulenceWallTreatmentType::None:
+            return std::monostate{};
+        case TurbulenceWallTreatmentType::ResolvedLowReSST:
+            return resolved_wall_type(mesh, options.wall_options,
+                                      velocity_boundary_conditions);
+        case TurbulenceWallTreatmentType::StandardHighReKEpsilon:
+            return high_re_wall_type(mesh, options.wall_options,
+                                     velocity_boundary_conditions);
+        }
+        throw std::logic_error("Unknown turbulence wall-treatment type.");
+    }
+
+    wall_evaluation_type evaluate_wall(
+        const field_type& k_field, const velocity_field_type& velocity,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const material_type& material, scalar_type reference_density,
+        scalar_type turbulent_prandtl_number) const
+    {
+        wall_evaluation_type result;
+        std::visit(
+            [&](const auto& treatment)
+            {
+                using treatment_type = std::remove_cvref_t<decltype(treatment)>;
+                if constexpr (!std::is_same_v<treatment_type, std::monostate>)
+                {
+                    result = treatment.evaluate(k_field, velocity,
+                                                velocity_boundary_cache, material,
+                                                reference_density,
+                                                turbulent_prandtl_number);
+                }
+            },
+            wall_treatment);
+        return result;
+    }
+
+    static std::optional<BoundaryCondition> wall_boundary_condition(
+        const wall_evaluation_type& evaluation, int batch_id,
+        size_t in_batch_id, bool k_field)
+    {
+        return std::visit(
+            [&](const auto& values) -> std::optional<BoundaryCondition>
+            {
+                using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                {
+                    return std::nullopt;
+                }
+                else
+                {
+                    if (!values.contains_face(batch_id, in_batch_id))
+                    {
+                        return std::nullopt;
+                    }
+                    const auto& face = values.face(batch_id, in_batch_id);
+                    return k_field ? face.turbulent_kinetic_energy
+                                   : face.secondary;
+                }
+            },
+            evaluation);
+    }
+
+    static std::optional<scalar_type> wall_secondary_constraint(
+        const wall_evaluation_type& evaluation, local_ordinal_type cell_lid)
+    {
+        return std::visit(
+            [&](const auto& values) -> std::optional<scalar_type>
+            {
+                using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                    return std::nullopt;
+                else
+                    return values.secondary_constraint(cell_lid);
+            },
+            evaluation);
+    }
+
+    static std::optional<scalar_type> wall_production_override(
+        const wall_evaluation_type& evaluation, local_ordinal_type cell_lid)
+    {
+        return std::visit(
+            [&](const auto& values) -> std::optional<scalar_type>
+            {
+                using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                    return std::nullopt;
+                else
+                    return values.production_override(cell_lid);
+            },
+            evaluation);
+    }
+
+    static const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity(
+        const wall_evaluation_type& evaluation) noexcept
+    {
+        return std::visit(
+            [](const auto& values) -> const FVM::BoundaryCache<Pack>*
+            {
+                using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                    return nullptr;
+                else
+                    return &values.boundary_dynamic_viscosity();
+            },
+            evaluation);
+    }
+
+    static const FVM::BoundaryCache<Pack>* boundary_thermal_conductivity(
+        const wall_evaluation_type& evaluation) noexcept
+    {
+        return std::visit(
+            [](const auto& values) -> const FVM::BoundaryCache<Pack>*
+            {
+                using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                    return nullptr;
+                else
+                    return &values.boundary_thermal_conductivity();
+            },
+            evaluation);
+    }
+
+    static const FVM::BoundaryCache<Pack>* boundary_scalar_diffusivity(
+        const wall_evaluation_type& evaluation) noexcept
+    {
+        return std::visit(
+            [](const auto& values) -> const FVM::BoundaryCache<Pack>*
+            {
+                using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                    return nullptr;
+                else
+                    return &values.boundary_scalar_diffusivity();
+            },
+            evaluation);
+    }
+
+    void publish_wall_evaluation(wall_evaluation_type evaluation)
+    {
+        for (size_t owned = 0; owned < wall_y_plus.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto value = std::visit(
+                [&](const auto& values) -> scalar_type
+                {
+                    using evaluation_type = std::remove_cvref_t<decltype(values)>;
+                    if constexpr (std::is_same_v<evaluation_type, std::monostate>)
+                        return scalar_type{};
+                    else
+                        return values.cell_y_plus(cell_lid).value_or(scalar_type{});
+                },
+                evaluation);
+            wall_y_plus.set_owned_value(cell_lid, value);
+        }
+        wall_y_plus.sync_ghosts();
+        wall_evaluation = std::move(evaluation);
+    }
+
     bool epsilon_family;
     bool menter_family;
     closure_type closure;
+    wall_treatment_type wall_treatment;
+    wall_evaluation_type wall_evaluation;
     field_type k;
     field_type secondary;
     field_type candidate_k;
@@ -154,6 +352,8 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
     field_type secondary_source;
     field_type secondary_sink;
     field_type wall_distance;
+    field_type wall_y_plus;
+    velocity_field_type wall_velocity;
     TensorCellField<Pack> velocity_gradient;
     VectorCellField<Pack> k_gradient;
     VectorCellField<Pack> secondary_gradient;
@@ -168,12 +368,15 @@ template <TpetraTypePack Pack>
 TurbulenceModel<Pack>::TurbulenceModel(SP<const mesh_type> mesh,
                                        const BoundaryConditionSet& boundary_conditions)
     : d_mesh(std::move(mesh)), d_velocity_boundary_conditions(boundary_conditions.velocity),
+      d_wall_velocity_boundary_cache(d_mesh),
       d_boundary_conditions(boundary_conditions.turbulence)
 {
     if (!d_mesh)
     {
         throw std::invalid_argument("TurbulenceModel requires a non-null mesh.");
     }
+    d_wall_velocity_boundary_cache =
+        FVM::cache_velocity_boundary_conditions<Pack>(d_mesh, boundary_conditions);
 
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence boundary-condition validation",
@@ -221,6 +424,23 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
                                                    { validate_turbulence_model_options(options); });
     turbulence_detail::require_uniform_integral(*d_mesh, static_cast<int>(options.model),
                                                 "Turbulence model type");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(options.wall_treatment),
+        "Turbulence wall-treatment type");
+    const real_t wall_scalar_options[] = {
+        options.wall_options.c_mu,
+        options.wall_options.kappa,
+        options.wall_options.log_layer_e,
+        options.wall_options.sst_beta_1,
+        options.wall_options.sst_omega_wall_coefficient};
+    for (const auto value : wall_scalar_options)
+    {
+        turbulence_detail::require_uniform_real(
+            *d_mesh, value, "Turbulence wall scalar options");
+    }
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, options.wall_options.epsilon_low_re_correction ? 1 : 0,
+        "Turbulence wall epsilon low-Re correction");
     const std::array<real_t, 7> scalar_options{options.initial_turbulent_kinetic_energy,
                                                options.initial_dissipation_rate,
                                                options.initial_specific_dissipation_rate,
@@ -251,8 +471,8 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
         [&]
         {
             auto validate_scalar_boundaries =
-                [](const BoundaryConditionMap& conditions, real_t floor,
-                   std::string_view field_name)
+                [&](const BoundaryConditionMap& conditions, real_t floor,
+                    std::string_view field_name)
             {
                 for (const auto& [name, condition] : conditions)
                 {
@@ -270,8 +490,12 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
                             std::string(field_name) + " boundary '" + name +
                             "' contains non-finite data.");
                     }
+                    const auto wall_owned =
+                        std::find(options.wall_options.boundary_names.begin(),
+                                  options.wall_options.boundary_names.end(), name) !=
+                        options.wall_options.boundary_names.end();
                     if (condition.type == BoundaryConditionType::Dirichlet &&
-                        condition.value < floor)
+                        condition.value < floor && !wall_owned)
                     {
                         throw std::invalid_argument(
                             std::string(field_name) + " Dirichlet boundary '" + name +
@@ -308,21 +532,59 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
     turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
 
-    auto candidate = std::make_unique<State>(d_mesh, d_boundary_conditions, options);
+    BoundaryConditionSet configured_boundaries;
+    configured_boundaries.velocity = d_velocity_boundary_conditions;
+    auto configured_velocity_boundary_cache =
+        FVM::cache_velocity_boundary_conditions<Pack>(
+            d_mesh, configured_boundaries);
+    auto candidate = std::make_unique<State>(d_mesh, d_boundary_conditions,
+                                             d_velocity_boundary_conditions, options);
+    auto initial_wall_evaluation = candidate->evaluate_wall(
+        candidate->k, candidate->wall_velocity,
+        configured_velocity_boundary_cache, material, reference_density,
+        static_cast<scalar_type>(options.turbulent_prandtl_number));
     turbulence_detail::collective_local_validation(
         *d_mesh, "Initial turbulence-gradient reconstruction",
         [&]
         {
-            FVM::cell_gradient(
-                candidate->k,
-                d_boundary_conditions.turbulent_kinetic_energy,
-                candidate->k_gradient);
+            auto k_condition = [&](int batch_id, size_t in_batch_id)
+            {
+                const auto wall = State::wall_boundary_condition(
+                    initial_wall_evaluation, batch_id, in_batch_id, true);
+                if (wall)
+                    return *wall;
+                const auto& name = d_mesh->boundary_batch_name(batch_id);
+                const auto iter = d_boundary_conditions.turbulent_kinetic_energy.find(name);
+                return iter == d_boundary_conditions.turbulent_kinetic_energy.end()
+                     ? BoundaryCondition{}
+                     : iter->second;
+            };
+            auto k_value = [&](int batch_id, size_t in_batch_id)
+            { return static_cast<scalar_type>(k_condition(batch_id, in_batch_id).value); };
+            FVM::cell_gradient(candidate->k, k_condition, k_value,
+                               candidate->k_gradient);
             if (candidate->menter_family)
             {
-                FVM::cell_gradient(
-                    candidate->secondary,
-                    d_boundary_conditions.specific_dissipation_rate,
-                    candidate->secondary_gradient);
+                auto secondary_condition = [&](int batch_id, size_t in_batch_id)
+                {
+                    const auto wall = State::wall_boundary_condition(
+                        initial_wall_evaluation, batch_id, in_batch_id, false);
+                    if (wall)
+                        return *wall;
+                    const auto& name = d_mesh->boundary_batch_name(batch_id);
+                    const auto iter =
+                        d_boundary_conditions.specific_dissipation_rate.find(name);
+                    return iter == d_boundary_conditions.specific_dissipation_rate.end()
+                         ? BoundaryCondition{}
+                         : iter->second;
+                };
+                auto secondary_value = [&](int batch_id, size_t in_batch_id)
+                {
+                    return static_cast<scalar_type>(
+                        secondary_condition(batch_id, in_batch_id).value);
+                };
+                FVM::cell_gradient(candidate->secondary, secondary_condition,
+                                   secondary_value, candidate->secondary_gradient);
             }
         });
     candidate->k_gradient.sync_ghosts();
@@ -333,6 +595,9 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
     stage_effective_properties(*candidate, candidate->nu_t, material, reference_density,
                                static_cast<scalar_type>(options.turbulent_prandtl_number));
     commit_effective_properties(*candidate);
+    candidate->publish_wall_evaluation(std::move(initial_wall_evaluation));
+    d_wall_velocity_boundary_cache =
+        std::move(configured_velocity_boundary_cache);
     d_options = options;
     d_state = std::move(candidate);
 }
@@ -341,7 +606,7 @@ template <TpetraTypePack Pack> bool TurbulenceModel<Pack>::disable() noexcept
 {
     const auto was_enabled = static_cast<bool>(d_state);
     d_state.reset();
-    d_options.model = TurbulenceModelType::Laminar;
+    d_options = TurbulenceModelOptions{};
     return was_enabled;
 }
 
@@ -471,9 +736,14 @@ void TurbulenceModel<Pack>::refresh_effective_properties(const material_type& ma
     auto& state = require_state();
     turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
+    auto wall_evaluation = state.evaluate_wall(
+        state.k, state.wall_velocity, d_wall_velocity_boundary_cache,
+        material, reference_density,
+        static_cast<scalar_type>(d_options.turbulent_prandtl_number));
     stage_effective_properties(state, state.nu_t, material, reference_density,
                                static_cast<scalar_type>(d_options.turbulent_prandtl_number));
     commit_effective_properties(state);
+    state.publish_wall_evaluation(std::move(wall_evaluation));
 }
 
 template <TpetraTypePack Pack>
@@ -516,6 +786,7 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                 throw std::invalid_argument("TurbulenceModel material field mesh mismatch.");
             }
         });
+    auto accepted_velocity_boundary_cache = velocity_boundary_cache;
 
     auto boundary_velocity = [&](int batch_id, size_t in_batch_id) ->
         typename velocity_field_type::vec_type
@@ -550,17 +821,53 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         }
         return velocity_boundary_cache.value.at(batch_id).at(in_batch_id);
     };
+    auto current_wall_evaluation = state.evaluate_wall(
+        state.k, velocity, velocity_boundary_cache, material,
+        reference_density,
+        static_cast<scalar_type>(d_options.turbulent_prandtl_number));
     auto update_scalar_gradients =
         [&, this](const field_type& k_field, const field_type& secondary_field,
                   velocity_field_type& k_gradient,
-                  velocity_field_type& secondary_gradient)
+                  velocity_field_type& secondary_gradient,
+                  const typename State::wall_evaluation_type& wall_evaluation)
     {
-        FVM::cell_gradient(k_field, d_boundary_conditions.turbulent_kinetic_energy,
-                           k_gradient);
+        auto k_condition = [&](int batch_id, size_t in_batch_id)
+        {
+            const auto wall = State::wall_boundary_condition(
+                wall_evaluation, batch_id, in_batch_id, true);
+            if (wall)
+                return *wall;
+            const auto& name = d_mesh->boundary_batch_name(batch_id);
+            const auto iter = d_boundary_conditions.turbulent_kinetic_energy.find(name);
+            return iter == d_boundary_conditions.turbulent_kinetic_energy.end()
+                 ? BoundaryCondition{}
+                 : iter->second;
+        };
+        auto k_value = [&](int batch_id, size_t in_batch_id)
+        { return static_cast<scalar_type>(k_condition(batch_id, in_batch_id).value); };
+        FVM::cell_gradient(k_field, k_condition, k_value, k_gradient);
         if (state.menter_family)
         {
-            FVM::cell_gradient(secondary_field, d_boundary_conditions.specific_dissipation_rate,
-                               secondary_gradient);
+            auto secondary_condition = [&](int batch_id, size_t in_batch_id)
+            {
+                const auto wall = State::wall_boundary_condition(
+                    wall_evaluation, batch_id, in_batch_id, false);
+                if (wall)
+                    return *wall;
+                const auto& name = d_mesh->boundary_batch_name(batch_id);
+                const auto iter =
+                    d_boundary_conditions.specific_dissipation_rate.find(name);
+                return iter == d_boundary_conditions.specific_dissipation_rate.end()
+                     ? BoundaryCondition{}
+                     : iter->second;
+            };
+            auto secondary_value = [&](int batch_id, size_t in_batch_id)
+            {
+                return static_cast<scalar_type>(
+                    secondary_condition(batch_id, in_batch_id).value);
+            };
+            FVM::cell_gradient(secondary_field, secondary_condition,
+                               secondary_value, secondary_gradient);
         }
     };
     auto sync_scalar_gradients = [&](velocity_field_type& k_gradient,
@@ -578,14 +885,16 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         {
             FVM::cell_gradient(velocity, boundary_velocity, state.velocity_gradient);
             update_scalar_gradients(state.k, state.secondary, state.k_gradient,
-                                    state.secondary_gradient);
+                                    state.secondary_gradient,
+                                    current_wall_evaluation);
         });
     sync_scalar_gradients(state.k_gradient, state.secondary_gradient);
 
     auto evaluate_closure =
         [&, this](const field_type& k_field, const field_type& secondary_field,
                   const velocity_field_type& k_gradient,
-                  const velocity_field_type& secondary_gradient)
+                  const velocity_field_type& secondary_gradient,
+                  const typename State::wall_evaluation_type& wall_evaluation)
     {
         turbulence_detail::collective_local_validation(
             *d_mesh, "Turbulence closure evaluation",
@@ -651,7 +960,11 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                         const KEpsilonState local{k, secondary};
                         nu_t = closure.turbulent_kinematic_viscosity(local);
                         const auto diffusion = closure.diffusivities(local, molecular_nu);
-                        const auto production = nu_t * strain_magnitude * strain_magnitude;
+                        const auto production = State::wall_production_override(
+                                                    wall_evaluation, cell_lid)
+                                                    .value_or(
+                                                        nu_t * strain_magnitude *
+                                                        strain_magnitude);
                         const auto& coefficients = closure.coefficients();
                         k_diffusivity = diffusion.k;
                         secondary_diffusivity = diffusion.epsilon;
@@ -819,7 +1132,7 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         state.secondary_diffusivity.sync_ghosts();
     };
     evaluate_closure(state.k, state.secondary, state.k_gradient,
-                     state.secondary_gradient);
+                     state.secondary_gradient, current_wall_evaluation);
 
     auto k_source = [&](local_ordinal_type cell_lid) { return state.k_source.value(cell_lid); };
     auto k_sink = [&](local_ordinal_type cell_lid) { return state.k_sink.value(cell_lid); };
@@ -828,17 +1141,78 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
     auto secondary_sink = [&](local_ordinal_type cell_lid)
     { return state.secondary_sink.value(cell_lid); };
 
+    TurbulenceScalarBoundaryOverrides<Pack> k_wall_overrides;
+    k_wall_overrides.boundary_condition =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return State::wall_boundary_condition(
+            current_wall_evaluation, batch_id, in_batch_id, true);
+    };
+    k_wall_overrides.boundary_value =
+        [&](int batch_id, size_t in_batch_id) -> std::optional<scalar_type>
+    {
+        const auto condition = State::wall_boundary_condition(
+            current_wall_evaluation, batch_id, in_batch_id, true);
+        return condition && condition->type == BoundaryConditionType::Dirichlet
+             ? std::optional<scalar_type>{static_cast<scalar_type>(condition->value)}
+             : std::nullopt;
+    };
+    k_wall_overrides.allow_zero_dirichlet =
+        d_options.wall_treatment == TurbulenceWallTreatmentType::ResolvedLowReSST;
+    k_wall_overrides.boundary_diffusivity =
+        State::boundary_scalar_diffusivity(current_wall_evaluation);
+
+    TurbulenceScalarBoundaryOverrides<Pack> secondary_wall_overrides;
+    secondary_wall_overrides.boundary_condition =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return State::wall_boundary_condition(
+            current_wall_evaluation, batch_id, in_batch_id, false);
+    };
+    secondary_wall_overrides.boundary_value =
+        [&](int batch_id, size_t in_batch_id) -> std::optional<scalar_type>
+    {
+        const auto condition = State::wall_boundary_condition(
+            current_wall_evaluation, batch_id, in_batch_id, false);
+        return condition && condition->type == BoundaryConditionType::Dirichlet
+             ? std::optional<scalar_type>{static_cast<scalar_type>(condition->value)}
+             : std::nullopt;
+    };
+    secondary_wall_overrides.fixed_cell_value =
+        [&](local_ordinal_type cell_lid)
+    {
+        auto value = State::wall_secondary_constraint(
+            current_wall_evaluation, cell_lid);
+        if (value)
+        {
+            *value = std::max(
+                *value,
+                static_cast<scalar_type>(
+                    state.epsilon_family
+                        ? d_options.min_dissipation_rate
+                        : d_options.min_specific_dissipation_rate));
+        }
+        return value;
+    };
+    secondary_wall_overrides.boundary_diffusivity =
+        State::boundary_scalar_diffusivity(current_wall_evaluation);
+
     LinearSolveSummary summary;
     summary.add(state.k_equation.advance(
         state.k, projected_face_fluxes, time_step, state.k_diffusivity, state.candidate_k, k_source,
         k_sink, static_cast<scalar_type>(d_options.min_turbulent_kinetic_energy), treatment,
-        linear_options));
+        linear_options, &k_wall_overrides));
     summary.add(state.secondary_equation.advance(
         state.secondary, projected_face_fluxes, time_step, state.secondary_diffusivity,
         state.candidate_secondary, secondary_source, secondary_sink,
         static_cast<scalar_type>(state.epsilon_family ? d_options.min_dissipation_rate
                                                       : d_options.min_specific_dissipation_rate),
-        treatment, linear_options));
+        treatment, linear_options, &secondary_wall_overrides));
+
+    auto candidate_wall_evaluation = state.evaluate_wall(
+        state.candidate_k, velocity, velocity_boundary_cache, material,
+        reference_density,
+        static_cast<scalar_type>(d_options.turbulent_prandtl_number));
 
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence candidate-gradient reconstruction",
@@ -846,13 +1220,15 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         {
             update_scalar_gradients(state.candidate_k, state.candidate_secondary,
                                     state.candidate_k_gradient,
-                                    state.candidate_secondary_gradient);
+                                    state.candidate_secondary_gradient,
+                                    candidate_wall_evaluation);
         });
     sync_scalar_gradients(state.candidate_k_gradient,
                           state.candidate_secondary_gradient);
     evaluate_closure(state.candidate_k, state.candidate_secondary,
                      state.candidate_k_gradient,
-                     state.candidate_secondary_gradient);
+                     state.candidate_secondary_gradient,
+                     candidate_wall_evaluation);
     stage_effective_properties(state, state.candidate_nu_t, material, reference_density,
                                static_cast<scalar_type>(d_options.turbulent_prandtl_number));
 
@@ -878,6 +1254,15 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         state.secondary_gradient.sync_ghosts();
     }
     commit_effective_properties(state);
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        state.wall_velocity.set_owned_value(cell_lid, velocity.value(cell_lid));
+    }
+    state.wall_velocity.sync_ghosts();
+    state.publish_wall_evaluation(std::move(candidate_wall_evaluation));
+    d_wall_velocity_boundary_cache =
+        std::move(accepted_velocity_boundary_cache);
     return summary;
 }
 
@@ -952,6 +1337,32 @@ template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::effective_thermal_conductivity() const -> const field_type&
 {
     return require_state().effective_thermal_conductivity;
+}
+
+template <TpetraTypePack Pack>
+auto TurbulenceModel<Pack>::effective_dynamic_viscosity_boundary_cache() const noexcept
+    -> const FVM::BoundaryCache<Pack>*
+{
+    return d_state
+         ? State::boundary_dynamic_viscosity(d_state->wall_evaluation)
+         : nullptr;
+}
+
+template <TpetraTypePack Pack>
+auto TurbulenceModel<Pack>::effective_thermal_conductivity_boundary_cache() const noexcept
+    -> const FVM::BoundaryCache<Pack>*
+{
+    return d_state
+         ? State::boundary_thermal_conductivity(d_state->wall_evaluation)
+         : nullptr;
+}
+
+template <TpetraTypePack Pack>
+auto TurbulenceModel<Pack>::wall_y_plus() const noexcept -> const field_type*
+{
+    return d_state && d_options.wall_treatment != TurbulenceWallTreatmentType::None
+         ? &d_state->wall_y_plus
+         : nullptr;
 }
 
 template <TpetraTypePack Pack>

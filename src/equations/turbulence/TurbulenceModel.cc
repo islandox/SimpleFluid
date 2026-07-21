@@ -53,6 +53,33 @@ TurbulenceModelType parse_turbulence_model_type(const std::string& value)
     throw std::invalid_argument("Unknown turbulence model '" + value + "'.");
 }
 
+std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept
+{
+    switch (treatment)
+    {
+    case TurbulenceWallTreatmentType::None:
+        return "none";
+    case TurbulenceWallTreatmentType::ResolvedLowReSST:
+        return "resolvedLowReSST";
+    case TurbulenceWallTreatmentType::StandardHighReKEpsilon:
+        return "standardHighReKEpsilon";
+    }
+    return "unknown";
+}
+
+TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
+    const std::string& value)
+{
+    if (value == "none" || value == "off")
+        return TurbulenceWallTreatmentType::None;
+    if (value == "resolvedLowReSST" || value == "resolvedSST")
+        return TurbulenceWallTreatmentType::ResolvedLowReSST;
+    if (value == "standardHighReKEpsilon" || value == "OpenFOAMKEpsilon")
+        return TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    throw std::invalid_argument(
+        "Unknown turbulence wall treatment '" + value + "'.");
+}
+
 void validate_turbulence_model_options(const TurbulenceModelOptions& options)
 {
     const real_t positive_values[] = {options.initial_turbulent_kinetic_energy,
@@ -89,6 +116,39 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
     {
         throw std::invalid_argument("BSL and SST k-omega models require a positive wall distance.");
     }
+
+    switch (options.wall_treatment)
+    {
+    case TurbulenceWallTreatmentType::None:
+        if (!options.wall_options.boundary_names.empty())
+        {
+            throw std::invalid_argument(
+                "Turbulence wall boundaries require an active wall treatment.");
+        }
+        break;
+    case TurbulenceWallTreatmentType::ResolvedLowReSST:
+        if (options.model != TurbulenceModelType::SSTKOmega)
+        {
+            throw std::invalid_argument(
+                "resolvedLowReSST wall treatment requires the SST k-omega model.");
+        }
+        validate_turbulence_wall_treatment_options(options.wall_options);
+        {
+            auto coefficients = SSTKOmegaEquation::Coefficients{};
+            coefficients.beta_1 = options.wall_options.sst_beta_1;
+            coefficients.kappa = options.wall_options.kappa;
+            static_cast<void>(SSTKOmegaEquation{coefficients});
+        }
+        break;
+    case TurbulenceWallTreatmentType::StandardHighReKEpsilon:
+        if (options.model != TurbulenceModelType::StandardKEpsilon)
+        {
+            throw std::invalid_argument(
+                "standardHighReKEpsilon wall treatment requires the standard k-epsilon model.");
+        }
+        validate_turbulence_wall_treatment_options(options.wall_options);
+        break;
+    }
 }
 
 TurbulenceModelOptions turbulence_model_options_from_database(const Database& database)
@@ -114,6 +174,27 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
     {
         options.initial_wall_distance = database.get<real_t>("wall_distance");
     }
+    options.wall_treatment = parse_turbulence_wall_treatment_type(
+        detail::database_value_or<std::string>(database, "wall_treatment", "none"));
+    if (database.contains("wall_boundaries"))
+    {
+        options.wall_options.boundary_names = database.get<ArrString>("wall_boundaries");
+    }
+    options.wall_options.c_mu = detail::database_value_or<real_t>(
+        database, "wall_c_mu", options.wall_options.c_mu);
+    options.wall_options.kappa = detail::database_value_or<real_t>(
+        database, "wall_kappa", options.wall_options.kappa);
+    options.wall_options.log_layer_e = detail::database_value_or<real_t>(
+        database, "wall_e", options.wall_options.log_layer_e);
+    options.wall_options.epsilon_low_re_correction =
+        detail::database_value_or<bool>(
+            database, "wall_epsilon_low_re_correction",
+            options.wall_options.epsilon_low_re_correction);
+    options.wall_options.sst_beta_1 = detail::database_value_or<real_t>(
+        database, "wall_beta_1", options.wall_options.sst_beta_1);
+    options.wall_options.sst_omega_wall_coefficient = detail::database_value_or<real_t>(
+        database, "wall_sst_omega_face_coefficient",
+        options.wall_options.sst_omega_wall_coefficient);
     validate_turbulence_model_options(options);
     return options;
 }
