@@ -42,15 +42,16 @@ class FissionPowerSource;
  */
 struct BoussinesqModelOptions
 {
-    real_t reference_density = 1.0;
+    real_t reference_density = 1.0; ///< Reference density used by momentum scaling.
     real_t density = 1.0;
     real_t specific_heat_capacity = 1.0;
     std::optional<real_t> dynamic_viscosity;
     std::optional<real_t> thermal_conductivity;
-    bool density_feedback_enabled = false;
+    bool density_feedback_enabled = false; ///< Whether density already includes buoyancy feedback.
     ArrString temperature_source_names;
     ArrReal temperature_source_power_densities;
 
+    /** @brief Derive physical material defaults from legacy kinematic inputs. */
     static BoussinesqModelOptions legacy_defaults(
         const TimeStepperOptions& time_options)
     {
@@ -745,6 +746,7 @@ struct MaterialPropertyFields
 
     void clear_updater() noexcept { updater = {}; }
 
+    /** @brief Run the updater, validate physical bounds, and synchronize ghosts. */
     void update(const context_type& context)
     {
         if (updater)
@@ -754,6 +756,7 @@ struct MaterialPropertyFields
         validate_and_sync();
     }
 
+    /** @brief Validate physical bounds and synchronize all material fields. */
     void validate_and_sync()
     {
         validate_positive(density, "density");

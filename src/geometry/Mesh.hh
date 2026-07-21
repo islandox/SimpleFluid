@@ -204,7 +204,12 @@ public:
 
 //-------------------------------- assemble ----------------------------------//
 public:
+    /**
+     * @brief Finalize connectivity, distributed maps, and device-side mirrors
+     *        after the concrete mesh has been populated.
+     */
     virtual void assemble() = 0;
+
     virtual void export_vtu(const std::string& filename) const = 0;
 
 protected:
@@ -326,6 +331,13 @@ public:
      */
     inline void sync_periodic_boundaries(VectorCellField<Pack>& field) const;
 
+    /**
+     * @brief Synchronize tensor overlap values used by periodic paired-cell
+     *        stencils.
+     *
+     * Periodic neighbors are represented as local overlap cells, so the
+     * existing Tpetra ghost import is the synchronization path.
+     */
     inline void sync_periodic_boundaries(TensorCellField<Pack>& field) const;
 
     /**

@@ -102,7 +102,7 @@ private:
         return d_topology->indexer();
     }
 
-    const Topology* d_topology;
+    const Topology* d_topology; //!< Non-owning topology reference.
     Dimension d_coordinate;
     size_t d_num_partitions;
     Ordinal d_ghost_layers;

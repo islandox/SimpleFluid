@@ -34,7 +34,7 @@ struct RadiolyticGasStepStatistics
     Scalar hydrogen_produced = {};
     Scalar hydrogen_escaped = {};
     Scalar hydrogen_after = {};
-    Scalar inventory_error = {};
+    Scalar inventory_error = {}; ///< Hydrogen conservation residual.
     Scalar escaped_bubble_count = {};
     Scalar cumulative_hydrogen_escaped = {};
     Scalar cumulative_escaped_bubble_count = {};
@@ -336,8 +336,11 @@ private:
         const face_flux_field_type& liquid_face_flux,
         const material_type& material);
     void sync_all_fields();
+    /** @brief Compute a globally reduced volume integral. */
     scalar_type global_integral(const field_type& field) const;
+    /** @brief Sum a rank-local scalar and replicate it on every rank. */
     scalar_type global_sum(scalar_type local_value) const;
+    /** @brief Compute and replicate the communicator-wide integer maximum. */
     int global_max(int local_value) const;
     void reduce_event_statistics();
     scalar_type total_hydrogen_inventory() const;

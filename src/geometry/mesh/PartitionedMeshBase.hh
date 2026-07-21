@@ -74,6 +74,11 @@ public:
         std::vector<local_ordinal_type> face_lids;
     };
 
+    /**
+     * @brief Couple rank-local geometry with global indexing and maps.
+     * @throws std::invalid_argument If @p mesh is null or its layout differs
+     *         from @p indexer.
+     */
     PartitionedMesh(
         SP<const mesh_type> mesh,
         indexer_type indexer,
@@ -162,6 +167,9 @@ public:
     bool is_boundary_face(local_ordinal_type face_local_id) const;
     int boundary_id(local_ordinal_type face_local_id) const;
     const std::string& boundary_batch_name(int batch_id) const;
+    /**
+     * @throws std::out_of_range If @p batch_id is not present locally.
+     */
     const BoundaryFaceBatch& boundary_face_batch(int batch_id) const;
     const std::unordered_map<int, BoundaryFaceBatch>&
     boundary_batches() const noexcept;

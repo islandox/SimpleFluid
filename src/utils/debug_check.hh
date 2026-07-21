@@ -109,7 +109,6 @@ inline void check(bool condition, std::string message = "Debug check failed")
  * @tparam Op Supported arithmetic functor type.
  * @param v1 Left operand.
  * @param v2 Right operand.
- * @param op Binary operation to check for overflow (e.g., std::multiplies<>()).
  * @param message Error message used when the check fails.
  * @throws std::overflow_error If the requested operation would overflow its
  *         result type.

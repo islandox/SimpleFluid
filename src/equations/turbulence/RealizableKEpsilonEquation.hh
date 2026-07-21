@@ -31,10 +31,10 @@ public:
     /** @brief Coefficients controlling the realizable k-epsilon closure. */
     struct Coefficients
     {
-        real_t a_zero = 4.04;
-        real_t c_epsilon_2 = 1.9;
-        real_t sigma_k = 1.0;
-        real_t sigma_epsilon = 1.2;
+        real_t a_zero = 4.04; ///< Base denominator in the variable @f$C_\mu@f$ relation.
+        real_t c_epsilon_2 = 1.9; ///< Epsilon destruction coefficient.
+        real_t sigma_k = 1.0; ///< Turbulent Prandtl number for @f$k@f$.
+        real_t sigma_epsilon = 1.2; ///< Turbulent Prandtl number for @f$\epsilon@f$.
     };
 
     RealizableKEpsilonEquation() : RealizableKEpsilonEquation(Coefficients{}) {}

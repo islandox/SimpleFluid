@@ -77,15 +77,26 @@ public:
                      LinearSolverOptions linear_options,
                      BoussinesqModelOptions model_options);
 
+    /**
+     * @brief Initialize a linear temperature profile and uniform pressure.
+     * @p initial_pressure is physical gauge pressure in Pa.
+     */
     void initialize_linear_temperature(const vec_type& direction,
                                        scalar_type hot_at_min,
                                        scalar_type cold_at_max,
                                        scalar_type initial_pressure = 0.0);
 
+    /**
+     * @brief Initialize the standard side-heated-box state.
+     * @p initial_pressure is physical gauge pressure in Pa.
+     */
     void initialize_heated_box(scalar_type hot_temperature,
                                scalar_type cold_temperature,
                                scalar_type initial_pressure = 0.0);
 
+    /**
+     * @param initial_pressure Physical gauge pressure in Pa.
+     */
     void initialize_bottom_hot_top_cold(scalar_type hot_temperature,
                                         scalar_type cold_temperature,
                                         scalar_type initial_pressure = 0.0);
@@ -114,6 +125,10 @@ public:
     /** Return the active turbulence model, or nullptr in laminar mode. */
     const TurbulenceModel<Pack>* find_turbulence_model() const noexcept;
 
+    /**
+     * @param name Must be unique and non-reserved.
+     * @param initial_power_density Volumetric power density in W/m^3.
+     */
     VolumetricScalarSource<Pack>& add_temperature_source(
         std::string name,
         scalar_type initial_power_density = {});

@@ -35,8 +35,8 @@ struct DelayedNeutronPrecursorOptions
     ArrReal decay_constants;
     ArrReal initial_concentrations;
     ArrReal source_terms;
-    ArrReal power_yields;
-    real_t effective_diffusivity = 0.0;
+    ArrReal power_yields; ///< Production per unit fission power density.
+    real_t effective_diffusivity = 0.0; ///< Shared liquid-phase diffusivity.
 };
 
 /**
@@ -370,6 +370,7 @@ public:
     }
 
 private:
+    /** @brief Require a finite liquid fraction in the interval (0, 1]. */
     static scalar_type checked_liquid_fraction(scalar_type value)
     {
         if (!std::isfinite(value)
@@ -420,6 +421,7 @@ private:
         }
     }
 
+    /** @brief Diffuse group concentrations while preserving liquid inventory. */
     void diffuse(
         scalar_type time_step,
         const field_type& alpha_l)

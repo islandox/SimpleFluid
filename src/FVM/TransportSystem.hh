@@ -857,6 +857,16 @@ transport_system(const VectorCellField<Pack>& old_values,
  * transport_system(). Viscous diffusion uses the Phase 1 orthogonal
  * two-point stencil plus Phase 2/3 non-orthogonal treatment selected by
  * @p treatment.
+ *
+ * @param face_fluxes Oriented volumetric fluxes on the @p old_values mesh.
+ * @param time_step Must be positive.
+ * @param diffusivity Must be non-negative.
+ * @param right_hand_source Volumetric vector-source provider.
+ * @param correction_field Optional lagged field for explicit correction terms.
+ * @param[in,out] cached_matrix Optional compatible matrix to reuse.
+ * @param boundary_diffusion Selects boundary faces with viscous diffusion.
+ * @throws std::invalid_argument If fields use different meshes, the time step
+ *         is not positive, or diffusivity is negative.
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,
@@ -1134,6 +1144,20 @@ non_orthogonal_transport_system(
  *
  * Boundary diffusion honors the supplied boundary-condition type, while
  * advection remains first-order upwind and outflow conservative.
+ *
+ * @param face_fluxes Oriented volumetric fluxes on the @p old_values mesh.
+ * @param time_step Must be positive.
+ * @param storage_weight Must be positive and share the transported-field mesh.
+ * @param advection_weight Must be non-negative and share that mesh.
+ * @param correction_field Optional lagged field for explicit correction terms.
+ * @param[in,out] cached_matrix Optional compatible matrix to reuse.
+ * @param implicit_sink Optional finite, non-negative cell-centered sink.
+ * @param fixed_cell_value Optional finite values imposed as exact identity rows.
+ * @param boundary_diffusivity Optional compatible boundary-face coefficients.
+ * @throws std::invalid_argument If field/cache meshes are incompatible or a
+ *         validated time step, coefficient, sink, or fixed value is invalid.
+ * @throws std::runtime_error For a Robin boundary condition, which is not yet
+ *         implemented by this assembly path.
  */
 template<TpetraTypePack Pack,
          class BoundaryConditionProvider,
@@ -1526,6 +1550,16 @@ weighted_scalar_transport_system(
  *
  * Storage and advection use volumetric heat capacity rho*cp, diffusion uses
  * distance-weighted harmonic conductivity, and the source is power density.
+ *
+ * @param face_fluxes Oriented volumetric fluxes on the temperature mesh.
+ * @param time_step Must be positive.
+ * @param correction_field Optional lagged temperature for explicit correction.
+ * @param[in,out] cached_matrix Optional compatible matrix to reuse.
+ * @param boundary_thermal_conductivity Optional compatible boundary-face values.
+ * @throws std::invalid_argument If field/cache meshes are incompatible or the
+ *         time step is not positive.
+ * @throws std::runtime_error For a Robin boundary condition, which is not yet
+ *         implemented by this assembly path.
  */
 template<TpetraTypePack Pack,
          class BoundaryConditionProvider,
@@ -1859,6 +1893,16 @@ physical_temperature_transport_system(
 /**
  * @brief Assemble incompressible momentum transport with a variable dynamic
  *        viscosity field and constant reference density.
+ * @param face_fluxes Oriented volumetric fluxes on the velocity mesh.
+ * @param time_step Must be positive.
+ * @param reference_density Must be positive.
+ * @param acceleration_source Volumetric acceleration provider.
+ * @param correction_field Optional lagged velocity for explicit correction.
+ * @param[in,out] cached_matrix Optional compatible matrix to reuse.
+ * @param boundary_diffusion Selects boundary faces with viscous diffusion.
+ * @param boundary_dynamic_viscosity Optional compatible boundary-face values.
+ * @throws std::invalid_argument If field/cache meshes are incompatible or the
+ *         time step or reference density is not positive.
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,

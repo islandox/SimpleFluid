@@ -1,5 +1,5 @@
 /**
- * @file FvmCellOperators.hh
+ * @file CellOperators.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Cell-centered finite-volume gradient and divergence operators.
  * @version 0.1

@@ -107,7 +107,7 @@ bool OrthoMeshTopo::is_boundary_face(FaceID face_id) const noexcept
 /**
  * @brief Map an exterior face to its lower or upper boundary batch.
  * @param id Structured face identifier.
- * @return Boundary batch ID, or @ref invalid_boundary_id for other faces.
+ * @return Boundary batch ID, or `invalid_boundary_id` for other faces.
  */
 int OrthoMeshTopo::boundary_id(FaceID id) const noexcept
 {

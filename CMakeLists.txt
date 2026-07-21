@@ -73,12 +73,15 @@ find_package(GTest)
 
 if(SIMPLEFLUID_BUILD_DOCS)
     find_package(Doxygen REQUIRED)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     configure_file(
         "${PROJECT_SOURCE_DIR}/docs/Doxyfile.in"
         "${CMAKE_BINARY_DIR}/Doxyfile"
         @ONLY
     )
     add_custom_target(docs
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "${CMAKE_BINARY_DIR}/docs/doxygen"
         COMMAND Doxygen::doxygen "${CMAKE_BINARY_DIR}/Doxyfile"
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         COMMENT "Generating SimpleFluid API documentation"

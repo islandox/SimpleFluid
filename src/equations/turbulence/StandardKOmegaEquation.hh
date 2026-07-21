@@ -23,11 +23,11 @@ public:
     /** @brief Coefficients controlling the standard k-omega closure. */
     struct Coefficients
     {
-        real_t beta_star = 0.09;
-        real_t beta = 0.075;
-        real_t gamma = 5.0 / 9.0;
-        real_t sigma_k = 0.5;
-        real_t sigma_omega = 0.5;
+        real_t beta_star = 0.09; ///< Turbulent kinetic-energy destruction coefficient.
+        real_t beta = 0.075; ///< Omega destruction coefficient.
+        real_t gamma = 5.0 / 9.0; ///< Omega production coefficient.
+        real_t sigma_k = 0.5; ///< Turbulent diffusion coefficient for @f$k@f$.
+        real_t sigma_omega = 0.5; ///< Turbulent diffusion coefficient for @f$\omega@f$.
     };
 
     StandardKOmegaEquation() : StandardKOmegaEquation(Coefficients{}) {}

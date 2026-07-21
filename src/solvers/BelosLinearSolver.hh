@@ -146,6 +146,10 @@ public:
             matrix, rhs, solution, options).converged;
     }
 
+    /**
+     * @param solution Initial guesses replaced by computed solutions.
+     * @return Convergence flag, iteration count, and achieved tolerance.
+     */
     LinearSolveStatistics solve_with_statistics(
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs,
@@ -206,6 +210,10 @@ public:
             matrix, rhs, solution, options).converged;
     }
 
+    /**
+     * @param solution Initial guess replaced by the computed solution.
+     * @return Convergence flag, iteration count, and achieved tolerance.
+     */
     LinearSolveStatistics solve_with_statistics(
         const Teuchos::RCP<const operator_type>& matrix,
         const vector_type& rhs,
@@ -254,6 +262,11 @@ private:
         }
     }
 
+    /**
+     * @brief Build, reuse, or remove the configured right preconditioner.
+     * @throws std::invalid_argument If the selection is unknown or MueLu is
+     *         requested for a non-CRS operator.
+     */
     void configure_preconditioner(
         const Teuchos::RCP<const operator_type>& matrix,
         const LinearSolverOptions& options)

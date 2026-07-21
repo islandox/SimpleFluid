@@ -120,6 +120,11 @@ public:
         return *result;
     }
 
+    /**
+     * @brief Retrieve a mutable registered object by exact type and name.
+     * @throws std::out_of_range If no object has the requested name.
+     * @throws std::invalid_argument If the registered type differs.
+     */
     template<class Object>
     Object& object(const std::string& name)
     {
@@ -174,7 +179,10 @@ public:
                 std::move(descriptor), d_mesh, initial_value));
     }
 
-    /** @brief Retrieve a field and verify that it belongs to this mesh. */
+    /**
+     * @brief Retrieve a field and verify that it belongs to this mesh.
+     * @throws std::invalid_argument If the field belongs to another mesh.
+     */
     template<class StoredField>
     StoredField& field(const std::string& name)
     {

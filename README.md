@@ -81,7 +81,7 @@ Three non-orthogonal treatments, selectable at runtime:
 | `SIMPLE` | Predictor → pressure correction → velocity correction → flux correction |
 | `PISO` | One momentum predictor + multiple pressure corrections per step |
 | `PIMPLE` | Outer nonlinear loop with inner PISO corrections |
-| `coupledKrylov` | Monolithic $\begin{bmatrix}A_u & G \\ D & 0\end{bmatrix}$ system with block Schur preconditioner and MueLu AMG on the Schur complement |
+| `coupledKrylov` | Monolithic $\begin{bmatrix}A_u & G \\ D & 0\end{bmatrix}$ system with a block Schur preconditioner and MueLu AMG on the Schur complement |
 
 The coupled Krylov solver uses Belos **block GMRES** with an Ifpack2/MueLu
 block-preconditioning strategy for robust convergence on challenging meshes.
