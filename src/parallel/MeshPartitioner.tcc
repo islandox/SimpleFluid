@@ -13,10 +13,7 @@
 
 #include <map>
 #include <type_traits>
-
-#include <Zoltan2_PartitioningProblem.hpp>
-#include <Zoltan2_PartitioningSolution.hpp>
-#include <Zoltan2_TpetraRowGraphAdapter.hpp>
+#include "modules/Zoltan2.hh"
 
 using namespace SimpleFluid;
 

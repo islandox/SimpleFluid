@@ -10,8 +10,7 @@
  */
 
 #include "examples/ExampleRunner.hh"
-
-#include <Tpetra_Core.hpp>
+#include "modules/Tpetra.hh"
 
 #include <memory>
 

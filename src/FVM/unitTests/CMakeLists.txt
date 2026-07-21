@@ -2,7 +2,8 @@
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
-  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testFvmModule\\.cc$")
+  list(REMOVE_ITEM TEST_SOURCES
+       "${CMAKE_CURRENT_SOURCE_DIR}/testFvmModule.cc")
 endif()
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
@@ -11,6 +12,11 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_configure_test_executable(${TEST_NAME})
   if(SIMPLEFLUID_ENABLE_CXX_MODULES AND TEST_NAME STREQUAL "testFvmModule")
     set_target_properties(${TEST_NAME} PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    set_source_files_properties(${TEST_SRC}
+        PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
   endif()
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()

@@ -11,9 +11,7 @@
 #pragma once
 
 #include "geometry/Mesh.hh"
-
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_Access.hpp>
+#include "modules/Teuchos.hh"
 
 #include <cstddef>
 #include <stdexcept>

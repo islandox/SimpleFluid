@@ -10,12 +10,8 @@
  */
 
 #include "Mesh.hh"
-
-#include <Tpetra_Core.hpp>
-#include <Teuchos_ArrayView.hpp>
-#include <Teuchos_CommHelpers.hpp>
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Teuchos_DefaultMpiComm.hpp>
+#include "modules/Tpetra.hh"
+#include "modules/Teuchos.hh"
 
 #include <algorithm>
 #include <array>
