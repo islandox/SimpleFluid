@@ -14,8 +14,7 @@
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
 #include "utils/CompensatedSum.hh"
-
-#include <Teuchos_CommHelpers.hpp>
+#include "modules/Teuchos.hh"
 
 #include <algorithm>
 #include <chrono>

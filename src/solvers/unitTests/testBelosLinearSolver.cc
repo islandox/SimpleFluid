@@ -14,9 +14,8 @@
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
-
-#include <Teuchos_OrdinalTraits.hpp>
-#include <Tpetra_Core.hpp>
+#include "modules/Teuchos.hh"
+#include "modules/Tpetra.hh"
 
 #include <array>
 #include <limits>

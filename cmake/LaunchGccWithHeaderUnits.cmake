@@ -1,0 +1,47 @@
+# CMake does not yet add header-unit BMIs to GCC's generated module mapper.
+# Add the prebuilt wrapper mappings immediately before invoking the compiler.
+
+if(NOT DEFINED SIMPLEFLUID_HEADER_UNIT_MAP)
+    message(FATAL_ERROR "SIMPLEFLUID_HEADER_UNIT_MAP is required")
+endif()
+
+set(_command_start -1)
+math(EXPR _last_argument "${CMAKE_ARGC} - 1")
+foreach(_index RANGE 0 ${_last_argument})
+    if(CMAKE_ARGV${_index} STREQUAL "--")
+        math(EXPR _command_start "${_index} + 1")
+        break()
+    endif()
+endforeach()
+
+if(_command_start LESS 0)
+    message(FATAL_ERROR "Missing compiler command after --")
+endif()
+
+file(READ "${SIMPLEFLUID_HEADER_UNIT_MAP}" _header_unit_mappings)
+string(REPLACE "\n" ";" _header_unit_mappings "${_header_unit_mappings}")
+
+set(_compiler_command)
+foreach(_index RANGE ${_command_start} ${_last_argument})
+    set(_argument "${CMAKE_ARGV${_index}}")
+    if(_argument MATCHES "^-fmodule-mapper=(.+)$")
+        set(_module_mapper "${CMAKE_MATCH_1}")
+        file(READ "${_module_mapper}" _module_mapper_contents)
+        foreach(_mapping IN LISTS _header_unit_mappings)
+            if(_mapping STREQUAL "")
+                continue()
+            endif()
+            string(FIND "${_module_mapper_contents}" "${_mapping}" _mapping_index)
+            if(_mapping_index EQUAL -1)
+                file(APPEND "${_module_mapper}" "${_mapping}\n")
+                string(APPEND _module_mapper_contents "${_mapping}\n")
+            endif()
+        endforeach()
+    endif()
+    list(APPEND _compiler_command "${_argument}")
+endforeach()
+
+execute_process(COMMAND ${_compiler_command} RESULT_VARIABLE _compiler_result)
+if(NOT _compiler_result EQUAL 0)
+    message(FATAL_ERROR "Compiler exited with status ${_compiler_result}")
+endif()

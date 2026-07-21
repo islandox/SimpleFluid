@@ -16,9 +16,8 @@
 #include "utils/debug_check.hh"
 
 #include "MeshUtils.hh"
-
-#include <Teuchos_RCP.hpp>
-#include <Kokkos_Core.hpp>
+#include "modules/Teuchos.hh"
+#include "modules/Kokkos.hh"
 
 #include <string>
 #include <memory>

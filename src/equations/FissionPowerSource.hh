@@ -14,8 +14,7 @@
 #include "dataclass/DatabaseOptionReader.hh"
 #include "equations/BoussinesqModel.hh"
 #include "fields/MeshFieldTraits.hh"
-
-#include <Teuchos_CommHelpers.hpp>
+#include "modules/Teuchos.hh"
 
 #include <algorithm>
 #include <cctype>

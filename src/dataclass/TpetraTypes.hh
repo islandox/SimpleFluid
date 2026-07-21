@@ -15,16 +15,9 @@
 #include "typedefs.hh"
 
 #include <limits>
-
-#include <Tpetra_Map.hpp>
-#include <Teuchos_Comm.hpp>
-#include <Tpetra_Vector.hpp>
-#include <Tpetra_MultiVector.hpp>
-#include <Tpetra_CrsGraph.hpp>
-#include <Tpetra_CrsMatrix.hpp>
-#include <Tpetra_Import.hpp>
-#include <Tpetra_Operator.hpp>
-#include <Kokkos_Core.hpp>
+#include "modules/Tpetra.hh"
+#include "modules/Teuchos.hh"
+#include "modules/Kokkos.hh"
 
 namespace SimpleFluid
 {

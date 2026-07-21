@@ -12,11 +12,7 @@
 #include "MeshFactory.hh"
 #include "STKMesh.hh"
 #include "geometry/mesh/FrontalDelaunay2D.hh"
-
-#include <Teuchos_CommHelpers.hpp>
-#include <stk_io/IossBridge.hpp>
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
+#include "modules/STK.hh"
 
 #include <algorithm>
 #include <array>

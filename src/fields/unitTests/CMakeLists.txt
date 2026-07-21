@@ -3,8 +3,11 @@
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testGhostSyncMultiRank\\.cc$")
+list(REMOVE_ITEM TEST_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/testTrilinosModules.cc")
 if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
-  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testFieldsModule\\.cc$")
+  list(REMOVE_ITEM TEST_SOURCES
+       "${CMAKE_CURRENT_SOURCE_DIR}/testFieldsModule.cc")
 endif()
 
 add_executable(testFields ${TEST_SOURCES})
@@ -12,8 +15,26 @@ target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testFields)
 if(SIMPLEFLUID_ENABLE_CXX_MODULES)
   set_target_properties(testFields PROPERTIES CXX_SCAN_FOR_MODULES ON)
+  set_source_files_properties(
+      testFieldsModule.cc
+      PROPERTIES
+      SKIP_PRECOMPILE_HEADERS ON
+      COMPILE_OPTIONS
+      "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
 endif()
 simplefluid_discover_tests(testFields)
+
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+  add_executable(testTrilinosModules testTrilinosModules.cc)
+  target_link_libraries(testTrilinosModules
+      SimpleFluid::TrilinosModules)
+  set_target_properties(testTrilinosModules PROPERTIES
+      CXX_SCAN_FOR_MODULES ON)
+  set_source_files_properties(testTrilinosModules.cc PROPERTIES
+      SKIP_PRECOMPILE_HEADERS ON)
+  add_test(NAME TrilinosModulesTest.ExportsWrappedPackageTypes
+      COMMAND testTrilinosModules)
+endif()
 
 add_executable(testGhostSyncMultiRank testGhostSyncMultiRank.cc)
 target_link_libraries(testGhostSyncMultiRank SimpleFluid::Fields GTest::gtest_main)

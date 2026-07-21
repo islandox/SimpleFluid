@@ -12,12 +12,7 @@
 #include "STKMesh.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "io/VTUWriter.hh"
-
-#include <Teuchos_CommHelpers.hpp>
-#include <Tpetra_Core.hpp>
-#include <stk_io/IossBridge.hpp>
-#include <stk_mesh/base/MeshBuilder.hpp>
-#include <stk_util/parallel/Parallel.hpp>
+#include "modules/STK.hh"
 
 #include <algorithm>
 #include <cmath>

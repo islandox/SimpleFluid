@@ -12,8 +12,7 @@
 #pragma once
 
 #include "dataclass/TpetraTypes.hh"
-
-#include <Teuchos_RCP.hpp>
+#include "modules/Teuchos.hh"
 
 #include <functional>
 #include <memory>

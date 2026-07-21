@@ -24,11 +24,9 @@
 #include "fields/VectorCellField.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/CoupledBlockOperator.hh"
-
-#include <BelosBlockGmresSolMgr.hpp>
-#include <BelosLinearProblem.hpp>
-#include <Teuchos_Array.hpp>
-#include <Teuchos_RCP.hpp>
+#include "modules/LinearSolvers.hh"
+#include "modules/Teuchos.hh"
+#include "modules/Tpetra.hh"
 
 #include <array>
 #include <concepts>

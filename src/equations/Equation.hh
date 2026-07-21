@@ -16,8 +16,7 @@
 #include "equations/AssembledEquation.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/FieldStored.hh"
-
-#include <Teuchos_Array.hpp>
+#include "modules/Teuchos.hh"
 
 #include <array>
 #include <cstddef>
