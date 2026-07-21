@@ -20,8 +20,7 @@
 #include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 #include "solvers/BelosLinearSolver.hh"
-
-#include <Teuchos_RCP.hpp>
+#include "modules/Teuchos.hh"
 
 #include <concepts>
 #include <cstddef>

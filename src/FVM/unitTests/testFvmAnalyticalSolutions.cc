@@ -22,10 +22,7 @@
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
-
-#include <stk_io/IossBridge.hpp>
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
+#include "modules/STK.hh"
 
 #include <array>
 #include <cmath>
