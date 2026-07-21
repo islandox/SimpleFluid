@@ -1,6 +1,12 @@
 /**
  * @file STKMeshAdapter.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief FVM-facing adapter for the legacy distributed STK mesh.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -17,6 +23,8 @@ namespace SimpleFluid::Meshes
  *
  * The adapter shares ownership of the underlying mesh and preserves its local
  * ordinal IDs while presenting the API expected by MeshHandle.
+ *
+ * @tparam Pack Tpetra type pack used by the wrapped legacy mesh.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class STKMeshAdapter

@@ -21,6 +21,11 @@
 namespace SimpleFluid::detail
 {
 
+/**
+ * @brief Expose retained preconditioner state to focused unit tests.
+ *
+ * @tparam Pack Tpetra type pack used by the solver under test.
+ */
 template<TpetraTypePack Pack>
 struct BelosLinearSolverTestAccess
 {
@@ -43,6 +48,12 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/**
+ * @brief Read the number of MueLu hierarchy constructions from a solver.
+ *
+ * @param solver Solver instance under test.
+ * @return Number of completed preconditioner setups.
+ */
 std::size_t preconditioner_setup_count(
     const SimpleFluid::BelosLinearSolver<Pack>& solver)
 {
@@ -51,6 +62,7 @@ std::size_t preconditioner_setup_count(
     return Access::preconditioner_setup_count(solver);
 }
 
+/** @brief Minimal identity operator used to test non-CRS Belos inputs. */
 class IdentityOperator final : public Pack::operator_type
 {
 public:
@@ -165,6 +177,7 @@ TEST(BelosLinearSolverTest, SolvesMultiVectorIdentitySystem)
     }
 }
 
+/** @brief Verify retained solver state handles a changed right-hand side. */
 TEST(BelosLinearSolverTest, ReusesSolverForChangedRightHandSide)
 {
     const auto invalid_global_size =
@@ -197,6 +210,7 @@ TEST(BelosLinearSolverTest, ReusesSolverForChangedRightHandSide)
     }
 }
 
+/** @brief Verify one solve reports convergence iterations and achieved tolerance. */
 TEST(BelosLinearSolverTest, ReportsIterationsAndAchievedTolerance)
 {
     const auto invalid_global_size =
@@ -221,6 +235,7 @@ TEST(BelosLinearSolverTest, ReportsIterationsAndAchievedTolerance)
     EXPECT_GE(statistics.achieved_tolerance, 0.0);
 }
 
+/** @brief Verify CRS matrices can be solved with a MueLu preconditioner. */
 TEST(BelosLinearSolverTest, SupportsMueLuForCrsMatrices)
 {
     const auto invalid_global_size =
@@ -246,6 +261,7 @@ TEST(BelosLinearSolverTest, SupportsMueLuForCrsMatrices)
     EXPECT_GE(statistics.iterations, 0);
 }
 
+/** @brief Verify MueLu is rebuilt between solves unless reuse is enabled. */
 TEST(BelosLinearSolverTest, RebuildsMueLuByDefault)
 {
     const auto invalid_global_size =
@@ -272,6 +288,7 @@ TEST(BelosLinearSolverTest, RebuildsMueLuByDefault)
     EXPECT_EQ(preconditioner_setup_count(solver), 2U);
 }
 
+/** @brief Verify MueLu reuse is tied to operator identity and enablement. */
 TEST(BelosLinearSolverTest,
      ReusesMueLuOnlyForSameOperatorAndInvalidatesWhenDisabled)
 {
@@ -323,6 +340,7 @@ TEST(BelosLinearSolverTest,
     EXPECT_EQ(preconditioner_setup_count(solver), 3U);
 }
 
+/** @brief Verify MueLu rejects operators that are not Tpetra CRS matrices. */
 TEST(BelosLinearSolverTest, RejectsMueLuForNonCrsOperators)
 {
     const auto invalid_global_size =

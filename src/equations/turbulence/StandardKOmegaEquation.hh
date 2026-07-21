@@ -1,6 +1,12 @@
 /**
  * @file StandardKOmegaEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Wilcox-1988 standard k-omega closure equation terms.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -14,6 +20,7 @@ namespace SimpleFluid
 class StandardKOmegaEquation
 {
 public:
+    /** @brief Coefficients controlling the standard k-omega closure. */
     struct Coefficients
     {
         real_t beta_star = 0.09;

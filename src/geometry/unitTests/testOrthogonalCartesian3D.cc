@@ -41,6 +41,7 @@ Mesh make_mesh()
 
 } // namespace
 
+/** @brief Verifies consecutive-coordinate differences and midpoints. */
 TEST(MeshUtilsConsecutiveTest, ComputesDifferencesAndMidpoints)
 {
     const SimpleFluid::Arr<SimpleFluid::real_t> values{-1.0, 2.0, 6.0};
@@ -52,6 +53,7 @@ TEST(MeshUtilsConsecutiveTest, ComputesDifferencesAndMidpoints)
         SimpleFluid::Arr<SimpleFluid::real_t>{}).empty());
 }
 
+/** @brief Verifies malformed Cartesian edge arrays are rejected. */
 TEST(OrthogonalCartesian3DTest, RejectsInvalidEdges)
 {
     EXPECT_THROW(
@@ -70,6 +72,10 @@ TEST(OrthogonalCartesian3DTest, RejectsInvalidEdges)
         std::invalid_argument);
 }
 
+/**
+ * @brief Verifies entity counts, cell centroids, volumes, and cell-face lists
+ * for an orthogonal Cartesian mesh.
+ */
 TEST(OrthogonalCartesian3DTest, ReportsCountsAndCellGeometry)
 {
     const auto mesh = make_mesh();
@@ -96,6 +102,10 @@ TEST(OrthogonalCartesian3DTest, ReportsCountsAndCellGeometry)
     EXPECT_EQ(mesh.face_distances(cell).size(), 6U);
 }
 
+/**
+ * @brief Verifies interior-face connectivity, centroids, areas, normals, and
+ * center-to-center vectors.
+ */
 TEST(OrthogonalCartesian3DTest, ComputesInteriorFaceTopologyAndGeometry)
 {
     const auto mesh = make_mesh();
@@ -128,6 +138,10 @@ TEST(OrthogonalCartesian3DTest, ComputesInteriorFaceTopologyAndGeometry)
               (Vec3{1.5, 0.0, 0.0}));
 }
 
+/**
+ * @brief Verifies indexed face queries across the X, Y, and Z face
+ * orientations.
+ */
 TEST(OrthogonalCartesian3DTest, ComputesIndexedQueriesAcrossOrientations)
 {
     const auto mesh = make_mesh();
@@ -154,6 +168,10 @@ TEST(OrthogonalCartesian3DTest, ComputesIndexedQueriesAcrossOrientations)
     EXPECT_EQ(mesh.boundary_id(zmax), 5);
 }
 
+/**
+ * @brief Verifies physical boundary faces, IDs, names, normals, and batches
+ * on all six Cartesian sides.
+ */
 TEST(OrthogonalCartesian3DTest, ComputesBoundaryFacesAndBatches)
 {
     const auto mesh = make_mesh();
@@ -185,6 +203,10 @@ TEST(OrthogonalCartesian3DTest, ComputesBoundaryFacesAndBatches)
     EXPECT_THROW(mesh.boundary_face_batch(6), std::out_of_range);
 }
 
+/**
+ * @brief Verifies structured IDs map consistently to local cell, face, and
+ * node ordinals and coordinates.
+ */
 TEST(OrthogonalCartesian3DTest, MapsStructuredAndLocalIdentifiers)
 {
     const auto mesh = make_mesh();
@@ -210,6 +232,7 @@ TEST(OrthogonalCartesian3DTest, MapsStructuredAndLocalIdentifiers)
     EXPECT_THROW_WHEN_DEBUG(mesh.node_coord(NodeID{(unsigned)-1, 0, 0}), std::out_of_range);
 }
 
+/** @brief Verifies distance queries reject cells that do not share a face. */
 TEST(OrthogonalCartesian3DTest, RejectsNonAdjacentCellQueries)
 {
     const auto mesh = make_mesh();

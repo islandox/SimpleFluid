@@ -33,6 +33,9 @@ namespace SimpleFluid
  * Derived meshes provide the primitive geometry and connectivity operations
  * through private `*_impl` methods. MeshBase supplies the topology predicates,
  * outward geometry, and distance queries shared by finite-volume operators.
+ *
+ * @tparam DerivedMesh Concrete mesh implementing the primitive operations.
+ * @tparam Pack Mesh entity-ID and ordinal type pack.
  */
 template <class DerivedMesh, MeshIndexTypePack Pack>
 class MeshBase
@@ -373,6 +376,10 @@ private:
     }
 };
 
+/**
+ * @brief Require a CRTP mesh with matching index-pack and indexer entity IDs.
+ * @tparam DerivedMesh Candidate concrete mesh type.
+ */
 template <class DerivedMesh>
 concept MeshClass = requires {
     typename DerivedMesh::index_type_pack;

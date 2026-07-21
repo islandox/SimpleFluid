@@ -1,6 +1,12 @@
 /**
  * @file FissionPowerSource.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Prescribed fission power-density profiles for thermal coupling.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 
@@ -71,6 +77,14 @@ struct FissionPowerSourceOptions
 namespace detail
 {
 
+/**
+ * @brief Read a required, typed fission-source database value.
+ * @tparam T Requested database value type.
+ * @param database Source database.
+ * @param key Required option name.
+ * @return The decoded option value.
+ * @throws std::invalid_argument If the option is absent or has the wrong type.
+ */
 template<class T>
 T fission_database_value(
     const Database& database,
@@ -92,6 +106,12 @@ T fission_database_value(
     }
 }
 
+/**
+ * @brief Validate a non-negative fission-source scalar.
+ * @param value Value to validate.
+ * @param name Option name used in diagnostics.
+ * @throws std::invalid_argument If @p value is negative or not finite.
+ */
 inline void validate_non_negative_fission_value(
     real_t value,
     const std::string& name)
@@ -104,6 +124,13 @@ inline void validate_non_negative_fission_value(
     }
 }
 
+/**
+ * @brief Read a finite three-component fission-source option.
+ * @param database Source database.
+ * @param key Required array option name.
+ * @return The option converted to a three-component vector.
+ * @throws std::invalid_argument If the option is absent, malformed, or non-finite.
+ */
 inline vec3<real_t> fission_vec3(
     const Database& database,
     const std::string& key)
@@ -128,6 +155,11 @@ inline vec3<real_t> fission_vec3(
     return {values[0], values[1], values[2]};
 }
 
+/**
+ * @brief Validate prescribed fission-power options for the selected profile.
+ * @param options Options to validate.
+ * @throws std::invalid_argument If an active profile contains invalid parameters.
+ */
 inline void validate_fission_power_options(
     const FissionPowerSourceOptions& options)
 {

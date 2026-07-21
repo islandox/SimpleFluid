@@ -1,6 +1,12 @@
 /**
  * @file OrthogonalCylindrial3D.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief OrthogonalCylindrial3D setup and indexing implementation.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
@@ -16,6 +22,14 @@ namespace SimpleFluid::Meshes
 namespace
 {
 
+/**
+ * @brief Validate one cylindrical coordinate-edge array.
+ * @param edges Edge coordinates to validate.
+ * @param coordinate_name Coordinate label used in diagnostics.
+ * @throws std::invalid_argument If the array is too short, non-finite, or not
+ *         strictly increasing.
+ * @throws std::overflow_error If its cell count exceeds the mesh ID type.
+ */
 void validate_edges(
     const Arr<real_t>& edges,
     const char* coordinate_name)
@@ -57,6 +71,12 @@ void validate_edges(
 
 } // namespace
 
+/**
+ * @brief Construct and precompute cylindrical geometry and topology.
+ * @param cell_edges Strictly increasing radial, angular, and axial edges.
+ * @throws std::invalid_argument If coordinates or the angular domain are invalid.
+ * @throws std::overflow_error If entity counts exceed supported ID ranges.
+ */
 OrthogonalCylindrial3D::OrthogonalCylindrial3D(
     const Vec3D<Arr<real_t>>& cell_edges)
     : d_cell_edges(cell_edges)
@@ -159,6 +179,12 @@ OrthogonalCylindrial3D::OrthogonalCylindrial3D(
         {{"rmin", "rmax", "thetamin", "thetamax", "zmin", "zmax"}});
 }
 
+/**
+ * @brief Return a physical boundary batch name.
+ * @param batch_id Boundary batch identifier.
+ * @return Configured radial, angular, or axial boundary name.
+ * @throws std::out_of_range If @p batch_id is invalid.
+ */
 const std::string&
 OrthogonalCylindrial3D::boundary_batch_name_impl(int batch_id) const
 {

@@ -1,6 +1,12 @@
 /**
  * @file testPressureProjectionMultiRank.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Distributed pressure-projection gauge and residual tests.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -200,6 +206,7 @@ TEST(PressureProjectionMultiRankTest,
     expect_replicated(*comm, result.continuity);
 }
 
+/** @brief Verifies coherent rejection of incompatible pressure-velocity boundaries on all ranks. */
 TEST(PressureProjectionMultiRankTest,
      EveryRankRejectsIncompatiblePressureVelocityBoundaryPair)
 {

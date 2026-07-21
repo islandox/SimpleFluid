@@ -1,6 +1,12 @@
 /**
  * @file Field.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Lightweight typed field descriptors.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once

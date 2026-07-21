@@ -39,6 +39,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the standard 2-by-2-by-2 box test mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -56,6 +57,7 @@ SimpleFluid::SP<MeshType> make_box_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Build the 4-by-4-by-4 checkerboard test mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_checkerboard_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -74,6 +76,7 @@ SimpleFluid::SP<MeshType> make_checkerboard_box_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Build a single-cell box test mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_single_cell_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -91,6 +94,7 @@ SimpleFluid::SP<MeshType> make_single_cell_box_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Build a box refined toward all six boundaries. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_boundary_layer_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -115,6 +119,7 @@ SimpleFluid::SP<MeshType> make_boundary_layer_box_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Build the baseline cylindrical test mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_cylinder_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -131,6 +136,7 @@ SimpleFluid::SP<MeshType> make_cylinder_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Build a cylinder with boundary-layer refinement. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_boundaried_cylinder_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -154,6 +160,7 @@ SimpleFluid::SP<MeshType> make_boundaried_cylinder_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Build a sphere split into upper and lower boundary patches. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> make_split_sphere_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
@@ -169,6 +176,12 @@ SimpleFluid::SP<MeshType> make_split_sphere_mesh()
     return factory.template build<Pack>();
 }
 
+/**
+ * @brief Assert that all primary solution values are finite.
+ *
+ * @param mesh Mesh defining owned cells.
+ * @param solver Solver containing fields to inspect.
+ */
 void expect_finite_solution(const MeshType& mesh,
                             const SimpleFluid::BoussinesqSolver<Pack>& solver)
 {
@@ -185,6 +198,14 @@ void expect_finite_solution(const MeshType& mesh,
     }
 }
 
+/**
+ * @brief Assert zero boundary velocity and flux on a named patch.
+ *
+ * @param mesh Mesh defining boundary batches.
+ * @param face_velocity Reconstructed face velocity.
+ * @param face_fluxes Face-normal volumetric flux.
+ * @param boundary_name Patch to inspect.
+ */
 void expect_zero_boundary_velocity(
     const MeshType& mesh,
     const SimpleFluid::VectorFaceField<Pack>& face_velocity,
@@ -218,6 +239,16 @@ void expect_zero_boundary_velocity(
     EXPECT_TRUE(saw_boundary);
 }
 
+/**
+ * @brief Compute the cellwise L2 norm of pressure-weighted flux imbalance.
+ *
+ * @param velocity Cell-centered velocity field.
+ * @param pressure Cell-centered pressure field.
+ * @param pressure_coefficient Pressure contribution coefficient.
+ * @param cache Cached velocity boundary conditions.
+ * @param pressure_boundaries Pressure boundary conditions.
+ * @return Square-root sum of squared cell flux balances.
+ */
 Pack::scalar_type continuity_imbalance_norm(
     const SimpleFluid::VectorCellField<Pack>& velocity,
     const SimpleFluid::CellField<Pack>& pressure,
@@ -336,6 +367,7 @@ TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
     std::filesystem::remove(output_file);
 }
 
+/** @brief Verify the solver accepts the Cartesian CRTP mesh backend. */
 TEST(BoussinesqSolverTest, RunsCartesianCRTPMeshSmokeCase)
 {
     auto cartesian =
@@ -506,6 +538,7 @@ TEST(BoussinesqSolverTest, RunsBoundaryLayerBoxWithThreeDirectionGravity)
     expect_finite_solution(*mesh, solver);
 }
 
+/** @brief Exercise SIMPLE, PISO, PIMPLE, and coupled modes and inspect residuals. */
 TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 {
     double simple_continuity = std::numeric_limits<double>::infinity();
@@ -602,6 +635,7 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 TEST(BoussinesqSolverTest,
      StoresPressureInPascalsAcrossSegregatedAndCoupledSolves)
 {
+    /** @brief Pressure and velocity snapshots returned by one coupling run. */
     struct CaseState
     {
         std::vector<double> pressure;
@@ -708,6 +742,7 @@ TEST(BoussinesqSolverTest,
     }
 }
 
+/** @brief Verify coupled Krylov assembly produces all velocity-pressure blocks. */
 TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
 {
     auto mesh = make_checkerboard_box_mesh();
@@ -817,6 +852,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
     EXPECT_GT(checkerboard.dot(stabilized), 0.0);
 }
 
+/** @brief Verify coupled assembly honors a dynamic-viscosity override field. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovUsesDynamicViscosityOverride)
 {
@@ -923,6 +959,7 @@ TEST(BoussinesqSolverTest,
     EXPECT_GT(effective_diagonal, molecular_diagonal);
 }
 
+/** @brief Verify coupled momentum includes isotropic turbulent kinetic-energy stress. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovIncludesIsotropicTurbulentKineticEnergyStress)
 {
@@ -1009,6 +1046,7 @@ TEST(BoussinesqSolverTest,
     }
 }
 
+/** @brief Compare effective transpose-stress terms in both coupling paths. */
 TEST(BoussinesqSolverTest,
      SegregatedAndCoupledMomentumCarryEffectiveTransposeStress)
 {
@@ -1132,6 +1170,7 @@ TEST(BoussinesqSolverTest,
     EXPECT_GT(maximum_transpose_stress, 1.0e-6);
 }
 
+/** @brief Verify coupled pressure boundary data is normalized by reference density. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovNormalizesPhysicalPressureBoundaryData)
 {
@@ -1203,6 +1242,7 @@ TEST(BoussinesqSolverTest,
     EXPECT_DOUBLE_EQ(water.reference_density, 1000.0);
 }
 
+/** @brief Verify skew Neumann pressure data uses boundary-normal distance. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovUsesNormalDistanceForSkewBoundaryNeumannData)
 {
@@ -1345,6 +1385,7 @@ TEST(BoussinesqSolverTest,
     EXPECT_GT(maximum_euclidean_error, 1.0e-6);
 }
 
+/** @brief Verify Dirichlet pressure preserves continuity and the physical gauge shift. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovDirichletPressurePreservesContinuityAndGaugeShift)
 {
@@ -1493,6 +1534,7 @@ TEST(BoussinesqSolverTest,
     EXPECT_GT(maximum_rhs_shift, 0.0);
 }
 
+/** @brief Verify coupled continuity accounts for prescribed boundary face flux. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovDirichletContinuityMatchesBoundaryFaceFlux)
 {
@@ -1612,6 +1654,7 @@ TEST(BoussinesqSolverTest,
     EXPECT_GT(maximum_face_flux_balance, 1.0e-12);
 }
 
+/** @brief Verify segregated coupling rejects invalid corrector counts. */
 TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
 {
     auto mesh = make_box_mesh();
@@ -1626,6 +1669,7 @@ TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
     EXPECT_THROW(solver.step(), std::invalid_argument);
 }
 
+/** @brief Compare one-cell physical heat-source integration to its analytic rise. */
 TEST(BoussinesqSolverTest, PhysicalHeatSourcesGiveAnalyticalOneCellRise)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1659,6 +1703,7 @@ TEST(BoussinesqSolverTest, PhysicalHeatSourcesGiveAnalyticalOneCellRise)
         1.0e-12);
 }
 
+/** @brief Verify fission power adds to other registered heat sources. */
 TEST(BoussinesqSolverTest, FissionPowerAddsToOtherPhysicalHeatSources)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1690,6 +1735,7 @@ TEST(BoussinesqSolverTest, FissionPowerAddsToOtherPhysicalHeatSources)
         nullptr);
 }
 
+/** @brief Verify fission source callbacks observe the step-start context. */
 TEST(BoussinesqSolverTest, FissionMultiplierUsesStepStartContext)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1725,6 +1771,7 @@ TEST(BoussinesqSolverTest, FissionMultiplierUsesStepStartContext)
     EXPECT_EQ(update_times, (std::vector<double>{0.0, 0.1}));
 }
 
+/** @brief Exercise creation, lookup, configuration, and removal of fission sources. */
 TEST(BoussinesqSolverTest, ManagesSpecializedFissionSourceLifecycle)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1761,6 +1808,7 @@ TEST(BoussinesqSolverTest, ManagesSpecializedFissionSourceLifecycle)
     EXPECT_FALSE(solver.remove_fission_power_source());
 }
 
+/** @brief Verify material properties refresh before step-start source evaluation. */
 TEST(BoussinesqSolverTest, RefreshesMaterialBeforeSourcesAtStepStart)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1821,6 +1869,7 @@ TEST(BoussinesqSolverTest, RefreshesMaterialBeforeSourcesAtStepStart)
     EXPECT_NEAR(solver.temperature().value(0), 10.2, 1.0e-12);
 }
 
+/** @brief Verify density feedback retains reference-density buoyancy scaling. */
 TEST(BoussinesqSolverTest, DensityFeedbackUsesReferenceDensityBuoyancy)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1851,6 +1900,7 @@ TEST(BoussinesqSolverTest, DensityFeedbackUsesReferenceDensityBuoyancy)
     EXPECT_NEAR(velocity.z, 0.2, 1.0e-12);
 }
 
+/** @brief Compare explicit physical defaults against the legacy transport path. */
 TEST(BoussinesqSolverTest, PhysicalDefaultsMatchLegacySolver)
 {
     auto legacy_mesh = make_box_mesh();
@@ -1907,6 +1957,7 @@ TEST(BoussinesqSolverTest, PhysicalDefaultsMatchLegacySolver)
     }
 }
 
+/** @brief Verify auxiliary multiphysics fields are opt-in for VTU output. */
 TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1979,6 +2030,7 @@ TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
     std::filesystem::remove(auxiliary_file);
 }
 
+/** @brief Verify source updates reject non-finite power density values. */
 TEST(BoussinesqSolverTest, RejectsNonFiniteSourceUpdaterOutput)
 {
     auto mesh = make_single_cell_box_mesh();
@@ -1999,6 +2051,7 @@ TEST(BoussinesqSolverTest, RejectsNonFiniteSourceUpdaterOutput)
     EXPECT_THROW(solver.step(), std::invalid_argument);
 }
 
+/** @brief Verify coupled Krylov assembly uses configured physical material fields. */
 TEST(BoussinesqSolverTest, CoupledKrylovUsesPhysicalMaterialPath)
 {
     auto mesh = make_box_mesh();

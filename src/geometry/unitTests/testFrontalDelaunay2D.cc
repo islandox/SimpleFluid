@@ -1,6 +1,12 @@
 /**
  * @file testFrontalDelaunay2D.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for advancing-front XY point placement and Delaunay topology.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -93,6 +99,7 @@ void expect_complete_planar_triangulation(const Mesher::Result& mesh)
 
 } // namespace
 
+/** @brief Verifies malformed fronts and invalid sizing parameters are rejected. */
 TEST(FrontalDelaunay2DTest, RejectsInvalidPolygonAndSizing)
 {
     EXPECT_THROW(
@@ -113,6 +120,10 @@ TEST(FrontalDelaunay2DTest, RejectsInvalidPolygonAndSizing)
         std::invalid_argument);
 }
 
+/**
+ * @brief Verifies advancing-front triangulation covers a convex polygon with
+ * consistently oriented, boundary-conforming triangles.
+ */
 TEST(FrontalDelaunay2DTest, AdvancesFrontAcrossConvexPolygon)
 {
     const auto mesh = Mesher::triangulate(
@@ -147,6 +158,10 @@ TEST(FrontalDelaunay2DTest, AdvancesFrontAcrossConvexPolygon)
     }
 }
 
+/**
+ * @brief Verifies prescribed circular fronts produce valid annular and disk
+ * triangulations with the requested boundary markers.
+ */
 TEST(FrontalDelaunay2DTest, TriangulatesPrescribedCircularFronts)
 {
     const auto mesh = Mesher::triangulate_disk(

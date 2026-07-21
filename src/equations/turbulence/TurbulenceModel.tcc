@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceModel.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Template implementation of runtime two-equation turbulence coupling.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "TurbulenceCollectiveValidation.hh"
@@ -20,6 +26,10 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Owns all fields, closures, equations, and staged wall data.
+ * @tparam Pack Tpetra type pack used by the enclosing model.
+ */
 template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
 {
     using closure_type =
@@ -364,6 +374,13 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
     std::map<std::string, const field_type*> output_fields;
 };
 
+/**
+ * @brief Construct a runtime turbulence model on a mesh.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param mesh Distributed computational mesh.
+ * @param boundary_conditions Velocity and turbulence scalar boundaries.
+ * @throws std::invalid_argument if the mesh or boundary types are invalid.
+ */
 template <TpetraTypePack Pack>
 TurbulenceModel<Pack>::TurbulenceModel(SP<const mesh_type> mesh,
                                        const BoundaryConditionSet& boundary_conditions)
@@ -402,6 +419,15 @@ TurbulenceModel<Pack>::TurbulenceModel(SP<const mesh_type> mesh,
 
 template <TpetraTypePack Pack> TurbulenceModel<Pack>::~TurbulenceModel() = default;
 
+/**
+ * @brief Parse database options and replace the active closure collectively.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param database Source configuration database.
+ * @param material Material fields used to initialize effective properties.
+ * @param reference_density Positive momentum reference density.
+ * @throws std::invalid_argument if parsing or configuration validation fails.
+ * @throws std::overflow_error if a derived property is invalid.
+ */
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::configure(const Database& database,
                                       const material_type& material,
@@ -415,6 +441,16 @@ void TurbulenceModel<Pack>::configure(const Database& database,
     configure(parsed_options, material, reference_density);
 }
 
+/**
+ * @brief Replace the active closure and reset its transported state.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param options Closure, floor, and wall-treatment options.
+ * @param material Material fields used to initialize effective properties.
+ * @param reference_density Positive momentum reference density.
+ * @throws std::invalid_argument if options, boundaries, or material inputs fail.
+ * @throws std::logic_error if an invalid closure state is requested.
+ * @throws std::overflow_error if a derived property is invalid.
+ */
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
                                       const material_type& material, scalar_type reference_density)
@@ -602,6 +638,11 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
     d_state = std::move(candidate);
 }
 
+/**
+ * @brief Disable turbulence and release the allocated closure state.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return True when an active state was released.
+ */
 template <TpetraTypePack Pack> bool TurbulenceModel<Pack>::disable() noexcept
 {
     const auto was_enabled = static_cast<bool>(d_state);
@@ -610,22 +651,43 @@ template <TpetraTypePack Pack> bool TurbulenceModel<Pack>::disable() noexcept
     return was_enabled;
 }
 
+/**
+ * @brief Report whether a non-laminar closure is active.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return True when turbulence state is allocated.
+ */
 template <TpetraTypePack Pack> bool TurbulenceModel<Pack>::enabled() const noexcept
 {
     return static_cast<bool>(d_state);
 }
 
+/**
+ * @brief Return the configured turbulence model type.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Runtime model identifier.
+ */
 template <TpetraTypePack Pack> TurbulenceModelType TurbulenceModel<Pack>::type() const noexcept
 {
     return d_options.model;
 }
 
+/**
+ * @brief Return the currently configured model options.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Stored model options.
+ */
 template <TpetraTypePack Pack>
 const TurbulenceModelOptions& TurbulenceModel<Pack>::options() const noexcept
 {
     return d_options;
 }
 
+/**
+ * @brief Require and return mutable active turbulence state.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Mutable active state.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack> auto TurbulenceModel<Pack>::require_state() -> State&
 {
     if (!d_state)
@@ -635,6 +697,12 @@ template <TpetraTypePack Pack> auto TurbulenceModel<Pack>::require_state() -> St
     return *d_state;
 }
 
+/**
+ * @brief Require and return immutable active turbulence state.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Immutable active state.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack> auto TurbulenceModel<Pack>::require_state() const -> const State&
 {
     if (!d_state)
@@ -644,6 +712,17 @@ template <TpetraTypePack Pack> auto TurbulenceModel<Pack>::require_state() const
     return *d_state;
 }
 
+/**
+ * @brief Stage effective viscosity and conductivity from molecular fields.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param[in,out] state State receiving candidate effective properties.
+ * @param turbulent_kinematic_viscosity Eddy-viscosity field to apply.
+ * @param material Molecular material-property fields.
+ * @param reference_density Positive momentum reference density.
+ * @param turbulent_prandtl_number Positive turbulent Prandtl number.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::overflow_error if a derived property is invalid.
+ */
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::stage_effective_properties(
     State& state, const field_type& turbulent_kinematic_viscosity, const material_type& material,
@@ -715,6 +794,11 @@ void TurbulenceModel<Pack>::stage_effective_properties(
     state.candidate_effective_thermal_conductivity.sync_ghosts();
 }
 
+/**
+ * @brief Publish staged effective properties to accepted fields.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param[in,out] state State whose candidate properties are committed.
+ */
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::commit_effective_properties(State& state) const
 {
@@ -727,6 +811,15 @@ void TurbulenceModel<Pack>::commit_effective_properties(State& state) const
     state.effective_thermal_conductivity.sync_ghosts();
 }
 
+/**
+ * @brief Rebuild accepted effective properties without advancing turbulence.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param material Current molecular material-property fields.
+ * @param reference_density Positive momentum reference density.
+ * @throws std::logic_error if the model is disabled.
+ * @throws std::invalid_argument if material or wall inputs are invalid.
+ * @throws std::overflow_error if a derived property is invalid.
+ */
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::refresh_effective_properties(const material_type& material,
                                                          scalar_type reference_density)
@@ -746,6 +839,23 @@ void TurbulenceModel<Pack>::refresh_effective_properties(const material_type& ma
     state.publish_wall_evaluation(std::move(wall_evaluation));
 }
 
+/**
+ * @brief Advance both turbulence scalars and publish derived properties.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param velocity Accepted liquid velocity field.
+ * @param projected_face_fluxes Pressure-projected volumetric face fluxes.
+ * @param velocity_boundary_cache Cached velocity boundary values.
+ * @param time_step Positive physical time step.
+ * @param material Current molecular material-property fields.
+ * @param reference_density Positive momentum reference density.
+ * @param treatment Non-orthogonal scalar diffusion treatment.
+ * @param linear_options Linear-solver configuration.
+ * @return Aggregated statistics from the two scalar solves.
+ * @throws std::logic_error if the model is disabled or loses its closure.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::runtime_error if a solve or closure evaluation fails.
+ * @throws std::overflow_error if a derived property is invalid.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                                     const face_flux_field_type& projected_face_fluxes,
@@ -1266,6 +1376,13 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
     return summary;
 }
 
+/**
+ * @brief Replace the positive wall-distance field used by Menter closures.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param wall_distance Positive distance-to-wall field.
+ * @throws std::logic_error if the model is disabled.
+ * @throws std::invalid_argument if the field mesh or values are invalid.
+ */
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::set_wall_distance(const field_type& wall_distance)
 {
@@ -1296,12 +1413,24 @@ void TurbulenceModel<Pack>::set_wall_distance(const field_type& wall_distance)
     state.wall_distance.sync_ghosts();
 }
 
+/**
+ * @brief Return the accepted turbulent kinetic-energy field.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Accepted k field.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::turbulent_kinetic_energy() const -> const field_type&
 {
     return require_state().k;
 }
 
+/**
+ * @brief Return the accepted turbulent kinetic-energy gradient.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Accepted gradient of k.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::turbulent_kinetic_energy_gradient() const
     -> const velocity_field_type&
@@ -1309,36 +1438,69 @@ auto TurbulenceModel<Pack>::turbulent_kinetic_energy_gradient() const
     return require_state().k_gradient;
 }
 
+/**
+ * @brief Return the accepted epsilon field for epsilon-family closures.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Epsilon field, or null for disabled and omega-family models.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::dissipation_rate() const noexcept -> const field_type*
 {
     return d_state && d_state->epsilon_family ? &d_state->secondary : nullptr;
 }
 
+/**
+ * @brief Return the accepted omega field for omega-family closures.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Omega field, or null for disabled and epsilon-family models.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::specific_dissipation_rate() const noexcept -> const field_type*
 {
     return d_state && !d_state->epsilon_family ? &d_state->secondary : nullptr;
 }
 
+/**
+ * @brief Return the accepted turbulent kinematic-viscosity field.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Accepted eddy-viscosity field.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::turbulent_kinematic_viscosity() const -> const field_type&
 {
     return require_state().nu_t;
 }
 
+/**
+ * @brief Return the accepted effective dynamic-viscosity field.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Molecular plus turbulent dynamic viscosity.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::effective_dynamic_viscosity() const -> const field_type&
 {
     return require_state().effective_dynamic_viscosity;
 }
 
+/**
+ * @brief Return the accepted effective thermal-conductivity field.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Molecular plus turbulent thermal conductivity.
+ * @throws std::logic_error if the model is disabled.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::effective_thermal_conductivity() const -> const field_type&
 {
     return require_state().effective_thermal_conductivity;
 }
 
+/**
+ * @brief Return sparse wall-face effective viscosities when available.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Active wall viscosity cache, or null.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::effective_dynamic_viscosity_boundary_cache() const noexcept
     -> const FVM::BoundaryCache<Pack>*
@@ -1348,6 +1510,11 @@ auto TurbulenceModel<Pack>::effective_dynamic_viscosity_boundary_cache() const n
          : nullptr;
 }
 
+/**
+ * @brief Return sparse wall-face effective conductivities when available.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Active wall conductivity cache, or null.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::effective_thermal_conductivity_boundary_cache() const noexcept
     -> const FVM::BoundaryCache<Pack>*
@@ -1357,6 +1524,11 @@ auto TurbulenceModel<Pack>::effective_thermal_conductivity_boundary_cache() cons
          : nullptr;
 }
 
+/**
+ * @brief Return the accepted maximum incident-wall y+ diagnostic.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return y+ field when wall treatment is active, or null.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::wall_y_plus() const noexcept -> const field_type*
 {
@@ -1365,6 +1537,11 @@ auto TurbulenceModel<Pack>::wall_y_plus() const noexcept -> const field_type*
          : nullptr;
 }
 
+/**
+ * @brief Return active turbulence fields exposed for solution output.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Stable name-to-field mapping, empty when disabled.
+ */
 template <TpetraTypePack Pack>
 auto TurbulenceModel<Pack>::output_fields() const noexcept
     -> const std::map<std::string, const field_type*>&

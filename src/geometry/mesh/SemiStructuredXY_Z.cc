@@ -1,6 +1,12 @@
 /**
  * @file SemiStructuredXY_Z.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief SemiStructuredXY_Z setup and XY topology construction.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -16,6 +22,12 @@ namespace SimpleFluid::Meshes
 namespace
 {
 
+/**
+ * @brief Validate that an entity count fits the mesh ID type.
+ * @param count Entity count to validate.
+ * @param quantity Entity label used in diagnostics.
+ * @throws std::overflow_error If @p count exceeds the unsigned ID range.
+ */
 void validate_count(size_t count, const char* quantity)
 {
     if (count > static_cast<size_t>(
@@ -27,6 +39,13 @@ void validate_count(size_t count, const char* quantity)
     }
 }
 
+/**
+ * @brief Validate axial extrusion edge coordinates.
+ * @param edges Z coordinates to validate.
+ * @throws std::invalid_argument If fewer than two edges are supplied or they
+ *         are non-finite or not strictly increasing.
+ * @throws std::overflow_error If the edge count exceeds the ID type.
+ */
 void validate_z_edges(const Arr<real_t>& edges)
 {
     if (edges.size() < 2)
@@ -53,6 +72,15 @@ void validate_z_edges(const Arr<real_t>& edges)
 
 } // namespace
 
+/**
+ * @brief Construct an extruded polygonal finite-volume mesh.
+ * @param xy_nodes Base-topology XY node coordinates.
+ * @param xy_cell_nodes Counter-clockwise node loops for base cells.
+ * @param z_edges Strictly increasing axial edge coordinates.
+ * @param boundary_edges Named exterior edges in the base topology.
+ * @throws std::invalid_argument If geometry or topology is invalid.
+ * @throws std::overflow_error If entity counts exceed supported ID ranges.
+ */
 SemiStructuredXY_Z::SemiStructuredXY_Z(
     const Arr<Vec3>& xy_nodes,
     const Arr<Arr<unsigned>>& xy_cell_nodes,
@@ -104,6 +132,17 @@ SemiStructuredXY_Z::SemiStructuredXY_Z(
     Base::d_num_nodes = indexer.total_nodes();
 }
 
+/**
+ * @brief Triangulate a convex XY polygon and extrude it through Z.
+ * @param xy_boundary Convex counter-clockwise polygon vertices.
+ * @param z_edges Strictly increasing axial edge coordinates.
+ * @param target_edge_length Requested XY mesh spacing.
+ * @param side_batch_name Boundary name assigned to polygon sides.
+ * @return Constructed triangular-prism mesh.
+ * @throws std::invalid_argument If source geometry or spacing is invalid.
+ * @throws std::overflow_error If generated connectivity exceeds its ID type.
+ * @throws std::runtime_error If triangulation invariants cannot be satisfied.
+ */
 SemiStructuredXY_Z SemiStructuredXY_Z::from_frontal_delaunay(
     const Arr<Vec3>& xy_boundary,
     const Arr<real_t>& z_edges,
@@ -132,6 +171,11 @@ SemiStructuredXY_Z SemiStructuredXY_Z::from_frontal_delaunay(
         xy_mesh.nodes, cells, z_edges, boundary_edges);
 }
 
+/**
+ * @brief Compute base-cell and base-edge geometry from XY connectivity.
+ * @throws std::invalid_argument If a cell is not counter-clockwise and
+ *         non-degenerate or an edge has non-positive length.
+ */
 void SemiStructuredXY_Z::initialize_xy_geometry()
 {
     d_xy_cell_areas.resize(d_xy_cell_nodes.size());

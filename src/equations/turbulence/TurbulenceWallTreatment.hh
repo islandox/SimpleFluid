@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceWallTreatment.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Policy-based wall treatments for two-equation RANS closures.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -62,7 +68,10 @@ struct StandardHighReKEpsilonWallPolicy
     static constexpr std::string_view name = "standardHighReKEpsilon";
 };
 
-/** @brief Values staged for one configured wall face. */
+/**
+ * @brief Values staged for one configured wall face.
+ * @tparam Scalar Floating-point scalar type used by the evaluation.
+ */
 template <class Scalar> struct TurbulenceWallFaceEvaluation
 {
     BoundaryCondition turbulent_kinetic_energy{};
@@ -85,6 +94,8 @@ template <class Scalar> struct TurbulenceWallFaceEvaluation
  * an independent, copyable staging object so a caller can preserve accepted
  * wall data until all candidate turbulence fields have been validated.
  * Construction and evaluation are collective over the mesh communicator.
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
+ * @tparam Policy Wall-treatment policy tag.
  */
 template <TpetraTypePack Pack, class Policy> class TurbulenceWallTreatment
 {
@@ -189,6 +200,7 @@ public:
     scalar_type y_plus_lam() const noexcept { return static_cast<scalar_type>(d_y_plus_lam); }
 
 private:
+    /** @brief Rank-local batch identifier paired with its configured name. */
     struct LocalWallBatch
     {
         int id{};

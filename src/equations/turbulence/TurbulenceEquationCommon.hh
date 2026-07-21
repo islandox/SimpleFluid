@@ -1,7 +1,13 @@
 /**
  * @file TurbulenceEquationCommon.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Shared value types and validation for two-equation turbulence
  * closures.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -122,6 +128,12 @@ struct MenterBlendedCoefficients
 namespace turbulence_detail
 {
 
+/**
+ * @brief Require a finite scalar value.
+ * @param value Value to validate.
+ * @param name Quantity name used in diagnostics.
+ * @throws std::invalid_argument If @p value is not finite.
+ */
 inline void require_finite(real_t value, std::string_view name)
 {
     if (!std::isfinite(value))
@@ -130,6 +142,12 @@ inline void require_finite(real_t value, std::string_view name)
     }
 }
 
+/**
+ * @brief Require a finite, non-negative scalar value.
+ * @param value Value to validate.
+ * @param name Quantity name used in diagnostics.
+ * @throws std::invalid_argument If @p value is negative or not finite.
+ */
 inline void require_non_negative(real_t value, std::string_view name)
 {
     require_finite(value, name);
@@ -139,6 +157,12 @@ inline void require_non_negative(real_t value, std::string_view name)
     }
 }
 
+/**
+ * @brief Require a finite, strictly positive scalar value.
+ * @param value Value to validate.
+ * @param name Quantity name used in diagnostics.
+ * @throws std::invalid_argument If @p value is non-positive or not finite.
+ */
 inline void require_positive(real_t value, std::string_view name)
 {
     require_finite(value, name);
@@ -148,18 +172,33 @@ inline void require_positive(real_t value, std::string_view name)
     }
 }
 
+/**
+ * @brief Validate a k-epsilon closure state.
+ * @param state State whose turbulent kinetic energy and dissipation are checked.
+ * @throws std::invalid_argument If either state variable is non-positive or not finite.
+ */
 inline void validate(const KEpsilonState& state)
 {
     require_positive(state.k, "Turbulent kinetic energy k");
     require_positive(state.epsilon, "Dissipation rate epsilon");
 }
 
+/**
+ * @brief Validate a k-omega closure state.
+ * @param state State whose turbulent kinetic energy and specific dissipation are checked.
+ * @throws std::invalid_argument If either state variable is non-positive or not finite.
+ */
 inline void validate(const KOmegaState& state)
 {
     require_positive(state.k, "Turbulent kinetic energy k");
     require_positive(state.omega, "Specific dissipation rate omega");
 }
 
+/**
+ * @brief Validate invariants used by the realizable k-epsilon closure.
+ * @param invariants Local velocity-gradient and viscosity invariants.
+ * @throws std::invalid_argument If an invariant is outside its physical domain.
+ */
 inline void validate(const RealizableKEpsilonInvariants& invariants)
 {
     require_non_negative(invariants.strain_rate_magnitude, "Strain-rate magnitude");
@@ -169,6 +208,11 @@ inline void validate(const RealizableKEpsilonInvariants& invariants)
     require_non_negative(invariants.kinematic_viscosity, "Molecular kinematic viscosity");
 }
 
+/**
+ * @brief Validate invariants used by the Menter k-omega closures.
+ * @param invariants Local viscosity, wall-distance, gradient, and vorticity data.
+ * @throws std::invalid_argument If an invariant is outside its physical domain.
+ */
 inline void validate(const MenterKOmegaInvariants& invariants)
 {
     require_non_negative(invariants.kinematic_viscosity, "Molecular kinematic viscosity");
@@ -177,17 +221,35 @@ inline void validate(const MenterKOmegaInvariants& invariants)
     require_non_negative(invariants.vorticity_magnitude, "Vorticity magnitude");
 }
 
+/**
+ * @brief Validate the subset of Menter invariants needed at a wall.
+ * @param invariants Local molecular viscosity and wall-distance data.
+ * @throws std::invalid_argument If viscosity is negative or wall distance is non-positive.
+ */
 inline void validate_menter_wall_inputs(const MenterKOmegaInvariants& invariants)
 {
     require_non_negative(invariants.kinematic_viscosity, "Molecular kinematic viscosity");
     require_positive(invariants.wall_distance, "Wall distance");
 }
 
+/**
+ * @brief Validate turbulent kinetic-energy production.
+ * @param production Production rate to validate.
+ * @throws std::invalid_argument If @p production is negative or not finite.
+ */
 inline void validate_production(real_t production)
 {
     require_non_negative(production, "Turbulent kinetic-energy production");
 }
 
+/**
+ * @brief Blend inner and outer Menter coefficients.
+ * @param inner Inner-region coefficient.
+ * @param outer Outer-region coefficient.
+ * @param f1 Inner-region blending factor in the closed interval [0, 1].
+ * @return Linearly blended coefficient.
+ * @throws std::invalid_argument If @p f1 is outside [0, 1] or not finite.
+ */
 inline real_t blend(real_t inner, real_t outer, real_t f1)
 {
     require_finite(f1, "Menter blending factor");
@@ -198,16 +260,38 @@ inline real_t blend(real_t inner, real_t outer, real_t f1)
     return f1 * inner + (1.0 - f1) * outer;
 }
 
+/**
+ * @brief Validate a Menter inner-region blending factor.
+ * @param f1 Blending factor to validate.
+ * @throws std::invalid_argument If @p f1 is outside [0, 1] or not finite.
+ */
 inline void validate_blending_factor(real_t f1)
 {
     (void)blend(0.0, 0.0, f1);
 }
 
+/**
+ * @brief Compute the Menter gamma coefficient from model constants.
+ * @param beta Destruction coefficient.
+ * @param beta_star Turbulent kinetic-energy destruction coefficient.
+ * @param sigma_omega Specific-dissipation diffusion coefficient.
+ * @param kappa Von Karman constant.
+ * @return The derived gamma coefficient.
+ */
 inline real_t menter_gamma(real_t beta, real_t beta_star, real_t sigma_omega, real_t kappa)
 {
     return beta / beta_star - sigma_omega * kappa * kappa / std::sqrt(beta_star);
 }
 
+/**
+ * @brief Compute the safeguarded Menter cross-diffusion coefficient.
+ * @param state Local k-omega state.
+ * @param invariants Local gradient invariants.
+ * @param sigma_omega_2 Outer-region omega diffusion coefficient.
+ * @param floor Positive lower bound for the coefficient.
+ * @return Cross-diffusion coefficient limited from below by @p floor.
+ * @throws std::invalid_argument If any input is outside its required domain.
+ */
 inline real_t menter_cross_diffusion_coefficient(const KOmegaState& state,
                                                  const MenterKOmegaInvariants& invariants,
                                                  real_t sigma_omega_2, real_t floor)
@@ -219,6 +303,16 @@ inline real_t menter_cross_diffusion_coefficient(const KOmegaState& state,
     return std::max(2.0 * sigma_omega_2 * invariants.grad_k_dot_grad_omega / state.omega, floor);
 }
 
+/**
+ * @brief Evaluate Menter's first blending function.
+ * @param state Local k-omega state.
+ * @param invariants Local viscosity, wall-distance, and gradient invariants.
+ * @param beta_star Turbulent kinetic-energy destruction coefficient.
+ * @param sigma_omega_2 Outer-region omega diffusion coefficient.
+ * @param cross_diffusion_floor Positive cross-diffusion safeguard.
+ * @return First blending function in the interval [0, 1].
+ * @throws std::invalid_argument If any input is outside its required domain.
+ */
 inline real_t menter_blending_function_1(const KOmegaState& state,
                                          const MenterKOmegaInvariants& invariants, real_t beta_star,
                                          real_t sigma_omega_2, real_t cross_diffusion_floor)
@@ -239,6 +333,14 @@ inline real_t menter_blending_function_1(const KOmegaState& state,
     return std::tanh(argument_squared * argument_squared);
 }
 
+/**
+ * @brief Evaluate Menter's second blending function.
+ * @param state Local k-omega state.
+ * @param invariants Local viscosity and wall-distance invariants.
+ * @param beta_star Turbulent kinetic-energy destruction coefficient.
+ * @return Second blending function in the interval [0, 1].
+ * @throws std::invalid_argument If any input is outside its required domain.
+ */
 inline real_t menter_blending_function_2(const KOmegaState& state,
                                          const MenterKOmegaInvariants& invariants, real_t beta_star)
 {
@@ -252,6 +354,15 @@ inline real_t menter_blending_function_2(const KOmegaState& state,
     return std::tanh(argument * argument);
 }
 
+/**
+ * @brief Evaluate the Menter cross-diffusion source contribution.
+ * @param state Local k-omega state.
+ * @param invariants Local gradient invariants.
+ * @param sigma_omega_2 Outer-region omega diffusion coefficient.
+ * @param f1 First blending function in the interval [0, 1].
+ * @return Cross-diffusion source for the omega equation.
+ * @throws std::invalid_argument If any input is outside its required domain.
+ */
 inline real_t menter_cross_diffusion_source(const KOmegaState& state,
                                             const MenterKOmegaInvariants& invariants,
                                             real_t sigma_omega_2, real_t f1)

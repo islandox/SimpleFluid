@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iterator>
 
+/** @brief Verifies CSV escaping preserves plain text and quotes special content. */
 TEST(BenchmarkSupportTest, EscapesCsvText)
 {
     EXPECT_EQ(SimpleFluid::Benchmark::csv_escape("plain"), "plain");
@@ -54,6 +55,7 @@ TEST(BenchmarkSupportTest, WritesAndAppendsCompatibleCsv)
     std::filesystem::remove(path);
 }
 
+/** @brief Verify an existing CSV with an incompatible schema is rejected. */
 TEST(BenchmarkSupportTest, RejectsIncompatibleCsvHeader)
 {
     const auto path =
@@ -70,6 +72,7 @@ TEST(BenchmarkSupportTest, RejectsIncompatibleCsvHeader)
     std::filesystem::remove(path);
 }
 
+/** @brief Verifies process memory sampling reports resident and peak usage. */
 TEST(BenchmarkSupportTest, SamplesProcessMemory)
 {
     const auto memory =

@@ -1,6 +1,12 @@
 /**
  * @file testTypedefs.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for common SimpleFluid type aliases.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -26,6 +32,7 @@ static_assert(std::is_same_v<SimpleFluid::ArrString, std::vector<std::string>>);
 static_assert(std::is_same_v<SimpleFluid::ArrBool, std::vector<bool>>);
 static_assert(std::is_same_v<SimpleFluid::Vec3DReal, std::array<double, 3>>);
 
+/** @brief Verifies container and pointer aliases preserve their element types. */
 TEST(TypedefsTest, TemplateAliasesPreserveElementTypes)
 {
     EXPECT_TRUE((std::is_same_v<SimpleFluid::Arr<float>, std::vector<float>>));
@@ -35,6 +42,7 @@ TEST(TypedefsTest, TemplateAliasesPreserveElementTypes)
     EXPECT_TRUE((std::is_same_v<SimpleFluid::WP<int>, std::weak_ptr<int>>));
 }
 
+/** @brief Locks the dimension-enum values to X/Y/Z array ordering. */
 TEST(TypedefsTest, DimensionValuesMatchCoordinateOrder)
 {
     EXPECT_EQ(SimpleFluid::Dimension::X, 0);

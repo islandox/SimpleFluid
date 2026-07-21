@@ -47,42 +47,69 @@ static inline Comm comm = MPI_COMM_WORLD;
 
 // -- MPI datatype traits --------------------------------------------------
 
+/**
+ * @brief Map a supported C++ value type to its MPI datatype.
+ * @tparam T C++ value type.
+ * @return Corresponding predefined MPI datatype.
+ */
 template<typename T>
 MPI_Datatype type_trait();
 
 // char / byte types
 // Note: on most platforms std::int8_t ≡ signed char and std::uint8_t ≡ unsigned char,
 // so we do NOT provide separate specializations for signed char / unsigned char.
+/** @brief Map char to MPI_CHAR. @return MPI_CHAR. */
 template<> inline MPI_Datatype type_trait<char>()               { return MPI_CHAR; }
+/** @brief Map an 8-bit signed integer to MPI_INT8_T. @return MPI_INT8_T. */
 template<> inline MPI_Datatype type_trait<std::int8_t>()        { return MPI_INT8_T; }
+/** @brief Map a 16-bit signed integer to MPI_INT16_T. @return MPI_INT16_T. */
 template<> inline MPI_Datatype type_trait<std::int16_t>()       { return MPI_INT16_T; }
+/** @brief Map a 32-bit signed integer to MPI_INT32_T. @return MPI_INT32_T. */
 template<> inline MPI_Datatype type_trait<std::int32_t>()       { return MPI_INT32_T; }
+/** @brief Map a 64-bit signed integer to MPI_INT64_T. @return MPI_INT64_T. */
 template<> inline MPI_Datatype type_trait<std::int64_t>()       { return MPI_INT64_T; }
+/** @brief Map an 8-bit unsigned integer to MPI_UINT8_T. @return MPI_UINT8_T. */
 template<> inline MPI_Datatype type_trait<std::uint8_t>()       { return MPI_UINT8_T; }
+/** @brief Map a 16-bit unsigned integer to MPI_UINT16_T. @return MPI_UINT16_T. */
 template<> inline MPI_Datatype type_trait<std::uint16_t>()      { return MPI_UINT16_T; }
+/** @brief Map a 32-bit unsigned integer to MPI_UINT32_T. @return MPI_UINT32_T. */
 template<> inline MPI_Datatype type_trait<std::uint32_t>()      { return MPI_UINT32_T; }
+/** @brief Map a 64-bit unsigned integer to MPI_UINT64_T. @return MPI_UINT64_T. */
 template<> inline MPI_Datatype type_trait<std::uint64_t>()      { return MPI_UINT64_T; }
 
 // explicit 64‑bit signed (long long is distinct from int64_t ≡ long on Linux)
 #ifdef __linux__
+/** @brief Map Linux long long to MPI_INT64_T. @return MPI_INT64_T. */
 template<> inline MPI_Datatype type_trait<long long>()          { return MPI_INT64_T; }
+/** @brief Map Linux unsigned long long to MPI_UINT64_T. @return MPI_UINT64_T. */
 template<> inline MPI_Datatype type_trait<unsigned long long>() { return MPI_UINT64_T; }
 static_assert(sizeof(long long) == 8 && sizeof(unsigned long long) == 8, "global_index_t must be 64-bit");
 #endif
 
 // floating point
+/** @brief Map float to MPI_FLOAT. @return MPI_FLOAT. */
 template<> inline MPI_Datatype type_trait<float>()              { return MPI_FLOAT; }
+/** @brief Map double to MPI_DOUBLE. @return MPI_DOUBLE. */
 template<> inline MPI_Datatype type_trait<double>()             { return MPI_DOUBLE; }
+/** @brief Map long double to MPI_LONG_DOUBLE. @return MPI_LONG_DOUBLE. */
 template<> inline MPI_Datatype type_trait<long double>()        { return MPI_LONG_DOUBLE; }
 
 // complex
+/** @brief Map complex float to MPI_CXX_FLOAT_COMPLEX. @return MPI_CXX_FLOAT_COMPLEX. */
 template<> inline MPI_Datatype type_trait<std::complex<float>>()  { return MPI_CXX_FLOAT_COMPLEX; }
+/** @brief Map complex double to MPI_CXX_DOUBLE_COMPLEX. @return MPI_CXX_DOUBLE_COMPLEX. */
 template<> inline MPI_Datatype type_trait<std::complex<double>>() { return MPI_CXX_DOUBLE_COMPLEX; }
 
 // boolean
+/** @brief Map bool to MPI_CXX_BOOL. @return MPI_CXX_BOOL. */
 template<> inline MPI_Datatype type_trait<bool>() { return MPI_CXX_BOOL; }
 
 // unsupported types will cause a compile-time error due to missing specialization
+/**
+ * @brief Reject a C++ type without an MPI datatype specialization.
+ * @tparam T Unsupported C++ value type.
+ * @return MPI_DATATYPE_NULL; this path is unreachable after the assertion.
+ */
 template<typename T>
 MPI_Datatype type_trait() {
     static_assert(utils::TMP::always_false_v<T>, "MPI datatype not defined for this type:");
@@ -142,11 +169,30 @@ inline ErrorCode comm_free(Comm& comm_to_free) { return MPI_Comm_free(&comm_to_f
 
 // -- point-to-point (blocking) --------------------------------------------
 
+/**
+ * @brief Send a typed buffer on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Buffer to send.
+ * @param count Number of elements.
+ * @param dest Destination rank.
+ * @param tag Message tag.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode send(const T* data, int count, int dest, int tag) {
     return MPI_Send(data, count, type_trait<T>(), dest, tag, comm);
 }
 
+/**
+ * @brief Receive a typed buffer on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Destination buffer.
+ * @param count Maximum number of elements.
+ * @param source Source rank.
+ * @param tag Message tag.
+ * @param status Receives MPI status information.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode recv(T* data, int count, int source, int tag, Status& status) {
     return MPI_Recv(data, count, type_trait<T>(), source, tag, comm, &status);
@@ -154,11 +200,31 @@ inline ErrorCode recv(T* data, int count, int source, int tag, Status& status) {
 
 // -- point-to-point (non-blocking) ----------------------------------------
 
+/**
+ * @brief Start a nonblocking typed send on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Buffer to send.
+ * @param count Number of elements.
+ * @param dest Destination rank.
+ * @param tag Message tag.
+ * @param request Receives the pending MPI request.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode isend(const T* data, int count, int dest, int tag, Request& request) {
     return MPI_Isend(data, count, type_trait<T>(), dest, tag, comm, &request);
 }
 
+/**
+ * @brief Start a nonblocking typed receive on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Destination buffer.
+ * @param count Maximum number of elements.
+ * @param source Source rank.
+ * @param tag Message tag.
+ * @param request Receives the pending MPI request.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode irecv(T* data, int count, int source, int tag, Request& request) {
     return MPI_Irecv(data, count, type_trait<T>(), source, tag, comm, &request);
@@ -259,34 +325,76 @@ inline ErrorCode allreduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op) {
     return MPI_Allreduce(sendbuf, recvbuf, count, type_trait<T>(), op, comm);
 }
 
-/// Global sum reduction wrappers.
+/**
+ * @brief Sum a typed buffer across the active communicator.
+ * @tparam T Supported element type.
+ * @param sendbuf Local values.
+ * @param recvbuf Receives element-wise global sums.
+ * @param count Number of elements.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode global_sum(const T* sendbuf, T* recvbuf, int count) {
     return allreduce(sendbuf, recvbuf, count, MPI_SUM);
 }
 
+/**
+ * @brief Sum one value across the active communicator.
+ * @tparam T Supported value type.
+ * @param value Local value.
+ * @param result Receives the global sum.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode global_sum(const T& value, T& result) {
     return global_sum(&value, &result, 1);
 }
 
-/// Global max reduction wrappers.
+/**
+ * @brief Compute element-wise maxima across the active communicator.
+ * @tparam T Supported element type.
+ * @param sendbuf Local values.
+ * @param recvbuf Receives element-wise global maxima.
+ * @param count Number of elements.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode global_max(const T* sendbuf, T* recvbuf, int count) {
     return allreduce(sendbuf, recvbuf, count, MPI_MAX);
 }
 
+/**
+ * @brief Compute the maximum of one value across the active communicator.
+ * @tparam T Supported value type.
+ * @param value Local value.
+ * @param result Receives the global maximum.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode global_max(const T& value, T& result) {
     return global_max(&value, &result, 1);
 }
 
-/// Global min reduction wrappers.
+/**
+ * @brief Compute element-wise minima across the active communicator.
+ * @tparam T Supported element type.
+ * @param sendbuf Local values.
+ * @param recvbuf Receives element-wise global minima.
+ * @param count Number of elements.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode global_min(const T* sendbuf, T* recvbuf, int count) {
     return allreduce(sendbuf, recvbuf, count, MPI_MIN);
 }
 
+/**
+ * @brief Compute the minimum of one value across the active communicator.
+ * @tparam T Supported value type.
+ * @param value Local value.
+ * @param result Receives the global minimum.
+ * @return MPI error code.
+ */
 template<typename T>
 inline ErrorCode global_min(const T& value, T& result) {
     return global_min(&value, &result, 1);

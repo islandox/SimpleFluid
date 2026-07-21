@@ -56,6 +56,7 @@ public:
     void write(const std::string& filename) const;
 
 private:
+    /** @brief Type-erased cell-data array and its VTU metadata. */
     struct DataArray
     {
         std::string name;

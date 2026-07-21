@@ -38,6 +38,7 @@ TEST(TimeStepperOptionsTest, DefaultsArePhysicalSmokeValues)
     EXPECT_EQ(options.n_outer_correctors, 1);
 }
 
+/** @brief Verifies parsing of the pressure-velocity coupling switch. */
 TEST(TimeStepperOptionsTest, ParsesPressureVelocityCouplingSwitch)
 {
     EXPECT_EQ(SimpleFluid::pressure_velocity_coupling_from_string("SIMPLE"),
@@ -60,6 +61,7 @@ TEST(TimeStepperOptionsTest, ParsesPressureVelocityCouplingSwitch)
                  std::invalid_argument);
 }
 
+/** @brief Verifies construction of the gravity vector from configured components. */
 TEST(TimeStepperOptionsTest, GravityVectorReflectsComponents)
 {
     SimpleFluid::TimeStepperOptions options;

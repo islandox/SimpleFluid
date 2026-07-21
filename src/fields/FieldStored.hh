@@ -29,6 +29,11 @@ namespace SimpleFluid
 namespace detail
 {
 
+/**
+ * @brief Describes the scalar representation of a stored field value.
+ *
+ * @tparam Value Scalar value type stored in one Tpetra vector column.
+ */
 template<class Value>
 struct StoredFieldValueTraits
 {
@@ -37,6 +42,11 @@ struct StoredFieldValueTraits
     using scalar_type = Value;
 };
 
+/**
+ * @brief Maps a three-component vector value to MultiVector storage.
+ *
+ * @tparam Scalar Scalar type of each vector component.
+ */
 template<class Scalar>
 struct StoredFieldValueTraits<vec3<Scalar>>
 {

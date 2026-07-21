@@ -31,15 +31,32 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Forward declaration of a scalar field stored on mesh cells.
+ * @tparam Pack Tpetra type pack shared with the mesh.
+ */
 template<TpetraTypePack Pack>
 class CellField;
 
+/**
+ * @brief Forward declaration of a vector field stored on mesh cells.
+ * @tparam Pack Tpetra type pack shared with the mesh.
+ */
 template<TpetraTypePack Pack>
 class VectorCellField;
 
+/**
+ * @brief Forward declaration of a tensor field stored on mesh cells.
+ * @tparam Pack Tpetra type pack shared with the mesh.
+ */
 template<TpetraTypePack Pack>
 class TensorCellField;
 
+/**
+ * @brief Return the invalid sentinel for an integral identifier type.
+ * @tparam ID Signed or unsigned integral identifier type.
+ * @return Minus one for signed IDs, otherwise the maximum value.
+ */
 template <typename ID>
 constexpr ID invalid_id() noexcept
 {
@@ -180,6 +197,7 @@ public:
         ArrLO face_lids;
     };
 
+    /** @brief Device-resident mirrors of mesh connectivity and geometry. */
     struct DeviceViews;
 
     Mesh();
@@ -393,6 +411,10 @@ protected:
 
 /**
  * @brief Kokkos device-side views for mesh geometry and connectivity data.
+ */
+/**
+ * @brief Device-accessible storage backing a host-side Mesh.
+ * @tparam Pack Tpetra type pack that selects the Kokkos device type.
  */
 template<TpetraTypePack Pack>
 struct Mesh<Pack>::DeviceViews

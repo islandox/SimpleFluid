@@ -36,6 +36,10 @@ namespace SimpleFluid::FVM
 namespace detail
 {
 
+/**
+ * @brief Matrix prepared for fresh insertion or cached-graph reuse.
+ * @tparam Pack Tpetra type pack providing the matrix type.
+ */
 template<TpetraTypePack Pack>
 struct PreparedTransportMatrix
 {
@@ -43,6 +47,11 @@ struct PreparedTransportMatrix
     bool reused = false;
 };
 
+/**
+ * @brief Constrains a callable that supplies boundary-condition records.
+ * @tparam Provider Callable type.
+ * @tparam Condition Required result type.
+ */
 template<class Provider, class Condition>
 concept BoundaryConditionProviderFor =
     requires(Provider provider, int batch_id, size_t in_batch_id)
@@ -50,6 +59,11 @@ concept BoundaryConditionProviderFor =
     { provider(batch_id, in_batch_id) } -> std::convertible_to<Condition>;
 };
 
+/**
+ * @brief Constrains a callable that supplies boundary-face values.
+ * @tparam Provider Callable type.
+ * @tparam Value Required result type.
+ */
 template<class Provider, class Value>
 concept BoundaryValueProviderFor =
     requires(Provider provider, int batch_id, size_t in_batch_id)
@@ -57,6 +71,16 @@ concept BoundaryValueProviderFor =
     { provider(batch_id, in_batch_id) } -> std::convertible_to<Value>;
 };
 
+/**
+ * @brief Allocate a transport matrix or reset a compatible cached matrix.
+ * @tparam Pack Tpetra type pack providing the matrix type.
+ * @tparam MeshType Mesh interface type.
+ * @param mesh Mesh defining row, column, and domain maps.
+ * @param cached_matrix Optional fill-complete matrix to reuse.
+ * @param entries_per_row Initial graph allocation estimate.
+ * @return Prepared matrix and whether its existing graph is being reused.
+ * @throws std::invalid_argument if @p cached_matrix is incompatible.
+ */
 template<TpetraTypePack Pack, class MeshType>
 PreparedTransportMatrix<Pack> prepare_transport_matrix(
     const MeshType& mesh,
@@ -89,6 +113,15 @@ PreparedTransportMatrix<Pack> prepare_transport_matrix(
     return {cached_matrix, true};
 }
 
+/**
+ * @brief Insert a row on a fresh graph or sum values into a reused graph.
+ * @tparam Pack Tpetra type pack providing matrix scalar and ordinal types.
+ * @param prepared Matrix and graph-reuse state.
+ * @param row Local matrix row.
+ * @param columns Local column identifiers.
+ * @param values Coefficients corresponding to @p columns.
+ * @throws std::invalid_argument if a reused graph lacks an entry.
+ */
 template<TpetraTypePack Pack>
 void add_transport_values(
     const PreparedTransportMatrix<Pack>& prepared,

@@ -48,6 +48,7 @@ public:
     using Vec3 = typename Base::Vec3;
     using BoundaryFaceBatch = typename Base::BoundaryFaceBatch;
 
+    /** @brief Public aliases for axial and extruded-side face orientations. */
     enum FaceOrientation : std::uint8_t
     {
         Z_FACE = AXIAL,
@@ -58,6 +59,15 @@ public:
 
     static constexpr cell_id_t invalid_cell_id() noexcept { return {}; }
 
+    /**
+     * @brief Extrude a counter-clockwise polygonal XY mesh through Z layers.
+     * @param xy_nodes Base-topology node coordinates in the XY plane.
+     * @param xy_cell_nodes Counter-clockwise node loops for base cells.
+     * @param z_edges Strictly increasing axial edge coordinates.
+     * @param boundary_edges Named exterior edges in the base topology.
+     * @throws std::invalid_argument If geometry or connectivity is invalid.
+     * @throws std::overflow_error If entity counts exceed supported ID ranges.
+     */
     SemiStructuredXY_Z(
         const Arr<Vec3>& xy_nodes,
         const Arr<Arr<unsigned>>& xy_cell_nodes,
@@ -73,6 +83,9 @@ public:
      * @param target_edge_length Requested XY edge length.
      * @param side_batch_name Boundary batch assigned to the polygon sides.
      * @return Complete serial triangular-prism mesh.
+     * @throws std::invalid_argument If source geometry or spacing is invalid.
+     * @throws std::overflow_error If generated connectivity exceeds its ID type.
+     * @throws std::runtime_error If triangulation invariants cannot be satisfied.
      */
     static SemiStructuredXY_Z from_frontal_delaunay(
         const Arr<Vec3>& xy_boundary,

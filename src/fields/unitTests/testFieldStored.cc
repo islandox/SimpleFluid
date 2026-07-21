@@ -29,6 +29,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build a runtime mesh handle over a small Cartesian mesh. */
 SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_handle()
 {
     auto mesh = std::make_shared<Cartesian>(
@@ -39,6 +40,7 @@ SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_handle()
     return std::make_shared<SimpleFluid::MeshHandle<Pack>>(mesh);
 }
 
+/** @brief Build the equivalent statically typed partitioned Cartesian mesh. */
 SimpleFluid::SP<const PartitionedCartesian> make_partitioned_cartesian()
 {
     auto mesh = std::make_shared<Cartesian>(
@@ -54,6 +56,7 @@ SimpleFluid::SP<const PartitionedCartesian> make_partitioned_cartesian()
 
 } // namespace
 
+/** @brief Verifies scalar and vector descriptors use typed cell storage. */
 TEST(FieldStoredTest, StoresScalarAndVectorCellValues)
 {
     auto mesh = make_handle();
@@ -77,6 +80,7 @@ TEST(FieldStoredTest, StoresScalarAndVectorCellValues)
     EXPECT_EQ(scalar.num_owned_entries(), mesh->num_owned_cells());
 }
 
+/** @brief Exercises face and boundary-face location-specific map selection. */
 TEST(FieldStoredTest, SupportsFaceAndBoundaryFaceLocations)
 {
     auto mesh = make_handle();
@@ -98,6 +102,7 @@ TEST(FieldStoredTest, SupportsFaceAndBoundaryFaceLocations)
     EXPECT_TRUE(boundary.is_owned(boundary_face));
 }
 
+/** @brief Confirms runtime STK-backed fields preserve mesh global IDs. */
 TEST(FieldStoredTest, UsesSTKStorageGlobalIds)
 {
     auto legacy = SimpleFluid::test::build_mesh<Pack>(
@@ -122,6 +127,7 @@ TEST(FieldStoredTest, UsesSTKStorageGlobalIds)
               mesh->face_global_id(0));
 }
 
+/** @brief Confirms storage also accepts a statically typed partitioned mesh. */
 TEST(FieldStoredTest, AcceptsPartitionedCRTPMesh)
 {
     auto mesh = make_partitioned_cartesian();
@@ -147,6 +153,7 @@ TEST(FieldStoredTest, AcceptsPartitionedCRTPMesh)
     EXPECT_TRUE(mesh->is_owned_node(0));
 }
 
+/** @brief Locks down Problem registry name uniqueness and checked type access. */
 TEST(FieldStoredTest, ProblemRejectsDuplicateNamesAndWrongTypes)
 {
     auto mesh = make_handle();

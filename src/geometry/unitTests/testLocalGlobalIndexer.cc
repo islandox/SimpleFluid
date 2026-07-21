@@ -43,6 +43,10 @@ using OrthogonalBlockIndexTypes =
 using OrthogonalBlockIndexer =
     SimpleFluid::Meshes::LocalGlobalIndexer<OrthogonalBlockIndexTypes>;
 
+/**
+ * @brief Strongly typed integer ID used to test distinct ID domains.
+ * @tparam Tag Empty type distinguishing an entity-ID domain.
+ */
 template<class Tag>
 struct StrongID
 {
@@ -51,11 +55,17 @@ struct StrongID
     constexpr auto operator<=>(const StrongID&) const = default;
 };
 
+/** @brief Type tag for local cell identifiers. */
 struct LocalCellTag;
+/** @brief Type tag for local face identifiers. */
 struct LocalFaceTag;
+/** @brief Type tag for local node identifiers. */
 struct LocalNodeTag;
+/** @brief Type tag for global cell identifiers. */
 struct GlobalCellTag;
+/** @brief Type tag for global face identifiers. */
 struct GlobalFaceTag;
+/** @brief Type tag for global node identifiers. */
 struct GlobalNodeTag;
 
 using LocalCellID = StrongID<LocalCellTag>;
@@ -94,6 +104,10 @@ static_assert(std::is_same_v<
 
 } // namespace
 
+/**
+ * @brief Verifies owned and overlap cell, face, and node identifiers map in
+ * both local-to-global and global-to-local directions.
+ */
 TEST(LocalGlobalIndexerTest, MapsOwnedAndOverlapEntitiesBidirectionally)
 {
     const Indexer indexer(
@@ -146,6 +160,7 @@ TEST(LocalGlobalIndexerTest, MapsOwnedAndOverlapEntitiesBidirectionally)
     EXPECT_TRUE(indexer.is_owned_node(3));
 }
 
+/** @brief Verifies invalid and missing identifiers report the documented failures. */
 TEST(LocalGlobalIndexerTest, ReportsMissingAndInvalidIdentifiers)
 {
     const Indexer indexer(CellVec{1}, CellVec{2}, FaceVec{3}, FaceVec{}, NodeVec{4});
@@ -169,6 +184,7 @@ TEST(LocalGlobalIndexerTest, ReportsMissingAndInvalidIdentifiers)
     EXPECT_THROW(indexer.local_to_global_node(1), std::out_of_range);
 }
 
+/** @brief Verifies duplicate global identifiers are rejected for every entity map. */
 TEST(LocalGlobalIndexerTest, RejectsDuplicateGlobalIdentifiers)
 {
     EXPECT_THROW(
@@ -182,6 +198,10 @@ TEST(LocalGlobalIndexerTest, RejectsDuplicateGlobalIdentifiers)
         std::invalid_argument);
 }
 
+/**
+ * @brief Verifies indexers accept mesh packs whose cell, face, and node ID
+ * types are distinct strong types.
+ */
 TEST(LocalGlobalIndexerTest, AcceptsDistinctCRTPMeshIdentifierTypes)
 {
     const OrthogonalIndexer::CellID owned_cell{1, 2, 3};
@@ -229,6 +249,10 @@ TEST(LocalGlobalIndexerTest, AcceptsDistinctCRTPMeshIdentifierTypes)
     EXPECT_FALSE(indexer.is_owned_node(1));
 }
 
+/**
+ * @brief Verifies explicit strong identifiers and ordinal positions remain
+ * distinct throughout bidirectional mappings.
+ */
 TEST(LocalGlobalIndexerTest, MapsDistinctLocalAndGlobalIdsAndOrdinals)
 {
     const DistinctIndexer indexer(
@@ -264,6 +288,7 @@ TEST(LocalGlobalIndexerTest, MapsDistinctLocalAndGlobalIdsAndOrdinals)
     EXPECT_EQ(indexer.cell_ordinal({70}), 1);
 }
 
+/** @brief Verifies ambiguous explicit local/global mappings are rejected. */
 TEST(LocalGlobalIndexerTest, RejectsAmbiguousExplicitMappings)
 {
     EXPECT_THROW(
@@ -282,6 +307,10 @@ TEST(LocalGlobalIndexerTest, RejectsAmbiguousExplicitMappings)
         std::invalid_argument);
 }
 
+/**
+ * @brief Verifies orthogonal global indexing divides every coordinate
+ * dimension into balanced ownership blocks.
+ */
 TEST(OrthogonalLocalGlobalIndexerTest, DividesAllDimensionsIntoBalancedBlocks)
 {
     const OrthogonalIndexer global_indexer(10, 7, 5);
@@ -364,6 +393,10 @@ TEST(OrthogonalLocalGlobalIndexerTest, DividesAllDimensionsIntoBalancedBlocks)
         local_node_ordinal);
 }
 
+/**
+ * @brief Verifies local/global mappings wrap the upper partition seam in a
+ * periodic coordinate direction.
+ */
 TEST(OrthogonalLocalGlobalIndexerTest, MapsPeriodicUpperBlockSeam)
 {
     const OrthogonalIndexer global_indexer(6, 4, 2, true, false, false);
@@ -405,6 +438,7 @@ TEST(OrthogonalLocalGlobalIndexerTest, MapsPeriodicUpperBlockSeam)
               6U);
 }
 
+/** @brief Verifies malformed orthogonal block descriptions are rejected. */
 TEST(OrthogonalLocalGlobalIndexerTest, RejectsInvalidBlockDescriptions)
 {
     const OrthogonalIndexer global_indexer(4, 3, 2);

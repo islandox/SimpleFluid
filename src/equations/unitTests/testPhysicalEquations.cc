@@ -31,6 +31,10 @@
 namespace SimpleFluid::detail
 {
 
+/**
+ * @brief Test-only access to linear-solver preconditioner setup counts.
+ * @tparam Pack Tpetra type pack used by the solver.
+ */
 template<TpetraTypePack Pack>
 struct BelosLinearSolverTestAccess
 {
@@ -41,6 +45,10 @@ struct BelosLinearSolverTestAccess
     }
 };
 
+/**
+ * @brief Test-only access to cached pressure-projection state.
+ * @tparam Pack Tpetra type pack used by the equation.
+ */
 template<TpetraTypePack Pack>
 struct PressureProjectionEquationTestAccess
 {
@@ -160,6 +168,7 @@ bool cell_has_exterior_face(const MeshType& mesh,
 
 } // namespace
 
+/** @brief Verifies enforcement of a Dirichlet boundary in temperature diffusion. */
 TEST(PhysicalEquationsTest, TemperatureDiffusionAppliesDirichletBoundary)
 {
     auto mesh = make_single_hex_mesh();
@@ -176,6 +185,7 @@ TEST(PhysicalEquationsTest, TemperatureDiffusionAppliesDirichletBoundary)
     EXPECT_NEAR(temperature.value(0), 0.2, 1.0e-12);
 }
 
+/** @brief Verifies that an explicit temperature step includes its source term. */
 TEST(PhysicalEquationsTest, TemperatureExplicitStepAddsSourceTerm)
 {
     auto mesh = make_single_hex_mesh();
@@ -335,6 +345,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
     }
 }
 
+/** @brief Verifies that a semi-implicit temperature step includes its source term. */
 TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
 {
     auto mesh = make_single_hex_mesh();
@@ -357,6 +368,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
     EXPECT_NEAR(temperature.value(0), 2.3, 1.0e-12);
 }
 
+/** @brief Verifies that a rejected semi-implicit solve preserves aliased accepted state. */
 TEST(PhysicalEquationsTest,
      TemperatureSemiImplicitRejectionPreservesAliasedAcceptedField)
 {
@@ -410,6 +422,7 @@ TEST(PhysicalEquationsTest,
     }
 }
 
+/** @brief Verifies that a rejected physical-temperature solve preserves accepted state. */
 TEST(PhysicalEquationsTest,
      TemperaturePhysicalRejectionPreservesAliasedAcceptedField)
 {
@@ -476,6 +489,7 @@ TEST(PhysicalEquationsTest,
     }
 }
 
+/** @brief Verifies conversion of a Neumann gradient into prescribed wall heat flux. */
 TEST(PhysicalEquationsTest,
      PhysicalTemperatureNeumannGradientAddsPrescribedWallHeatFlux)
 {
@@ -541,6 +555,7 @@ TEST(PhysicalEquationsTest,
     EXPECT_NEAR(temperature.value(0), expected_temperature, 1.0e-12);
 }
 
+/** @brief Verifies use and validation of a spatial conductivity override. */
 TEST(PhysicalEquationsTest,
      PhysicalTemperatureUsesValidatedConductivityOverride)
 {
@@ -623,6 +638,7 @@ TEST(PhysicalEquationsTest,
         std::invalid_argument);
 }
 
+/** @brief Verifies pressure projection against an identity linear system. */
 TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)
 {
     auto mesh = make_single_hex_mesh();
@@ -639,6 +655,7 @@ TEST(PhysicalEquationsTest, PressureProjectionSolvesIdentitySystem)
     EXPECT_NEAR(pressure.value(0), 0.0, 1.0e-12);
 }
 
+/** @brief Verifies that pressure projection selects MueLu by default. */
 TEST(PhysicalEquationsTest, PressureProjectionUsesMueLuByDefault)
 {
     auto mesh = make_2x2x2_mesh();
@@ -649,6 +666,7 @@ TEST(PhysicalEquationsTest, PressureProjectionUsesMueLuByDefault)
         SimpleFluid::LinearPreconditioner::MueLu);
 }
 
+/** @brief Verifies MueLu reuse until pressure-projection matrix reconstruction. */
 TEST(PhysicalEquationsTest,
      PressureProjectionReusesMueLuUntilMatrixIsRebuilt)
 {
@@ -717,6 +735,7 @@ TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
     EXPECT_NEAR(pressure.value(1), reference_density, 1.0e-8);
 }
 
+/** @brief Verifies that a pressure Dirichlet boundary replaces the gauge constraint. */
 TEST(PhysicalEquationsTest,
      PressureProjectionDirichletBoundaryReplacesGaugeConstraint)
 {
@@ -943,6 +962,7 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
     }
 }
 
+/** @brief Verifies physical-equation advances on skewed triangular-prism cells. */
 TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -1201,6 +1221,7 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
     }
 }
 
+/** @brief Verifies uniform momentum at a homogeneous-Neumann outlet. */
 TEST(PhysicalEquationsTest,
      PhysicalMomentumPreservesUniformVelocityAtHomogeneousNeumannOutlet)
 {
@@ -1262,6 +1283,7 @@ TEST(PhysicalEquationsTest,
     }
 }
 
+/** @brief Verifies use and validation of a spatial dynamic-viscosity override. */
 TEST(PhysicalEquationsTest,
      PhysicalMomentumUsesValidatedDynamicViscosityOverride)
 {
@@ -1378,6 +1400,7 @@ TEST(PhysicalEquationsTest,
         std::invalid_argument);
 }
 
+/** @brief Verifies non-orthogonal momentum diffusion on a skewed mesh. */
 TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewedMesh)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();

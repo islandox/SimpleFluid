@@ -1,6 +1,12 @@
 /**
  * @file testSemiStructuredIndexer.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Unit tests for layered semi-structured mesh indexing.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -19,6 +25,10 @@ using NodeID = Indexer::NodeID;
 
 static_assert(SimpleFluid::MeshIndexer<Indexer>);
 
+/**
+ * @brief Verifies nonperiodic semi-structured entity counts and face-type
+ * offsets.
+ */
 TEST(SemiStructuredIndexerTest, ComputesNonPeriodicCountsAndOffsets)
 {
     const Indexer indexer(3, 5, 4, 2);
@@ -45,6 +55,10 @@ TEST(SemiStructuredIndexerTest, ComputesNonPeriodicCountsAndOffsets)
     EXPECT_EQ(indexer.total_nodes(), 12U);
 }
 
+/**
+ * @brief Verifies nonperiodic cell, face, and node IDs map bijectively to
+ * their local ordinals.
+ */
 TEST(SemiStructuredIndexerTest, MapsNonPeriodicIdentifiers)
 {
     const Indexer indexer(3, 5, 4, 2);
@@ -83,6 +97,10 @@ TEST(SemiStructuredIndexerTest, MapsNonPeriodicIdentifiers)
     }
 }
 
+/**
+ * @brief Verifies periodic axial indexing removes end boundaries and wraps
+ * face and node mappings across the seam.
+ */
 TEST(SemiStructuredIndexerTest, SupportsPeriodicAxialDirection)
 {
     const Indexer indexer(3, 5, 4, 2, true);

@@ -1,6 +1,12 @@
 /**
  * @file OrthoMeshPartitioner.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Coordinate-slab partitioning for orthogonal meshes.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/OrthoMeshPartitioner.hh"
@@ -11,6 +17,15 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Configure balanced slab partitioning for an orthogonal topology.
+ * @param topology Topology retained by reference for subsequent queries.
+ * @param coordinate Logical dimension along which to split the cells.
+ * @param num_partitions Number of non-empty slabs to create.
+ * @param ghost_layers Number of neighboring coordinate planes to overlap.
+ * @throws std::invalid_argument If the dimension or partition count is invalid,
+ *         or the topology has no cells.
+ */
 OrthoMeshPartitioner::OrthoMeshPartitioner(
     const Topology& topology,
     Dimension coordinate,
@@ -49,6 +64,12 @@ OrthoMeshPartitioner::OrthoMeshPartitioner(
     }
 }
 
+/**
+ * @brief Compute the half-open coordinate interval owned by a partition.
+ * @param partition Partition index.
+ * @return Balanced contiguous interval of cell coordinates.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 auto OrthoMeshPartitioner::owned_coordinate_range(
     size_t partition) const -> CoordinateRange
 {
@@ -67,6 +88,12 @@ auto OrthoMeshPartitioner::owned_coordinate_range(
         static_cast<Ordinal>(begin + size)};
 }
 
+/**
+ * @brief Locate the partition that owns a cell.
+ * @param cell_id Structured cell identifier.
+ * @return Owning partition index.
+ * @throws std::out_of_range If @p cell_id is invalid.
+ */
 size_t OrthoMeshPartitioner::owner_partition(CellID cell_id) const
 {
     check_cell_id(cell_id);
@@ -89,12 +116,25 @@ size_t OrthoMeshPartitioner::owner_partition(CellID cell_id) const
          + (coordinate - larger_partition_cells) / base_size;
 }
 
+/**
+ * @brief Locate the partition that owns a face through its owner cell.
+ * @param face_id Structured face identifier.
+ * @return Owning partition index.
+ * @throws std::out_of_range If @p face_id is invalid.
+ */
 size_t OrthoMeshPartitioner::owner_partition(FaceID face_id) const
 {
     check_face_id(face_id);
     return owner_partition(d_topology->owner_cell(face_id));
 }
 
+/**
+ * @brief Test whether a cell is owned by a partition.
+ * @param partition Partition index.
+ * @param cell_id Structured cell identifier.
+ * @return True when the partition owns the cell.
+ * @throws std::out_of_range If the partition or cell ID is invalid.
+ */
 bool OrthoMeshPartitioner::is_owned_cell(
     size_t partition,
     CellID cell_id) const
@@ -103,6 +143,13 @@ bool OrthoMeshPartitioner::is_owned_cell(
     return owner_partition(cell_id) == partition;
 }
 
+/**
+ * @brief Test whether a cell lies in a partition's ghost slab.
+ * @param partition Partition index.
+ * @param cell_id Structured cell identifier.
+ * @return True for a non-owned cell within the configured overlap depth.
+ * @throws std::out_of_range If the partition or cell ID is invalid.
+ */
 bool OrthoMeshPartitioner::is_ghost_cell(
     size_t partition,
     CellID cell_id) const
@@ -113,6 +160,13 @@ bool OrthoMeshPartitioner::is_ghost_cell(
         && is_ghost_coordinate(partition, cell_coordinate(cell_id));
 }
 
+/**
+ * @brief Test whether a cell is owned or ghosted by a partition.
+ * @param partition Partition index.
+ * @param cell_id Structured cell identifier.
+ * @return True when the cell is locally visible.
+ * @throws std::out_of_range If the partition or cell ID is invalid.
+ */
 bool OrthoMeshPartitioner::is_local_cell(
     size_t partition,
     CellID cell_id) const
@@ -121,6 +175,13 @@ bool OrthoMeshPartitioner::is_local_cell(
         || is_ghost_cell(partition, cell_id);
 }
 
+/**
+ * @brief Test whether a face's owner cell belongs to a partition.
+ * @param partition Partition index.
+ * @param face_id Structured face identifier.
+ * @return True when the face is owned by the partition.
+ * @throws std::out_of_range If the partition or face ID is invalid.
+ */
 bool OrthoMeshPartitioner::is_owned_face(
     size_t partition,
     FaceID face_id) const
@@ -129,6 +190,12 @@ bool OrthoMeshPartitioner::is_owned_face(
     return owner_partition(face_id) == partition;
 }
 
+/**
+ * @brief Count cells owned by one partition.
+ * @param partition Partition index.
+ * @return Number of owned cells.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 size_t OrthoMeshPartitioner::num_owned_cells(size_t partition) const
 {
     const auto range = owned_coordinate_range(partition);
@@ -144,6 +211,12 @@ size_t OrthoMeshPartitioner::num_owned_cells(size_t partition) const
     return range.size() * transverse_cells;
 }
 
+/**
+ * @brief Count ghost cells visible to one partition.
+ * @param partition Partition index.
+ * @return Number of ghost cells after periodic wrapping, if applicable.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 size_t OrthoMeshPartitioner::num_ghost_cells(size_t partition) const
 {
     check_partition(partition);
@@ -173,6 +246,12 @@ size_t OrthoMeshPartitioner::num_ghost_cells(size_t partition) const
     return ghost_coordinates * transverse_cells;
 }
 
+/**
+ * @brief Enumerate cells owned by one partition in mesh-local order.
+ * @param partition Partition index.
+ * @return Structured IDs of owned cells.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 std::vector<OrthoMeshPartitioner::CellID>
 OrthoMeshPartitioner::owned_cells(size_t partition) const
 {
@@ -194,6 +273,12 @@ OrthoMeshPartitioner::owned_cells(size_t partition) const
     return cells;
 }
 
+/**
+ * @brief Enumerate ghost cells visible to one partition in mesh-local order.
+ * @param partition Partition index.
+ * @return Structured IDs of ghost cells.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 std::vector<OrthoMeshPartitioner::CellID>
 OrthoMeshPartitioner::ghost_cells(size_t partition) const
 {
@@ -215,6 +300,11 @@ OrthoMeshPartitioner::ghost_cells(size_t partition) const
     return cells;
 }
 
+/**
+ * @brief Extract a cell's coordinate along the partition dimension.
+ * @param cell_id Structured cell identifier.
+ * @return I, J, or K coordinate selected at construction.
+ */
 auto OrthoMeshPartitioner::cell_coordinate(
     CellID cell_id) const noexcept -> Ordinal
 {
@@ -229,6 +319,13 @@ auto OrthoMeshPartitioner::cell_coordinate(
     return cell_id.k;
 }
 
+/**
+ * @brief Test whether a coordinate lies in a partition's overlap planes.
+ * @param partition Partition index.
+ * @param coordinate Cell coordinate along the partition dimension.
+ * @return True when the coordinate is ghosted but not owned.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 bool OrthoMeshPartitioner::is_ghost_coordinate(
     size_t partition,
     Ordinal coordinate) const
@@ -273,6 +370,11 @@ bool OrthoMeshPartitioner::is_ghost_coordinate(
     return false;
 }
 
+/**
+ * @brief Validate a partition index.
+ * @param partition Partition index to check.
+ * @throws std::out_of_range If @p partition is invalid.
+ */
 void OrthoMeshPartitioner::check_partition(size_t partition) const
 {
     if (partition >= d_num_partitions)
@@ -282,6 +384,11 @@ void OrthoMeshPartitioner::check_partition(size_t partition) const
     }
 }
 
+/**
+ * @brief Validate a structured cell identifier.
+ * @param cell_id Cell identifier to check.
+ * @throws std::out_of_range If any coordinate is outside the topology.
+ */
 void OrthoMeshPartitioner::check_cell_id(CellID cell_id) const
 {
     const auto& dimensions = indexer().num_cells_per_dim;
@@ -294,6 +401,11 @@ void OrthoMeshPartitioner::check_cell_id(CellID cell_id) const
     }
 }
 
+/**
+ * @brief Validate a structured face identifier.
+ * @param face_id Face identifier to check.
+ * @throws std::out_of_range If its orientation or coordinates are invalid.
+ */
 void OrthoMeshPartitioner::check_face_id(FaceID face_id) const
 {
     const auto orientation = static_cast<size_t>(face_id.orientation);

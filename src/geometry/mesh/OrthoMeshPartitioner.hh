@@ -1,6 +1,12 @@
 /**
  * @file OrthoMeshPartitioner.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Coordinate-slab partitioning for orthogonal three-dimensional meshes.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -32,6 +38,7 @@ public:
     using FaceID = Indexer::FaceID;
     using Dimension = Indexer::Dimension;
 
+    /** @brief Half-open owned-cell interval along the partition coordinate. */
     struct CoordinateRange
     {
         Ordinal begin = 0;

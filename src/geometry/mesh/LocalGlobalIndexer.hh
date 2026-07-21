@@ -71,6 +71,11 @@ public:
     using global_node_id_t = typename Pack::global_node_id_t;
     using ordinal_t = local_ordinal_type;
 
+    /**
+     * @brief Explicit local ID, global ID, and global ordinal association.
+     * @tparam LocalID Rank-local entity identifier type.
+     * @tparam GlobalID Global entity identifier type.
+     */
     template<class LocalID, class GlobalID>
     struct EntityMapping
     {
@@ -229,6 +234,11 @@ public:
     std::span<const node_id_t> overlap_node_global_ids() const noexcept;
 
 private:
+    /**
+     * @brief Bidirectional lookup storage for one entity kind.
+     * @tparam LocalID Rank-local entity identifier type.
+     * @tparam GlobalID Global entity identifier type.
+     */
     template<class LocalID, class GlobalID>
     struct EntityIndex
     {

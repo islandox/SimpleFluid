@@ -1,6 +1,12 @@
 /**
  * @file TurbulenceModel.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Runtime ownership and transport coupling for two-equation RANS models.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -102,6 +108,7 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
  * this coupling layer.
  * The isotropic Reynolds stress is supplied explicitly as
  * @f$-2/3\,\nabla k@f$, so the solver pressure remains mechanical pressure.
+ * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes> class TurbulenceModel
 {
@@ -193,6 +200,7 @@ public:
     const std::map<std::string, const field_type*>& output_fields() const noexcept;
 
 private:
+    /** @brief Lazily allocated closure, transport, and derived-field state. */
     struct State;
 
     State& require_state();

@@ -1,6 +1,12 @@
 /**
  * @file pitz_daily.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Transient standard-k-epsilon counterpart to OpenFOAM pitzDaily.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "equations/turbulence/TurbulenceModel.hh"
@@ -35,6 +41,15 @@ using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::STKMesh<Pack>;
 using Point = SimpleFluid::MeshUtils::Vec3;
 
+/**
+ * @brief Read a positive integer from an environment variable.
+ *
+ * @param name Environment-variable name.
+ * @param fallback Value used when the variable is unset.
+ * @return Parsed positive value or @p fallback.
+ * @throws std::invalid_argument if the configured value is invalid or non-positive.
+ * @throws std::out_of_range if the configured value exceeds the integer range.
+ */
 int positive_environment_integer(const char* name, int fallback)
 {
     const char* text = std::getenv(name);
@@ -51,6 +66,15 @@ int positive_environment_integer(const char* name, int fallback)
     return value;
 }
 
+/**
+ * @brief Read a finite positive floating-point value from the environment.
+ *
+ * @param name Environment-variable name.
+ * @param fallback Value used when the variable is unset.
+ * @return Parsed positive value or @p fallback.
+ * @throws std::invalid_argument if the configured value is invalid, non-finite, or non-positive.
+ * @throws std::out_of_range if the configured value exceeds the floating-point range.
+ */
 double positive_environment_real(const char* name, double fallback)
 {
     const char* text = std::getenv(name);
@@ -68,11 +92,26 @@ double positive_environment_real(const char* name, double fallback)
     return value;
 }
 
+/**
+ * @brief Scale a tutorial cell count while retaining at least one cell.
+ *
+ * @param tutorial_cells Cell count in the reference tutorial.
+ * @param divisor Requested coarsening divisor.
+ * @return Rounded-up scaled cell count.
+ */
 int scaled_cells(int tutorial_cells, int divisor)
 {
     return std::max(1, (tutorial_cells + divisor - 1) / divisor);
 }
 
+/**
+ * @brief Generate uniformly spaced coordinates over an interval.
+ *
+ * @param lower Lower interval endpoint.
+ * @param upper Upper interval endpoint.
+ * @param cells Number of cells.
+ * @return Coordinate vector containing @p cells plus one edges.
+ */
 std::vector<double> uniform_edges(double lower, double upper, int cells)
 {
     std::vector<double> edges(static_cast<size_t>(cells) + 1);
@@ -87,6 +126,7 @@ std::vector<double> uniform_edges(double lower, double upper, int cells)
     return edges;
 }
 
+/** @brief Quantized coordinates used to deduplicate STK mesh nodes. */
 struct NodeKey
 {
     std::int64_t x = 0;
@@ -96,6 +136,7 @@ struct NodeKey
     auto operator<=>(const NodeKey&) const = default;
 };
 
+/** @brief Assign stable STK identifiers to unique geometric nodes. */
 class NodeRegistry
 {
 public:
@@ -130,6 +171,7 @@ private:
     std::vector<std::pair<stk::mesh::EntityId, Point>> d_coordinates;
 };
 
+/** @brief Structured block geometry and boundary-label specification. */
 struct BlockSpec
 {
     std::vector<double> x_edges;
@@ -145,11 +187,26 @@ struct BlockSpec
     bool upper_wall = false;
 };
 
+/**
+ * @brief Linearly interpolate between two scalar endpoints.
+ *
+ * @param left Value at fraction zero.
+ * @param right Value at fraction one.
+ * @param fraction Interpolation fraction.
+ * @return Interpolated value.
+ */
 double interpolate(double left, double right, double fraction)
 {
     return left + fraction * (right - left);
 }
 
+/**
+ * @brief Build a coarsened multi-block STK mesh for the pitzDaily geometry.
+ *
+ * @param divisor Coarsening divisor applied to tutorial cell counts.
+ * @return Assembled mesh with inlet, outlet, wall, and spanwise boundaries.
+ * @throws std::runtime_error if node coordinates cannot be assigned.
+ */
 SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
 {
     auto mesh = std::make_shared<Mesh>();
@@ -302,6 +359,11 @@ SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
     return mesh;
 }
 
+/**
+ * @brief Construct velocity, pressure, and turbulence boundary conditions.
+ *
+ * @return Boundary conditions matching the OpenFOAM pitzDaily case.
+ */
 SimpleFluid::BoundaryConditionSet pitz_daily_boundary_conditions()
 {
     using Type = SimpleFluid::BoundaryConditionType;
@@ -338,6 +400,15 @@ SimpleFluid::BoundaryConditionSet pitz_daily_boundary_conditions()
     return conditions;
 }
 
+/**
+ * @brief Write rank-local flow and turbulence cell data to CSV.
+ *
+ * @param mesh Mesh providing owned cell centers.
+ * @param solver Solver providing velocity and pressure fields.
+ * @param turbulence Turbulence model providing k, epsilon, and eddy viscosity.
+ * @param rank MPI rank used in the output filename.
+ * @throws std::runtime_error if output cannot be opened or epsilon is unavailable.
+ */
 void write_cells(
     const Mesh& mesh,
     const SimpleFluid::BoussinesqSolver<Pack>& solver,
@@ -381,6 +452,13 @@ void write_cells(
 
 } // namespace
 
+/**
+ * @brief Run the configurable turbulent pitzDaily comparison case.
+ *
+ * @param argc Argument count passed to Tpetra.
+ * @param argv Argument vector passed to Tpetra.
+ * @return Process exit code, zero on normal completion.
+ */
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);

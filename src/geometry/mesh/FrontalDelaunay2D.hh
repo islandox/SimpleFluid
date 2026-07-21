@@ -1,6 +1,12 @@
 /**
  * @file FrontalDelaunay2D.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Frontal point placement and Delaunay triangulation in the XY plane.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -29,6 +35,7 @@ public:
     using Vec3 = MeshUtils::Vec3;
     using Triangle = std::array<unsigned, 3>;
 
+    /** @brief Oriented boundary segment and its physical batch name. */
     struct BoundaryEdge
     {
         unsigned node0{};
@@ -36,6 +43,7 @@ public:
         std::string batch_name = "side";
     };
 
+    /** @brief Nodes, triangles, and boundary segments produced by meshing. */
     struct Result
     {
         Arr<Vec3> nodes;
@@ -49,6 +57,14 @@ public:
      * Polygon edges are subdivided to respect @p target_edge_length before
      * the inward front is advanced.  Z coordinates in @p boundary are
      * ignored and generated nodes lie on z=0.
+     *
+     * @param boundary Convex counter-clockwise polygon vertices.
+     * @param target_edge_length Requested mesh spacing.
+     * @param boundary_name Batch name assigned to polygon boundary segments.
+     * @return Triangular mesh and boundary connectivity.
+     * @throws std::invalid_argument If the boundary, spacing, or name is invalid.
+     * @throws std::overflow_error If generated connectivity exceeds its ID type.
+     * @throws std::runtime_error If triangulation invariants cannot be satisfied.
      */
     static Result triangulate(
         const Arr<Vec3>& boundary,
@@ -61,6 +77,14 @@ public:
      * @p radial_edges must start at zero and increase strictly.  Its final
      * value is the disk radius.  Each nonzero radius becomes a point-placement
      * front, while the Delaunay step determines triangle connectivity.
+     *
+     * @param radial_edges Strictly increasing radii beginning at zero.
+     * @param target_edge_length Requested circumferential edge length.
+     * @param boundary_name Batch name assigned to the outer circle.
+     * @return Triangular disk mesh and boundary connectivity.
+     * @throws std::invalid_argument If the radii, spacing, or name is invalid.
+     * @throws std::overflow_error If generated connectivity exceeds its ID type.
+     * @throws std::runtime_error If triangulation invariants cannot be satisfied.
      */
     static Result triangulate_disk(
         const ArrReal& radial_edges,

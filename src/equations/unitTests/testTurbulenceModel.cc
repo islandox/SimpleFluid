@@ -1,6 +1,12 @@
 /**
  * @file testTurbulenceModel.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Direct runtime tests for two-equation turbulence model ownership.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -32,6 +38,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Runtime turbulence model and its expected secondary field name. */
 struct ModelCase
 {
     const char* name;
@@ -95,6 +102,7 @@ ModelOptions make_model_options(ModelType type)
     return options;
 }
 
+/** @brief Verifies null-mesh rejection before boundary-cache construction. */
 TEST(TurbulenceModelTest, RejectsNullMeshBeforeBuildingBoundaryCaches)
 {
     SimpleFluid::BoundaryConditionSet boundary_conditions;
@@ -102,6 +110,7 @@ TEST(TurbulenceModelTest, RejectsNullMeshBeforeBuildingBoundaryCaches)
                  std::invalid_argument);
 }
 
+/** @brief Verifies closure configuration, family fields, and clean model disabling. */
 TEST(TurbulenceModelTest, ConfiguresEveryClosureExposesFamilyFieldsAndDisablesCleanly)
 {
     auto mesh = make_single_cell_mesh();
@@ -164,6 +173,7 @@ TEST(TurbulenceModelTest, ConfiguresEveryClosureExposesFamilyFieldsAndDisablesCl
     EXPECT_FALSE(model.disable());
 }
 
+/** @brief Verifies positive eddy viscosity and effective properties for every closure. */
 TEST(TurbulenceModelTest, EveryClosureInitializesPositiveEddyViscosityAndEffectiveProperties)
 {
     auto mesh = make_single_cell_mesh();
@@ -197,6 +207,7 @@ TEST(TurbulenceModelTest, EveryClosureInitializesPositiveEddyViscosityAndEffecti
     }
 }
 
+/** @brief Verifies configuration rollback after effective-property overflow. */
 TEST(TurbulenceModelTest, ConfigureRejectsEffectivePropertyOverflowAndPreservesActiveModel)
 {
     auto mesh = make_single_cell_mesh();
@@ -235,6 +246,7 @@ TEST(TurbulenceModelTest, ConfigureRejectsEffectivePropertyOverflowAndPreservesA
     EXPECT_DOUBLE_EQ(model.effective_thermal_conductivity().value(0), initial_lambda_eff);
 }
 
+/** @brief Verifies rejection of unsafe active scalar boundary data. */
 TEST(TurbulenceModelTest, ConfigureRejectsUnsafeActiveScalarBoundaryData)
 {
     const auto expect_rejected =
@@ -269,6 +281,7 @@ TEST(TurbulenceModelTest, ConfigureRejectsUnsafeActiveScalarBoundaryData)
     expect_rejected(below_floor_epsilon);
 }
 
+/** @brief Verifies atomic rejection of effective-property overflow during refresh. */
 TEST(TurbulenceModelTest, RefreshRejectsEffectivePropertyOverflowWithoutPartialPublication)
 {
     auto mesh = make_two_cell_mesh();
@@ -306,6 +319,7 @@ TEST(TurbulenceModelTest, RefreshRejectsEffectivePropertyOverflowWithoutPartialP
     }
 }
 
+/** @brief Verifies configured and replacement wall-distance validation for BSL and SST. */
 TEST(TurbulenceModelTest, BSLAndSSTValidateConfiguredAndReplacementWallDistance)
 {
     const std::array menter_models{ModelType::BSLKOmega, ModelType::SSTKOmega};
@@ -350,6 +364,7 @@ TEST(TurbulenceModelTest, BSLAndSSTValidateConfiguredAndReplacementWallDistance)
     }
 }
 
+/** @brief Verifies that every active closure advances both transport equations. */
 TEST(TurbulenceModelTest, EveryClosureAdvancesBothTransportEquations)
 {
     for (const auto& entry : active_models)
@@ -429,6 +444,7 @@ TEST(TurbulenceModelTest, EveryClosureAdvancesBothTransportEquations)
     }
 }
 
+/** @brief Verifies boundary-aware shear and solve reporting for standard k-epsilon. */
 TEST(TurbulenceModelTest, StandardKEpsilonAdvanceUsesBoundaryAwareShearAndReportsTwoSolves)
 {
     auto mesh = make_two_cell_mesh();
@@ -491,6 +507,7 @@ TEST(TurbulenceModelTest, StandardKEpsilonAdvanceUsesBoundaryAwareShearAndReport
     }
 }
 
+/** @brief Verifies high-Re epsilon constraints and publication of wall-face properties. */
 TEST(TurbulenceModelTest, HighReWallTreatmentConstrainsEpsilonAndPublishesFaceProperties)
 {
     auto mesh = make_single_cell_mesh();
@@ -579,6 +596,7 @@ TEST(TurbulenceModelTest, HighReWallTreatmentConstrainsEpsilonAndPublishesFacePr
     EXPECT_EQ(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
 }
 
+/** @brief Verifies propagation of high-Re wall C-mu into the standard k-epsilon closure. */
 TEST(TurbulenceModelTest, HighReWallCmuAlsoConfiguresItsStandardKEpsilonClosure)
 {
     auto mesh = make_single_cell_mesh();
@@ -605,6 +623,7 @@ TEST(TurbulenceModelTest, HighReWallCmuAlsoConfiguresItsStandardKEpsilonClosure)
                      expected_nu_t);
 }
 
+/** @brief Verifies molecular wall transport under resolved SST treatment. */
 TEST(TurbulenceModelTest, ResolvedSSTWallTreatmentKeepsWallTransportMolecular)
 {
     auto mesh = make_single_cell_mesh();
@@ -652,6 +671,7 @@ TEST(TurbulenceModelTest, ResolvedSSTWallTreatmentKeepsWallTransportMolecular)
     EXPECT_NEAR(wall_lambda->value.begin()->second.at(0), molecular_conductivity, 1.0e-15);
 }
 
+/** @brief Verifies rejection of unknown and non-no-slip wall-treatment boundaries. */
 TEST(TurbulenceModelTest, WallTreatmentRejectsUnknownAndNonNoSlipBoundaries)
 {
     auto mesh = make_single_cell_mesh();

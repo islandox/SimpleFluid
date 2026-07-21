@@ -1,6 +1,12 @@
 /**
  * @file testFrameworkEquations.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Tests for generic equations, coupled blocks, and Problem assembly.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -31,6 +37,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Test backend that records invocation and solves diagonal blocks. */
 class RecordingCoupledBackend final
     : public SimpleFluid::CoupledSolverBackend<Pack>
 {
@@ -85,6 +92,7 @@ std::vector<std::pair<int, double>> row_values(
 
 } // namespace
 
+/** @brief Verifies scalar diffusion through the Cartesian mesh-handle interface. */
 TEST(FrameworkEquationTest, SolvesScalarDiffusionOnCartesianHandle)
 {
     auto mesh = make_cartesian_handle();
@@ -115,6 +123,7 @@ TEST(FrameworkEquationTest, SolvesScalarDiffusionOnCartesianHandle)
     EXPECT_NEAR(temperature->value(1), 0.75, 1.0e-12);
 }
 
+/** @brief Verifies that framework diffusion matches the established assembly path. */
 TEST(FrameworkEquationTest, MatchesExistingDiffusionAssembly)
 {
     auto legacy = SimpleFluid::test::build_mesh<Pack>(
@@ -151,6 +160,7 @@ TEST(FrameworkEquationTest, MatchesExistingDiffusionAssembly)
               existing.rhs->getData()[0]);
 }
 
+/** @brief Verifies solution of a transient vector equation. */
 TEST(FrameworkEquationTest, SolvesVectorTransientEquation)
 {
     auto mesh = make_cartesian_handle();
@@ -174,6 +184,7 @@ TEST(FrameworkEquationTest, SolvesVectorTransientEquation)
     EXPECT_NEAR(result.z, 3.0, 1.0e-12);
 }
 
+/** @brief Verifies assembly and solution of a named equation owned by a problem. */
 TEST(FrameworkEquationTest, ProblemAssemblesAndSolvesNamedEquation)
 {
     auto mesh = make_cartesian_handle();
@@ -198,6 +209,7 @@ TEST(FrameworkEquationTest, ProblemAssemblesAndSolvesNamedEquation)
     EXPECT_DOUBLE_EQ(field.value(0), 4.0);
 }
 
+/** @brief Verifies structural validation of coupled equation blocks. */
 TEST(FrameworkEquationTest, ValidatesCoupledBlockStructure)
 {
     auto mesh = make_cartesian_handle();
@@ -242,6 +254,7 @@ TEST(FrameworkEquationTest, ValidatesCoupledBlockStructure)
     EXPECT_NEAR(result.z, 2.0, 1.0e-12);
 }
 
+/** @brief Verifies dispatch to a custom coupled-equation backend. */
 TEST(FrameworkEquationTest, DispatchesCustomCoupledBackend)
 {
     auto mesh = make_cartesian_handle();
@@ -297,6 +310,7 @@ TEST(FrameworkEquationTest, DispatchesCustomCoupledBackend)
     EXPECT_TRUE(called);
 }
 
+/** @brief Verifies validation of framework operator configuration. */
 TEST(FrameworkEquationTest, ValidatesOperatorConfiguration)
 {
     auto mesh = make_cartesian_handle();
@@ -331,6 +345,7 @@ TEST(FrameworkEquationTest, ValidatesOperatorConfiguration)
         std::invalid_argument);
 }
 
+/** @brief Verifies rejection of misplaced terms and unsupported Robin boundaries. */
 TEST(FrameworkEquationTest, RejectsTermsOnWrongSideAndRobinBoundaries)
 {
     auto mesh = make_cartesian_handle();

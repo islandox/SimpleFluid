@@ -35,6 +35,7 @@ using namespace SimpleFluid;
  * 5. **Mesh rebuild** — reconstruct the per-rank d_cells, d_faces,
  *    node tables, and face geometry from owned + ghost packets.
  *
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  * @param mesh The replicated mesh to partition (modified in place).
  * @param comm Teuchos MPI communicator.
  * @return true if partitioning occurred, false if single-rank or
@@ -292,6 +293,7 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
  * replicated. The input object is replaced by compact rank-local geometry,
  * while the returned indexer retains those original IDs.
  *
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  * @param mesh Replicated unstructured mesh geometry.
  * @param comm Teuchos MPI communicator.
  * @return Global indexing and ownership metadata for the rebuilt mesh.
@@ -315,6 +317,13 @@ auto MeshPartitioner<Pack>::partition(
         myrank);
 }
 
+/**
+ * @brief Build the distributed cell-adjacency graph for a legacy mesh.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
+ * @param mesh Mesh whose owned-cell adjacency is distributed into graph rows.
+ * @param comm Communicator defining graph row ownership.
+ * @return Local graph rows plus the replicated column ID set.
+ */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::build_partition_graph(
     const Mesh<Pack>& mesh,
@@ -367,6 +376,13 @@ auto MeshPartitioner<Pack>::build_partition_graph(
     return graph;
 }
 
+/**
+ * @brief Build the distributed cell-adjacency graph for CRTP geometry.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
+ * @param mesh Replicated unstructured geometry.
+ * @param comm Communicator defining graph row ownership.
+ * @return Local graph rows plus the replicated column ID set.
+ */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::build_partition_graph(
     const Meshes::UnstructuredMesh& mesh,
@@ -413,6 +429,13 @@ auto MeshPartitioner<Pack>::build_partition_graph(
     return graph;
 }
 
+/**
+ * @brief Partition a distributed adjacency graph with Zoltan2/ParMETIS.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
+ * @param partition_graph Local graph rows and referenced columns.
+ * @param comm Communicator used by Tpetra, Zoltan2, and the result gather.
+ * @return Global map from cell ID to destination rank.
+ */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::solve_partition_graph(
     const PartitionGraph& partition_graph,
@@ -547,6 +570,23 @@ auto MeshPartitioner<Pack>::solve_partition_graph(
     return local_parts;
 }
 
+/**
+ * @brief Compute owned-first local cell, face, and node ordering.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
+ * @tparam CellFaces Callable returning faces of a cell local ID.
+ * @tparam OppositeCell Callable returning the opposite cell across a face.
+ * @tparam FaceNodes Callable returning nodes of a face local ID.
+ * @tparam CellNodes Callable returning nodes of a cell local ID.
+ * @param cell_count Number of source cells.
+ * @param cell_owner_ranks Destination rank for every source cell.
+ * @param rank Rank whose owned and overlap entities are selected.
+ * @param cell_faces Cell-to-face connectivity callback.
+ * @param opposite_cell Face-and-cell to opposite-cell callback.
+ * @param face_nodes Face-to-node connectivity callback.
+ * @param cell_nodes Cell-to-node connectivity callback.
+ * @return Owned-first entity ordering for the rebuilt local mesh.
+ * @throws std::invalid_argument If owner-rank metadata has the wrong size.
+ */
 template<TpetraTypePack Pack>
 template<class CellFaces, class OppositeCell, class FaceNodes, class CellNodes>
 auto MeshPartitioner<Pack>::reorder_local_entities(
@@ -678,6 +718,14 @@ auto MeshPartitioner<Pack>::reorder_local_entities(
     return order;
 }
 
+/**
+ * @brief Compute the destination rank of every replicated CRTP mesh cell.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
+ * @param mesh Replicated unstructured geometry.
+ * @param comm Communicator participating in partitioning.
+ * @return Owner rank indexed by source cell local ID.
+ * @throws std::runtime_error If the partition result is incomplete or invalid.
+ */
 template<TpetraTypePack Pack>
 std::vector<int> MeshPartitioner<Pack>::compute_unstructured_owner_ranks(
     const Meshes::UnstructuredMesh& mesh,
@@ -713,6 +761,17 @@ std::vector<int> MeshPartitioner<Pack>::compute_unstructured_owner_ranks(
     return owner_ranks;
 }
 
+/**
+ * @brief Rebuild replicated CRTP geometry into one rank's owned and ghost mesh.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
+ * @param mesh Replicated mesh replaced in place with rank-local geometry.
+ * @param cell_owner_ranks Destination rank for every source cell.
+ * @param rank Rank whose local mesh is built.
+ * @return Local/global indexer and source-cell owner ranks.
+ * @throws std::invalid_argument If owner-rank metadata has the wrong size.
+ * @throws std::runtime_error If rebuilt face identity or ownership is inconsistent.
+ * @throws std::overflow_error If a source entity ID exceeds global ordinals.
+ */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::rebuild(
     Meshes::UnstructuredMesh& mesh,
@@ -1024,6 +1083,7 @@ auto MeshPartitioner<Pack>::rebuild(
  * @param mesh The replicated mesh whose owned cells are to be mapped.
  * @param comm Teuchos MPI communicator.
  * @return Unordered map from cell GID to destination rank.
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::compute_gid_to_rank_map(
@@ -1040,6 +1100,7 @@ auto MeshPartitioner<Pack>::compute_gid_to_rank_map(
  * cell-face adjacency, and face geometry (centroids, normals, areas,
  * distances).  Face deduplication uses sorted-node-GID keys.
  *
+ * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  * @param mesh Mesh instance to rebuild (modified in place).
  * @param owned_pkts Cell packets destined for this rank.
  * @param ghost_pkts Cell packets describing off-rank neighbours.

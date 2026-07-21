@@ -1,3 +1,14 @@
+/**
+ * @file RadiolyticGasModel.tcc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Template implementations for the runtime radiolytic gas model.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #pragma once
 
 #include "FVM/CellOperators.hh"
@@ -14,6 +25,13 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Require a mesh before constructing model-owned fields.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param mesh Candidate computational mesh.
+ * @return The validated mesh pointer.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<TpetraTypePack Pack>
 SP<const typename RadiolyticGasModel<Pack>::mesh_type>
 RadiolyticGasModel<Pack>::require_mesh(SP<const mesh_type> mesh)
@@ -26,6 +44,13 @@ RadiolyticGasModel<Pack>::require_mesh(SP<const mesh_type> mesh)
     return mesh;
 }
 
+/**
+ * @brief Construct and initialize a radiolytic gas model.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param mesh Computational mesh.
+ * @param options Validated runtime physics options.
+ * @throws std::invalid_argument if the mesh or options are invalid.
+ */
 template<TpetraTypePack Pack>
 RadiolyticGasModel<Pack>::RadiolyticGasModel(
     SP<const mesh_type> mesh,
@@ -82,6 +107,12 @@ RadiolyticGasModel<Pack>::RadiolyticGasModel(
     initialize_fields();
 }
 
+/**
+ * @brief Reconfigure the model and reset its evolving state.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param options Replacement runtime physics options.
+ * @throws std::invalid_argument if @p options is inconsistent.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::configure(
     const RadiolyticGasOptions& options)
@@ -104,6 +135,10 @@ void RadiolyticGasModel<Pack>::configure(
     initialize_fields();
 }
 
+/**
+ * @brief Register stable output names for all model-owned fields.
+ * @tparam Pack Tpetra type pack used by the model.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::register_output_fields()
 {
@@ -142,6 +177,10 @@ void RadiolyticGasModel<Pack>::register_output_fields()
         {"H2_inventory_error", &d_inventory_error}};
 }
 
+/**
+ * @brief Reset primary, history, diagnostic, and cumulative model fields.
+ * @tparam Pack Tpetra type pack used by the model.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::initialize_fields()
 {
@@ -192,6 +231,19 @@ void RadiolyticGasModel<Pack>::initialize_fields()
     sync_all_fields();
 }
 
+/**
+ * @brief Build the derived initial state for two-population radiolysis.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time Initial physical time.
+ * @param temperature Initial cell temperature.
+ * @param gauge_pressure Initial gauge pressure in Pa.
+ * @param velocity Initial liquid velocity.
+ * @param material Initial material-property fields.
+ * @param force Whether to discard an already initialized state.
+ * @throws std::logic_error if the active mode is not two-population.
+ * @throws std::invalid_argument if time or input meshes are invalid.
+ * @throws std::runtime_error if a derived property cannot be reconstructed.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::initialize_state(
     scalar_type time,
@@ -266,6 +318,12 @@ void RadiolyticGasModel<Pack>::initialize_state(
     sync_all_fields();
 }
 
+/**
+ * @brief Sum one scalar value over the model communicator.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param local_value Rank-local contribution.
+ * @return Communicator-wide sum.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::global_sum(
     scalar_type local_value) const -> scalar_type
@@ -281,6 +339,12 @@ auto RadiolyticGasModel<Pack>::global_sum(
     return global_value;
 }
 
+/**
+ * @brief Compute the communicator-wide maximum of an integer diagnostic.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param local_value Rank-local diagnostic.
+ * @return Communicator-wide maximum.
+ */
 template<TpetraTypePack Pack>
 int RadiolyticGasModel<Pack>::global_max(int local_value) const
 {
@@ -295,6 +359,10 @@ int RadiolyticGasModel<Pack>::global_max(int local_value) const
     return global_value;
 }
 
+/**
+ * @brief Reduce local event counters into rank-consistent statistics.
+ * @tparam Pack Tpetra type pack used by the model.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::reduce_event_statistics()
 {
@@ -317,6 +385,12 @@ void RadiolyticGasModel<Pack>::reduce_event_statistics()
     d_last_statistics.radius_solver_failures = global_counts[2];
 }
 
+/**
+ * @brief Integrate an owned cell field over the distributed mesh volume.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param field Cell field to integrate.
+ * @return Global volume integral.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::global_integral(
     const field_type& field) const -> scalar_type
@@ -332,6 +406,11 @@ auto RadiolyticGasModel<Pack>::global_integral(
     return global_sum(local_integral);
 }
 
+/**
+ * @brief Compute dissolved plus bubble hydrogen inventory over the mesh.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @return Global hydrogen inventory in moles.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::total_hydrogen_inventory() const
     -> scalar_type
@@ -341,6 +420,12 @@ auto RadiolyticGasModel<Pack>::total_hydrogen_inventory() const
          + global_integral(d_large_moles);
 }
 
+/**
+ * @brief Interpolate the prescribed absolute-pressure history.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time Physical time at which to sample the history.
+ * @return Clamped, linearly interpolated absolute pressure.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::prescribed_pressure(
     scalar_type time) const -> scalar_type
@@ -365,6 +450,12 @@ auto RadiolyticGasModel<Pack>::prescribed_pressure(
          + fraction * (values[high] - values[low]);
 }
 
+/**
+ * @brief Reconstruct absolute pressure for the configured pressure mode.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time Current physical time.
+ * @param gauge_pressure Cell gauge pressure in Pa.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::reconstruct_absolute_pressure(
     scalar_type time,
@@ -423,6 +514,16 @@ void RadiolyticGasModel<Pack>::reconstruct_absolute_pressure(
     d_absolute_pressure.sync_ghosts();
 }
 
+/**
+ * @brief Update the ideal-gas void-fraction source from fission power.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time_step Positive physical time step.
+ * @param temperature Cell temperature field.
+ * @param fission_power_density Required fission power-density field.
+ * @param alpha_g Authoritative gas void fraction.
+ * @param alpha_max Upper bound for gas void fraction.
+ * @throws std::invalid_argument if required fields or values are invalid.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::update_ideal_gas_source(
     scalar_type time_step,
@@ -474,6 +575,17 @@ void RadiolyticGasModel<Pack>::update_ideal_gas_source(
     d_source_alpha_rad.sync_ghosts();
 }
 
+/**
+ * @brief Evaluate the configured bubble slip velocity.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param radius Bubble radius.
+ * @param liquid_density Liquid density.
+ * @param dynamic_viscosity Liquid dynamic viscosity.
+ * @param surface_tension Liquid-gas surface tension.
+ * @return Non-negative rise speed.
+ * @throws std::invalid_argument if correlation inputs are invalid.
+ * @throws std::runtime_error if the Celata iteration does not converge.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::rise_velocity(
     scalar_type radius,
@@ -510,6 +622,20 @@ auto RadiolyticGasModel<Pack>::rise_velocity(
     return 0.0;
 }
 
+/**
+ * @brief Transport one non-negative radiolytic inventory field.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param[in,out] field Inventory or population field to transport.
+ * @param time_step Positive physical time step.
+ * @param liquid_face_flux Oriented liquid volumetric flux.
+ * @param slip_velocity Optional cell slip speed added in the axial direction.
+ * @param diffusivity Molecular diffusivity.
+ * @param diffuse Whether diffusion is active.
+ * @param liquid_weighted Whether storage and advection use liquid fraction.
+ * @param[in,out] escape_rate Accumulated free-surface escape rate.
+ * @throws std::invalid_argument if a field or transport input is invalid.
+ * @throws std::runtime_error if the transport solve does not converge.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::transport_scalar(
     field_type& field,
@@ -689,6 +815,17 @@ void RadiolyticGasModel<Pack>::transport_scalar(
     }
 }
 
+/**
+ * @brief Transport dissolved hydrogen and both bubble populations.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time_step Positive physical time step.
+ * @param temperature Cell temperature field.
+ * @param velocity Liquid velocity field.
+ * @param liquid_face_flux Oriented liquid volumetric flux.
+ * @param material Material-property fields.
+ * @throws std::invalid_argument if property or transport inputs are invalid.
+ * @throws std::runtime_error if a radius, rise, or transport solve fails.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::transport_populations(
     scalar_type time_step,
@@ -874,6 +1011,17 @@ void RadiolyticGasModel<Pack>::transport_populations(
         d_cumulative_escaped_bubble_count;
 }
 
+/**
+ * @brief Derive thermophysical and nucleation properties for one cell.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param cell_lid Local cell identifier.
+ * @param temperature Cell temperature field.
+ * @param velocity Liquid velocity field reserved for property extensions.
+ * @param material Material-property fields.
+ * @return Derived cell properties used by kinetics.
+ * @throws std::invalid_argument if a correlation input is invalid.
+ * @throws std::runtime_error if the nucleation radius leaves configured bounds.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::cell_properties(
     local_ordinal_type cell_lid,
@@ -924,6 +1072,13 @@ auto RadiolyticGasModel<Pack>::cell_properties(
     return properties;
 }
 
+/**
+ * @brief Recover dissolved concentration from liquid-volume inventory.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param state Conserved per-cell kinetics state.
+ * @param liquid_fraction Local liquid volume fraction.
+ * @return Dissolved concentration, or zero without liquid volume.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::concentration(
     const CellKineticsState& state,
@@ -934,6 +1089,12 @@ auto RadiolyticGasModel<Pack>::concentration(
     return state.dissolved_inventory / liquid_fraction;
 }
 
+/**
+ * @brief Clamp and publish one updated cell kinetics state.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param cell_lid Local cell identifier.
+ * @param state Updated conserved inventories and populations.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::assign_cell_state(
     local_ordinal_type cell_lid,
@@ -958,6 +1119,17 @@ void RadiolyticGasModel<Pack>::assign_cell_state(
         cell_lid, std::max(state.large_moles, scalar_type{}));
 }
 
+/**
+ * @brief Integrate local hydrogen production, conversion, and dissolution.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param cell_lid Local cell identifier.
+ * @param time_step Positive physical time step.
+ * @param power_density Local fission power density.
+ * @param properties Derived thermophysical cell properties.
+ * @return Updated conserved cell kinetics state.
+ * @throws std::invalid_argument if a correlation input is invalid.
+ * @throws std::runtime_error if the selected rise-velocity solve fails.
+ */
 template<TpetraTypePack Pack>
 auto RadiolyticGasModel<Pack>::integrate_cell_kinetics(
     local_ordinal_type cell_lid,
@@ -1150,6 +1322,15 @@ auto RadiolyticGasModel<Pack>::integrate_cell_kinetics(
     return state;
 }
 
+/**
+ * @brief Reconstruct radii, void fractions, concentrations, and diagnostics.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param temperature Cell temperature field.
+ * @param velocity Liquid velocity field.
+ * @param material Material-property fields.
+ * @throws std::invalid_argument if a correlation input is invalid.
+ * @throws std::runtime_error if a derived-property solve fails.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::reconstruct_derived_fields(
     const field_type& temperature,
@@ -1277,6 +1458,18 @@ void RadiolyticGasModel<Pack>::reconstruct_derived_fields(
     }
 }
 
+/**
+ * @brief Advance the full two-population transport and kinetics model.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time_step Positive physical time step.
+ * @param temperature Cell temperature field.
+ * @param velocity Liquid velocity field.
+ * @param liquid_face_flux Oriented liquid volumetric flux.
+ * @param material Material-property fields.
+ * @param fission_power_density Required fission power-density field.
+ * @throws std::invalid_argument if required fields or values are invalid.
+ * @throws std::runtime_error if a transport or property solve fails.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::advance_two_population(
     scalar_type time_step,
@@ -1345,6 +1538,15 @@ void RadiolyticGasModel<Pack>::advance_two_population(
     d_last_statistics.void_volume = global_integral(d_alpha_g);
 }
 
+/**
+ * @brief Advance reconstructed absolute pressure with the inertial closure.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time_step Positive physical time step.
+ * @param temperature Cell temperature field.
+ * @param liquid_face_flux Oriented liquid volumetric flux.
+ * @param material Material-property fields.
+ * @throws std::invalid_argument if the selected property correlation is invalid.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::update_inertial_pressure(
     scalar_type time_step,
@@ -1449,6 +1651,21 @@ void RadiolyticGasModel<Pack>::update_inertial_pressure(
     }
 }
 
+/**
+ * @brief Advance non-ideal radiolysis using the model-owned void fraction.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time Current physical time.
+ * @param time_step Positive physical time step.
+ * @param temperature Cell temperature field.
+ * @param gauge_pressure Cell gauge pressure in Pa.
+ * @param velocity Liquid velocity field.
+ * @param liquid_face_flux Oriented liquid volumetric flux.
+ * @param material Material-property fields.
+ * @param fission_power_density Optional source field required when active.
+ * @throws std::logic_error if called for ideal-gas source mode.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::runtime_error if a transport or property solve fails.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::advance(
     scalar_type time,
@@ -1478,6 +1695,23 @@ void RadiolyticGasModel<Pack>::advance(
         d_options.alpha_max);
 }
 
+/**
+ * @brief Advance the active radiolysis mode with authoritative void bounds.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param time Current physical time.
+ * @param time_step Positive physical time step.
+ * @param temperature Cell temperature field.
+ * @param gauge_pressure Cell gauge pressure in Pa.
+ * @param velocity Liquid velocity field.
+ * @param liquid_face_flux Oriented liquid volumetric flux.
+ * @param material Material-property fields.
+ * @param fission_power_density Optional source field required when active.
+ * @param alpha_g Authoritative void fraction for ideal-gas source mode.
+ * @param alpha_max Upper bound for authoritative void fraction.
+ * @throws std::logic_error if model and authoritative state are incompatible.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::runtime_error if a transport or property solve fails.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::advance(
     scalar_type time,
@@ -1558,6 +1792,14 @@ void RadiolyticGasModel<Pack>::advance(
     sync_all_fields();
 }
 
+/**
+ * @brief Mirror an externally authoritative scalar void-fraction field.
+ * @tparam Pack Tpetra type pack used by the model.
+ * @param alpha_g Authoritative gas void fraction.
+ * @param alpha_max Maximum permitted gas void fraction.
+ * @throws std::logic_error unless ideal-gas source mode is active.
+ * @throws std::invalid_argument if the field, bound, or values are invalid.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::synchronize_void_fraction(
     const field_type& alpha_g,
@@ -1600,6 +1842,10 @@ void RadiolyticGasModel<Pack>::synchronize_void_fraction(
     d_alpha_l.sync_ghosts();
 }
 
+/**
+ * @brief Synchronize overlap storage for every model-owned cell field.
+ * @tparam Pack Tpetra type pack used by the model.
+ */
 template<TpetraTypePack Pack>
 void RadiolyticGasModel<Pack>::sync_all_fields()
 {

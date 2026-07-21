@@ -1,6 +1,12 @@
 /**
  * @file FrontalDelaunay2D.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Frontal-Delaunay XY mesh generation implementation.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "geometry/mesh/FrontalDelaunay2D.hh"
@@ -23,6 +29,7 @@ namespace
 using Vec3 = FrontalDelaunay2D::Vec3;
 using Triangle = FrontalDelaunay2D::Triangle;
 
+/** @brief Canonically ordered node pair used as an undirected edge key. */
 struct Edge
 {
     unsigned node0{};
@@ -31,11 +38,24 @@ struct Edge
     friend auto operator<=>(const Edge&, const Edge&) = default;
 };
 
+/**
+ * @brief Order two node IDs into a canonical undirected edge.
+ * @param node0 First node ID.
+ * @param node1 Second node ID.
+ * @return Edge with its smaller node ID first.
+ */
 Edge normalized_edge(unsigned node0, unsigned node1)
 {
     return node0 < node1 ? Edge{node0, node1} : Edge{node1, node0};
 }
 
+/**
+ * @brief Evaluate the signed twice-area orientation predicate in XY.
+ * @param a First point.
+ * @param b Second point.
+ * @param c Third point.
+ * @return Positive for counter-clockwise order and negative for clockwise.
+ */
 long double orient2d(const Vec3& a, const Vec3& b, const Vec3& c)
 {
     return (static_cast<long double>(b.x) - a.x)
@@ -44,6 +64,12 @@ long double orient2d(const Vec3& a, const Vec3& b, const Vec3& c)
          * (static_cast<long double>(c.x) - a.x);
 }
 
+/**
+ * @brief Compute squared XY distance between two points.
+ * @param a First point.
+ * @param b Second point.
+ * @return Squared planar distance.
+ */
 real_t squared_distance(const Vec3& a, const Vec3& b)
 {
     const auto dx = a.x - b.x;
@@ -51,6 +77,11 @@ real_t squared_distance(const Vec3& a, const Vec3& b)
     return dx * dx + dy * dy;
 }
 
+/**
+ * @brief Test whether both planar coordinates are finite.
+ * @param point Point to inspect.
+ * @return True when x and y are finite.
+ */
 bool finite_xy(const Vec3& point)
 {
     return std::isfinite(point.x) && std::isfinite(point.y);
@@ -58,6 +89,9 @@ bool finite_xy(const Vec3& point)
 
 /**
  * @brief Test whether a point lies inside or on a convex CCW polygon.
+ * @param polygon Convex counter-clockwise boundary vertices.
+ * @param point Point to classify.
+ * @return True when the point lies inside or on the boundary.
  */
 bool inside_convex_polygon(const Arr<Vec3>& polygon, const Vec3& point)
 {
@@ -80,6 +114,11 @@ bool inside_convex_polygon(const Arr<Vec3>& polygon, const Vec3& point)
 
 /**
  * @brief Return true when p is strictly inside a CCW triangle circumcircle.
+ * @param a First triangle vertex.
+ * @param b Second triangle vertex.
+ * @param c Third triangle vertex.
+ * @param point Point to classify.
+ * @return True when @p point is strictly inside the circumcircle.
  */
 bool in_circumcircle(const Vec3& a,
                      const Vec3& b,
@@ -111,6 +150,14 @@ bool in_circumcircle(const Vec3& a,
          : determinant < -tolerance;
 }
 
+/**
+ * @brief Test whether a point lies inside or on a counter-clockwise triangle.
+ * @param a First triangle vertex.
+ * @param b Second triangle vertex.
+ * @param c Third triangle vertex.
+ * @param point Point to classify.
+ * @return True when @p point is inside or on the triangle.
+ */
 bool in_triangle(const Vec3& a,
                  const Vec3& b,
                  const Vec3& c,
@@ -133,6 +180,13 @@ bool in_triangle(const Vec3& a,
 
 /**
  * @brief Bowyer-Watson triangulation of a unique planar point set.
+ * @param input_nodes Unique planar points to triangulate.
+ * @return Counter-clockwise triangle connectivity over @p input_nodes.
+ * @throws std::invalid_argument If fewer than three points are supplied or
+ *         their planar extent is not positive and finite.
+ * @throws std::overflow_error If node IDs exceed the connectivity type.
+ * @throws std::runtime_error If a point cannot be inserted or no triangle is
+ *         produced.
  */
 Arr<Triangle> delaunay_triangulate(const Arr<Vec3>& input_nodes)
 {
@@ -280,6 +334,11 @@ Arr<Triangle> delaunay_triangulate(const Arr<Vec3>& input_nodes)
     return result;
 }
 
+/**
+ * @brief Require a non-empty boundary batch name.
+ * @param boundary_name Name to validate.
+ * @throws std::invalid_argument If @p boundary_name is empty.
+ */
 void validate_boundary_name(const std::string& boundary_name)
 {
     if (boundary_name.empty())
@@ -289,6 +348,11 @@ void validate_boundary_name(const std::string& boundary_name)
     }
 }
 
+/**
+ * @brief Require a positive finite target edge length.
+ * @param target_edge_length Requested spacing to validate.
+ * @throws std::invalid_argument If the spacing is not positive and finite.
+ */
 void validate_target_length(real_t target_edge_length)
 {
     if (!(target_edge_length > 0.0)
@@ -299,6 +363,12 @@ void validate_target_length(real_t target_edge_length)
     }
 }
 
+/**
+ * @brief Validate boundary preservation and edge-manifold invariants.
+ * @param mesh Generated mesh to inspect.
+ * @throws std::runtime_error If nodes are orphaned, boundary edges are lost,
+ *         or the triangulation contains holes or non-manifold edges.
+ */
 void verify_boundary_edges(const FrontalDelaunay2D::Result& mesh)
 {
     std::map<Edge, unsigned> mesh_edges;

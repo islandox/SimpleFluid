@@ -19,6 +19,10 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Require the entity IDs and compatible integral ordinals of a mesh pack.
+ * @tparam Pack Candidate mesh index type pack.
+ */
 template <class Pack>
 concept MeshIndexTypePack = requires {
     typename Pack::cell_id_t;
@@ -37,6 +41,10 @@ concept MeshIndexTypePack = requires {
   && (std::numeric_limits<typename Pack::local_ordinal_type>::max()
       <= std::numeric_limits<typename Pack::global_ordinal_type>::max());
 
+/**
+ * @brief Require reversible cell, face, and node ID-to-ordinal conversions.
+ * @tparam Indexer Candidate mesh indexer type.
+ */
 template<class Indexer>
 concept MeshIndexer = requires {
     typename Indexer::cell_id_t;

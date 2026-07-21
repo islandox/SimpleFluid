@@ -30,6 +30,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the assembled two-cell mesh shared by vector-field tests. */
 SimpleFluid::SP<MeshType> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
@@ -38,6 +39,7 @@ SimpleFluid::SP<MeshType> make_two_hex_mesh()
 
 } // namespace
 
+/** @brief Verifies three-component storage and component-wise updates. */
 TEST(VectorCellFieldTest, StoresThreeComponentsInMultiVector)
 {
     auto mesh = make_two_hex_mesh();
@@ -57,6 +59,7 @@ TEST(VectorCellFieldTest, StoresThreeComponentsInMultiVector)
     EXPECT_DOUBLE_EQ(velocity.component_value(1, 2), 9.0);
 }
 
+/** @brief Confirms uniform construction fills owned and overlap entries. */
 TEST(VectorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
 {
     auto mesh = make_two_hex_mesh();
@@ -66,6 +69,7 @@ TEST(VectorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
     EXPECT_EQ(velocity.local_value(1), (SimpleFluid::vec3{4.0, 5.0, 6.0}));
 }
 
+/** @brief Verifies periodic synchronization copies every vector component. */
 TEST(VectorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
 {
     auto mesh = make_two_hex_mesh();
@@ -80,6 +84,7 @@ TEST(VectorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
     EXPECT_EQ(velocity.local_value(1), (SimpleFluid::vec3{4.0, 5.0, 6.0}));
 }
 
+/** @brief Ensures construction rejects a mesh without assembled maps. */
 TEST(VectorCellFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh =

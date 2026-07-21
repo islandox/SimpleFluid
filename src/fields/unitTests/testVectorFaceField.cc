@@ -31,12 +31,14 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Build the assembled two-cell mesh shared by vector-face tests. */
 SimpleFluid::SP<MeshType> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
 }
 
+/** @brief Minimal mesh fixture with one locally owned face. */
 class MinimalFaceOwnershipMesh : public MeshType
 {
 public:
@@ -69,6 +71,7 @@ public:
 
 } // namespace
 
+/** @brief Verifies vector components and global/local face access agree. */
 TEST(VectorFaceFieldTest, StoresThreeComponentsOnOwnedFaceMap)
 {
     auto mesh = make_two_hex_mesh();
@@ -94,6 +97,7 @@ TEST(VectorFaceFieldTest, StoresThreeComponentsOnOwnedFaceMap)
     EXPECT_EQ(velocity.global_value(gid), (Vec3{5.0, 6.0, 7.0}));
 }
 
+/** @brief Confirms uniform construction fills all components on every face. */
 TEST(VectorFaceFieldTest, InitialValueConstructorFillsAllComponents)
 {
     auto mesh = make_two_hex_mesh();
@@ -108,6 +112,7 @@ TEST(VectorFaceFieldTest, InitialValueConstructorFillsAllComponents)
     }
 }
 
+/** @brief Checks that the face map follows owner-cell ownership. */
 TEST(VectorFaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 {
     auto mesh = std::make_shared<MinimalFaceOwnershipMesh>();
@@ -128,6 +133,7 @@ TEST(VectorFaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 #endif
 }
 
+/** @brief Ensures construction rejects a mesh without assembled maps. */
 TEST(VectorFaceFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh =

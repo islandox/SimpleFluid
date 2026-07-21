@@ -12,6 +12,11 @@
 
 #include <iostream>
 
+/**
+ * @brief Run the placeholder SimpleFluid application executable.
+ *
+ * @return Process exit code, zero on normal completion.
+ */
 int main()
 {
 

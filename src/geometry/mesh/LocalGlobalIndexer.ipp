@@ -19,6 +19,11 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Return the sentinel used for unavailable local entities.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @return Minus one for signed ordinals, otherwise the maximum value.
+ */
 template<MeshIndexTypePack Pack>
 constexpr typename LocalGlobalIndexer<Pack>::local_ordinal_type
 LocalGlobalIndexer<Pack>::invalid_local_id() noexcept
@@ -30,6 +35,16 @@ LocalGlobalIndexer<Pack>::invalid_local_id() noexcept
     return std::numeric_limits<local_ordinal_type>::max();
 }
 
+/**
+ * @brief Validate a local ordinal against an entity index.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index supplying the local count.
+ * @param local_id Local ordinal to validate.
+ * @param entity Entity label used in diagnostics.
+ * @throws std::out_of_range If @p local_id is invalid.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline void LocalGlobalIndexer<Pack>::check_local(
@@ -54,6 +69,17 @@ inline void LocalGlobalIndexer<Pack>::check_local(
     }
 }
 
+/**
+ * @brief Resolve a validated local ordinal to its global ID.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index to query.
+ * @param local_id Local ordinal.
+ * @param entity Entity label used in diagnostics.
+ * @return Global entity ID.
+ * @throws std::out_of_range If @p local_id is invalid.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline GlobalID
@@ -66,6 +92,15 @@ LocalGlobalIndexer<Pack>::global_id(
     return index.global_ids[static_cast<size_t>(local_id)];
 }
 
+/**
+ * @brief Find the local ordinal associated with a global ID.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index to query.
+ * @param global_id Global ID to locate.
+ * @return Local ordinal, or @ref invalid_local_id when unavailable.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline typename LocalGlobalIndexer<Pack>::local_ordinal_type
@@ -79,6 +114,17 @@ LocalGlobalIndexer<Pack>::local_id(
          : iter->second;
 }
 
+/**
+ * @brief Resolve an explicit rank-local ID to its global ID.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index to query.
+ * @param local_id Rank-local entity ID.
+ * @param entity Entity label used in diagnostics.
+ * @return Global entity ID.
+ * @throws std::out_of_range If @p local_id is unavailable.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline GlobalID
@@ -97,6 +143,17 @@ LocalGlobalIndexer<Pack>::mapped_global_id(
     return index.global_ids[static_cast<size_t>(iter->second)];
 }
 
+/**
+ * @brief Resolve a global ID to its explicit rank-local entity ID.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index to query.
+ * @param global_id Global entity ID.
+ * @param entity Entity label used in diagnostics.
+ * @return Rank-local entity ID.
+ * @throws std::out_of_range If @p global_id is unavailable locally.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline LocalID
@@ -115,6 +172,17 @@ LocalGlobalIndexer<Pack>::mapped_local_id(
     return index.local_ids[static_cast<size_t>(ordinal)];
 }
 
+/**
+ * @brief Resolve a local ordinal to its global ordinal.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index to query.
+ * @param local_ordinal Local ordinal.
+ * @param entity Entity label used in diagnostics.
+ * @return Global ordinal.
+ * @throws std::out_of_range If @p local_ordinal is invalid.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline typename LocalGlobalIndexer<Pack>::global_ordinal_type
@@ -128,6 +196,15 @@ LocalGlobalIndexer<Pack>::global_ordinal(
         static_cast<size_t>(local_ordinal)];
 }
 
+/**
+ * @brief Find the local ordinal associated with a global ordinal.
+ * @tparam Pack Mesh entity-ID and ordinal types.
+ * @tparam LocalID Rank-local entity identifier type.
+ * @tparam GlobalID Global entity identifier type.
+ * @param index Entity index to query.
+ * @param global_ordinal Global ordinal to locate.
+ * @return Local ordinal, or @ref invalid_local_id when unavailable.
+ */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
 inline typename LocalGlobalIndexer<Pack>::local_ordinal_type

@@ -418,6 +418,14 @@ PartitionedMesh<GeometryMesh, Pack>::overlap_node_map() const
 
 // Private helper methods
 
+/**
+ * @brief Test whether a possibly signed local ordinal lies below a count.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param local_id Local ordinal to test.
+ * @param count Exclusive upper bound.
+ * @return True when @p local_id is valid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline bool PartitionedMesh<GeometryMesh, Pack>::valid_local(
     local_ordinal_type local_id, size_t count)
@@ -432,6 +440,14 @@ inline bool PartitionedMesh<GeometryMesh, Pack>::valid_local(
     return static_cast<size_t>(local_id) < count;
 }
 
+/**
+ * @brief Convert a size-based ordinal to the configured local type.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param local_id Size-based ordinal to convert.
+ * @return Local ordinal.
+ * @throws std::overflow_error If @p local_id does not fit.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type
 PartitionedMesh<GeometryMesh, Pack>::checked_local(size_t local_id)
@@ -444,6 +460,14 @@ PartitionedMesh<GeometryMesh, Pack>::checked_local(size_t local_id)
     return static_cast<local_ordinal_type>(local_id);
 }
 
+/**
+ * @brief Validate a local cell ordinal and recover its geometry ID.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param local_id Local cell ordinal.
+ * @return Geometry cell ID.
+ * @throws std::out_of_range If @p local_id is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::cell_id_t
 PartitionedMesh<GeometryMesh, Pack>::geometry_cell_id(
@@ -456,6 +480,14 @@ PartitionedMesh<GeometryMesh, Pack>::geometry_cell_id(
     return mesh().cell_id(static_cast<size_t>(local_id));
 }
 
+/**
+ * @brief Validate a local face ordinal and recover its geometry ID.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param local_id Local face ordinal.
+ * @return Geometry face ID.
+ * @throws std::out_of_range If @p local_id is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::face_id_t
 PartitionedMesh<GeometryMesh, Pack>::geometry_face_id(
@@ -468,6 +500,14 @@ PartitionedMesh<GeometryMesh, Pack>::geometry_face_id(
     return mesh().face_id(static_cast<size_t>(local_id));
 }
 
+/**
+ * @brief Validate a local node ordinal and recover its geometry ID.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param local_id Local node ordinal.
+ * @return Geometry node ID.
+ * @throws std::out_of_range If @p local_id is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::node_id_t
 PartitionedMesh<GeometryMesh, Pack>::geometry_node_id(

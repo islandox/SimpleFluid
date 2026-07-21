@@ -90,6 +90,15 @@ struct CoupledPressureVelocityResult
 namespace detail
 {
 
+/**
+ * @brief Accumulate one sparse coefficient into an assembly row.
+ *
+ * @tparam Column Sparse column-index type.
+ * @tparam Scalar Sparse coefficient type.
+ * @param row Row accumulator keyed by column.
+ * @param column Column receiving the contribution.
+ * @param value Contribution to add.
+ */
 template<class Column, class Scalar>
 void add_entry(std::unordered_map<Column, Scalar>& row,
                Column column,
@@ -98,6 +107,13 @@ void add_entry(std::unordered_map<Column, Scalar>& row,
     row[column] += value;
 }
 
+/**
+ * @brief Build the four-unknown-per-cell map for a coupled system.
+ *
+ * @tparam Pack Tpetra type pack defining the distributed map.
+ * @param mesh Mesh that owns the cell distribution.
+ * @return Coupled velocity-pressure map.
+ */
 template<TpetraTypePack Pack>
 auto make_coupled_map(const Mesh<Pack>& mesh)
     -> Teuchos::RCP<const typename Pack::map_type>
@@ -117,6 +133,11 @@ auto make_coupled_map(const Mesh<Pack>& mesh)
         comm));
 }
 
+/**
+ * @brief Affine least-squares stencil for a normalized pressure gradient.
+ *
+ * @tparam Pack Tpetra type pack defining mesh ordinals and vectors.
+ */
 template<TpetraTypePack Pack>
 struct AffinePressureGradientStencil
 {
@@ -130,6 +151,13 @@ struct AffinePressureGradientStencil
  * The coupled matrix acts on normalized pressure q = p/rho_ref. Cell
  * coefficients populate its pressure block, while the constant vector
  * carries prescribed Dirichlet values and Neumann gradients to the RHS.
+ *
+ * @tparam Pack Tpetra type pack defining mesh and scalar types.
+ * @param mesh Mesh providing cells, faces, and boundary geometry.
+ * @param boundary_conditions Pressure boundary conditions by patch name.
+ * @param reference_density Density used to normalize physical pressure.
+ * @return One affine pressure-gradient stencil per owned cell.
+ * @throws std::invalid_argument for unsupported pressure boundary types.
  */
 template<TpetraTypePack Pack>
 auto pressure_gradient_stencils(
@@ -281,6 +309,14 @@ auto pressure_gradient_stencils(
     return stencils;
 }
 
+/**
+ * @brief Left-scale a gradient matrix by an inverse momentum diagonal.
+ *
+ * @tparam Pack Tpetra type pack defining matrix and vector types.
+ * @param gradient Gradient operator to scale.
+ * @param inverse_diagonal Per-row inverse momentum diagonal.
+ * @return Newly allocated scaled gradient matrix.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 scaled_gradient_matrix(
@@ -317,6 +353,18 @@ scaled_gradient_matrix(
     return scaled;
 }
 
+/**
+ * @brief Build the pressure Schur-complement approximation.
+ *
+ * @tparam Pack Tpetra type pack defining matrix and ordinal types.
+ * @param momentum Momentum block used for diagonal inversion.
+ * @param gradient Cartesian pressure-gradient blocks.
+ * @param divergence Cartesian velocity-divergence blocks.
+ * @param pressure_stabilization Pressure stabilization block.
+ * @param pressure_gauge_gid Optional pressure row fixed as the gauge.
+ * @return Assembled Schur-complement approximation.
+ * @throws std::runtime_error if the momentum diagonal is singular.
+ */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 build_schur_approximation(
@@ -443,6 +491,11 @@ build_schur_approximation(
     return schur;
 }
 
+/**
+ * @brief Apply a block-triangular velocity-pressure preconditioner.
+ *
+ * @tparam Pack Tpetra type pack defining operator and multivector types.
+ */
 template<TpetraTypePack Pack>
 class CoupledSchurPreconditioner final
     : public Pack::operator_type
@@ -615,6 +668,11 @@ private:
 
 } // namespace detail
 
+/**
+ * @brief Assemble and solve monolithic cell velocity-pressure systems.
+ *
+ * @tparam Pack Tpetra type pack defining distributed algebra types.
+ */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class CoupledPressureVelocitySolver
 {

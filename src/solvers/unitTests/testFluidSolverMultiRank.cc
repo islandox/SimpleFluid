@@ -1,6 +1,12 @@
 /**
  * @file testFluidSolverMultiRank.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief MPI tests for globally reduced pressure-velocity residual norms.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -29,6 +35,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Expose the protected global velocity-update norm for MPI tests. */
 class ExposedFluidSolver : public SimpleFluid::FluidSolver<Pack>
 {
 public:
@@ -42,6 +49,13 @@ public:
     }
 };
 
+/**
+ * @brief Sum a scalar value over the mesh communicator.
+ *
+ * @param mesh Mesh providing the communicator.
+ * @param local_value Local contribution.
+ * @return Global sum across ranks.
+ */
 double global_sum(const MeshType& mesh, double local_value)
 {
     double global_value = 0.0;
@@ -54,18 +68,25 @@ double global_sum(const MeshType& mesh, double local_value)
     return global_value;
 }
 
+/** @brief Build the distributed cavity mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> distributed_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(8, 8, 1, 0.125));
 }
 
+/** @brief Build the distributed line mesh. @return Assembled mesh. */
 SimpleFluid::SP<MeshType> distributed_line_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
 }
 
+/**
+ * @brief Construct moving-lid cavity velocity boundary conditions.
+ *
+ * @return Boundary conditions for the distributed cavity fixture.
+ */
 SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
 {
     SimpleFluid::BoundaryConditionSet conditions;
@@ -86,6 +107,7 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
 
 } // namespace
 
+/** @brief Verify the velocity update norm is reduced over all ranks. */
 TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
 {
     auto mesh = distributed_mesh();
@@ -124,6 +146,7 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
         std::max(1.0e-14, expected * 1.0e-12));
 }
 
+/** @brief Verify coupled continuity residuals use a global reduction. */
 TEST(FluidSolverMultiRankTest, CoupledContinuityResidualIsGlobal)
 {
     auto mesh = distributed_mesh();
@@ -187,6 +210,7 @@ TEST(FluidSolverMultiRankTest, CoupledContinuityResidualIsGlobal)
         std::max(1.0e-14, expected * 1.0e-12));
 }
 
+/** @brief Verify a remote Dirichlet pressure patch disables the global gauge row. */
 TEST(FluidSolverMultiRankTest,
      CoupledDirichletPressureSuppressesGaugeOnEveryRank)
 {

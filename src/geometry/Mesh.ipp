@@ -49,6 +49,12 @@ inline Ordinal checked_size_to_ordinal(size_t value, std::string_view label)
 
 } // namespace detail
 
+/**
+ * @brief Validate a local cell ordinal when runtime checks are enabled.
+ * @tparam Pack Tpetra type pack.
+ * @param lid Local cell ordinal.
+ * @throws std::out_of_range If @p lid is negative or outside local cells.
+ */
 template<TpetraTypePack Pack>
 inline void Mesh<Pack>::check_cell(local_ordinal_type lid) const
 {
@@ -72,6 +78,12 @@ inline void Mesh<Pack>::check_cell(local_ordinal_type lid) const
 #endif
 }
 
+/**
+ * @brief Validate a local face ordinal when runtime checks are enabled.
+ * @tparam Pack Tpetra type pack.
+ * @param lid Local face ordinal.
+ * @throws std::out_of_range If @p lid is negative or outside local faces.
+ */
 template<TpetraTypePack Pack>
 inline void Mesh<Pack>::check_face(local_ordinal_type lid) const
 {
@@ -95,6 +107,13 @@ inline void Mesh<Pack>::check_face(local_ordinal_type lid) const
 #endif
 }
 
+/**
+ * @brief Retrieve checked cell metadata by local ordinal.
+ * @tparam Pack Tpetra type pack.
+ * @param lid Local cell ordinal.
+ * @return Cell metadata.
+ * @throws std::out_of_range If @p lid is invalid and checks are enabled.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell(local_ordinal_type lid) const -> const CellInfo&
 {
@@ -102,6 +121,13 @@ inline auto Mesh<Pack>::cell(local_ordinal_type lid) const -> const CellInfo&
     return d_cells[static_cast<size_t>(lid)];
 }
 
+/**
+ * @brief Retrieve checked face metadata by local ordinal.
+ * @tparam Pack Tpetra type pack.
+ * @param lid Local face ordinal.
+ * @return Face metadata.
+ * @throws std::out_of_range If @p lid is invalid and checks are enabled.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face(local_ordinal_type lid) const -> const FaceInfo&
 {
@@ -109,6 +135,13 @@ inline auto Mesh<Pack>::face(local_ordinal_type lid) const -> const FaceInfo&
     return d_faces[static_cast<size_t>(lid)];
 }
 
+/**
+ * @brief Translate a local cell ordinal to an owned or ghost global ID.
+ * @tparam Pack Tpetra type pack.
+ * @param lid Local cell ordinal.
+ * @return Global cell ID.
+ * @throws std::out_of_range If @p lid is invalid and checks are enabled.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const global_ordinal_type&
 {
@@ -122,6 +155,13 @@ inline auto Mesh<Pack>::cell_global_id(local_ordinal_type lid) const -> const gl
     return d_ghost_cell_global_ids[index - d_owned_cell_global_ids.size()];
 }
 
+/**
+ * @brief Translate a local face ordinal to its global ID.
+ * @tparam Pack Tpetra type pack.
+ * @param lid Local face ordinal.
+ * @return Global face ID.
+ * @throws std::out_of_range If @p lid is invalid and checks are enabled.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_global_id(local_ordinal_type lid) const -> const global_ordinal_type&
 {
@@ -129,6 +169,13 @@ inline auto Mesh<Pack>::face_global_id(local_ordinal_type lid) const -> const gl
     return d_owned_face_global_ids[static_cast<size_t>(lid)];
 }
 
+/**
+ * @brief Return coordinates for a node global ID visible on this rank.
+ * @tparam Pack Tpetra type pack.
+ * @param node_gid Global node ID.
+ * @return Node coordinates.
+ * @throws std::out_of_range If @p node_gid is not local.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::node_coord(global_ordinal_type node_gid) const -> const Vec3&
 {
@@ -142,42 +189,91 @@ inline auto Mesh<Pack>::node_coord(global_ordinal_type node_gid) const -> const 
     return d_node_coords[static_cast<size_t>(iter->second)];
 }
 
+/**
+ * @brief Return the cell across a face from a supplied adjacent cell.
+ * @tparam Pack Tpetra type pack.
+ * @param fid Local face ordinal.
+ * @param cell_lid One adjacent local cell ordinal.
+ * @return Opposite cell, or the invalid sentinel at an exterior boundary.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ * @throws std::out_of_range If an ordinal is invalid and checks are enabled.
+ */
 template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_owned_cell(local_ordinal_type lid) const
 {
     return cell(lid).owned;
 }
 
+/**
+ * @brief Synchronize ghost values for a scalar field on this mesh.
+ * @tparam Pack Tpetra type pack.
+ * @param field Scalar field whose ghost values are updated.
+ * @throws std::invalid_argument If @p field belongs to another mesh.
+ */
 template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_owned_face(local_ordinal_type fid) const
 {
     return is_owned_cell(owner_cell(fid));
 }
 
+/**
+ * @brief Synchronize ghost values for a vector field on this mesh.
+ * @tparam Pack Tpetra type pack.
+ * @param field Vector field whose ghost values are updated.
+ * @throws std::invalid_argument If @p field belongs to another mesh.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::faces(local_ordinal_type cell_lid) const -> const ViewLO&
 {
     return cell(cell_lid).faces;
 }
 
+/**
+ * @brief Synchronize ghost values for a tensor field on this mesh.
+ * @tparam Pack Tpetra type pack.
+ * @param field Tensor field whose ghost values are updated.
+ * @throws std::invalid_argument If @p field belongs to another mesh.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_distances(local_ordinal_type cell_lid) const -> const ViewReal&
 {
     return cell(cell_lid).face_distances;
 }
 
+/**
+ * @brief Compute a face area vector in stored owner orientation.
+ * @tparam Pack Tpetra type pack.
+ * @param fid Local face ordinal.
+ * @return Unit normal multiplied by face area.
+ */
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::cell_volume(local_ordinal_type lid) const
 {
     return cell(lid).volume;
 }
 
+/**
+ * @brief Compute a face area vector outward from an adjacent cell.
+ * @tparam Pack Tpetra type pack.
+ * @param fid Local face ordinal.
+ * @param cell_lid Adjacent local cell ordinal.
+ * @return Outward unit normal multiplied by face area.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_centroid(local_ordinal_type lid) const -> const Vec3&
 {
     return cell(lid).center;
 }
 
+/**
+ * @brief Form the vector from one cell center to the opposite cell center.
+ * @tparam Pack Tpetra type pack.
+ * @param fid Local face ordinal.
+ * @param cell_lid Adjacent local cell ordinal.
+ * @return Vector from @p cell_lid to its opposite neighbor.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::owner_cell(local_ordinal_type fid) const -> local_ordinal_type
 {
@@ -376,6 +472,12 @@ inline bool Mesh<Pack>::is_interior_face(local_ordinal_type fid) const
     return face(fid).neighbor != invalid_id<local_ordinal_type>();
 }
 
+/**
+ * @brief Test whether a face is both exterior and physically tagged.
+ * @tparam Pack Tpetra type pack.
+ * @param fid Local face ordinal.
+ * @return True for a physical boundary face.
+ */
 template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_boundary_face(local_ordinal_type fid) const
 {
@@ -493,6 +595,12 @@ inline auto Mesh<Pack>::boundary_face_batch(int batch_id) const -> const Boundar
     return iter->second;
 }
 
+/**
+ * @brief Find the local ordinal associated with a global cell ID.
+ * @tparam Pack Tpetra type pack.
+ * @param gid Global cell ID.
+ * @return Local ordinal, or the invalid sentinel when the cell is not local.
+ */
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::global_to_local_cell(global_ordinal_type gid) const 
     -> local_ordinal_type

@@ -42,6 +42,7 @@ std::string read_file(const std::string& filename)
 // ---------------------------------------------------------------------------
 // Helper: build a minimal valid VTU file (2 tri cells, 4 points)
 // ---------------------------------------------------------------------------
+/** @brief Fixture-like helper containing a minimal two-triangle VTU grid. */
 struct TwoTriangles
 {
     VTUWriter writer;
@@ -72,6 +73,7 @@ struct TwoTriangles
 // Construction & basic accessors
 // ===========================================================================
 
+/** @brief Verifies writer construction and basic mesh-property accessors. */
 TEST(VTUWriter, ConstructionAndBasicAccess)
 {
     VTUWriter writer;
@@ -89,6 +91,10 @@ TEST(VTUWriter, ConstructionAndBasicAccess)
 // Cell data addition
 // ===========================================================================
 
+/**
+ * @brief Verifies scalar, vector, integer, and component-wise cell arrays are
+ * accepted with correct metadata.
+ */
 TEST(VTUWriter, CellDataAddition)
 {
     // Scalar
@@ -135,6 +141,10 @@ TEST(VTUWriter, CellDataAddition)
 // Output content validation — structure
 // ===========================================================================
 
+/**
+ * @brief Verifies emitted VTU XML contains the expected unstructured-grid,
+ * point, cell, type, and offset sections.
+ */
 TEST(VTUWriter, OutputStructure)
 {
     TwoTriangles tt;
@@ -155,6 +165,7 @@ TEST(VTUWriter, OutputStructure)
 // Output content validation — cell data
 // ===========================================================================
 
+/** @brief Verifies emitted cell-data arrays contain the supplied values. */
 TEST(VTUWriter, OutputCellDataContent)
 {
     // Scalar data
@@ -196,6 +207,10 @@ TEST(VTUWriter, OutputCellDataContent)
 // Validation — error paths
 // ===========================================================================
 
+/**
+ * @brief Verifies invalid connectivity, data lengths, component counts, and
+ * output paths report errors.
+ */
 TEST(VTUWriter, ValidationErrors)
 {
     // Mismatched offsets and types
@@ -237,6 +252,10 @@ TEST(VTUWriter, ValidationErrors)
 // Edge cases
 // ===========================================================================
 
+/**
+ * @brief Verifies empty meshes, zero-length data, and minimal valid cells are
+ * serialized safely.
+ */
 TEST(VTUWriter, EdgeCases)
 {
     // Write with zero points

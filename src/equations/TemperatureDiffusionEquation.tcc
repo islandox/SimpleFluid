@@ -359,6 +359,23 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     return statistics;
 }
 
+/**
+ * @brief Advance conservative temperature transport with physical properties.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_temperature Accepted temperature from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param time_step Positive time-step size.
+ * @param material Density, heat-capacity, and conductivity fields.
+ * @param[out] temperature Updated temperature field.
+ * @param power_density Per-cell volumetric heat-source provider.
+ * @param treatment Non-orthogonal diffusion treatment.
+ * @param linear_options Linear-solver configuration.
+ * @param thermal_conductivity_override Optional effective conductivity field.
+ * @param boundary_thermal_conductivity Optional boundary conductivity cache.
+ * @return Linear-solve statistics for the accepted update.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::runtime_error if the linear solve fails or is non-finite.
+ */
 template<TpetraTypePack Pack>
 auto TemperatureDiffusionEquation<Pack>::advance_physical(
     const field_type& old_temperature,

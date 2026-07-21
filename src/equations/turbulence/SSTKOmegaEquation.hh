@@ -1,6 +1,12 @@
 /**
  * @file SSTKOmegaEquation.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Original Menter-1994 shear-stress-transport closure equation terms.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #pragma once
@@ -24,6 +30,7 @@ namespace SimpleFluid
 class SSTKOmegaEquation
 {
 public:
+    /** @brief Coefficients controlling the SST k-omega closure. */
     struct Coefficients
     {
         real_t beta_star = 0.09;

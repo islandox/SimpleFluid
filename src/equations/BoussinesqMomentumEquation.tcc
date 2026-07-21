@@ -17,6 +17,14 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Select and validate the dynamic-viscosity field used by momentum.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param material Material fields supplying the default viscosity.
+ * @param dynamic_viscosity_override Optional effective-viscosity field.
+ * @return Selected viscosity field.
+ * @throws std::invalid_argument if the override is mismatched or invalid.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::select_dynamic_viscosity(
     const MaterialPropertyFields<Pack>& material,
@@ -44,6 +52,12 @@ auto BoussinesqMomentumEquation<Pack>::select_dynamic_viscosity(
     return *dynamic_viscosity_override;
 }
 
+/**
+ * @brief Construct a Boussinesq momentum equation on a mesh.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param mesh Computational mesh.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<TpetraTypePack Pack>
 BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
     SP<const mesh_type> mesh)
@@ -51,6 +65,20 @@ BoussinesqMomentumEquation<Pack>::BoussinesqMomentumEquation(
 {
 }
 
+/**
+ * @brief Advance velocity with buoyancy and no additional source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param temperature Cell temperature driving buoyancy.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Time-step and Boussinesq parameters.
+ * @param[out] velocity Updated velocity field.
+ * @param linear_options Linear-solver configuration.
+ * @return Aggregated linear-solve statistics.
+ * @throws std::invalid_argument if input fields or options are inconsistent.
+ * @throws std::runtime_error if a velocity solve fails.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
@@ -71,6 +99,18 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity(
         options, velocity, zero_source, linear_options);
 }
 
+/**
+ * @brief Assemble the Boussinesq momentum system without an extra source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param temperature Cell temperature driving buoyancy.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Time-step and Boussinesq parameters.
+ * @param correction_field Optional lagged non-orthogonal correction field.
+ * @return Assembled vector transport system.
+ * @throws std::invalid_argument if input fields or options are inconsistent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::assemble_system(
     const velocity_field_type& old_velocity,
@@ -90,6 +130,19 @@ auto BoussinesqMomentumEquation<Pack>::assemble_system(
         options, zero_source, correction_field);
 }
 
+/**
+ * @brief Assemble the Boussinesq momentum system with a caller source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param temperature Cell temperature driving buoyancy.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Time-step and Boussinesq parameters.
+ * @param right_hand_source Additional per-cell acceleration.
+ * @param correction_field Optional lagged non-orthogonal correction field.
+ * @return Assembled vector transport system.
+ * @throws std::invalid_argument if input fields or options are inconsistent.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::assemble_system(
     const velocity_field_type& old_velocity,
@@ -120,6 +173,21 @@ auto BoussinesqMomentumEquation<Pack>::assemble_system(
         combined_source, correction_field);
 }
 
+/**
+ * @brief Advance velocity with buoyancy and a caller acceleration source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param temperature Cell temperature driving buoyancy.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Time-step and Boussinesq parameters.
+ * @param[out] velocity Updated velocity field.
+ * @param right_hand_source Additional per-cell acceleration.
+ * @param linear_options Linear-solver configuration.
+ * @return Aggregated linear-solve statistics.
+ * @throws std::invalid_argument if input fields or options are inconsistent.
+ * @throws std::runtime_error if a velocity solve fails.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
@@ -151,6 +219,24 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity(
         velocity, combined_source, linear_options);
 }
 
+/**
+ * @brief Assemble physical momentum transport with material feedback.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param temperature Cell temperature driving Boussinesq buoyancy.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Time-step and Boussinesq parameters.
+ * @param material Physical material-property fields.
+ * @param reference_density Density used to normalize momentum diffusion.
+ * @param density_feedback_enabled Whether density replaces thermal buoyancy.
+ * @param right_hand_source Additional per-cell acceleration.
+ * @param correction_field Optional lagged non-orthogonal correction field.
+ * @param dynamic_viscosity_override Optional effective-viscosity field.
+ * @param boundary_dynamic_viscosity Optional boundary viscosity cache.
+ * @return Assembled physical momentum system.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
     const velocity_field_type& old_velocity,
@@ -204,6 +290,26 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
         correction_field, boundary_dynamic_viscosity);
 }
 
+/**
+ * @brief Advance physical momentum with material-dependent buoyancy.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param temperature Cell temperature driving Boussinesq buoyancy.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Time-step and Boussinesq parameters.
+ * @param material Physical material-property fields.
+ * @param reference_density Density used to normalize momentum diffusion.
+ * @param density_feedback_enabled Whether density replaces thermal buoyancy.
+ * @param[out] velocity Updated velocity field.
+ * @param right_hand_source Additional per-cell acceleration.
+ * @param linear_options Linear-solver configuration.
+ * @param dynamic_viscosity_override Optional effective-viscosity field.
+ * @param boundary_dynamic_viscosity Optional boundary viscosity cache.
+ * @return Aggregated linear-solve statistics.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::runtime_error if a velocity solve fails.
+ */
 template<TpetraTypePack Pack>
 auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
     const velocity_field_type& old_velocity,

@@ -1,3 +1,14 @@
+/**
+ * @file testFissionPowerSource.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Tests prescribed fission power profiles and source registration.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #include <gtest/gtest.h>
 
 #include "equations/FissionPowerSource.hh"
@@ -49,6 +60,7 @@ SimpleFluid::SP<MeshType> make_cylinder()
     return SimpleFluid::test::build_mesh<Pack>(database);
 }
 
+/** @brief Verifies parsing of disabled, constant, and Gaussian fission-source options. */
 TEST(FissionPowerSourceTest, ParsesDisabledConstantAndGaussianOptions)
 {
     SimpleFluid::Database empty;
@@ -91,6 +103,7 @@ TEST(FissionPowerSourceTest, ParsesDisabledConstantAndGaussianOptions)
         (SimpleFluid::vec3<>{0.5, 1.0, 2.0}));
 }
 
+/** @brief Verifies rejection of invalid fission-source database options. */
 TEST(FissionPowerSourceTest, RejectsInvalidDatabaseOptions)
 {
     auto expect_invalid =
@@ -172,6 +185,7 @@ TEST(FissionPowerSourceTest, RejectsInvalidDatabaseOptions)
     expect_invalid(non_finite);
 }
 
+/** @brief Verifies total-power normalization of constant and Gaussian profiles. */
 TEST(FissionPowerSourceTest, ConstantAndGaussianProfilesIntegrateCorrectly)
 {
     auto mesh = make_unit_box();
@@ -221,6 +235,7 @@ TEST(FissionPowerSourceTest, ConstantAndGaussianProfilesIntegrateCorrectly)
         value_at(0.5, 0.5, 1.0 / 6.0));
 }
 
+/** @brief Verifies axisymmetry of the Gaussian profile on a cylindrical mesh. */
 TEST(FissionPowerSourceTest, GaussianIsAxisymmetricOnCylinder)
 {
     auto mesh = make_cylinder();
@@ -252,6 +267,7 @@ TEST(FissionPowerSourceTest, GaussianIsAxisymmetricOnCylinder)
     }
 }
 
+/** @brief Verifies that caller-owned profiles are copied and normalized independently. */
 TEST(FissionPowerSourceTest, CopiesAndNormalizesCallerOwnedFields)
 {
     auto mesh = make_unit_box(2);
@@ -297,6 +313,7 @@ TEST(FissionPowerSourceTest, CopiesAndNormalizesCallerOwnedFields)
         std::invalid_argument);
 }
 
+/** @brief Verifies application of the configured time multiplier during updates. */
 TEST(FissionPowerSourceTest, AppliesTimeMultiplierAtUpdateTime)
 {
     auto mesh = make_unit_box(1);
@@ -335,6 +352,7 @@ TEST(FissionPowerSourceTest, AppliesTimeMultiplierAtUpdateTime)
     EXPECT_THROW(registry.update(context), std::invalid_argument);
 }
 
+/** @brief Verifies that the reserved fission source rejects generic registry operations. */
 TEST(FissionPowerSourceTest, SpecializedNameCannotUseGenericOperations)
 {
     auto mesh = make_unit_box(1);

@@ -1,6 +1,12 @@
 /**
  * @file testRadiolyticGasModelMultiRank.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief MPI consistency tests for the radiolytic gas model.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include <gtest/gtest.h>
@@ -31,6 +37,8 @@ testing::Environment* const kokkos_environment =
 
 /**
  * @brief Sheng two-population options used by distributed inventory tests.
+ *
+ * @return Configured Sheng-model options.
  */
 SimpleFluid::RadiolyticGasOptions sheng_options()
 {
@@ -55,6 +63,9 @@ SimpleFluid::RadiolyticGasOptions sheng_options()
 
 /**
  * @brief Create water-like material fields on the distributed test mesh.
+ *
+ * @param mesh Mesh owning the material fields.
+ * @return Initialized water-property fields.
  */
 SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
     const SimpleFluid::SP<MeshType>& mesh)
@@ -71,6 +82,10 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
 
 /**
  * @brief Sum a scalar diagnostic over all ranks in the mesh communicator.
+ *
+ * @param mesh Mesh providing the communicator.
+ * @param local_value Local rank contribution.
+ * @return Global sum across ranks.
  */
 double global_sum(const MeshType& mesh, double local_value)
 {
@@ -86,6 +101,9 @@ double global_sum(const MeshType& mesh, double local_value)
 
 /**
  * @brief Compute a distributed cell-volume integral for a cell field.
+ *
+ * @param field Cell field to integrate.
+ * @return Global volume integral.
  */
 double global_integral(const FieldType& field)
 {
@@ -103,6 +121,9 @@ double global_integral(const FieldType& field)
 
 /**
  * @brief Verify that a replicated diagnostic has the same value on every rank.
+ *
+ * @param mesh Mesh providing the communicator.
+ * @param value Replicated value to compare.
  */
 void expect_same_on_all_ranks(const MeshType& mesh, double value)
 {
@@ -216,6 +237,7 @@ TEST(RadiolyticGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
     }
 }
 
+/** @brief Verify finite-Courant free-surface escape is globally conservative. */
 TEST(RadiolyticGasModelMultiRankTest,
      ConservesFiniteCourantFreeSurfaceEscape)
 {
@@ -298,6 +320,7 @@ TEST(RadiolyticGasModelMultiRankTest,
         *mesh, statistics.cumulative_escaped_bubble_count);
 }
 
+/** @brief Verify clipped-cell diagnostics are reduced over every rank. */
 TEST(RadiolyticGasModelMultiRankTest, ReducesClippedCellCountGlobally)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(

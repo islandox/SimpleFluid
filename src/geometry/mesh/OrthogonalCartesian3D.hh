@@ -47,12 +47,14 @@ public:
     using Vec3 = typename Base::Vec3;
     using BoundaryFaceBatch = typename Base::BoundaryFaceBatch;
 
+    /** @brief Cartesian coordinate aliases for the generic I/J/K axes. */
     enum Dimension : uint8_t
     {
         X = I,
         Y = J,
         Z = K
     };
+    /** @brief Cartesian aliases for coordinate-normal face orientations. */
     enum FaceOrientation : uint8_t
     {
         X_FACE = I_FACE,
@@ -62,6 +64,13 @@ public:
 
     static constexpr cell_id_t invalid_cell_id() noexcept { return {}; }
 
+    /**
+     * @brief Construct a Cartesian mesh from X, Y, and Z edge coordinates.
+     * @param cell_edges Strictly increasing coordinate edges for each axis.
+     * @throws std::invalid_argument If an axis has too few, non-finite, or
+     *         non-increasing edges.
+     * @throws std::overflow_error If entity counts exceed supported ID ranges.
+     */
     explicit OrthogonalCartesian3D(
         const Vec3D<Arr<real_t>>& cell_edges);
 

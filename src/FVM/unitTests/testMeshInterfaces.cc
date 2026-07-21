@@ -190,6 +190,7 @@ SemiStructured make_semi_structured()
 
 } // namespace
 
+/** @brief Verifies mesh identifier conversion and identifier-based queries. */
 TEST(MeshInterfacesTest, ConvertsIdentifiersAndQueriesById)
 {
     expect_identifier_conversion_interface(make_cartesian());
@@ -197,6 +198,7 @@ TEST(MeshInterfacesTest, ConvertsIdentifiersAndQueriesById)
     expect_identifier_conversion_interface(make_semi_structured());
 }
 
+/** @brief Verifies mesh implementations support finite-volume geometry helpers. */
 TEST(MeshInterfacesTest, SupportsFiniteVolumeGeometryHelpers)
 {
     expect_fvm_geometry_helpers(make_cartesian());

@@ -47,6 +47,10 @@ Topology make_topology(
 
 } // namespace
 
+/**
+ * @brief Verifies owner/neighbor queries and boundary classification for a
+ * nonperiodic orthogonal topology.
+ */
 TEST(OrthoMeshTopoTest, QueriesNonPeriodicOwnerAndNeighborCells)
 {
     const auto topology = make_topology();
@@ -74,6 +78,7 @@ TEST(OrthoMeshTopoTest, QueriesNonPeriodicOwnerAndNeighborCells)
     EXPECT_FALSE(topology.is_boundary_face(k_interior));
 }
 
+/** @brief Verifies physical faces are grouped into named boundary batches. */
 TEST(OrthoMeshTopoTest, BuildsBoundaryFaceBatches)
 {
     const auto topology = make_topology();
@@ -98,6 +103,10 @@ TEST(OrthoMeshTopoTest, BuildsBoundaryFaceBatches)
     EXPECT_THROW(topology.boundary_batch_name(6), std::out_of_range);
 }
 
+/**
+ * @brief Verifies interior-face and cell-neighbor batches are cached with
+ * stable, expected connectivity.
+ */
 TEST(OrthoMeshTopoTest, CachesInteriorBatchAndCellNeighbors)
 {
     const Topology topology(
@@ -125,6 +134,7 @@ TEST(OrthoMeshTopoTest, CachesInteriorBatchAndCellNeighbors)
             {0, 0, 1}}));
 }
 
+/** @brief Verifies face adjacency wraps in periodic coordinate dimensions. */
 TEST(OrthoMeshTopoTest, WrapsPeriodicDimensions)
 {
     const auto topology = make_topology(true, true, true);
@@ -159,6 +169,10 @@ TEST(OrthoMeshTopoTest, WrapsPeriodicDimensions)
             {0, 0, 1}}));
 }
 
+/**
+ * @brief Verifies one-cell coordinate dimensions retain valid boundary and
+ * neighbor topology.
+ */
 TEST(OrthoMeshTopoTest, HandlesSingleCellDimensions)
 {
     const Topology non_periodic(

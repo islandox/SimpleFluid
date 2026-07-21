@@ -32,6 +32,16 @@ namespace SimpleFluid::FVM
 namespace detail
 {
 
+/**
+ * @brief Reconstruct scalar gradients with optional boundary samples.
+ * @tparam Pack Tpetra type pack used by the fields and mesh.
+ * @param field Scalar field to differentiate.
+ * @param boundary_condition Optional boundary-condition provider.
+ * @param boundary_value Optional boundary-value provider.
+ * @param[out] gradients Reconstructed cell gradients.
+ * @param cached_boundary_locations Optional precomputed boundary-face lookup.
+ * @throws std::invalid_argument if fields or cached locations use another mesh.
+ */
 template<TpetraTypePack Pack>
 void scalar_cell_gradient(
     const CellField<Pack>& field,

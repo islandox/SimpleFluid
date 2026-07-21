@@ -1,7 +1,13 @@
 /**
  * @file constant_power_cylinder_vessel.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Cylinder vessel smoke example with uniform fission power,
  *        radiolytic gas, and boiling.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 
 #include "examples/ExampleRunner.hh"

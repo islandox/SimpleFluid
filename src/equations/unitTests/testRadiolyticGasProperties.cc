@@ -1,3 +1,14 @@
+/**
+ * @file testRadiolyticGasProperties.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Tests radiolytic gas option parsing and pure property functions.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
 #include <gtest/gtest.h>
 
 #include "equations/RadiolyticGasProperties.hh"
@@ -12,6 +23,7 @@ namespace
 
 namespace Physics = SimpleFluid::RadiolyticGasPhysics;
 
+/** @brief Verifies the expected scaling of the ideal-gas radiolytic source. */
 TEST(RadiolyticGasPropertiesTest, IdealGasSourceHasExpectedScaling)
 {
     const auto base = Physics::ideal_gas_alpha_source(
@@ -41,6 +53,7 @@ TEST(RadiolyticGasPropertiesTest, IdealGasSourceHasExpectedScaling)
         base / 3.0);
 }
 
+/** @brief Verifies rejection of invalid thermodynamic property inputs. */
 TEST(RadiolyticGasPropertiesTest, RejectsInvalidThermodynamicInputs)
 {
     EXPECT_THROW(
@@ -57,6 +70,7 @@ TEST(RadiolyticGasPropertiesTest, RejectsInvalidThermodynamicInputs)
         std::invalid_argument);
 }
 
+/** @brief Verifies monotonic Henry-law and Laplace-pressure terms. */
 TEST(RadiolyticGasPropertiesTest, HenryAndLaplaceTermsAreMonotone)
 {
     const auto low_pressure =
@@ -72,6 +86,7 @@ TEST(RadiolyticGasPropertiesTest, HenryAndLaplaceTermsAreMonotone)
     EXPECT_GT(small_bubble, low_pressure);
 }
 
+/** @brief Verifies the radiolytic pressure correction against published reference data. */
 TEST(RadiolyticGasPropertiesTest, PublishedPressureCorrectionRegression)
 {
     EXPECT_NEAR(
@@ -83,6 +98,7 @@ TEST(RadiolyticGasPropertiesTest, PublishedPressureCorrectionRegression)
         Physics::pressure_nucleation_correction(101325.0, 101325.0));
 }
 
+/** @brief Verifies SI concentration units in the Winter LET correlation. */
 TEST(RadiolyticGasPropertiesTest, WinterLetUsesMolPerCubicMetre)
 {
     constexpr double temperature = 298.15;
@@ -102,6 +118,7 @@ TEST(RadiolyticGasPropertiesTest, WinterLetUsesMolPerCubicMetre)
         Physics::mean_fission_fragment_let(temperature, 1.0));
 }
 
+/** @brief Verifies SI concentration units in the Sheng surface-tension correlation. */
 TEST(RadiolyticGasPropertiesTest, ShengSurfaceTensionUsesMolPerCubicMetre)
 {
     constexpr double temperature_celsius = 25.0;
@@ -118,6 +135,7 @@ TEST(RadiolyticGasPropertiesTest, ShengSurfaceTensionUsesMolPerCubicMetre)
         1.0e-15);
 }
 
+/** @brief Verifies range checking in the Winter yield correction. */
 TEST(RadiolyticGasPropertiesTest, WinterYieldCorrectionChecksRange)
 {
     EXPECT_THROW(
@@ -130,6 +148,7 @@ TEST(RadiolyticGasPropertiesTest, WinterYieldCorrectionChecksRange)
         std::invalid_argument);
 }
 
+/** @brief Verifies Hughmark-correlation branches and validity constraints. */
 TEST(RadiolyticGasPropertiesTest, HughmarkBranchesAndValidity)
 {
     const auto low =
@@ -148,6 +167,7 @@ TEST(RadiolyticGasPropertiesTest, HughmarkBranchesAndValidity)
         std::invalid_argument);
 }
 
+/** @brief Verifies that the Celata bubble-rise velocity balances drag. */
 TEST(RadiolyticGasPropertiesTest, CelataRiseVelocityBalancesDrag)
 {
     constexpr double radius = 1.0e-3;
@@ -175,6 +195,7 @@ TEST(RadiolyticGasPropertiesTest, CelataRiseVelocityBalancesDrag)
         std::abs(result.residual), 1.0e-9 * velocity_scale);
 }
 
+/** @brief Verifies that the computed bubble radius satisfies the equation of state. */
 TEST(RadiolyticGasPropertiesTest, BubbleRadiusSolvesEos)
 {
     constexpr double pressure = 101325.0;
@@ -201,6 +222,7 @@ TEST(RadiolyticGasPropertiesTest, BubbleRadiusSolvesEos)
     EXPECT_GT(larger.radius, result.radius);
 }
 
+/** @brief Verifies expected bubble-radius trends with thermodynamic state. */
 TEST(RadiolyticGasPropertiesTest, BubbleRadiusTrendsWithState)
 {
     constexpr double pressure = 101325.0;
@@ -231,6 +253,7 @@ TEST(RadiolyticGasPropertiesTest, BubbleRadiusTrendsWithState)
     EXPECT_LT(more_bubbles.radius, base.radius);
 }
 
+/** @brief Verifies reconstruction of void fraction and characteristic radius. */
 TEST(RadiolyticGasPropertiesTest, VoidAndCharacteristicRadiusReconstruct)
 {
     const auto micro_void =
@@ -250,6 +273,7 @@ TEST(RadiolyticGasPropertiesTest, VoidAndCharacteristicRadiusReconstruct)
         0.0);
 }
 
+/** @brief Verifies parsing of flat runtime correlation selectors. */
 TEST(RadiolyticGasPropertiesTest, ParsesFlatRuntimeSelectors)
 {
     SimpleFluid::Database database;
@@ -272,6 +296,7 @@ TEST(RadiolyticGasPropertiesTest, ParsesFlatRuntimeSelectors)
     EXPECT_DOUBLE_EQ(options.alpha_max, 0.95);
 }
 
+/** @brief Verifies that enabled radiolysis requires yield and rate-limit inputs. */
 TEST(RadiolyticGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
 {
     SimpleFluid::Database missing;

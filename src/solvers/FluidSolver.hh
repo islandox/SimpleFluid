@@ -36,6 +36,8 @@ namespace SimpleFluid
  *
  * Derived fluid solvers can override the momentum hooks while reusing field
  * ownership, pressure-velocity coupling, time stepping, and solution output.
+ *
+ * @tparam Pack Tpetra type pack used for distributed solver storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class FluidSolver
@@ -102,6 +104,7 @@ public:
     void write_solution_vtu(const std::string& filename) const;
 
 protected:
+    /** @brief Tag selecting deferred registration of a momentum equation. */
     struct DeferredMomentumEquationTag {};
 
     FluidSolver(SP<const MeshHandle<Pack>> mesh,

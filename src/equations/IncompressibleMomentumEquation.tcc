@@ -18,6 +18,12 @@
 namespace SimpleFluid
 {
 
+/**
+ * @brief Construct an incompressible momentum equation on a mesh.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param mesh Computational mesh.
+ * @throws std::invalid_argument if @p mesh is null.
+ */
 template<TpetraTypePack Pack>
 IncompressibleMomentumEquation<Pack>::IncompressibleMomentumEquation(
     SP<const mesh_type> mesh)
@@ -26,6 +32,16 @@ IncompressibleMomentumEquation<Pack>::IncompressibleMomentumEquation(
 {
 }
 
+/**
+ * @brief Validate fields, time-step options, and cached boundary data.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param correction_field Optional lagged correction field.
+ * @throws std::invalid_argument if an input violates the transport contract.
+ */
 template<TpetraTypePack Pack>
 void IncompressibleMomentumEquation<Pack>::validate_transport_inputs(
     const velocity_field_type& old_velocity,
@@ -63,6 +79,17 @@ void IncompressibleMomentumEquation<Pack>::validate_transport_inputs(
     }
 }
 
+/**
+ * @brief Assemble velocity transport with no explicit acceleration source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param correction_field Optional lagged correction field.
+ * @return Assembled vector transport system.
+ * @throws std::invalid_argument if an input violates the transport contract.
+ */
 template<TpetraTypePack Pack>
 auto IncompressibleMomentumEquation<Pack>::assemble_system(
     const velocity_field_type& old_velocity,
@@ -81,6 +108,18 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         zero_source, correction_field);
 }
 
+/**
+ * @brief Assemble velocity transport with a caller acceleration source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param right_hand_source Per-cell acceleration provider.
+ * @param correction_field Optional lagged correction field.
+ * @return Assembled vector transport system.
+ * @throws std::invalid_argument if an input violates the transport contract.
+ */
 template<TpetraTypePack Pack>
 auto IncompressibleMomentumEquation<Pack>::assemble_system(
     const velocity_field_type& old_velocity,
@@ -134,6 +173,19 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
     return system;
 }
 
+/**
+ * @brief Advance velocity with no explicit acceleration source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param[out] velocity Updated velocity field.
+ * @param linear_options Linear-solver configuration.
+ * @return Aggregated linear-solve statistics.
+ * @throws std::invalid_argument if an input violates the transport contract.
+ * @throws std::runtime_error if a velocity solve fails or is non-finite.
+ */
 template<TpetraTypePack Pack>
 auto IncompressibleMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
@@ -153,6 +205,20 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
         velocity, zero_source, linear_options);
 }
 
+/**
+ * @brief Advance velocity with a caller acceleration source.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param[out] velocity Updated velocity field.
+ * @param right_hand_source Per-cell acceleration provider.
+ * @param linear_options Linear-solver configuration.
+ * @return Aggregated linear-solve statistics.
+ * @throws std::invalid_argument if an input violates the transport contract.
+ * @throws std::runtime_error if a velocity solve fails or is non-finite.
+ */
 template<TpetraTypePack Pack>
 auto IncompressibleMomentumEquation<Pack>::advance_velocity(
     const velocity_field_type& old_velocity,
@@ -256,6 +322,21 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
     return summary;
 }
 
+/**
+ * @brief Assemble material-dependent incompressible momentum transport.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param dynamic_viscosity Cell dynamic-viscosity field.
+ * @param reference_density Constant density used to normalize momentum.
+ * @param acceleration_source Per-cell acceleration provider.
+ * @param correction_field Optional lagged correction field.
+ * @param boundary_dynamic_viscosity Optional boundary viscosity cache.
+ * @return Assembled physical momentum system.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ */
 template<TpetraTypePack Pack>
 auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
     const velocity_field_type& old_velocity,
@@ -343,6 +424,23 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
     return system;
 }
 
+/**
+ * @brief Advance material-dependent incompressible momentum transport.
+ * @tparam Pack Tpetra type pack used by the equation.
+ * @param old_velocity Accepted velocity from the previous step.
+ * @param face_fluxes Oriented volumetric face fluxes.
+ * @param velocity_boundary_cache Cached boundary velocities.
+ * @param options Transport and non-orthogonal-correction options.
+ * @param dynamic_viscosity Cell dynamic-viscosity field.
+ * @param reference_density Constant density used to normalize momentum.
+ * @param[out] velocity Updated velocity field.
+ * @param acceleration_source Per-cell acceleration provider.
+ * @param linear_options Linear-solver configuration.
+ * @param boundary_dynamic_viscosity Optional boundary viscosity cache.
+ * @return Aggregated linear-solve statistics.
+ * @throws std::invalid_argument if fields or physical inputs are invalid.
+ * @throws std::runtime_error if a velocity solve fails or is non-finite.
+ */
 template<TpetraTypePack Pack>
 auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
     const velocity_field_type& old_velocity,

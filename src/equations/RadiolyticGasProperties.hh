@@ -1,6 +1,12 @@
 /**
  * @file RadiolyticGasProperties.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
  * @brief Configuration and pure property functions for radiolytic gas models.
+ * @version 0.1
+ * @date 2026-07-21
+ *
+ * @copyright Copyright (c) 2026
+ *
  */
 #pragma once
 

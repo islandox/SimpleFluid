@@ -211,6 +211,7 @@ public:
         const Teuchos::RCP<const comm_type>& comm);
 
 private:
+    /** @brief Distributed graph rows and referenced column cell IDs. */
     struct PartitionGraph
     {
         std::vector<GO> row_gids;
@@ -218,6 +219,7 @@ private:
         std::vector<GO> column_gids;
     };
 
+    /** @brief Owned-first ordering of rebuilt local mesh entities. */
     struct LocalEntityOrder
     {
         std::vector<size_t> owned_cells;

@@ -23,6 +23,16 @@
 namespace SimpleFluid::Meshes
 {
 
+/**
+ * @brief Couple rank-local geometry with global indexing and Tpetra maps.
+ * @tparam GeometryMesh Rank-local CRTP geometry mesh type.
+ * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
+ * @param mesh Rank-local geometry shared with the wrapper.
+ * @param indexer Owned-first local/global entity indexer.
+ * @param comm Communicator used to construct distributed maps.
+ * @throws std::invalid_argument If the mesh is null or its layout differs
+ *         from the indexer.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 PartitionedMesh<GeometryMesh, Pack>::PartitionedMesh(
     SP<const mesh_type> mesh,
@@ -36,6 +46,15 @@ PartitionedMesh<GeometryMesh, Pack>::PartitionedMesh(
     initialize_maps(comm ? comm : Tpetra::getDefaultComm());
 }
 
+/**
+ * @brief Translate a cell's geometry face IDs to local ordinals.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param cell_local_id Local cell ordinal.
+ * @return Local ordinals of faces bounding the cell.
+ * @throws std::out_of_range If the cell ordinal is invalid.
+ * @throws std::overflow_error If a face ordinal cannot be represented.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 std::vector<typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type>
 PartitionedMesh<GeometryMesh, Pack>::faces(
@@ -49,6 +68,14 @@ PartitionedMesh<GeometryMesh, Pack>::faces(
     return result;
 }
 
+/**
+ * @brief Return the local owner-cell ordinal of a face.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @return Owner-cell ordinal.
+ * @throws std::out_of_range If the face ordinal is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type
 PartitionedMesh<GeometryMesh, Pack>::owner_cell(
@@ -57,6 +84,14 @@ PartitionedMesh<GeometryMesh, Pack>::owner_cell(
     return adjacent_cell(face_local_id, true);
 }
 
+/**
+ * @brief Return the local neighbor-cell ordinal of a face.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @return Neighbor ordinal, or @ref invalid_local_id for an exterior face.
+ * @throws std::out_of_range If the face ordinal is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type
 PartitionedMesh<GeometryMesh, Pack>::neighbor_cell(
@@ -65,6 +100,16 @@ PartitionedMesh<GeometryMesh, Pack>::neighbor_cell(
     return adjacent_cell(face_local_id, false);
 }
 
+/**
+ * @brief Return the cell across a face from a supplied adjacent cell.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param cell_local_id One adjacent cell ordinal.
+ * @return The other cell, or @ref invalid_local_id at an exterior boundary.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ * @throws std::out_of_range If the face ordinal is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type
 PartitionedMesh<GeometryMesh, Pack>::opposite_cell(
@@ -85,6 +130,16 @@ PartitionedMesh<GeometryMesh, Pack>::opposite_cell(
         "Cell is not adjacent to requested face.");
 }
 
+/**
+ * @brief Return the opposite cell using the mesh's already-wrapped topology.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param cell_local_id One adjacent cell ordinal.
+ * @return Opposite local cell ordinal.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ * @throws std::out_of_range If the face ordinal is invalid.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type
 PartitionedMesh<GeometryMesh, Pack>::opposite_or_periodic_neighbor_cell(
@@ -94,6 +149,13 @@ PartitionedMesh<GeometryMesh, Pack>::opposite_or_periodic_neighbor_cell(
     return opposite_cell(face_local_id, cell_local_id);
 }
 
+/**
+ * @brief Compute a face area vector in the stored owner orientation.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param local_id Local face ordinal.
+ * @return Unit normal multiplied by face area.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::Vec3
 PartitionedMesh<GeometryMesh, Pack>::face_area_vector(
@@ -102,6 +164,15 @@ PartitionedMesh<GeometryMesh, Pack>::face_area_vector(
     return face_normal(local_id) * face_area(local_id);
 }
 
+/**
+ * @brief Orient a face unit normal outward from an adjacent cell.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param cell_local_id Adjacent cell ordinal.
+ * @return Outward unit normal.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::Vec3
 PartitionedMesh<GeometryMesh, Pack>::face_normal_outward(
@@ -120,6 +191,15 @@ PartitionedMesh<GeometryMesh, Pack>::face_normal_outward(
         "Cell is not adjacent to requested face.");
 }
 
+/**
+ * @brief Compute a face area vector outward from an adjacent cell.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param cell_local_id Adjacent cell ordinal.
+ * @return Outward unit normal multiplied by face area.
+ * @throws std::invalid_argument If the cell is not adjacent to the face.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::Vec3
 PartitionedMesh<GeometryMesh, Pack>::face_area_vector_outward(
@@ -130,6 +210,13 @@ PartitionedMesh<GeometryMesh, Pack>::face_area_vector_outward(
          * face_area(face_local_id);
 }
 
+/**
+ * @brief Measure the distance between cells adjacent to an interior face.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @return Cell-center distance, or zero for an exterior face.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 real_t PartitionedMesh<GeometryMesh, Pack>::face_cell_center_distance(
     local_ordinal_type face_local_id) const
@@ -143,6 +230,15 @@ real_t PartitionedMesh<GeometryMesh, Pack>::face_cell_center_distance(
           - cell_centroid(owner_cell(face_local_id))).norm();
 }
 
+/**
+ * @brief Form the vector from a cell center to its opposite neighbor center.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param cell_local_id Adjacent cell ordinal.
+ * @return Vector from @p cell_local_id to the opposite cell.
+ * @throws std::invalid_argument If the cell is not adjacent or the face is exterior.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::Vec3
 PartitionedMesh<GeometryMesh, Pack>::cell_center_vector(
@@ -158,6 +254,14 @@ PartitionedMesh<GeometryMesh, Pack>::cell_center_vector(
     return cell_centroid(other) - cell_centroid(cell_local_id);
 }
 
+/**
+ * @brief Measure distance from a cell centroid to a face centroid.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param cell_local_id Local cell ordinal.
+ * @return Euclidean centroid-to-face distance.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 real_t PartitionedMesh<GeometryMesh, Pack>::cell_to_face_distance(
     local_ordinal_type face_local_id,
@@ -167,6 +271,14 @@ real_t PartitionedMesh<GeometryMesh, Pack>::cell_to_face_distance(
           - cell_centroid(cell_local_id)).norm();
 }
 
+/**
+ * @brief Require a non-null geometry mesh pointer.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Geometry pointer to validate.
+ * @return The validated pointer.
+ * @throws std::invalid_argument If @p mesh is null.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 SP<const GeometryMesh>
 PartitionedMesh<GeometryMesh, Pack>::require_mesh(
@@ -180,6 +292,12 @@ PartitionedMesh<GeometryMesh, Pack>::require_mesh(
     return mesh;
 }
 
+/**
+ * @brief Verify geometry counts against the local/global indexer layout.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @throws std::invalid_argument If any entity count or owned prefix differs.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 void PartitionedMesh<GeometryMesh, Pack>::validate_layout() const
 {
@@ -194,6 +312,16 @@ void PartitionedMesh<GeometryMesh, Pack>::validate_layout() const
     }
 }
 
+/**
+ * @brief Translate a geometry-adjacent cell ID to a local ordinal.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param face_local_id Local face ordinal.
+ * @param owner Select the owner when true, otherwise the neighbor.
+ * @return Adjacent cell ordinal, or @ref invalid_local_id when absent.
+ * @throws std::out_of_range If the face ordinal is invalid.
+ * @throws std::overflow_error If the cell ordinal cannot be represented.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 typename PartitionedMesh<GeometryMesh, Pack>::local_ordinal_type
 PartitionedMesh<GeometryMesh, Pack>::adjacent_cell(
@@ -210,6 +338,16 @@ PartitionedMesh<GeometryMesh, Pack>::adjacent_cell(
     return checked_local(mesh().cell_local_id(cell));
 }
 
+/**
+ * @brief Create a noncontiguous Tpetra map from local global IDs.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @tparam CommPtr Teuchos communicator pointer type.
+ * @param comm Communicator shared by the map.
+ * @param globals Global IDs represented on this rank.
+ * @return Constructed Tpetra map.
+ * @throws std::overflow_error If the local element count cannot be represented.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 template<class CommPtr>
 Teuchos::RCP<const typename PartitionedMesh<GeometryMesh, Pack>::map_type>
@@ -227,6 +365,12 @@ PartitionedMesh<GeometryMesh, Pack>::make_map(
         comm));
 }
 
+/**
+ * @brief Translate geometry boundary batches into rank-local face ordinals.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @throws std::overflow_error If a face ordinal cannot be represented.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 void PartitionedMesh<GeometryMesh, Pack>::initialize_boundary_batches()
 {
@@ -263,6 +407,13 @@ void PartitionedMesh<GeometryMesh, Pack>::initialize_boundary_batches()
     }
 }
 
+/**
+ * @brief Construct owned, overlap, global, and boundary Tpetra maps.
+ * @tparam GeometryMesh Rank-local geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param comm Communicator shared by the maps.
+ * @throws std::overflow_error If a local count cannot be represented.
+ */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 void PartitionedMesh<GeometryMesh, Pack>::initialize_maps(
     const Teuchos::RCP<const typename Pack::comm_type>& comm)

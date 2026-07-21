@@ -584,6 +584,7 @@ bool cell_has_exterior_face(const MeshType& mesh,
 
 } // namespace
 
+/** @brief Verifies face-sampled affine velocity has the exact discrete divergence. */
 TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
 {
     auto mesh = make_unit_box_mesh();
@@ -615,6 +616,7 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
     }
 }
 
+/** @brief Verifies exact affine-velocity divergence on a skewed prism mesh. */
 TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSkewedPrisms)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
@@ -673,6 +675,7 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
     }
 }
 
+/** @brief Verifies the sampled Taylor-Green vortex is discretely divergence-free. */
 TEST(FvmAnalyticalSolutionsTest, TaylorGreenVortexIsDiscreteDivergenceFree)
 {
     auto mesh = make_taylor_green_mesh();
@@ -1062,6 +1065,7 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
     options.tolerance = 1.0e-12;
     options.max_iterations = 500;
 
+    /** @brief Non-orthogonal treatment and its explicit corrector count. */
     struct TreatmentCase
     {
         SimpleFluid::FVM::NonOrthogonalTreatment treatment;

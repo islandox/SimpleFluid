@@ -63,6 +63,12 @@ void append_value(std::ostream& output, const Value& value)
     output << value;
 }
 
+/**
+ * @brief Append a CSV-escaped string to an output stream.
+ *
+ * @param output Output stream receiving the field.
+ * @param value String field to escape and append.
+ */
 void append_value(std::ostream& output, const std::string& value)
 {
     output << csv_escape(value);

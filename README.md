@@ -200,6 +200,11 @@ simulation with VTU output.
 
 ## Build
 
+Maintainers and contributors should also read
+[`MAINTENANCE.md`](MAINTENANCE.md) for architecture boundaries, focused test
+commands, extension paths, numerical review checks, profiling, and Doxygen
+generation.
+
 ### Prerequisites
 
 - C++23 compiler (GCC ≥ 13 or Clang ≥ 17)
