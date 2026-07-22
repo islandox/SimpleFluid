@@ -18,6 +18,15 @@ using ::SimpleFluid::BoundaryCondition;
 using ::SimpleFluid::BoundaryConditionMap;
 using ::SimpleFluid::BoundaryConditionSet;
 using ::SimpleFluid::BoundaryConditionType;
+using ::SimpleFluid::VectorBoundaryCondition;
+using ::SimpleFluid::VectorBoundaryConditionMap;
+using ::SimpleFluid::LinearPreconditioner;
+using ::SimpleFluid::LinearSolveStatistics;
+using ::SimpleFluid::LinearSolveSummary;
+using ::SimpleFluid::LinearSolverOptions;
+using ::SimpleFluid::BelosLinearSolver;
+using ::SimpleFluid::solve_linear_system;
+using ::SimpleFluid::to_string;
 using ::SimpleFluid::cache_boundary_conditions;
 }
 
