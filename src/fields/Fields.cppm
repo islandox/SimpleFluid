@@ -13,32 +13,28 @@ module;
 
 export module SimpleFluid.Fields;
 
+export import SimpleFluid.Mesh;
+
 export namespace SimpleFluid
 {
 using ::SimpleFluid::AnyFieldStored;
-using ::SimpleFluid::Arr;
 using ::SimpleFluid::BoundaryFaceField;
 using ::SimpleFluid::BoundaryFaceLocation;
 using ::SimpleFluid::CellField;
 using ::SimpleFluid::CellFieldBase;
 using ::SimpleFluid::CellLocation;
-using ::SimpleFluid::DefaultTpetraTypes;
 using ::SimpleFluid::FaceField;
 using ::SimpleFluid::FaceFieldBase;
 using ::SimpleFluid::FaceLocation;
 using ::SimpleFluid::Field;
 using ::SimpleFluid::FieldStored;
-using ::SimpleFluid::Mesh;
 using ::SimpleFluid::ScalarBoundaryFaceFieldDescriptor;
 using ::SimpleFluid::ScalarBoundaryFaceFieldStored;
 using ::SimpleFluid::ScalarCellFieldDescriptor;
 using ::SimpleFluid::ScalarCellFieldStored;
 using ::SimpleFluid::ScalarFaceFieldDescriptor;
 using ::SimpleFluid::ScalarFaceFieldStored;
-using ::SimpleFluid::SP;
 using ::SimpleFluid::TensorCellField;
-using ::SimpleFluid::TpetraTypePack;
-using ::SimpleFluid::TpetraTypes;
 using ::SimpleFluid::VectorBoundaryFaceFieldDescriptor;
 using ::SimpleFluid::VectorBoundaryFaceFieldStored;
 using ::SimpleFluid::VectorCellField;
@@ -47,14 +43,4 @@ using ::SimpleFluid::VectorCellFieldStored;
 using ::SimpleFluid::VectorFaceField;
 using ::SimpleFluid::VectorFaceFieldDescriptor;
 using ::SimpleFluid::VectorFaceFieldStored;
-using ::SimpleFluid::real_t;
-using ::SimpleFluid::vec3;
-}
-
-// Keep the dependencies of exported CrsMatrix specializations reachable when
-// Clang instantiates them through the Fields and FVM module boundary.
-export namespace Tpetra::MMdetails
-{
-using ::Tpetra::MMdetails::KernelWrappers;
-using ::Tpetra::MMdetails::KernelWrappers2;
 }
