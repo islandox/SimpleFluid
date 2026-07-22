@@ -62,12 +62,13 @@ alpha_max
 initial_alpha_g
 alpha_collapse_time
 alpha_diffusivity
-constant_slip_velocity  # reserved; the low-order scalar model requires 0
 ```
 
 The low-order scalar void model does not yet have an advective transport
-path, so it rejects a nonzero `constant_slip_velocity` instead of silently
-ignoring it. Bubble-population transport has its own operational rise-velocity
+path. Direct `ScalarVoidFractionOptions` therefore reject a nonzero reserved
+`constant_slip_velocity`, while the scalar model's flat database parser does
+not consume that key. In a shared flat database, `constant_slip_velocity`
+belongs to the bubble-population model's operational rise-velocity
 configuration.
 
 Material feedback keys:
@@ -154,8 +155,8 @@ iteration driver are intentionally deferred.
 - Wall boiling uses a prescribed heat flux and does not implement RPI heat
   flux partitioning.
 - Viscosity feedback currently supports a constant model with a safety floor.
-- Precursor transport currently implements liquid-weighted local
-  source/decay; advective/diffusive transport is reserved for the next
-  refinement.
+- Precursor transport currently implements liquid-weighted source, decay, and
+  diffusion. Liquid-velocity advection and group inventory diagnostics are
+  reserved for the next refinement.
 - Full SILENE validation is deferred until point-kinetics or neutronics
   coupling is available.

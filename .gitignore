@@ -73,7 +73,7 @@ Testing/
 
 # Machine-specific files
 .vscode
-CMakePresets.json
+CMakeUserPresets.json
 
 # Copilot / Codex settings
 .github/prompts

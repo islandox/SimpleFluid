@@ -24,7 +24,7 @@ set(GHOST_SYNC_MULTI_RANK_CTEST_FILE
 if(NOT SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0 AND SIMPLEFLUID_MAX_TEST_PROCS LESS 4)
   set(_ghost_4proc_test "")
 else()
-  set(_ghost_4proc_test "add_test(GhostSyncMultiRank_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\" --gtest_filter=\"*LargeMesh*\")\nset_tests_properties(GhostSyncMultiRank_4procs PROPERTIES PROCESSORS 4)\n")
+  set(_ghost_4proc_test "add_test(GhostSyncMultiRank_4procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"4\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\" --gtest_filter=\"*LargeMesh*\")\nset_tests_properties(GhostSyncMultiRank_4procs PROPERTIES PROCESSORS 4 LABELS mpi)\n")
 endif()
 if(CMAKE_CONFIGURATION_TYPES)
   file(WRITE "${GHOST_SYNC_MULTI_RANK_CTEST_FILE}"
@@ -34,12 +34,12 @@ if(CMAKE_CONFIGURATION_TYPES)
        "  set(_ghost_sync_config \"Debug\")\n"
        "endif()\n"
        "add_test(GhostSyncMultiRank_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\")\n"
-       "set_tests_properties(GhostSyncMultiRank_2procs PROPERTIES PROCESSORS 2)\n"
+       "set_tests_properties(GhostSyncMultiRank_2procs PROPERTIES PROCESSORS 2 LABELS mpi)\n"
        "${_ghost_4proc_test}")
 else()
   file(WRITE "${GHOST_SYNC_MULTI_RANK_CTEST_FILE}"
        "add_test(GhostSyncMultiRank_2procs \"${MPIEXEC_EXECUTABLE}\" \"${MPIEXEC_NUMPROC_FLAG}\" \"2\" \"${GHOST_SYNC_MULTI_RANK_EXECUTABLE}\")\n"
-       "set_tests_properties(GhostSyncMultiRank_2procs PROPERTIES PROCESSORS 2)\n"
+       "set_tests_properties(GhostSyncMultiRank_2procs PROPERTIES PROCESSORS 2 LABELS mpi)\n"
        "${_ghost_4proc_test}")
 endif()
 set_property(DIRECTORY APPEND PROPERTY

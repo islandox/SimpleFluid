@@ -58,7 +58,7 @@ Mesh<Pack>::Mesh()
 template<TpetraTypePack Pack>
 void Mesh<Pack>::assign_contiguous_tpetra_gids()
 {
-    if (!d_tpetra_gid_to_mesh_gid.empty())
+    if (d_contiguous_tpetra_gids_assigned)
     {
         return; // already assigned
     }
@@ -66,6 +66,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
     const auto comm = Tpetra::getDefaultComm();
     const int myrank = comm->getRank();
     const int nranks = comm->getSize();
+    MPI_Comm raw_comm = MPI_COMM_NULL;
 
     const int my_owned_count = static_cast<int>(d_owned_cell_global_ids.size());
 
@@ -79,7 +80,7 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
         {
             throw std::runtime_error("assign_contiguous_tpetra_gids requires an MPI communicator.");
         }
-        const auto raw_comm = static_cast<MPI_Comm>(*(mpi_comm->getRawMpiComm()));
+        raw_comm = static_cast<MPI_Comm>(*(mpi_comm->getRawMpiComm()));
 
         MPI_Allgather(&my_owned_count, 1, MPI_INT,
                       all_owned_counts.data(), 1, MPI_INT, raw_comm);
@@ -118,10 +119,22 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
     const int my_ghost_count = static_cast<int>(d_ghost_cell_global_ids.size());
     d_ghost_cell_tpetra_gids.resize(static_cast<size_t>(my_ghost_count));
 
-    if (my_ghost_count > 0 && nranks > 1)
+    int any_rank_has_ghosts = my_ghost_count > 0 ? 1 : 0;
+    if (nranks > 1)
     {
-        auto* mpi_comm_ptr = dynamic_cast<const Teuchos::MpiComm<int>*>(comm.get());
-        const auto raw_comm = static_cast<MPI_Comm>(*(mpi_comm_ptr->getRawMpiComm()));
+        int global_has_ghosts = 0;
+        MPI_Allreduce(
+            &any_rank_has_ghosts,
+            &global_has_ghosts,
+            1,
+            MPI_INT,
+            MPI_MAX,
+            raw_comm);
+        any_rank_has_ghosts = global_has_ghosts;
+    }
+
+    if (any_rank_has_ghosts != 0 && nranks > 1)
+    {
 
         // --- Gather all owned mesh GIDs from all processes ---
         std::vector<int> displs(static_cast<size_t>(nranks), 0);
@@ -202,6 +215,22 @@ void Mesh<Pack>::assign_contiguous_tpetra_gids()
             d_mesh_gid_to_tpetra_gid[mesh_gid] = tpetra_gid;
         }
     }
+
+    d_contiguous_tpetra_gids_assigned = true;
+}
+
+/**
+ * @brief Clear contiguous Tpetra cell-ID state before rebuilding a mesh.
+ * @tparam Pack Tpetra type pack.
+ */
+template<TpetraTypePack Pack>
+void Mesh<Pack>::reset_contiguous_tpetra_gids() noexcept
+{
+    d_ghost_cell_tpetra_gids.clear();
+    d_mesh_gid_to_tpetra_gid.clear();
+    d_tpetra_gid_to_mesh_gid.clear();
+    d_tpetra_gid_offset = 0;
+    d_contiguous_tpetra_gids_assigned = false;
 }
 
 /**

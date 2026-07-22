@@ -195,6 +195,7 @@ private:
     using Base::make_vectorV3D_view;
     using Base::make_vector_view;
     using Base::prefer_owned_face_owners;
+    using Base::reset_contiguous_tpetra_gids;
 
     STKMeshContainer d_stk;
 };
