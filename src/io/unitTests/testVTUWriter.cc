@@ -12,9 +12,13 @@
 #include <gtest/gtest.h>
 #include "io/VTUWriter.hh"
 
+#include <algorithm>
+#include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -32,11 +36,26 @@ using namespace SimpleFluid;
 // ---------------------------------------------------------------------------
 std::string read_file(const std::string& filename)
 {
-    std::ifstream in(filename);
+    std::ifstream in(filename, std::ios::binary);
     EXPECT_TRUE(in.is_open()) << "Failed to open " << filename;
     std::ostringstream oss;
     oss << in.rdbuf();
     return oss.str();
+}
+
+/** @brief Decode one little-endian arithmetic value from a binary string. */
+template<class Value>
+Value read_little_endian(const std::string& content, size_t offset)
+{
+    std::array<unsigned char, sizeof(Value)> bytes{};
+    std::memcpy(bytes.data(), content.data() + offset, bytes.size());
+    if constexpr (std::endian::native == std::endian::big)
+    {
+        std::reverse(bytes.begin(), bytes.end());
+    }
+    Value value{};
+    std::memcpy(&value, bytes.data(), bytes.size());
+    return value;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +106,28 @@ TEST(VTUWriter, ConstructionAndBasicAccess)
     EXPECT_EQ(writer.num_cells(), 1UL);
 }
 
+/** @brief Verifies immutable topology is shared until a writer mutates it. */
+TEST(VTUWriter, SharesImmutableTopologyAcrossWriters)
+{
+    auto topology = VTUWriter::make_topology(
+        {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}},
+        {0, 1, 2},
+        {3},
+        {5});
+    VTUWriter first(topology);
+    VTUWriter second(topology);
+
+    ASSERT_TRUE(first.topology_handle());
+    ASSERT_TRUE(second.topology_handle());
+    EXPECT_EQ(first.topology_handle().get(), second.topology_handle().get());
+    EXPECT_EQ(first.num_points(), 3UL);
+
+    first.set_points({{2, 0, 0}, {3, 0, 0}, {2, 1, 0}});
+    EXPECT_FALSE(first.topology_handle());
+    EXPECT_EQ(first.num_points(), 3UL);
+    EXPECT_EQ(second.topology_handle().get(), topology.get());
+}
+
 // ===========================================================================
 // Cell data addition
 // ===========================================================================
@@ -135,6 +176,49 @@ TEST(VTUWriter, CellDataAddition)
         tt.writer.write(tt.filename);
         EXPECT_TRUE(std::filesystem::exists(tt.filename));
     }
+}
+
+/** @brief Verifies schema keys cover ordered names, types, and components. */
+TEST(VTUWriter, CellDataSchemaKeyDescribesParallelMetadata)
+{
+    VTUWriter scalar;
+    scalar.add_scalar_cell_data("field;with:delimiters", {1.0});
+
+    VTUWriter same_schema;
+    same_schema.add_scalar_cell_data(
+        "field;with:delimiters", {2.0, 3.0});
+    EXPECT_EQ(
+        scalar.cell_data_schema_key(),
+        same_schema.cell_data_schema_key());
+
+    VTUWriter different_name;
+    different_name.add_scalar_cell_data("another_field", {1.0});
+    EXPECT_NE(
+        scalar.cell_data_schema_key(),
+        different_name.cell_data_schema_key());
+
+    VTUWriter different_type;
+    different_type.add_int_cell_data("field;with:delimiters", {1});
+    EXPECT_NE(
+        scalar.cell_data_schema_key(),
+        different_type.cell_data_schema_key());
+
+    VTUWriter different_components;
+    different_components.add_vector_cell_data(
+        "field;with:delimiters", {{1.0, 0.0, 0.0}});
+    EXPECT_NE(
+        scalar.cell_data_schema_key(),
+        different_components.cell_data_schema_key());
+
+    VTUWriter reordered;
+    reordered.add_scalar_cell_data("second", {1.0});
+    reordered.add_scalar_cell_data("first", {1.0});
+    VTUWriter ordered;
+    ordered.add_scalar_cell_data("first", {1.0});
+    ordered.add_scalar_cell_data("second", {1.0});
+    EXPECT_NE(
+        ordered.cell_data_schema_key(),
+        reordered.cell_data_schema_key());
 }
 
 // ===========================================================================
@@ -203,6 +287,94 @@ TEST(VTUWriter, OutputCellDataContent)
     }
 }
 
+/** @brief Verifies appended binary metadata, offsets, and payload lengths. */
+TEST(VTUWriter, AppendedBinaryOutput)
+{
+    TwoTriangles tt;
+    tt.writer.add_scalar_cell_data("temperature", {300.0, 350.0});
+    tt.writer.write(
+        tt.filename, VTUWriter::Encoding::AppendedBinary);
+    const auto content = read_file(tt.filename);
+
+    const auto appended = content.find("<AppendedData encoding=\"raw\">\n_");
+    ASSERT_NE(appended, std::string::npos);
+    const auto metadata = content.substr(0, appended);
+    EXPECT_NE(metadata.find("header_type=\"UInt64\""), std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "Name=\"temperature\" format=\"appended\" offset=\"0\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "format=\"appended\" offset=\"24\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "Name=\"connectivity\" format=\"appended\" offset=\"128\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "Name=\"offsets\" format=\"appended\" offset=\"184\""),
+              std::string::npos);
+    EXPECT_NE(metadata.find(
+                  "Name=\"types\" format=\"appended\" offset=\"208\""),
+              std::string::npos);
+
+    const auto payload = appended
+                       + std::string("<AppendedData encoding=\"raw\">\n_")
+                             .size();
+    ASSERT_GE(content.size(), payload + 218UL);
+    EXPECT_EQ(read_little_endian<std::uint64_t>(content, payload), 16UL);
+    EXPECT_EQ(read_little_endian<std::uint64_t>(content, payload + 24), 96UL);
+    EXPECT_EQ(read_little_endian<std::uint64_t>(content, payload + 128), 48UL);
+    EXPECT_EQ(read_little_endian<std::uint64_t>(content, payload + 184), 16UL);
+    EXPECT_EQ(read_little_endian<std::uint64_t>(content, payload + 208), 2UL);
+    EXPECT_DOUBLE_EQ(
+        read_little_endian<double>(content, payload + sizeof(std::uint64_t)),
+        300.0);
+    EXPECT_DOUBLE_EQ(
+        read_little_endian<double>(
+            content, payload + sizeof(std::uint64_t) + sizeof(double)),
+        350.0);
+}
+
+/** @brief Verifies PVTU schemas and collision-free piece references. */
+TEST(VTUWriter, ParallelIndexOutput)
+{
+    TwoTriangles tt;
+    tt.writer.add_scalar_cell_data("temperature", {300.0, 350.0});
+    tt.writer.add_vector_cell_data(
+        "velocity", {{1, 0, 0}, {0, 1, 0}});
+    const std::string index_filename = "test_vtu_two_tris.pvtu";
+    const std::vector<std::string> pieces{
+        VTUWriter::rank_piece_filename(tt.filename, 0, 2),
+        VTUWriter::rank_piece_filename(tt.filename, 1, 2)};
+
+    tt.writer.write_parallel_index(index_filename, pieces);
+    const auto content = read_file(index_filename);
+    EXPECT_NE(content.find("type=\"PUnstructuredGrid\""),
+              std::string::npos);
+    EXPECT_NE(content.find("Name=\"temperature\""), std::string::npos);
+    EXPECT_NE(content.find("Name=\"velocity\""), std::string::npos);
+    EXPECT_NE(content.find("Source=\"test_vtu_two_tris_rank0.vtu\""),
+              std::string::npos);
+    EXPECT_NE(content.find("Source=\"test_vtu_two_tris_rank1.vtu\""),
+              std::string::npos);
+    EXPECT_EQ(
+        VTUWriter::parallel_index_filename(tt.filename),
+        index_filename);
+    std::filesystem::remove(index_filename);
+
+    const std::string nested_index = "test_vtu_nested_index.pvtu";
+    tt.writer.write_parallel_index(
+        nested_index,
+        {"nested/piece_rank0.vtu", "nested/piece_rank1.vtu"});
+    const auto nested_content = read_file(nested_index);
+    EXPECT_NE(nested_content.find(
+                  "Source=\"nested/piece_rank0.vtu\""),
+              std::string::npos);
+    EXPECT_NE(nested_content.find(
+                  "Source=\"nested/piece_rank1.vtu\""),
+              std::string::npos);
+    std::filesystem::remove(nested_index);
+}
+
 // ===========================================================================
 // Validation — error paths
 // ===========================================================================
@@ -213,6 +385,16 @@ TEST(VTUWriter, OutputCellDataContent)
  */
 TEST(VTUWriter, ValidationErrors)
 {
+    EXPECT_THROW(
+        VTUWriter::rank_piece_filename("solution.vtu", 0, 0),
+        std::invalid_argument);
+    EXPECT_THROW(
+        VTUWriter::rank_piece_filename("solution.vtu", -1, 1),
+        std::invalid_argument);
+    EXPECT_THROW(
+        VTUWriter::rank_piece_filename("solution.vtu", 1, 1),
+        std::invalid_argument);
+
     // Mismatched offsets and types
     {
         VTUWriter writer;
@@ -240,6 +422,24 @@ TEST(VTUWriter, ValidationErrors)
         tt.writer.add_scalar_cell_data("T", {300.0});
         EXPECT_THROW(tt.writer.write(tt.filename), std::runtime_error);
     }
+    // Connectivity without cells
+    {
+        VTUWriter writer;
+        writer.set_points({{0, 0, 0}});
+        writer.set_cells({0}, {}, {});
+        EXPECT_THROW(
+            writer.write("connectivity_without_cells.vtu"),
+            std::runtime_error);
+    }
+    // Connectivity outside the point array
+    {
+        VTUWriter writer;
+        writer.set_points({{0, 0, 0}});
+        writer.set_cells({1}, {1}, {1});
+        EXPECT_THROW(
+            writer.write("invalid_connectivity.vtu"),
+            std::runtime_error);
+    }
     // Unwritable path
     {
         TwoTriangles tt;
@@ -258,15 +458,16 @@ TEST(VTUWriter, ValidationErrors)
  */
 TEST(VTUWriter, EdgeCases)
 {
-    // Write with zero points
+    // Empty mesh with zero points and cells
     {
         VTUWriter writer;
-        writer.set_cells({0, 1, 2}, {3}, {5});
+        writer.set_cells({}, {}, {});
         const std::string fname = "test_zero_points.vtu";
         writer.write(fname);
         EXPECT_TRUE(std::filesystem::exists(fname));
         const auto content = read_file(fname);
         EXPECT_NE(content.find("NumberOfPoints=\"0\""), std::string::npos);
+        EXPECT_NE(content.find("NumberOfCells=\"0\""), std::string::npos);
         std::filesystem::remove(fname);
     }
     // Single hex cell

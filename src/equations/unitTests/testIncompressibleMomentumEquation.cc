@@ -14,7 +14,11 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
+
+#include <array>
+#include <vector>
 
 namespace
 {
@@ -178,4 +182,104 @@ TEST(IncompressibleMomentumEquationTest,
         local_matrix_entry(*physical_viscosity_system.matrix, 0, 0),
         transient,
         1.0e-12);
+}
+
+/** @brief Repeated assembly reuses persistent storage without changing values. */
+TEST(IncompressibleMomentumEquationTest,
+     RepeatedNonOrthogonalAssemblyIsNumericallyEquivalent)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    VectorFieldType velocity(mesh, "cached_momentum_velocity");
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_value(
+            cell_lid,
+            {0.5 + center.x * center.y,
+             -0.25 + center.y * center.z,
+             center.x - 0.5 * center.z});
+    }
+    velocity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        (void)batch;
+        boundary_conditions.velocity[mesh->boundary_batch_name(batch_id)] =
+            {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.2;
+    options.kinematic_viscosity = 0.7;
+    options.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid;
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    const auto first = equation.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options, &velocity);
+    std::vector<std::array<Pack::scalar_type, 3>> first_rhs(
+        mesh->num_owned_cells());
+    for (size_t component = 0; component < 3; ++component)
+    {
+        const auto values = first.rhs->getData(component);
+        for (size_t row = 0; row < first_rhs.size(); ++row)
+        {
+            first_rhs[row][component] = values[row];
+        }
+    }
+    std::vector<Pack::scalar_type> first_matrix(
+        mesh->num_owned_cells() * mesh->num_local_cells());
+    for (MeshType::local_ordinal_type row = 0;
+         row < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++row)
+    {
+        for (MeshType::local_ordinal_type column = 0;
+             column < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_local_cells());
+             ++column)
+        {
+            first_matrix[
+                static_cast<size_t>(row) * mesh->num_local_cells()
+                + static_cast<size_t>(column)] =
+                    local_matrix_entry(*first.matrix, row, column);
+        }
+    }
+    const auto* const matrix_storage = first.matrix.get();
+
+    const auto second = equation.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options, &velocity);
+    EXPECT_EQ(second.matrix.get(), matrix_storage);
+    for (MeshType::local_ordinal_type row = 0;
+         row < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++row)
+    {
+        for (size_t component = 0; component < 3; ++component)
+        {
+            EXPECT_NEAR(
+                second.rhs->getData(component)[row],
+                first_rhs[static_cast<size_t>(row)][component],
+                1.0e-12);
+        }
+        for (MeshType::local_ordinal_type column = 0;
+             column < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_local_cells());
+             ++column)
+        {
+            EXPECT_NEAR(
+                local_matrix_entry(*second.matrix, row, column),
+                first_matrix[
+                    static_cast<size_t>(row) * mesh->num_local_cells()
+                    + static_cast<size_t>(column)],
+                1.0e-12);
+        }
+    }
 }

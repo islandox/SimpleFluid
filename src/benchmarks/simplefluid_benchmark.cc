@@ -60,6 +60,11 @@ using FieldType = SimpleFluid::CellField<Pack>;
 using STKMeshType = SimpleFluid::STKMesh<Pack>;
 using Comm = Teuchos::Comm<int>;
 
+constexpr std::string_view lid_driven_cavity_case_name =
+    "lid_driven_cavity";
+constexpr std::string_view legacy_pressure_velocity_case_name =
+    "pressure_velocity";
+
 /**
  * @brief Mesh dimensions for a benchmark case (cells in each direction).
  */
@@ -77,7 +82,7 @@ enum class CaseSelection
 {
     All,
     Diffusion,
-    PressureVelocity
+    LidDrivenCavity
 };
 
 /**
@@ -88,7 +93,7 @@ struct Options
     std::string preset = "debug-small";
     CaseSelection selection = CaseSelection::All;
     Dimensions diffusion{6, 6, 6};
-    Dimensions pressure_velocity{8, 8, 1};
+    Dimensions lid_driven_cavity{8, 8, 1};
     std::vector<double> shears{0.0, 0.2, 0.4, 0.6};
     int repetitions = 1;
     int warmups = 0;
@@ -221,7 +226,7 @@ void apply_preset(Options& options,
     {
         options.selection = CaseSelection::All;
         options.diffusion = {6, 6, 6};
-        options.pressure_velocity = {8, 8, 1};
+        options.lid_driven_cavity = {8, 8, 1};
         options.repetitions = 3;
         options.warmups = 1;
         return;
@@ -230,23 +235,23 @@ void apply_preset(Options& options,
     {
         options.selection = CaseSelection::All;
         options.diffusion = {64, 64, 64};
-        options.pressure_velocity = {64, 64, 8};
+        options.lid_driven_cavity = {64, 64, 8};
         options.repetitions = 3;
         options.warmups = 1;
         return;
     }
     if (preset == "mpi-strong")
     {
-        options.selection = CaseSelection::PressureVelocity;
-        options.pressure_velocity = {64, 64, 8};
+        options.selection = CaseSelection::LidDrivenCavity;
+        options.lid_driven_cavity = {64, 64, 8};
         options.repetitions = 3;
         options.warmups = 1;
         return;
     }
     if (preset == "mpi-weak")
     {
-        options.selection = CaseSelection::PressureVelocity;
-        options.pressure_velocity = {32 * mpi_ranks, 32, 8};
+        options.selection = CaseSelection::LidDrivenCavity;
+        options.lid_driven_cavity = {32 * mpi_ranks, 32, 8};
         options.repetitions = 3;
         options.warmups = 1;
         return;
@@ -337,9 +342,10 @@ Options parse_options(int argc, char** argv, int mpi_ranks)
             {
                 options.selection = CaseSelection::Diffusion;
             }
-            else if (value == "pressure_velocity")
+            else if (value == lid_driven_cavity_case_name
+                     || value == legacy_pressure_velocity_case_name)
             {
-                options.selection = CaseSelection::PressureVelocity;
+                options.selection = CaseSelection::LidDrivenCavity;
             }
             else
             {
@@ -351,21 +357,21 @@ Options parse_options(int argc, char** argv, int mpi_ranks)
             const auto value =
                 parse_int(require_value(argc, argv, i, argument), argument);
             options.diffusion.nx = value;
-            options.pressure_velocity.nx = value;
+            options.lid_driven_cavity.nx = value;
         }
         else if (argument == "--ny")
         {
             const auto value =
                 parse_int(require_value(argc, argv, i, argument), argument);
             options.diffusion.ny = value;
-            options.pressure_velocity.ny = value;
+            options.lid_driven_cavity.ny = value;
         }
         else if (argument == "--nz")
         {
             const auto value =
                 parse_int(require_value(argc, argv, i, argument), argument);
             options.diffusion.nz = value;
-            options.pressure_velocity.nz = value;
+            options.lid_driven_cavity.nz = value;
         }
         else if (argument == "--shear")
         {
@@ -418,11 +424,13 @@ Options parse_options(int argc, char** argv, int mpi_ranks)
             std::cout
                 << "simplefluid_benchmark [--preset debug-small|release-profile|"
                    "mpi-strong|mpi-weak] [--case all|diffusion_nonorthogonal|"
-                   "pressure_velocity] [--nx N --ny N --nz N] [--shear S] "
+                   "lid_driven_cavity] [--nx N --ny N --nz N] [--shear S] "
                    "[--repetitions N] [--warmups N] [--output PATH] "
                    "[--baseline PATH] "
                    "[--configuration all|explicit|implicit|hybrid|coupled] "
-                   "[--scaling none|strong|weak]\n";
+                   "[--scaling none|strong|weak]\n"
+                   "  legacy case alias: pressure_velocity -> "
+                << lid_driven_cavity_case_name << '\n';
             std::exit(0);
         }
         else
@@ -904,7 +912,7 @@ SimpleFluid::Benchmark::Record run_diffusion(
  *
  * @return Populated BoundaryConditionSet for the cavity benchmark.
  */
-SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
+SimpleFluid::BoundaryConditionSet lid_driven_cavity_boundary_conditions()
 {
     SimpleFluid::BoundaryConditionSet conditions;
     for (const auto* name :
@@ -930,7 +938,7 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
 }
 
 /**
- * @brief Run the pressure-velocity coupling benchmark case.
+ * @brief Run the lid-driven-cavity pressure-velocity benchmark case.
  *
  * Solves the lid-driven cavity problem with configurable coupling,
  * non-orthogonal treatment, and preconditioner.
@@ -941,7 +949,7 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
  * @param repetition Repetition index within the run.
  * @return Populated benchmark Record with timing and convergence metrics.
  */
-SimpleFluid::Benchmark::Record run_pressure_velocity(
+SimpleFluid::Benchmark::Record run_lid_driven_cavity(
     const Options& options,
     const std::string& run_id,
     const SolverConfiguration& configuration,
@@ -952,7 +960,7 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
     const auto total_start = MPI_Wtime();
     const auto setup_start = total_start;
     SimpleFluid::MeshFactory factory(
-        make_box_database(options.pressure_velocity));
+        make_box_database(options.lid_driven_cavity));
     auto mesh = factory.build<Pack>();
     long long local_lid_faces = 0;
     long long local_owned_lid_faces = 0;
@@ -977,17 +985,17 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
     if (global_sum(comm, local_lid_faces) == 0)
     {
         throw std::runtime_error(
-            "Pressure-velocity benchmark mesh has no ymax boundary faces.");
+            "Lid-driven-cavity benchmark mesh has no ymax boundary faces.");
     }
     if (global_sum(comm, local_owned_lid_faces) == 0)
     {
         throw std::runtime_error(
-            "Pressure-velocity benchmark mesh has no owned ymax boundary faces.");
+            "Lid-driven-cavity benchmark mesh has no owned ymax boundary faces.");
     }
     if (global_sum(comm, local_lid_area) <= 0.0)
     {
         throw std::runtime_error(
-            "Pressure-velocity benchmark moving lid has zero area.");
+            "Lid-driven-cavity benchmark moving lid has zero area.");
     }
 
     SimpleFluid::TimeStepperOptions time_options;
@@ -1013,7 +1021,8 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
     linear_options.tolerance = 1.0e-10;
     linear_options.preconditioner = configuration.preconditioner;
 
-    const auto boundary_conditions = cavity_boundary_conditions();
+    const auto boundary_conditions =
+        lid_driven_cavity_boundary_conditions();
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, boundary_conditions);
@@ -1032,7 +1041,7 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
     if (global_sum(comm, local_lid_velocity) <= 0.0)
     {
         throw std::runtime_error(
-            "Pressure-velocity benchmark lost its moving-lid values.");
+            "Lid-driven-cavity benchmark lost its moving-lid values.");
     }
 
     SimpleFluid::BoussinesqSolver<Pack> solver(
@@ -1047,8 +1056,8 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
 
     const auto statistics = solver.last_step_statistics();
     auto record = base_record(
-        options, run_id, "pressure_velocity",
-        options.pressure_velocity, comm->getSize());
+        options, run_id, std::string(lid_driven_cavity_case_name),
+        options.lid_driven_cavity, comm->getSize());
     record.global_cells =
         static_cast<long long>(
             mesh->owned_cell_map()->getGlobalNumElements());
@@ -1198,18 +1207,27 @@ int main(int argc, char** argv)
              SimpleFluid::PressureVelocityCoupling::PISO,
              4, "MueLu"},
             {SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+             SimpleFluid::LinearPreconditioner::MueLu,
+             SimpleFluid::PressureVelocityCoupling::PISO,
+             0, "MueLu"},
+            {SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+             SimpleFluid::LinearPreconditioner::MueLu,
+             SimpleFluid::PressureVelocityCoupling::PISO,
+             4, "MueLu"}
+        }};
+        const std::array<SolverConfiguration, 4> cavity_configurations{{
+            {SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+             SimpleFluid::LinearPreconditioner::MueLu,
+             SimpleFluid::PressureVelocityCoupling::PISO,
+             4, "MueLu"},
+            {SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
              SimpleFluid::LinearPreconditioner::None,
              SimpleFluid::PressureVelocityCoupling::PISO,
              0, "none"},
             {SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
              SimpleFluid::LinearPreconditioner::None,
              SimpleFluid::PressureVelocityCoupling::PISO,
-             4, "none"}
-        }};
-        const std::array<SolverConfiguration, 4> pressure_configurations{{
-            diffusion_configurations[0],
-            diffusion_configurations[1],
-            diffusion_configurations[2],
+             4, "none"},
             {SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
              SimpleFluid::LinearPreconditioner::None,
              SimpleFluid::PressureVelocityCoupling::CoupledKrylov,
@@ -1251,10 +1269,10 @@ int main(int argc, char** argv)
         }
 
         if (options.selection == CaseSelection::All
-            || options.selection == CaseSelection::PressureVelocity)
+            || options.selection == CaseSelection::LidDrivenCavity)
         {
             for (const auto& configuration :
-                 pressure_configurations)
+                 cavity_configurations)
             {
                 if (!selected_configuration(options, configuration))
                 {
@@ -1264,7 +1282,7 @@ int main(int argc, char** argv)
                      warmup < options.warmups;
                      ++warmup)
                 {
-                    (void)run_pressure_velocity(
+                    (void)run_lid_driven_cavity(
                         options, run_id, configuration, -1);
                 }
                 for (int repetition = 0;
@@ -1272,7 +1290,7 @@ int main(int argc, char** argv)
                      ++repetition)
                 {
                     emit_record(
-                        run_pressure_velocity(
+                        run_lid_driven_cavity(
                             options, run_id, configuration,
                             repetition),
                         writer.get(), gate.get(), rank);

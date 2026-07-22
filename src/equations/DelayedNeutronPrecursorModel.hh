@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -163,6 +164,7 @@ public:
             throw std::invalid_argument(
                 "DelayedNeutronPrecursorModel requires a non-null mesh.");
         }
+        d_transport_geometry_cache.emplace(*d_mesh);
         configure(options);
     }
 
@@ -503,7 +505,12 @@ private:
                 boundary_value,
                 zero_source,
                 FVM::NonOrthogonalTreatment::Explicit,
-                &old_concentration);
+                &old_concentration,
+                Teuchos::null,
+                {},
+                {},
+                nullptr,
+                &*d_transport_geometry_cache);
             field_type solution(d_mesh, "precursor_diffusion_solution");
             const auto statistics =
                 d_transport_solver.solve_with_statistics(
@@ -565,6 +572,8 @@ private:
     }
 
     SP<const mesh_type> d_mesh;
+    std::optional<FVM::TransportGeometryCache<mesh_type>>
+        d_transport_geometry_cache;
     DelayedNeutronPrecursorOptions d_options;
     ArrReal d_decay_constants;
     ArrReal d_source_terms;

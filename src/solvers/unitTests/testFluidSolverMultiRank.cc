@@ -22,6 +22,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <system_error>
 
 namespace
 {
@@ -180,8 +185,347 @@ TEST(FluidSolverMultiRankTest, SolutionOutputContainsOwnedCellsOnly)
 
     ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
     ExposedFluidSolver solver(mesh, {});
-    const auto writer = solver.solution_writer();
-    EXPECT_EQ(writer.num_cells(), mesh->num_owned_cells());
+    const auto first_writer = solver.solution_writer();
+    const auto second_writer = solver.solution_writer();
+    EXPECT_EQ(first_writer.num_cells(), mesh->num_owned_cells());
+    ASSERT_TRUE(first_writer.topology_handle());
+    ASSERT_TRUE(second_writer.topology_handle());
+    EXPECT_EQ(
+        first_writer.topology_handle().get(),
+        second_writer.topology_handle().get());
+}
+
+/** @brief Verify distributed output publishes binary pieces and one PVTU index. */
+TEST(FluidSolverMultiRankTest, ParallelSolutionOutputPublishesIndex)
+{
+    auto mesh = distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    const auto rank_count = communicator->getSize();
+    if (rank_count < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+    const auto base_filename =
+        (std::filesystem::temp_directory_path()
+         / ("SimpleFluid_parallel_solution_"
+            + std::to_string(rank_count) + ".vtu"))
+            .string();
+    const auto piece_filename =
+        SimpleFluid::VTUWriter::rank_piece_filename(
+            base_filename, rank, rank_count);
+    const auto index_filename =
+        SimpleFluid::VTUWriter::parallel_index_filename(
+            base_filename);
+    std::error_code cleanup_error;
+    std::filesystem::remove(piece_filename, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+
+    solver.write_parallel_solution_vtu(base_filename);
+    EXPECT_TRUE(std::filesystem::exists(piece_filename));
+
+    if (rank == 0)
+    {
+        std::ifstream input(index_filename);
+        EXPECT_TRUE(input.good());
+        if (input.good())
+        {
+            const std::string contents(
+                (std::istreambuf_iterator<char>(input)),
+                std::istreambuf_iterator<char>());
+            EXPECT_NE(contents.find("PUnstructuredGrid"),
+                      std::string::npos);
+            EXPECT_NE(contents.find("Name=\"temperature\""),
+                      std::string::npos);
+            for (int piece_rank = 0;
+                 piece_rank < rank_count;
+                 ++piece_rank)
+            {
+                const auto source = std::filesystem::path(
+                    SimpleFluid::VTUWriter::rank_piece_filename(
+                        base_filename, piece_rank, rank_count))
+                                        .filename()
+                                        .string();
+                EXPECT_NE(contents.find(source), std::string::npos);
+            }
+        }
+        input.close();
+        EXPECT_FALSE(input.fail());
+    }
+
+    communicator->barrier();
+    cleanup_error.clear();
+    std::filesystem::remove(piece_filename, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+}
+
+/** @brief Reject rank-varying CellData before pieces or an index are written. */
+TEST(FluidSolverMultiRankTest, ParallelOutputRejectsRankVaryingCellDataSchema)
+{
+    auto mesh = distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    const auto rank_count = communicator->getSize();
+    if (rank_count < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    const auto base_filename =
+        (std::filesystem::temp_directory_path()
+         / ("SimpleFluid_parallel_schema_failure_"
+            + std::to_string(rank_count) + ".vtu"))
+            .string();
+    const auto piece_filename =
+        SimpleFluid::VTUWriter::rank_piece_filename(
+            base_filename, rank, rank_count);
+    const auto index_filename =
+        SimpleFluid::VTUWriter::parallel_index_filename(
+            base_filename);
+    std::error_code cleanup_error;
+    std::filesystem::remove(piece_filename, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+    // Deliberately violate the registry's cross-rank mutation contract to
+    // verify output catches the mismatch independently.
+    solver.add_temperature_source(
+        "qdot_rank_" + std::to_string(rank), 1.0);
+    SimpleFluid::SolutionOutputOptions output_options;
+    output_options.include_sources = true;
+    EXPECT_THROW(
+        solver.write_parallel_solution_vtu(
+            base_filename, output_options),
+        std::invalid_argument);
+
+    std::error_code exists_error;
+    EXPECT_FALSE(std::filesystem::exists(piece_filename, exists_error));
+    EXPECT_FALSE(exists_error);
+    if (rank == 0)
+    {
+        exists_error.clear();
+        EXPECT_FALSE(std::filesystem::exists(index_filename, exists_error));
+        EXPECT_FALSE(exists_error);
+    }
+    communicator->barrier();
+
+    cleanup_error.clear();
+    std::filesystem::remove(piece_filename, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+}
+
+/** @brief Reject rank-varying filenames and field-selection options. */
+TEST(FluidSolverMultiRankTest, ParallelOutputRejectsRankVaryingArguments)
+{
+    auto mesh = distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    const auto rank_count = communicator->getSize();
+    if (rank_count < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+    const auto base = std::filesystem::temp_directory_path()
+        / ("SimpleFluid_parallel_argument_failure_"
+           + std::to_string(rank_count));
+    const auto local_filename =
+        base.string() + "_rank" + std::to_string(rank) + ".vtu";
+    EXPECT_THROW(
+        solver.write_parallel_solution_vtu(local_filename),
+        std::invalid_argument);
+
+    SimpleFluid::SolutionOutputOptions output_options;
+    output_options.include_sources = rank == 0;
+    EXPECT_THROW(
+        solver.write_parallel_solution_vtu(
+            base.string() + ".vtu", output_options),
+        std::invalid_argument);
+
+    std::error_code cleanup_error;
+    std::filesystem::remove(
+        SimpleFluid::VTUWriter::rank_piece_filename(
+            local_filename, rank, rank_count),
+        cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    cleanup_error.clear();
+    const auto common_filename = base.string() + ".vtu";
+    std::filesystem::remove(
+        SimpleFluid::VTUWriter::rank_piece_filename(
+            common_filename, rank, rank_count),
+        cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove(
+            SimpleFluid::VTUWriter::parallel_index_filename(
+                local_filename),
+            cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+        cleanup_error.clear();
+        std::filesystem::remove(
+            SimpleFluid::VTUWriter::parallel_index_filename(
+                common_filename),
+            cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+}
+
+/** @brief Verify one rank's piece error is propagated before index output. */
+TEST(FluidSolverMultiRankTest, ParallelSolutionOutputFailureIsRankCoherent)
+{
+    auto mesh = distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    const auto rank_count = communicator->getSize();
+    if (rank_count < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    const auto base_filename =
+        (std::filesystem::temp_directory_path()
+         / ("SimpleFluid_parallel_solution_failure_"
+            + std::to_string(rank_count) + ".vtu"))
+            .string();
+    const auto piece_filename =
+        SimpleFluid::VTUWriter::rank_piece_filename(
+            base_filename, rank, rank_count);
+    const auto index_filename =
+        SimpleFluid::VTUWriter::parallel_index_filename(
+            base_filename);
+
+    std::error_code cleanup_error;
+    if (rank == 0)
+    {
+        std::filesystem::remove_all(piece_filename, cleanup_error);
+        cleanup_error.clear();
+        std::filesystem::remove(index_filename, cleanup_error);
+        cleanup_error.clear();
+        const auto directory_created =
+            std::filesystem::create_directory(
+                piece_filename, cleanup_error);
+        EXPECT_TRUE(directory_created);
+        EXPECT_FALSE(cleanup_error);
+    }
+    else
+    {
+        std::filesystem::remove(piece_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+    EXPECT_THROW(
+        solver.write_parallel_solution_vtu(base_filename),
+        std::exception);
+
+    cleanup_error.clear();
+    if (rank == 0)
+    {
+        std::filesystem::remove_all(piece_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+        cleanup_error.clear();
+        std::filesystem::remove(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    else
+    {
+        std::filesystem::remove(piece_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+}
+
+/** @brief Verify a rank-zero index error is propagated to every rank. */
+TEST(FluidSolverMultiRankTest, ParallelIndexOutputFailureIsRankCoherent)
+{
+    auto mesh = distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    const auto rank_count = communicator->getSize();
+    if (rank_count < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    const auto base_filename =
+        (std::filesystem::temp_directory_path()
+         / ("SimpleFluid_parallel_index_failure_"
+            + std::to_string(rank_count) + ".vtu"))
+            .string();
+    const auto piece_filename =
+        SimpleFluid::VTUWriter::rank_piece_filename(
+            base_filename, rank, rank_count);
+    const auto index_filename =
+        SimpleFluid::VTUWriter::parallel_index_filename(
+            base_filename);
+
+    std::error_code cleanup_error;
+    std::filesystem::remove(piece_filename, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove_all(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+        cleanup_error.clear();
+        const auto directory_created =
+            std::filesystem::create_directory(
+                index_filename, cleanup_error);
+        EXPECT_TRUE(directory_created);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
+
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+    EXPECT_THROW(
+        solver.write_parallel_solution_vtu(base_filename),
+        std::exception);
+
+    cleanup_error.clear();
+    std::filesystem::remove(piece_filename, cleanup_error);
+    EXPECT_FALSE(cleanup_error);
+    if (rank == 0)
+    {
+        cleanup_error.clear();
+        std::filesystem::remove_all(index_filename, cleanup_error);
+        EXPECT_FALSE(cleanup_error);
+    }
+    communicator->barrier();
 }
 
 /** @brief Verify coupled continuity residuals use a global reduction. */

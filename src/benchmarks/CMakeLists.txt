@@ -78,7 +78,7 @@ if(MPIEXEC_EXECUTABLE)
             "${MPIEXEC_NUMPROC_FLAG}" "2"
             "$<TARGET_FILE:simplefluid_benchmark>"
             --preset debug-small
-            --case pressure_velocity
+            --case lid_driven_cavity
             --warmups 1
             --repetitions 3
             --baseline "${CMAKE_CURRENT_SOURCE_DIR}/baselines/debug-small-mpi-2.csv"

@@ -318,6 +318,7 @@ auto PressureProjectionEquation<Pack>::project(
     FVM::pressure_weighted_face_fluxes(
         velocity,
         pressure,
+        d_face_flux_workspace.pressure_gradient(),
         time_step,
         velocity_boundary_cache,
         d_pressure_correction_boundary_conditions,

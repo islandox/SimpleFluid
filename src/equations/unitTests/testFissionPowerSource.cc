@@ -352,6 +352,41 @@ TEST(FissionPowerSourceTest, AppliesTimeMultiplierAtUpdateTime)
     EXPECT_THROW(registry.update(context), std::invalid_argument);
 }
 
+/** @brief Verifies a static fission profile does no per-step callback work. */
+TEST(FissionPowerSourceTest, ClearingTimeMultiplierLeavesStaticProfile)
+{
+    auto mesh = make_unit_box(1);
+    SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
+    SourceType source(mesh, registry);
+    source.initialize_constant(4.0);
+
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    const SimpleFluid::BoussinesqUpdateContext<Pack> context{
+        2.5, 7, *mesh, temperature, pressure, velocity};
+
+    int calls = 0;
+    source.set_time_multiplier(
+        [&](const auto&)
+        {
+            ++calls;
+            return 2.0;
+        });
+    registry.update(context);
+    EXPECT_EQ(calls, 1);
+    EXPECT_NEAR(source.integrated_power(), 8.0, 1.0e-12);
+
+    source.clear_time_multiplier();
+    registry.update(context);
+    EXPECT_EQ(calls, 1);
+    EXPECT_NEAR(source.integrated_power(), 4.0, 1.0e-12);
+
+    registry.update(context);
+    EXPECT_EQ(calls, 1);
+    EXPECT_NEAR(source.integrated_power(), 4.0, 1.0e-12);
+}
+
 /** @brief Verifies that the reserved fission source rejects generic registry operations. */
 TEST(FissionPowerSourceTest, SpecializedNameCannotUseGenericOperations)
 {

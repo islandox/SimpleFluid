@@ -32,6 +32,7 @@ TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
     SP<const mesh_type> mesh, BoundaryConditionMap boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh),
                                                        "TurbulenceScalarTransportEquation")),
+      d_transport_geometry_cache(*d_mesh),
       d_boundary_conditions(std::move(boundary_conditions)),
       d_unit_weight(d_mesh, scalar_type{1}, "turbulence_scalar_unit_weight")
 {
@@ -350,7 +351,8 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
         std::move(fixed_cell_value),
         boundary_overrides != nullptr
             ? boundary_overrides->boundary_diffusivity
-            : nullptr);
+            : nullptr,
+        &d_transport_geometry_cache);
     d_cached_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_diffusivities_positive)
     {

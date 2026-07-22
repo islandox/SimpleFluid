@@ -35,8 +35,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -87,6 +89,39 @@ struct CoupledPressureVelocityResult
     Scalar achieved_tolerance = {};
 };
 
+/**
+ * @brief Controls when coupled operator and solver setup is rebuilt.
+ *
+ * Immutable mesh maps and boundary-face locations are always retained for the
+ * solver lifetime. `OnOperatorGraphChange` additionally retains compatible
+ * matrix graphs, Schur products, preconditioners, and Belos manager state.
+ */
+enum class CoupledRebuildPolicy : std::uint8_t
+{
+    OnOperatorGraphChange = 0, ///< Reuse compatible graphs and numeric state.
+    Always                 = 1  ///< Rebuild operator-dependent setup each call.
+};
+
+/**
+ * @brief Observable counters for coupled setup reuse.
+ *
+ * The counters are intended for regression tests and lightweight runtime
+ * instrumentation. They do not participate in the numerical algorithm.
+ */
+struct CoupledPressureVelocityCacheStatistics
+{
+    size_t coupled_map_builds = 0;
+    size_t static_geometry_builds = 0;
+    size_t static_geometry_reuses = 0;
+    size_t matrix_graph_reuses = 0;
+    size_t schur_product_reuses = 0;
+    size_t preconditioner_builds = 0;
+    size_t preconditioner_numeric_reuses = 0;
+    size_t belos_solver_builds = 0;
+    size_t belos_solver_reuses = 0;
+    size_t preconditioner_scratch_allocations = 0;
+};
+
 namespace detail
 {
 
@@ -131,6 +166,99 @@ auto make_coupled_map(const Mesh<Pack>& mesh)
         block_size * mesh.num_owned_cells(),
         global_ordinal_type{0},
         comm));
+}
+
+/** @brief Matrix reset for cached-graph assembly. */
+template<TpetraTypePack Pack>
+struct PreparedCoupledMatrix
+{
+    Teuchos::RCP<typename Pack::matrix_type> matrix;
+    bool reused = false;
+};
+
+/**
+ * @brief Allocate a matrix or reset a compatible cached graph.
+ */
+template<TpetraTypePack Pack>
+PreparedCoupledMatrix<Pack> prepare_coupled_matrix(
+    const Teuchos::RCP<const typename Pack::map_type>& row_map,
+    const Teuchos::RCP<const typename Pack::map_type>& column_map,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    size_t entries_per_row)
+{
+    using matrix_type = typename Pack::matrix_type;
+
+    const auto compatible =
+        !cached_matrix.is_null()
+        && cached_matrix->isFillComplete()
+        && cached_matrix->getRowMap()->isSameAs(*row_map)
+        && cached_matrix->getDomainMap()->isSameAs(*row_map)
+        && (column_map.is_null()
+            || (!cached_matrix->getColMap().is_null()
+                && cached_matrix->getColMap()->isSameAs(*column_map)));
+    if (!compatible)
+    {
+        if (column_map.is_null())
+        {
+            return {
+                Teuchos::rcp(new matrix_type(row_map, entries_per_row)),
+                false};
+        }
+        return {
+            Teuchos::rcp(new matrix_type(
+                row_map, column_map, entries_per_row)),
+            false};
+    }
+
+    cached_matrix->resumeFill();
+    cached_matrix->setAllToScalar(typename Pack::scalar_type{});
+    return {std::move(cached_matrix), true};
+}
+
+/** @brief Insert into a fresh local graph or sum into a reused one. */
+template<TpetraTypePack Pack>
+void add_coupled_local_values(
+    const PreparedCoupledMatrix<Pack>& prepared,
+    typename Pack::local_ordinal_type row,
+    const Teuchos::ArrayView<const typename Pack::local_ordinal_type>& columns,
+    const Teuchos::ArrayView<const typename Pack::scalar_type>& values)
+{
+    if (!prepared.reused)
+    {
+        prepared.matrix->insertLocalValues(row, columns, values);
+        return;
+    }
+    const auto updated = prepared.matrix->sumIntoLocalValues(
+        row, columns, values);
+    if (updated != static_cast<typename Pack::local_ordinal_type>(
+                       columns.size()))
+    {
+        throw std::invalid_argument(
+            "Coupled cached matrix graph is incompatible with local assembly.");
+    }
+}
+
+/** @brief Insert into a fresh global graph or sum into a reused one. */
+template<TpetraTypePack Pack>
+void add_coupled_global_values(
+    const PreparedCoupledMatrix<Pack>& prepared,
+    typename Pack::global_ordinal_type row,
+    const Teuchos::ArrayView<const typename Pack::global_ordinal_type>& columns,
+    const Teuchos::ArrayView<const typename Pack::scalar_type>& values)
+{
+    if (!prepared.reused)
+    {
+        prepared.matrix->insertGlobalValues(row, columns, values);
+        return;
+    }
+    const auto updated = prepared.matrix->sumIntoGlobalValues(
+        row, columns, values);
+    if (updated != static_cast<typename Pack::local_ordinal_type>(
+                       columns.size()))
+    {
+        throw std::invalid_argument(
+            "Coupled cached matrix graph is incompatible with global assembly.");
+    }
 }
 
 /**
@@ -315,21 +443,25 @@ auto pressure_gradient_stencils(
  * @tparam Pack Tpetra type pack defining matrix and vector types.
  * @param gradient Gradient operator to scale.
  * @param inverse_diagonal Per-row inverse momentum diagonal.
- * @return Newly allocated scaled gradient matrix.
+ * @param cached_matrix Optional compatible matrix whose graph is reused.
+ * @return Scaled gradient matrix with refreshed numeric values.
  */
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 scaled_gradient_matrix(
     const typename Pack::matrix_type& gradient,
-    const typename Pack::vector_type& inverse_diagonal)
+    const typename Pack::vector_type& inverse_diagonal,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
 
-    auto scaled = Teuchos::rcp(new matrix_type(
+    const auto prepared = prepare_coupled_matrix<Pack>(
         gradient.getRowMap(), gradient.getColMap(),
-        gradient.getLocalMaxNumRowEntries()));
+        std::move(cached_matrix),
+        gradient.getLocalMaxNumRowEntries());
+    const auto& scaled = prepared.matrix;
     const auto diagonal = inverse_diagonal.getData();
     for (size_t row = 0; row < gradient.getLocalNumRows(); ++row)
     {
@@ -345,13 +477,30 @@ scaled_gradient_matrix(
             copied_columns[entry] = columns[entry];
             copied_values[entry] = diagonal[row] * values[entry];
         }
-        scaled->insertLocalValues(
-            static_cast<local_ordinal_type>(row),
+        add_coupled_local_values<Pack>(
+            prepared, static_cast<local_ordinal_type>(row),
             copied_columns(), copied_values());
     }
     scaled->fillComplete();
     return scaled;
 }
+
+/** @brief Persistent scratch matrices for Schur numeric updates. */
+template<TpetraTypePack Pack>
+struct CoupledSchurWorkspace
+{
+    Teuchos::RCP<typename Pack::vector_type> inverse_diagonal;
+    std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>
+        scaled_gradient;
+    std::array<Teuchos::RCP<typename Pack::matrix_type>, 3> product;
+
+    void clear()
+    {
+        inverse_diagonal = Teuchos::null;
+        scaled_gradient = {};
+        product = {};
+    }
+};
 
 /**
  * @brief Build the pressure Schur-complement approximation.
@@ -362,6 +511,9 @@ scaled_gradient_matrix(
  * @param divergence Cartesian velocity-divergence blocks.
  * @param pressure_stabilization Pressure stabilization block.
  * @param pressure_gauge_gid Optional pressure row fixed as the gauge.
+ * @param cached_schur Optional compatible Schur matrix to refresh.
+ * @param workspace Optional persistent scaled-gradient and product storage.
+ * @param reused_products Optional output set when every product was reused.
  * @return Assembled Schur-complement approximation.
  * @throws std::runtime_error if the momentum diagonal is singular.
  */
@@ -373,7 +525,10 @@ build_schur_approximation(
     const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& divergence,
     const typename Pack::matrix_type& pressure_stabilization,
     std::optional<typename Pack::global_ordinal_type>
-        pressure_gauge_gid)
+        pressure_gauge_gid,
+    Teuchos::RCP<typename Pack::matrix_type> cached_schur = Teuchos::null,
+    CoupledSchurWorkspace<Pack>* workspace = nullptr,
+    bool* reused_products = nullptr)
 {
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -381,7 +536,17 @@ build_schur_approximation(
     using scalar_type = typename Pack::scalar_type;
     using vector_type = typename Pack::vector_type;
 
-    vector_type inverse_diagonal(momentum.getRowMap(), true);
+    CoupledSchurWorkspace<Pack> local_workspace;
+    auto& active_workspace =
+        workspace == nullptr ? local_workspace : *workspace;
+    if (active_workspace.inverse_diagonal.is_null()
+        || !active_workspace.inverse_diagonal->getMap()->isSameAs(
+            *momentum.getRowMap()))
+    {
+        active_workspace.inverse_diagonal = Teuchos::rcp(
+            new vector_type(momentum.getRowMap(), true));
+    }
+    auto& inverse_diagonal = *active_workspace.inverse_diagonal;
     momentum.getLocalDiagCopy(inverse_diagonal);
     auto diagonal = inverse_diagonal.getDataNonConst();
     for (size_t row = 0; row < diagonal.size(); ++row)
@@ -394,68 +559,72 @@ build_schur_approximation(
         diagonal[row] = scalar_type{1} / diagonal[row];
     }
 
-    Teuchos::RCP<matrix_type> accumulated;
+    bool products_reused = true;
     for (size_t component = 0; component < gradient.size(); ++component)
     {
-        auto scaled =
-            scaled_gradient_matrix<Pack>(*gradient[component],
-                                         inverse_diagonal);
-        auto product = Teuchos::rcp(new matrix_type(
-            divergence[component]->getRowMap(), 32));
+        const auto had_scaled =
+            !active_workspace.scaled_gradient[component].is_null();
+        auto scaled = scaled_gradient_matrix<Pack>(
+            *gradient[component], inverse_diagonal,
+            active_workspace.scaled_gradient[component]);
+        active_workspace.scaled_gradient[component] = scaled;
+
+        auto& product = active_workspace.product[component];
+        const auto had_product = !product.is_null();
+        if (product.is_null())
+        {
+            product = Teuchos::rcp(new matrix_type(
+                divergence[component]->getRowMap(), 32));
+        }
         Tpetra::MatrixMatrix::Multiply(
             *divergence[component], false,
             *scaled, false,
             *product, true);
-
-        if (accumulated.is_null())
-        {
-            accumulated = std::move(product);
-        }
-        else
-        {
-            Teuchos::RCP<matrix_type> sum;
-            Tpetra::MatrixMatrix::Add(
-                *accumulated, false, scalar_type{1},
-                *product, false, scalar_type{1},
-                sum);
-            if (!sum->isFillComplete())
-            {
-                sum->fillComplete();
-            }
-            accumulated = std::move(sum);
-        }
+        products_reused = products_reused && had_scaled && had_product;
+    }
+    if (reused_products != nullptr)
+    {
+        *reused_products = products_reused;
     }
 
-    auto schur = Teuchos::rcp(new matrix_type(
-        accumulated->getRowMap(), 32));
-    const auto accumulated_col_map = accumulated->getColMap();
+    const auto prepared_schur = prepare_coupled_matrix<Pack>(
+        pressure_stabilization.getRowMap(), Teuchos::null,
+        std::move(cached_schur), 32);
+    const auto& schur = prepared_schur.matrix;
     const auto stabilization_col_map =
         pressure_stabilization.getColMap();
-    for (size_t row = 0; row < accumulated->getLocalNumRows(); ++row)
+    for (size_t row = 0;
+         row < pressure_stabilization.getLocalNumRows();
+         ++row)
     {
         const auto local_row = static_cast<local_ordinal_type>(row);
         const auto global_row =
-            accumulated->getRowMap()->getGlobalElement(local_row);
+            pressure_stabilization.getRowMap()->getGlobalElement(local_row);
         if (pressure_gauge_gid
             && global_row == *pressure_gauge_gid)
         {
             Teuchos::Array<global_ordinal_type> columns{global_row};
             Teuchos::Array<scalar_type> values{scalar_type{1}};
-            schur->insertGlobalValues(global_row, columns(), values());
+            add_coupled_global_values<Pack>(
+                prepared_schur, global_row, columns(), values());
             continue;
         }
 
         std::unordered_map<global_ordinal_type, scalar_type> row_values;
         typename matrix_type::local_inds_host_view_type local_columns;
         typename matrix_type::values_host_view_type local_values;
-        accumulated->getLocalRowView(
-            local_row, local_columns, local_values);
-        for (size_t entry = 0;
-             entry < local_columns.extent(0);
-             ++entry)
+        for (const auto& product : active_workspace.product)
         {
-            row_values[accumulated_col_map->getGlobalElement(
-                local_columns[entry])] -= local_values[entry];
+            product->getLocalRowView(
+                local_row, local_columns, local_values);
+            const auto product_col_map = product->getColMap();
+            for (size_t entry = 0;
+                 entry < local_columns.extent(0);
+                 ++entry)
+            {
+                row_values[product_col_map->getGlobalElement(
+                    local_columns[entry])] -= local_values[entry];
+            }
         }
 
         pressure_stabilization.getLocalRowView(
@@ -485,7 +654,8 @@ build_schur_approximation(
             columns.push_back(column);
             values.push_back(value);
         }
-        schur->insertGlobalValues(global_row, columns(), values());
+        add_coupled_global_values<Pack>(
+            prepared_schur, global_row, columns(), values());
     }
     schur->fillComplete();
     return schur;
@@ -493,6 +663,10 @@ build_schur_approximation(
 
 /**
  * @brief Apply a block-triangular velocity-pressure preconditioner.
+ *
+ * Scratch MultiVectors are resized only when the input column count changes.
+ * Packing and unpacking use the Tpetra device views. Like the underlying
+ * Ifpack2 and MueLu objects, one instance must not be applied concurrently.
  *
  * @tparam Pack Tpetra type pack defining operator and multivector types.
  */
@@ -512,6 +686,12 @@ public:
             typename Pack::local_ordinal_type,
             typename Pack::global_ordinal_type,
             typename Pack::node_type>;
+    using pressure_preconditioner_type =
+        MueLu::TpetraOperator<
+            scalar_type,
+            typename Pack::local_ordinal_type,
+            typename Pack::global_ordinal_type,
+            typename Pack::node_type>;
 
     CoupledSchurPreconditioner(
         Teuchos::RCP<const map_type> coupled_map,
@@ -521,13 +701,15 @@ public:
         Teuchos::RCP<matrix_type> schur)
         : d_coupled_map(std::move(coupled_map)),
           d_cell_map(std::move(cell_map)),
-          d_gradient(std::move(gradient))
+          d_momentum(std::move(momentum)),
+          d_gradient(std::move(gradient)),
+          d_schur(std::move(schur))
     {
         Teuchos::ParameterList momentum_parameters;
         momentum_parameters.set("relaxation: type", "Jacobi");
         momentum_parameters.set("relaxation: sweeps", 1);
         d_momentum_preconditioner =
-            Ifpack2::Factory::create("RELAXATION", momentum);
+            Ifpack2::Factory::create("RELAXATION", d_momentum);
         d_momentum_preconditioner->setParameters(momentum_parameters);
         d_momentum_preconditioner->initialize();
         d_momentum_preconditioner->compute();
@@ -539,14 +721,71 @@ public:
         pressure_parameters.sublist("smoother: params").set(
             "relaxation: type", "Jacobi");
         pressure_parameters.set("coarse: type", "RELAXATION");
+        pressure_parameters.set("reuse: type", "full");
         pressure_parameters.sublist("coarse: params").set(
             "relaxation: type", "Jacobi");
         pressure_parameters.sublist("coarse: params").set(
             "relaxation: sweeps", 4);
-        Teuchos::RCP<operator_type> pressure_operator = schur;
+        Teuchos::RCP<operator_type> pressure_operator = d_schur;
         d_pressure_preconditioner =
             MueLu::CreateTpetraPreconditioner(pressure_operator,
                                                pressure_parameters);
+    }
+
+    /**
+     * @brief Test whether new numeric operators share the cached graphs.
+     */
+    bool is_compatible(
+        const Teuchos::RCP<const matrix_type>& momentum,
+        const std::array<Teuchos::RCP<matrix_type>, 3>& gradient,
+        const Teuchos::RCP<matrix_type>& schur) const
+    {
+        if (momentum.is_null() || schur.is_null()
+            || momentum.getRawPtr() != d_momentum.getRawPtr()
+            || !same_graph(*d_momentum, *momentum)
+            || !same_graph(*d_schur, *schur))
+        {
+            return false;
+        }
+        for (size_t component = 0; component < d_gradient.size(); ++component)
+        {
+            if (gradient[component].is_null()
+                || !same_graph(*d_gradient[component],
+                               *gradient[component]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @brief Refresh numeric preconditioner state while retaining setup.
+     * @throws std::invalid_argument if an operator graph changed.
+     */
+    void update(
+        Teuchos::RCP<const matrix_type> momentum,
+        std::array<Teuchos::RCP<matrix_type>, 3> gradient,
+        Teuchos::RCP<matrix_type> schur)
+    {
+        if (!is_compatible(momentum, gradient, schur))
+        {
+            throw std::invalid_argument(
+                "CoupledSchurPreconditioner cannot reuse changed operator graphs.");
+        }
+
+        d_momentum_preconditioner->compute();
+        MueLu::ReuseTpetraPreconditioner(
+            schur, *d_pressure_preconditioner);
+        d_momentum = std::move(momentum);
+        d_gradient = std::move(gradient);
+        d_schur = std::move(schur);
+    }
+
+    /** @brief Number of scratch-storage shapes allocated so far. */
+    size_t scratch_allocations() const noexcept
+    {
+        return d_scratch_allocations;
     }
 
     Teuchos::RCP<const map_type> getDomainMap() const override
@@ -578,103 +817,159 @@ public:
         }
 
         const auto num_vectors = input.getNumVectors();
-        multi_vector_type pressure_rhs(d_cell_map, num_vectors, true);
-        multi_vector_type pressure_solution(d_cell_map, num_vectors, true);
-        multi_vector_type velocity_rhs(
-            d_cell_map, 3 * num_vectors, true);
-        multi_vector_type velocity_solution(
-            d_cell_map, 3 * num_vectors, true);
+        ensure_scratch(num_vectors);
+        auto& pressure_rhs = *d_pressure_rhs;
+        auto& pressure_solution = *d_pressure_solution;
+        auto& velocity_rhs = *d_velocity_rhs;
+        auto& velocity_solution = *d_velocity_solution;
+        auto& gradient_value = *d_gradient_value;
+        auto& result = *d_result;
 
-        auto input_view = input.getLocalViewHost(Tpetra::Access::ReadOnly);
-        auto pressure_rhs_view =
-            pressure_rhs.getLocalViewHost(Tpetra::Access::ReadWrite);
-        auto velocity_rhs_view =
-            velocity_rhs.getLocalViewHost(Tpetra::Access::ReadWrite);
-        for (size_t cell = 0;
-             cell < d_cell_map->getLocalNumElements();
-             ++cell)
+        const auto local_cells = d_cell_map->getLocalNumElements();
+        const auto packed_entries = local_cells * num_vectors;
+        using execution_space = typename Pack::execution_space;
+        using range_policy = Kokkos::RangePolicy<
+            execution_space, Kokkos::IndexType<size_t>>;
         {
-            for (size_t vector = 0; vector < num_vectors; ++vector)
-            {
-                pressure_rhs_view(cell, vector) =
-                    input_view(4 * cell + 3, vector);
-                for (size_t component = 0; component < 3; ++component)
+            const auto input_view =
+                input.getLocalViewDevice(Tpetra::Access::ReadOnly);
+            const auto pressure_rhs_view =
+                pressure_rhs.getLocalViewDevice(Tpetra::Access::OverwriteAll);
+            const auto velocity_rhs_view =
+                velocity_rhs.getLocalViewDevice(Tpetra::Access::OverwriteAll);
+            Kokkos::parallel_for(
+                "SimpleFluid::CoupledSchurPreconditioner::pack",
+                range_policy(0, packed_entries),
+                KOKKOS_LAMBDA(const size_t packed)
                 {
-                    velocity_rhs_view(cell, 3 * vector + component) =
-                        input_view(4 * cell + component, vector);
-                }
-            }
+                    const auto cell = packed / num_vectors;
+                    const auto vector = packed % num_vectors;
+                    pressure_rhs_view(cell, vector) =
+                        input_view(4 * cell + 3, vector);
+                    for (size_t component = 0; component < 3; ++component)
+                    {
+                        velocity_rhs_view(cell, 3 * vector + component) =
+                            input_view(4 * cell + component, vector);
+                    }
+                });
         }
 
         d_pressure_preconditioner->apply(
             pressure_rhs, pressure_solution);
 
-        multi_vector_type gradient_value(
-            d_cell_map, num_vectors, true);
         for (size_t component = 0; component < d_gradient.size(); ++component)
         {
             gradient_value.putScalar(scalar_type{});
             d_gradient[component]->apply(
                 pressure_solution, gradient_value);
             const auto gradient_view =
-                gradient_value.getLocalViewHost(Tpetra::Access::ReadOnly);
-            velocity_rhs_view =
-                velocity_rhs.getLocalViewHost(Tpetra::Access::ReadWrite);
-            for (size_t cell = 0;
-                 cell < d_cell_map->getLocalNumElements();
-                 ++cell)
-            {
-                for (size_t vector = 0; vector < num_vectors; ++vector)
+                gradient_value.getLocalViewDevice(Tpetra::Access::ReadOnly);
+            const auto velocity_update_view =
+                velocity_rhs.getLocalViewDevice(Tpetra::Access::ReadWrite);
+            Kokkos::parallel_for(
+                "SimpleFluid::CoupledSchurPreconditioner::gradient_update",
+                range_policy(0, packed_entries),
+                KOKKOS_LAMBDA(const size_t packed)
                 {
-                    velocity_rhs_view(
+                    const auto cell = packed / num_vectors;
+                    const auto vector = packed % num_vectors;
+                    velocity_update_view(
                         cell, 3 * vector + component) -=
                         gradient_view(cell, vector);
-                }
-            }
+                });
         }
 
         d_momentum_preconditioner->apply(
             velocity_rhs, velocity_solution);
 
-        multi_vector_type result(d_coupled_map, num_vectors, true);
-        auto result_view =
-            result.getLocalViewHost(Tpetra::Access::ReadWrite);
-        const auto pressure_view =
-            pressure_solution.getLocalViewHost(Tpetra::Access::ReadOnly);
-        const auto velocity_view =
-            velocity_solution.getLocalViewHost(Tpetra::Access::ReadOnly);
-        for (size_t cell = 0;
-             cell < d_cell_map->getLocalNumElements();
-             ++cell)
         {
-            for (size_t vector = 0; vector < num_vectors; ++vector)
-            {
-                for (size_t component = 0; component < 3; ++component)
+            const auto result_view =
+                result.getLocalViewDevice(Tpetra::Access::OverwriteAll);
+            const auto pressure_view =
+                pressure_solution.getLocalViewDevice(Tpetra::Access::ReadOnly);
+            const auto velocity_view =
+                velocity_solution.getLocalViewDevice(Tpetra::Access::ReadOnly);
+            Kokkos::parallel_for(
+                "SimpleFluid::CoupledSchurPreconditioner::unpack",
+                range_policy(0, packed_entries),
+                KOKKOS_LAMBDA(const size_t packed)
                 {
-                    result_view(4 * cell + component, vector) =
-                        velocity_view(cell, 3 * vector + component);
-                }
-                result_view(4 * cell + 3, vector) =
-                    pressure_view(cell, vector);
-            }
+                    const auto cell = packed / num_vectors;
+                    const auto vector = packed % num_vectors;
+                    for (size_t component = 0; component < 3; ++component)
+                    {
+                        result_view(4 * cell + component, vector) =
+                            velocity_view(cell, 3 * vector + component);
+                    }
+                    result_view(4 * cell + 3, vector) =
+                        pressure_view(cell, vector);
+                });
         }
 
         output.update(alpha, result, beta);
     }
 
 private:
+    static bool same_graph(
+        const matrix_type& lhs,
+        const matrix_type& rhs)
+    {
+        return lhs.isFillComplete()
+            && rhs.isFillComplete()
+            && lhs.getCrsGraph()->isIdenticalTo(*rhs.getCrsGraph());
+    }
+
+    void ensure_scratch(size_t num_vectors) const
+    {
+        if (num_vectors == d_scratch_num_vectors
+            && !d_pressure_rhs.is_null())
+        {
+            return;
+        }
+
+        d_pressure_rhs = Teuchos::rcp(
+            new multi_vector_type(d_cell_map, num_vectors, true));
+        d_pressure_solution = Teuchos::rcp(
+            new multi_vector_type(d_cell_map, num_vectors, true));
+        d_velocity_rhs = Teuchos::rcp(
+            new multi_vector_type(d_cell_map, 3 * num_vectors, true));
+        d_velocity_solution = Teuchos::rcp(
+            new multi_vector_type(d_cell_map, 3 * num_vectors, true));
+        d_gradient_value = Teuchos::rcp(
+            new multi_vector_type(d_cell_map, num_vectors, true));
+        d_result = Teuchos::rcp(
+            new multi_vector_type(d_coupled_map, num_vectors, true));
+        d_scratch_num_vectors = num_vectors;
+        ++d_scratch_allocations;
+    }
+
     Teuchos::RCP<const map_type> d_coupled_map;
     Teuchos::RCP<const map_type> d_cell_map;
+    Teuchos::RCP<const matrix_type> d_momentum;
     std::array<Teuchos::RCP<matrix_type>, 3> d_gradient;
+    Teuchos::RCP<matrix_type> d_schur;
     Teuchos::RCP<momentum_preconditioner_type>
         d_momentum_preconditioner;
-    Teuchos::RCP<operator_type> d_pressure_preconditioner;
+    Teuchos::RCP<pressure_preconditioner_type>
+        d_pressure_preconditioner;
+    mutable Teuchos::RCP<multi_vector_type> d_pressure_rhs;
+    mutable Teuchos::RCP<multi_vector_type> d_pressure_solution;
+    mutable Teuchos::RCP<multi_vector_type> d_velocity_rhs;
+    mutable Teuchos::RCP<multi_vector_type> d_velocity_solution;
+    mutable Teuchos::RCP<multi_vector_type> d_gradient_value;
+    mutable Teuchos::RCP<multi_vector_type> d_result;
+    mutable size_t d_scratch_num_vectors = 0;
+    mutable size_t d_scratch_allocations = 0;
 };
 
 } // namespace detail
 
 /**
  * @brief Assemble and solve monolithic cell velocity-pressure systems.
+ *
+ * The mesh is immutable for the solver lifetime. Cached mutable algebra makes
+ * instances sequential-use objects; concurrent assembly or solve calls on the
+ * same instance are unsupported.
  *
  * @tparam Pack Tpetra type pack defining distributed algebra types.
  */
@@ -689,19 +984,73 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
+    using graph_type = typename Pack::graph_type;
     using matrix_type = typename Pack::matrix_type;
     using vector_type = typename Pack::vector_type;
+    using multi_vector_type = typename Pack::multi_vector_type;
+    using operator_type = typename Pack::operator_type;
     using momentum_system_type = FVM::VectorTransportSystem<Pack>;
     using system_type = CoupledPressureVelocitySystem<Pack>;
     using result_type = CoupledPressureVelocityResult<scalar_type>;
+    using preconditioner_type = detail::CoupledSchurPreconditioner<Pack>;
+    using problem_type =
+        Belos::LinearProblem<scalar_type, multi_vector_type, operator_type>;
+    using solver_type =
+        Belos::BlockGmresSolMgr<scalar_type, multi_vector_type, operator_type>;
 
     /**
      * @throws std::invalid_argument If @p mesh is null.
      */
     explicit CoupledPressureVelocitySolver(SP<const mesh_type> mesh)
         : d_mesh(EquationValidation::require_non_null_mesh(
-              std::move(mesh), "CoupledPressureVelocitySolver"))
+              std::move(mesh), "CoupledPressureVelocitySolver")),
+          d_coupled_map(detail::make_coupled_map(*d_mesh)),
+          d_boundary_locations(
+              FVM::detail::boundary_face_locations(*d_mesh))
     {
+        d_cache_statistics.coupled_map_builds = 1;
+    }
+
+    /** @brief Select the coupled setup rebuild policy. */
+    void set_rebuild_policy(CoupledRebuildPolicy policy)
+    {
+        if (d_rebuild_policy == policy)
+        {
+            return;
+        }
+        d_rebuild_policy = policy;
+        clear_cache();
+    }
+
+    /** @brief Return the active coupled setup rebuild policy. */
+    CoupledRebuildPolicy rebuild_policy() const noexcept
+    {
+        return d_rebuild_policy;
+    }
+
+    /** @brief Return setup-reuse instrumentation counters. */
+    const CoupledPressureVelocityCacheStatistics&
+    cache_statistics() const noexcept
+    {
+        return d_cache_statistics;
+    }
+
+    /**
+     * @brief Discard cached assembly, preconditioner, and Krylov state.
+     *
+     * Instrumentation counters remain cumulative across this operation.
+     */
+    void clear_cache()
+    {
+        d_cached_system = {};
+        d_static_geometry = {};
+        d_schur_workspace.clear();
+        d_gradient_stabilization_products = {};
+        d_cached_momentum_graph = nullptr;
+        d_cached_pressure_graph_signature.clear();
+        d_preconditioner = Teuchos::null;
+        d_belos_solver = Teuchos::null;
+        d_solution = Teuchos::null;
     }
 
     /**
@@ -848,6 +1197,77 @@ public:
     }
 
 private:
+    using pressure_graph_signature_type =
+        std::vector<std::pair<std::string, BoundaryConditionType>>;
+
+    struct StaticGeometryCache
+    {
+        BoundaryConditionMap pressure_boundaries;
+        scalar_type reference_density = {};
+        std::vector<detail::AffinePressureGradientStencil<Pack>> stencils;
+        std::array<Teuchos::RCP<matrix_type>, 3> gradient_operators;
+        std::array<Teuchos::RCP<vector_type>, 3> gradient_constants;
+
+        bool empty() const noexcept
+        {
+            return stencils.empty();
+        }
+    };
+
+    static bool same_pressure_boundaries(
+        const BoundaryConditionMap& lhs,
+        const BoundaryConditionMap& rhs)
+    {
+        if (lhs.size() != rhs.size())
+        {
+            return false;
+        }
+        for (const auto& [name, condition] : lhs)
+        {
+            const auto iter = rhs.find(name);
+            if (iter == rhs.end()
+                || iter->second.type != condition.type
+                || iter->second.value != condition.value
+                || iter->second.robin_coefficient
+                   != condition.robin_coefficient)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static pressure_graph_signature_type pressure_graph_signature(
+        const BoundaryConditionMap& boundaries)
+    {
+        pressure_graph_signature_type signature;
+        signature.reserve(boundaries.size());
+        for (const auto& [name, condition] : boundaries)
+        {
+            signature.emplace_back(name, condition.type);
+        }
+        std::sort(
+            signature.begin(), signature.end(),
+            [](const auto& lhs, const auto& rhs)
+            {
+                return lhs.first < rhs.first;
+            });
+        return signature;
+    }
+
+    bool can_reuse_assembly_graph(
+        const momentum_system_type& momentum,
+        const pressure_graph_signature_type& pressure_signature) const
+    {
+        return d_rebuild_policy
+                   == CoupledRebuildPolicy::OnOperatorGraphChange
+            && !d_cached_system.matrix.is_null()
+            && d_cached_system.matrix.strong_count() == 1
+            && momentum.matrix->getCrsGraph().getRawPtr()
+               == d_cached_momentum_graph
+            && pressure_signature == d_cached_pressure_graph_signature;
+    }
+
     system_type assemble_coupled_system(
         const momentum_system_type& momentum,
         const velocity_field_type& velocity,
@@ -868,82 +1288,144 @@ private:
             velocity_boundary_cache,
             boundary_conditions.pressure);
 
-        auto coupled_map = detail::make_coupled_map(*d_mesh);
-        auto coupled_matrix = Teuchos::rcp(new matrix_type(
-            coupled_map, 128));
-        auto coupled_rhs = Teuchos::rcp(
-            new vector_type(coupled_map, true));
+        const auto pressure_signature =
+            pressure_graph_signature(boundary_conditions.pressure);
+        const auto reuse_assembly_graph =
+            can_reuse_assembly_graph(momentum, pressure_signature);
+        if (!reuse_assembly_graph)
+        {
+            d_schur_workspace.clear();
+            d_gradient_stabilization_products = {};
+        }
 
+        const auto prepared_coupled =
+            detail::prepare_coupled_matrix<Pack>(
+                d_coupled_map, Teuchos::null,
+                reuse_assembly_graph
+                    ? d_cached_system.matrix
+                    : Teuchos::null,
+                128);
+        const auto& coupled_matrix = prepared_coupled.matrix;
+        auto coupled_rhs =
+            reuse_assembly_graph && !d_cached_system.rhs.is_null()
+          ? d_cached_system.rhs
+          : Teuchos::rcp(new vector_type(d_coupled_map, true));
+        coupled_rhs->putScalar(scalar_type{});
+
+        std::array<detail::PreparedCoupledMatrix<Pack>, 3>
+            prepared_gradient;
+        std::array<detail::PreparedCoupledMatrix<Pack>, 3>
+            prepared_divergence;
+        for (size_t component = 0; component < 3; ++component)
+        {
+            prepared_gradient[component] =
+                detail::prepare_coupled_matrix<Pack>(
+                d_mesh->owned_cell_map(),
+                d_mesh->overlap_cell_map(),
+                reuse_assembly_graph
+                    ? d_cached_system.gradient[component]
+                    : Teuchos::null,
+                16);
+            prepared_divergence[component] =
+                detail::prepare_coupled_matrix<Pack>(
+                d_mesh->owned_cell_map(),
+                d_mesh->overlap_cell_map(),
+                reuse_assembly_graph
+                    ? d_cached_system.divergence[component]
+                    : Teuchos::null,
+                16);
+        }
         std::array<Teuchos::RCP<matrix_type>, 3> gradient;
         std::array<Teuchos::RCP<matrix_type>, 3> divergence;
         for (size_t component = 0; component < 3; ++component)
         {
-            gradient[component] = Teuchos::rcp(new matrix_type(
-                d_mesh->owned_cell_map(),
-                d_mesh->overlap_cell_map(), 16));
-            divergence[component] = Teuchos::rcp(new matrix_type(
-                d_mesh->owned_cell_map(),
-                d_mesh->overlap_cell_map(), 16));
+            gradient[component] = prepared_gradient[component].matrix;
+            divergence[component] = prepared_divergence[component].matrix;
         }
-        auto pressure_stabilization = Teuchos::rcp(new matrix_type(
-            d_mesh->owned_cell_map(),
-            d_mesh->overlap_cell_map(), 32));
+        auto prepared_pressure_stabilization =
+            detail::prepare_coupled_matrix<Pack>(
+                d_mesh->owned_cell_map(),
+                Teuchos::null,
+                reuse_assembly_graph
+                    ? d_cached_system.pressure_stabilization
+                    : Teuchos::null,
+                32);
+        auto& pressure_stabilization =
+            prepared_pressure_stabilization.matrix;
 
-        const auto boundary_locations =
-            FVM::detail::boundary_face_locations(*d_mesh);
-        const auto gradient_stencils =
-            detail::pressure_gradient_stencils<Pack>(
-                *d_mesh,
-                boundary_conditions.pressure,
-                reference_density);
-
-        // Store the affine least-squares reconstruction grad(q) = G*q + c
-        // on its owning rank. Distributed products below import remote rows
-        // instead of approximating a ghost cell's stencil from local geometry.
-        std::array<Teuchos::RCP<matrix_type>, 3>
-            pressure_gradient_operators;
-        std::array<Teuchos::RCP<vector_type>, 3>
-            pressure_gradient_constants;
-        for (size_t component = 0; component < 3; ++component)
+        const auto reuse_static_geometry =
+            d_rebuild_policy
+                == CoupledRebuildPolicy::OnOperatorGraphChange
+            && !d_static_geometry.empty()
+            && d_static_geometry.reference_density == reference_density
+            && same_pressure_boundaries(
+                d_static_geometry.pressure_boundaries,
+                boundary_conditions.pressure);
+        if (reuse_static_geometry)
         {
-            pressure_gradient_operators[component] = Teuchos::rcp(
-                new matrix_type(
-                    d_mesh->owned_cell_map(),
-                    d_mesh->overlap_cell_map(),
-                    16));
-            pressure_gradient_constants[component] = Teuchos::rcp(
-                new vector_type(d_mesh->owned_cell_map(), true));
+            ++d_cache_statistics.static_geometry_reuses;
         }
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        else
         {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto& stencil = gradient_stencils[owned];
+            ++d_cache_statistics.static_geometry_builds;
+            StaticGeometryCache rebuilt;
+            rebuilt.pressure_boundaries = boundary_conditions.pressure;
+            rebuilt.reference_density = reference_density;
+            rebuilt.stencils =
+                detail::pressure_gradient_stencils<Pack>(
+                    *d_mesh,
+                    boundary_conditions.pressure,
+                    reference_density);
             for (size_t component = 0; component < 3; ++component)
             {
-                Teuchos::Array<local_ordinal_type> columns;
-                Teuchos::Array<scalar_type> values;
-                columns.reserve(stencil.entries.size());
-                values.reserve(stencil.entries.size());
-                for (const auto& entry : stencil.entries)
-                {
-                    columns.push_back(entry.cell_lid);
-                    values.push_back(
-                        entry.coefficient.component(component));
-                }
-                pressure_gradient_operators[component]
-                    ->insertLocalValues(cell_lid, columns(), values());
-                pressure_gradient_constants[component]
-                    ->replaceLocalValue(
-                        cell_lid,
-                        stencil.constant.component(component));
+                rebuilt.gradient_operators[component] = Teuchos::rcp(
+                    new matrix_type(
+                        d_mesh->owned_cell_map(),
+                        d_mesh->overlap_cell_map(),
+                        16));
+                rebuilt.gradient_constants[component] = Teuchos::rcp(
+                    new vector_type(d_mesh->owned_cell_map(), true));
             }
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells();
+                 ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                const auto& stencil = rebuilt.stencils[owned];
+                for (size_t component = 0; component < 3; ++component)
+                {
+                    Teuchos::Array<local_ordinal_type> columns;
+                    Teuchos::Array<scalar_type> values;
+                    columns.reserve(stencil.entries.size());
+                    values.reserve(stencil.entries.size());
+                    for (const auto& entry : stencil.entries)
+                    {
+                        columns.push_back(entry.cell_lid);
+                        values.push_back(
+                            entry.coefficient.component(component));
+                    }
+                    rebuilt.gradient_operators[component]
+                        ->insertLocalValues(
+                            cell_lid, columns(), values());
+                    rebuilt.gradient_constants[component]
+                        ->replaceLocalValue(
+                            cell_lid,
+                            stencil.constant.component(component));
+                }
+            }
+            for (auto& pressure_gradient_operator :
+                 rebuilt.gradient_operators)
+            {
+                pressure_gradient_operator->fillComplete();
+            }
+            d_static_geometry = std::move(rebuilt);
         }
-        for (auto& pressure_gradient_operator :
-             pressure_gradient_operators)
-        {
-            pressure_gradient_operator->fillComplete();
-        }
+        const auto& pressure_gradient_operators =
+            d_static_geometry.gradient_operators;
+        const auto& pressure_gradient_constants =
+            d_static_geometry.gradient_constants;
+        const auto& boundary_locations = d_boundary_locations;
         const auto momentum_rhs = momentum.rhs->getLocalViewHost(
             Tpetra::Access::ReadOnly);
         const auto momentum_col_map = momentum.matrix->getColMap();
@@ -1159,7 +1641,8 @@ private:
                         static_cast<local_ordinal_type>(column));
                     values.push_back(value);
                 }
-                gradient[component]->insertLocalValues(
+                detail::add_coupled_local_values<Pack>(
+                    prepared_gradient[component],
                     cell_lid, columns(), values());
 
                 columns.clear();
@@ -1171,22 +1654,26 @@ private:
                         static_cast<local_ordinal_type>(column));
                     values.push_back(value);
                 }
-                divergence[component]->insertLocalValues(
+                detail::add_coupled_local_values<Pack>(
+                    prepared_divergence[component],
                     cell_lid, columns(), values());
             }
 
             {
-                Teuchos::Array<local_ordinal_type> columns;
+                Teuchos::Array<global_ordinal_type> columns;
                 Teuchos::Array<scalar_type> values;
                 columns.reserve(stabilization_row.size());
                 values.reserve(stabilization_row.size());
                 for (const auto& [column, value] : stabilization_row)
                 {
-                    columns.push_back(column);
+                    columns.push_back(
+                        d_mesh->overlap_cell_map()->getGlobalElement(
+                            column));
                     values.push_back(value);
                 }
-                pressure_stabilization->insertLocalValues(
-                    cell_lid, columns(), values());
+                detail::add_coupled_global_values<Pack>(
+                    prepared_pressure_stabilization,
+                    cell_gid, columns(), values());
             }
 
             typename matrix_type::local_inds_host_view_type
@@ -1226,7 +1713,8 @@ private:
                 const auto coupled_row =
                     4 * cell_gid
                     + static_cast<global_ordinal_type>(component);
-                coupled_matrix->insertGlobalValues(
+                detail::add_coupled_global_values<Pack>(
+                    prepared_coupled,
                     coupled_row, columns(), values());
                 coupled_rhs->replaceGlobalValue(
                     coupled_row,
@@ -1240,7 +1728,6 @@ private:
             gradient[component]->fillComplete();
             divergence[component]->fillComplete();
         }
-        pressure_stabilization->fillComplete();
 
         // The divergence matrices contain the face interpolation weights.
         // D*G therefore assembles the same owner-neighbor gradient average
@@ -1263,29 +1750,55 @@ private:
                   * constant_divergence_data[owned];
             }
 
-            auto gradient_stabilization = Teuchos::rcp(
-                new matrix_type(
-                    divergence[component]->getRowMap(), 32));
+            auto& gradient_stabilization =
+                d_gradient_stabilization_products[component];
+            if (gradient_stabilization.is_null())
+            {
+                gradient_stabilization = Teuchos::rcp(
+                    new matrix_type(
+                        divergence[component]->getRowMap(), 32));
+            }
             Tpetra::MatrixMatrix::Multiply(
                 *divergence[component], false,
                 *pressure_gradient_operators[component], false,
                 *gradient_stabilization, true);
-            Teuchos::RCP<matrix_type> accumulated_stabilization;
-            Tpetra::MatrixMatrix::Add(
-                *pressure_stabilization,
-                false,
-                scalar_type{1},
-                *gradient_stabilization,
-                false,
-                time_options.time_step,
-                accumulated_stabilization);
-            if (!accumulated_stabilization->isFillComplete())
+            const auto product_col_map =
+                gradient_stabilization->getColMap();
+            for (size_t row = 0;
+                 row < gradient_stabilization->getLocalNumRows();
+                 ++row)
             {
-                accumulated_stabilization->fillComplete();
+                typename matrix_type::local_inds_host_view_type
+                    product_columns;
+                typename matrix_type::values_host_view_type product_values;
+                gradient_stabilization->getLocalRowView(
+                    static_cast<local_ordinal_type>(row),
+                    product_columns, product_values);
+                Teuchos::Array<global_ordinal_type> columns(
+                    product_columns.extent(0));
+                Teuchos::Array<scalar_type> values(
+                    product_values.extent(0));
+                for (size_t entry = 0;
+                     entry < product_columns.extent(0);
+                     ++entry)
+                {
+                    const auto column_gid =
+                        product_col_map->getGlobalElement(
+                            product_columns[entry]);
+                    columns[entry] = column_gid;
+                    values[entry] =
+                        time_options.time_step * product_values[entry];
+                }
+                const auto row_gid =
+                    gradient_stabilization->getRowMap()->getGlobalElement(
+                        static_cast<local_ordinal_type>(row));
+                detail::add_coupled_global_values<Pack>(
+                    prepared_pressure_stabilization,
+                    row_gid,
+                    columns(), values());
             }
-            pressure_stabilization =
-                std::move(accumulated_stabilization);
         }
+        pressure_stabilization->fillComplete();
 
         const auto stabilization_col_map =
             pressure_stabilization->getColMap();
@@ -1301,7 +1814,8 @@ private:
             {
                 Teuchos::Array<global_ordinal_type> columns{pressure_row};
                 Teuchos::Array<scalar_type> values{scalar_type{1}};
-                coupled_matrix->insertGlobalValues(
+                detail::add_coupled_global_values<Pack>(
+                    prepared_coupled,
                     pressure_row, columns(), values());
                 coupled_rhs->replaceGlobalValue(
                     pressure_row, scalar_type{});
@@ -1348,20 +1862,34 @@ private:
                 columns.push_back(4 * column_cell_gid + 3);
                 values.push_back(local_values[entry]);
             }
-            coupled_matrix->insertGlobalValues(
+            detail::add_coupled_global_values<Pack>(
+                prepared_coupled,
                 pressure_row, columns(), values());
             coupled_rhs->replaceGlobalValue(
                 pressure_row, continuity_rhs_values[owned]);
         }
 
-        coupled_matrix->fillComplete(coupled_map, coupled_map);
+        coupled_matrix->fillComplete(d_coupled_map, d_coupled_map);
         const auto coupled_overlap_map = coupled_matrix->getColMap();
 
+        bool reused_schur_products = false;
         auto schur = detail::build_schur_approximation<Pack>(
             *momentum.matrix, gradient, divergence,
-            *pressure_stabilization, pressure_gauge_gid);
-        return {
-            coupled_map,
+            *pressure_stabilization, pressure_gauge_gid,
+            reuse_assembly_graph ? d_cached_system.schur : Teuchos::null,
+            &d_schur_workspace,
+            &reused_schur_products);
+        if (reuse_assembly_graph)
+        {
+            ++d_cache_statistics.matrix_graph_reuses;
+        }
+        if (reused_schur_products)
+        {
+            ++d_cache_statistics.schur_product_reuses;
+        }
+
+        system_type assembled{
+            d_coupled_map,
             coupled_overlap_map,
             coupled_matrix,
             coupled_rhs,
@@ -1371,6 +1899,11 @@ private:
             std::move(pressure_stabilization),
             std::move(schur),
             reference_density};
+        d_cached_momentum_graph =
+            momentum.matrix->getCrsGraph().getRawPtr();
+        d_cached_pressure_graph_signature = pressure_signature;
+        d_cached_system = assembled;
+        return assembled;
     }
 
 public:
@@ -1388,17 +1921,6 @@ public:
         field_type& pressure,
         const LinearSolverOptions& options) const
     {
-        using multi_vector_type = typename Pack::multi_vector_type;
-        using operator_type = typename Pack::operator_type;
-        using problem_type =
-            Belos::LinearProblem<scalar_type,
-                                 multi_vector_type,
-                                 operator_type>;
-        using solver_type =
-            Belos::BlockGmresSolMgr<scalar_type,
-                                    multi_vector_type,
-                                    operator_type>;
-
         if (!std::isfinite(system.reference_density)
             || system.reference_density <= scalar_type{})
         {
@@ -1407,8 +1929,15 @@ public:
                 "reference density.");
         }
 
-        auto solution = Teuchos::rcp(
-            new vector_type(system.map, true));
+        if (d_solution.is_null()
+            || !d_solution->getMap()->isSameAs(*system.map)
+            || d_rebuild_policy == CoupledRebuildPolicy::Always)
+        {
+            d_solution = Teuchos::rcp(
+                new vector_type(system.map, true));
+        }
+        auto solution = d_solution;
+        solution->putScalar(scalar_type{});
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
@@ -1424,16 +1953,34 @@ public:
                 pressure.value(cell_lid) / system.reference_density);
         }
 
-        auto preconditioner = Teuchos::rcp(
-            new detail::CoupledSchurPreconditioner<Pack>(
+        const auto reuse_preconditioner =
+            d_rebuild_policy
+                == CoupledRebuildPolicy::OnOperatorGraphChange
+            && !d_preconditioner.is_null()
+            && d_preconditioner->is_compatible(
+                system.momentum, system.gradient, system.schur);
+        if (reuse_preconditioner)
+        {
+            d_preconditioner->update(
+                system.momentum, system.gradient, system.schur);
+            ++d_cache_statistics.preconditioner_numeric_reuses;
+        }
+        else
+        {
+            d_preconditioner = Teuchos::rcp(
+                new preconditioner_type(
                 system.map,
                 d_mesh->owned_cell_map(),
                 system.momentum,
                 system.gradient,
                 system.schur));
+            ++d_cache_statistics.preconditioner_builds;
+        }
+        const auto scratch_allocations_before =
+            d_preconditioner->scratch_allocations();
         Teuchos::RCP<const operator_type> matrix = system.matrix;
         Teuchos::RCP<const operator_type> right_preconditioner =
-            preconditioner;
+            d_preconditioner;
         auto solution_mv =
             Teuchos::rcp_implicit_cast<multi_vector_type>(solution);
         auto rhs_mv =
@@ -1462,10 +2009,26 @@ public:
                     std::max(1, options.max_iterations / 4),
                     static_cast<int>(
                         system.map->getGlobalNumElements() / 4))));
-        auto solver = Teuchos::rcp(
-            new solver_type(problem, parameters));
+        if (d_belos_solver.is_null()
+            || d_rebuild_policy == CoupledRebuildPolicy::Always)
+        {
+            d_belos_solver = Teuchos::rcp(
+                new solver_type(problem, parameters));
+            ++d_cache_statistics.belos_solver_builds;
+        }
+        else
+        {
+            d_belos_solver->setProblem(problem);
+            d_belos_solver->setParameters(parameters);
+            ++d_cache_statistics.belos_solver_reuses;
+        }
         const auto converged =
-            solver->solve() == Belos::Converged;
+            d_belos_solver->solve() == Belos::Converged;
+        const auto iterations = d_belos_solver->getNumIters();
+        const auto achieved_tolerance = d_belos_solver->achievedTol();
+        d_cache_statistics.preconditioner_scratch_allocations +=
+            d_preconditioner->scratch_allocations()
+          - scratch_allocations_before;
 
         const auto solution_view =
             solution->getLocalViewHost(Tpetra::Access::ReadOnly);
@@ -1485,15 +2048,33 @@ public:
         }
         d_mesh->sync_periodic_boundaries(velocity);
         d_mesh->sync_periodic_boundaries(pressure);
+        d_belos_solver->setProblem(Teuchos::null);
 
         return {
             converged,
-            solver->getNumIters(),
-            solver->achievedTol()};
+            iterations,
+            achieved_tolerance};
     }
 
 private:
     SP<const mesh_type> d_mesh;
+    CoupledRebuildPolicy d_rebuild_policy =
+        CoupledRebuildPolicy::OnOperatorGraphChange;
+    Teuchos::RCP<const typename Pack::map_type> d_coupled_map;
+    std::vector<FVM::detail::BoundaryFaceLocation<mesh_type>>
+        d_boundary_locations;
+    mutable CoupledPressureVelocityCacheStatistics d_cache_statistics;
+    mutable system_type d_cached_system;
+    mutable StaticGeometryCache d_static_geometry;
+    mutable detail::CoupledSchurWorkspace<Pack> d_schur_workspace;
+    mutable std::array<Teuchos::RCP<matrix_type>, 3>
+        d_gradient_stabilization_products;
+    mutable const graph_type* d_cached_momentum_graph = nullptr;
+    mutable pressure_graph_signature_type
+        d_cached_pressure_graph_signature;
+    mutable Teuchos::RCP<preconditioner_type> d_preconditioner;
+    mutable Teuchos::RCP<solver_type> d_belos_solver;
+    mutable Teuchos::RCP<vector_type> d_solution;
 };
 
 } // namespace SimpleFluid
