@@ -519,12 +519,9 @@ int main(int argc, char** argv)
 
     const auto comm = Tpetra::getDefaultComm();
     const int rank = comm->getRank();
-    const std::string vtu_filename = comm->getSize() == 1
-        ? "pitz_daily.vtu"
-        : "pitz_daily_rank" + std::to_string(rank) + ".vtu";
     SimpleFluid::SolutionOutputOptions output_options;
     output_options.include_turbulence_fields = true;
-    solver.write_solution_vtu(vtu_filename, output_options);
+    solver.write_parallel_solution_vtu("pitz_daily.vtu", output_options);
     write_cells(*mesh, solver, turbulence, rank);
 
     if (rank == 0)

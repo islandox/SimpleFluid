@@ -754,6 +754,272 @@ boundary_face_locations(const MeshType& mesh)
     return locations;
 }
 
+/** @brief Static least-squares geometry for one boundary sample. */
+template<class MeshType>
+struct BoundaryGradientSampleGeometry
+{
+    typename MeshType::local_ordinal_type face_lid{};
+    BoundaryFaceLocation<MeshType> location{};
+    typename MeshType::Vec3 basis{};
+    real_t normal_distance{};
+};
+
+/** @brief Mesh-only part of one boundary-aware gradient reconstruction. */
+template<class MeshType>
+struct BoundaryAwareGradientCellGeometry
+{
+    LeastSquaresGradientStencil<MeshType> interior_entries;
+    std::vector<BoundaryGradientSampleGeometry<MeshType>> boundary_samples;
+};
+
+/**
+ * @brief Build reusable boundary-aware least-squares basis geometry.
+ *
+ * Boundary values and condition types are deliberately excluded. Both
+ * Dirichlet and Neumann samples use the same normal matrix and basis; their
+ * different affine contributions are materialized at assembly time.
+ */
+template<class MeshType>
+std::vector<BoundaryAwareGradientCellGeometry<MeshType>>
+boundary_aware_gradient_geometry(
+    const MeshType& mesh,
+    const std::vector<BoundaryFaceLocation<MeshType>>& boundary_locations)
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+    using vec_type = typename MeshType::Vec3;
+
+    std::vector<BoundaryAwareGradientCellGeometry<MeshType>> geometry(
+        mesh.num_owned_cells());
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto cell_id = query_cell_id(mesh, cell_lid);
+        std::array<std::array<real_t, 3>, 3> normal{};
+        auto add_direction = [&](const vec_type& direction)
+        {
+            normal[0][0] += direction.x * direction.x;
+            normal[0][1] += direction.x * direction.y;
+            normal[0][2] += direction.x * direction.z;
+            normal[1][1] += direction.y * direction.y;
+            normal[1][2] += direction.y * direction.z;
+            normal[2][2] += direction.z * direction.z;
+        };
+
+        for (const auto face_id : mesh.faces(cell_id))
+        {
+            if (mesh.is_interior_face(face_id))
+            {
+                add_direction(mesh.cell_center_vector(face_id, cell_id));
+                continue;
+            }
+            if (!mesh.is_boundary_face(face_id))
+            {
+                continue;
+            }
+            const auto location = boundary_locations.at(
+                packed_face_local_id(mesh, face_id));
+            if (location.active)
+            {
+                add_direction(
+                    mesh.face_centroid(face_id)
+                    - mesh.cell_centroid(cell_id));
+            }
+        }
+
+        normal[1][0] = normal[0][1];
+        normal[2][0] = normal[0][2];
+        normal[2][1] = normal[1][2];
+        std::unordered_map<local_ordinal_type, vec_type> coefficients;
+        auto& cell_geometry = geometry[owned];
+
+        for (const auto face_id : mesh.faces(cell_id))
+        {
+            if (mesh.is_interior_face(face_id))
+            {
+                auto direction = mesh.cell_center_vector(face_id, cell_id);
+                auto local_normal = normal;
+                const auto basis = solve_3x3(local_normal, direction);
+                const auto other_id =
+                    mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
+                const auto other_lid =
+                    packed_cell_local_id(mesh, other_id);
+                add_gradient_coefficient<MeshType>(
+                    coefficients, other_lid, basis);
+                add_gradient_coefficient<MeshType>(
+                    coefficients, cell_lid,
+                    {-basis.x, -basis.y, -basis.z});
+                continue;
+            }
+            if (!mesh.is_boundary_face(face_id))
+            {
+                continue;
+            }
+            const auto packed_face_lid = static_cast<local_ordinal_type>(
+                packed_face_local_id(mesh, face_id));
+            const auto location = boundary_locations.at(
+                static_cast<size_t>(packed_face_lid));
+            if (!location.active)
+            {
+                continue;
+            }
+            auto direction =
+                mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+            auto local_normal = normal;
+            cell_geometry.boundary_samples.push_back({
+                packed_face_lid,
+                location,
+                solve_3x3(local_normal, direction),
+                static_cast<real_t>(
+                    boundary_normal_distance(mesh, face_id, cell_id))});
+        }
+
+        cell_geometry.interior_entries.reserve(coefficients.size());
+        for (const auto& [entry_lid, coefficient] : coefficients)
+        {
+            cell_geometry.interior_entries.push_back(
+                {entry_lid, coefficient});
+        }
+    }
+    return geometry;
+}
+
+/** @brief Add or accumulate an entry in a materialized gradient stencil. */
+template<class MeshType>
+void add_materialized_gradient_coefficient(
+    LeastSquaresGradientStencil<MeshType>& entries,
+    typename MeshType::local_ordinal_type cell_lid,
+    const typename MeshType::Vec3& coefficient)
+{
+    const auto iter = std::find_if(
+        entries.begin(), entries.end(),
+        [cell_lid](const auto& entry)
+        {
+            return entry.cell_lid == cell_lid;
+        });
+    if (iter == entries.end())
+    {
+        entries.push_back({cell_lid, coefficient});
+        return;
+    }
+    iter->coefficient = {
+        iter->coefficient.x + coefficient.x,
+        iter->coefficient.y + coefficient.y,
+        iter->coefficient.z + coefficient.z};
+}
+
+/** @brief Materialize scalar affine stencils from cached mesh geometry. */
+template<class MeshType,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+std::vector<AffineLeastSquaresGradientStencil<MeshType>>
+materialize_scalar_affine_gradient_stencils(
+    const std::vector<BoundaryAwareGradientCellGeometry<MeshType>>& geometry,
+    BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value)
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+    using vec_type = typename MeshType::Vec3;
+
+    std::vector<AffineLeastSquaresGradientStencil<MeshType>> stencils(
+        geometry.size());
+    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto& cell_geometry = geometry[owned];
+        auto& stencil = stencils[owned];
+        stencil.entries = cell_geometry.interior_entries;
+        vec_type cell_coefficient{};
+        bool has_dirichlet_sample = false;
+
+        for (const auto& sample : cell_geometry.boundary_samples)
+        {
+            const auto condition = boundary_condition(
+                sample.location.batch_id,
+                sample.location.in_batch_id);
+            real_t boundary_increment{};
+            if (condition.type == BoundaryConditionType::Dirichlet)
+            {
+                has_dirichlet_sample = true;
+                cell_coefficient.x -= sample.basis.x;
+                cell_coefficient.y -= sample.basis.y;
+                cell_coefficient.z -= sample.basis.z;
+                boundary_increment = static_cast<real_t>(boundary_value(
+                    sample.location.batch_id,
+                    sample.location.in_batch_id));
+            }
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
+                boundary_increment =
+                    static_cast<real_t>(condition.value)
+                    * sample.normal_distance;
+            }
+            else
+            {
+                throw std::invalid_argument(
+                    "Affine scalar gradients support only Dirichlet and "
+                    "Neumann boundary conditions.");
+            }
+            stencil.constant.x += sample.basis.x * boundary_increment;
+            stencil.constant.y += sample.basis.y * boundary_increment;
+            stencil.constant.z += sample.basis.z * boundary_increment;
+        }
+
+        if (has_dirichlet_sample)
+        {
+            add_materialized_gradient_coefficient<MeshType>(
+                stencil.entries, cell_lid, cell_coefficient);
+        }
+    }
+    return stencils;
+}
+
+/** @brief Materialize vector affine stencils from cached mesh geometry. */
+template<class MeshType, class BoundaryValueProvider>
+std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>>
+materialize_vector_affine_gradient_stencils(
+    const std::vector<BoundaryAwareGradientCellGeometry<MeshType>>& geometry,
+    BoundaryValueProvider boundary_value)
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+    using vec_type = typename MeshType::Vec3;
+
+    std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>> stencils(
+        geometry.size());
+    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto& cell_geometry = geometry[owned];
+        auto& stencil = stencils[owned];
+        stencil.entries = cell_geometry.interior_entries;
+        vec_type cell_coefficient{};
+        for (const auto& sample : cell_geometry.boundary_samples)
+        {
+            cell_coefficient.x -= sample.basis.x;
+            cell_coefficient.y -= sample.basis.y;
+            cell_coefficient.z -= sample.basis.z;
+            const auto value = static_cast<vec_type>(boundary_value(
+                sample.location.batch_id,
+                sample.location.in_batch_id));
+            for (size_t component_id = 0; component_id < 3; ++component_id)
+            {
+                const auto value_component = value.component(component_id);
+                stencil.constants[component_id].x +=
+                    sample.basis.x * value_component;
+                stencil.constants[component_id].y +=
+                    sample.basis.y * value_component;
+                stencil.constants[component_id].z +=
+                    sample.basis.z * value_component;
+            }
+        }
+        if (!cell_geometry.boundary_samples.empty())
+        {
+            add_materialized_gradient_coefficient<MeshType>(
+                stencil.entries, cell_lid, cell_coefficient);
+        }
+    }
+    return stencils;
+}
+
 /**
  * @brief Build scalar least-squares gradient stencils including boundary data.
  *

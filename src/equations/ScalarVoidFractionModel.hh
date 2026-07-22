@@ -18,6 +18,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -144,6 +145,7 @@ public:
             throw std::invalid_argument(
                 "ScalarVoidFractionModel requires a non-null mesh.");
         }
+        d_transport_geometry_cache.emplace(*d_mesh);
         configure(d_options);
     }
 
@@ -365,7 +367,13 @@ private:
             zero_neumann,
             zero_boundary_value,
             zero_source,
-            FVM::NonOrthogonalTreatment::Explicit);
+            FVM::NonOrthogonalTreatment::Explicit,
+            nullptr,
+            Teuchos::null,
+            {},
+            {},
+            nullptr,
+            &*d_transport_geometry_cache);
         field_type solution(d_mesh, "alpha_diffusion_solution");
         const auto statistics =
             d_diffusion_solver.solve_with_statistics(
@@ -448,6 +456,8 @@ private:
     }
 
     SP<const mesh_type> d_mesh;
+    std::optional<FVM::TransportGeometryCache<mesh_type>>
+        d_transport_geometry_cache;
     ScalarVoidFractionOptions d_options;
     field_type d_alpha_g;
     field_type d_alpha_l;

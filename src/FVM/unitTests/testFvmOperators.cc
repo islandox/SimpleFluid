@@ -20,11 +20,13 @@
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -604,6 +606,242 @@ TEST(FvmOperatorsTest, VectorTransportImplicitNonOrthogonalDiffusionExpandsGradi
     EXPECT_TRUE(saw_expanded_row);
 }
 
+/** @brief Verifies cached reconstruction geometry is reused without freezing boundary data. */
+TEST(FvmOperatorsTest,
+     TransportGeometryCachePreservesDynamicBoundaryReconstruction)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    using GeometryCache =
+        SimpleFluid::FVM::TransportGeometryCache<MeshType>;
+    GeometryCache geometry_cache(*mesh);
+
+    ASSERT_FALSE(geometry_cache.interior_stencils().empty());
+    ASSERT_EQ(
+        geometry_cache.boundary_locations().size(),
+        mesh->num_faces());
+    ASSERT_FALSE(geometry_cache.boundary_geometry().empty());
+    const auto* const interior_storage =
+        geometry_cache.interior_stencils().data();
+    const auto* const boundary_storage =
+        geometry_cache.boundary_locations().data();
+    const auto* const basis_storage =
+        geometry_cache.boundary_geometry().data();
+
+    const int changing_batch = mesh->boundary_batches().begin()->first;
+    bool use_neumann = false;
+    Pack::scalar_type boundary_shift = 0.25;
+    auto boundary_condition =
+        [&](int batch_id, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        if (use_neumann && batch_id == changing_batch)
+        {
+            return {SimpleFluid::BoundaryConditionType::Neumann, 0.4};
+        }
+        return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto boundary_value =
+        [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        return nonlinear_scalar(mesh->face_centroid(face_lid))
+             + boundary_shift;
+    };
+    auto vector_boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        const auto value = boundary_value(batch_id, in_batch_id);
+        return SimpleFluid::vec3<Pack::scalar_type>{
+            value, -2.0 * value, 0.5 * value};
+    };
+
+    auto expect_entries_equal =
+        [](const auto& expected, const auto& actual)
+    {
+        ASSERT_EQ(actual.size(), expected.size());
+        for (const auto& expected_entry : expected)
+        {
+            const auto iter = std::find_if(
+                actual.begin(), actual.end(),
+                [&](const auto& actual_entry)
+                {
+                    return actual_entry.cell_lid
+                        == expected_entry.cell_lid;
+                });
+            ASSERT_NE(iter, actual.end());
+            EXPECT_NEAR(
+                iter->coefficient.x,
+                expected_entry.coefficient.x,
+                1.0e-12);
+            EXPECT_NEAR(
+                iter->coefficient.y,
+                expected_entry.coefficient.y,
+                1.0e-12);
+            EXPECT_NEAR(
+                iter->coefficient.z,
+                expected_entry.coefficient.z,
+                1.0e-12);
+        }
+    };
+    auto verify_reconstruction_equivalence = [&]
+    {
+        const auto expected_scalar =
+            SimpleFluid::FVM::detail::scalar_affine_gradient_stencils(
+                *mesh, boundary_condition, boundary_value);
+        const auto cached_scalar = geometry_cache.scalar_affine_stencils(
+            boundary_condition, boundary_value);
+        ASSERT_EQ(cached_scalar.size(), expected_scalar.size());
+        for (size_t cell = 0; cell < expected_scalar.size(); ++cell)
+        {
+            expect_entries_equal(
+                expected_scalar[cell].entries,
+                cached_scalar[cell].entries);
+            EXPECT_NEAR(
+                cached_scalar[cell].constant.x,
+                expected_scalar[cell].constant.x,
+                1.0e-12);
+            EXPECT_NEAR(
+                cached_scalar[cell].constant.y,
+                expected_scalar[cell].constant.y,
+                1.0e-12);
+            EXPECT_NEAR(
+                cached_scalar[cell].constant.z,
+                expected_scalar[cell].constant.z,
+                1.0e-12);
+        }
+
+        const auto expected_vector =
+            SimpleFluid::FVM::detail::vector_affine_gradient_stencils(
+                *mesh, vector_boundary_value);
+        const auto cached_vector = geometry_cache.vector_affine_stencils(
+            vector_boundary_value);
+        ASSERT_EQ(cached_vector.size(), expected_vector.size());
+        for (size_t cell = 0; cell < expected_vector.size(); ++cell)
+        {
+            expect_entries_equal(
+                expected_vector[cell].entries,
+                cached_vector[cell].entries);
+            for (size_t component = 0; component < 3; ++component)
+            {
+                EXPECT_NEAR(
+                    cached_vector[cell].constants[component].x,
+                    expected_vector[cell].constants[component].x,
+                    1.0e-12);
+                EXPECT_NEAR(
+                    cached_vector[cell].constants[component].y,
+                    expected_vector[cell].constants[component].y,
+                    1.0e-12);
+                EXPECT_NEAR(
+                    cached_vector[cell].constants[component].z,
+                    expected_vector[cell].constants[component].z,
+                    1.0e-12);
+            }
+        }
+    };
+
+    verify_reconstruction_equivalence();
+
+    FieldType scalar(mesh, "cached_transport_scalar");
+    FieldType storage(mesh, 1.0, "cached_transport_storage");
+    FieldType advection(mesh, 0.0, "cached_transport_advection");
+    FieldType diffusivity(mesh, 0.7, "cached_transport_diffusivity");
+    for (MeshType::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++cell_lid)
+    {
+        scalar.set_value(
+            cell_lid,
+            nonlinear_scalar(mesh->cell_centroid(cell_lid)));
+    }
+    scalar.sync_ghosts();
+    diffusivity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "cached_transport_fluxes");
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    using SinkProvider = std::function<Pack::scalar_type(
+        MeshType::local_ordinal_type)>;
+    using FixedValueProvider = std::function<std::optional<Pack::scalar_type>(
+        MeshType::local_ordinal_type)>;
+    auto assemble = [&](const GeometryCache* cache)
+    {
+        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar,
+            zero_fluxes,
+            0.2,
+            storage,
+            advection,
+            diffusivity,
+            boundary_condition,
+            boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+            &scalar,
+            Teuchos::null,
+            SinkProvider{},
+            FixedValueProvider{},
+            nullptr,
+            cache);
+    };
+    auto expect_systems_equal = [&](const auto& expected, const auto& actual)
+    {
+        for (MeshType::local_ordinal_type row = 0;
+             row < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_owned_cells());
+             ++row)
+        {
+            EXPECT_NEAR(
+                actual.rhs->getData()[row],
+                expected.rhs->getData()[row],
+                1.0e-12);
+            for (MeshType::local_ordinal_type column = 0;
+                 column < static_cast<MeshType::local_ordinal_type>(
+                     mesh->num_local_cells());
+                 ++column)
+            {
+                EXPECT_NEAR(
+                    local_matrix_entry(*actual.matrix, row, column),
+                    local_matrix_entry(*expected.matrix, row, column),
+                    1.0e-12);
+            }
+        }
+    };
+
+    const auto uncached_dirichlet = assemble(nullptr);
+    const auto cached_dirichlet = assemble(&geometry_cache);
+    expect_systems_equal(uncached_dirichlet, cached_dirichlet);
+    std::vector<Pack::scalar_type> initial_rhs(
+        cached_dirichlet.rhs->getData().begin(),
+        cached_dirichlet.rhs->getData().end());
+
+    use_neumann = true;
+    boundary_shift = 1.5;
+    verify_reconstruction_equivalence();
+    const auto uncached_changed = assemble(nullptr);
+    const auto cached_changed = assemble(&geometry_cache);
+    expect_systems_equal(uncached_changed, cached_changed);
+
+    bool dynamic_rhs_changed = false;
+    for (size_t row = 0; row < initial_rhs.size(); ++row)
+    {
+        dynamic_rhs_changed = dynamic_rhs_changed
+            || std::abs(initial_rhs[row]
+                      - cached_changed.rhs->getData()[row]) > 1.0e-10;
+    }
+    EXPECT_TRUE(dynamic_rhs_changed);
+    EXPECT_EQ(geometry_cache.interior_stencils().data(), interior_storage);
+    EXPECT_EQ(geometry_cache.boundary_locations().data(), boundary_storage);
+    EXPECT_EQ(geometry_cache.boundary_geometry().data(), basis_storage);
+
+    auto other_mesh = make_mesh();
+    GeometryCache other_geometry_cache(*other_mesh);
+    EXPECT_THROW(assemble(&other_geometry_cache), std::invalid_argument);
+}
+
 /** @brief Verifies the implicit non-orthogonal matrix matches the full residual. */
 TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
 {
@@ -745,6 +983,81 @@ TEST(FvmOperatorsTest, PressureWeightedFluxPreservesLinearPressure)
         if (fluxes.is_owned_face(face_lid))
         {
             EXPECT_NEAR(fluxes.value(face_lid), 0.0, 1.0e-12);
+        }
+    }
+}
+
+/** @brief Verifies a precomputed pressure gradient avoids reconstruction without changing fluxes. */
+TEST(FvmOperatorsTest, PressureWeightedFluxAcceptsPrecomputedGradient)
+{
+    auto mesh = make_mesh();
+    VectorFieldType velocity(mesh, "velocity");
+    FieldType pressure(mesh, "pressure");
+    VectorFieldType pressure_gradient(mesh, "precomputed_pressure_gradient");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 2.5};
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_owned_value(
+            cell_lid,
+            {0.5 + center.x,
+             -0.25 + 0.5 * center.y,
+             0.75 - center.z});
+        pressure.set_owned_value(cell_lid, nonlinear_scalar(center));
+    }
+    velocity.sync_ghosts();
+    pressure.sync_ghosts();
+
+    SimpleFluid::FVM::cell_gradient(
+        pressure, bcs.pressure, pressure_gradient);
+    SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace<Pack>
+        reference_workspace(mesh);
+    SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace<Pack>
+        reused_gradient_workspace(mesh);
+    SimpleFluid::FaceField<Pack> reference_fluxes(
+        mesh, "reference_pressure_weighted_flux");
+    SimpleFluid::FaceField<Pack> reused_gradient_fluxes(
+        mesh, "reused_gradient_pressure_weighted_flux");
+
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        0.2,
+        velocity_cache,
+        bcs.pressure,
+        reference_workspace,
+        reference_fluxes);
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        pressure_gradient,
+        0.2,
+        velocity_cache,
+        bcs.pressure,
+        reused_gradient_workspace,
+        reused_gradient_fluxes);
+
+    for (MeshType::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_faces());
+         ++face_lid)
+    {
+        if (reference_fluxes.is_owned_face(face_lid))
+        {
+            EXPECT_DOUBLE_EQ(
+                reused_gradient_fluxes.value(face_lid),
+                reference_fluxes.value(face_lid));
         }
     }
 }

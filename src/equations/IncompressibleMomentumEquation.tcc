@@ -28,7 +28,8 @@ template<TpetraTypePack Pack>
 IncompressibleMomentumEquation<Pack>::IncompressibleMomentumEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
-          std::move(mesh), "IncompressibleMomentumEquation"))
+          std::move(mesh), "IncompressibleMomentumEquation")),
+      d_transport_geometry_cache(*d_mesh)
 {
 }
 
@@ -168,7 +169,8 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         old_velocity, face_fluxes, options.time_step,
         options.kinematic_viscosity, boundary_value, right_hand_source,
         options.non_orthogonal_treatment, correction_field,
-        d_cached_transport_matrix, boundary_diffusion);
+        d_cached_transport_matrix, boundary_diffusion,
+        &d_transport_geometry_cache);
     d_cached_transport_matrix = system.matrix;
     return system;
 }
@@ -415,7 +417,7 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         reference_density, boundary_value, acceleration_source,
         options.non_orthogonal_treatment, correction_field,
         d_cached_physical_transport_matrix, boundary_diffusion,
-        boundary_dynamic_viscosity);
+        boundary_dynamic_viscosity, &d_transport_geometry_cache);
     d_cached_physical_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_viscosities_positive)
     {

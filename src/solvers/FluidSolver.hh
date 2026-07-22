@@ -161,6 +161,7 @@ protected:
     scalar_type d_time = 0.0;
     int d_step_index = 0;
     step_statistics_type d_last_step_statistics;
+    mutable VTUWriter::TopologyHandle d_vtu_topology;
 
 private:
     FluidSolver(SP<const MeshHandle<Pack>> mesh,

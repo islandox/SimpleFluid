@@ -28,6 +28,7 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
     const BoundaryConditionSet& boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "TemperatureDiffusionEquation")),
+      d_transport_geometry_cache(*d_mesh),
       d_boundary_condition(std::make_shared<BoundaryConditionMap>(boundary_conditions.temperature))
 {
     refresh_boundary_cache();
@@ -504,7 +505,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
             treatment,
             correction_field,
             d_cached_physical_transport_matrix,
-            boundary_thermal_conductivity);
+            boundary_thermal_conductivity,
+            &d_transport_geometry_cache);
     d_cached_physical_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_conductivities_positive)
     {

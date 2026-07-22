@@ -947,38 +947,49 @@ auto FluidSolver<Pack>::collect_scalar_field(
 template<TpetraTypePack Pack>
 VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
 {
-    std::unordered_map<global_ordinal_type, global_index_t> node_lid;
-    VTUWriter::VectorData node_coords;
-    VTUWriter::Int64Data cell_node_offsets;
-    VTUWriter::Int64Data cell_node_ids;
-    VTUWriter::UInt8Data cell_types;
-
-    auto append_node = [&](global_ordinal_type node_gid) -> global_index_t
+    if (!d_vtu_topology)
     {
-        const auto iter = node_lid.find(node_gid);
-        if (iter != node_lid.end())
+        std::unordered_map<global_ordinal_type, global_index_t> node_lid;
+        VTUWriter::VectorData node_coords;
+        VTUWriter::Int64Data cell_node_offsets;
+        VTUWriter::Int64Data cell_node_ids;
+        VTUWriter::UInt8Data cell_types;
+
+        auto append_node =
+            [&](global_ordinal_type node_gid) -> global_index_t
         {
-            return iter->second;
+            const auto iter = node_lid.find(node_gid);
+            if (iter != node_lid.end())
+            {
+                return iter->second;
+            }
+
+            const auto lid =
+                static_cast<global_index_t>(node_coords.size());
+            node_lid.emplace(node_gid, lid);
+            node_coords.push_back(d_mesh->node_coord(node_gid));
+            return lid;
+        };
+
+        for (size_t lid = 0; lid < d_mesh->num_owned_cells(); ++lid)
+        {
+            const auto& cell_info =
+                d_mesh->cell(static_cast<local_ordinal_type>(lid));
+            for (const auto node_gid : cell_info.node_gids)
+            {
+                cell_node_ids.push_back(append_node(node_gid));
+            }
+            cell_node_offsets.push_back(
+                static_cast<global_index_t>(cell_node_ids.size()));
+            cell_types.push_back(static_cast<std::uint8_t>(
+                MeshUtils::vtu_cell_type_code(cell_info.type)));
         }
 
-        const auto lid = static_cast<global_index_t>(node_coords.size());
-        node_lid.emplace(node_gid, lid);
-        node_coords.push_back(d_mesh->node_coord(node_gid));
-        return lid;
-    };
-
-    for (size_t lid = 0; lid < d_mesh->num_owned_cells(); ++lid)
-    {
-        const auto& cell_info =
-            d_mesh->cell(static_cast<local_ordinal_type>(lid));
-        for (const auto node_gid : cell_info.node_gids)
-        {
-            cell_node_ids.push_back(append_node(node_gid));
-        }
-        cell_node_offsets.push_back(
-            static_cast<global_index_t>(cell_node_ids.size()));
-        cell_types.push_back(static_cast<std::uint8_t>(
-            MeshUtils::vtu_cell_type_code(cell_info.type)));
+        d_vtu_topology = VTUWriter::make_topology(
+            std::move(node_coords),
+            std::move(cell_node_ids),
+            std::move(cell_node_offsets),
+            std::move(cell_types));
     }
 
     VTUWriter::VectorData velocity_values;
@@ -990,12 +1001,7 @@ VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
                 static_cast<local_ordinal_type>(lid)));
     }
 
-    VTUWriter writer;
-    writer.set_points(std::move(node_coords));
-    writer.set_cells(
-        std::move(cell_node_ids),
-        std::move(cell_node_offsets),
-        std::move(cell_types));
+    VTUWriter writer(d_vtu_topology);
     writer.add_scalar_cell_data(
         "pressure", collect_scalar_field(pressure()));
     writer.add_vector_cell_data(
@@ -1013,7 +1019,8 @@ template<TpetraTypePack Pack>
 void FluidSolver<Pack>::write_solution_vtu(
     const std::string& filename) const
 {
-    fluid_solution_writer().write(filename);
+    fluid_solution_writer().write(
+        filename, VTUWriter::Encoding::AppendedBinary);
 }
 
 } // namespace SimpleFluid
