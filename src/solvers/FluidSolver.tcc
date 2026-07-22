@@ -9,7 +9,10 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "FluidSolver.hh"
+#endif
+
 #include "solvers/CoupledNonlinearProblem.hh"
 
 #include <Teuchos_CommHelpers.hpp>

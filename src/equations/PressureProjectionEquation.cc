@@ -9,7 +9,14 @@
  *
  */
 
+#include "cmake/StandardHeaders.hh"
+
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.Equations;
+#else
 #include "PressureProjectionEquation.hh"
+#endif
+
 #include "PressureProjectionEquation.tcc"
 
 namespace SimpleFluid

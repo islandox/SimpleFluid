@@ -9,10 +9,12 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "TemperatureDiffusionEquation.hh"
-#include "equations/CollectiveValidation.hh"
+#endif
 
-#include <Teuchos_CommHelpers.hpp>
+#include "equations/CollectiveValidation.hh"
+#include "modules/Teuchos.hh"
 
 namespace SimpleFluid
 {

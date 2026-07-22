@@ -9,13 +9,16 @@
  *
  */
 #include <gtest/gtest.h>
-
-#include "benchmarks/BenchmarkSupport.hh"
-
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.BenchmarkSupport;
+#else
+#include "benchmarks/BenchmarkSupport.hh"
+#endif
 
 namespace
 {

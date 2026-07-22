@@ -10,6 +10,7 @@ module;
 export module SimpleFluid.FVM;
 
 export import SimpleFluid.Fields;
+export import SimpleFluid.LinearSolvers;
 
 export namespace SimpleFluid
 {
@@ -62,12 +63,15 @@ using ::SimpleFluid::FVM::identity_matrix;
 using ::SimpleFluid::FVM::non_orthogonal_diffusion_system;
 using ::SimpleFluid::FVM::non_orthogonal_transport_system;
 using ::SimpleFluid::FVM::normal_face_fluxes;
+using ::SimpleFluid::FVM::non_orthogonal_treatment_from_string;
 using ::SimpleFluid::FVM::physical_momentum_transport_system;
 using ::SimpleFluid::FVM::physical_temperature_transport_system;
 using ::SimpleFluid::FVM::pressure_poisson_matrix;
 using ::SimpleFluid::FVM::pressure_weighted_face_fluxes;
 using ::SimpleFluid::FVM::solve_explicit_non_orthogonal_diffusion;
 using ::SimpleFluid::FVM::solve_non_orthogonal_diffusion;
+using ::SimpleFluid::FVM::slip_face_velocity;
+using ::SimpleFluid::FVM::to_string;
 using ::SimpleFluid::FVM::transport_system;
 using ::SimpleFluid::FVM::upwind_convection_matrix;
 using ::SimpleFluid::FVM::vector_diffusion_system;

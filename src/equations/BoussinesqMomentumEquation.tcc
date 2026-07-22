@@ -9,7 +9,9 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "BoussinesqMomentumEquation.hh"
+#endif
 
 #include <cmath>
 #include <utility>

@@ -9,7 +9,14 @@
  *
  */
 
+#include "cmake/StandardHeaders.hh"
+
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.Equations;
+#else
 #include "IncompressibleMomentumEquation.hh"
+#endif
+
 #include "IncompressibleMomentumEquation.tcc"
 
 namespace SimpleFluid

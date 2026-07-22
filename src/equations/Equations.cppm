@@ -56,6 +56,7 @@ using ::SimpleFluid::CoupledEquation;
 using ::SimpleFluid::make_assembled_equation_model;
 
 using ::SimpleFluid::BoussinesqModelOptions;
+using ::SimpleFluid::validate_boussinesq_model_options;
 using ::SimpleFluid::boussinesq_model_options_from_database;
 using ::SimpleFluid::BoussinesqUpdateContext;
 using ::SimpleFluid::initialize_cell_field;
@@ -153,4 +154,15 @@ using ::SimpleFluid::RadiolyticGasPhysics::solve_bubble_radius;
 using ::SimpleFluid::RadiolyticGasPhysics::bubble_void_fraction;
 using ::SimpleFluid::RadiolyticGasPhysics::characteristic_radius;
 using ::SimpleFluid::RadiolyticGasPhysics::smoothed_heaviside;
+}
+
+// Implementation units need these Teuchos names while defining the exported
+// equation templates.  Re-export only that narrow surface instead of making
+// the whole Trilinos header-unit facade a dependency of this project module.
+export namespace Teuchos
+{
+using ::Teuchos::Array;
+using ::Teuchos::RCP;
+using ::Teuchos::null;
+using ::Teuchos::rcp;
 }

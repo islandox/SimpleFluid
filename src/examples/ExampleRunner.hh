@@ -13,7 +13,7 @@
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
 
-#include <iostream>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -21,6 +21,12 @@
 
 namespace SimpleFluid
 {
+
+/** @brief Allocate the database shared by an example configuration. */
+inline std::shared_ptr<Database> make_example_database()
+{
+    return std::make_shared<Database>();
+}
 
 namespace detail
 {
