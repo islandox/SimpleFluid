@@ -227,6 +227,35 @@ TEST(TurbulenceWallTreatmentTest, HighReKEpsilonMatchesOpenFOAMLogLayerFormulas)
     EXPECT_NEAR(*evaluation.production_override(0), production, 1.0e-12);
 }
 
+/** @brief Verifies wall-normal motion does not create high-Re wall shear. */
+TEST(TurbulenceWallTreatmentTest,
+     HighReKEpsilonIgnoresWallNormalRelativeVelocity)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh, boundaries);
+    constexpr double nu = 1.0e-3;
+    auto material = make_material(mesh, nu);
+    Field k(mesh, 1.0e-4, "k");
+    Velocity velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {0.0, 1.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::TurbulenceWallTreatmentOptions options;
+    options.boundary_names = {"ymin"};
+    SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack> treatment(
+        mesh, options, boundaries.velocity);
+    const auto evaluation = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+
+    const auto id = boundary_id(*mesh, "ymin");
+    EXPECT_DOUBLE_EQ(evaluation.face(id, 0).y_plus, 0.0);
+    ASSERT_TRUE(evaluation.production_override(0).has_value());
+    EXPECT_DOUBLE_EQ(*evaluation.production_override(0), 0.0);
+}
+
 /** @brief Verifies OpenFOAM v2606 high-Re defaults and the optional low-Re correction. */
 TEST(TurbulenceWallTreatmentTest,
      HighReDefaultsToOpenFOAMV2606AndOffersLowReCorrection)

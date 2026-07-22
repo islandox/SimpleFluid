@@ -23,6 +23,7 @@
 #include "utils/testing_environment.hh"
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <set>
@@ -216,6 +217,44 @@ gather_all_owned_gids(const MeshHandle& mesh)
 
 } // namespace
 
+/** @brief Verifies face identity survives legacy cell-packet transport. */
+TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
+{
+    using Packet = SimpleFluid::partition_detail::CellPacket<Pack>;
+    Packet packet;
+    packet.gid = 17;
+    packet.face_node_keys = {{8, 3, 5, 1}, {9, 4, 6, 2}};
+    packet.face_global_ids = {101, 307};
+    packet.face_boundary_ids = {
+        MeshType::invalid_boundary_id, 4};
+
+    const auto bytes = Packet::serialize_packets({packet});
+    const auto restored =
+        Packet::deserialize_packets(bytes.data(), bytes.size());
+
+    ASSERT_EQ(restored.size(), 1U);
+    EXPECT_EQ(restored.front().face_node_keys, packet.face_node_keys);
+    EXPECT_EQ(restored.front().face_global_ids, packet.face_global_ids);
+    EXPECT_EQ(restored.front().face_boundary_ids, packet.face_boundary_ids);
+}
+
+/** @brief Verifies STK assigns a distinct identity to every local face. */
+TEST(MeshPartitionerTest, InitialFaceGlobalIDsAreOneToOne)
+{
+    auto mesh = make_4x4x4_box_mesh();
+    std::set<Pack::global_ordinal_type> face_global_ids;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<Pack::local_ordinal_type>(face);
+        EXPECT_TRUE(
+            face_global_ids.insert(
+                mesh->face_global_id(face_lid)).second)
+            << "Two local faces share global ID "
+            << mesh->face_global_id(face_lid);
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Test 1: Partition produces a valid distribution
 // ---------------------------------------------------------------------------
@@ -381,6 +420,90 @@ TEST(MeshPartitionerTest, PreservesBoundaryAndFaceGeometry)
         }
         EXPECT_GT(mesh->face_area(face_lid), 0.0);
         EXPECT_GT(mesh->face_cell_center_distance(face_lid), 0.0);
+    }
+}
+
+/**
+ * @brief Verifies rebuilt local faces retain a rank-independent global ID.
+ *
+ * A face may be present on multiple ranks as owned or overlap geometry. Its
+ * sorted global-node key and global face ID must remain a one-to-one mapping
+ * after the legacy packet-based rebuild reorders local faces.
+ */
+TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
+{
+    auto mesh = make_4x4x4_box_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    using GO = Pack::global_ordinal_type;
+    constexpr size_t nodes_per_face = 4;
+    constexpr size_t record_size = nodes_per_face + 1;
+    std::vector<GO> local_records;
+    local_records.reserve(mesh->num_faces() * record_size);
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
+        std::vector<GO> node_key(
+            mesh->face(face_lid).node_gids.begin(),
+            mesh->face(face_lid).node_gids.end());
+        EXPECT_EQ(node_key.size(), nodes_per_face);
+        if (node_key.size() != nodes_per_face)
+        {
+            continue;
+        }
+        std::sort(node_key.begin(), node_key.end());
+
+        local_records.push_back(mesh->face_global_id(face_lid));
+        local_records.insert(
+            local_records.end(), node_key.begin(), node_key.end());
+    }
+
+    const int local_count = static_cast<int>(local_records.size());
+    std::vector<int> counts(static_cast<size_t>(comm->getSize()), 0);
+    my_mpi::allgather(&local_count, 1, counts.data(), 1);
+    std::vector<int> displacements(counts.size(), 0);
+    for (size_t rank = 1; rank < counts.size(); ++rank)
+    {
+        displacements[rank] = displacements[rank - 1] + counts[rank - 1];
+    }
+
+    std::vector<GO> global_records(static_cast<size_t>(
+        displacements.back() + counts.back()));
+    my_mpi::allgatherv(
+        local_records.data(),
+        local_count,
+        global_records.data(),
+        counts.data(),
+        displacements.data());
+
+    ASSERT_EQ(global_records.size() % record_size, 0U);
+    std::map<std::vector<GO>, GO> global_id_by_node_key;
+    std::map<GO, std::vector<GO>> node_key_by_global_id;
+    for (size_t offset = 0;
+         offset < global_records.size();
+         offset += record_size)
+    {
+        const GO global_id = global_records[offset];
+        std::vector<GO> node_key(
+            global_records.begin() + static_cast<std::ptrdiff_t>(offset + 1),
+            global_records.begin()
+                + static_cast<std::ptrdiff_t>(offset + record_size));
+
+        const auto [key_iter, key_inserted] =
+            global_id_by_node_key.emplace(node_key, global_id);
+        EXPECT_EQ(key_iter->second, global_id)
+            << "A physical face has different global IDs across ranks.";
+
+        const auto [id_iter, id_inserted] =
+            node_key_by_global_id.emplace(global_id, node_key);
+        EXPECT_EQ(id_iter->second, node_key)
+            << "A global face ID identifies different physical faces.";
+        (void)key_inserted;
+        (void)id_inserted;
     }
 }
 

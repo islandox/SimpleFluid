@@ -185,6 +185,46 @@ TEST(PhysicalEquationsTest, TemperatureDiffusionAppliesDirichletBoundary)
     EXPECT_NEAR(temperature.value(0), 0.2, 1.0e-12);
 }
 
+/** @brief Verifies explicit diffusion applies a prescribed outward gradient. */
+TEST(PhysicalEquationsTest,
+     TemperatureExplicitDiffusionAppliesNonzeroNeumannGradient)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType temperature(mesh, 300.0, "temperature");
+
+    constexpr double time_step = 0.1;
+    constexpr double diffusivity = 0.5;
+    constexpr double outward_gradient = 2.0;
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.temperature["zmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann,
+        outward_gradient};
+
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    equation.advance_explicit(
+        local_values(temperature), time_step, diffusivity, temperature);
+
+    const auto zmax_id = [&]
+    {
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        {
+            (void)batch;
+            if (mesh->boundary_batch_name(batch_id) == "zmax")
+            {
+                return batch_id;
+            }
+        }
+        return -1;
+    }();
+    ASSERT_GE(zmax_id, 0);
+    const auto face_lid =
+        mesh->boundary_batches().at(zmax_id).face_lids.front();
+    const auto expected =
+        300.0 + time_step * diffusivity * outward_gradient
+              * mesh->face_area(face_lid) / mesh->cell_volume(0);
+    EXPECT_NEAR(temperature.value(0), expected, 1.0e-12);
+}
+
 /** @brief Verifies that an explicit temperature step includes its source term. */
 TEST(PhysicalEquationsTest, TemperatureExplicitStepAddsSourceTerm)
 {

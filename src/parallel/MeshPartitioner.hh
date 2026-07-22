@@ -31,7 +31,8 @@ namespace partition_detail {
  *
  * Used to redistribute cells across MPI ranks after partitioning.
  * `node_gids` and `node_coords` are parallel arrays. Face node IDs are sorted
- * to form stable keys, and `face_boundary_ids` is parallel to those keys.
+ * to form stable keys, and `face_global_ids` and `face_boundary_ids` are
+ * parallel to those keys.
  *
  * @tparam Pack Tpetra type pack providing GO, LO, map, and graph types.
  */
@@ -48,6 +49,7 @@ struct CellPacket {
     std::vector<GO> node_gids;
     std::vector<Vec3> node_coords;
     std::vector<std::vector<GO>> face_node_keys;
+    std::vector<GO> face_global_ids;
     std::vector<int> face_boundary_ids;
 
     /**
@@ -76,6 +78,7 @@ struct CellPacket {
             std::uint32_t nf = static_cast<std::uint32_t>(p.face_node_keys.size());
             append(buf, nf);
             for (size_t face = 0; face < p.face_node_keys.size(); ++face) {
+                append(buf, p.face_global_ids[face]);
                 append(buf, static_cast<std::int32_t>(
                     p.face_boundary_ids[face]));
                 const auto& fn = p.face_node_keys[face];
@@ -116,8 +119,10 @@ struct CellPacket {
             }
             std::uint32_t nf = 0; rd(nf);
             pk.face_node_keys.resize(nf);
+            pk.face_global_ids.resize(nf);
             pk.face_boundary_ids.resize(nf);
             for (std::uint32_t f = 0; f < nf; ++f) {
+                rd(pk.face_global_ids[f]);
                 std::int32_t boundary_id = 0;
                 rd(boundary_id);
                 pk.face_boundary_ids[f] = boundary_id;

@@ -917,19 +917,19 @@ void FluidSolver<Pack>::write_step_progress(
 }
 
 /**
- * @brief Gather one local scalar field into VTU cell-data order.
+ * @brief Gather one rank-owned scalar field into VTU cell-data order.
  *
  * @tparam Pack Tpetra type pack.
  * @param field Cell field to collect.
- * @return Scalar values ordered by local cell identifier.
+ * @return Scalar values ordered by owned local cell identifier.
  */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::collect_scalar_field(
     const field_type& field) const -> VTUWriter::ScalarData
 {
     VTUWriter::ScalarData values;
-    values.reserve(d_mesh->num_local_cells());
-    for (size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
+    values.reserve(d_mesh->num_owned_cells());
+    for (size_t lid = 0; lid < d_mesh->num_owned_cells(); ++lid)
     {
         values.push_back(static_cast<real_t>(
             field.local_value(
@@ -967,7 +967,7 @@ VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
         return lid;
     };
 
-    for (size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
+    for (size_t lid = 0; lid < d_mesh->num_owned_cells(); ++lid)
     {
         const auto& cell_info =
             d_mesh->cell(static_cast<local_ordinal_type>(lid));
@@ -982,8 +982,8 @@ VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
     }
 
     VTUWriter::VectorData velocity_values;
-    velocity_values.reserve(d_mesh->num_local_cells());
-    for (size_t lid = 0; lid < d_mesh->num_local_cells(); ++lid)
+    velocity_values.reserve(d_mesh->num_owned_cells());
+    for (size_t lid = 0; lid < d_mesh->num_owned_cells(); ++lid)
     {
         velocity_values.push_back(
             velocity().local_value(

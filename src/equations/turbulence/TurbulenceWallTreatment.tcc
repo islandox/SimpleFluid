@@ -134,6 +134,12 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
     const auto c_mu_three_quarters = static_cast<Scalar>(std::pow(options.c_mu, 0.75));
     const auto sqrt_k = std::sqrt(input.k);
     const auto k_based_y_plus = c_mu_quarter * input.wall_distance * sqrt_k / input.molecular_nu;
+    const auto velocity_difference = input.owner_velocity - input.wall_velocity;
+    const auto normal_velocity =
+        input.outward_normal * velocity_difference.dot(input.outward_normal);
+    const auto tangential_velocity = velocity_difference - normal_velocity;
+    const auto wall_shear_gradient_magnitude =
+        tangential_velocity.norm() / input.wall_distance;
 
     const bool in_log_layer = k_based_y_plus > y_plus_lam;
     if (in_log_layer)
@@ -155,11 +161,11 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
         }
         else
         {
-            const auto wall_normal_gradient =
-                (input.wall_velocity - input.owner_velocity).norm() / input.wall_distance;
             const auto effective_nu = input.molecular_nu + result.turbulent_kinematic_viscosity;
-            result.y_plus = input.wall_distance * std::sqrt(effective_nu * wall_normal_gradient) /
-                            input.molecular_nu;
+            result.y_plus =
+                input.wall_distance *
+                std::sqrt(effective_nu * wall_shear_gradient_magnitude) /
+                input.molecular_nu;
         }
     }
 
@@ -176,10 +182,8 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
 
     if (!options.epsilon_low_re_correction || in_log_layer)
     {
-        const auto wall_normal_gradient =
-            (input.wall_velocity - input.owner_velocity).norm() / input.wall_distance;
         result.production_override = (result.turbulent_kinematic_viscosity + input.molecular_nu) *
-                                     wall_normal_gradient * c_mu_quarter * sqrt_k /
+                                     wall_shear_gradient_magnitude * c_mu_quarter * sqrt_k /
                                      (static_cast<Scalar>(options.kappa) * input.wall_distance);
     }
     else
@@ -217,7 +221,7 @@ TurbulenceWallTreatment<Pack, Policy>::Evaluation::Evaluation(SP<const mesh_type
  * @throws std::out_of_range if the batch or face is absent.
  */
 template <TpetraTypePack Pack, class Policy>
-const auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::face(int batch_id,
+auto TurbulenceWallTreatment<Pack, Policy>::Evaluation::face(int batch_id,
                                                                    size_t in_batch_id) const
     -> const face_evaluation_type&
 {

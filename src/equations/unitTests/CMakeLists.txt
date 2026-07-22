@@ -2,6 +2,8 @@
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testBoussinesqModelMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFissionPowerSourceMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testPressureProjectionMultiRank\\.cc$")
@@ -20,6 +22,15 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+add_executable(
+  testBoussinesqModelMultiRank
+  testBoussinesqModelMultiRank.cc)
+target_link_libraries(
+  testBoussinesqModelMultiRank
+  SimpleFluid::Equations
+  GTest::gtest_main)
+simplefluid_exe_reuse_precompiled_header(testBoussinesqModelMultiRank)
 
 add_executable(
   testFissionPowerSourceMultiRank
@@ -51,6 +62,16 @@ simplefluid_exe_reuse_precompiled_header(testTurbulenceModelMultiRank)
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
         OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
+  add_test(
+    NAME BoussinesqModel_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testBoussinesqModelMultiRank>")
+  set_tests_properties(BoussinesqModel_2procs PROPERTIES
+    LABELS "mpi;boussinesq"
+    PROCESSORS 2
+    TIMEOUT 120)
+
   add_test(
     NAME FissionPowerSource_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
