@@ -16,10 +16,43 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace SimpleFluid
 {
+
+namespace detail
+{
+
+/**
+ * @brief Return a collision-free VTU piece filename for this communicator rank.
+ *
+ * Serial output preserves the caller-provided filename. Distributed output
+ * inserts a rank suffix before the conventional `.vtu` extension so that no
+ * two ranks truncate or overwrite the same file.
+ */
+inline std::string rank_local_vtu_filename(
+    const std::string& filename,
+    int rank,
+    int communicator_size)
+{
+    if (communicator_size <= 1)
+    {
+        return filename;
+    }
+
+    const auto suffix = "_rank" + std::to_string(rank);
+    constexpr std::string_view extension = ".vtu";
+    if (filename.ends_with(extension))
+    {
+        return filename.substr(0, filename.size() - extension.size())
+             + suffix + ".vtu";
+    }
+    return filename + suffix;
+}
+
+} // namespace detail
 
 /**
  * @brief Build a mesh, run a configured Boussinesq example, and write VTU output.
@@ -54,12 +87,19 @@ void run_boussinesq_example(
                                   time_options, linear_options);
     std::forward<Initializer>(initialize)(solver);
     solver.run();
-    solver.write_solution_vtu(vtu_filename, output_options);
 
-    if (mesh->owned_cell_map()->getComm()->getRank() == 0)
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto output_filename = detail::rank_local_vtu_filename(
+        vtu_filename, communicator->getRank(), communicator->getSize());
+    solver.write_solution_vtu(output_filename, output_options);
+
+    if (communicator->getRank() == 0)
     {
-        std::cout << "Wrote " << vtu_filename << " at t="
-                  << solver.time() << "\n";
+        std::cout << "Wrote "
+                  << (communicator->getSize() == 1
+                    ? output_filename
+                    : vtu_filename + " as rank-local pieces")
+                  << " at t=" << solver.time() << "\n";
     }
 }
 
@@ -102,12 +142,19 @@ void run_boussinesq_example(
         std::move(model_options));
     std::forward<Initializer>(initialize)(solver);
     solver.run();
-    solver.write_solution_vtu(vtu_filename, output_options);
 
-    if (mesh->owned_cell_map()->getComm()->getRank() == 0)
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const auto output_filename = detail::rank_local_vtu_filename(
+        vtu_filename, communicator->getRank(), communicator->getSize());
+    solver.write_solution_vtu(output_filename, output_options);
+
+    if (communicator->getRank() == 0)
     {
-        std::cout << "Wrote " << vtu_filename << " at t="
-                  << solver.time() << "\n";
+        std::cout << "Wrote "
+                  << (communicator->getSize() == 1
+                    ? output_filename
+                    : vtu_filename + " as rank-local pieces")
+                  << " at t=" << solver.time() << "\n";
     }
 }
 

@@ -120,6 +120,7 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
             auto& face = mesh.d_faces[static_cast<size_t>(fid)];
             std::vector<GO> fn(face.node_gids.begin(), face.node_gids.end());
             p.face_node_keys.push_back(std::move(fn));
+            p.face_global_ids.push_back(mesh.face_global_id(fid));
             p.face_boundary_ids.push_back(face.boundary_id);
         }
         send_p[static_cast<size_t>(dest)].push_back(std::move(p));
@@ -1118,6 +1119,7 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     mesh.d_cell_owned_face_ids.clear(); mesh.d_cell_face_distances.clear();
     mesh.d_cell_owned_node_global_ids.clear(); mesh.d_face_owned_node_global_ids.clear();
     mesh.d_face_key_to_face.clear();
+    mesh.d_owned_face_global_ids.clear();
     // Clear contiguous Tpetra GID assignments; they will be recomputed by create_maps().
     mesh.d_ghost_cell_tpetra_gids.clear();
     mesh.d_mesh_gid_to_tpetra_gid.clear();
@@ -1156,6 +1158,11 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
                 != packet.face_boundary_ids.size()) {
                 throw std::runtime_error(
                     "MeshPartitioner cell packet has inconsistent boundary IDs.");
+            }
+            if (packet.face_node_keys.size()
+                != packet.face_global_ids.size()) {
+                throw std::runtime_error(
+                    "MeshPartitioner cell packet has inconsistent face global IDs.");
             }
             for (size_t node = 0; node < packet.node_gids.size(); ++node) {
                 needed_nodes.emplace(
@@ -1208,6 +1215,8 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
             auto& fn = p.face_node_keys[packet_face];
             const auto boundary_id =
                 p.face_boundary_ids[packet_face];
+            const auto face_global_id =
+                p.face_global_ids[packet_face];
             std::string key = Mesh<Pack>::make_face_key(typename Mesh<Pack>::ViewGO(const_cast<GO*>(fn.data()), fn.size()));
             auto it = mesh.d_face_key_to_face.find(key);
             if (it == mesh.d_face_key_to_face.end()) {
@@ -1220,10 +1229,17 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
                 fi.owner = cl; fi.neighbor = invalid_lid;
                 fi.node_gids = typename Mesh<Pack>::ViewGO(mesh.d_face_owned_node_global_ids.data() + off, fn.size());
                 mesh.d_faces.push_back(std::move(fi));
+                mesh.d_owned_face_global_ids.push_back(face_global_id);
                 mesh.d_face_key_to_face[key] = fid;
                 cfl[static_cast<size_t>(cl)].push_back(fid);
             } else {
                 LO fid = it->second;
+                if (mesh.d_owned_face_global_ids[static_cast<size_t>(fid)]
+                    != face_global_id)
+                {
+                    throw std::runtime_error(
+                        "MeshPartitioner received inconsistent global IDs for the same face.");
+                }
                 auto& fi = mesh.d_faces[static_cast<size_t>(fid)];
                 if (fi.boundary_id == Mesh<Pack>::invalid_boundary_id
                     && boundary_id != Mesh<Pack>::invalid_boundary_id)
