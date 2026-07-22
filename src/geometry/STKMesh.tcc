@@ -215,6 +215,7 @@ void STKMesh<Pack>::assemble()
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::build_cell_list()
 {
+    reset_contiguous_tpetra_gids();
     d_spatial_dim = static_cast<int>(d_stk.meta->spatial_dimension());
 
     d_stk.cell_entities.clear();

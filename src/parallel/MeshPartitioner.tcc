@@ -1121,10 +1121,7 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     mesh.d_face_key_to_face.clear();
     mesh.d_owned_face_global_ids.clear();
     // Clear contiguous Tpetra GID assignments; they will be recomputed by create_maps().
-    mesh.d_ghost_cell_tpetra_gids.clear();
-    mesh.d_mesh_gid_to_tpetra_gid.clear();
-    mesh.d_tpetra_gid_to_mesh_gid.clear();
-    mesh.d_tpetra_gid_offset = 0;
+    mesh.reset_contiguous_tpetra_gids();
 
     const auto total_cells = owned_pkts.size() + ghost_pkts.size();
     size_t total_cell_nodes = 0;

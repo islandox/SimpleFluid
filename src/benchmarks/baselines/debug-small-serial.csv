@@ -1,0 +1,17 @@
+benchmark_case,preset,mesh_nx,mesh_ny,mesh_nz,mpi_ranks,shear,treatment,coupling,preconditioner,max_nonlinear_iterations,max_linear_solves,max_krylov_iterations,max_total_seconds
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.0,explicit,none,MueLu,0,5,80,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.0,implicit,none,none,0,1,30,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.0,hybrid,none,none,0,5,130,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.2,explicit,none,MueLu,0,5,80,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.2,implicit,none,none,0,1,40,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.2,hybrid,none,none,0,5,170,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.4,explicit,none,MueLu,0,5,80,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.4,implicit,none,none,0,1,40,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.4,hybrid,none,none,0,5,180,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.6,explicit,none,MueLu,0,5,80,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.6,implicit,none,none,0,1,40,10
+diffusion_nonorthogonal,debug-small,6,6,6,1,0.6,hybrid,none,none,0,5,180,10
+pressure_velocity,debug-small,8,8,1,1,0.0,explicit,PISO,MueLu,1,8,40,10
+pressure_velocity,debug-small,8,8,1,1,0.0,implicit,PISO,none,1,4,40,10
+pressure_velocity,debug-small,8,8,1,1,0.0,hybrid,PISO,none,1,8,40,10
+pressure_velocity,debug-small,8,8,1,1,0.0,implicit,coupledKrylov,Schur(Ifpack2+MueLu),1,2,32,10

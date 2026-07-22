@@ -94,6 +94,7 @@ struct Options
     int warmups = 0;
     std::string configuration = "all";
     std::filesystem::path output{"simplefluid_benchmark.csv"};
+    std::filesystem::path baseline;
 };
 
 /**
@@ -221,8 +222,8 @@ void apply_preset(Options& options,
         options.selection = CaseSelection::All;
         options.diffusion = {6, 6, 6};
         options.pressure_velocity = {8, 8, 1};
-        options.repetitions = 1;
-        options.warmups = 0;
+        options.repetitions = 3;
+        options.warmups = 1;
         return;
     }
     if (preset == "release-profile")
@@ -393,6 +394,11 @@ Options parse_options(int argc, char** argv, int mpi_ranks)
             options.output =
                 require_value(argc, argv, i, argument);
         }
+        else if (argument == "--baseline")
+        {
+            options.baseline =
+                require_value(argc, argv, i, argument);
+        }
         else if (argument == "--configuration")
         {
             options.configuration =
@@ -414,6 +420,7 @@ Options parse_options(int argc, char** argv, int mpi_ranks)
                    "mpi-strong|mpi-weak] [--case all|diffusion_nonorthogonal|"
                    "pressure_velocity] [--nx N --ny N --nz N] [--shear S] "
                    "[--repetitions N] [--warmups N] [--output PATH] "
+                   "[--baseline PATH] "
                    "[--configuration all|explicit|implicit|hybrid|coupled] "
                    "[--scaling none|strong|weak]\n";
             std::exit(0);
@@ -1091,15 +1098,21 @@ SimpleFluid::Benchmark::Record run_pressure_velocity(
  *
  * @param record Benchmark result to emit.
  * @param writer Rank-zero CSV writer.
+ * @param gate Optional rank-zero regression gate.
  * @param rank Calling MPI rank.
  */
 void emit_record(const SimpleFluid::Benchmark::Record& record,
                  SimpleFluid::Benchmark::CsvWriter* writer,
+                 SimpleFluid::Benchmark::RegressionGate* gate,
                  int rank)
 {
     if (rank != 0)
     {
         return;
+    }
+    if (gate != nullptr)
+    {
+        gate->check(record);
     }
     writer->append(record);
     std::cout
@@ -1165,11 +1178,18 @@ int main(int argc, char** argv)
             SimpleFluid::Benchmark::utc_timestamp()
           + "-" + std::to_string(getpid());
         std::unique_ptr<SimpleFluid::Benchmark::CsvWriter> writer;
+        std::unique_ptr<SimpleFluid::Benchmark::RegressionGate> gate;
         if (rank == 0)
         {
             writer =
                 std::make_unique<SimpleFluid::Benchmark::CsvWriter>(
                     options.output);
+            if (!options.baseline.empty())
+            {
+                gate =
+                    std::make_unique<SimpleFluid::Benchmark::RegressionGate>(
+                        options.baseline, options.repetitions);
+            }
         }
 
         const std::array<SolverConfiguration, 3> diffusion_configurations{{
@@ -1224,7 +1244,7 @@ int main(int argc, char** argv)
                             run_diffusion(
                                 options, run_id, configuration,
                                 shear, repetition),
-                            writer.get(), rank);
+                            writer.get(), gate.get(), rank);
                     }
                 }
             }
@@ -1255,9 +1275,15 @@ int main(int argc, char** argv)
                         run_pressure_velocity(
                             options, run_id, configuration,
                             repetition),
-                        writer.get(), rank);
+                        writer.get(), gate.get(), rank);
                 }
             }
+        }
+        if (gate != nullptr)
+        {
+            gate->verify_complete();
+            std::cout << "Benchmark regression baseline passed: "
+                      << options.baseline << '\n';
         }
     }
     catch (const std::exception& error)

@@ -13,7 +13,9 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -72,6 +74,98 @@ void append_value(std::ostream& output, const Value& value)
 void append_value(std::ostream& output, const std::string& value)
 {
     output << csv_escape(value);
+}
+
+/** @brief Parse one RFC 4180-style CSV row. */
+std::vector<std::string> parse_csv_row(std::string_view row)
+{
+    std::vector<std::string> fields;
+    std::string field;
+    bool quoted = false;
+    for (size_t i = 0; i < row.size(); ++i)
+    {
+        const auto character = row[i];
+        if (character == '"')
+        {
+            if (quoted && i + 1 < row.size() && row[i + 1] == '"')
+            {
+                field += '"';
+                ++i;
+            }
+            else
+            {
+                quoted = !quoted;
+            }
+        }
+        else if (character == ',' && !quoted)
+        {
+            fields.push_back(std::move(field));
+            field.clear();
+        }
+        else
+        {
+            field += character;
+        }
+    }
+    if (quoted)
+    {
+        throw std::runtime_error("Unterminated quoted CSV field.");
+    }
+    fields.push_back(std::move(field));
+    return fields;
+}
+
+/** @brief Parse a non-negative integer baseline field. */
+long long parse_baseline_integer(
+    std::string_view value,
+    std::string_view name,
+    size_t line_number)
+{
+    size_t consumed = 0;
+    long long parsed = 0;
+    bool parsed_successfully = true;
+    try
+    {
+        parsed = std::stoll(std::string(value), &consumed);
+    }
+    catch (const std::exception&)
+    {
+        parsed_successfully = false;
+    }
+    if (!parsed_successfully || consumed != value.size() || parsed < 0)
+    {
+        throw std::runtime_error(
+            "Invalid " + std::string(name) + " on baseline line "
+            + std::to_string(line_number) + ".");
+    }
+    return parsed;
+}
+
+/** @brief Parse a finite non-negative floating-point baseline field. */
+double parse_baseline_real(
+    std::string_view value,
+    std::string_view name,
+    size_t line_number)
+{
+    size_t consumed = 0;
+    double parsed = 0.0;
+    bool parsed_successfully = true;
+    try
+    {
+        parsed = std::stod(std::string(value), &consumed);
+    }
+    catch (const std::exception&)
+    {
+        parsed_successfully = false;
+    }
+    if (!parsed_successfully || consumed != value.size()
+        || !std::isfinite(parsed) || parsed < 0.0)
+    {
+        throw std::runtime_error(
+            "Invalid " + std::string(name) + " on baseline line "
+            + std::to_string(line_number) + ".");
+    }
+    return parsed;
 }
 
 } // namespace
@@ -302,6 +396,251 @@ void CsvWriter::append(const Record& record)
     append(record.achieved_tolerance);
     append(record.converged ? 1 : 0);
     output << '\n';
+}
+
+/** @brief Return the regression-baseline CSV schema. */
+std::string RegressionGate::header()
+{
+    return
+        "benchmark_case,preset,mesh_nx,mesh_ny,mesh_nz,mpi_ranks,shear,"
+        "treatment,coupling,preconditioner,max_nonlinear_iterations,"
+        "max_linear_solves,max_krylov_iterations,max_total_seconds";
+}
+
+/**
+ * @brief Load and validate a checked-in benchmark baseline.
+ */
+RegressionGate::RegressionGate(
+    std::filesystem::path baseline_path,
+    int expected_samples_per_case)
+    : d_baseline_path(std::move(baseline_path))
+    , d_expected_samples_per_case(expected_samples_per_case)
+{
+    if (d_expected_samples_per_case <= 0)
+    {
+        throw std::invalid_argument(
+            "Benchmark regression gate requires at least one measured sample.");
+    }
+
+    std::ifstream input(d_baseline_path);
+    if (!input)
+    {
+        throw std::runtime_error(
+            "Could not open benchmark baseline: "
+            + d_baseline_path.string());
+    }
+
+    std::string baseline_header;
+    std::getline(input, baseline_header);
+    if (!baseline_header.empty() && baseline_header.back() == '\r')
+    {
+        baseline_header.pop_back();
+    }
+    if (baseline_header != header())
+    {
+        throw std::runtime_error(
+            "Benchmark baseline has an incompatible header: "
+            + d_baseline_path.string());
+    }
+
+    std::string line;
+    size_t line_number = 1;
+    while (std::getline(input, line))
+    {
+        ++line_number;
+        if (!line.empty() && line.back() == '\r')
+        {
+            line.pop_back();
+        }
+        if (line.empty())
+        {
+            continue;
+        }
+
+        const auto fields = parse_csv_row(line);
+        if (fields.size() != 14)
+        {
+            throw std::runtime_error(
+                "Benchmark baseline line " + std::to_string(line_number)
+                + " has " + std::to_string(fields.size())
+                + " fields; expected 14.");
+        }
+
+        Entry entry;
+        entry.benchmark_case = fields[0];
+        entry.preset = fields[1];
+        entry.mesh_nx = parse_baseline_integer(
+            fields[2], "mesh_nx", line_number);
+        entry.mesh_ny = parse_baseline_integer(
+            fields[3], "mesh_ny", line_number);
+        entry.mesh_nz = parse_baseline_integer(
+            fields[4], "mesh_nz", line_number);
+        const auto mpi_ranks = parse_baseline_integer(
+            fields[5], "mpi_ranks", line_number);
+        entry.shear = parse_baseline_real(
+            fields[6], "shear", line_number);
+        entry.treatment = fields[7];
+        entry.coupling = fields[8];
+        entry.preconditioner = fields[9];
+        const auto nonlinear_iterations = parse_baseline_integer(
+            fields[10], "max_nonlinear_iterations", line_number);
+        const auto linear_solves = parse_baseline_integer(
+            fields[11], "max_linear_solves", line_number);
+        const auto krylov_iterations = parse_baseline_integer(
+            fields[12], "max_krylov_iterations", line_number);
+        entry.max_total_seconds = parse_baseline_real(
+            fields[13], "max_total_seconds", line_number);
+
+        if (entry.mesh_nx == 0 || entry.mesh_ny == 0 || entry.mesh_nz == 0
+            || mpi_ranks == 0
+            || mpi_ranks > std::numeric_limits<int>::max()
+            || nonlinear_iterations > std::numeric_limits<int>::max()
+            || linear_solves > std::numeric_limits<int>::max()
+            || krylov_iterations > std::numeric_limits<int>::max()
+            || entry.max_total_seconds == 0.0)
+        {
+            throw std::runtime_error(
+                "Benchmark baseline line " + std::to_string(line_number)
+                + " contains an out-of-range limit or dimension.");
+        }
+        entry.mpi_ranks = static_cast<int>(mpi_ranks);
+        entry.max_nonlinear_iterations =
+            static_cast<int>(nonlinear_iterations);
+        entry.max_linear_solves = static_cast<int>(linear_solves);
+        entry.max_krylov_iterations =
+            static_cast<int>(krylov_iterations);
+
+        const auto duplicate = std::find_if(
+            d_entries.begin(), d_entries.end(),
+            [&](const Entry& existing)
+            {
+                return existing.benchmark_case == entry.benchmark_case
+                    && existing.preset == entry.preset
+                    && existing.mesh_nx == entry.mesh_nx
+                    && existing.mesh_ny == entry.mesh_ny
+                    && existing.mesh_nz == entry.mesh_nz
+                    && existing.mpi_ranks == entry.mpi_ranks
+                    && std::abs(existing.shear - entry.shear) <= 1.0e-12
+                    && existing.treatment == entry.treatment
+                    && existing.coupling == entry.coupling
+                    && existing.preconditioner == entry.preconditioner;
+            });
+        if (duplicate != d_entries.end())
+        {
+            throw std::runtime_error(
+                "Benchmark baseline contains a duplicate configuration on line "
+                + std::to_string(line_number) + ".");
+        }
+        d_entries.push_back(std::move(entry));
+    }
+
+    if (d_entries.empty())
+    {
+        throw std::runtime_error(
+            "Benchmark baseline contains no configurations: "
+            + d_baseline_path.string());
+    }
+}
+
+/**
+ * @brief Check one measured record against its matching baseline row.
+ */
+void RegressionGate::check(const Record& record)
+{
+    const auto match = std::find_if(
+        d_entries.begin(), d_entries.end(),
+        [&](const Entry& entry)
+        {
+            return entry.benchmark_case == record.benchmark_case
+                && entry.preset == record.preset
+                && entry.mesh_nx == record.mesh_nx
+                && entry.mesh_ny == record.mesh_ny
+                && entry.mesh_nz == record.mesh_nz
+                && entry.mpi_ranks == record.mpi_ranks
+                && std::abs(entry.shear - record.shear) <= 1.0e-12
+                && entry.treatment == record.treatment
+                && entry.coupling == record.coupling
+                && entry.preconditioner == record.preconditioner;
+        });
+    if (match == d_entries.end())
+    {
+        throw std::runtime_error(
+            "Benchmark regression baseline has no entry for "
+            + record.benchmark_case + "/" + record.treatment + "/"
+            + record.coupling + " at shear=" + std::to_string(record.shear)
+            + " with " + std::to_string(record.mpi_ranks) + " MPI rank(s).");
+    }
+    if (match->observed_samples >= d_expected_samples_per_case)
+    {
+        throw std::runtime_error(
+            "Benchmark regression received too many samples for "
+            + record.benchmark_case + "/" + record.treatment + "/"
+            + record.coupling + ".");
+    }
+    if (!record.converged)
+    {
+        throw std::runtime_error(
+            "Benchmark regression solver did not converge for "
+            + record.benchmark_case + "/" + record.treatment + "/"
+            + record.coupling + ".");
+    }
+    if (!std::isfinite(record.total_seconds) || record.total_seconds < 0.0)
+    {
+        throw std::runtime_error(
+            "Benchmark regression produced an invalid elapsed time.");
+    }
+
+    const auto check_ceiling =
+        [&](const auto actual, const auto maximum, std::string_view metric)
+    {
+        if (actual > maximum)
+        {
+            std::ostringstream message;
+            message << "Benchmark regression exceeded " << metric
+                    << " for " << record.benchmark_case << '/'
+                    << record.treatment << '/' << record.coupling
+                    << ": measured " << actual
+                    << ", limit " << maximum << '.';
+            throw std::runtime_error(message.str());
+        }
+    };
+    check_ceiling(
+        record.nonlinear_iterations,
+        match->max_nonlinear_iterations,
+        "nonlinear-iteration ceiling");
+    check_ceiling(
+        record.linear_solves,
+        match->max_linear_solves,
+        "linear-solve ceiling");
+    check_ceiling(
+        record.krylov_iterations,
+        match->max_krylov_iterations,
+        "Krylov-iteration ceiling");
+    check_ceiling(
+        record.total_seconds,
+        match->max_total_seconds,
+        "elapsed-time ceiling (seconds)");
+    ++match->observed_samples;
+}
+
+/**
+ * @brief Verify that every baseline configuration produced every sample.
+ */
+void RegressionGate::verify_complete() const
+{
+    for (const auto& entry : d_entries)
+    {
+        if (entry.observed_samples != d_expected_samples_per_case)
+        {
+            throw std::runtime_error(
+                "Benchmark regression expected "
+                + std::to_string(d_expected_samples_per_case)
+                + " sample(s) for " + entry.benchmark_case + "/"
+                + entry.treatment + "/" + entry.coupling
+                + " but observed "
+                + std::to_string(entry.observed_samples) + ".");
+        }
+    }
 }
 
 } // namespace SimpleFluid::Benchmark
