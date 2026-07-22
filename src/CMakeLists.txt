@@ -68,6 +68,25 @@ if(APPLE)
     set(SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN NO)
 endif()
 
+# Configure ordinary translation units that consume named modules.  These
+# sources must not inherit the Trilinos-heavy PCH: mixing textual Trilinos
+# declarations with declarations reachable through a BMI is ill-formed on
+# GCC and Clang, and would also defeat the compile-time benefit of importing.
+function(simplefluid_configure_module_consumers target_name)
+    if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
+        return()
+    endif()
+
+    set_target_properties(${target_name} PROPERTIES
+        CXX_SCAN_FOR_MODULES ON)
+    set_source_files_properties(${ARGN}
+        PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_DEFINITIONS SIMPLEFLUID_USE_CXX_MODULES=1
+        COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+endfunction()
+
 if(SIMPLEFLUID_ENABLE_CXX_MODULES)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         message(FATAL_ERROR
@@ -80,6 +99,7 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
     set(SIMPLEFLUID_TRILINOS_WRAPPER_MODULES
         modules/Trilinos.cppm
         modules/Kokkos.cppm
+        modules/STK.cppm
         modules/Teuchos.cppm
         modules/Tpetra.cppm
         modules/Zoltan2.cppm
@@ -316,9 +336,36 @@ set_target_properties(SimpleFluidFields PROPERTIES
     VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_link_libraries(SimpleFluidFields PUBLIC SimpleFluidMesh)
 
+# Keep the expensive Belos default specialization in one conventional object.
+# Higher layers import its API module without repeatedly instantiating the
+# solver implementation through their BMIs.
+add_library(SimpleFluidLinearSolvers STATIC
+    solvers/BelosLinearSolver.cc
+)
+add_library(SimpleFluid::LinearSolvers ALIAS SimpleFluidLinearSolvers)
+simplefluid_configure_library(SimpleFluidLinearSolvers)
+simplefluid_enable_native_archive_fallback(SimpleFluidLinearSolvers)
+set_target_properties(SimpleFluidLinearSolvers PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
+target_link_libraries(SimpleFluidLinearSolvers PUBLIC SimpleFluidFields)
+
+# Header-defined helper specializations remain available to consumers without
+# exposing private implementation symbols through the shared FVM ABI.
+add_library(SimpleFluidFvmTemplates STATIC
+    FVM/FvmInstantiations.cc
+)
+simplefluid_configure_library(SimpleFluidFvmTemplates)
+simplefluid_enable_native_archive_fallback(SimpleFluidFvmTemplates)
+set_target_properties(SimpleFluidFvmTemplates PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
+target_link_libraries(SimpleFluidFvmTemplates PUBLIC SimpleFluidLinearSolvers)
+
 # FVM retains the shared-library ownership of its supported template pack.
 add_library(SimpleFluidFVM SHARED
-    FVM/FvmInstantiations.cc
     FVM/NonOrthogonalCorrection.cc
     FVM/TransportSystem.cc
 )
@@ -328,7 +375,7 @@ set_target_properties(SimpleFluidFVM PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
     VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
-target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
+target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFvmTemplates)
 
 if(SIMPLEFLUID_ENABLE_CXX_MODULES)
     add_dependencies(SimpleFluidFields SimpleFluidHeaderUnits)
@@ -455,6 +502,12 @@ endif()
 add_library(SimpleFluidEquations INTERFACE)
 add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
 target_link_libraries(SimpleFluidEquations INTERFACE SimpleFluidSolvers)
+
+# Problem is a header-only ownership/registry layer. Its named module is built
+# in the physical solver DSO alongside the equation and solver modules.
+add_library(SimpleFluidProblems INTERFACE)
+add_library(SimpleFluid::Problems ALIAS SimpleFluidProblems)
+target_link_libraries(SimpleFluidProblems INTERFACE SimpleFluidEquations)
 
 # Source visibility attributes select the public SimpleFluid API.  The ELF
 # version script localizes embedded vendor archives except for a separately
@@ -611,15 +664,17 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
         SimpleFluidCore
         SimpleFluidMesh
         SimpleFluidFields
+        SimpleFluidLinearSolvers
         SimpleFluidFVM
-        SimpleFluidEquations
         SimpleFluidSolvers)
     set(_simplefluid_project_module_sources
         dataclass/Core.cppm
         geometry/Mesh.cppm
         fields/Fields.cppm
+        solvers/LinearSolvers.cppm
         FVM/FVM.cppm
         equations/Equations.cppm
+        problems/Problems.cppm
         solvers/Solvers.cppm
         SimpleFluid.cppm)
 
@@ -635,18 +690,20 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
         FILE_SET CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES fields/Fields.cppm)
+    target_sources(SimpleFluidLinearSolvers PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES solvers/LinearSolvers.cppm)
     target_sources(SimpleFluidFVM PUBLIC
         FILE_SET CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES FVM/FVM.cppm)
-    target_sources(SimpleFluidEquations PUBLIC
-        FILE_SET CXX_MODULES
-        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
-        FILES equations/Equations.cppm)
     target_sources(SimpleFluidSolvers PUBLIC
         FILE_SET CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES
+            equations/Equations.cppm
+            problems/Problems.cppm
             solvers/Solvers.cppm
             SimpleFluid.cppm)
 
@@ -679,6 +736,23 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
         ${_simplefluid_project_module_sources}
         PROPERTIES COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+
+    # Clang safely consumes the project BMIs from implementation TUs.  GCC's
+    # current header-unit implementation emits interposable Trilinos template
+    # bodies into each shared library; keep those library TUs on the textual
+    # PCH path until that runtime ODR issue is fixed upstream.  GCC leaf
+    # executables still consume the named modules below.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        simplefluid_configure_module_consumers(
+            SimpleFluidSolvers
+            equations/BoussinesqMomentumEquation.cc
+            equations/IncompressibleMomentumEquation.cc
+            equations/PressureProjectionEquation.cc
+            equations/RadiolyticGasProperties.cc
+            equations/TemperatureDiffusionEquation.cc
+            solvers/BoussinesqSolver.cc
+            solvers/FluidSolver.cc)
+    endif()
 endif()
 
 # Preserve the original target as an umbrella for downstream users.
@@ -691,10 +765,44 @@ if(SIMPLEFLUID_ENABLE_IF97)
     target_link_libraries(SimpleFluid INTERFACE SimpleFluidIF97)
 endif()
 
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    # Examples keep their reusable runner in a separate top-level module so
+    # each executable imports one BMI instead of reparsing all solver headers.
+    add_library(SimpleFluidExamples STATIC)
+    add_library(SimpleFluid::Examples ALIAS SimpleFluidExamples)
+    simplefluid_configure_library(SimpleFluidExamples)
+    simplefluid_enable_native_archive_fallback(SimpleFluidExamples)
+    set_target_properties(SimpleFluidExamples PROPERTIES
+        POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(SimpleFluidExamples PUBLIC
+        SimpleFluid)
+    target_sources(SimpleFluidExamples PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES examples/Examples.cppm)
+    add_dependencies(SimpleFluidExamples SimpleFluidHeaderUnits)
+    set_source_files_properties(examples/Examples.cppm PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_DEFINITIONS
+        "$<$<CXX_COMPILER_ID:GNU>:SIMPLEFLUID_USE_TRILINOS_MODULES=1>"
+        COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set_property(TARGET SimpleFluidExamples
+            PROPERTY CXX_COMPILER_LAUNCHER
+            ${CMAKE_COMMAND}
+            -DSIMPLEFLUID_HEADER_UNIT_MAP=${_simplefluid_gcc_header_unit_map}
+            -P ${PROJECT_SOURCE_DIR}/cmake/LaunchGccWithHeaderUnits.cmake
+            --)
+    endif()
+endif()
+
 # Reuse a visibility-compatible PCH for every object embedded in the DSO.
 target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidFields REUSE_FROM SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidLinearSolvers REUSE_FROM SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidFvmTemplates REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidFVM REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidSolvers REUSE_FROM SimpleFluidSharedPch)
 
@@ -851,20 +959,45 @@ else()
 endif()
 
 add_executable(natural_convection_box examples/natural_convection_box.cc)
-target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
-simplefluid_exe_reuse_precompiled_header(natural_convection_box)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    target_link_libraries(natural_convection_box PRIVATE SimpleFluid::Examples)
+    simplefluid_configure_module_consumers(
+        natural_convection_box examples/natural_convection_box.cc)
+else()
+    target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
+    simplefluid_exe_reuse_precompiled_header(natural_convection_box)
+endif()
 
 add_executable(natural_convection_cylinder examples/natural_convection_cylinder.cc)
-target_link_libraries(natural_convection_cylinder PRIVATE SimpleFluid)
-simplefluid_exe_reuse_precompiled_header(natural_convection_cylinder)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    target_link_libraries(natural_convection_cylinder PRIVATE SimpleFluid::Examples)
+    simplefluid_configure_module_consumers(
+        natural_convection_cylinder examples/natural_convection_cylinder.cc)
+else()
+    target_link_libraries(natural_convection_cylinder PRIVATE SimpleFluid)
+    simplefluid_exe_reuse_precompiled_header(natural_convection_cylinder)
+endif()
 
 add_executable(natural_convection_sphere examples/natural_convection_sphere.cc)
-target_link_libraries(natural_convection_sphere PRIVATE SimpleFluid)
-simplefluid_exe_reuse_precompiled_header(natural_convection_sphere)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    target_link_libraries(natural_convection_sphere PRIVATE SimpleFluid::Examples)
+    simplefluid_configure_module_consumers(
+        natural_convection_sphere examples/natural_convection_sphere.cc)
+else()
+    target_link_libraries(natural_convection_sphere PRIVATE SimpleFluid)
+    simplefluid_exe_reuse_precompiled_header(natural_convection_sphere)
+endif()
 
 add_executable(natural_convection_boundary_layer_box examples/natural_convection_boundary_layer_box.cc)
-target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
-simplefluid_exe_reuse_precompiled_header(natural_convection_boundary_layer_box)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid::Examples)
+    simplefluid_configure_module_consumers(
+        natural_convection_boundary_layer_box
+        examples/natural_convection_boundary_layer_box.cc)
+else()
+    target_link_libraries(natural_convection_boundary_layer_box PRIVATE SimpleFluid)
+    simplefluid_exe_reuse_precompiled_header(natural_convection_boundary_layer_box)
+endif()
 
 add_executable(natural_convection_shiri examples/natural_convection_shiri.cc)
 target_link_libraries(natural_convection_shiri PRIVATE SimpleFluid)
@@ -948,8 +1081,14 @@ if(BUILD_TESTING)
 endif()
 
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
-target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
-simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid::Examples)
+    simplefluid_configure_module_consumers(
+        fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
+else()
+    target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
+    simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
+endif()
 
 add_executable(
     fissile_solution_tank_sst

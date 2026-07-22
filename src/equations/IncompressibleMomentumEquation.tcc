@@ -9,7 +9,9 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "IncompressibleMomentumEquation.hh"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -199,7 +201,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
             if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
             {
-                return FVM::detail::slip_face_velocity(
+                return FVM::slip_face_velocity(
                     old_velocity, face_lid);
             }
             else
@@ -535,7 +537,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
             if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
             {
-                return FVM::detail::slip_face_velocity(
+                return FVM::slip_face_velocity(
                     old_velocity, face_lid);
             }
             else

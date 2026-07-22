@@ -8,17 +8,8 @@
  * @copyright Copyright (c) 2026
  *
  */
-#include "benchmarks/BenchmarkSupport.hh"
-#include "equations/BoundaryConditions.hh"
-#include "FVM/Operators.hh"
-#include "geometry/MeshFactory.hh"
-#include "geometry/STKMesh.hh"
-#include "solvers/BelosLinearSolver.hh"
-#include "solvers/BoussinesqSolver.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
 #include <unistd.h>
-#include "modules/STK.hh"
+#include <mpi.h>
 
 #include <algorithm>
 #include <array>
@@ -34,6 +25,25 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid;
+import SimpleFluid.BenchmarkSupport;
+import SimpleFluid.STK;
+import SimpleFluid.Teuchos;
+import SimpleFluid.Tpetra;
+#else
+#include "benchmarks/BenchmarkSupport.hh"
+#include "equations/BoundaryConditions.hh"
+#include "FVM/Operators.hh"
+#include "geometry/MeshFactory.hh"
+#include "geometry/STKMesh.hh"
+#include "solvers/BelosLinearSolver.hh"
+#include "solvers/BoussinesqSolver.hh"
+#include "modules/Teuchos.hh"
+#include "modules/Tpetra.hh"
+#include "modules/STK.hh"
+#endif
 
 #ifndef SIMPLEFLUID_GIT_COMMIT
 #define SIMPLEFLUID_GIT_COMMIT "unknown"

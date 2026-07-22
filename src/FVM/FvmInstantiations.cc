@@ -65,6 +65,10 @@ template VelocityBoundaryCache<DefaultTpetraTypes>
 cache_velocity_boundary_conditions<DefaultTpetraTypes>(
     SP<const Mesh<DefaultTpetraTypes>>,
     const BoundaryConditionSet&);
+template VectorCellField<DefaultTpetraTypes>::vec_type
+slip_face_velocity<DefaultTpetraTypes>(
+    const VectorCellField<DefaultTpetraTypes>&,
+    DefaultTpetraTypes::local_ordinal_type);
 
 namespace detail
 {
@@ -79,10 +83,6 @@ template void validate_face_velocity_output<DefaultTpetraTypes>(
 template void validate_normal_flux_inputs<DefaultTpetraTypes>(
     const VectorFaceField<DefaultTpetraTypes>&,
     const FaceField<DefaultTpetraTypes>&);
-template VectorCellField<DefaultTpetraTypes>::vec_type
-slip_face_velocity<DefaultTpetraTypes>(
-    const VectorCellField<DefaultTpetraTypes>&,
-    DefaultTpetraTypes::local_ordinal_type);
 template void load_boundary_face_velocity<DefaultTpetraTypes>(
     const VelocityBoundaryCache<DefaultTpetraTypes>*,
     const VectorCellField<DefaultTpetraTypes>&,
