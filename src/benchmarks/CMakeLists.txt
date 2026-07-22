@@ -8,6 +8,15 @@ target_link_libraries(SimpleFluidBenchmarkSupport PUBLIC SimpleFluid::Solvers)
 set_target_properties(SimpleFluidBenchmarkSupport PROPERTIES POSITION_INDEPENDENT_CODE ON)
 simplefluid_lib_reuse_precompiled_header(SimpleFluidBenchmarkSupport)
 simplefluid_require_complete_pgo(SimpleFluidBenchmarkSupport)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES
+   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_sources(SimpleFluidBenchmarkSupport PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${PROJECT_SOURCE_DIR}/src
+        FILES BenchmarkSupport.cppm)
+    set_source_files_properties(BenchmarkSupport.cppm PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON)
+endif()
 
 execute_process(
     COMMAND git rev-parse --short=12 HEAD
@@ -34,8 +43,18 @@ endif()
 
 add_executable(simplefluid_benchmark simplefluid_benchmark.cc)
 target_link_libraries(
-    simplefluid_benchmark PRIVATE SimpleFluid::BenchmarkSupport)
-simplefluid_exe_reuse_precompiled_header(simplefluid_benchmark)
+    simplefluid_benchmark PRIVATE
+    SimpleFluid::BenchmarkSupport
+    SimpleFluid)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES
+   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_libraries(simplefluid_benchmark PRIVATE
+        SimpleFluid::TrilinosModules)
+    simplefluid_configure_module_consumers(
+        simplefluid_benchmark simplefluid_benchmark.cc)
+else()
+    simplefluid_exe_reuse_precompiled_header(simplefluid_benchmark)
+endif()
 target_compile_definitions(simplefluid_benchmark PRIVATE
     SIMPLEFLUID_GIT_COMMIT="${SIMPLEFLUID_GIT_COMMIT_VALUE}"
     SIMPLEFLUID_GIT_DIRTY="${SIMPLEFLUID_GIT_DIRTY_VALUE}"

@@ -9,7 +9,10 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "BoussinesqSolver.hh"
+#endif
+
 #include "solvers/CoupledNonlinearProblem.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -479,7 +482,8 @@ BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, Bounda
           typename base_type::DeferredMomentumEquationTag{}),
       d_model_options(std::move(model_options)), d_physical_model_enabled(physical_model_enabled)
 {
-    detail::validate_model_options(d_model_options, d_problem.time_options());
+    validate_boussinesq_model_options(
+        d_model_options, d_problem.time_options());
 
     d_problem.add_field(ScalarCellFieldDescriptor<Pack>("temperature"));
 
@@ -790,7 +794,6 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::add_prescribed_heat_s
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::configure_prescribed_heat_source(const PrescribedHeatSourceOptions& options)
 {
-    detail::validate_prescribed_heat_power_options(options);
     if (options.profile == PrescribedHeatProfile::Disabled)
     {
         remove_prescribed_heat_source();
