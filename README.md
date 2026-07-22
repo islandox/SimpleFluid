@@ -296,7 +296,7 @@ generation.
 ### Prerequisites
 
 - C++23 compiler (GCC ≥ 13 or Clang ≥ 17)
-- CMake ≥ 3.21
+- CMake ≥ 3.28
 - Trilinos 17+ with:
   - Kokkos, Teuchos, Tpetra
   - STK (IO, Mesh, Topology, Util)
@@ -316,6 +316,28 @@ cmake -B build -G "Ninja Multi-Config" \
   -DTrilinos_DIR=/path/to/trilinos/lib/cmake/Trilinos
 cmake --build build --config Release
 ```
+
+### C++ Module API
+
+C++ modules are enabled by default for GCC and Clang builds. Import the full
+framework through the umbrella module:
+
+```cpp
+import SimpleFluid;
+```
+
+Consumers can instead import only the layer they need. The public dependency
+chain is:
+
+```text
+SimpleFluid.Core → SimpleFluid.Mesh → SimpleFluid.Fields → SimpleFluid.FVM
+                 → SimpleFluid.Equations → SimpleFluid.Solvers → SimpleFluid
+```
+
+`SimpleFluid.Kokkos`, `SimpleFluid.Teuchos`, `SimpleFluid.Tpetra`, and
+`SimpleFluid.Zoltan2` provide the corresponding Trilinos compatibility views.
+Header-based consumers remain supported; configure with
+`-DSIMPLEFLUID_ENABLE_CXX_MODULES=OFF` to omit module interfaces entirely.
 
 ### Run Tests
 

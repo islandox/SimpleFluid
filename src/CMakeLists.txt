@@ -513,6 +513,81 @@ if(SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
         "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-fno-semantic-interposition>")
 endif()
 
+if(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    set(_simplefluid_project_module_targets
+        SimpleFluidCore
+        SimpleFluidMesh
+        SimpleFluidFields
+        SimpleFluidFVM
+        SimpleFluidEquations
+        SimpleFluidSolvers)
+    set(_simplefluid_project_module_sources
+        dataclass/Core.cppm
+        geometry/Mesh.cppm
+        fields/Fields.cppm
+        FVM/FVM.cppm
+        equations/Equations.cppm
+        solvers/Solvers.cppm
+        SimpleFluid.cppm)
+
+    target_sources(SimpleFluidCore PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES dataclass/Core.cppm)
+    target_sources(SimpleFluidMesh PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES geometry/Mesh.cppm)
+    target_sources(SimpleFluidFields PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES fields/Fields.cppm)
+    target_sources(SimpleFluidFVM PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES FVM/FVM.cppm)
+    target_sources(SimpleFluidEquations PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES equations/Equations.cppm)
+    target_sources(SimpleFluidSolvers PUBLIC
+        FILE_SET CXX_MODULES
+        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+        FILES
+            solvers/Solvers.cppm
+            SimpleFluid.cppm)
+
+    foreach(_module_target IN LISTS _simplefluid_project_module_targets)
+        add_dependencies(${_module_target} SimpleFluidHeaderUnits)
+    endforeach()
+
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        foreach(_module_target IN LISTS _simplefluid_project_module_targets)
+            set_property(TARGET ${_module_target}
+                PROPERTY CXX_COMPILER_LAUNCHER
+                ${CMAKE_COMMAND}
+                -DSIMPLEFLUID_HEADER_UNIT_MAP=${_simplefluid_gcc_header_unit_map}
+                -P ${PROJECT_SOURCE_DIR}/cmake/LaunchGccWithHeaderUnits.cmake
+                --)
+        endforeach()
+    endif()
+
+    set_source_files_properties(
+        ${_simplefluid_project_module_sources}
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    # GCC imports the aggregate header unit to keep Trilinos TU-local entities
+    # out of named modules. Clang keeps the established textual GMF path; its
+    # public wrapper modules still use the aggregate header unit above.
+    set_source_files_properties(
+        ${_simplefluid_project_module_sources}
+        PROPERTIES COMPILE_DEFINITIONS
+        "$<$<CXX_COMPILER_ID:GNU>:SIMPLEFLUID_USE_TRILINOS_MODULES=1>")
+    set_source_files_properties(
+        ${_simplefluid_project_module_sources}
+        PROPERTIES COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+endif()
+
 # Preserve the original target as an umbrella for downstream users.
 add_library(SimpleFluid INTERFACE)
 add_library(SimpleFluid::SimpleFluid ALIAS SimpleFluid)
@@ -564,6 +639,15 @@ function(simplefluid_configure_test_executable target_name)
             "$<$<CONFIG:Release,RelWithDebInfo>:-fno-lto>"
             "$<$<CONFIG:Release,RelWithDebInfo>:-fno-use-linker-plugin>")
     endif()
+endfunction()
+
+function(simplefluid_configure_module_test target_name source_file)
+    set_target_properties(${target_name} PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    set_source_files_properties(${source_file}
+        PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+        COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
 endfunction()
 
 add_subdirectory(dataclass/unitTests)
