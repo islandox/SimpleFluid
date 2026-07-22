@@ -9,7 +9,14 @@
  *
  */
 
+#include "cmake/StandardHeaders.hh"
+
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.Solvers;
+#else
 #include "FluidSolver.hh"
+#endif
+
 #include "FluidSolver.tcc"
 
 namespace SimpleFluid

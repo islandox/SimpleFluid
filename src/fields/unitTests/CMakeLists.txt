@@ -5,6 +5,7 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testGhostSyncMultiRank\\.cc$")
 set(TRILINOS_MODULE_TEST_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/testKokkosModule.cc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/testSTKModule.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/testTeuchosModule.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/testTpetraModule.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/testZoltan2Module.cc")

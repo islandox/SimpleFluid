@@ -9,10 +9,12 @@
  *
  */
 
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.Examples;
+#else
 #include "examples/ExampleRunner.hh"
 #include "modules/Tpetra.hh"
-
-#include <memory>
+#endif
 
 /**
  * @brief Entry point for the natural-convection cylinder example.
@@ -29,7 +31,7 @@ int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);
 
-    auto db = std::make_shared<SimpleFluid::Database>();
+    auto db = SimpleFluid::make_example_database();
     db->set("dimension", 3);
     db->set("mesh_size", SimpleFluid::real_t{1.0});
     db->set("domain_type",

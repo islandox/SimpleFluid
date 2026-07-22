@@ -9,16 +9,24 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFeedbackMapMultiRank\\.cc$")
 if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
   list(REMOVE_ITEM TEST_SOURCES
+       "${CMAKE_CURRENT_SOURCE_DIR}/testLinearSolversModule.cc"
+       "${CMAKE_CURRENT_SOURCE_DIR}/testProblemsModule.cc"
        "${CMAKE_CURRENT_SOURCE_DIR}/testSimpleFluidModule.cc"
        "${CMAKE_CURRENT_SOURCE_DIR}/testSolversModule.cc")
 endif()
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
-  target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
+  if(TEST_NAME STREQUAL "testLinearSolversModule")
+    target_link_libraries(${TEST_NAME} SimpleFluid::LinearSolvers GTest::gtest_main)
+  elseif(TEST_NAME STREQUAL "testProblemsModule")
+    target_link_libraries(${TEST_NAME} SimpleFluid::Problems GTest::gtest_main)
+  else()
+    target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(SIMPLEFLUID_ENABLE_CXX_MODULES AND
-     TEST_NAME MATCHES "^test(SimpleFluid|Solvers)Module$")
+     TEST_NAME MATCHES "^test(LinearSolvers|Problems|SimpleFluid|Solvers)Module$")
     simplefluid_configure_module_test(${TEST_NAME} ${TEST_SRC})
   endif()
   if(TEST_NAME STREQUAL "testVerificationCases")

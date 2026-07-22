@@ -824,4 +824,10 @@ bool solve_linear_system(const Teuchos::RCP<const typename Pack::matrix_type>& m
     return solve_linear_system<Pack>(op, rhs, solution, options);
 }
 
+// Compile the default solver specialization once.  Besides reducing repeated
+// Belos template work, this keeps its iostream-dependent implementation in a
+// conventional translation unit instead of duplicating it across BMI
+// consumers.
+extern template class BelosLinearSolver<DefaultTpetraTypes>;
+
 } // namespace SimpleFluid

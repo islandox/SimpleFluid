@@ -9,7 +9,9 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "TemperatureDiffusionEquation.hh"
+#endif
 
 namespace SimpleFluid
 {

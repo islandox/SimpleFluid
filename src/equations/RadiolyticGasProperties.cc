@@ -9,11 +9,13 @@
  *
  */
 
-#include "equations/RadiolyticGasProperties.hh"
+#include "cmake/StandardHeaders.hh"
 
-#include <algorithm>
-#include <cctype>
-#include <cmath>
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.Equations;
+#else
+#include "equations/RadiolyticGasProperties.hh"
+#endif
 
 namespace SimpleFluid
 {

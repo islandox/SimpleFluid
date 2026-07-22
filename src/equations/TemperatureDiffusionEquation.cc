@@ -9,7 +9,14 @@
  *
  */
 
+#include "cmake/StandardHeaders.hh"
+
+#if defined(SIMPLEFLUID_USE_CXX_MODULES)
+import SimpleFluid.Equations;
+#else
 #include "TemperatureDiffusionEquation.hh"
+#endif
+
 #include "TemperatureDiffusionEquation.tcc"
 
 namespace SimpleFluid

@@ -205,6 +205,16 @@ inline void validate_model_options(
 } // namespace detail
 
 /**
+ * @brief Validate physical Boussinesq options against time-step properties.
+ */
+inline void validate_boussinesq_model_options(
+    const BoussinesqModelOptions& options,
+    const TimeStepperOptions& time_options)
+{
+    detail::validate_model_options(options, time_options);
+}
+
+/**
  * @brief Parse and validate physical Boussinesq options from a flat database.
  * @param database Source configuration database.
  * @param time_options Time-stepper values used for legacy defaults.
@@ -258,7 +268,7 @@ inline BoussinesqModelOptions boussinesq_model_options_from_database(
         detail::database_value_or<ArrReal>(
             database, "temperature_source_power_densities", {});
 
-    detail::validate_model_options(options, time_options);
+    validate_boussinesq_model_options(options, time_options);
     return options;
 }
 

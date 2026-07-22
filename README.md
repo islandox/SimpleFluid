@@ -330,12 +330,23 @@ Consumers can instead import only the layer they need. The public dependency
 chain is:
 
 ```text
-SimpleFluid.Core → SimpleFluid.Mesh → SimpleFluid.Fields → SimpleFluid.FVM
-                 → SimpleFluid.Equations → SimpleFluid.Solvers → SimpleFluid
+SimpleFluid.Core → SimpleFluid.Mesh → SimpleFluid.Fields
+                 → SimpleFluid.LinearSolvers → SimpleFluid.FVM
+                 → SimpleFluid.Equations → SimpleFluid.Problems
+                 → SimpleFluid.Solvers → SimpleFluid
 ```
 
-`SimpleFluid.Kokkos`, `SimpleFluid.Teuchos`, `SimpleFluid.Tpetra`, and
-`SimpleFluid.Zoltan2` provide the corresponding Trilinos compatibility views.
+Example executables import `SimpleFluid.Examples`. GCC benchmark builds import
+`SimpleFluid.BenchmarkSupport`; Clang benchmark builds retain the header/PCH
+fallback because mixing their standard-library declarations with the current
+Trilinos module boundary is not yet runtime-safe. Clang builds also compile the
+equation and solver implementation units against their BMIs. GCC keeps those
+shared-library implementation units on the safe PCH path while leaf executables
+consume the named modules.
+
+`SimpleFluid.Kokkos`, `SimpleFluid.STK`, `SimpleFluid.Teuchos`,
+`SimpleFluid.Tpetra`, and `SimpleFluid.Zoltan2` provide the corresponding
+Trilinos compatibility views.
 Header-based consumers remain supported; configure with
 `-DSIMPLEFLUID_ENABLE_CXX_MODULES=OFF` to omit module interfaces entirely.
 

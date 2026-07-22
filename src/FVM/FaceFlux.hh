@@ -211,6 +211,27 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
     return cache;
 }
 
+/**
+ * @brief Project owner-cell velocity onto the tangent plane of a boundary face.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param velocity Cell-centered velocity field.
+ * @param face_lid Local ID of the boundary face.
+ * @return Velocity component tangential to the boundary face.
+ */
+template<TpetraTypePack Pack>
+auto slip_face_velocity(const VectorCellField<Pack>& velocity,
+                        typename Pack::local_ordinal_type face_lid)
+    -> typename VectorCellField<Pack>::vec_type
+{
+    const auto& mesh = velocity.mesh();
+    const auto owner = mesh.owner_cell(face_lid);
+    const auto cell_velocity = velocity.local_value(owner);
+    const auto& normal = mesh.face_normal_outward(face_lid, owner);
+
+    return cell_velocity - normal * cell_velocity.dot(normal);
+}
+
 namespace detail
 {
 
@@ -315,27 +336,6 @@ void validate_normal_flux_inputs(
         throw std::invalid_argument(
             "normal_face_fluxes requires output on the face-velocity mesh.");
     }
-}
-
-/**
- * @brief Project owner-cell velocity onto the tangent plane of a boundary face.
- *
- * @tparam Pack Tpetra type pack.
- * @param velocity Cell-centered velocity field.
- * @param face_lid Local ID of the boundary face.
- * @return Velocity component tangential to the boundary face.
- */
-template<TpetraTypePack Pack>
-auto slip_face_velocity(const VectorCellField<Pack>& velocity,
-                        typename Pack::local_ordinal_type face_lid)
-    -> typename VectorCellField<Pack>::vec_type
-{
-    const auto& mesh = velocity.mesh();
-    const auto owner = mesh.owner_cell(face_lid);
-    const auto cell_velocity = velocity.local_value(owner);
-    const auto& normal = mesh.face_normal_outward(face_lid, owner);
-
-    return cell_velocity - normal * cell_velocity.dot(normal);
 }
 
 /**
@@ -1083,6 +1083,10 @@ extern template VelocityBoundaryCache<DefaultTpetraTypes>
 cache_velocity_boundary_conditions<DefaultTpetraTypes>(
     SP<const Mesh<DefaultTpetraTypes>>,
     const BoundaryConditionSet&);
+extern template VectorCellField<DefaultTpetraTypes>::vec_type
+slip_face_velocity<DefaultTpetraTypes>(
+    const VectorCellField<DefaultTpetraTypes>&,
+    DefaultTpetraTypes::local_ordinal_type);
 
 namespace detail
 {
@@ -1096,10 +1100,6 @@ extern template void validate_face_velocity_output<DefaultTpetraTypes>(
 extern template void validate_normal_flux_inputs<DefaultTpetraTypes>(
     const VectorFaceField<DefaultTpetraTypes>&,
     const FaceField<DefaultTpetraTypes>&);
-extern template VectorCellField<DefaultTpetraTypes>::vec_type
-slip_face_velocity<DefaultTpetraTypes>(
-    const VectorCellField<DefaultTpetraTypes>&,
-    DefaultTpetraTypes::local_ordinal_type);
 extern template void load_boundary_face_velocity<DefaultTpetraTypes>(
     const VelocityBoundaryCache<DefaultTpetraTypes>*,
     const VectorCellField<DefaultTpetraTypes>&,

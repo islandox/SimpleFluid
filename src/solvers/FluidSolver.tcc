@@ -9,8 +9,10 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "FluidSolver.hh"
 #include "geometry/MeshFactory.hh"
+#endif
 
 #include <Teuchos_CommHelpers.hpp>
 

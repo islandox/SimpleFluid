@@ -9,7 +9,9 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_CXX_MODULES)
 #include "PressureProjectionEquation.hh"
+#endif
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -69,7 +71,7 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
     const SP<const mesh_type>& mesh) -> Teuchos::RCP<const map_type>
 {
     auto map = mesh->owned_cell_map();
-    if (map == Teuchos::null)
+    if (map.is_null())
     {
         throw std::runtime_error(
             "PressureProjectionEquation requires an assembled mesh with an owned-cell map.");
