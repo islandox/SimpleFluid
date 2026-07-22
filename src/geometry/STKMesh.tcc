@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -425,18 +426,53 @@ void STKMesh<Pack>::build_face_table()
     }
     d_face_owned_node_global_ids.reserve(max_face_nodes);
 
+    // STK side relations are compact and cannot be indexed by topology-side
+    // ordinal. Give every cell side an injective ID instead, then retain the
+    // smaller adjacent-cell candidate when two cells share a face. The fixed
+    // stride matches STK's conventional element-side numbering and exceeds
+    // the side count of every supported volume topology.
+    constexpr global_ordinal_type side_id_stride = 10;
+    int local_invalid_face_id_range = 0;
+    for (const auto elem : d_stk.cell_entities)
+    {
+        const auto raw_element_id = d_stk.bulk->identifier(elem);
+        const auto topo = d_stk.bulk->bucket(elem).topology();
+        if (!std::in_range<global_ordinal_type>(raw_element_id)
+            || topo.num_sides() >= side_id_stride)
+        {
+            local_invalid_face_id_range = 1;
+            break;
+        }
+
+        const auto element_gid =
+            static_cast<global_ordinal_type>(raw_element_id);
+        const auto maximum_side_offset =
+            static_cast<global_ordinal_type>(topo.num_sides());
+        if (element_gid
+            > (std::numeric_limits<global_ordinal_type>::max()
+               - maximum_side_offset) / side_id_stride)
+        {
+            local_invalid_face_id_range = 1;
+            break;
+        }
+    }
+    int global_invalid_face_id_range = 0;
+    Teuchos::reduceAll(
+        *Tpetra::getDefaultComm(),
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_invalid_face_id_range,
+        &global_invalid_face_id_range);
+    if (global_invalid_face_id_range != 0)
+    {
+        throw std::overflow_error(
+            "STK element-side ID exceeds the mesh global ordinal type.");
+    }
+
     for (size_t cell_index = 0; cell_index < d_cells.size(); ++cell_index)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(cell_index);
         const auto elem = d_stk.cell_entities[cell_index];
-
-        // In 3D, this is usually FACE_RANK.
-        // In dimension-independent code, prefer side_rank().
-        stk::mesh::EntityRank sideRank = d_stk.bulk->mesh_meta_data().side_rank();
-
-        const unsigned num_connected_faces =
-            d_stk.bulk->num_connectivity(elem, sideRank);
-        const stk::mesh::Entity* faces = d_stk.bulk->begin(elem, sideRank);
 
         const auto topo = d_stk.bulk->bucket(elem).topology();
         const auto* elem_nodes = d_stk.bulk->begin_nodes(elem);
@@ -454,6 +490,13 @@ void STKMesh<Pack>::build_face_table()
                 face_node_ids.push_back(static_cast<global_ordinal_type>(
                     d_stk.bulk->identifier(elem_nodes[ordinal])));
             }
+
+            const auto element_gid = static_cast<global_ordinal_type>(
+                d_stk.bulk->identifier(elem));
+            const auto side_offset =
+                static_cast<global_ordinal_type>(side + 1);
+            const global_ordinal_type face_gid =
+                element_gid * side_id_stride + side_offset;
 
             const auto key = make_face_key(face_node_ids);
             const auto iter = d_face_key_to_face.find(key);
@@ -479,20 +522,13 @@ void STKMesh<Pack>::build_face_table()
                 d_face_key_to_face.emplace(key, fid);
                 cell_face_ids[cell_index].push_back(fid);
 
-                const bool has_connected_face =
-                    faces != nullptr && side < num_connected_faces
-                    && faces[side].is_local_offset_valid();
-                const auto gid = has_connected_face
-                               ? static_cast<global_ordinal_type>(
-                                     d_stk.bulk->identifier(faces[side]))
-                               : static_cast<global_ordinal_type>(
-                                     d_stk.bulk->identifier(elem) * topo.num_sides()
-                                     + side + 1);
-                d_owned_face_global_ids.push_back(gid);
+                d_owned_face_global_ids.push_back(face_gid);
             }
             else
             {
-                auto& face_info = d_faces[static_cast<size_t>(iter->second)];
+                const auto face_index =
+                    static_cast<size_t>(iter->second);
+                auto& face_info = d_faces[face_index];
                 if (face_info.neighbor != invalid_id<local_ordinal_type>())
                 {
                     throw std::runtime_error("Non-manifold face encountered.");
@@ -500,8 +536,36 @@ void STKMesh<Pack>::build_face_table()
 
                 face_info.neighbor = cell_lid;
                 cell_face_ids[cell_index].push_back(iter->second);
+                d_owned_face_global_ids[face_index] = std::min(
+                    d_owned_face_global_ids[face_index], face_gid);
             }
         }
+    }
+
+    std::unordered_map<global_ordinal_type, std::string> key_by_face_gid;
+    int local_face_gid_collision = 0;
+    for (size_t face = 0; face < d_faces.size(); ++face)
+    {
+        const auto key = make_face_key(d_faces[face].node_gids);
+        const auto [iter, inserted] = key_by_face_gid.emplace(
+            d_owned_face_global_ids[face], key);
+        if (!inserted && iter->second != key)
+        {
+            local_face_gid_collision = 1;
+            break;
+        }
+    }
+    int global_face_gid_collision = 0;
+    Teuchos::reduceAll(
+        *Tpetra::getDefaultComm(),
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_face_gid_collision,
+        &global_face_gid_collision);
+    if (global_face_gid_collision != 0)
+    {
+        throw std::runtime_error(
+            "STK mesh assigned one global ID to multiple physical faces.");
     }
 
     size_t total_cell_faces = 0;

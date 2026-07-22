@@ -297,7 +297,14 @@ public:
      */
     void configure(const FissionPowerSourceOptions& options)
     {
-        detail::validate_fission_power_options(options);
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission power configuration",
+            [&]
+            {
+                detail::validate_fission_power_options(options);
+            });
+        require_uniform_configuration(options);
         switch (options.profile)
         {
             case FissionPowerProfile::Disabled:
@@ -320,7 +327,15 @@ public:
      */
     void initialize_constant(scalar_type power_density)
     {
-        require_non_negative(power_density, "power density");
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission constant-power initialization",
+            [&]
+            {
+                require_non_negative(
+                    power_density, "power density");
+            });
+        require_uniform_value(power_density, "power density");
         d_base_profile.put_scalar(power_density);
         apply_base_profile(scalar_type{1});
     }
@@ -333,22 +348,40 @@ public:
         const vec3<scalar_type>& center,
         const vec3<scalar_type>& standard_deviation)
     {
-        require_non_negative(total_power, "total power");
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission Gaussian configuration",
+            [&]
+            {
+                require_non_negative(total_power, "total power");
+                for (size_t component = 0;
+                     component < 3;
+                     ++component)
+                {
+                    if (!std::isfinite(center.component(component)))
+                    {
+                        throw std::invalid_argument(
+                            "Fission Gaussian center must be finite.");
+                    }
+                    const auto width =
+                        standard_deviation.component(component);
+                    if (!std::isfinite(width)
+                        || width <= scalar_type{})
+                    {
+                        throw std::invalid_argument(
+                            "Fission Gaussian standard deviations must be "
+                            "finite and positive.");
+                    }
+                }
+            });
+        require_uniform_value(total_power, "total power");
         for (size_t component = 0; component < 3; ++component)
         {
-            if (!std::isfinite(center.component(component)))
-            {
-                throw std::invalid_argument(
-                    "Fission Gaussian center must be finite.");
-            }
-            const auto width =
-                standard_deviation.component(component);
-            if (!std::isfinite(width) || width <= scalar_type{})
-            {
-                throw std::invalid_argument(
-                    "Fission Gaussian standard deviations must be finite "
-                    "and positive.");
-            }
+            require_uniform_value(
+                center.component(component), "Gaussian center");
+            require_uniform_value(
+                standard_deviation.component(component),
+                "Gaussian standard deviation");
         }
 
         scalar_type local_integral{};
@@ -373,40 +406,60 @@ public:
               * d_mesh->cell_volume(cell_lid);
         }
         const auto profile_integral = global_sum(local_integral);
-        if (total_power > scalar_type{}
-            && (!std::isfinite(profile_integral)
-                || profile_integral <= scalar_type{}))
-        {
-            throw std::invalid_argument(
-                "Positive fission total power requires a positive profile "
-                "integral.");
-        }
-        const auto scale =
-            total_power == scalar_type{}
-                ? scalar_type{}
-                : checked_scale(total_power, profile_integral);
-
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto centroid = d_mesh->cell_centroid(cell_lid);
-            scalar_type exponent{};
-            for (size_t component = 0; component < 3; ++component)
+        scalar_type scale{};
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission Gaussian normalization",
+            [&]
             {
-                const auto scaled =
-                    (centroid.component(component)
-                     - center.component(component))
-                  / standard_deviation.component(component);
-                exponent += scaled * scaled;
-            }
-            const auto value =
-                scale * std::exp(-scalar_type{0.5} * exponent);
-            require_non_negative(value, "Gaussian field value");
-            d_base_profile.set_owned_value(cell_lid, value);
-        }
+                if (total_power > scalar_type{}
+                    && (!std::isfinite(profile_integral)
+                        || profile_integral <= scalar_type{}))
+                {
+                    throw std::invalid_argument(
+                        "Positive fission total power requires a positive "
+                        "profile integral.");
+                }
+                scale = total_power == scalar_type{}
+                            ? scalar_type{}
+                            : checked_scale(
+                                  total_power, profile_integral);
+            });
+
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission Gaussian field initialization",
+            [&]
+            {
+                for (size_t owned = 0;
+                     owned < d_mesh->num_owned_cells();
+                     ++owned)
+                {
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto centroid =
+                        d_mesh->cell_centroid(cell_lid);
+                    scalar_type exponent{};
+                    for (size_t component = 0;
+                         component < 3;
+                         ++component)
+                    {
+                        const auto scaled =
+                            (centroid.component(component)
+                             - center.component(component))
+                          / standard_deviation.component(component);
+                        exponent += scaled * scaled;
+                    }
+                    const auto value =
+                        scale
+                      * std::exp(
+                            -scalar_type{0.5} * exponent);
+                    require_non_negative(
+                        value, "Gaussian field value");
+                    d_base_profile.set_owned_value(
+                        cell_lid, value);
+                }
+            });
         d_base_profile.sync_ghosts();
         apply_base_profile(scalar_type{1});
     }
@@ -416,7 +469,10 @@ public:
      */
     void initialize_from_power_density(const field_type& power_density)
     {
-        require_same_mesh(power_density);
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission power-density initialization",
+            [&] { require_same_mesh(power_density); });
         copy_non_negative_field(power_density);
         apply_base_profile(scalar_type{1});
     }
@@ -428,30 +484,45 @@ public:
         const field_type& shape,
         scalar_type total_power)
     {
-        require_same_mesh(shape);
-        require_non_negative(total_power, "total power");
-        validate_non_negative_field(shape);
-        if (total_power == scalar_type{})
-        {
-            initialize_constant(scalar_type{});
-            return;
-        }
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission shape initialization",
+            [&]
+            {
+                require_same_mesh(shape);
+                require_non_negative(total_power, "total power");
+                validate_non_negative_field(shape);
+            });
+        require_uniform_value(total_power, "total power");
 
         const auto profile_integral = integrate(shape);
-        if (!std::isfinite(profile_integral)
-            || profile_integral <= scalar_type{})
-        {
-            throw std::invalid_argument(
-                "Positive fission total power requires a positive profile "
-                "integral.");
-        }
-        copy_scaled_field(
-            shape, checked_scale(total_power, profile_integral));
+        scalar_type scale{};
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission shape normalization",
+            [&]
+            {
+                if (total_power > scalar_type{}
+                    && (!std::isfinite(profile_integral)
+                        || profile_integral <= scalar_type{}))
+                {
+                    throw std::invalid_argument(
+                        "Positive fission total power requires a positive "
+                        "profile integral.");
+                }
+                scale = total_power == scalar_type{}
+                            ? scalar_type{}
+                            : checked_scale(
+                                  total_power, profile_integral);
+            });
+        copy_scaled_field(shape, scale);
         apply_base_profile(scalar_type{1});
     }
 
     /**
      * @brief Install a non-negative time multiplier for the source field.
+     * @note The callback must perform rank-local work only; callback failures
+     *       are propagated collectively by the source registry update.
      */
     void set_time_multiplier(multiplier_type multiplier)
     {
@@ -496,6 +567,83 @@ public:
     }
 
 private:
+    /** @brief Require one scalar configuration value on every mesh rank. */
+    void require_uniform_value(
+        scalar_type local_value,
+        const std::string& label) const
+    {
+        scalar_type minimum_value{};
+        scalar_type maximum_value{};
+        const auto communicator = d_mesh->owned_cell_map()->getComm();
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            1,
+            &local_value,
+            &minimum_value);
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_value,
+            &maximum_value);
+        if (minimum_value != maximum_value)
+        {
+            throw std::invalid_argument(
+                "Fission " + label + " must agree on every rank.");
+        }
+    }
+
+    /** @brief Require one communicator-wide prescribed profile. */
+    void require_uniform_configuration(
+        const FissionPowerSourceOptions& options) const
+    {
+        const auto communicator = d_mesh->owned_cell_map()->getComm();
+        const int local_profile = static_cast<int>(options.profile);
+        int minimum_profile = 0;
+        int maximum_profile = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            1,
+            &local_profile,
+            &minimum_profile);
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_profile,
+            &maximum_profile);
+        if (minimum_profile != maximum_profile)
+        {
+            throw std::invalid_argument(
+                "Fission power profile must agree on every rank.");
+        }
+
+        switch (options.profile)
+        {
+            case FissionPowerProfile::Disabled:
+                return;
+            case FissionPowerProfile::Constant:
+                require_uniform_value(
+                    options.power_density, "power density");
+                return;
+            case FissionPowerProfile::Gaussian:
+                require_uniform_value(
+                    options.total_power, "total power");
+                for (size_t component = 0; component < 3; ++component)
+                {
+                    require_uniform_value(
+                        options.center.component(component),
+                        "Gaussian center");
+                    require_uniform_value(
+                        options.standard_deviation.component(component),
+                        "Gaussian standard deviation");
+                }
+                return;
+        }
+    }
+
     static SP<const Mesh<Pack>> require_mesh(
         SP<const Mesh<Pack>> mesh)
     {
@@ -530,7 +678,6 @@ private:
 
     void copy_non_negative_field(const field_type& field)
     {
-        validate_non_negative_field(field);
         copy_scaled_field(field, scalar_type{1});
     }
 
@@ -551,16 +698,25 @@ private:
         const field_type& field,
         scalar_type scale)
     {
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto value = field.value(cell_lid) * scale;
-            require_non_negative(value, "normalized field value");
-            d_base_profile.set_owned_value(cell_lid, value);
-        }
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission field copy",
+            [&]
+            {
+                for (size_t owned = 0;
+                     owned < d_mesh->num_owned_cells();
+                     ++owned)
+                {
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto value =
+                        field.value(cell_lid) * scale;
+                    require_non_negative(
+                        value, "normalized field value");
+                    d_base_profile.set_owned_value(
+                        cell_lid, value);
+                }
+            });
         d_base_profile.sync_ghosts();
     }
 
@@ -612,16 +768,24 @@ private:
     void apply_base_profile(scalar_type multiplier)
     {
         auto& applied = d_source->field();
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            applied.set_owned_value(
-                cell_lid,
-                d_base_profile.value(cell_lid) * multiplier);
-        }
+        collective_detail::collective_local_validation(
+            *d_mesh,
+            "Fission applied-field update",
+            [&]
+            {
+                for (size_t owned = 0;
+                     owned < d_mesh->num_owned_cells();
+                     ++owned)
+                {
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto value =
+                        d_base_profile.value(cell_lid) * multiplier;
+                    require_non_negative(
+                        value, "applied field value");
+                    applied.set_owned_value(cell_lid, value);
+                }
+            });
         applied.sync_ghosts();
     }
 

@@ -35,6 +35,7 @@ struct ScalarVoidFractionOptions
     real_t alpha_collapse_time =
         std::numeric_limits<real_t>::infinity();
     real_t alpha_diffusivity = 0.0;
+    /** @brief Reserved for a future advective transport path; must be zero. */
     real_t constant_slip_velocity = 0.0;
 };
 
@@ -74,10 +75,12 @@ inline void validate_scalar_void_fraction_options(
         throw std::invalid_argument(
             "Alpha diffusivity must be finite and non-negative.");
     }
-    if (!std::isfinite(options.constant_slip_velocity))
+    if (!std::isfinite(options.constant_slip_velocity)
+        || options.constant_slip_velocity != 0.0)
     {
         throw std::invalid_argument(
-            "Scalar void slip velocity must be finite.");
+            "Scalar void constant slip velocity is not implemented and must "
+            "be zero.");
     }
 }
 

@@ -62,8 +62,13 @@ alpha_max
 initial_alpha_g
 alpha_collapse_time
 alpha_diffusivity
-constant_slip_velocity
+constant_slip_velocity  # reserved; the low-order scalar model requires 0
 ```
+
+The low-order scalar void model does not yet have an advective transport
+path, so it rejects a nonzero `constant_slip_velocity` instead of silently
+ignoring it. Bubble-population transport has its own operational rise-velocity
+configuration.
 
 Material feedback keys:
 

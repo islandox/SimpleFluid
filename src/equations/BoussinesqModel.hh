@@ -11,6 +11,7 @@
 #pragma once
 
 #include "dataclass/Database.hh"
+#include "equations/CollectiveValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
@@ -305,20 +306,29 @@ void initialize_cell_field(
     const std::string& label)
 {
     const auto& mesh = field.mesh();
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<typename Pack::local_ordinal_type>(owned);
-        const auto value =
-            std::invoke(provider, mesh.cell_centroid(cell_lid));
-        if (!std::isfinite(value))
+    collective_detail::collective_local_validation(
+        mesh,
+        label + " initialization",
+        [&]
         {
-            throw std::invalid_argument(
-                label + " initializer produced a non-finite value.");
-        }
-        std::invoke(validator, value, label);
-        field.set_owned_value(cell_lid, value);
-    }
+            for (size_t owned = 0;
+                 owned < mesh.num_owned_cells();
+                 ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<typename Pack::local_ordinal_type>(owned);
+                const auto value =
+                    std::invoke(provider, mesh.cell_centroid(cell_lid));
+                if (!std::isfinite(value))
+                {
+                    throw std::invalid_argument(
+                        label
+                        + " initializer produced a non-finite value.");
+                }
+                std::invoke(validator, value, label);
+                field.set_owned_value(cell_lid, value);
+            }
+        });
     field.sync_ghosts();
 }
 
@@ -376,6 +386,11 @@ public:
     bool enabled() const noexcept { return d_enabled; }
     void set_enabled(bool enabled) noexcept { d_enabled = enabled; }
 
+    /**
+     * @brief Install rank-local source update work.
+     * @note The callback must not perform communication; failures are reduced
+     *       collectively after it returns or throws.
+     */
     void set_updater(updater_type updater)
     {
         if (!updater)
@@ -390,11 +405,17 @@ public:
 
     void update(const context_type& context)
     {
-        if (d_updater)
-        {
-            d_updater(context, d_field);
-        }
-        validate();
+        collective_detail::collective_local_validation(
+            d_field.mesh(),
+            "Temperature source '" + d_name + "' update",
+            [&]
+            {
+                if (d_updater)
+                {
+                    d_updater(context, d_field);
+                }
+                validate();
+            });
         d_field.sync_ghosts();
     }
 
@@ -473,6 +494,7 @@ public:
         }
     }
 
+    /** @note Invoke source-registry mutations consistently on every mesh rank. */
     source_type& add(std::string name, scalar_type initial_value = {})
     {
         if (is_reserved_name(name))
@@ -495,6 +517,7 @@ public:
         return *iter->second;
     }
 
+    /** @note Invoke source-registry mutations consistently on every mesh rank. */
     bool remove(const std::string& name)
     {
         if (name == "qdot_fission")
@@ -734,6 +757,11 @@ struct MaterialPropertyFields
             "thermal_conductivity");
     }
 
+    /**
+     * @brief Install rank-local material-property update work.
+     * @note The callback must not perform communication; failures are reduced
+     *       collectively after it returns or throws.
+     */
     void set_updater(updater_type value)
     {
         if (!value)
@@ -749,15 +777,32 @@ struct MaterialPropertyFields
     /** @brief Run the updater, validate physical bounds, and synchronize ghosts. */
     void update(const context_type& context)
     {
-        if (updater)
-        {
-            updater(context, *this);
-        }
-        validate_and_sync();
+        collective_detail::collective_local_validation(
+            density.mesh(),
+            "Material property update",
+            [&]
+            {
+                if (updater)
+                {
+                    updater(context, *this);
+                }
+                validate_local();
+            });
+        sync_ghosts();
     }
 
     /** @brief Validate physical bounds and synchronize all material fields. */
     void validate_and_sync()
+    {
+        collective_detail::collective_local_validation(
+            density.mesh(),
+            "Material property validation",
+            [&] { validate_local(); });
+        sync_ghosts();
+    }
+
+private:
+    void validate_local() const
     {
         validate_positive(density, "density");
         validate_positive(
@@ -766,13 +811,16 @@ struct MaterialPropertyFields
             dynamic_viscosity, "dynamic_viscosity");
         validate_non_negative(
             thermal_conductivity, "thermal_conductivity");
+    }
+
+    void sync_ghosts()
+    {
         density.sync_ghosts();
         specific_heat_capacity.sync_ghosts();
         dynamic_viscosity.sync_ghosts();
         thermal_conductivity.sync_ghosts();
     }
 
-private:
     template<class Provider>
     static void initialize_positive(
         CellField<Pack>& field,

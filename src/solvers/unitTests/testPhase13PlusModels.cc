@@ -370,6 +370,22 @@ TEST(ScalarVoidFractionModelTest, AggregatesAndBoundsSources)
         1.0e-14);
 }
 
+/** @brief Verify the reserved low-order scalar slip option fails honestly. */
+TEST(ScalarVoidFractionModelTest, RejectsNonzeroUnimplementedSlipVelocity)
+{
+    SimpleFluid::ScalarVoidFractionOptions options;
+    options.constant_slip_velocity = 0.1;
+    EXPECT_THROW(
+        SimpleFluid::validate_scalar_void_fraction_options(options),
+        std::invalid_argument);
+
+    SimpleFluid::Database database;
+    database.set("constant_slip_velocity", SimpleFluid::real_t{0.1});
+    EXPECT_THROW(
+        SimpleFluid::scalar_void_fraction_options_from_database(database),
+        std::invalid_argument);
+}
+
 /** @brief Verify zero diffusivity preserves a nonuniform void field. */
 TEST(ScalarVoidFractionModelTest,
      ZeroDiffusivityLeavesNonuniformAlphaUnchanged)

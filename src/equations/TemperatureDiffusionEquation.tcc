@@ -38,7 +38,7 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
  *
  * Scans all boundary batches and stores the prescribed Dirichlet
  * temperature for each owned boundary face. Neumann and NoSlip conditions
- * are handled implicitly in the diffusion solve and are not cached here.
+ * are applied directly by the advance routines and are not cached here.
  *
  * @tparam Pack Tpetra type pack.
  */
@@ -203,8 +203,22 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         }
         else if (BC.type == BoundaryConditionType::Neumann)
         {
-            if (BC.value == scalar_type{0.0}) continue; // No contribution for zero Neumann flux.
-            // Nonzero Neumann Condition is to be implemented in the future; currently treated as zero flux.
+            for (const auto boundary_face_lid : boundary_batch.face_lids)
+            {
+                if (!d_mesh->is_owned_face(boundary_face_lid))
+                {
+                    continue;
+                }
+
+                const auto owner = d_mesh->owner_cell(boundary_face_lid);
+                const auto boundary_contribution =
+                    static_cast<scalar_type>(BC.value)
+                  * d_mesh->face_area(boundary_face_lid);
+                temperature.sum_into_value(
+                    owner,
+                    time_step * thermal_diffusivity
+                  * boundary_contribution / d_mesh->cell_volume(owner));
+            }
         }
         else if (BC.type == BoundaryConditionType::NoSlip)
         {

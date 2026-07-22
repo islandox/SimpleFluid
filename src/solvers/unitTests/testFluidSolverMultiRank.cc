@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/FaceFlux.hh"
+#include "examples/ExampleRunner.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/FluidSolver.hh"
 #include "utils/testing_environment.hh"
@@ -46,6 +47,11 @@ public:
         const VelocityFieldType& after) const
     {
         return velocity_update_norm(before, after);
+    }
+
+    SimpleFluid::VTUWriter solution_writer() const
+    {
+        return fluid_solution_writer();
     }
 };
 
@@ -107,6 +113,23 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
 
 } // namespace
 
+/** @brief Verify distributed examples never select the same VTU filename. */
+TEST(FluidSolverOutputTest, DistributedVtuFilenamesAreRankSpecific)
+{
+    EXPECT_EQ(
+        SimpleFluid::detail::rank_local_vtu_filename(
+            "solution.vtu", 0, 1),
+        "solution.vtu");
+    EXPECT_EQ(
+        SimpleFluid::detail::rank_local_vtu_filename(
+            "solution.vtu", 0, 2),
+        "solution_rank0.vtu");
+    EXPECT_EQ(
+        SimpleFluid::detail::rank_local_vtu_filename(
+            "solution.vtu", 1, 2),
+        "solution_rank1.vtu");
+}
+
 /** @brief Verify the velocity update norm is reduced over all ranks. */
 TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
 {
@@ -144,6 +167,21 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
         solver.update_norm(before, after),
         expected,
         std::max(1.0e-14, expected * 1.0e-12));
+}
+
+/** @brief Verify rank-local VTU pieces omit overlap ghost cells. */
+TEST(FluidSolverMultiRankTest, SolutionOutputContainsOwnedCellsOnly)
+{
+    auto mesh = distributed_line_mesh();
+    if (mesh->owned_cell_map()->getComm()->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+    ExposedFluidSolver solver(mesh, {});
+    const auto writer = solver.solution_writer();
+    EXPECT_EQ(writer.num_cells(), mesh->num_owned_cells());
 }
 
 /** @brief Verify coupled continuity residuals use a global reduction. */
