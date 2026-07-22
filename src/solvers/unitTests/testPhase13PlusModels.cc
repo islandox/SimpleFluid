@@ -370,7 +370,7 @@ TEST(ScalarVoidFractionModelTest, AggregatesAndBoundsSources)
         1.0e-14);
 }
 
-/** @brief Verify the reserved low-order scalar slip option fails honestly. */
+/** @brief Verify scalar slip is rejected directly but ignored by flat parsing. */
 TEST(ScalarVoidFractionModelTest, RejectsNonzeroUnimplementedSlipVelocity)
 {
     SimpleFluid::ScalarVoidFractionOptions options;
@@ -381,9 +381,18 @@ TEST(ScalarVoidFractionModelTest, RejectsNonzeroUnimplementedSlipVelocity)
 
     SimpleFluid::Database database;
     database.set("constant_slip_velocity", SimpleFluid::real_t{0.1});
-    EXPECT_THROW(
-        SimpleFluid::scalar_void_fraction_options_from_database(database),
-        std::invalid_argument);
+    database.set(
+        "bubble_rise_velocity_model", std::string{"constantSlip"});
+    const auto parsed =
+        SimpleFluid::scalar_void_fraction_options_from_database(database);
+    EXPECT_DOUBLE_EQ(parsed.constant_slip_velocity, 0.0);
+
+    const auto radiolytic =
+        SimpleFluid::radiolytic_gas_options_from_database(database);
+    EXPECT_EQ(
+        radiolytic.rise_velocity_mode,
+        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip);
+    EXPECT_DOUBLE_EQ(radiolytic.constant_slip_velocity, 0.1);
 }
 
 /** @brief Verify zero diffusivity preserves a nonuniform void field. */

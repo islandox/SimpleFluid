@@ -44,12 +44,15 @@ target_compile_definitions(simplefluid_benchmark PRIVATE
 add_subdirectory(unitTests)
 
 add_test(
-    NAME benchmark_debug_small
+    NAME benchmark_debug_regression
     COMMAND simplefluid_benchmark
         --preset debug-small
-        --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_debug_small_$<CONFIG>.csv"
+        --warmups 1
+        --repetitions 3
+        --baseline "${CMAKE_CURRENT_SOURCE_DIR}/baselines/debug-small-serial.csv"
+        --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_debug_regression_$<CONFIG>.csv"
 )
-set_tests_properties(benchmark_debug_small PROPERTIES
+set_tests_properties(benchmark_debug_regression PROPERTIES
     LABELS "benchmark;performance"
     TIMEOUT 300
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
@@ -70,15 +73,18 @@ if(MPIEXEC_EXECUTABLE)
     endif()
 
     add_test(
-        NAME benchmark_mpi_smoke_2procs
+        NAME benchmark_mpi_regression_2procs
         COMMAND "${MPIEXEC_EXECUTABLE}" ${_benchmark_mpi_preflags}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
             "$<TARGET_FILE:simplefluid_benchmark>"
             --preset debug-small
             --case pressure_velocity
-            --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_mpi_smoke_$<CONFIG>.csv"
+            --warmups 1
+            --repetitions 3
+            --baseline "${CMAKE_CURRENT_SOURCE_DIR}/baselines/debug-small-mpi-2.csv"
+            --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_mpi_regression_$<CONFIG>.csv"
     )
-    set_tests_properties(benchmark_mpi_smoke_2procs PROPERTIES
+    set_tests_properties(benchmark_mpi_regression_2procs PROPERTIES
         LABELS "benchmark;performance;mpi"
         PROCESSORS 2
         TIMEOUT 300

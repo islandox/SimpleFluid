@@ -87,6 +87,9 @@ inline void validate_scalar_void_fraction_options(
 /**
  * @brief Parse scalar void-fraction options from a flat database.
  *
+ * The flat `constant_slip_velocity` key belongs to radiolytic bubble
+ * transport and is intentionally not consumed by this parser.
+ *
  * @param database Database containing optional scalar-void keys.
  * @return Validated scalar void-fraction options.
  */
@@ -106,10 +109,6 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
         options.alpha_collapse_time);
     options.alpha_diffusivity = detail::database_value_or<real_t>(
         database, "alpha_diffusivity", options.alpha_diffusivity);
-    options.constant_slip_velocity = detail::database_value_or<real_t>(
-        database,
-        "constant_slip_velocity",
-        options.constant_slip_velocity);
     validate_scalar_void_fraction_options(options);
     return options;
 }

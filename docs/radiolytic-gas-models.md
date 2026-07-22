@@ -74,7 +74,7 @@ Standalone ideal-mode calls likewise must use the `advance` overload that
 supplies authoritative `alpha_g` and `alpha_max`; the shorter overload is
 reserved for disabled and two-population modes.
 
-## Phase 12.1 state
+## Phase 14.1 state
 
 The advanced model stores dissolved hydrogen conservatively as
 

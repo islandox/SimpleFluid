@@ -142,6 +142,162 @@ make_unstructured_hex_line(unsigned cells)
         boundaries);
 }
 
+/** @brief Minimal mesh exposing contiguous-ID assignment for MPI tests. */
+class ContiguousGidProbeMesh final : public MeshType
+{
+public:
+    using GO = Pack::global_ordinal_type;
+
+    void initialize(bool owns_cell,
+                    GO owned_gid,
+                    bool has_ghost,
+                    GO ghost_gid)
+    {
+        if (owns_cell)
+        {
+            d_owned_cell_ids.push_back(0);
+            d_owned_cell_global_ids.push_back(owned_gid);
+        }
+        if (has_ghost)
+        {
+            d_ghost_cell_global_ids.push_back(ghost_gid);
+        }
+    }
+
+    void assign_ids()
+    {
+        assign_contiguous_tpetra_gids();
+    }
+
+    const ArrGO& ghost_tpetra_gids() const noexcept
+    {
+        return d_ghost_cell_tpetra_gids;
+    }
+
+    void assemble() override {}
+    void export_vtu(const std::string&) const override {}
+};
+
+/**
+ * @brief Replicated legacy mesh assembled from CRTP geometry without maps.
+ *
+ * Unlike MeshFactory's STK mesh, this fixture remains unpartitioned until a
+ * test explicitly calls MeshPartitioner::partition().
+ */
+class ReplicatedLegacyMesh final : public MeshType
+{
+public:
+    explicit ReplicatedLegacyMesh(const UnstructuredMesh& source)
+    {
+        d_spatial_dim = static_cast<int>(source.spatial_dimension());
+        d_node_coords = source.nodes();
+        for (size_t node = 0; node < source.num_nodes(); ++node)
+        {
+            const auto node_gid = static_cast<GO>(source.node_id(node));
+            d_node_gid_to_lid.emplace(
+                node_gid, static_cast<LO>(node));
+        }
+
+        size_t total_cell_nodes = 0;
+        size_t total_cell_faces = 0;
+        for (size_t cell = 0; cell < source.num_cells(); ++cell)
+        {
+            const auto cell_id = source.cell_id(cell);
+            total_cell_nodes += source.cell_nodes(cell_id).size();
+            total_cell_faces += source.faces(cell_id).size();
+        }
+        d_cells.reserve(source.num_cells());
+        d_owned_cell_ids.reserve(source.num_cells());
+        d_owned_cell_global_ids.reserve(source.num_cells());
+        d_cell_owned_node_global_ids.reserve(total_cell_nodes);
+        d_cell_owned_face_ids.reserve(total_cell_faces);
+
+        for (size_t cell = 0; cell < source.num_cells(); ++cell)
+        {
+            const auto cell_id = source.cell_id(cell);
+            const auto cell_lid = static_cast<LO>(cell);
+            CellInfo info;
+            info.owned = true;
+            info.type = source.cell_type(cell_id);
+            info.center = source.cell_centroid(cell_id);
+            info.volume = source.cell_volume(cell_id);
+
+            const auto node_offset = d_cell_owned_node_global_ids.size();
+            for (const auto node_id : source.cell_nodes(cell_id))
+            {
+                d_cell_owned_node_global_ids.push_back(
+                    static_cast<GO>(node_id));
+            }
+            info.node_gids = ViewGO(
+                d_cell_owned_node_global_ids.data() + node_offset,
+                source.cell_nodes(cell_id).size());
+
+            const auto face_offset = d_cell_owned_face_ids.size();
+            for (const auto face_id : source.faces(cell_id))
+            {
+                d_cell_owned_face_ids.push_back(
+                    static_cast<LO>(source.face_local_id(face_id)));
+            }
+            info.faces = ViewLO(
+                d_cell_owned_face_ids.data() + face_offset,
+                source.faces(cell_id).size());
+
+            const auto cell_gid = static_cast<GO>(cell_id);
+            d_cell_gid_to_lid.emplace(cell_gid, cell_lid);
+            d_owned_cell_ids.push_back(cell_lid);
+            d_owned_cell_global_ids.push_back(cell_gid);
+            d_cells.push_back(std::move(info));
+        }
+
+        size_t total_face_nodes = 0;
+        for (size_t face = 0; face < source.num_faces(); ++face)
+        {
+            total_face_nodes +=
+                source.face_nodes(source.face_id(face)).size();
+        }
+        d_faces.reserve(source.num_faces());
+        d_owned_face_global_ids.reserve(source.num_faces());
+        d_face_owned_node_global_ids.reserve(total_face_nodes);
+        for (size_t face = 0; face < source.num_faces(); ++face)
+        {
+            const auto face_id = source.face_id(face);
+            const auto& node_ids = source.face_nodes(face_id);
+            FaceInfo info;
+            info.type = node_ids.size() == 3
+                      ? FaceType::TRIANGLE
+                      : FaceType::QUAD;
+            info.boundary_id = source.boundary_id(face_id);
+            info.owner = static_cast<LO>(
+                source.cell_local_id(source.owner_cell(face_id)));
+            const auto neighbor = source.neighbor_cell(face_id);
+            info.neighbor = neighbor == UnstructuredMesh::invalid_cell_id()
+                          ? SimpleFluid::invalid_id<LO>()
+                          : static_cast<LO>(source.cell_local_id(neighbor));
+
+            const auto node_offset = d_face_owned_node_global_ids.size();
+            for (const auto node_id : node_ids)
+            {
+                d_face_owned_node_global_ids.push_back(
+                    static_cast<GO>(node_id));
+            }
+            info.node_gids = ViewGO(
+                d_face_owned_node_global_ids.data() + node_offset,
+                node_ids.size());
+
+            d_faces.push_back(std::move(info));
+            d_owned_face_global_ids.push_back(
+                static_cast<GO>(10000 + 17 * face));
+        }
+    }
+
+    void assemble() override {}
+    void export_vtu(const std::string&) const override {}
+
+private:
+    using GO = Pack::global_ordinal_type;
+    using LO = Pack::local_ordinal_type;
+};
+
 /**
  * @brief Gather all owned cell GIDs from all ranks and return the union.
  */
@@ -236,6 +392,79 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
     EXPECT_EQ(restored.front().face_node_keys, packet.face_node_keys);
     EXPECT_EQ(restored.front().face_global_ids, packet.face_global_ids);
     EXPECT_EQ(restored.front().face_boundary_ids, packet.face_boundary_ids);
+}
+
+/** @brief Keeps owner resolution collective when only some ranks have ghosts. */
+TEST(MeshContiguousGidTest, MixedZeroAndNonzeroGhostRanksRemainCoherent)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    using GO = Pack::global_ordinal_type;
+    const int rank = comm->getRank();
+    const bool has_ghost = rank == 1;
+    const GO owned_gid = static_cast<GO>(1000 + rank);
+    constexpr GO ghost_gid = 1000;
+
+    ContiguousGidProbeMesh mesh;
+    mesh.initialize(true, owned_gid, has_ghost, ghost_gid);
+    mesh.assign_ids();
+
+    const GO expected_owned_tpetra_gid = static_cast<GO>(rank);
+    EXPECT_EQ(
+        mesh.mesh_gid_to_tpetra_gid(owned_gid),
+        expected_owned_tpetra_gid);
+    EXPECT_EQ(
+        mesh.tpetra_gid_to_mesh_gid(expected_owned_tpetra_gid),
+        owned_gid);
+    if (has_ghost)
+    {
+        ASSERT_EQ(mesh.ghost_tpetra_gids().size(), 1U);
+        EXPECT_EQ(mesh.ghost_tpetra_gids().front(), 0);
+        EXPECT_EQ(mesh.mesh_gid_to_tpetra_gid(ghost_gid), 0);
+    }
+    else
+    {
+        EXPECT_TRUE(mesh.ghost_tpetra_gids().empty());
+    }
+}
+
+/** @brief Repeated assignment is rank coherent when some ranks own no cells. */
+TEST(MeshContiguousGidTest, ZeroOwnedRanksRemainIdempotent)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    using GO = Pack::global_ordinal_type;
+    const int rank = comm->getRank();
+    constexpr GO owned_gid = 2000;
+
+    ContiguousGidProbeMesh mesh;
+    mesh.initialize(rank == 0, owned_gid, rank == 1, owned_gid);
+    mesh.assign_ids();
+    mesh.assign_ids();
+
+    if (rank == 0)
+    {
+        EXPECT_EQ(mesh.mesh_gid_to_tpetra_gid(owned_gid), 0);
+        EXPECT_EQ(mesh.tpetra_gid_to_mesh_gid(0), owned_gid);
+    }
+    else if (rank == 1)
+    {
+        ASSERT_EQ(mesh.ghost_tpetra_gids().size(), 1U);
+        EXPECT_EQ(mesh.ghost_tpetra_gids().front(), 0);
+        EXPECT_EQ(mesh.mesh_gid_to_tpetra_gid(owned_gid), 0);
+    }
+    else
+    {
+        EXPECT_TRUE(mesh.ghost_tpetra_gids().empty());
+    }
 }
 
 /** @brief Verifies STK assigns a distinct identity to every local face. */
@@ -432,8 +661,10 @@ TEST(MeshPartitionerTest, PreservesBoundaryAndFaceGeometry)
  */
 TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
 {
-    auto mesh = make_4x4x4_box_mesh();
-    const auto comm = mesh->owned_cell_map()->getComm();
+    constexpr unsigned cell_count = 8;
+    const auto source = make_unstructured_hex_line(cell_count);
+    auto mesh = std::make_shared<ReplicatedLegacyMesh>(*source);
+    const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
     {
         GTEST_SKIP() << "This test requires at least two MPI ranks.";
@@ -442,6 +673,21 @@ TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
     using GO = Pack::global_ordinal_type;
     constexpr size_t nodes_per_face = 4;
     constexpr size_t record_size = nodes_per_face + 1;
+    std::map<std::vector<GO>, GO> original_global_id_by_node_key;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
+        std::vector<GO> node_key(
+            mesh->face(face_lid).node_gids.begin(),
+            mesh->face(face_lid).node_gids.end());
+        std::sort(node_key.begin(), node_key.end());
+        original_global_id_by_node_key.emplace(
+            std::move(node_key), mesh->face_global_id(face_lid));
+    }
+
+    EXPECT_TRUE(SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm));
+    EXPECT_LT(mesh->num_owned_cells(), static_cast<size_t>(cell_count));
+
     std::vector<GO> local_records;
     local_records.reserve(mesh->num_faces() * record_size);
     for (size_t face = 0; face < mesh->num_faces(); ++face)
@@ -457,7 +703,16 @@ TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
         }
         std::sort(node_key.begin(), node_key.end());
 
-        local_records.push_back(mesh->face_global_id(face_lid));
+        const auto original_id =
+            original_global_id_by_node_key.find(node_key);
+        EXPECT_NE(original_id, original_global_id_by_node_key.end());
+        if (original_id == original_global_id_by_node_key.end())
+        {
+            continue;
+        }
+        const auto rebuilt_global_id = mesh->face_global_id(face_lid);
+        EXPECT_EQ(rebuilt_global_id, original_id->second);
+        local_records.push_back(rebuilt_global_id);
         local_records.insert(
             local_records.end(), node_key.begin(), node_key.end());
     }

@@ -215,6 +215,7 @@ public:
 protected:
     void create_maps();
     void assign_contiguous_tpetra_gids();
+    void reset_contiguous_tpetra_gids() noexcept;
     void create_cell_face_distances();
     void create_device_views();
 
@@ -390,6 +391,9 @@ protected:
     ArrGO d_ghost_cell_tpetra_gids;                // Tpetra GIDs for ghost cells (size = num_ghost).
     GO2GOMap d_mesh_gid_to_tpetra_gid;             // Mesh GID -> Tpetra GID (all local cells).
     ArrGO d_tpetra_gid_to_mesh_gid;                // Tpetra GID -> Mesh GID (owned cells, indexed by local owned index).
+    // An explicit flag is required because a valid zero-owned rank leaves the
+    // reverse mapping empty after assignment.
+    bool d_contiguous_tpetra_gids_assigned = false;
 
     ArrGO d_owned_face_global_ids;
 

@@ -112,4 +112,49 @@ private:
     std::filesystem::path d_path;
 };
 
+/**
+ * @brief Validate benchmark records against a checked-in regression baseline.
+ *
+ * A baseline row identifies one benchmark configuration and supplies ceilings
+ * for solver work and elapsed time. Every emitted record must match exactly
+ * one row, and every row must be observed the requested number of times.
+ * Warmup records should not be passed to this class.
+ */
+class RegressionGate
+{
+public:
+    RegressionGate(
+        std::filesystem::path baseline_path,
+        int expected_samples_per_case);
+
+    void check(const Record& record);
+    void verify_complete() const;
+
+    static std::string header();
+
+private:
+    struct Entry
+    {
+        std::string benchmark_case;
+        std::string preset;
+        long long mesh_nx = 0;
+        long long mesh_ny = 0;
+        long long mesh_nz = 0;
+        int mpi_ranks = 1;
+        double shear = 0.0;
+        std::string treatment;
+        std::string coupling;
+        std::string preconditioner;
+        int max_nonlinear_iterations = 0;
+        int max_linear_solves = 0;
+        int max_krylov_iterations = 0;
+        double max_total_seconds = 0.0;
+        int observed_samples = 0;
+    };
+
+    std::filesystem::path d_baseline_path;
+    int d_expected_samples_per_case = 0;
+    std::vector<Entry> d_entries;
+};
+
 } // namespace SimpleFluid::Benchmark

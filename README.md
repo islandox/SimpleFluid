@@ -7,12 +7,13 @@ GPU-portable parallelism.
 ## Project Status
 
 SimpleFluid is in active development with a tested incompressible Navier–Stokes
-solver for natural convection. Phases 0–12 of the planned roadmap are complete,
-covering mesh infrastructure, verification, performance benchmarking, physical
-heat sources, updateable material properties, prescribed fission heating, and
-the baseline radiolytic-gas source.
+solver for natural convection. The foundation through Phase 12 is substantially
+implemented, covering mesh infrastructure, verification, performance
+benchmarking, physical heat sources, updateable material properties, prescribed
+fission heating, and the baseline radiolytic-gas source. Numerical verification
+gaps and later multiphysics acceptance work remain tracked in `TODO.md`.
 
-**The advanced Phase 12.1 two-population radiolytic-bubble model is implemented
+**The advanced Phase 14.1 two-population radiolytic-bubble model is implemented
 in part and remains under verification.**
 
 | Capability | Status |
@@ -208,7 +209,7 @@ generation.
 ### Prerequisites
 
 - C++23 compiler (GCC ≥ 13 or Clang ≥ 17)
-- CMake ≥ 3.16
+- CMake ≥ 3.21
 - Trilinos 17+ with:
   - Kokkos, Teuchos, Tpetra
   - STK (IO, Mesh, Topology, Util)
@@ -232,8 +233,8 @@ cmake --build build --config Release
 ### Run Tests
 
 ```bash
-cd build
-ctest --output-on-failure
+cmake --build --preset Debug
+ctest --preset Debug
 ```
 
 ### Run Examples
