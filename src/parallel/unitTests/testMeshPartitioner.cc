@@ -164,6 +164,15 @@ public:
         }
     }
 
+    void initialize(const ArrGO& owned_gids,
+                    const ArrGO& ghost_gids)
+    {
+        d_owned_cell_global_ids = owned_gids;
+        d_ghost_cell_global_ids = ghost_gids;
+        d_owned_cell_ids.resize(owned_gids.size());
+        std::iota(d_owned_cell_ids.begin(), d_owned_cell_ids.end(), 0);
+    }
+
     void assign_ids()
     {
         assign_contiguous_tpetra_gids();
@@ -465,6 +474,85 @@ TEST(MeshContiguousGidTest, ZeroOwnedRanksRemainIdempotent)
     {
         EXPECT_TRUE(mesh.ghost_tpetra_gids().empty());
     }
+}
+
+/** @brief Distributed lookup preserves the original contiguous numbering. */
+TEST(MeshContiguousGidTest, DistributedDirectoryMatchesRankBlockNumbering)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    using GO = Pack::global_ordinal_type;
+    const int rank = comm->getRank();
+    const int next_rank = (rank + 1) % comm->getSize();
+    const int owned_count = rank + 1;
+    const int next_owned_count = next_rank + 1;
+
+    MeshType::ArrGO owned_gids;
+    owned_gids.reserve(static_cast<size_t>(owned_count));
+    for (int local = 0; local < owned_count; ++local)
+    {
+        owned_gids.push_back(
+            static_cast<GO>(10000 + 100 * rank + 7 * local));
+    }
+    const GO ghost_gid = static_cast<GO>(
+        10000 + 100 * next_rank + 7 * (next_owned_count - 1));
+
+    ContiguousGidProbeMesh mesh;
+    mesh.initialize(owned_gids, {ghost_gid});
+    mesh.assign_ids();
+
+    const GO expected_offset = static_cast<GO>(rank * (rank + 1) / 2);
+    for (int local = 0; local < owned_count; ++local)
+    {
+        const GO expected_tpetra_gid =
+            expected_offset + static_cast<GO>(local);
+        EXPECT_EQ(
+            mesh.mesh_gid_to_tpetra_gid(
+                owned_gids[static_cast<size_t>(local)]),
+            expected_tpetra_gid);
+        EXPECT_EQ(
+            mesh.tpetra_gid_to_mesh_gid(expected_tpetra_gid),
+            owned_gids[static_cast<size_t>(local)]);
+    }
+
+    const GO next_offset =
+        static_cast<GO>(next_rank * (next_rank + 1) / 2);
+    const GO expected_ghost_tpetra_gid =
+        next_offset + static_cast<GO>(next_owned_count - 1);
+    ASSERT_EQ(mesh.ghost_tpetra_gids().size(), 1U);
+    EXPECT_EQ(
+        mesh.ghost_tpetra_gids().front(),
+        expected_ghost_tpetra_gid);
+    EXPECT_EQ(
+        mesh.mesh_gid_to_tpetra_gid(ghost_gid),
+        expected_ghost_tpetra_gid);
+}
+
+/** @brief A missing ghost ID fails coherently on every rank. */
+TEST(MeshContiguousGidTest, MissingGhostIDThrowsCollectively)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    using GO = Pack::global_ordinal_type;
+    const int rank = comm->getRank();
+    const GO owned_gid = static_cast<GO>(3000 + rank);
+    MeshType::ArrGO ghost_gids;
+    if (rank == 1)
+    {
+        ghost_gids.push_back(static_cast<GO>(987654321));
+    }
+
+    ContiguousGidProbeMesh mesh;
+    mesh.initialize({owned_gid}, ghost_gids);
+    EXPECT_THROW(mesh.assign_ids(), std::runtime_error);
 }
 
 /** @brief Verifies STK assigns a distinct identity to every local face. */

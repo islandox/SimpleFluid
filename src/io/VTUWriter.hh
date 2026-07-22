@@ -1,7 +1,7 @@
 /**
  * @file VTUWriter.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Concrete VTU writer for ASCII unstructured-grid output.
+ * @brief Concrete VTU writer for ASCII or appended-binary unstructured grids.
  * @version 0.1
  * @date 2026-06-03
  *
@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
@@ -26,9 +27,10 @@ namespace SimpleFluid
 /**
  * @brief Non-template writer for VTU unstructured-grid files.
  *
- * The writer accepts plain host-side geometry and cell data arrays. Template
- * mesh and field code can gather data in their native types and delegate the
- * actual XML emission here.
+ * The writer accepts plain host-side geometry and cell data arrays. Immutable
+ * topology handles let transient solvers reuse mesh connectivity across
+ * output timesteps, while appended binary encoding avoids per-value text
+ * formatting for production output.
  */
 class VTUWriter
 {
@@ -40,6 +42,39 @@ public:
     using Int64Data = std::vector<global_index_t>;
     using UInt8Data = std::vector<std::uint8_t>;
 
+    /** @brief Encoding used for numeric VTU arrays. */
+    enum class Encoding : std::uint8_t
+    {
+        Ascii = 0,
+        AppendedBinary = 1
+    };
+
+    /** @brief Immutable mesh topology reusable across output timesteps. */
+    struct Topology
+    {
+        VectorData points;
+        Int64Data connectivity;
+        Int64Data cell_offsets;
+        UInt8Data cell_types;
+    };
+    using TopologyHandle = std::shared_ptr<const Topology>;
+
+    VTUWriter() = default;
+    explicit VTUWriter(TopologyHandle topology);
+
+    static TopologyHandle make_topology(
+        VectorData points,
+        Int64Data connectivity,
+        Int64Data offsets,
+        UInt8Data cell_types);
+
+    static std::string rank_piece_filename(
+        const std::string& filename,
+        int rank,
+        int communicator_size);
+    static std::string parallel_index_filename(
+        const std::string& filename);
+
     void set_points(VectorData points);
     void set_cells(Int64Data connectivity,
                    Int64Data offsets,
@@ -50,10 +85,33 @@ public:
     void add_int_cell_data(std::string name, IntData values);
     void add_int64_cell_data(std::string name, Int64Data values);
 
-    size_t num_points() const noexcept { return d_points.size(); }
-    size_t num_cells() const noexcept { return d_cell_offsets.size(); }
+    size_t num_points() const noexcept { return topology().points.size(); }
+    size_t num_cells() const noexcept
+    {
+        return topology().cell_offsets.size();
+    }
 
-    void write(const std::string& filename) const;
+    /**
+     * @brief Return an exact key for the ordered CellData schema.
+     *
+     * Values and local cell counts are intentionally excluded so MPI ranks
+     * can compare names, VTK types, and component counts before publishing a
+     * shared PVTU index.
+     */
+    std::string cell_data_schema_key() const;
+
+    /** @return Shared topology, or null when using mutable owned topology. */
+    const TopologyHandle& topology_handle() const noexcept
+    {
+        return d_shared_topology;
+    }
+
+    void write(
+        const std::string& filename,
+        Encoding encoding = Encoding::Ascii) const;
+    void write_parallel_index(
+        const std::string& filename,
+        const std::vector<std::string>& piece_filenames) const;
 
 private:
     /** @brief Type-erased cell-data array and its VTU metadata. */
@@ -71,11 +129,13 @@ private:
     static void write_cell_data_array(std::ostream& out,
                                       const DataArray& data_array,
                                       const std::string& indent);
+    void write_ascii(std::ostream& out) const;
+    void write_appended_binary(std::ostream& out) const;
+    const Topology& topology() const noexcept;
+    Topology& mutable_topology();
 
-    VectorData d_points;
-    Int64Data d_connectivity;
-    Int64Data d_cell_offsets;
-    UInt8Data d_cell_types;
+    Topology d_owned_topology;
+    TopologyHandle d_shared_topology;
     std::vector<DataArray> d_cell_data;
 };
 

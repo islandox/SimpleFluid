@@ -271,10 +271,7 @@ int main(int argc, char** argv)
 
     const auto comm = Tpetra::getDefaultComm();
     const int rank = comm->getRank();
-    const std::string vtu_filename = comm->getSize() == 1
-        ? "natural_convection_shiri.vtu"
-        : "natural_convection_shiri_rank" + std::to_string(rank) + ".vtu";
-    solver.write_solution_vtu(vtu_filename);
+    solver.write_parallel_solution_vtu("natural_convection_shiri.vtu");
     write_profile_cells(*mesh, solver, rank);
 
     if (rank == 0)

@@ -121,6 +121,7 @@ private:
         const velocity_field_type* correction_field) const;
 
     SP<const mesh_type> d_mesh;
+    FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable Teuchos::RCP<typename Pack::matrix_type>
         d_cached_physical_transport_matrix;

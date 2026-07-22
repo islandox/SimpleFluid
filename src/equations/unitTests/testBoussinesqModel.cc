@@ -199,6 +199,51 @@ TEST(BoussinesqModelTest, RegistryIsOrderedAndSupportsSpatialInitialization)
     EXPECT_EQ(registry.find("zeta"), nullptr);
 }
 
+/** @brief Verifies timestep refresh skips static and disabled source fields. */
+TEST(BoussinesqModelTest, RegistryUpdatesOnlyEnabledDynamicSources)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
+
+    auto& static_source = registry.add("static", 2.0);
+    auto& disabled_source = registry.add("disabled", 3.0);
+    auto& dynamic_source = registry.add("dynamic", 4.0);
+    int disabled_calls = 0;
+    int dynamic_calls = 0;
+    disabled_source.set_updater(
+        [&](const auto&, auto&)
+        {
+            ++disabled_calls;
+        });
+    disabled_source.set_enabled(false);
+    dynamic_source.set_updater(
+        [&](const auto&, auto& field)
+        {
+            ++dynamic_calls;
+            field.put_scalar(5.0);
+        });
+
+    SimpleFluid::CellField<Pack> temperature(
+        mesh, 300.0, "temperature");
+    SimpleFluid::CellField<Pack> pressure(mesh, 0.0, "pressure");
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    const SimpleFluid::BoussinesqUpdateContext<Pack> context{
+        1.0, 2, *mesh, temperature, pressure, velocity};
+
+    registry.update(context);
+
+    EXPECT_EQ(disabled_calls, 0);
+    EXPECT_EQ(dynamic_calls, 1);
+    EXPECT_DOUBLE_EQ(static_source.field().value(0), 2.0);
+    EXPECT_DOUBLE_EQ(disabled_source.field().value(0), 3.0);
+    EXPECT_DOUBLE_EQ(dynamic_source.field().value(0), 5.0);
+
+    dynamic_source.clear_updater();
+    registry.update(context);
+    EXPECT_EQ(dynamic_calls, 1);
+}
+
 /** @brief Verifies that material validation rejects non-finite field updates. */
 TEST(BoussinesqModelTest, MaterialValidationRejectsNonFiniteUpdates)
 {

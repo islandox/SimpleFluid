@@ -42,6 +42,109 @@ struct OwnerCellBoundaryCoefficient
 struct OmitBoundaryGradientSamples
 {};
 
+/** @brief Evaluate cached scalar affine reconstruction coefficients. */
+template<TpetraTypePack Pack>
+void evaluate_scalar_affine_gradients(
+    const CellField<Pack>& field,
+    const std::vector<AffineLeastSquaresGradientStencil<Mesh<Pack>>>& stencils,
+    VectorCellField<Pack>& gradients)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    if (stencils.size() != field.mesh().num_owned_cells())
+    {
+        throw std::invalid_argument(
+            "Scalar gradient stencil cache is incompatible with the mesh.");
+    }
+    for (size_t owned = 0; owned < stencils.size(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        auto gradient = stencils[owned].constant;
+        for (const auto& entry : stencils[owned].entries)
+        {
+            const auto value = field.local_value(entry.cell_lid);
+            gradient.x += entry.coefficient.x * value;
+            gradient.y += entry.coefficient.y * value;
+            gradient.z += entry.coefficient.z * value;
+        }
+        gradients.set_owned_value(cell_lid, gradient);
+    }
+}
+
+/** @brief Evaluate cached vector affine reconstruction coefficients. */
+template<TpetraTypePack Pack>
+void evaluate_vector_affine_gradients(
+    const VectorCellField<Pack>& field,
+    const std::vector<VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>&
+        stencils,
+    TensorCellField<Pack>& gradients)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using tensor_type = typename TensorCellField<Pack>::tensor_type;
+    if (stencils.size() != field.mesh().num_owned_cells())
+    {
+        throw std::invalid_argument(
+            "Vector gradient stencil cache is incompatible with the mesh.");
+    }
+    for (size_t owned = 0; owned < stencils.size(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        tensor_type gradient{};
+        for (size_t component = 0;
+             component < VectorCellField<Pack>::num_components;
+             ++component)
+        {
+            gradient[component] = stencils[owned].constants[component];
+            for (const auto& entry : stencils[owned].entries)
+            {
+                const auto value =
+                    field.local_value(entry.cell_lid).component(component);
+                gradient[component].x += entry.coefficient.x * value;
+                gradient[component].y += entry.coefficient.y * value;
+                gradient[component].z += entry.coefficient.z * value;
+            }
+        }
+        gradients.set_owned_value(cell_lid, gradient);
+    }
+}
+
+/** @brief Evaluate cached interior-only vector reconstruction coefficients. */
+template<TpetraTypePack Pack>
+void evaluate_vector_interior_gradients(
+    const VectorCellField<Pack>& field,
+    const std::vector<LeastSquaresGradientStencil<Mesh<Pack>>>& stencils,
+    TensorCellField<Pack>& gradients)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using tensor_type = typename TensorCellField<Pack>::tensor_type;
+    if (stencils.size() != field.mesh().num_owned_cells())
+    {
+        throw std::invalid_argument(
+            "Interior gradient stencil cache is incompatible with the mesh.");
+    }
+    for (size_t owned = 0; owned < stencils.size(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        tensor_type gradient{};
+        for (const auto& entry : stencils[owned])
+        {
+            const auto value = field.local_value(entry.cell_lid);
+            for (size_t component = 0;
+                 component < VectorCellField<Pack>::num_components;
+                 ++component)
+            {
+                const auto component_value = value.component(component);
+                gradient[component].x +=
+                    entry.coefficient.x * component_value;
+                gradient[component].y +=
+                    entry.coefficient.y * component_value;
+                gradient[component].z +=
+                    entry.coefficient.z * component_value;
+            }
+        }
+        gradients.set_owned_value(cell_lid, gradient);
+    }
+}
+
 } // namespace detail
 
 /**
@@ -168,6 +271,7 @@ void add_explicit_non_orthogonal_correction(
  * diffusion faces, matching vector transport-system assembly.
  *
  * @param correction_weight Fraction of the correction added to @p rhs.
+ * @param gradient_stencils Optional cached interior reconstruction stencil.
  * @throws std::invalid_argument if @p rhs is incompatible with the mesh or
  *         does not contain three component vectors.
  */
@@ -179,7 +283,9 @@ void add_explicit_non_orthogonal_correction(
     typename Pack::multi_vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0,
     BoundaryDiffusionProvider boundary_diffusion =
-        BoundaryDiffusionProvider{})
+        BoundaryDiffusionProvider{},
+    const std::vector<detail::LeastSquaresGradientStencil<Mesh<Pack>>>*
+        gradient_stencils = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -205,7 +311,15 @@ void add_explicit_non_orthogonal_correction(
 
     TensorCellField<Pack> gradients(
         correction_field.mesh_ptr(), "vector_non_orthogonal_gradient");
-    cell_gradient(correction_field, gradients);
+    if (gradient_stencils == nullptr)
+    {
+        cell_gradient(correction_field, gradients);
+    }
+    else
+    {
+        detail::evaluate_vector_interior_gradients(
+            correction_field, *gradient_stencils, gradients);
+    }
     gradients.sync_ghosts();
 
     auto gradient_for_face =
@@ -303,6 +417,7 @@ void add_explicit_non_orthogonal_correction(
  * @param correction_weight Fraction of the correction added to @p rhs.
  * @param boundary_coefficient Boundary-face coefficient provider receiving
  *        the owner-cell value as its fallback.
+ * @param gradient_stencils Optional materialized affine reconstruction.
  * @throws std::invalid_argument if fields use different meshes, @p rhs uses
  *         an incompatible map, or a cell coefficient is negative.
  */
@@ -319,7 +434,10 @@ void add_variable_explicit_non_orthogonal_correction(
     typename Pack::vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0,
     BoundaryCoefficientProvider boundary_coefficient =
-        BoundaryCoefficientProvider{})
+        BoundaryCoefficientProvider{},
+    const std::vector<
+        detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>>*
+        gradient_stencils = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -339,9 +457,14 @@ void add_variable_explicit_non_orthogonal_correction(
 
     VectorCellField<Pack> gradients(
         correction_field.mesh_ptr(), "variable_non_orthogonal_gradient");
-    if constexpr (std::is_same_v<
-                      std::remove_cvref_t<BoundaryValueProvider>,
-                      detail::OmitBoundaryGradientSamples>)
+    if (gradient_stencils != nullptr)
+    {
+        detail::evaluate_scalar_affine_gradients(
+            correction_field, *gradient_stencils, gradients);
+    }
+    else if constexpr (std::is_same_v<
+                           std::remove_cvref_t<BoundaryValueProvider>,
+                           detail::OmitBoundaryGradientSamples>)
     {
         cell_gradient(correction_field, gradients);
     }
@@ -445,6 +568,8 @@ void add_variable_explicit_non_orthogonal_correction(
  * @param correction_weight Fraction of the correction added to @p rhs.
  * @param boundary_coefficient Boundary-face coefficient provider receiving
  *        the owner-cell value as its fallback.
+ * @param gradient_stencils Optional materialized affine reconstruction.
+ * @param cached_boundary_locations Optional mesh-bound boundary lookup.
  * @throws std::invalid_argument if fields use different meshes, @p rhs is
  *         incompatible, or a cell coefficient is negative.
  */
@@ -462,7 +587,12 @@ void add_variable_explicit_non_orthogonal_correction(
     BoundaryDiffusionProvider boundary_diffusion =
         BoundaryDiffusionProvider{},
     BoundaryCoefficientProvider boundary_coefficient =
-        BoundaryCoefficientProvider{})
+        BoundaryCoefficientProvider{},
+    const std::vector<
+        detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>*
+        gradient_stencils = nullptr,
+    const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>*
+        cached_boundary_locations = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -486,9 +616,14 @@ void add_variable_explicit_non_orthogonal_correction(
     TensorCellField<Pack> gradients(
         correction_field.mesh_ptr(),
         "variable_vector_non_orthogonal_gradient");
-    if constexpr (std::is_same_v<
-                      std::remove_cvref_t<BoundaryValueProvider>,
-                      detail::OmitBoundaryGradientSamples>)
+    if (gradient_stencils != nullptr)
+    {
+        detail::evaluate_vector_affine_gradients(
+            correction_field, *gradient_stencils, gradients);
+    }
+    else if constexpr (std::is_same_v<
+                           std::remove_cvref_t<BoundaryValueProvider>,
+                           detail::OmitBoundaryGradientSamples>)
     {
         cell_gradient(correction_field, gradients);
     }
@@ -498,8 +633,20 @@ void add_variable_explicit_non_orthogonal_correction(
     }
     gradients.sync_ghosts();
 
-    const auto boundary_locations =
-        detail::boundary_face_locations(mesh);
+    std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>
+        local_boundary_locations;
+    if (cached_boundary_locations == nullptr)
+    {
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+        cached_boundary_locations = &local_boundary_locations;
+    }
+    if (cached_boundary_locations->size() != mesh.num_faces())
+    {
+        throw std::invalid_argument(
+            "Variable vector non-orthogonal correction received boundary "
+            "locations for another mesh.");
+    }
+    const auto& boundary_locations = *cached_boundary_locations;
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -618,6 +765,8 @@ void add_variable_explicit_non_orthogonal_correction(
  * @param boundary_value Boundary-face velocity provider.
  * @param[in,out] rhs Three-component owned-cell momentum RHS.
  * @param boundary_stress Boundary-face stress selector.
+ * @param gradient_stencils Optional materialized affine reconstruction.
+ * @param cached_boundary_locations Optional mesh-bound boundary lookup.
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,
@@ -632,7 +781,12 @@ void add_explicit_deviatoric_transpose_gradient_stress(
     typename Pack::multi_vector_type& rhs,
     BoundaryStressProvider boundary_stress = BoundaryStressProvider{},
     BoundaryCoefficientProvider boundary_coefficient =
-        BoundaryCoefficientProvider{})
+        BoundaryCoefficientProvider{},
+    const std::vector<
+        detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>*
+        gradient_stencils = nullptr,
+    const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>*
+        cached_boundary_locations = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -662,11 +816,31 @@ void add_explicit_deviatoric_transpose_gradient_stress(
 
     TensorCellField<Pack> gradients(
         old_velocity.mesh_ptr(), "transpose_gradient_stress_velocity_gradient");
-    cell_gradient(old_velocity, boundary_value, gradients);
+    if (gradient_stencils == nullptr)
+    {
+        cell_gradient(old_velocity, boundary_value, gradients);
+    }
+    else
+    {
+        detail::evaluate_vector_affine_gradients(
+            old_velocity, *gradient_stencils, gradients);
+    }
     gradients.sync_ghosts();
 
-    const auto boundary_locations =
-        detail::boundary_face_locations(mesh);
+    std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>
+        local_boundary_locations;
+    if (cached_boundary_locations == nullptr)
+    {
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+        cached_boundary_locations = &local_boundary_locations;
+    }
+    if (cached_boundary_locations->size() != mesh.num_faces())
+    {
+        throw std::invalid_argument(
+            "Explicit transpose-gradient stress received boundary "
+            "locations for another mesh.");
+    }
+    const auto& boundary_locations = *cached_boundary_locations;
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);

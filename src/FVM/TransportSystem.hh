@@ -174,6 +174,93 @@ struct VectorTransportSystem
 };
 
 /**
+ * @brief Mesh-bound cache for transport reconstruction geometry.
+ *
+ * The cache owns only topology- and geometry-dependent data. Boundary
+ * condition types and values remain callback-driven and are materialized for
+ * each assembly, so changing boundary data does not require rebuilding this
+ * cache. The referenced mesh topology and geometry must remain unchanged for
+ * the cache lifetime; construct a new cache after any mesh revision.
+ *
+ * @tparam MeshType Mesh interface used by the transport fields.
+ */
+template<class MeshType>
+class TransportGeometryCache
+{
+public:
+    using interior_stencils_type = std::vector<
+        detail::LeastSquaresGradientStencil<MeshType>>;
+    using boundary_locations_type = std::vector<
+        detail::BoundaryFaceLocation<MeshType>>;
+    using boundary_geometry_type = std::vector<
+        detail::BoundaryAwareGradientCellGeometry<MeshType>>;
+
+    explicit TransportGeometryCache(const MeshType& mesh)
+        : d_mesh(&mesh),
+          d_interior_stencils(
+              detail::least_squares_gradient_stencils(mesh)),
+          d_boundary_locations(
+              detail::boundary_face_locations(mesh)),
+          d_boundary_geometry(
+              detail::boundary_aware_gradient_geometry(
+                  mesh, d_boundary_locations))
+    {
+    }
+
+    /** @brief Throw if this cache was built for another mesh instance. */
+    void require_mesh(const MeshType& mesh) const
+    {
+        if (&mesh != d_mesh)
+        {
+            throw std::invalid_argument(
+                "transport geometry cache belongs to another mesh.");
+        }
+    }
+
+    const interior_stencils_type& interior_stencils() const noexcept
+    {
+        return d_interior_stencils;
+    }
+
+    const boundary_locations_type& boundary_locations() const noexcept
+    {
+        return d_boundary_locations;
+    }
+
+    const boundary_geometry_type& boundary_geometry() const noexcept
+    {
+        return d_boundary_geometry;
+    }
+
+    template<class BoundaryConditionProvider,
+             class BoundaryValueProvider>
+    auto scalar_affine_stencils(
+        BoundaryConditionProvider boundary_condition,
+        BoundaryValueProvider boundary_value) const
+    {
+        return detail::materialize_scalar_affine_gradient_stencils<MeshType>(
+            d_boundary_geometry,
+            std::move(boundary_condition),
+            std::move(boundary_value));
+    }
+
+    template<class BoundaryValueProvider>
+    auto vector_affine_stencils(
+        BoundaryValueProvider boundary_value) const
+    {
+        return detail::materialize_vector_affine_gradient_stencils<MeshType>(
+            d_boundary_geometry,
+            std::move(boundary_value));
+    }
+
+private:
+    const MeshType* d_mesh;
+    interior_stencils_type d_interior_stencils;
+    boundary_locations_type d_boundary_locations;
+    boundary_geometry_type d_boundary_geometry;
+};
+
+/**
  * @brief Assemble the semi-implicit transport system (unsteady
  *        advection-diffusion) for a scalar field.
  *
@@ -865,6 +952,7 @@ transport_system(const VectorCellField<Pack>& old_values,
  * @param correction_field Optional lagged field for explicit correction terms.
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_diffusion Selects boundary faces with viscous diffusion.
+ * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If fields use different meshes, the time step
  *         is not positive, or diffusivity is negative.
  */
@@ -885,7 +973,8 @@ non_orthogonal_transport_system(
     const VectorCellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     BoundaryDiffusionProvider boundary_diffusion =
-        BoundaryDiffusionProvider{})
+        BoundaryDiffusionProvider{},
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -931,9 +1020,28 @@ non_orthogonal_transport_system(
             break;
     }
 
-    const auto gradient_stencils =
-        detail::least_squares_gradient_stencils(mesh);
-    const auto boundary_locations = detail::boundary_face_locations(mesh);
+    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::interior_stencils_type
+        local_gradient_stencils;
+    typename geometry_cache_type::boundary_locations_type
+        local_boundary_locations;
+    if (geometry_cache == nullptr)
+    {
+        local_gradient_stencils =
+            detail::least_squares_gradient_stencils(mesh);
+        local_boundary_locations =
+            detail::boundary_face_locations(mesh);
+    }
+    else
+    {
+        geometry_cache->require_mesh(mesh);
+    }
+    const auto& gradient_stencils = geometry_cache == nullptr
+        ? local_gradient_stencils
+        : geometry_cache->interior_stencils();
+    const auto& boundary_locations = geometry_cache == nullptr
+        ? local_boundary_locations
+        : geometry_cache->boundary_locations();
 
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
@@ -1125,7 +1233,7 @@ non_orthogonal_transport_system(
     {
         add_explicit_non_orthogonal_correction<Pack>(
             *correction_field, diffusivity, *rhs, explicit_weight,
-            boundary_diffusion);
+            boundary_diffusion, &gradient_stencils);
     }
 
     matrix->fillComplete();
@@ -1154,6 +1262,7 @@ non_orthogonal_transport_system(
  * @param implicit_sink Optional finite, non-negative cell-centered sink.
  * @param fixed_cell_value Optional finite values imposed as exact identity rows.
  * @param boundary_diffusivity Optional compatible boundary-face coefficients.
+ * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible or a
  *         validated time step, coefficient, sink, or fixed value is invalid.
  * @throws std::runtime_error For a Robin boundary condition, which is not yet
@@ -1181,7 +1290,8 @@ weighted_scalar_transport_system(
         typename Pack::local_ordinal_type)> implicit_sink = {},
     std::function<std::optional<typename Pack::scalar_type>(
         typename Pack::local_ordinal_type)> fixed_cell_value = {},
-    const BoundaryCache<Pack>* boundary_diffusivity = nullptr)
+    const BoundaryCache<Pack>* boundary_diffusivity = nullptr,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1251,11 +1361,26 @@ weighted_scalar_transport_system(
             break;
     }
 
-    const auto gradient_stencils =
-        detail::scalar_affine_gradient_stencils(
+    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::boundary_locations_type
+        local_boundary_locations;
+    std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>>
+        gradient_stencils;
+    if (geometry_cache == nullptr)
+    {
+        gradient_stencils = detail::scalar_affine_gradient_stencils(
             mesh, boundary_condition, boundary_value);
-    const auto boundary_locations =
-        detail::boundary_face_locations(mesh);
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+    }
+    else
+    {
+        geometry_cache->require_mesh(mesh);
+        gradient_stencils = geometry_cache->scalar_affine_stencils(
+            boundary_condition, boundary_value);
+    }
+    const auto& boundary_locations = geometry_cache == nullptr
+        ? local_boundary_locations
+        : geometry_cache->boundary_locations();
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
@@ -1526,7 +1651,8 @@ weighted_scalar_transport_system(
             boundary_value,
             *rhs,
             explicit_weight,
-            boundary_face_diffusivity);
+            boundary_face_diffusivity,
+            &gradient_stencils);
     }
     // An explicit correction is an RHS update, so restore constrained values
     // after it to keep fixed rows exactly equal to phi = phi_fixed.
@@ -1556,6 +1682,7 @@ weighted_scalar_transport_system(
  * @param correction_field Optional lagged temperature for explicit correction.
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_thermal_conductivity Optional compatible boundary-face values.
+ * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible or the
  *         time step is not positive.
  * @throws std::runtime_error For a Robin boundary condition, which is not yet
@@ -1579,7 +1706,8 @@ physical_temperature_transport_system(
     NonOrthogonalTreatment treatment,
     const CellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
-    const BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr)
+    const BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1635,11 +1763,26 @@ physical_temperature_transport_system(
             break;
     }
 
-    const auto gradient_stencils =
-        detail::scalar_affine_gradient_stencils(
+    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::boundary_locations_type
+        local_boundary_locations;
+    std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>>
+        gradient_stencils;
+    if (geometry_cache == nullptr)
+    {
+        gradient_stencils = detail::scalar_affine_gradient_stencils(
             mesh, boundary_condition, boundary_value);
-    const auto boundary_locations =
-        detail::boundary_face_locations(mesh);
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+    }
+    else
+    {
+        geometry_cache->require_mesh(mesh);
+        gradient_stencils = geometry_cache->scalar_affine_stencils(
+            boundary_condition, boundary_value);
+    }
+    const auto& boundary_locations = geometry_cache == nullptr
+        ? local_boundary_locations
+        : geometry_cache->boundary_locations();
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
@@ -1883,7 +2026,8 @@ physical_temperature_transport_system(
             boundary_value,
             *rhs,
             explicit_weight,
-            boundary_conductivity);
+            boundary_conductivity,
+            &gradient_stencils);
     }
 
     matrix->fillComplete();
@@ -1901,6 +2045,7 @@ physical_temperature_transport_system(
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_diffusion Selects boundary faces with viscous diffusion.
  * @param boundary_dynamic_viscosity Optional compatible boundary-face values.
+ * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible or the
  *         time step or reference density is not positive.
  */
@@ -1922,7 +2067,8 @@ physical_momentum_transport_system(
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     BoundaryDiffusionProvider boundary_diffusion =
         BoundaryDiffusionProvider{},
-    const BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr)
+    const BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1979,10 +2125,26 @@ physical_momentum_transport_system(
             break;
     }
 
-    const auto gradient_stencils =
-        detail::vector_affine_gradient_stencils(mesh, boundary_value);
-    const auto boundary_locations =
-        detail::boundary_face_locations(mesh);
+    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::boundary_locations_type
+        local_boundary_locations;
+    std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>
+        gradient_stencils;
+    if (geometry_cache == nullptr)
+    {
+        gradient_stencils = detail::vector_affine_gradient_stencils(
+            mesh, boundary_value);
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+    }
+    else
+    {
+        geometry_cache->require_mesh(mesh);
+        gradient_stencils = geometry_cache->vector_affine_stencils(
+            boundary_value);
+    }
+    const auto& boundary_locations = geometry_cache == nullptr
+        ? local_boundary_locations
+        : geometry_cache->boundary_locations();
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
@@ -2234,7 +2396,9 @@ physical_momentum_transport_system(
             *rhs,
             explicit_weight / reference_density,
             boundary_diffusion,
-            boundary_viscosity);
+            boundary_viscosity,
+            &gradient_stencils,
+            &boundary_locations);
     }
 
     add_explicit_deviatoric_transpose_gradient_stress<Pack>(
@@ -2244,7 +2408,9 @@ physical_momentum_transport_system(
         boundary_value,
         *rhs,
         boundary_diffusion,
-        boundary_viscosity);
+        boundary_viscosity,
+        &gradient_stencils,
+        &boundary_locations);
 
     matrix->fillComplete();
     return {matrix, rhs};

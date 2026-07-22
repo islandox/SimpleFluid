@@ -57,10 +57,11 @@ struct VelocityBoundaryCache
 /**
  * @brief Reusable scratch storage for Rhie-Chow face-flux reconstruction.
  *
- * The workspace owns only temporary pressure-gradient values. Every
- * invocation of pressure_weighted_face_fluxes overwrites the values needed by
- * that call; no pressure-derived result is reused. Boundary-face locations
- * depend only on the immutable mesh topology and are cached at construction.
+ * The workspace owns temporary pressure-gradient values. The standard
+ * pressure_weighted_face_fluxes overload reconstructs those values on every
+ * call, while the overload accepting a precomputed gradient reuses the
+ * caller-provided values. Boundary-face locations depend only on the immutable
+ * mesh topology and are cached at construction.
  *
  * A workspace is tied to one exact mesh instance. It is move-only to prevent
  * scratch storage from being shallow-copied, and is not safe for concurrent
@@ -663,6 +664,7 @@ void pressure_weighted_face_fluxes_impl(
     const VelocityBoundaryCache<Pack>& boundary_cache,
     const BoundaryConditionMap* pressure_boundary_conditions,
     PressureWeightedFaceFluxWorkspace<Pack>& workspace,
+    VectorCellField<Pack>* precomputed_pressure_gradient,
     FaceField<Pack>& fluxes)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -681,6 +683,13 @@ void pressure_weighted_face_fluxes_impl(
         throw std::invalid_argument(
             "pressure_weighted_face_fluxes received a workspace for "
             "another mesh.");
+    }
+    if (precomputed_pressure_gradient != nullptr
+        && &precomputed_pressure_gradient->mesh() != &velocity.mesh())
+    {
+        throw std::invalid_argument(
+            "pressure_weighted_face_fluxes received a pressure gradient "
+            "for another mesh.");
     }
     if (pressure_coefficient < scalar_type{})
     {
@@ -703,12 +712,15 @@ void pressure_weighted_face_fluxes_impl(
     }
 
     const auto& mesh = velocity.mesh();
-    auto& pressure_gradient = workspace.pressure_gradient();
-    if (pressure_boundary_conditions == nullptr)
+    auto& pressure_gradient = precomputed_pressure_gradient == nullptr
+      ? workspace.pressure_gradient()
+      : *precomputed_pressure_gradient;
+    if (precomputed_pressure_gradient == nullptr
+        && pressure_boundary_conditions == nullptr)
     {
         cell_gradient(pressure, pressure_gradient);
     }
-    else
+    else if (precomputed_pressure_gradient == nullptr)
     {
         scalar_cell_gradient(
             pressure,
@@ -836,7 +848,8 @@ void pressure_weighted_face_fluxes(
 {
     detail::pressure_weighted_face_fluxes_impl(
         velocity, pressure, pressure_coefficient,
-        boundary_cache, nullptr, workspace, fluxes);
+        boundary_cache, nullptr, workspace,
+        static_cast<VectorCellField<Pack>*>(nullptr), fluxes);
 }
 
 /**
@@ -889,7 +902,43 @@ void pressure_weighted_face_fluxes(
 {
     detail::pressure_weighted_face_fluxes_impl(
         velocity, pressure, pressure_coefficient,
-        boundary_cache, &pressure_boundary_conditions, workspace, fluxes);
+        boundary_cache, &pressure_boundary_conditions, workspace,
+        static_cast<VectorCellField<Pack>*>(nullptr), fluxes);
+}
+
+/**
+ * @brief Compute pressure-weighted face fluxes from a pressure gradient that
+ *        has already been reconstructed.
+ *
+ * This overload avoids repeating least-squares reconstruction when a caller
+ * needs the same pressure gradient for both a cell update and Rhie-Chow face
+ * fluxes. The overlap values of @p pressure_gradient are synchronized before
+ * use. Boundary locations continue to come from @p workspace.
+ *
+ * @param velocity Cell-centered velocity field.
+ * @param pressure Cell-centered pressure field.
+ * @param pressure_gradient Precomputed pressure gradient on the same mesh.
+ * @param pressure_coefficient Velocity-pressure coefficient.
+ * @param boundary_cache Pre-computed velocity-boundary cache.
+ * @param pressure_boundary_conditions Pressure boundary-condition map.
+ * @param[in,out] workspace Scratch storage tied to the field mesh.
+ * @param[out] fluxes Pre-allocated face-flux output.
+ */
+template<TpetraTypePack Pack>
+void pressure_weighted_face_fluxes(
+    const VectorCellField<Pack>& velocity,
+    const CellField<Pack>& pressure,
+    VectorCellField<Pack>& pressure_gradient,
+    typename Pack::scalar_type pressure_coefficient,
+    const VelocityBoundaryCache<Pack>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions,
+    PressureWeightedFaceFluxWorkspace<Pack>& workspace,
+    FaceField<Pack>& fluxes)
+{
+    detail::pressure_weighted_face_fluxes_impl(
+        velocity, pressure, pressure_coefficient,
+        boundary_cache, &pressure_boundary_conditions, workspace,
+        &pressure_gradient, fluxes);
 }
 
 /**

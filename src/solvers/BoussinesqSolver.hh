@@ -287,6 +287,9 @@ public:
     void write_solution_vtu(
         const std::string& filename,
         const SolutionOutputOptions& output_options) const;
+    void write_parallel_solution_vtu(
+        const std::string& filename,
+        const SolutionOutputOptions& output_options = {}) const;
 
 private:
     using base_type::begin_step;
@@ -328,6 +331,8 @@ private:
     TurbulenceModel<Pack>& stored_turbulence_model();
     const TurbulenceModel<Pack>& stored_turbulence_model() const;
     bool physical_transport_enabled() const noexcept;
+    VTUWriter solution_writer(
+        const SolutionOutputOptions& output_options) const;
     TemperatureSourceRegistry<Pack>& stored_temperature_sources();
     const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
     void refresh_physical_models();

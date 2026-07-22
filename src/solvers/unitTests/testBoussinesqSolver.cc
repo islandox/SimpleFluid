@@ -852,6 +852,120 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
     EXPECT_GT(checkerboard.dot(stabilized), 0.0);
 }
 
+/** @brief Verify coupled setup reuse is observable and numerically neutral. */
+TEST(BoussinesqSolverTest,
+     CoupledKrylovReusesCompatibleSetupAndMatchesForcedRebuild)
+{
+    struct RunResult
+    {
+        std::vector<MeshType::Vec3> velocity;
+        std::vector<double> pressure;
+        SimpleFluid::CoupledPressureVelocityCacheStatistics statistics;
+    };
+
+    auto run = [](SimpleFluid::CoupledRebuildPolicy policy)
+    {
+        auto mesh = make_box_mesh();
+        SimpleFluid::BoundaryConditionSet boundaries;
+        for (const auto* name :
+             {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+        {
+            boundaries.velocity[name] = {
+                SimpleFluid::BoundaryConditionType::NoSlip, {}};
+        }
+        const auto boundary_cache =
+            SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+                mesh, boundaries);
+
+        SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+        SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+        SimpleFluid::CellField<Pack> temperature(mesh, "temperature");
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            temperature.set_owned_value(
+                cell_lid, mesh->cell_centroid(cell_lid).x);
+        }
+        temperature.sync_ghosts();
+        SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
+
+        SimpleFluid::TimeStepperOptions time_options;
+        time_options.time_step = 1.0e-2;
+        time_options.kinematic_viscosity = 1.0e-2;
+        time_options.thermal_expansion = 1.0;
+        time_options.gravity_x = -1.0;
+        time_options.reference_temperature = 0.5;
+        SimpleFluid::LinearSolverOptions linear_options;
+        linear_options.tolerance = 1.0e-12;
+        linear_options.max_iterations = 200;
+
+        SimpleFluid::BoussinesqMomentumEquation<Pack> momentum(mesh);
+        SimpleFluid::CoupledPressureVelocitySolver<Pack> solver(mesh);
+        solver.set_rebuild_policy(policy);
+        for (size_t step = 0; step < 2; ++step)
+        {
+            SimpleFluid::FVM::face_fluxes(
+                velocity, boundary_cache, face_fluxes);
+            const auto system = solver.assemble(
+                momentum,
+                velocity,
+                pressure,
+                temperature,
+                face_fluxes,
+                boundary_cache,
+                boundaries,
+                time_options);
+            const auto result = solver.solve(
+                system, velocity, pressure, linear_options);
+            EXPECT_TRUE(result.converged);
+        }
+
+        RunResult result;
+        result.statistics = solver.cache_statistics();
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            result.velocity.push_back(velocity.value(cell_lid));
+            result.pressure.push_back(pressure.value(cell_lid));
+        }
+        return result;
+    };
+
+    const auto cached = run(
+        SimpleFluid::CoupledRebuildPolicy::OnOperatorGraphChange);
+    const auto rebuilt = run(SimpleFluid::CoupledRebuildPolicy::Always);
+    ASSERT_EQ(cached.velocity.size(), rebuilt.velocity.size());
+    ASSERT_EQ(cached.pressure.size(), rebuilt.pressure.size());
+    for (size_t cell = 0; cell < cached.velocity.size(); ++cell)
+    {
+        EXPECT_NEAR(cached.velocity[cell].x, rebuilt.velocity[cell].x, 1.0e-12);
+        EXPECT_NEAR(cached.velocity[cell].y, rebuilt.velocity[cell].y, 1.0e-12);
+        EXPECT_NEAR(cached.velocity[cell].z, rebuilt.velocity[cell].z, 1.0e-12);
+        EXPECT_NEAR(cached.pressure[cell], rebuilt.pressure[cell], 1.0e-12);
+    }
+
+    EXPECT_EQ(cached.statistics.coupled_map_builds, 1U);
+    EXPECT_EQ(cached.statistics.static_geometry_builds, 1U);
+    EXPECT_EQ(cached.statistics.static_geometry_reuses, 1U);
+    EXPECT_EQ(cached.statistics.matrix_graph_reuses, 1U);
+    EXPECT_EQ(cached.statistics.schur_product_reuses, 1U);
+    EXPECT_EQ(cached.statistics.preconditioner_builds, 1U);
+    EXPECT_EQ(cached.statistics.preconditioner_numeric_reuses, 1U);
+    EXPECT_EQ(cached.statistics.belos_solver_builds, 1U);
+    EXPECT_EQ(cached.statistics.belos_solver_reuses, 1U);
+    EXPECT_EQ(cached.statistics.preconditioner_scratch_allocations, 1U);
+
+    EXPECT_EQ(rebuilt.statistics.static_geometry_reuses, 0U);
+    EXPECT_EQ(rebuilt.statistics.matrix_graph_reuses, 0U);
+    EXPECT_EQ(rebuilt.statistics.schur_product_reuses, 0U);
+    EXPECT_EQ(rebuilt.statistics.preconditioner_numeric_reuses, 0U);
+    EXPECT_EQ(rebuilt.statistics.belos_solver_reuses, 0U);
+    EXPECT_EQ(rebuilt.statistics.preconditioner_builds, 2U);
+    EXPECT_EQ(rebuilt.statistics.belos_solver_builds, 2U);
+}
+
 /** @brief Verify coupled assembly honors a dynamic-viscosity override field. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovUsesDynamicViscosityOverride)

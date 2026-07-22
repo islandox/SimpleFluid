@@ -153,13 +153,16 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 
 ### I/O
 
-- VTU (VTK Unstructured Grid) output via `VTUWriter` — compatible with ParaView
+- Cached-topology VTU output via `VTUWriter`, with appended binary arrays and
+  rank-local pieces plus a `.pvtu` index for ParaView
 - STK Exodus II `HEX_8` and `WEDGE_6` mesh input via `STKMesh`
 
 ### Parallelism
 
 - MPI distributed-memory parallelism via Trilinos/Tpetra
-- Kokkos on-node parallelism (CPU Serial, OpenMP, CUDA, HIP, SYCL)
+- Kokkos device-resident mesh geometry and device-local coupled-preconditioner
+  packing (CPU Serial/OpenMP and accelerator backends); general FVM matrix
+  assembly remains host-side
 - Zoltan2 graph/hierarchical mesh partitioning
 
 ## Verification
@@ -257,6 +260,20 @@ The benchmark writes one CSV row per measured repetition. Rows include solver
 configuration, mesh and MPI sizes, non-orthogonality angles, nonlinear and
 Krylov iterations, residuals, setup/solve/total wall time, process memory,
 compiler/build metadata, and the Git revision.
+
+The canonical cases are `diffusion_nonorthogonal` and `lid_driven_cavity`.
+The legacy `pressure_velocity` spelling remains accepted as an input alias for
+`lid_driven_cavity`; emitted CSV rows always use the canonical name.
+The cavity workload advances one startup step at nominal Re = 100 in a unit
+box, with a unit-speed `ymax` lid and slip front/back boundaries, so it is an
+extruded quasi-two-dimensional performance case rather than a steady-profile
+validation.
+
+The coupled Krylov implementation reuses compatible matrix graphs, static
+reconstruction geometry, Schur-product storage, numeric preconditioner state,
+Belos state, and preconditioner scratch vectors. Its default rebuild policy
+invalidates this state when an operator graph changes; an explicit always-
+rebuild policy remains available for comparison and diagnosis.
 
 Run the larger profiling preset with frame pointers and debug symbols:
 

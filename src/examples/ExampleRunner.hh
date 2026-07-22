@@ -30,26 +30,16 @@ namespace detail
  *
  * Serial output preserves the caller-provided filename. Distributed output
  * inserts a rank suffix before the conventional `.vtu` extension so that no
- * two ranks truncate or overwrite the same file.
+ * two ranks truncate or overwrite the same file; the solver also emits a
+ * `.pvtu` index referencing these pieces.
  */
 inline std::string rank_local_vtu_filename(
     const std::string& filename,
     int rank,
     int communicator_size)
 {
-    if (communicator_size <= 1)
-    {
-        return filename;
-    }
-
-    const auto suffix = "_rank" + std::to_string(rank);
-    constexpr std::string_view extension = ".vtu";
-    if (filename.ends_with(extension))
-    {
-        return filename.substr(0, filename.size() - extension.size())
-             + suffix + ".vtu";
-    }
-    return filename + suffix;
+    return VTUWriter::rank_piece_filename(
+        filename, rank, communicator_size);
 }
 
 } // namespace detail
@@ -89,16 +79,14 @@ void run_boussinesq_example(
     solver.run();
 
     const auto communicator = mesh->owned_cell_map()->getComm();
-    const auto output_filename = detail::rank_local_vtu_filename(
-        vtu_filename, communicator->getRank(), communicator->getSize());
-    solver.write_solution_vtu(output_filename, output_options);
+    solver.write_parallel_solution_vtu(vtu_filename, output_options);
 
     if (communicator->getRank() == 0)
     {
         std::cout << "Wrote "
                   << (communicator->getSize() == 1
-                    ? output_filename
-                    : vtu_filename + " as rank-local pieces")
+                    ? vtu_filename
+                    : VTUWriter::parallel_index_filename(vtu_filename))
                   << " at t=" << solver.time() << "\n";
     }
 }
@@ -144,16 +132,14 @@ void run_boussinesq_example(
     solver.run();
 
     const auto communicator = mesh->owned_cell_map()->getComm();
-    const auto output_filename = detail::rank_local_vtu_filename(
-        vtu_filename, communicator->getRank(), communicator->getSize());
-    solver.write_solution_vtu(output_filename, output_options);
+    solver.write_parallel_solution_vtu(vtu_filename, output_options);
 
     if (communicator->getRank() == 0)
     {
         std::cout << "Wrote "
                   << (communicator->getSize() == 1
-                    ? output_filename
-                    : vtu_filename + " as rank-local pieces")
+                    ? vtu_filename
+                    : VTUWriter::parallel_index_filename(vtu_filename))
                   << " at t=" << solver.time() << "\n";
     }
 }

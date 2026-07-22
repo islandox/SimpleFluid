@@ -1,5 +1,5 @@
 benchmark_case,preset,mesh_nx,mesh_ny,mesh_nz,mpi_ranks,shear,treatment,coupling,preconditioner,max_nonlinear_iterations,max_linear_solves,max_krylov_iterations,max_total_seconds
-pressure_velocity,debug-small,8,8,1,2,0.0,explicit,PISO,MueLu,1,8,45,10
-pressure_velocity,debug-small,8,8,1,2,0.0,implicit,PISO,none,1,4,45,10
-pressure_velocity,debug-small,8,8,1,2,0.0,hybrid,PISO,none,1,8,45,10
-pressure_velocity,debug-small,8,8,1,2,0.0,implicit,coupledKrylov,Schur(Ifpack2+MueLu),1,2,32,10
+lid_driven_cavity,debug-small,8,8,1,2,0.0,explicit,PISO,MueLu,1,8,45,10
+lid_driven_cavity,debug-small,8,8,1,2,0.0,implicit,PISO,none,1,4,45,10
+lid_driven_cavity,debug-small,8,8,1,2,0.0,hybrid,PISO,none,1,8,45,10
+lid_driven_cavity,debug-small,8,8,1,2,0.0,implicit,coupledKrylov,Schur(Ifpack2+MueLu),1,2,32,10

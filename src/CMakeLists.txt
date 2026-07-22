@@ -120,9 +120,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cc")
     if(SIMPLEFLUID_MAIN_SIZE GREATER 0)
         add_executable(SimpleFluid_app main.cc)
         target_link_libraries(SimpleFluid_app PRIVATE SimpleFluid)
-        target_precompile_headers(SimpleFluid_app PRIVATE
-    "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"
-)
+        target_precompile_headers(SimpleFluid_app REUSE_FROM SimpleFluidPch)
     endif()
 endif()
 
@@ -132,7 +130,7 @@ function(simplefluid_lib_reuse_precompiled_header target_name)
 endfunction()
 
 function(simplefluid_exe_reuse_precompiled_header target_name)
-    target_precompile_headers(${target_name} REUSE_FROM SimpleFluid_app)
+    target_precompile_headers(${target_name} REUSE_FROM SimpleFluidPch)
 endfunction()
 
 add_subdirectory(dataclass/unitTests)

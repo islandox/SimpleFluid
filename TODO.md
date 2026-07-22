@@ -134,8 +134,8 @@ Keep this phase independent of the new physics so solver performance changes can
 - [x] Measure iteration count versus mesh non-orthogonality.
 - [x] Compare diffusion/momentum treatments:
   - [x] explicit non-orthogonal correction + AMG
-  - [x] implicit non-orthogonal matrix + GMRES
-  - [x] hybrid non-orthogonal treatment
+  - [x] implicit non-orthogonal matrix + AMG-preconditioned GMRES
+  - [x] hybrid non-orthogonal treatment + AMG-preconditioned GMRES
   - [x] coupled Krylov + Schur preconditioner
 - [x] Add MPI scaling benchmarks.
 - [x] Ensure benchmark output is machine-readable, for example CSV or JSON.
@@ -143,6 +143,21 @@ Keep this phase independent of the new physics so solver performance changes can
       size, non-orthogonality, treatment, coupling mode, and preconditioner.
 - [x] Check deterministic iteration ceilings and a deliberately generous
       wall-time ceiling in CTest after warmup and repeated measured runs.
+- [x] Reuse compatible coupled-system graphs, static pressure-gradient
+      geometry, Schur-product storage, Ifpack/MueLu numeric state, Belos state,
+      and preconditioner scratch vectors under an explicit rebuild policy.
+- [x] Move coupled preconditioner packing, gradient updates, and unpacking to
+      Kokkos device-local kernels.
+- [x] Resolve ghost-cell ownership through a distributed Tpetra directory
+      rather than replicating every owned mesh GID on every rank.
+- [x] Cache mesh-only least-squares transport geometry and boundary-face
+      locations while continuing to materialize dynamic boundary data.
+- [x] Batch dynamic-source collective validation and skip disabled/static
+      source and material imports.
+- [x] Cache VTU topology and support appended binary rank pieces with a PVTU
+      index.
+- [ ] Migrate the remaining host-side finite-volume row assembly loops to
+      backend-portable Kokkos kernels after defining a device assembly API.
 
 The timing ceiling is a smoke-regression guard, not a claim of comparable
 performance across different machines. Release scaling and profiling remain
@@ -157,8 +172,10 @@ manual measurement workflows.
 - [x] Debug CTest fails when a matching stored baseline exceeds its configured
       iteration or wall-time ceiling.
 
-**Status:** measurement harness and a deterministic Debug smoke-regression
-gate are implemented; cross-machine performance qualification is not.
+**Status:** measurement harness, a deterministic Debug smoke-regression gate,
+and the highest-frequency setup/allocation/metadata bottlenecks are addressed.
+Cross-machine qualification and general device-side matrix assembly remain
+open.
 
 ---
 

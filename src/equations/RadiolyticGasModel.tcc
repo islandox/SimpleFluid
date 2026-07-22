@@ -56,6 +56,7 @@ RadiolyticGasModel<Pack>::RadiolyticGasModel(
     SP<const mesh_type> mesh,
     RadiolyticGasOptions options)
     : d_mesh(require_mesh(std::move(mesh))),
+      d_transport_geometry_cache(*d_mesh),
       d_options(std::move(options)),
       d_alpha_g(d_mesh, "alpha_g"),
       d_alpha_l(d_mesh, "alpha_l"),
@@ -757,7 +758,12 @@ void RadiolyticGasModel<Pack>::transport_scalar(
         boundary_value,
         source,
         FVM::NonOrthogonalTreatment::Hybrid,
-        &old_values);
+        &old_values,
+        Teuchos::null,
+        {},
+        {},
+        nullptr,
+        &d_transport_geometry_cache);
 
     field_type solution(d_mesh, "radiolytic_transport_solution");
     const auto solve_statistics =

@@ -13,6 +13,7 @@
 #include "equations/BoussinesqModel.hh"
 #include "equations/RadiolyticGasProperties.hh"
 #include "fields/FaceField.hh"
+#include "FVM/TransportSystem.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <map>
@@ -357,6 +358,7 @@ private:
         const CellKineticsState& state);
 
     SP<const mesh_type> d_mesh;
+    FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     RadiolyticGasOptions d_options;
 
     field_type d_alpha_g;

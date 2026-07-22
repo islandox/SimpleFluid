@@ -264,19 +264,6 @@ public:
           d_source(&registry.add_reserved(
               std::string(field_name), scalar_type{}))
     {
-        try
-        {
-            d_source->set_updater(
-                [this](const context_type& context, field_type& field)
-                {
-                    apply_time_multiplier(context, field);
-                });
-        }
-        catch (...)
-        {
-            d_registry->remove_reserved(std::string(field_name));
-            throw;
-        }
     }
 
     ~FissionPowerSource()
@@ -531,6 +518,11 @@ public:
             throw std::invalid_argument(
                 "Fission power time multiplier must be callable.");
         }
+        d_source->set_updater(
+            [this](const context_type& context, field_type& field)
+            {
+                apply_time_multiplier(context, field);
+            });
         d_time_multiplier = std::move(multiplier);
     }
 
@@ -539,7 +531,12 @@ public:
      */
     void clear_time_multiplier() noexcept
     {
+        if (!d_time_multiplier)
+        {
+            return;
+        }
         d_time_multiplier = {};
+        d_source->clear_updater_after_next_update();
     }
 
     /**

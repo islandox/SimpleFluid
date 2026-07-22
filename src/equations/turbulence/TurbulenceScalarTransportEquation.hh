@@ -114,6 +114,7 @@ public:
 
 private:
     SP<const mesh_type> d_mesh;
+    FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     BoundaryConditionMap d_boundary_conditions;
     field_type d_unit_weight;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;

@@ -11,6 +11,13 @@
 
 #include "BoussinesqSolver.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
+#include <array>
+#include <exception>
+#include <limits>
+#include <optional>
+
 namespace SimpleFluid
 {
 
@@ -1819,9 +1826,8 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
  * @param output_options Field-selection controls for optional model data.
  */
 template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::write_solution_vtu(
-    const std::string& filename,
-    const SolutionOutputOptions& output_options) const
+auto BoussinesqSolver<Pack>::solution_writer(
+    const SolutionOutputOptions& output_options) const -> VTUWriter
 {
     auto writer = fluid_solution_writer();
     writer.add_scalar_cell_data(
@@ -1940,7 +1946,261 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
                 name, collect_scalar_field(*field));
         }
     }
-    writer.write(filename);
+    return writer;
+}
+
+/** @brief Write selected solution fields to one VTU piece. */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::write_solution_vtu(
+    const std::string& filename,
+    const SolutionOutputOptions& output_options) const
+{
+    solution_writer(output_options).write(
+        filename, VTUWriter::Encoding::AppendedBinary);
+}
+
+/**
+ * @brief Write collision-free rank pieces and a rank-zero PVTU index.
+ *
+ * Every rank writes only its owned cells. Collective status reductions ensure
+ * rank zero publishes the index only after every piece is complete and make
+ * piece or index failures rank coherent.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::write_parallel_solution_vtu(
+    const std::string& filename,
+    const SolutionOutputOptions& output_options) const
+{
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    const auto rank_count = communicator->getSize();
+    if (rank_count > 1)
+    {
+        const auto option_mask =
+            static_cast<int>(output_options.include_sources)
+          | (static_cast<int>(
+                 output_options.include_material_properties) << 1)
+          | (static_cast<int>(
+                 output_options.include_radiolytic_gas_fields) << 2)
+          | (static_cast<int>(
+                 output_options.include_precursor_fields) << 3)
+          | (static_cast<int>(
+                 output_options.include_turbulence_fields) << 4);
+        std::array<long long, 2> root_arguments{
+            rank == 0
+                ? static_cast<long long>(filename.size())
+                : 0LL,
+            rank == 0 ? static_cast<long long>(option_mask) : 0LL};
+        Teuchos::broadcast(
+            *communicator,
+            0,
+            static_cast<int>(root_arguments.size()),
+            root_arguments.data());
+        if (root_arguments[0] < 0
+            || root_arguments[0]
+               > std::numeric_limits<int>::max())
+        {
+            throw std::invalid_argument(
+                "Parallel VTU filename is too long for MPI broadcast.");
+        }
+
+        std::string root_filename(
+            static_cast<size_t>(root_arguments[0]), '\0');
+        if (rank == 0)
+        {
+            root_filename = filename;
+        }
+        if (!root_filename.empty())
+        {
+            Teuchos::broadcast(
+                *communicator,
+                0,
+                static_cast<int>(root_filename.size()),
+                root_filename.data());
+        }
+
+        const int local_arguments_mismatch =
+            (filename != root_filename
+             || option_mask != static_cast<int>(root_arguments[1]))
+                ? 1
+                : 0;
+        int any_arguments_mismatch = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_arguments_mismatch,
+            &any_arguments_mismatch);
+        if (any_arguments_mismatch != 0)
+        {
+            throw std::invalid_argument(
+                "Parallel VTU filename and output options must agree on "
+                "every rank.");
+        }
+    }
+    const auto piece_filename = VTUWriter::rank_piece_filename(
+        filename, rank, rank_count);
+    if (rank_count <= 1)
+    {
+        solution_writer(output_options).write(
+            piece_filename, VTUWriter::Encoding::AppendedBinary);
+        return;
+    }
+
+    std::optional<VTUWriter> writer;
+    std::string local_schema_key;
+    std::exception_ptr preparation_error;
+    try
+    {
+        writer.emplace(solution_writer(output_options));
+        local_schema_key = writer->cell_data_schema_key();
+    }
+    catch (...)
+    {
+        preparation_error = std::current_exception();
+    }
+    const int local_preparation_failed = preparation_error ? 1 : 0;
+    int any_preparation_failed = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_preparation_failed,
+        &any_preparation_failed);
+    if (any_preparation_failed != 0)
+    {
+        if (preparation_error)
+        {
+            std::rethrow_exception(preparation_error);
+        }
+        throw std::runtime_error(
+            "VTU output preparation failed on another MPI rank.");
+    }
+
+    const int local_schema_size_is_valid =
+        local_schema_key.size()
+                <= static_cast<size_t>(
+                    std::numeric_limits<int>::max())
+            ? 1
+            : 0;
+    int global_schema_size_is_valid = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MIN,
+        1,
+        &local_schema_size_is_valid,
+        &global_schema_size_is_valid);
+    if (global_schema_size_is_valid == 0)
+    {
+        throw std::invalid_argument(
+            "Parallel VTU CellData schema is too large for MPI "
+            "broadcast.");
+    }
+
+    int root_schema_size = rank == 0
+        ? static_cast<int>(local_schema_key.size())
+        : 0;
+    Teuchos::broadcast(
+        *communicator, 0, 1, &root_schema_size);
+    std::string root_schema_key(
+        static_cast<size_t>(root_schema_size), '\0');
+    if (rank == 0)
+    {
+        root_schema_key = local_schema_key;
+    }
+    if (!root_schema_key.empty())
+    {
+        Teuchos::broadcast(
+            *communicator,
+            0,
+            root_schema_size,
+            root_schema_key.data());
+    }
+    const int local_schema_mismatch =
+        local_schema_key == root_schema_key ? 0 : 1;
+    int any_schema_mismatch = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_schema_mismatch,
+        &any_schema_mismatch);
+    if (any_schema_mismatch != 0)
+    {
+        throw std::invalid_argument(
+            "Parallel VTU CellData names, types, and component counts "
+            "must agree on every rank.");
+    }
+
+    std::exception_ptr piece_error;
+    try
+    {
+        writer->write(
+            piece_filename, VTUWriter::Encoding::AppendedBinary);
+    }
+    catch (...)
+    {
+        piece_error = std::current_exception();
+    }
+    const int local_piece_failed = piece_error ? 1 : 0;
+    int any_piece_failed = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_piece_failed,
+        &any_piece_failed);
+    if (any_piece_failed != 0)
+    {
+        if (piece_error)
+        {
+            std::rethrow_exception(piece_error);
+        }
+        throw std::runtime_error(
+            "A VTU piece failed to write on another MPI rank.");
+    }
+
+    std::exception_ptr index_error;
+    if (rank == 0)
+    {
+        try
+        {
+            std::vector<std::string> piece_filenames;
+            piece_filenames.reserve(static_cast<size_t>(rank_count));
+            for (int piece_rank = 0;
+                 piece_rank < rank_count;
+                 ++piece_rank)
+            {
+                piece_filenames.push_back(
+                    VTUWriter::rank_piece_filename(
+                        filename, piece_rank, rank_count));
+            }
+            writer->write_parallel_index(
+                VTUWriter::parallel_index_filename(filename),
+                piece_filenames);
+        }
+        catch (...)
+        {
+            index_error = std::current_exception();
+        }
+    }
+    int local_index_failed = index_error ? 1 : 0;
+    int any_index_failed = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_index_failed,
+        &any_index_failed);
+    if (any_index_failed != 0)
+    {
+        if (index_error)
+        {
+            std::rethrow_exception(index_error);
+        }
+        throw std::runtime_error(
+            "The PVTU index failed to write on another MPI rank.");
+    }
 }
 
 } // namespace SimpleFluid
