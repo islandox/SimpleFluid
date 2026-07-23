@@ -966,6 +966,71 @@ TEST(BoussinesqSolverTest,
     EXPECT_EQ(rebuilt.statistics.belos_solver_builds, 2U);
 }
 
+/**
+ * @brief A dormant Belos owner must not hide an external cached-matrix owner.
+ */
+TEST(BoussinesqSolverTest,
+     CoupledKrylovDoesNotMutateRetainedUnsolvedGraphChange)
+{
+    auto mesh = make_box_mesh();
+    SimpleFluid::BoundaryConditionSet boundaries;
+    for (const auto* name :
+         {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundaries);
+
+    SimpleFluid::VectorCellField<Pack> velocity(mesh, "velocity");
+    SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
+    SimpleFluid::CellField<Pack> temperature(
+        mesh, 0.5, "temperature");
+    SimpleFluid::FaceField<Pack> face_fluxes(
+        mesh, 0.0, "face_fluxes");
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.kinematic_viscosity = 1.0e-2;
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-12;
+    linear_options.max_iterations = 200;
+
+    SimpleFluid::BoussinesqMomentumEquation<Pack> momentum(mesh);
+    SimpleFluid::CoupledPressureVelocitySolver<Pack> solver(mesh);
+    const auto initial = solver.assemble(
+        momentum, velocity, pressure, temperature, face_fluxes,
+        boundary_cache, boundaries, time_options);
+    ASSERT_TRUE(
+        solver.solve(
+            initial, velocity, pressure, linear_options).converged);
+
+    auto changed_boundaries = boundaries;
+    changed_boundaries.pressure["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    Teuchos::RCP<Pack::matrix_type> retained_changed_matrix;
+    {
+        const auto changed = solver.assemble(
+            momentum, velocity, pressure, temperature, face_fluxes,
+            boundary_cache, changed_boundaries, time_options);
+        retained_changed_matrix = changed.matrix;
+    }
+    const auto reuses_before =
+        solver.cache_statistics().matrix_graph_reuses;
+
+    const auto next = solver.assemble(
+        momentum, velocity, pressure, temperature, face_fluxes,
+        boundary_cache, changed_boundaries, time_options);
+
+    EXPECT_NE(
+        next.matrix.getRawPtr(),
+        retained_changed_matrix.getRawPtr());
+    EXPECT_EQ(
+        solver.cache_statistics().matrix_graph_reuses,
+        reuses_before);
+}
+
 /** @brief Verify coupled assembly honors a dynamic-viscosity override field. */
 TEST(BoussinesqSolverTest,
      CoupledKrylovUsesDynamicViscosityOverride)

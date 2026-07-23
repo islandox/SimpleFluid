@@ -8,3 +8,18 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_exe_reuse_precompiled_header(${TEST_NAME})
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()
+
+if(MPIEXEC_EXECUTABLE
+   AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
+        OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
+  add_test(
+    NAME NonOrthogonalPartitionFaces_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testFvmOperators>"
+            "--gtest_filter=FvmOperatorsTest.ImplicitNonOrthogonalMatrixMatchesFullResidual:FvmOperatorsTest.ImplicitNonOrthogonalRejectsInconsistentPartitionCorrectionInputs:FvmOperatorsTest.TransportAssemblersRejectInconsistentPartitionGradientInputs:FvmOperatorsTest.HybridNonOrthogonalSolveSupportsPartitionFaces:FvmOperatorsTest.VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph:FvmOperatorsTest.ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients:FvmOperatorsTest.PhysicalTemperatureNonOrthogonalTreatmentsMatchExplicitResidual")
+  set_tests_properties(NonOrthogonalPartitionFaces_2procs PROPERTIES
+    LABELS "mpi;non_orthogonal"
+    PROCESSORS 2
+    TIMEOUT 120)
+endif()

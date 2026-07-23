@@ -824,7 +824,8 @@ SimpleFluid::Benchmark::Record run_diffusion(
         solve_system(
             SimpleFluid::FVM::
                 fully_implicit_non_orthogonal_diffusion_system<Pack>(
-                    *mesh, diffusivity, boundary_condition, source));
+                    *mesh, diffusivity, boundary_condition, source,
+                    &solution));
     }
     else
     {

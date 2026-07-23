@@ -88,7 +88,7 @@ if(MPIEXEC_EXECUTABLE
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
             "$<TARGET_FILE:testTurbulentBoussinesqSolver>"
-            "--gtest_filter=TurbulentBoussinesqSolverTest.AdvancesTurbulenceThroughSegregatedAndCoupledPressureVelocitySolves")
+            "--gtest_filter=TurbulentBoussinesqSolverTest.AdvancesTurbulenceThroughSegregatedAndCoupledPressureVelocitySolves:TurbulentBoussinesqSolverTest.PassesDirectBuoyancyContextThroughSegregatedAndCoupledSolvers")
   set_tests_properties(TurbulentBoussinesq_2procs PROPERTIES
     LABELS "mpi;turbulence;pressure_velocity"
     PROCESSORS 2

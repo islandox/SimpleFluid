@@ -1646,6 +1646,17 @@ void BoussinesqSolver<Pack>::step()
     const auto time_step = d_problem.time_options().time_step;
     if (auto* turbulence = find_turbulence_model())
     {
+        const auto gravity =
+            d_problem.time_options().gravity_vector();
+        const TurbulenceBuoyancyContext<Pack> buoyancy_context{
+            &temperature(),
+            &d_problem.boundary_conditions().temperature,
+            {static_cast<scalar_type>(gravity.x),
+             static_cast<scalar_type>(gravity.y),
+             static_cast<scalar_type>(gravity.z)},
+            static_cast<scalar_type>(
+                d_problem.time_options().thermal_expansion),
+            d_model_options.density_feedback_enabled};
         const auto turbulence_statistics = turbulence->advance(
             velocity(),
             projected_face_fluxes(),
@@ -1654,7 +1665,8 @@ void BoussinesqSolver<Pack>::step()
             stored_material_properties(),
             d_model_options.reference_density,
             d_problem.time_options().non_orthogonal_treatment,
-            d_problem.linear_options());
+            d_problem.linear_options(),
+            &buoyancy_context);
         d_last_step_statistics.add(turbulence_statistics);
     }
     const auto advanced_radiolysis =

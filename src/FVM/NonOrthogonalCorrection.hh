@@ -18,7 +18,10 @@
 #include "FVM/OperatorDetails.hh"
 #include "solvers/BelosLinearSolver.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <cmath>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
 
@@ -989,8 +992,16 @@ explicit_non_orthogonal_diffusion_system(
  * @param non_orthogonal_implicit_weight Fraction of the tangential term to
  *        place in the matrix. Use 1.0 for a fully implicit operator and
  *        0.5 for the built-in hybrid treatment.
- * @throws std::invalid_argument if diffusivity is negative or the implicit
- *         weight is outside `[0, 1]`.
+ * @param partition_correction_field Lagged field used to reconstruct the
+ *        remote half of a partition-face gradient. The owned half remains in
+ *        the matrix. This field is required when a nonzero implicit weight is
+ *        assembled on a distributed partition face because the remote
+ *        cell's extended least-squares stencil is not locally addressable.
+ * @throws std::invalid_argument if diffusivity is not finite and
+ *         non-negative, the implicit weight is not finite or outside
+ *         `[0, 1]`, ranks disagree about whether an implicit correction or
+ *         correction field is present, the correction field uses another
+ *         mesh, or a distributed partition face needs a missing field.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack>
@@ -999,27 +1010,116 @@ implicit_non_orthogonal_diffusion_system(
     typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition,
     SourceProvider right_hand_source,
-    typename Pack::scalar_type non_orthogonal_implicit_weight = 1.0)
+    typename Pack::scalar_type non_orthogonal_implicit_weight = 1.0,
+    const CellField<Pack>* partition_correction_field = nullptr)
 {
     using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    if (diffusivity < scalar_type{0})
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    const int local_maximum_state[] = {
+        !std::isfinite(diffusivity) || diffusivity < scalar_type{0},
+        !std::isfinite(non_orthogonal_implicit_weight)
+            || non_orthogonal_implicit_weight < scalar_type{0}
+            || non_orthogonal_implicit_weight > scalar_type{1},
+        non_orthogonal_implicit_weight > scalar_type{} ? 1 : 0,
+        partition_correction_field == nullptr
+            ? 0
+            : (&partition_correction_field->mesh() == &mesh ? 1 : 2)};
+    int global_maximum_state[4] = {};
+    Teuchos::reduceAll(
+        *communicator, Teuchos::REDUCE_MAX, 4,
+        local_maximum_state, global_maximum_state);
+
+    const int local_minimum_state[] = {
+        local_maximum_state[2], local_maximum_state[3]};
+    int global_minimum_state[2] = {};
+    Teuchos::reduceAll(
+        *communicator, Teuchos::REDUCE_MIN, 2,
+        local_minimum_state, global_minimum_state);
+
+    if (global_maximum_state[0] != 0)
     {
         throw std::invalid_argument(
-            "implicit_non_orthogonal_diffusion_system requires non-negative diffusivity.");
+            "implicit_non_orthogonal_diffusion_system requires finite "
+            "non-negative diffusivity.");
     }
-    if (non_orthogonal_implicit_weight < scalar_type{0}
-        || non_orthogonal_implicit_weight > scalar_type{1})
+    if (global_maximum_state[1] != 0)
     {
         throw std::invalid_argument(
-            "non-orthogonal implicit weight must be in [0, 1].");
+            "non-orthogonal implicit weight must be finite and in [0, 1].");
+    }
+    if (global_minimum_state[0] != global_maximum_state[2])
+    {
+        throw std::invalid_argument(
+            "Ranks must agree whether implicit non-orthogonal correction "
+            "is active.");
+    }
+    if (global_minimum_state[1] != global_maximum_state[3])
+    {
+        throw std::invalid_argument(
+            "Ranks must supply a consistent partition correction field.");
+    }
+    if (global_maximum_state[3] == 2)
+    {
+        throw std::invalid_argument(
+            "implicit_non_orthogonal_diffusion_system requires its "
+            "partition correction field on the target mesh.");
+    }
+    if (non_orthogonal_implicit_weight > scalar_type{}
+        && partition_correction_field == nullptr)
+    {
+        int local_partition_face = 0;
+        for (size_t owned = 0;
+             owned < mesh.num_owned_cells()
+             && local_partition_face == 0;
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            for (const auto face_lid : mesh.faces(cell_lid))
+            {
+                if (!mesh.is_interior_face(face_lid))
+                {
+                    continue;
+                }
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                if (!mesh.is_owned_cell(other))
+                {
+                    local_partition_face = 1;
+                    break;
+                }
+            }
+        }
+        int global_partition_face = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX, 1,
+            &local_partition_face, &global_partition_face);
+        if (global_partition_face != 0)
+        {
+            throw std::invalid_argument(
+                "Distributed implicit non-orthogonal diffusion requires "
+                "a synchronized partition correction field.");
+        }
     }
 
     const auto gradient_stencils =
         detail::least_squares_gradient_stencils(mesh);
     const auto boundary_locations = detail::boundary_face_locations(mesh);
+    std::unique_ptr<VectorCellField<Pack>> partition_gradients;
+    if (non_orthogonal_implicit_weight > scalar_type{}
+        && partition_correction_field != nullptr)
+    {
+        partition_gradients = std::make_unique<VectorCellField<Pack>>(
+            partition_correction_field->mesh_ptr(),
+            "partition_diffusion_non_orthogonal_gradient");
+        cell_gradient(*partition_correction_field, *partition_gradients);
+        partition_gradients->sync_ghosts();
+    }
 
     auto matrix = Teuchos::rcp(
         new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 32));
@@ -1099,7 +1199,19 @@ implicit_non_orthogonal_diffusion_system(
                 else
                 {
                     add_non_orthogonal_stencil(
-                        cell_lid, scalar_type{1}, tangential_area);
+                        cell_lid, scalar_type{0.5}, tangential_area);
+                    if (partition_gradients == nullptr)
+                    {
+                        throw std::logic_error(
+                            "Partition-face correction validation lost its "
+                            "synchronized gradient field.");
+                    }
+                    rhs_value +=
+                        non_orthogonal_implicit_weight
+                      * diffusivity
+                      * scalar_type{0.5}
+                      * partition_gradients->local_value(other).dot(
+                            tangential_area);
                 }
                 continue;
             }
@@ -1174,6 +1286,9 @@ implicit_non_orthogonal_diffusion_system(
 
 /**
  * @brief Assemble a fully implicit scalar non-orthogonal diffusion system.
+ *
+ * On distributed meshes, @p partition_correction_field supplies the lagged
+ * remote half of partition-face gradients.
  */
 template<TpetraTypePack Pack, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack>
@@ -1181,10 +1296,12 @@ fully_implicit_non_orthogonal_diffusion_system(
     const Mesh<Pack>& mesh,
     typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition,
-    SourceProvider right_hand_source)
+    SourceProvider right_hand_source,
+    const CellField<Pack>* partition_correction_field = nullptr)
 {
     return implicit_non_orthogonal_diffusion_system<Pack>(
-        mesh, diffusivity, boundary_condition, right_hand_source, 1.0);
+        mesh, diffusivity, boundary_condition, right_hand_source, 1.0,
+        partition_correction_field);
 }
 
 /**
@@ -1193,8 +1310,9 @@ fully_implicit_non_orthogonal_diffusion_system(
  *
  * Explicit and hybrid systems use @p correction_field for the explicit RHS
  * fraction when it is supplied. If no correction field is provided,
- * `explicit` falls back to the orthogonal matrix and `hybrid` assembles only
- * its implicit half.
+ * `explicit` falls back to the orthogonal matrix. A nonzero implicit fraction
+ * additionally requires the field when the mesh has distributed partition
+ * faces so their remote gradient half can be synchronized.
  *
  * @throws std::invalid_argument if @p correction_field uses another mesh or
  *         @p treatment is invalid.
@@ -1230,12 +1348,14 @@ non_orthogonal_diffusion_system(
 
         case NonOrthogonalTreatment::Implicit:
             return fully_implicit_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source);
+                mesh, diffusivity, boundary_condition, right_hand_source,
+                correction_field);
 
         case NonOrthogonalTreatment::Hybrid:
         {
             auto system = implicit_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, 0.5);
+                mesh, diffusivity, boundary_condition, right_hand_source, 0.5,
+                correction_field);
             if (correction_field != nullptr)
             {
                 add_explicit_non_orthogonal_correction<Pack>(
@@ -1464,6 +1584,8 @@ bool solve_non_orthogonal_diffusion(
     int nNonOrthogonalCorrectors,
     const LinearSolverOptions& linear_options = {})
 {
+    using scalar_type = typename Pack::scalar_type;
+
     if (&solution.mesh() != &mesh)
     {
         throw std::invalid_argument(
@@ -1486,7 +1608,8 @@ bool solve_non_orthogonal_diffusion(
     {
         auto system =
             fully_implicit_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source);
+                mesh, diffusivity, boundary_condition, right_hand_source,
+                &solution);
         solution.owned_data().putScalar(0.0);
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto converged = solve_linear_system<Pack>(
@@ -1505,10 +1628,14 @@ bool solve_non_orthogonal_diffusion(
          corrector <= nNonOrthogonalCorrectors;
          ++corrector)
     {
-        const auto* correction_field = corrector == 0 ? nullptr : &solution;
-        auto system = non_orthogonal_diffusion_system<Pack>(
-            mesh, diffusivity, boundary_condition, right_hand_source,
-            NonOrthogonalTreatment::Hybrid, correction_field);
+        auto system =
+            corrector == 0
+          ? implicit_non_orthogonal_diffusion_system<Pack>(
+                mesh, diffusivity, boundary_condition, right_hand_source,
+                scalar_type{0.5}, &solution)
+          : non_orthogonal_diffusion_system<Pack>(
+                mesh, diffusivity, boundary_condition, right_hand_source,
+                NonOrthogonalTreatment::Hybrid, &solution);
 
         solution.owned_data().putScalar(0.0);
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;

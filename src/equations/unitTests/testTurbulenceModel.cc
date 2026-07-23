@@ -13,6 +13,7 @@
 
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <array>
@@ -153,7 +154,7 @@ TEST(TurbulenceModelTest, ConfiguresEveryClosureExposesFamilyFieldsAndDisablesCl
         }
 
         const auto& output = model.output_fields();
-        ASSERT_EQ(output.size(), 5U);
+        ASSERT_EQ(output.size(), entry.requires_wall_distance ? 6U : 5U);
         EXPECT_EQ(output.at("k"), &model.turbulent_kinetic_energy());
         EXPECT_EQ(output.at(entry.epsilon_family ? "epsilon" : "omega"),
                   entry.epsilon_family ? epsilon : omega);
@@ -161,6 +162,16 @@ TEST(TurbulenceModelTest, ConfiguresEveryClosureExposesFamilyFieldsAndDisablesCl
         EXPECT_EQ(output.at("mu_eff"), &model.effective_dynamic_viscosity());
         EXPECT_EQ(output.at("lambda_eff"), &model.effective_thermal_conductivity());
         EXPECT_EQ(output.count(entry.epsilon_family ? "omega" : "epsilon"), 0U);
+        if (entry.requires_wall_distance)
+        {
+            ASSERT_NE(model.wall_distance(), nullptr);
+            EXPECT_EQ(output.at("wall_distance"), model.wall_distance());
+        }
+        else
+        {
+            EXPECT_EQ(model.wall_distance(), nullptr);
+            EXPECT_EQ(output.count("wall_distance"), 0U);
+        }
     }
 
     EXPECT_TRUE(model.disable());
@@ -350,17 +361,541 @@ TEST(TurbulenceModelTest, BSLAndSSTValidateConfiguredAndReplacementWallDistance)
 
         model.configure(make_model_options(type), material, reference_density);
         FieldType valid_distance(mesh, 0.125, "wall_distance");
-        EXPECT_NO_THROW(model.set_wall_distance(valid_distance));
+        EXPECT_NO_THROW(model.set_wall_distance(
+            valid_distance, material, reference_density));
 
         for (const auto distance : invalid_distances)
         {
             FieldType invalid_distance(mesh, distance, "invalid_wall_distance");
-            EXPECT_THROW(model.set_wall_distance(invalid_distance), std::invalid_argument);
+            EXPECT_THROW(
+                model.set_wall_distance(
+                    invalid_distance, material, reference_density),
+                std::invalid_argument);
         }
 
         FieldType wrong_mesh_distance(other_mesh, 0.125, "wrong_mesh_wall_distance");
-        EXPECT_THROW(model.set_wall_distance(wrong_mesh_distance), std::invalid_argument);
-        EXPECT_NO_THROW(model.set_wall_distance(valid_distance));
+        EXPECT_THROW(
+            model.set_wall_distance(
+                wrong_mesh_distance, material, reference_density),
+            std::invalid_argument);
+        EXPECT_NO_THROW(model.set_wall_distance(
+            valid_distance, material, reference_density));
+    }
+}
+
+/**
+ * @brief Verifies an SST distance replacement immediately refreshes accepted momentum data.
+ */
+TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedProperties)
+{
+    auto mesh = make_two_cell_mesh();
+    auto other_mesh = make_two_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {0.0, 0.0, 0.0}};
+    boundary_conditions.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {0.0, 200.0, 0.0}};
+
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.initial_wall_distance = 1.0e6;
+    Model model(mesh, boundary_conditions);
+    model.configure(options, material, reference_density);
+
+    VectorFieldType velocity(mesh, "velocity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto x = mesh->cell_centroid(cell_lid).x;
+        velocity.set_owned_value(
+            cell_lid, {0.0, 100.0 * x, 0.0});
+    }
+    velocity.sync_ghosts();
+    const auto velocity_boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "projected_face_fluxes");
+    const auto summary = model.advance(
+        velocity, zero_fluxes, velocity_boundary_cache, 1.0e-8,
+        material, reference_density,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    ASSERT_TRUE(summary.converged);
+    ASSERT_NE(model.specific_dissipation_rate(), nullptr);
+    ASSERT_NE(model.wall_distance(), nullptr);
+
+    std::array<double, 2> accepted_k{};
+    std::array<double, 2> accepted_omega{};
+    std::array<double, 2> old_nu_t{};
+    std::array<double, 2> old_mu_eff{};
+    std::array<double, 2> old_lambda_eff{};
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        accepted_k[owned] =
+            model.turbulent_kinetic_energy().value(cell_lid);
+        accepted_omega[owned] =
+            model.specific_dissipation_rate()->value(cell_lid);
+        old_nu_t[owned] =
+            model.turbulent_kinematic_viscosity().value(cell_lid);
+        old_mu_eff[owned] =
+            model.effective_dynamic_viscosity().value(cell_lid);
+        old_lambda_eff[owned] =
+            model.effective_thermal_conductivity().value(cell_lid);
+    }
+
+    FieldType near_wall_distance(
+        mesh, 0.01, "near_wall_distance");
+    model.set_wall_distance(
+        near_wall_distance, material, reference_density);
+
+    bool limiter_changed = false;
+    bool effective_properties_changed = false;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto nu_t =
+            model.turbulent_kinematic_viscosity().value(cell_lid);
+        limiter_changed =
+            limiter_changed || nu_t != old_nu_t[owned];
+        if (nu_t != old_nu_t[owned])
+        {
+            EXPECT_NE(
+                model.effective_dynamic_viscosity().value(cell_lid),
+                old_mu_eff[owned]);
+            EXPECT_NE(
+                model.effective_thermal_conductivity().value(cell_lid),
+                old_lambda_eff[owned]);
+            effective_properties_changed = true;
+        }
+        EXPECT_DOUBLE_EQ(
+            model.turbulent_kinetic_energy().value(cell_lid),
+            accepted_k[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.specific_dissipation_rate()->value(cell_lid),
+            accepted_omega[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.wall_distance()->value(cell_lid), 0.01);
+        EXPECT_DOUBLE_EQ(
+            model.effective_dynamic_viscosity().value(cell_lid),
+            material.dynamic_viscosity.value(cell_lid)
+                + reference_density * nu_t);
+        EXPECT_DOUBLE_EQ(
+            model.effective_thermal_conductivity().value(cell_lid),
+            material.thermal_conductivity.value(cell_lid)
+                + material.density.value(cell_lid)
+                      * material.specific_heat_capacity.value(cell_lid)
+                      * nu_t / options.turbulent_prandtl_number);
+    }
+    EXPECT_TRUE(limiter_changed);
+    EXPECT_TRUE(effective_properties_changed);
+
+    std::array<double, 2> committed_distance{};
+    std::array<double, 2> committed_nu_t{};
+    std::array<double, 2> committed_mu_eff{};
+    std::array<double, 2> committed_lambda_eff{};
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        committed_distance[owned] =
+            model.wall_distance()->value(cell_lid);
+        committed_nu_t[owned] =
+            model.turbulent_kinematic_viscosity().value(cell_lid);
+        committed_mu_eff[owned] =
+            model.effective_dynamic_viscosity().value(cell_lid);
+        committed_lambda_eff[owned] =
+            model.effective_thermal_conductivity().value(cell_lid);
+    }
+
+    auto overflow_material = make_material(mesh);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        overflow_material.specific_heat_capacity.set_owned_value(
+            static_cast<MeshType::local_ordinal_type>(owned),
+            std::numeric_limits<double>::max());
+    }
+    overflow_material.specific_heat_capacity.sync_ghosts();
+    FieldType rejected_distance(
+        mesh, 0.02, "rejected_distance");
+    EXPECT_THROW(
+        model.set_wall_distance(
+            rejected_distance, overflow_material, reference_density),
+        std::overflow_error);
+
+    FieldType non_positive_distance(
+        mesh, 0.0, "non_positive_distance");
+    EXPECT_THROW(
+        model.set_wall_distance(
+            non_positive_distance, material, reference_density),
+        std::invalid_argument);
+    FieldType wrong_mesh_distance(
+        other_mesh, 0.02, "wrong_mesh_distance");
+    EXPECT_THROW(
+        model.set_wall_distance(
+            wrong_mesh_distance, material, reference_density),
+        std::invalid_argument);
+    auto wrong_mesh_material = make_material(other_mesh);
+    EXPECT_THROW(
+        model.set_wall_distance(
+            rejected_distance, wrong_mesh_material, reference_density),
+        std::invalid_argument);
+    EXPECT_THROW(
+        model.set_wall_distance(
+            rejected_distance, material, -reference_density),
+        std::invalid_argument);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_DOUBLE_EQ(
+            model.wall_distance()->value(cell_lid),
+            committed_distance[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.turbulent_kinematic_viscosity().value(cell_lid),
+            committed_nu_t[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.effective_dynamic_viscosity().value(cell_lid),
+            committed_mu_eff[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.effective_thermal_conductivity().value(cell_lid),
+            committed_lambda_eff[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.turbulent_kinetic_energy().value(cell_lid),
+            accepted_k[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.specific_dissipation_rate()->value(cell_lid),
+            accepted_omega[owned]);
+    }
+}
+
+/**
+ * @brief Automatic SST distance immediately initializes its momentum properties.
+ */
+TEST(TurbulenceModelTest, AutomaticWallDistanceImmediatelyInitializesSSTDerivedProperties)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    boundary_conditions.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {0.0, 1.0, 0.0}};
+
+    auto automatic_options =
+        make_model_options(ModelType::SSTKOmega);
+    automatic_options.initial_turbulent_kinetic_energy = 1.0e-8;
+    automatic_options.initial_specific_dissipation_rate = 0.01;
+    automatic_options.initial_wall_distance.reset();
+    automatic_options.wall_distance_equation.linear_solver.tolerance =
+        1.0e-13;
+    automatic_options.wall_distance_equation.linear_solver.max_iterations =
+        500;
+
+    Model automatic_model(mesh, boundary_conditions);
+    ASSERT_NO_THROW(
+        automatic_model.configure(
+            automatic_options, material, reference_density));
+    ASSERT_NE(automatic_model.wall_distance(), nullptr);
+
+    FieldType automatic_distance(mesh, "automatic_wall_distance_copy");
+    automatic_distance.owned_data().update(
+        1.0, automatic_model.wall_distance()->owned_data(), 0.0);
+    automatic_distance.sync_ghosts();
+
+    auto explicit_options = automatic_options;
+    explicit_options.initial_wall_distance = 1.0e6;
+    Model explicit_model(mesh, boundary_conditions);
+    ASSERT_NO_THROW(
+        explicit_model.configure(
+            explicit_options, material, reference_density));
+    const auto placeholder_nu_t =
+        explicit_model.turbulent_kinematic_viscosity().value(0);
+    ASSERT_NO_THROW(
+        explicit_model.set_wall_distance(
+            automatic_distance, material, reference_density));
+
+    const auto automatic_nu_t =
+        automatic_model.turbulent_kinematic_viscosity().value(0);
+    const auto refreshed_nu_t =
+        explicit_model.turbulent_kinematic_viscosity().value(0);
+    EXPECT_LT(
+        automatic_nu_t,
+        automatic_options.initial_turbulent_kinetic_energy
+            / automatic_options.initial_specific_dissipation_rate);
+    EXPECT_NE(placeholder_nu_t, refreshed_nu_t);
+    EXPECT_DOUBLE_EQ(automatic_nu_t, refreshed_nu_t);
+
+    const auto expected_dynamic_viscosity =
+        material.dynamic_viscosity.value(0)
+        + reference_density * automatic_nu_t;
+    const auto expected_thermal_conductivity =
+        material.thermal_conductivity.value(0)
+        + material.density.value(0)
+              * material.specific_heat_capacity.value(0)
+              * automatic_nu_t
+              / automatic_options.turbulent_prandtl_number;
+    EXPECT_DOUBLE_EQ(
+        automatic_model.effective_dynamic_viscosity().value(0),
+        expected_dynamic_viscosity);
+    EXPECT_DOUBLE_EQ(
+        automatic_model.effective_thermal_conductivity().value(0),
+        expected_thermal_conductivity);
+    EXPECT_DOUBLE_EQ(
+        automatic_model.effective_dynamic_viscosity().value(0),
+        explicit_model.effective_dynamic_viscosity().value(0));
+    EXPECT_DOUBLE_EQ(
+        automatic_model.effective_thermal_conductivity().value(0),
+        explicit_model.effective_thermal_conductivity().value(0));
+}
+
+/**
+ * @brief SST refresh immediately applies unsaturated F2 viscosity changes atomically.
+ */
+TEST(TurbulenceModelTest, RefreshTransactionallyRecomputesSSTEddyViscosity)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    boundary_conditions.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {0.0, 1.0, 0.0}};
+
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.initial_turbulent_kinetic_energy = 1.0e-8;
+    options.initial_specific_dissipation_rate = 0.01;
+    options.initial_wall_distance = 0.5;
+    Model model(mesh, boundary_conditions);
+    model.configure(options, material, reference_density);
+
+    const auto initial_nu_t =
+        model.turbulent_kinematic_viscosity().value(0);
+    material.dynamic_viscosity.set_owned_value(
+        0, 2.0 * molecular_viscosity);
+    material.dynamic_viscosity.sync_ghosts();
+    ASSERT_NO_THROW(
+        model.refresh_effective_properties(
+            material, reference_density));
+
+    const auto refreshed_nu_t =
+        model.turbulent_kinematic_viscosity().value(0);
+    const SimpleFluid::MenterKOmegaInvariants invariants{
+        2.0 * molecular_viscosity / reference_density,
+        0.5, 0.0, 1.0};
+    const SimpleFluid::SSTKOmegaEquation closure;
+    const auto f2 = closure.blending_function_2(
+        {options.initial_turbulent_kinetic_energy,
+         options.initial_specific_dissipation_rate},
+        invariants);
+    ASSERT_GT(f2, 0.0);
+    ASSERT_LT(f2, 0.99);
+    EXPECT_LT(refreshed_nu_t, initial_nu_t);
+    EXPECT_NEAR(
+        refreshed_nu_t,
+        closure.turbulent_kinematic_viscosity(
+            {options.initial_turbulent_kinetic_energy,
+             options.initial_specific_dissipation_rate},
+            invariants),
+        1.0e-18);
+    EXPECT_DOUBLE_EQ(
+        model.effective_dynamic_viscosity().value(0),
+        2.0 * molecular_viscosity
+            + reference_density * refreshed_nu_t);
+    EXPECT_DOUBLE_EQ(
+        model.effective_thermal_conductivity().value(0),
+        molecular_conductivity
+            + density * heat_capacity * refreshed_nu_t
+                  / options.turbulent_prandtl_number);
+
+    const auto accepted_nu_t = refreshed_nu_t;
+    const auto accepted_mu_eff =
+        model.effective_dynamic_viscosity().value(0);
+    const auto accepted_lambda_eff =
+        model.effective_thermal_conductivity().value(0);
+    auto rejected_material = make_material(mesh);
+    rejected_material.dynamic_viscosity.set_owned_value(
+        0, 3.0 * molecular_viscosity);
+    rejected_material.specific_heat_capacity.set_owned_value(
+        0, std::numeric_limits<double>::max());
+    rejected_material.dynamic_viscosity.sync_ghosts();
+    rejected_material.specific_heat_capacity.sync_ghosts();
+
+    EXPECT_THROW(
+        model.refresh_effective_properties(
+            rejected_material, reference_density),
+        std::overflow_error);
+    EXPECT_DOUBLE_EQ(
+        model.turbulent_kinematic_viscosity().value(0),
+        accepted_nu_t);
+    EXPECT_DOUBLE_EQ(
+        model.effective_dynamic_viscosity().value(0),
+        accepted_mu_eff);
+    EXPECT_DOUBLE_EQ(
+        model.effective_thermal_conductivity().value(0),
+        accepted_lambda_eff);
+}
+
+/**
+ * @brief Verifies wall-distance replacement rejects inactive and non-Menter closures.
+ */
+TEST(TurbulenceModelTest, SetWallDistanceRejectsDisabledAndNonMenterModelsWithoutMutation)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    Model model(mesh, boundary_conditions);
+    FieldType distance(mesh, 0.25, "wall_distance");
+
+    EXPECT_THROW(
+        model.set_wall_distance(
+            distance, material, reference_density),
+        std::logic_error);
+
+    model.configure(
+        make_model_options(ModelType::StandardKEpsilon), material,
+        reference_density);
+    ASSERT_NE(model.dissipation_rate(), nullptr);
+    const auto accepted_k =
+        model.turbulent_kinetic_energy().value(0);
+    const auto accepted_epsilon =
+        model.dissipation_rate()->value(0);
+    const auto accepted_nu_t =
+        model.turbulent_kinematic_viscosity().value(0);
+    const auto accepted_mu_eff =
+        model.effective_dynamic_viscosity().value(0);
+    const auto accepted_lambda_eff =
+        model.effective_thermal_conductivity().value(0);
+
+    EXPECT_THROW(
+        model.set_wall_distance(
+            distance, material, reference_density),
+        std::logic_error);
+    EXPECT_DOUBLE_EQ(
+        model.turbulent_kinetic_energy().value(0), accepted_k);
+    EXPECT_DOUBLE_EQ(
+        model.dissipation_rate()->value(0), accepted_epsilon);
+    EXPECT_DOUBLE_EQ(
+        model.turbulent_kinematic_viscosity().value(0),
+        accepted_nu_t);
+    EXPECT_DOUBLE_EQ(
+        model.effective_dynamic_viscosity().value(0),
+        accepted_mu_eff);
+    EXPECT_DOUBLE_EQ(
+        model.effective_thermal_conductivity().value(0),
+        accepted_lambda_eff);
+}
+
+/**
+ * @brief Explicit anchors augment rather than replace every no-slip wall.
+ */
+TEST(TurbulenceModelTest, AutomaticWallDistanceUsesUnionOfAllNoSlipWalls)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    boundary_conditions.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.initial_wall_distance.reset();
+    options.wall_distance_boundaries = {"xmin"};
+    options.wall_distance_equation.linear_solver.tolerance = 1.0e-13;
+    options.wall_distance_equation.linear_solver.max_iterations = 500;
+
+    Model model(mesh, boundary_conditions);
+    ASSERT_NO_THROW(
+        model.configure(options, material, reference_density));
+    ASSERT_NE(model.wall_distance(), nullptr);
+
+    FieldType union_distance(mesh, "union_wall_distance");
+    FieldType explicit_only_distance(mesh, "explicit_only_wall_distance");
+    SimpleFluid::PoissonWallDistanceEquation<Pack> equation(mesh);
+    equation.solve(
+        {"xmin", "xmax"}, union_distance,
+        options.wall_distance_equation);
+    equation.solve(
+        {"xmin"}, explicit_only_distance,
+        options.wall_distance_equation);
+
+    bool differs_from_explicit_only = false;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_NEAR(
+            model.wall_distance()->value(cell_lid),
+            union_distance.value(cell_lid), 1.0e-12);
+        differs_from_explicit_only =
+            differs_from_explicit_only
+            || std::abs(
+                   union_distance.value(cell_lid)
+                   - explicit_only_distance.value(cell_lid))
+                   > 1.0e-8;
+    }
+    EXPECT_TRUE(differs_from_explicit_only);
+}
+
+/** @brief Explicit wall-distance anchors must be no-slip velocity patches. */
+TEST(TurbulenceModelTest, AutomaticWallDistanceRejectsNonNoSlipAnchor)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Slip, {}};
+
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.initial_wall_distance.reset();
+    options.wall_distance_boundaries = {"xmin"};
+
+    Model model(mesh, boundary_conditions);
+    EXPECT_THROW(
+        model.configure(options, material, reference_density),
+        std::invalid_argument);
+    EXPECT_FALSE(model.enabled());
+}
+
+/**
+ * @brief Automatic distance configures SST on genuinely non-orthogonal cells.
+ */
+TEST(TurbulenceModelTest, AutomaticWallDistanceConfiguresOnSkewedMesh)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.initial_wall_distance.reset();
+    options.wall_distance_equation.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit;
+    options.wall_distance_equation.non_orthogonal_correctors = 3;
+    options.wall_distance_equation.linear_solver.max_iterations = 500;
+    options.wall_distance_equation.linear_solver.tolerance = 1.0e-12;
+
+    Model model(mesh, boundary_conditions);
+    ASSERT_NO_THROW(
+        model.configure(options, material, reference_density));
+    ASSERT_NE(model.wall_distance(), nullptr);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_TRUE(std::isfinite(model.wall_distance()->value(cell_lid)));
+        EXPECT_GT(model.wall_distance()->value(cell_lid), 0.0);
     }
 }
 
@@ -555,6 +1090,13 @@ TEST(TurbulenceModelTest, HighReWallTreatmentConstrainsEpsilonAndPublishesFacePr
     EXPECT_NEAR(model.dissipation_rate()->value(0), expected_epsilon, 1.0e-11);
     ASSERT_NE(model.wall_y_plus(), nullptr);
     EXPECT_GT(model.wall_y_plus()->value(0), 0.0);
+    const auto& wall_statistics = model.wall_y_plus_statistics();
+    ASSERT_EQ(wall_statistics.size(), 1U);
+    EXPECT_EQ(wall_statistics.front().boundary_name, "xmin");
+    EXPECT_EQ(wall_statistics.front().global_face_count, 1U);
+    EXPECT_NEAR(
+        wall_statistics.front().maximum,
+        model.wall_y_plus()->value(0), 1.0e-14);
     const auto* wall_mu = model.effective_dynamic_viscosity_boundary_cache();
     ASSERT_NE(wall_mu, nullptr);
     ASSERT_EQ(wall_mu->value.size(), 1U);
@@ -593,7 +1135,164 @@ TEST(TurbulenceModelTest, HighReWallTreatmentConstrainsEpsilonAndPublishesFacePr
               SimpleFluid::TurbulenceWallTreatmentType::None);
     EXPECT_TRUE(model.options().wall_options.boundary_names.empty());
     EXPECT_EQ(model.wall_y_plus(), nullptr);
+    EXPECT_TRUE(model.wall_y_plus_statistics().empty());
     EXPECT_EQ(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
+}
+
+/**
+ * @brief A late effective-property failure preserves accepted wall publication.
+ */
+TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailure)
+{
+    auto mesh = make_two_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    boundary_conditions.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+    auto options = make_model_options(ModelType::StandardKEpsilon);
+    options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    options.wall_options.boundary_names = {"xmin"};
+    Model model(mesh, boundary_conditions);
+    model.configure(options, material, reference_density);
+
+    VectorFieldType velocity(mesh, "velocity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        velocity.set_owned_value(
+            static_cast<MeshType::local_ordinal_type>(owned),
+            {0.0, 1.0, 0.0});
+    }
+    velocity.sync_ghosts();
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "projected_face_fluxes");
+    ASSERT_TRUE(
+        model.advance(
+                 velocity, zero_fluxes, velocity_cache, 1.0e-4,
+                 material, reference_density,
+                 SimpleFluid::FVM::NonOrthogonalTreatment::Explicit)
+            .converged);
+
+    std::array<double, 2> accepted_k{};
+    std::array<double, 2> accepted_epsilon{};
+    std::array<double, 2> accepted_nu_t{};
+    std::array<double, 2> accepted_mu_eff{};
+    std::array<double, 2> accepted_lambda_eff{};
+    std::array<double, 2> accepted_y_plus{};
+    std::array<VectorFieldType::vec_type, 2> accepted_k_gradient{};
+    ASSERT_NE(model.dissipation_rate(), nullptr);
+    ASSERT_NE(model.wall_y_plus(), nullptr);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        accepted_k[owned] =
+            model.turbulent_kinetic_energy().value(cell_lid);
+        accepted_epsilon[owned] =
+            model.dissipation_rate()->value(cell_lid);
+        accepted_nu_t[owned] =
+            model.turbulent_kinematic_viscosity().value(cell_lid);
+        accepted_mu_eff[owned] =
+            model.effective_dynamic_viscosity().value(cell_lid);
+        accepted_lambda_eff[owned] =
+            model.effective_thermal_conductivity().value(cell_lid);
+        accepted_y_plus[owned] =
+            model.wall_y_plus()->value(cell_lid);
+        accepted_k_gradient[owned] =
+            model.turbulent_kinetic_energy_gradient().value(cell_lid);
+    }
+    const auto accepted_statistics =
+        model.wall_y_plus_statistics();
+    const auto accepted_wall_mu =
+        model.effective_dynamic_viscosity_boundary_cache()
+            ->value.begin()->second.at(0);
+    const auto accepted_wall_lambda =
+        model.effective_thermal_conductivity_boundary_cache()
+            ->value.begin()->second.at(0);
+
+    auto rejected_material = make_material(mesh);
+    rejected_material.specific_heat_capacity.set_owned_value(
+        1, std::numeric_limits<double>::max());
+    rejected_material.specific_heat_capacity.sync_ghosts();
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        velocity.set_owned_value(
+            static_cast<MeshType::local_ordinal_type>(owned),
+            {0.0, 4.0, 0.0});
+    }
+    velocity.sync_ghosts();
+
+    EXPECT_THROW(
+        model.advance(
+            velocity, zero_fluxes, velocity_cache, 1.0e-4,
+            rejected_material, reference_density,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit),
+        std::overflow_error);
+
+    ASSERT_EQ(
+        model.wall_y_plus_statistics().size(),
+        accepted_statistics.size());
+    for (size_t index = 0; index < accepted_statistics.size(); ++index)
+    {
+        EXPECT_EQ(
+            model.wall_y_plus_statistics()[index].boundary_name,
+            accepted_statistics[index].boundary_name);
+        EXPECT_EQ(
+            model.wall_y_plus_statistics()[index].global_face_count,
+            accepted_statistics[index].global_face_count);
+        EXPECT_DOUBLE_EQ(
+            model.wall_y_plus_statistics()[index].minimum,
+            accepted_statistics[index].minimum);
+        EXPECT_DOUBLE_EQ(
+            model.wall_y_plus_statistics()[index].maximum,
+            accepted_statistics[index].maximum);
+        EXPECT_DOUBLE_EQ(
+            model.wall_y_plus_statistics()[index].area_weighted_mean,
+            accepted_statistics[index].area_weighted_mean);
+    }
+    EXPECT_DOUBLE_EQ(
+        model.effective_dynamic_viscosity_boundary_cache()
+            ->value.begin()->second.at(0),
+        accepted_wall_mu);
+    EXPECT_DOUBLE_EQ(
+        model.effective_thermal_conductivity_boundary_cache()
+            ->value.begin()->second.at(0),
+        accepted_wall_lambda);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_DOUBLE_EQ(
+            model.turbulent_kinetic_energy().value(cell_lid),
+            accepted_k[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.dissipation_rate()->value(cell_lid),
+            accepted_epsilon[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.turbulent_kinematic_viscosity().value(cell_lid),
+            accepted_nu_t[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.effective_dynamic_viscosity().value(cell_lid),
+            accepted_mu_eff[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.effective_thermal_conductivity().value(cell_lid),
+            accepted_lambda_eff[owned]);
+        EXPECT_DOUBLE_EQ(
+            model.wall_y_plus()->value(cell_lid),
+            accepted_y_plus[owned]);
+        const auto gradient =
+            model.turbulent_kinetic_energy_gradient().value(cell_lid);
+        EXPECT_DOUBLE_EQ(
+            gradient.x, accepted_k_gradient[owned].x);
+        EXPECT_DOUBLE_EQ(
+            gradient.y, accepted_k_gradient[owned].y);
+        EXPECT_DOUBLE_EQ(
+            gradient.z, accepted_k_gradient[owned].z);
+    }
 }
 
 /** @brief Verifies propagation of high-Re wall C-mu into the standard k-epsilon closure. */

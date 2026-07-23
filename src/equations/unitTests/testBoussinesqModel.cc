@@ -188,7 +188,14 @@ TEST(BoussinesqModelTest, RegistryIsOrderedAndSupportsSpatialInitialization)
             alpha.field().value(cell_lid) + 2.0);
     }
 
-    EXPECT_THROW(registry.add("temperature"), std::invalid_argument);
+    for (const auto* reserved_name :
+         {"temperature", "wall_distance", "wall_y_plus",
+          "buoyancy_production"})
+    {
+        EXPECT_THROW(
+            registry.add(reserved_name),
+            std::invalid_argument);
+    }
     EXPECT_THROW(
         registry.add(
             "invalid",

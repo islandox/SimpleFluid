@@ -397,3 +397,335 @@ TEST(TurbulenceWallTreatmentTest, RejectsMissingDuplicateAndNonWallPatches)
                      mesh, non_wall, boundaries.velocity)),
                  std::invalid_argument);
 }
+
+/** @brief Verifies OpenFOAM v2606 sand-grain roughness regime switching. */
+TEST(TurbulenceWallTreatmentTest, RoughKEpsilonMatchesAllSandGrainRegimes)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh, boundaries);
+    constexpr double nu = 1.0e-5;
+    constexpr double k_value = 1.0;
+    constexpr double roughness_constant = 0.5;
+    auto material = make_material(mesh, nu);
+    Field k(mesh, k_value, "k");
+    Velocity velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {1.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+    const auto id = boundary_id(*mesh, "ymin");
+    const auto friction_velocity = std::pow(0.09, 0.25) * std::sqrt(k_value);
+
+    const auto evaluate_regime =
+        [&](double roughness_height_plus)
+    {
+        SimpleFluid::TurbulenceWallTreatmentOptions options;
+        options.boundary_names = {"ymin"};
+        options.roughness_models = {
+            SimpleFluid::TurbulenceWallRoughnessModel::SandGrain};
+        options.roughness_heights = {
+            roughness_height_plus * nu / friction_velocity};
+        options.roughness_constants = {roughness_constant};
+        SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack> treatment(
+            mesh, options, boundaries.velocity);
+        return std::pair{options, treatment.evaluate(
+                                      k, velocity, cache, material, 1.0, 0.9)};
+    };
+
+    const auto [hydraulically_smooth_options, hydraulically_smooth] =
+        evaluate_regime(2.25);
+    const auto& hydraulically_smooth_face =
+        hydraulically_smooth.face(id, 0);
+    EXPECT_NEAR(hydraulically_smooth_face.roughness_height_plus, 2.25,
+                1.0e-13);
+    EXPECT_DOUBLE_EQ(hydraulically_smooth_face.effective_log_layer_e,
+                     hydraulically_smooth_options.log_layer_e);
+
+    const auto [transitional_options, transitional] = evaluate_regime(30.0);
+    const auto& transitional_face = transitional.face(id, 0);
+    const auto transitional_multiplier =
+        std::pow((30.0 - 2.25) / 87.75 + roughness_constant * 30.0,
+                 std::sin(0.4258 * (std::log(30.0) - 0.811)));
+    EXPECT_NEAR(transitional_face.roughness_height_plus, 30.0, 1.0e-12);
+    EXPECT_NEAR(transitional_face.effective_log_layer_e,
+                transitional_options.log_layer_e / transitional_multiplier,
+                1.0e-13);
+
+    const auto [fully_rough_options, fully_rough] = evaluate_regime(90.0);
+    const auto& fully_rough_face = fully_rough.face(id, 0);
+    EXPECT_NEAR(fully_rough_face.roughness_height_plus, 90.0, 1.0e-12);
+    EXPECT_NEAR(fully_rough_face.effective_log_layer_e,
+                fully_rough_options.log_layer_e /
+                    (1.0 + roughness_constant * 90.0),
+                1.0e-14);
+
+    const auto expected_epsilon =
+        std::pow(0.09, 0.75) * k_value * std::sqrt(k_value) /
+        (fully_rough_options.kappa * 0.5);
+    EXPECT_NEAR(*hydraulically_smooth.secondary_constraint(0),
+                expected_epsilon, 1.0e-14);
+    EXPECT_NEAR(*transitional.secondary_constraint(0), expected_epsilon,
+                1.0e-14);
+    EXPECT_NEAR(*fully_rough.secondary_constraint(0), expected_epsilon,
+                1.0e-14);
+}
+
+/** @brief Verifies the accepted-state limiter used by rough nut walls. */
+TEST(TurbulenceWallTreatmentTest, RoughKEpsilonLimitsAgainstAcceptedFaceState)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh, boundaries);
+    constexpr double nu = 1.0e-5;
+    auto material = make_material(mesh, nu);
+    Field k(mesh, 1.0, "k");
+    Velocity velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {1.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::TurbulenceWallTreatmentOptions options;
+    options.boundary_names = {"ymin"};
+    options.roughness_models = {
+        SimpleFluid::TurbulenceWallRoughnessModel::SandGrain};
+    options.roughness_heights = {100.0 * nu / std::pow(options.c_mu, 0.25)};
+    options.roughness_constants = {0.5};
+    SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack> treatment(
+        mesh, options, boundaries.velocity);
+    const auto first = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+    const auto id = boundary_id(*mesh, "ymin");
+    EXPECT_DOUBLE_EQ(first.face(id, 0).turbulent_kinematic_viscosity,
+                     2.0 * nu);
+
+    const auto second = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9, &first);
+    EXPECT_DOUBLE_EQ(second.face(id, 0).turbulent_kinematic_viscosity,
+                     4.0 * nu);
+
+    k.put_scalar(0.0);
+    k.sync_ghosts();
+    const auto lower_limited = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+    EXPECT_DOUBLE_EQ(lower_limited.face(id, 0).turbulent_kinematic_viscosity,
+                     0.5 * nu);
+}
+
+/**
+ * @brief Verifies rough nut retains inherited low-Re epsilon/G and y+ behavior.
+ */
+TEST(TurbulenceWallTreatmentTest,
+     RoughLowReCorrectionUsesShearYPlusAndFeedsJayatilleke)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh, boundaries);
+    constexpr double nu = 1.0e-5;
+    constexpr double molecular_prandtl = 0.7;
+    constexpr double wall_prandtl = 0.85;
+    constexpr double conductivity = nu * 1000.0 / molecular_prandtl;
+    constexpr double target_shear_y_plus = 20.0;
+    auto material = make_material(mesh, nu, conductivity);
+
+    SimpleFluid::TurbulenceWallTreatmentOptions options;
+    options.boundary_names = {"ymin"};
+    options.roughness_models = {
+        SimpleFluid::TurbulenceWallRoughnessModel::SandGrain};
+    options.roughness_constants = {0.5};
+    options.epsilon_low_re_correction = true;
+    options.thermal_wall_law =
+        SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke;
+    options.thermal_turbulent_prandtl_number = wall_prandtl;
+    const auto k_based_y_plus =
+        0.5 * SimpleFluid::openfoam_y_plus_lam(
+                  options.kappa, options.log_layer_e);
+    const auto c_mu_quarter = std::pow(options.c_mu, 0.25);
+    const auto k_value =
+        std::pow(k_based_y_plus * nu / (c_mu_quarter * 0.5), 2);
+    const auto friction_velocity = c_mu_quarter * std::sqrt(k_value);
+    options.roughness_heights = {30.0 * nu / friction_velocity};
+
+    Field k(mesh, k_value, "k");
+    Velocity velocity(mesh, "velocity");
+    // The first rough evaluation is lower-limited to nut=0.5*nu.
+    const auto expected_nut = 0.5 * nu;
+    const auto tangential_velocity =
+        target_shear_y_plus * target_shear_y_plus * nu * nu /
+        (0.5 * (nu + expected_nut));
+    velocity.set_owned_value(0, {tangential_velocity, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack> treatment(
+        mesh, options, boundaries.velocity);
+    const auto evaluation = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+    const auto id = boundary_id(*mesh, "ymin");
+    const auto& face = evaluation.face(id, 0);
+    EXPECT_DOUBLE_EQ(face.turbulent_kinematic_viscosity, expected_nut);
+    EXPECT_NEAR(face.y_plus, target_shear_y_plus, 1.0e-13);
+    ASSERT_TRUE(evaluation.cell_y_plus(0).has_value());
+    EXPECT_NEAR(*evaluation.cell_y_plus(0), target_shear_y_plus, 1.0e-13);
+    ASSERT_TRUE(face.secondary_constraint.has_value());
+    EXPECT_NEAR(*face.secondary_constraint,
+                2.0 * k_value * nu / (0.5 * 0.5), 1.0e-18);
+    ASSERT_TRUE(face.production_override.has_value());
+    EXPECT_DOUBLE_EQ(*face.production_override, 0.0);
+
+    const auto expected_p =
+        9.24 * (std::pow(molecular_prandtl / wall_prandtl, 0.75) - 1.0) *
+        (1.0 +
+         0.28 * std::exp(-0.007 * molecular_prandtl / wall_prandtl));
+    const auto expected_alphat =
+        nu * std::max(
+                 target_shear_y_plus /
+                         (wall_prandtl *
+                          (std::log(options.log_layer_e *
+                                    target_shear_y_plus) /
+                               options.kappa +
+                           expected_p)) -
+                     1.0 / molecular_prandtl,
+                 0.0);
+    EXPECT_NEAR(face.turbulent_thermal_diffusivity, expected_alphat,
+                1.0e-18);
+}
+
+/** @brief Verifies Jayatilleke P, transition y+, alphat, and face cache. */
+TEST(TurbulenceWallTreatmentTest, JayatillekeMatchesReferenceAndThermalTransition)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh, boundaries);
+    constexpr double nu = 1.0e-5;
+    constexpr double molecular_prandtl = 0.7;
+    constexpr double wall_prandtl = 0.85;
+    constexpr double conductivity = nu * 1000.0 / molecular_prandtl;
+    auto material = make_material(mesh, nu, conductivity);
+    const auto c_mu_quarter = std::pow(0.09, 0.25);
+    const auto k_for_y_plus =
+        [&](double y_plus)
+    {
+        return std::pow(y_plus * nu / (c_mu_quarter * 0.5), 2);
+    };
+    Field k(mesh, k_for_y_plus(20.0), "k");
+    Velocity velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {1.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::TurbulenceWallTreatmentOptions options;
+    options.boundary_names = {"ymin"};
+    options.thermal_wall_law =
+        SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke;
+    options.thermal_turbulent_prandtl_number = wall_prandtl;
+    SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack> treatment(
+        mesh, options, boundaries.velocity);
+    const auto logarithmic = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+    const auto id = boundary_id(*mesh, "ymin");
+    const auto& face = logarithmic.face(id, 0);
+    EXPECT_NEAR(face.y_plus, 20.0, 1.0e-13);
+    EXPECT_NEAR(face.jayatilleke_p, -1.6007036357494067, 1.0e-14);
+    EXPECT_NEAR(face.thermal_y_plus_transition, 12.232197503385374,
+                1.0e-12);
+    EXPECT_NEAR(face.turbulent_thermal_diffusivity,
+                6.5871149200354e-6, 1.0e-18);
+    const auto expected_conductivity =
+        conductivity + 1000.0 * face.turbulent_thermal_diffusivity;
+    EXPECT_NEAR(face.effective_thermal_conductivity,
+                expected_conductivity, 1.0e-15);
+    EXPECT_NEAR(logarithmic.boundary_thermal_conductivity().value.at(id).at(0),
+                expected_conductivity, 1.0e-15);
+
+    k.put_scalar(k_for_y_plus(10.0));
+    k.sync_ghosts();
+    velocity.set_owned_value(0, {10.0 * 10.0 * nu / 0.5, 0.0, 0.0});
+    velocity.sync_ghosts();
+    const auto viscous = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+    EXPECT_NEAR(viscous.face(id, 0).y_plus, 10.0, 1.0e-13);
+    EXPECT_DOUBLE_EQ(
+        viscous.face(id, 0).turbulent_thermal_diffusivity, 0.0);
+    EXPECT_DOUBLE_EQ(
+        viscous.face(id, 0).effective_thermal_conductivity, conductivity);
+}
+
+/** @brief Verifies the OpenFOAM non-positive Newton-iterate guard. */
+TEST(TurbulenceWallTreatmentTest,
+     JayatillekeLowPrandtlRatioReturnsZeroThermalTransition)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh, boundaries);
+    constexpr double nu = 1.0e-5;
+    constexpr double wall_prandtl = 0.85;
+    constexpr double prandtl_ratio = 0.15;
+    constexpr double molecular_prandtl = prandtl_ratio * wall_prandtl;
+    constexpr double conductivity = nu * 1000.0 / molecular_prandtl;
+    auto material = make_material(mesh, nu, conductivity);
+    const auto c_mu_quarter = std::pow(0.09, 0.25);
+    Field k(mesh, std::pow(20.0 * nu / (c_mu_quarter * 0.5), 2), "k");
+    Velocity velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {1.0, 0.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::TurbulenceWallTreatmentOptions options;
+    options.boundary_names = {"ymin"};
+    options.thermal_wall_law =
+        SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke;
+    options.thermal_turbulent_prandtl_number = wall_prandtl;
+    SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack> treatment(
+        mesh, options, boundaries.velocity);
+    const auto evaluation = treatment.evaluate(
+        k, velocity, cache, material, 1.0, 0.9);
+    const auto& face = evaluation.face(boundary_id(*mesh, "ymin"), 0);
+    EXPECT_DOUBLE_EQ(face.thermal_y_plus_transition, 0.0);
+    EXPECT_TRUE(std::isfinite(face.turbulent_thermal_diffusivity));
+    EXPECT_GE(face.turbulent_thermal_diffusivity, 0.0);
+}
+
+/** @brief Verifies roughness alignment and resolved-SST compatibility checks. */
+TEST(TurbulenceWallTreatmentTest, RejectsInvalidRoughAndResolvedThermalWallOptions)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+
+    SimpleFluid::TurbulenceWallTreatmentOptions partial;
+    partial.boundary_names = {"xmin"};
+    partial.roughness_models = {
+        SimpleFluid::TurbulenceWallRoughnessModel::SandGrain};
+    EXPECT_THROW((SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack>(
+                     mesh, partial, boundaries.velocity)),
+                 std::invalid_argument);
+
+    auto rough = partial;
+    rough.roughness_heights = {1.0e-4};
+    rough.roughness_constants = {0.5};
+    EXPECT_NO_THROW((SimpleFluid::StandardHighReKEpsilonWallTreatment<Pack>(
+        mesh, rough, boundaries.velocity)));
+    EXPECT_THROW((SimpleFluid::ResolvedLowReSSTWallTreatment<Pack>(
+                     mesh, rough, boundaries.velocity)),
+                 std::invalid_argument);
+
+    SimpleFluid::TurbulenceWallTreatmentOptions thermal;
+    thermal.boundary_names = {"xmin"};
+    thermal.thermal_wall_law =
+        SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke;
+    EXPECT_THROW((SimpleFluid::ResolvedLowReSSTWallTreatment<Pack>(
+                     mesh, thermal, boundaries.velocity)),
+                 std::invalid_argument);
+
+    EXPECT_EQ(SimpleFluid::parse_turbulence_wall_roughness_model("sandGrain"),
+              SimpleFluid::TurbulenceWallRoughnessModel::SandGrain);
+    EXPECT_EQ(SimpleFluid::parse_turbulence_thermal_wall_law("Jayatilleke"),
+              SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke);
+    EXPECT_THROW(SimpleFluid::parse_turbulence_wall_roughness_model("unknown"),
+                 std::invalid_argument);
+}

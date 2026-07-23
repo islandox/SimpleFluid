@@ -20,6 +20,8 @@
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -532,6 +534,8 @@ TEST(FvmOperatorsTest,
 TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType correction(mesh, 0.0, "partition_correction");
+    correction.sync_ghosts();
     auto boundary_condition =
         [](int, size_t) -> SimpleFluid::BoundaryCondition
     {
@@ -547,7 +551,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
         *mesh, 0.5, boundary_condition, source);
     const auto implicit =
         SimpleFluid::FVM::fully_implicit_non_orthogonal_diffusion_system<Pack>(
-            *mesh, 0.5, boundary_condition, source);
+            *mesh, 0.5, boundary_condition, source, &correction);
 
     bool saw_expanded_row = false;
     for (MeshType::local_ordinal_type row = 0;
@@ -563,6 +567,173 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
     }
 
     EXPECT_TRUE(saw_expanded_row);
+}
+
+/**
+ * @brief Reject rank-inconsistent partition-correction inputs collectively.
+ */
+TEST(FvmOperatorsTest,
+     ImplicitNonOrthogonalRejectsInconsistentPartitionCorrectionInputs)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    FieldType correction(mesh, 0.0, "partition_correction");
+    correction.sync_ghosts();
+    auto other_mesh = make_mesh();
+    FieldType foreign_correction(
+        other_mesh, 0.0, "foreign_partition_correction");
+    foreign_correction.sync_ghosts();
+
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    };
+    auto source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+
+    const auto* inconsistent_presence =
+        communicator->getRank() == 0 ? nullptr : &correction;
+    EXPECT_THROW(
+        SimpleFluid::FVM::
+            fully_implicit_non_orthogonal_diffusion_system<Pack>(
+                *mesh, 0.5, boundary_condition, source,
+                inconsistent_presence),
+        std::invalid_argument);
+
+    const auto* inconsistent_mesh =
+        communicator->getRank() == 0
+            ? &foreign_correction
+            : &correction;
+    EXPECT_THROW(
+        SimpleFluid::FVM::
+            fully_implicit_non_orthogonal_diffusion_system<Pack>(
+                *mesh, 0.5, boundary_condition, source,
+                inconsistent_mesh),
+        std::invalid_argument);
+
+    const auto inconsistent_weight =
+        communicator->getRank() == 0 ? 0.0 : 1.0;
+    EXPECT_THROW(
+        SimpleFluid::FVM::implicit_non_orthogonal_diffusion_system<Pack>(
+            *mesh, 0.5, boundary_condition, source,
+            inconsistent_weight, &correction),
+        std::invalid_argument);
+}
+
+/**
+ * @brief Reject rank-dependent lagged-field and treatment choices in every
+ *        partition-gradient transport assembler.
+ */
+TEST(FvmOperatorsTest,
+     TransportAssemblersRejectInconsistentPartitionGradientInputs)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    auto other_mesh = make_mesh();
+    FieldType scalar(mesh, 0.0, "transport_scalar");
+    FieldType scalar_correction(mesh, 0.0, "scalar_correction");
+    FieldType foreign_scalar(
+        other_mesh, 0.0, "foreign_scalar_correction");
+    FieldType unit_weight(mesh, 1.0, "unit_weight");
+    FieldType diffusivity(mesh, 1.0, "diffusivity");
+    VectorFieldType velocity(mesh, "transport_velocity");
+    VectorFieldType velocity_correction(mesh, "velocity_correction");
+    scalar.sync_ghosts();
+    scalar_correction.sync_ghosts();
+    unit_weight.sync_ghosts();
+    diffusivity.sync_ghosts();
+    velocity.sync_ghosts();
+    velocity_correction.sync_ghosts();
+
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "zero_fluxes");
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto scalar_boundary_value =
+        [](int, size_t) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto scalar_source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto vector_boundary_value =
+        [](int, size_t) -> MeshType::Vec3
+    {
+        return {};
+    };
+    auto vector_source =
+        [](MeshType::local_ordinal_type) -> MeshType::Vec3
+    {
+        return {};
+    };
+
+    const auto* inconsistent_vector_presence =
+        communicator->getRank() == 0
+            ? nullptr
+            : &velocity_correction;
+    EXPECT_THROW(
+        SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(
+            velocity, zero_fluxes, 1.0, 1.0,
+            vector_boundary_value, vector_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            inconsistent_vector_presence),
+        std::invalid_argument);
+
+    const auto* inconsistent_scalar_mesh =
+        communicator->getRank() == 0
+            ? &foreign_scalar
+            : &scalar_correction;
+    EXPECT_THROW(
+        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar, zero_fluxes, 1.0, unit_weight, unit_weight,
+            diffusivity, boundary_condition, scalar_boundary_value,
+            scalar_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            inconsistent_scalar_mesh),
+        std::invalid_argument);
+
+    const auto inconsistent_temperature_treatment =
+        communicator->getRank() == 0
+            ? SimpleFluid::FVM::NonOrthogonalTreatment::Implicit
+            : SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid;
+    EXPECT_THROW(
+        SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+            scalar, zero_fluxes, 1.0, unit_weight, unit_weight,
+            diffusivity, boundary_condition, scalar_boundary_value,
+            scalar_source, inconsistent_temperature_treatment,
+            &scalar_correction),
+        std::invalid_argument);
+
+    const auto inconsistent_momentum_treatment =
+        communicator->getRank() == 0
+            ? SimpleFluid::FVM::NonOrthogonalTreatment::Explicit
+            : SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
+    EXPECT_THROW(
+        SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+            velocity, zero_fluxes, 1.0, diffusivity, 1.0,
+            vector_boundary_value, vector_source,
+            inconsistent_momentum_treatment),
+        std::invalid_argument);
 }
 
 /** @brief Verifies implicit non-orthogonal vector transport expands the gradient graph. */
@@ -873,7 +1044,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
 
     const auto system =
         SimpleFluid::FVM::fully_implicit_non_orthogonal_diffusion_system<Pack>(
-            *mesh, diffusivity, boundary_condition, source);
+            *mesh, diffusivity, boundary_condition, source, &phi);
     const auto residual =
         SimpleFluid::FVM::full_diffusion_residual<Pack>(
             phi, diffusivity, boundary_condition);
@@ -884,6 +1055,87 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     for (size_t row = 0; row < applied.size(); ++row)
     {
         EXPECT_NEAR(applied[row] - rhs_view[row], residual_view[row], 1.0e-10);
+    }
+}
+
+/**
+ * @brief Hybrid diffusion supplies its initial lagged partition gradient.
+ */
+TEST(FvmOperatorsTest, HybridNonOrthogonalSolveSupportsPartitionFaces)
+{
+    constexpr double diffusivity = 0.7;
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    int local_partition_faces = 0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        for (const auto face_lid : mesh->faces(cell_lid))
+        {
+            if (!mesh->is_interior_face(face_lid))
+            {
+                continue;
+            }
+            const auto other =
+                mesh->opposite_or_periodic_neighbor_cell(
+                    face_lid, cell_lid);
+            if (!mesh->is_owned_cell(other))
+            {
+                ++local_partition_faces;
+            }
+        }
+    }
+    int global_partition_faces = 0;
+    Teuchos::reduceAll(
+        *communicator, Teuchos::REDUCE_SUM, 1,
+        &local_partition_faces, &global_partition_faces);
+    ASSERT_GT(global_partition_faces, 0);
+
+    FieldType solution(mesh, "hybrid_partition_solution");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        solution.set_owned_value(
+            cell_lid,
+            nonlinear_scalar(mesh->cell_centroid(cell_lid)));
+    }
+    solution.sync_ghosts();
+
+    auto boundary_condition =
+        [&](int batch_id, size_t in_batch_id)
+            -> SimpleFluid::BoundaryCondition
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        return {
+            SimpleFluid::BoundaryConditionType::Dirichlet,
+            nonlinear_scalar(mesh->face_centroid(face_lid))};
+    };
+    auto source =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    SimpleFluid::LinearSolverOptions options;
+    options.max_iterations = 500;
+    options.tolerance = 1.0e-12;
+
+    ASSERT_TRUE(
+        SimpleFluid::FVM::solve_non_orthogonal_diffusion<Pack>(
+            *mesh, diffusivity, boundary_condition, source, solution,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, 1,
+            options));
+    for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+    {
+        EXPECT_TRUE(std::isfinite(solution.local_value(
+            static_cast<MeshType::local_ordinal_type>(local))));
     }
 }
 
@@ -2926,6 +3178,92 @@ TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
             rhs_data[cell_lid],
             expected_rhs[static_cast<size_t>(cell_lid)],
             1.0e-12);
+    }
+}
+
+/**
+ * @brief Match physical-temperature implicit partition correction to explicit.
+ */
+TEST(FvmOperatorsTest,
+     PhysicalTemperatureNonOrthogonalTreatmentsMatchExplicitResidual)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType temperature(mesh, "temperature");
+    FieldType density(mesh, 1.0, "density");
+    FieldType heat_capacity(mesh, 1.0, "heat_capacity");
+    FieldType conductivity(mesh, 2.0, "conductivity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        temperature.set_owned_value(
+            cell_lid,
+            nonlinear_scalar(mesh->cell_centroid(cell_lid)));
+    }
+    temperature.sync_ghosts();
+    conductivity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "zero_fluxes");
+
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id)
+                .face_lids[in_batch_id];
+        return nonlinear_scalar(mesh->face_centroid(face_lid));
+    };
+    auto zero_source =
+        [](MeshType::local_ordinal_type)
+    {
+        return Pack::scalar_type{};
+    };
+    auto assemble =
+        [&](SimpleFluid::FVM::NonOrthogonalTreatment treatment,
+            const FieldType* correction_field)
+    {
+        return SimpleFluid::FVM::
+            physical_temperature_transport_system<Pack>(
+                temperature, zero_fluxes, 1.0, density,
+                heat_capacity, conductivity, boundary_condition,
+                boundary_value, zero_source, treatment,
+                correction_field);
+    };
+
+    const auto explicit_system = assemble(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+        &temperature);
+    const auto implicit_system = assemble(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+        nullptr);
+    const auto hybrid_system = assemble(
+        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+        &temperature);
+    const auto explicit_action =
+        local_matrix_action(*explicit_system.matrix, temperature);
+    const auto implicit_action =
+        local_matrix_action(*implicit_system.matrix, temperature);
+    const auto hybrid_action =
+        local_matrix_action(*hybrid_system.matrix, temperature);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto explicit_residual =
+            explicit_action[owned]
+          - explicit_system.rhs->getData()[owned];
+        const auto implicit_residual =
+            implicit_action[owned]
+          - implicit_system.rhs->getData()[owned];
+        const auto hybrid_residual =
+            hybrid_action[owned]
+          - hybrid_system.rhs->getData()[owned];
+        EXPECT_NEAR(implicit_residual, explicit_residual, 1.0e-11);
+        EXPECT_NEAR(hybrid_residual, explicit_residual, 1.0e-11);
     }
 }
 

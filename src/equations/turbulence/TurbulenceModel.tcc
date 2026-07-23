@@ -18,6 +18,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -42,6 +44,11 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
     using wall_evaluation_type =
         std::variant<std::monostate, typename resolved_wall_type::Evaluation,
                      typename high_re_wall_type::Evaluation>;
+    struct wall_publication_type
+    {
+        wall_evaluation_type evaluation;
+        Arr<WallYPlusStatistics> statistics;
+    };
 
     State(SP<const mesh_type> mesh, const TurbulenceBoundaryConditionSet& boundary_conditions,
           const VectorBoundaryConditionMap& velocity_boundary_conditions,
@@ -51,6 +58,7 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
                          options.model == TurbulenceModelType::RealizableKEpsilon),
           menter_family(options.model == TurbulenceModelType::BSLKOmega ||
                         options.model == TurbulenceModelType::SSTKOmega),
+          wall_boundary_names(options.wall_options.boundary_names),
           closure(make_closure(options)),
           wall_treatment(make_wall_treatment(mesh, options, velocity_boundary_conditions)),
           k(mesh, static_cast<scalar_type>(options.initial_turbulent_kinetic_energy), "k"),
@@ -76,11 +84,23 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
           k_source(mesh, "k_explicit_source"), k_sink(mesh, "k_implicit_sink"),
           secondary_source(mesh, "turbulence_secondary_explicit_source"),
           secondary_sink(mesh, "turbulence_secondary_implicit_sink"),
+          buoyancy_production(mesh, scalar_type{},
+                              "buoyancy_production"),
+          candidate_buoyancy_production(
+              mesh, scalar_type{}, "buoyancy_production_candidate"),
           wall_distance(mesh, static_cast<scalar_type>(options.initial_wall_distance.value_or(1.0)),
                         "wall_distance"),
           wall_y_plus(mesh, scalar_type{}, "wall_y_plus"),
+          candidate_wall_y_plus(mesh, scalar_type{},
+                                "wall_y_plus_candidate"),
           wall_velocity(mesh, "turbulence_wall_velocity"),
-          velocity_gradient(mesh, "velocity_gradient"), k_gradient(mesh, "k_gradient"),
+          candidate_wall_velocity(
+              mesh, "turbulence_wall_velocity_candidate"),
+          velocity_gradient(mesh, "velocity_gradient"),
+          candidate_velocity_gradient(
+              mesh, "velocity_gradient_candidate"),
+          buoyancy_gradient(mesh, "turbulence_buoyancy_gradient"),
+          k_gradient(mesh, "k_gradient"),
           secondary_gradient(mesh, "turbulence_secondary_gradient"),
           candidate_k_gradient(mesh, "k_candidate_gradient"),
           candidate_secondary_gradient(mesh, "turbulence_secondary_candidate_gradient"),
@@ -135,6 +155,15 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
         if (options.wall_treatment != TurbulenceWallTreatmentType::None)
         {
             output_fields.emplace("wall_y_plus", &wall_y_plus);
+        }
+        if (menter_family)
+        {
+            output_fields.emplace("wall_distance", &wall_distance);
+        }
+        if (options.buoyancy_model != TurbulenceBuoyancyModel::None)
+        {
+            output_fields.emplace(
+                "buoyancy_production", &buoyancy_production);
         }
     }
 
@@ -199,7 +228,8 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
         const field_type& k_field, const velocity_field_type& velocity,
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const material_type& material, scalar_type reference_density,
-        scalar_type turbulent_prandtl_number) const
+        scalar_type turbulent_prandtl_number,
+        const wall_evaluation_type* accepted_evaluation = nullptr) const
     {
         wall_evaluation_type result;
         std::visit(
@@ -208,10 +238,16 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
                 using treatment_type = std::remove_cvref_t<decltype(treatment)>;
                 if constexpr (!std::is_same_v<treatment_type, std::monostate>)
                 {
+                    using evaluation_type = typename treatment_type::Evaluation;
+                    const auto* accepted =
+                        accepted_evaluation != nullptr
+                            ? std::get_if<evaluation_type>(accepted_evaluation)
+                            : nullptr;
                     result = treatment.evaluate(k_field, velocity,
                                                 velocity_boundary_cache, material,
                                                 reference_density,
-                                                turbulent_prandtl_number);
+                                                turbulent_prandtl_number,
+                                                accepted);
                 }
             },
             wall_treatment);
@@ -319,9 +355,74 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
             evaluation);
     }
 
-    void publish_wall_evaluation(wall_evaluation_type evaluation)
+    wall_publication_type
+    stage_wall_publication(wall_evaluation_type evaluation)
     {
-        for (size_t owned = 0; owned < wall_y_plus.num_owned_cells(); ++owned)
+        WallYPlusSamplesByPatch local_samples;
+        Arr<WallYPlusStatistics> statistics;
+        if (!wall_boundary_names.empty())
+        {
+            std::visit(
+                [&](const auto& values)
+                {
+                    using evaluation_type =
+                        std::remove_cvref_t<decltype(values)>;
+                    if constexpr (!std::is_same_v<
+                                      evaluation_type,
+                                      std::monostate>)
+                    {
+                        for (const auto& [batch_id, batch] :
+                             wall_y_plus.mesh().boundary_batches())
+                        {
+                            const auto& name =
+                                wall_y_plus.mesh()
+                                    .boundary_batch_name(batch_id);
+                            if (std::find(
+                                    wall_boundary_names.begin(),
+                                    wall_boundary_names.end(),
+                                    name)
+                                == wall_boundary_names.end())
+                            {
+                                continue;
+                            }
+                            auto& samples = local_samples[name];
+                            for (size_t in_batch_id = 0;
+                                 in_batch_id < batch.face_lids.size();
+                                 ++in_batch_id)
+                            {
+                                const auto face_lid =
+                                    batch.face_lids[in_batch_id];
+                                if (!wall_y_plus.mesh().is_owned_face(
+                                        face_lid)
+                                    || !values.contains_face(
+                                        batch_id, in_batch_id))
+                                {
+                                    continue;
+                                }
+                                samples.push_back(
+                                    {static_cast<real_t>(
+                                         values.face(
+                                             batch_id,
+                                             in_batch_id)
+                                             .y_plus),
+                                     wall_y_plus.mesh().face_area(
+                                         face_lid)});
+                            }
+                        }
+                    }
+                },
+                evaluation);
+            statistics =
+                reduce_wall_y_plus_statistics(
+                    *wall_y_plus.mesh()
+                         .owned_cell_map()
+                         ->getComm(),
+                    std::span<const std::string>{
+                        wall_boundary_names},
+                    local_samples);
+        }
+        for (size_t owned = 0;
+             owned < candidate_wall_y_plus.num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             const auto value = std::visit(
@@ -334,14 +435,34 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
                         return values.cell_y_plus(cell_lid).value_or(scalar_type{});
                 },
                 evaluation);
-            wall_y_plus.set_owned_value(cell_lid, value);
+            candidate_wall_y_plus.set_owned_value(cell_lid, value);
         }
-        wall_y_plus.sync_ghosts();
-        wall_evaluation = std::move(evaluation);
+        candidate_wall_y_plus.sync_ghosts();
+        return {std::move(evaluation), std::move(statistics)};
+    }
+
+    template<class Field>
+    static void publish_synced_field(
+        Field& accepted, const Field& candidate) noexcept
+    {
+        accepted.owned_data().update(
+            scalar_type{1}, candidate.owned_data(), scalar_type{0});
+        accepted.overlap_data().update(
+            scalar_type{1}, candidate.overlap_data(), scalar_type{0});
+    }
+
+    void publish_wall_publication(
+        wall_publication_type publication) noexcept
+    {
+        publish_synced_field(wall_y_plus, candidate_wall_y_plus);
+        wall_statistics = std::move(publication.statistics);
+        wall_evaluation = std::move(publication.evaluation);
     }
 
     bool epsilon_family;
     bool menter_family;
+    ArrString wall_boundary_names;
+    Arr<WallYPlusStatistics> wall_statistics;
     closure_type closure;
     wall_treatment_type wall_treatment;
     wall_evaluation_type wall_evaluation;
@@ -361,10 +482,16 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
     field_type k_sink;
     field_type secondary_source;
     field_type secondary_sink;
+    field_type buoyancy_production;
+    field_type candidate_buoyancy_production;
     field_type wall_distance;
     field_type wall_y_plus;
+    field_type candidate_wall_y_plus;
     velocity_field_type wall_velocity;
+    velocity_field_type candidate_wall_velocity;
     TensorCellField<Pack> velocity_gradient;
+    TensorCellField<Pack> candidate_velocity_gradient;
+    VectorCellField<Pack> buoyancy_gradient;
     VectorCellField<Pack> k_gradient;
     VectorCellField<Pack> secondary_gradient;
     VectorCellField<Pack> candidate_k_gradient;
@@ -463,6 +590,46 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
     turbulence_detail::require_uniform_integral(
         *d_mesh, static_cast<int>(options.wall_treatment),
         "Turbulence wall-treatment type");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(options.buoyancy_model),
+        "Turbulence buoyancy model");
+    turbulence_detail::require_uniform_real(
+        *d_mesh, options.buoyancy_coefficient,
+        "Turbulence buoyancy coefficient");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh,
+        static_cast<int>(
+            options.wall_distance_equation
+                .non_orthogonal_treatment),
+        "Turbulence wall-distance non-orthogonal treatment");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh,
+        options.wall_distance_equation.non_orthogonal_correctors,
+        "Turbulence wall-distance correctors");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh,
+        options.wall_distance_equation.linear_solver.max_iterations,
+        "Turbulence wall-distance maximum iterations");
+    turbulence_detail::require_uniform_real(
+        *d_mesh,
+        options.wall_distance_equation.linear_solver.tolerance,
+        "Turbulence wall-distance linear tolerance");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh,
+        options.wall_distance_equation.linear_solver.verbosity,
+        "Turbulence wall-distance linear verbosity");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh,
+        static_cast<int>(
+            options.wall_distance_equation.linear_solver.preconditioner),
+        "Turbulence wall-distance preconditioner");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh,
+        options.wall_distance_equation.linear_solver
+                .reuse_preconditioner
+            ? 1
+            : 0,
+        "Turbulence wall-distance preconditioner reuse");
     const real_t wall_scalar_options[] = {
         options.wall_options.c_mu,
         options.wall_options.kappa,
@@ -506,6 +673,21 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
         *d_mesh, "Active turbulence boundary-condition validation",
         [&]
         {
+            for (const auto& name : options.wall_distance_boundaries)
+            {
+                const auto velocity_condition =
+                    d_velocity_boundary_conditions.find(name);
+                if (velocity_condition
+                        == d_velocity_boundary_conditions.end()
+                    || velocity_condition->second.type
+                        != BoundaryConditionType::NoSlip)
+                {
+                    throw std::invalid_argument(
+                        "Wall-distance boundary '" + name
+                        + "' must be a no-slip velocity patch.");
+                }
+            }
+
             auto validate_scalar_boundaries =
                 [&](const BoundaryConditionMap& conditions, real_t floor,
                     std::string_view field_name)
@@ -575,6 +757,30 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
             d_mesh, configured_boundaries);
     auto candidate = std::make_unique<State>(d_mesh, d_boundary_conditions,
                                              d_velocity_boundary_conditions, options);
+    if (candidate->menter_family
+        && !options.initial_wall_distance.has_value())
+    {
+        auto wall_names = options.wall_distance_boundaries;
+        wall_names.insert(
+            wall_names.end(),
+            options.wall_options.boundary_names.begin(),
+            options.wall_options.boundary_names.end());
+        for (const auto& [name, condition] :
+             d_velocity_boundary_conditions)
+        {
+            if (condition.type == BoundaryConditionType::NoSlip)
+            {
+                wall_names.push_back(name);
+            }
+        }
+        std::sort(wall_names.begin(), wall_names.end());
+        wall_names.erase(
+            std::unique(wall_names.begin(), wall_names.end()),
+            wall_names.end());
+        PoissonWallDistanceEquation<Pack>{d_mesh}.solve(
+            wall_names, candidate->wall_distance,
+            options.wall_distance_equation);
+    }
     auto initial_wall_evaluation = candidate->evaluate_wall(
         candidate->k, candidate->wall_velocity,
         configured_velocity_boundary_cache, material, reference_density,
@@ -628,10 +834,132 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
     {
         candidate->secondary_gradient.sync_ghosts();
     }
-    stage_effective_properties(*candidate, candidate->nu_t, material, reference_density,
+
+    if (options.model == TurbulenceModelType::SSTKOmega)
+    {
+        auto initial_boundary_velocity =
+            [&](int batch_id, size_t in_batch_id) ->
+            typename velocity_field_type::vec_type
+        {
+            const auto& batch =
+                d_mesh->boundary_batches().at(batch_id);
+            const auto face_lid =
+                batch.face_lids.at(in_batch_id);
+            const auto type =
+                configured_velocity_boundary_cache.type.at(batch_id);
+            if (type == BoundaryConditionType::Slip)
+            {
+                return FVM::detail::slip_face_velocity(
+                    candidate->wall_velocity, face_lid);
+            }
+            if (type == BoundaryConditionType::Periodic)
+            {
+                return candidate->wall_velocity.local_value(
+                    d_mesh->owner_cell(face_lid));
+            }
+            if (type == BoundaryConditionType::Neumann)
+            {
+                return candidate->wall_velocity.local_value(
+                    d_mesh->owner_cell(face_lid));
+            }
+            return configured_velocity_boundary_cache.value
+                .at(batch_id)
+                .at(in_batch_id);
+        };
+        turbulence_detail::collective_local_validation(
+            *d_mesh, "Initial SST eddy-viscosity evaluation",
+            [&]
+            {
+                if (&material.dynamic_viscosity.mesh() != d_mesh.get())
+                {
+                    throw std::invalid_argument(
+                        "TurbulenceModel material field mesh mismatch.");
+                }
+                FVM::cell_gradient(
+                    candidate->wall_velocity,
+                    initial_boundary_velocity,
+                    candidate->velocity_gradient);
+                const auto& closure =
+                    std::get<SSTKOmegaEquation>(
+                        candidate->closure);
+                for (size_t owned = 0;
+                     owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto molecular_viscosity =
+                        static_cast<real_t>(
+                            material.dynamic_viscosity.value(
+                                cell_lid));
+                    if (!std::isfinite(molecular_viscosity)
+                        || molecular_viscosity < 0.0)
+                    {
+                        throw std::invalid_argument(
+                            "TurbulenceModel requires finite "
+                            "non-negative molecular viscosity.");
+                    }
+
+                    const auto gradient =
+                        candidate->velocity_gradient.value(cell_lid);
+                    real_t rotation_squared{};
+                    for (size_t row = 0; row < 3; ++row)
+                    {
+                        for (size_t column = 0; column < 3;
+                             ++column)
+                        {
+                            const auto gij = static_cast<real_t>(
+                                gradient[row].component(column));
+                            const auto gji = static_cast<real_t>(
+                                gradient[column].component(row));
+                            const auto wij = 0.5 * (gij - gji);
+                            rotation_squared += wij * wij;
+                        }
+                    }
+                    const auto k_gradient =
+                        candidate->k_gradient.value(cell_lid);
+                    const auto omega_gradient =
+                        candidate->secondary_gradient.value(cell_lid);
+                    const MenterKOmegaInvariants invariants{
+                        molecular_viscosity
+                            / static_cast<real_t>(reference_density),
+                        static_cast<real_t>(
+                            candidate->wall_distance.value(cell_lid)),
+                        static_cast<real_t>(
+                            k_gradient.dot(omega_gradient)),
+                        std::sqrt(2.0 * rotation_squared)};
+                    const auto nu_t =
+                        closure.turbulent_kinematic_viscosity(
+                            {static_cast<real_t>(
+                                 candidate->k.value(cell_lid)),
+                             static_cast<real_t>(
+                                 candidate->secondary.value(cell_lid))},
+                            invariants);
+                    if (!std::isfinite(nu_t) || nu_t < 0.0)
+                    {
+                        throw std::runtime_error(
+                            "Initial SST evaluation produced an "
+                            "invalid eddy viscosity.");
+                    }
+                    candidate->candidate_nu_t.set_owned_value(
+                        cell_lid,
+                        static_cast<scalar_type>(nu_t));
+                }
+            });
+        candidate->velocity_gradient.sync_ghosts();
+        candidate->candidate_nu_t.sync_ghosts();
+    }
+
+    stage_effective_properties(*candidate, candidate->candidate_nu_t, material,
+                               reference_density,
                                static_cast<scalar_type>(options.turbulent_prandtl_number));
+    auto initial_wall_publication =
+        candidate->stage_wall_publication(
+            std::move(initial_wall_evaluation));
+    State::publish_synced_field(
+        candidate->nu_t, candidate->candidate_nu_t);
     commit_effective_properties(*candidate);
-    candidate->publish_wall_evaluation(std::move(initial_wall_evaluation));
+    candidate->publish_wall_publication(
+        std::move(initial_wall_publication));
     d_wall_velocity_boundary_cache =
         std::move(configured_velocity_boundary_cache);
     d_options = options;
@@ -802,13 +1130,126 @@ void TurbulenceModel<Pack>::stage_effective_properties(
 template <TpetraTypePack Pack>
 void TurbulenceModel<Pack>::commit_effective_properties(State& state) const
 {
-    state.effective_dynamic_viscosity.owned_data().update(
-        scalar_type{1}, state.candidate_effective_dynamic_viscosity.owned_data(), scalar_type{0});
-    state.effective_thermal_conductivity.owned_data().update(
-        scalar_type{1}, state.candidate_effective_thermal_conductivity.owned_data(),
-        scalar_type{0});
-    state.effective_dynamic_viscosity.sync_ghosts();
-    state.effective_thermal_conductivity.sync_ghosts();
+    State::publish_synced_field(
+        state.effective_dynamic_viscosity,
+        state.candidate_effective_dynamic_viscosity);
+    State::publish_synced_field(
+        state.effective_thermal_conductivity,
+        state.candidate_effective_thermal_conductivity);
+}
+
+/**
+ * @brief Stage accepted-state BSL/SST eddy viscosity for new molecular data.
+ */
+template <TpetraTypePack Pack>
+void TurbulenceModel<Pack>::stage_menter_eddy_viscosity(
+    State& state, const field_type& wall_distance,
+    const material_type& material, scalar_type reference_density,
+    std::string_view context) const
+{
+    turbulence_detail::collective_local_validation(
+        *d_mesh, context,
+        [&]
+        {
+            if (!state.menter_family)
+            {
+                throw std::logic_error(
+                    "TurbulenceModel wall distance is available only for "
+                    "BSL or SST k-omega closures.");
+            }
+            if (&wall_distance.mesh() != d_mesh.get()
+                || &material.dynamic_viscosity.mesh() != d_mesh.get())
+            {
+                throw std::invalid_argument(
+                    "TurbulenceModel Menter refresh field mesh mismatch.");
+            }
+            if (!std::isfinite(reference_density)
+                || reference_density <= scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "TurbulenceModel Menter refresh requires a positive "
+                    "finite reference density.");
+            }
+
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                const auto molecular_viscosity =
+                    static_cast<real_t>(
+                        material.dynamic_viscosity.value(cell_lid));
+                if (!std::isfinite(molecular_viscosity)
+                    || molecular_viscosity < 0.0)
+                {
+                    throw std::invalid_argument(
+                        "TurbulenceModel Menter refresh requires finite "
+                        "non-negative molecular viscosity.");
+                }
+
+                const auto velocity_gradient =
+                    state.velocity_gradient.value(cell_lid);
+                real_t rotation_squared{};
+                for (size_t row = 0; row < 3; ++row)
+                {
+                    for (size_t column = 0; column < 3; ++column)
+                    {
+                        const auto gij = static_cast<real_t>(
+                            velocity_gradient[row].component(column));
+                        const auto gji = static_cast<real_t>(
+                            velocity_gradient[column].component(row));
+                        const auto wij = 0.5 * (gij - gji);
+                        rotation_squared += wij * wij;
+                    }
+                }
+                const KOmegaState local{
+                    static_cast<real_t>(state.k.value(cell_lid)),
+                    static_cast<real_t>(
+                        state.secondary.value(cell_lid))};
+                const auto k_gradient =
+                    state.k_gradient.value(cell_lid);
+                const auto omega_gradient =
+                    state.secondary_gradient.value(cell_lid);
+                const MenterKOmegaInvariants invariants{
+                    molecular_viscosity
+                        / static_cast<real_t>(reference_density),
+                    static_cast<real_t>(
+                        wall_distance.value(cell_lid)),
+                    static_cast<real_t>(
+                        k_gradient.dot(omega_gradient)),
+                    std::sqrt(2.0 * rotation_squared)};
+
+                real_t nu_t{};
+                if (d_options.model == TurbulenceModelType::BSLKOmega)
+                {
+                    nu_t = std::get<BSLKOmegaEquation>(
+                               state.closure)
+                               .turbulent_kinematic_viscosity(local);
+                }
+                else if (d_options.model
+                         == TurbulenceModelType::SSTKOmega)
+                {
+                    nu_t = std::get<SSTKOmegaEquation>(
+                               state.closure)
+                               .turbulent_kinematic_viscosity(
+                                   local, invariants);
+                }
+                else
+                {
+                    throw std::logic_error(
+                        "TurbulenceModel lost its active Menter closure.");
+                }
+                if (!std::isfinite(nu_t) || nu_t < 0.0)
+                {
+                    throw std::runtime_error(
+                        "TurbulenceModel Menter refresh produced an "
+                        "invalid eddy viscosity.");
+                }
+                state.candidate_nu_t.set_owned_value(
+                    cell_lid, static_cast<scalar_type>(nu_t));
+            }
+        });
+    state.candidate_nu_t.sync_ghosts();
 }
 
 /**
@@ -832,11 +1273,27 @@ void TurbulenceModel<Pack>::refresh_effective_properties(const material_type& ma
     auto wall_evaluation = state.evaluate_wall(
         state.k, state.wall_velocity, d_wall_velocity_boundary_cache,
         material, reference_density,
-        static_cast<scalar_type>(d_options.turbulent_prandtl_number));
-    stage_effective_properties(state, state.nu_t, material, reference_density,
+        static_cast<scalar_type>(d_options.turbulent_prandtl_number),
+        &state.wall_evaluation);
+    auto wall_publication =
+        state.stage_wall_publication(std::move(wall_evaluation));
+    const field_type* effective_nu_t = &state.nu_t;
+    if (state.menter_family)
+    {
+        stage_menter_eddy_viscosity(
+            state, state.wall_distance, material, reference_density,
+            "Turbulence Menter effective-property refresh");
+        effective_nu_t = &state.candidate_nu_t;
+    }
+    stage_effective_properties(state, *effective_nu_t, material,
+                               reference_density,
                                static_cast<scalar_type>(d_options.turbulent_prandtl_number));
+    if (state.menter_family)
+    {
+        State::publish_synced_field(state.nu_t, state.candidate_nu_t);
+    }
     commit_effective_properties(state);
-    state.publish_wall_evaluation(std::move(wall_evaluation));
+    state.publish_wall_publication(std::move(wall_publication));
 }
 
 /**
@@ -863,7 +1320,9 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                                     scalar_type time_step, const material_type& material,
                                     scalar_type reference_density,
                                     FVM::NonOrthogonalTreatment treatment,
-                                    const LinearSolverOptions& linear_options) -> LinearSolveSummary
+                                    const LinearSolverOptions& linear_options,
+                                    const TurbulenceBuoyancyContext<Pack>*
+                                        buoyancy_context) -> LinearSolveSummary
 {
     turbulence_detail::require_uniform_integral(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
@@ -876,6 +1335,36 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                                             "Turbulence time step");
     turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
+    const auto direct_buoyancy =
+        d_options.buoyancy_model
+        == TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, buoyancy_context != nullptr ? 1 : 0,
+        "Turbulence buoyancy-context presence");
+    if (direct_buoyancy && buoyancy_context != nullptr)
+    {
+        turbulence_detail::require_uniform_real(
+            *d_mesh,
+            static_cast<real_t>(
+                buoyancy_context->thermal_expansion),
+            "Turbulence thermal expansion");
+        turbulence_detail::require_uniform_real(
+            *d_mesh,
+            static_cast<real_t>(buoyancy_context->gravity.x),
+            "Turbulence gravity x");
+        turbulence_detail::require_uniform_real(
+            *d_mesh,
+            static_cast<real_t>(buoyancy_context->gravity.y),
+            "Turbulence gravity y");
+        turbulence_detail::require_uniform_real(
+            *d_mesh,
+            static_cast<real_t>(buoyancy_context->gravity.z),
+            "Turbulence gravity z");
+        turbulence_detail::require_uniform_integral(
+            *d_mesh,
+            buoyancy_context->density_feedback_enabled ? 1 : 0,
+            "Turbulence density-feedback mode");
+    }
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence advance input validation",
         [&]
@@ -894,6 +1383,47 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
             if (&material.dynamic_viscosity.mesh() != d_mesh.get())
             {
                 throw std::invalid_argument("TurbulenceModel material field mesh mismatch.");
+            }
+            if (direct_buoyancy)
+            {
+                if (buoyancy_context == nullptr)
+                {
+                    throw std::invalid_argument(
+                        "OpenFOAMBoussinesq turbulence production requires "
+                        "a buoyancy context.");
+                }
+                const auto& context = *buoyancy_context;
+                const auto finite_vector =
+                    std::isfinite(context.gravity.x)
+                    && std::isfinite(context.gravity.y)
+                    && std::isfinite(context.gravity.z);
+                if (!finite_vector
+                    || !std::isfinite(context.thermal_expansion)
+                    || context.thermal_expansion < scalar_type{})
+                {
+                    throw std::invalid_argument(
+                        "Turbulence buoyancy requires finite gravity and a "
+                        "finite non-negative thermal expansion.");
+                }
+                if (context.density_feedback_enabled)
+                {
+                    if (&material.density.mesh() != d_mesh.get())
+                    {
+                        throw std::invalid_argument(
+                            "Turbulence buoyancy density field mesh "
+                            "mismatch.");
+                    }
+                }
+                else if (context.temperature == nullptr
+                         || context.temperature_boundary_conditions
+                            == nullptr
+                         || &context.temperature->mesh() != d_mesh.get())
+                {
+                    throw std::invalid_argument(
+                        "Temperature-based turbulence buoyancy requires a "
+                        "temperature field and boundary map on the model "
+                        "mesh.");
+                }
             }
         });
     auto accepted_velocity_boundary_cache = velocity_boundary_cache;
@@ -934,7 +1464,8 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
     auto current_wall_evaluation = state.evaluate_wall(
         state.k, velocity, velocity_boundary_cache, material,
         reference_density,
-        static_cast<scalar_type>(d_options.turbulent_prandtl_number));
+        static_cast<scalar_type>(d_options.turbulent_prandtl_number),
+        &state.wall_evaluation);
     auto update_scalar_gradients =
         [&, this](const field_type& k_field, const field_type& secondary_field,
                   velocity_field_type& k_gradient,
@@ -993,12 +1524,38 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         *d_mesh, "Turbulence gradient reconstruction",
         [&]
         {
-            FVM::cell_gradient(velocity, boundary_velocity, state.velocity_gradient);
-            update_scalar_gradients(state.k, state.secondary, state.k_gradient,
-                                    state.secondary_gradient,
+            FVM::cell_gradient(
+                velocity, boundary_velocity,
+                state.candidate_velocity_gradient);
+            update_scalar_gradients(state.k, state.secondary,
+                                    state.candidate_k_gradient,
+                                    state.candidate_secondary_gradient,
                                     current_wall_evaluation);
+            if (direct_buoyancy)
+            {
+                if (buoyancy_context->density_feedback_enabled)
+                {
+                    FVM::cell_gradient(
+                        material.density, state.buoyancy_gradient);
+                }
+                else
+                {
+                    FVM::cell_gradient(
+                        *buoyancy_context->temperature,
+                        *buoyancy_context
+                             ->temperature_boundary_conditions,
+                        state.buoyancy_gradient);
+                }
+            }
         });
-    sync_scalar_gradients(state.k_gradient, state.secondary_gradient);
+    state.candidate_velocity_gradient.sync_ghosts();
+    sync_scalar_gradients(
+        state.candidate_k_gradient,
+        state.candidate_secondary_gradient);
+    if (direct_buoyancy)
+    {
+        state.buoyancy_gradient.sync_ghosts();
+    }
 
     auto evaluate_closure =
         [&, this](const field_type& k_field, const field_type& secondary_field,
@@ -1026,7 +1583,8 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                     const auto molecular_nu =
                         molecular_viscosity / static_cast<real_t>(reference_density);
 
-                    const auto gradient = state.velocity_gradient.value(cell_lid);
+                    const auto gradient =
+                        state.candidate_velocity_gradient.value(cell_lid);
                     std::array<std::array<real_t, 3>, 3> strain{};
                     real_t strain_squared{};
                     real_t rotation_squared{};
@@ -1062,6 +1620,7 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                     real_t implicit_k_sink{};
                     real_t explicit_secondary_source{};
                     real_t implicit_secondary_sink{};
+                    real_t buoyancy_secondary_multiplier{};
                     switch (d_options.model)
                     {
                     case TurbulenceModelType::StandardKEpsilon:
@@ -1083,6 +1642,8 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                         explicit_secondary_source =
                             coefficients.c_epsilon_1 * production * secondary / k;
                         implicit_secondary_sink = coefficients.c_epsilon_2 * secondary / k;
+                        buoyancy_secondary_multiplier =
+                            coefficients.c_epsilon_1 * secondary / k;
                         break;
                     }
                     case TurbulenceModelType::RNGKEpsilon:
@@ -1103,6 +1664,8 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                             std::max(-correction, 0.0);
                         implicit_secondary_sink = coefficients.c_epsilon_2 * secondary / k +
                                                   std::max(correction / secondary, 0.0);
+                        buoyancy_secondary_multiplier =
+                            coefficients.c_epsilon_1 * secondary / k;
                         break;
                     }
                     case TurbulenceModelType::RealizableKEpsilon:
@@ -1126,6 +1689,8 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                             strain_magnitude * secondary;
                         implicit_secondary_sink =
                             coefficients.c_epsilon_2 * secondary / epsilon_denominator;
+                        buoyancy_secondary_multiplier =
+                            1.44 * secondary / k;
                         break;
                     }
                     case TurbulenceModelType::StandardKOmega:
@@ -1142,6 +1707,10 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                         implicit_k_sink = coefficients.beta_star * secondary;
                         explicit_secondary_source = coefficients.gamma * production * secondary / k;
                         implicit_secondary_sink = coefficients.beta * secondary;
+                        buoyancy_secondary_multiplier =
+                            coefficients.gamma
+                          / (nu_t
+                             + std::numeric_limits<real_t>::epsilon());
                         break;
                     }
                     case TurbulenceModelType::BSLKOmega:
@@ -1172,6 +1741,10 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                                                         std::max(cross_diffusion, 0.0);
                             implicit_secondary_sink = coefficients.beta * secondary +
                                                       std::max(-cross_diffusion / secondary, 0.0);
+                            buoyancy_secondary_multiplier =
+                                coefficients.gamma
+                              / (nu_t
+                                 + std::numeric_limits<real_t>::epsilon());
                         }
                         else
                         {
@@ -1191,11 +1764,121 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                                                         std::max(cross_diffusion, 0.0);
                             implicit_secondary_sink = coefficients.beta * secondary +
                                                       std::max(-cross_diffusion / secondary, 0.0);
+                            buoyancy_secondary_multiplier =
+                                coefficients.gamma
+                              / (nu_t
+                                 + std::numeric_limits<real_t>::epsilon());
                         }
                         break;
                     }
                     case TurbulenceModelType::Laminar:
                         throw std::logic_error("TurbulenceModel lost its active closure.");
+                    }
+
+                    real_t local_buoyancy_production{};
+                    if (direct_buoyancy)
+                    {
+                        const auto gradient =
+                            state.buoyancy_gradient.value(cell_lid);
+                        const auto gravity = buoyancy_context->gravity;
+                        const auto gravity_dot_gradient =
+                            static_cast<real_t>(
+                                gravity.dot(gradient));
+                        const auto turbulent_thermal_diffusivity =
+                            nu_t / d_options.turbulent_prandtl_number;
+                        if (buoyancy_context->density_feedback_enabled)
+                        {
+                            local_buoyancy_production =
+                                -d_options.buoyancy_coefficient
+                              * turbulent_thermal_diffusivity
+                              * gravity_dot_gradient
+                              / static_cast<real_t>(reference_density);
+                        }
+                        else
+                        {
+                            local_buoyancy_production =
+                                d_options.buoyancy_coefficient
+                              * static_cast<real_t>(
+                                    buoyancy_context->thermal_expansion)
+                              * turbulent_thermal_diffusivity
+                              * gravity_dot_gradient;
+                        }
+
+                        real_t c3 = 1.0;
+                        if (state.epsilon_family)
+                        {
+                            const auto gravity_magnitude =
+                                std::sqrt(
+                                    static_cast<real_t>(
+                                        gravity.dot(gravity)));
+                            if (gravity_magnitude
+                                <= std::numeric_limits<real_t>::epsilon())
+                            {
+                                c3 = 0.0;
+                            }
+                            else
+                            {
+                                const auto velocity_value =
+                                    velocity.value(cell_lid);
+                                const auto parallel =
+                                    static_cast<real_t>(
+                                        velocity_value.dot(gravity))
+                                    / gravity_magnitude;
+                                const auto velocity_squared =
+                                    static_cast<real_t>(
+                                        velocity_value.dot(
+                                            velocity_value));
+                                const auto perpendicular =
+                                    std::sqrt(std::max(
+                                        velocity_squared
+                                      - parallel * parallel,
+                                        real_t{}));
+                                const auto parallel_magnitude =
+                                    std::abs(parallel);
+                                // Match OpenFOAM's incompressible
+                                // fv::buoyancyTurbSource.  Its Boussinesq
+                                // temperature source uses
+                                // tanh(|U_perpendicular + SMALL|
+                                //      / |U_parallel|), which is the
+                                // opposite orientation convention from the
+                                // compressible buoyantKEpsilon model.
+                                c3 =
+                                    parallel_magnitude
+                                        <= std::numeric_limits<
+                                               real_t>::epsilon()
+                                      ? real_t{1}
+                                      : std::tanh(
+                                            (perpendicular
+                                             + std::numeric_limits<
+                                                   real_t>::epsilon())
+                                            / parallel_magnitude);
+                            }
+                        }
+
+                        const auto secondary_buoyancy =
+                            buoyancy_secondary_multiplier
+                          * c3
+                          * local_buoyancy_production;
+                        if (local_buoyancy_production >= 0.0)
+                        {
+                            explicit_k_source +=
+                                local_buoyancy_production;
+                        }
+                        else
+                        {
+                            implicit_k_sink +=
+                                -local_buoyancy_production / k;
+                        }
+                        if (secondary_buoyancy >= 0.0)
+                        {
+                            explicit_secondary_source +=
+                                secondary_buoyancy;
+                        }
+                        else
+                        {
+                            implicit_secondary_sink +=
+                                -secondary_buoyancy / secondary;
+                        }
                     }
 
                     const real_t values[] = {nu_t,
@@ -1204,7 +1887,8 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                                              explicit_k_source,
                                              implicit_k_sink,
                                              explicit_secondary_source,
-                                             implicit_secondary_sink};
+                                             implicit_secondary_sink,
+                                             local_buoyancy_production};
                     for (const auto value : values)
                     {
                         if (!std::isfinite(value))
@@ -1235,14 +1919,20 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                         cell_lid, static_cast<scalar_type>(explicit_secondary_source));
                     state.secondary_sink.set_owned_value(
                         cell_lid, static_cast<scalar_type>(implicit_secondary_sink));
+                    state.candidate_buoyancy_production.set_owned_value(
+                        cell_lid,
+                        static_cast<scalar_type>(
+                            local_buoyancy_production));
                 }
             });
         state.candidate_nu_t.sync_ghosts();
         state.k_diffusivity.sync_ghosts();
         state.secondary_diffusivity.sync_ghosts();
+        state.candidate_buoyancy_production.sync_ghosts();
     };
-    evaluate_closure(state.k, state.secondary, state.k_gradient,
-                     state.secondary_gradient, current_wall_evaluation);
+    evaluate_closure(
+        state.k, state.secondary, state.candidate_k_gradient,
+        state.candidate_secondary_gradient, current_wall_evaluation);
 
     auto k_source = [&](local_ordinal_type cell_lid) { return state.k_source.value(cell_lid); };
     auto k_sink = [&](local_ordinal_type cell_lid) { return state.k_sink.value(cell_lid); };
@@ -1322,7 +2012,11 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
     auto candidate_wall_evaluation = state.evaluate_wall(
         state.candidate_k, velocity, velocity_boundary_cache, material,
         reference_density,
-        static_cast<scalar_type>(d_options.turbulent_prandtl_number));
+        static_cast<scalar_type>(d_options.turbulent_prandtl_number),
+        &state.wall_evaluation);
+    auto candidate_wall_publication =
+        state.stage_wall_publication(
+            std::move(candidate_wall_evaluation));
 
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence candidate-gradient reconstruction",
@@ -1331,76 +2025,115 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
             update_scalar_gradients(state.candidate_k, state.candidate_secondary,
                                     state.candidate_k_gradient,
                                     state.candidate_secondary_gradient,
-                                    candidate_wall_evaluation);
+                                    candidate_wall_publication.evaluation);
         });
     sync_scalar_gradients(state.candidate_k_gradient,
                           state.candidate_secondary_gradient);
     evaluate_closure(state.candidate_k, state.candidate_secondary,
                      state.candidate_k_gradient,
                      state.candidate_secondary_gradient,
-                     candidate_wall_evaluation);
+                     candidate_wall_publication.evaluation);
     stage_effective_properties(state, state.candidate_nu_t, material, reference_density,
                                static_cast<scalar_type>(d_options.turbulent_prandtl_number));
+    state.candidate_wall_velocity.owned_data().update(
+        scalar_type{1}, velocity.owned_data(), scalar_type{0});
+    state.candidate_wall_velocity.overlap_data().update(
+        scalar_type{1}, velocity.overlap_data(), scalar_type{0});
 
     // Publish only after both solves and all derived-field validation pass.
-    state.k.owned_data().update(scalar_type{1}, state.candidate_k.owned_data(), scalar_type{0});
-    state.secondary.owned_data().update(scalar_type{1}, state.candidate_secondary.owned_data(),
-                                        scalar_type{0});
-    state.nu_t.owned_data().update(scalar_type{1}, state.candidate_nu_t.owned_data(),
-                                   scalar_type{0});
-    state.k_gradient.owned_data().update(
-        scalar_type{1}, state.candidate_k_gradient.owned_data(), scalar_type{0});
+    State::publish_synced_field(state.k, state.candidate_k);
+    State::publish_synced_field(
+        state.secondary, state.candidate_secondary);
+    State::publish_synced_field(state.nu_t, state.candidate_nu_t);
+    State::publish_synced_field(
+        state.buoyancy_production,
+        state.candidate_buoyancy_production);
+    State::publish_synced_field(
+        state.k_gradient, state.candidate_k_gradient);
     if (state.menter_family)
     {
-        state.secondary_gradient.owned_data().update(
-            scalar_type{1}, state.candidate_secondary_gradient.owned_data(), scalar_type{0});
+        State::publish_synced_field(
+            state.secondary_gradient,
+            state.candidate_secondary_gradient);
     }
-    state.k.sync_ghosts();
-    state.secondary.sync_ghosts();
-    state.nu_t.sync_ghosts();
-    state.k_gradient.sync_ghosts();
-    if (state.menter_family)
-    {
-        state.secondary_gradient.sync_ghosts();
-    }
+    State::publish_synced_field(
+        state.velocity_gradient,
+        state.candidate_velocity_gradient);
     commit_effective_properties(state);
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        state.wall_velocity.set_owned_value(cell_lid, velocity.value(cell_lid));
-    }
-    state.wall_velocity.sync_ghosts();
-    state.publish_wall_evaluation(std::move(candidate_wall_evaluation));
+    State::publish_synced_field(
+        state.wall_velocity, state.candidate_wall_velocity);
+    state.publish_wall_publication(
+        std::move(candidate_wall_publication));
     d_wall_velocity_boundary_cache =
         std::move(accepted_velocity_boundary_cache);
     return summary;
 }
 
 /**
- * @brief Replace the positive wall-distance field used by Menter closures.
+ * @brief Transactionally replace the wall distance and its dependent properties.
  * @tparam Pack Tpetra type pack used by the model.
  * @param wall_distance Positive distance-to-wall field.
+ * @param material Current molecular material-property fields.
+ * @param reference_density Positive momentum reference density.
  * @throws std::logic_error if the model is disabled.
- * @throws std::invalid_argument if the field mesh or values are invalid.
+ * @throws std::logic_error if the active closure is not BSL or SST k-omega.
+ * @throws std::invalid_argument if a field mesh or physical value is invalid.
+ * @throws std::overflow_error if an effective-property calculation is invalid.
  */
 template <TpetraTypePack Pack>
-void TurbulenceModel<Pack>::set_wall_distance(const field_type& wall_distance)
+void TurbulenceModel<Pack>::set_wall_distance(
+    const field_type& wall_distance, const material_type& material,
+    scalar_type reference_density)
 {
     turbulence_detail::require_uniform_integral(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
     auto& state = require_state();
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(d_options.model),
+        "Active turbulence model type");
+    turbulence_detail::require_uniform_real(
+        *d_mesh, static_cast<real_t>(reference_density),
+        "Turbulence reference density");
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence wall-distance validation",
         [&]
         {
+            if (!state.menter_family)
+            {
+                throw std::logic_error(
+                    "TurbulenceModel wall distance is available only for "
+                    "BSL or SST k-omega closures.");
+            }
             if (&wall_distance.mesh() != d_mesh.get())
             {
                 throw std::invalid_argument("TurbulenceModel wall-distance mesh mismatch.");
             }
-            for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
+            const field_type* material_fields[] = {
+                &material.density,
+                &material.specific_heat_capacity,
+                &material.dynamic_viscosity,
+                &material.thermal_conductivity};
+            for (const auto* field : material_fields)
             {
-                const auto cell_lid = static_cast<local_ordinal_type>(local);
-                const auto value = wall_distance.local_value(cell_lid);
+                if (&field->mesh() != d_mesh.get())
+                {
+                    throw std::invalid_argument(
+                        "TurbulenceModel wall-distance material mesh mismatch.");
+                }
+            }
+            if (!std::isfinite(reference_density)
+                || reference_density <= scalar_type{})
+            {
+                throw std::invalid_argument(
+                    "TurbulenceModel wall-distance refresh requires a "
+                    "positive finite reference density.");
+            }
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                const auto value = wall_distance.value(cell_lid);
                 if (!std::isfinite(value) || value <= scalar_type{})
                 {
                     throw std::invalid_argument("TurbulenceModel wall distance must be finite and "
@@ -1408,9 +2141,46 @@ void TurbulenceModel<Pack>::set_wall_distance(const field_type& wall_distance)
                 }
             }
         });
-    state.wall_distance.owned_data().update(scalar_type{1}, wall_distance.owned_data(),
-                                            scalar_type{0});
-    state.wall_distance.sync_ghosts();
+
+    field_type candidate_wall_distance(
+        d_mesh, "wall_distance_candidate");
+    candidate_wall_distance.owned_data().update(
+        scalar_type{1}, wall_distance.owned_data(), scalar_type{0});
+    candidate_wall_distance.sync_ghosts();
+
+    turbulence_detail::collective_local_validation(
+        *d_mesh, "Synchronized turbulence wall-distance validation",
+        [&]
+        {
+            for (size_t local = 0;
+                 local < d_mesh->num_local_cells(); ++local)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(local);
+                const auto value =
+                    candidate_wall_distance.local_value(cell_lid);
+                if (!std::isfinite(value)
+                    || value <= scalar_type{})
+                {
+                    throw std::invalid_argument(
+                        "TurbulenceModel synchronized wall distance must "
+                        "be finite and positive.");
+                }
+            }
+        });
+    stage_menter_eddy_viscosity(
+        state, candidate_wall_distance, material, reference_density,
+        "Turbulence wall-distance closure evaluation");
+    stage_effective_properties(
+        state, state.candidate_nu_t, material, reference_density,
+        static_cast<scalar_type>(
+            d_options.turbulent_prandtl_number));
+
+    // Publish only after the replacement and every dependent field validate.
+    State::publish_synced_field(
+        state.wall_distance, candidate_wall_distance);
+    State::publish_synced_field(state.nu_t, state.candidate_nu_t);
+    commit_effective_properties(state);
 }
 
 /**
@@ -1496,6 +2266,26 @@ auto TurbulenceModel<Pack>::effective_thermal_conductivity() const -> const fiel
     return require_state().effective_thermal_conductivity;
 }
 
+template <TpetraTypePack Pack>
+auto TurbulenceModel<Pack>::buoyancy_production() const noexcept
+    -> const field_type*
+{
+    return d_state
+            && d_options.buoyancy_model
+               != TurbulenceBuoyancyModel::None
+         ? &d_state->buoyancy_production
+         : nullptr;
+}
+
+template <TpetraTypePack Pack>
+auto TurbulenceModel<Pack>::wall_distance() const noexcept
+    -> const field_type*
+{
+    return d_state && d_state->menter_family
+         ? &d_state->wall_distance
+         : nullptr;
+}
+
 /**
  * @brief Return sparse wall-face effective viscosities when available.
  * @tparam Pack Tpetra type pack used by the model.
@@ -1535,6 +2325,15 @@ auto TurbulenceModel<Pack>::wall_y_plus() const noexcept -> const field_type*
     return d_state && d_options.wall_treatment != TurbulenceWallTreatmentType::None
          ? &d_state->wall_y_plus
          : nullptr;
+}
+
+template <TpetraTypePack Pack>
+auto TurbulenceModel<Pack>::wall_y_plus_statistics() const noexcept
+    -> const Arr<WallYPlusStatistics>&
+{
+    return d_state
+         ? d_state->wall_statistics
+         : d_empty_wall_y_plus_statistics;
 }
 
 /**

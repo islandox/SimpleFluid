@@ -30,6 +30,20 @@ target_precompile_headers(SimpleFluidPch PRIVATE
 )
 set_target_properties(SimpleFluidPch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Executables are compiled without `-fPIC`, so GCC cannot reuse the
+# position-independent library PCH above.  Build one matching executable PCH
+# instead of regenerating the same header for every test and example target.
+add_library(SimpleFluidExecutablePch STATIC
+    ${PROJECT_SOURCE_DIR}/cmake/PrecompiledHeaders.cc
+)
+simplefluid_configure_library(SimpleFluidExecutablePch)
+target_precompile_headers(SimpleFluidExecutablePch PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"
+)
+set_target_properties(
+    SimpleFluidExecutablePch
+    PROPERTIES POSITION_INDEPENDENT_CODE OFF)
+
 # Low-level data structures and the runtime database.
 add_library(SimpleFluidCore STATIC
     dataclass/Database.cc
@@ -81,7 +95,11 @@ target_include_directories(SimpleFluidFVM INTERFACE
 )
 target_link_libraries(SimpleFluidFVM INTERFACE SimpleFluidFields)
 
-add_library(SimpleFluidEquations SHARED
+# Trilinos installations used by SimpleFluid commonly provide static archives
+# that are not position-independent (notably MueLu).  Keep the compiled upper
+# layers static so a clean build never embeds those archives in a shared object.
+# The public SimpleFluid::* aliases below preserve the downstream link API.
+add_library(SimpleFluidEquations STATIC
     equations/BoussinesqMomentumEquation.cc
     equations/IncompressibleMomentumEquation.cc
     equations/PressureProjectionEquation.cc
@@ -90,17 +108,20 @@ add_library(SimpleFluidEquations SHARED
     equations/turbulence/TurbulenceModel.cc
     equations/turbulence/TurbulenceScalarTransportEquation.cc
     equations/turbulence/TurbulenceWallTreatment.cc
+    equations/turbulence/WallDistanceEquation.cc
 )
 add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
 simplefluid_configure_library(SimpleFluidEquations)
+set_target_properties(SimpleFluidEquations PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(SimpleFluidEquations PUBLIC SimpleFluidFVM)
 
-add_library(SimpleFluidSolvers SHARED
+add_library(SimpleFluidSolvers STATIC
     solvers/BoussinesqSolver.cc
     solvers/FluidSolver.cc
 )
 add_library(SimpleFluid::Solvers ALIAS SimpleFluidSolvers)
 simplefluid_configure_library(SimpleFluidSolvers)
+set_target_properties(SimpleFluidSolvers PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidEquations)
 
 # Preserve the original target as an umbrella for downstream users.
@@ -120,7 +141,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cc")
     if(SIMPLEFLUID_MAIN_SIZE GREATER 0)
         add_executable(SimpleFluid_app main.cc)
         target_link_libraries(SimpleFluid_app PRIVATE SimpleFluid)
-        target_precompile_headers(SimpleFluid_app REUSE_FROM SimpleFluidPch)
+        target_precompile_headers(
+            SimpleFluid_app REUSE_FROM SimpleFluidExecutablePch)
     endif()
 endif()
 
@@ -130,7 +152,8 @@ function(simplefluid_lib_reuse_precompiled_header target_name)
 endfunction()
 
 function(simplefluid_exe_reuse_precompiled_header target_name)
-    target_precompile_headers(${target_name} REUSE_FROM SimpleFluidPch)
+    target_precompile_headers(
+        ${target_name} REUSE_FROM SimpleFluidExecutablePch)
 endfunction()
 
 add_subdirectory(dataclass/unitTests)

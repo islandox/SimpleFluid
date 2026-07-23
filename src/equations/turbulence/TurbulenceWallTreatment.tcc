@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <set>
 #include <stdexcept>
 #include <type_traits>
@@ -78,6 +77,15 @@ template <class Scalar, class Vec> struct FaceInputs
     Vec outward_normal{};
 };
 
+/** @brief Patch-local equivalent sand-grain roughness parameters. */
+template <class Scalar> struct RoughnessInputs
+{
+    TurbulenceWallRoughnessModel model = TurbulenceWallRoughnessModel::Smooth;
+    Scalar height{};
+    Scalar constant{};
+    Scalar accepted_turbulent_nu{};
+};
+
 /**
  * @brief Evaluate integration-to-the-wall SST boundary data.
  * @tparam Scalar Floating-point scalar type.
@@ -123,7 +131,8 @@ evaluate_resolved_sst_face(const FaceInputs<Scalar, Vec>& input,
 template <class Scalar, class Vec>
 TurbulenceWallFaceEvaluation<Scalar>
 evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
-                                 const TurbulenceWallTreatmentOptions& options, Scalar y_plus_lam)
+                                 const TurbulenceWallTreatmentOptions& options, Scalar y_plus_lam,
+                                 const RoughnessInputs<Scalar>& roughness)
 {
     TurbulenceWallFaceEvaluation<Scalar> result;
     result.turbulent_kinetic_energy = {BoundaryConditionType::Neumann, 0.0};
@@ -141,8 +150,50 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
     const auto wall_shear_gradient_magnitude =
         tangential_velocity.norm() / input.wall_distance;
 
+    result.y_plus = k_based_y_plus;
+    result.roughness_height = roughness.height;
+    result.roughness_constant = roughness.constant;
+    result.effective_log_layer_e = static_cast<Scalar>(options.log_layer_e);
+
+    const bool rough_wall = roughness.model == TurbulenceWallRoughnessModel::SandGrain;
     const bool in_log_layer = k_based_y_plus > y_plus_lam;
-    if (in_log_layer)
+    if (rough_wall)
+    {
+        const auto friction_velocity = c_mu_quarter * sqrt_k;
+        const auto roughness_height_plus =
+            friction_velocity * roughness.height / input.molecular_nu;
+        result.roughness_height_plus = roughness_height_plus;
+
+        Scalar roughness_multiplier{1};
+        if (roughness_height_plus > Scalar{2.25} &&
+            roughness_height_plus < Scalar{90})
+        {
+            const auto base =
+                (roughness_height_plus - Scalar{2.25}) / Scalar{87.75} +
+                roughness.constant * roughness_height_plus;
+            const auto exponent = std::sin(
+                Scalar{0.4258} * (std::log(roughness_height_plus) - Scalar{0.811}));
+            roughness_multiplier = std::pow(base, exponent);
+        }
+        else if (roughness_height_plus >= Scalar{90})
+        {
+            roughness_multiplier =
+                Scalar{1} + roughness.constant * roughness_height_plus;
+        }
+        result.effective_log_layer_e =
+            static_cast<Scalar>(options.log_layer_e) / roughness_multiplier;
+        const auto logarithm = std::log(std::max(
+            result.effective_log_layer_e * k_based_y_plus, Scalar{1.0001}));
+        const auto raw_nut =
+            input.molecular_nu *
+            (k_based_y_plus * static_cast<Scalar>(options.kappa) / logarithm - Scalar{1});
+        const auto limiter_scale =
+            std::max(roughness.accepted_turbulent_nu, input.molecular_nu);
+        result.turbulent_kinematic_viscosity =
+            std::max(std::min(raw_nut, Scalar{2} * limiter_scale),
+                     Scalar{0.5} * limiter_scale);
+    }
+    else if (in_log_layer)
     {
         const auto logarithm = std::log(
             std::max(static_cast<Scalar>(options.log_layer_e) * k_based_y_plus, Scalar{1.0001}));
@@ -150,23 +201,20 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
             input.molecular_nu *
             std::max(k_based_y_plus * static_cast<Scalar>(options.kappa) / logarithm - Scalar{1},
                      Scalar{});
-        result.y_plus = k_based_y_plus;
     }
     else
     {
         result.turbulent_kinematic_viscosity = Scalar{};
-        if (k_based_y_plus >= y_plus_lam)
-        {
-            result.y_plus = k_based_y_plus;
-        }
-        else
-        {
-            const auto effective_nu = input.molecular_nu + result.turbulent_kinematic_viscosity;
-            result.y_plus =
-                input.wall_distance *
-                std::sqrt(effective_nu * wall_shear_gradient_magnitude) /
-                input.molecular_nu;
-        }
+    }
+
+    if (k_based_y_plus < y_plus_lam)
+    {
+        const auto effective_nu =
+            input.molecular_nu + result.turbulent_kinematic_viscosity;
+        result.y_plus =
+            input.wall_distance *
+            std::sqrt(effective_nu * wall_shear_gradient_magnitude) /
+            input.molecular_nu;
     }
 
     if (!options.epsilon_low_re_correction || k_based_y_plus >= y_plus_lam)
@@ -191,6 +239,48 @@ evaluate_standard_k_epsilon_face(const FaceInputs<Scalar, Vec>& input,
         result.production_override = Scalar{};
     }
     return result;
+}
+
+/**
+ * @brief Jayatilleke log-layer offset for a molecular/turbulent Prandtl ratio.
+ */
+template <class Scalar> Scalar jayatilleke_p(Scalar prandtl_ratio)
+{
+    return Scalar{9.24} * (std::pow(prandtl_ratio, Scalar{0.75}) - Scalar{1}) *
+           (Scalar{1} + Scalar{0.28} * std::exp(Scalar{-0.007} * prandtl_ratio));
+}
+
+/**
+ * @brief Solve the Jayatilleke viscous/log thermal-layer intersection.
+ */
+template <class Scalar>
+Scalar jayatilleke_y_plus_thermal(Scalar p, Scalar prandtl_ratio, Scalar kappa,
+                                  Scalar log_layer_e)
+{
+    constexpr Scalar convergence_tolerance{0.01};
+    Scalar y_plus_thermal{11};
+    for (int iteration = 0; iteration < 10; ++iteration)
+    {
+        const auto logarithm =
+            std::log(log_layer_e * y_plus_thermal);
+        const auto residual =
+            y_plus_thermal - (logarithm / kappa + p) / prandtl_ratio;
+        const auto derivative =
+            Scalar{1} - Scalar{1} / (kappa * prandtl_ratio * y_plus_thermal);
+        const auto next_y_plus_thermal =
+            y_plus_thermal - residual / derivative;
+        if (next_y_plus_thermal <= Scalar{})
+        {
+            return Scalar{};
+        }
+        if (std::abs(next_y_plus_thermal - y_plus_thermal) <
+            convergence_tolerance)
+        {
+            return next_y_plus_thermal;
+        }
+        y_plus_thermal = next_y_plus_thermal;
+    }
+    return y_plus_thermal;
 }
 
 } // namespace turbulence_wall_detail
@@ -400,12 +490,76 @@ void TurbulenceWallTreatment<Pack, Policy>::initialize(
     turbulence_detail::require_uniform_real(*d_mesh, d_options.c_mu, "Turbulence wall Cmu");
     turbulence_detail::require_uniform_real(*d_mesh, d_options.kappa, "Turbulence wall kappa");
     turbulence_detail::require_uniform_real(*d_mesh, d_options.log_layer_e, "Turbulence wall E");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(d_options.thermal_wall_law),
+        "Turbulence thermal wall law");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, d_options.thermal_turbulent_prandtl_number.has_value() ? 1 : 0,
+        "Turbulence thermal wall Prandtl presence");
+    if (d_options.thermal_turbulent_prandtl_number.has_value())
+    {
+        turbulence_detail::require_uniform_real(
+            *d_mesh, *d_options.thermal_turbulent_prandtl_number,
+            "Turbulence thermal wall Prandtl number");
+    }
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(d_options.roughness_models.size()),
+        "Turbulence wall roughness-model count");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(d_options.roughness_heights.size()),
+        "Turbulence wall roughness-height count");
+    turbulence_detail::require_uniform_integral(
+        *d_mesh, static_cast<int>(d_options.roughness_constants.size()),
+        "Turbulence wall roughness-constant count");
+    for (size_t index = 0; index < d_options.roughness_models.size(); ++index)
+    {
+        turbulence_detail::require_uniform_integral(
+            *d_mesh, static_cast<int>(d_options.roughness_models[index]),
+            "Turbulence wall roughness model " + std::to_string(index));
+        turbulence_detail::require_uniform_real(
+            *d_mesh, d_options.roughness_heights[index],
+            "Turbulence wall roughness height " + std::to_string(index));
+        turbulence_detail::require_uniform_real(
+            *d_mesh, d_options.roughness_constants[index],
+            "Turbulence wall roughness constant " + std::to_string(index));
+    }
     turbulence_detail::require_uniform_integral(*d_mesh,
                                                 d_options.epsilon_low_re_correction ? 1 : 0,
                                                 "Turbulence wall epsilon low-Re correction");
     turbulence_detail::require_uniform_real(*d_mesh, d_options.sst_beta_1, "Turbulence wall beta1");
     turbulence_detail::require_uniform_real(*d_mesh, d_options.sst_omega_wall_coefficient,
                                             "Turbulence wall omega coefficient");
+
+    if constexpr (std::is_same_v<Policy, ResolvedLowReSSTWallPolicy>)
+    {
+        turbulence_detail::collective_local_validation(
+            *d_mesh, "Resolved SST wall-law compatibility",
+            [&]
+            {
+                const auto has_unresolved_roughness =
+                    std::any_of(d_options.roughness_models.begin(),
+                                d_options.roughness_models.end(),
+                                [](const auto model)
+                                {
+                                    return model !=
+                                           TurbulenceWallRoughnessModel::Smooth;
+                                }) ||
+                    std::any_of(d_options.roughness_heights.begin(),
+                                d_options.roughness_heights.end(),
+                                [](const auto height) { return height != 0.0; });
+                if (has_unresolved_roughness)
+                {
+                    throw std::invalid_argument(
+                        "Resolved low-Re SST does not accept an unresolved rough-wall law.");
+                }
+                if (d_options.thermal_wall_law !=
+                    TurbulenceThermalWallLaw::TurbulentPrandtl)
+                {
+                    throw std::invalid_argument(
+                        "Resolved low-Re SST requires molecular wall heat transport.");
+                }
+            });
+    }
 
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence wall boundary-condition validation",
@@ -423,8 +577,18 @@ void TurbulenceWallTreatment<Pack, Policy>::initialize(
             }
         });
 
-    for (const auto& name : d_options.boundary_names)
+    for (size_t boundary_index = 0;
+         boundary_index < d_options.boundary_names.size(); ++boundary_index)
     {
+        const auto& name = d_options.boundary_names[boundary_index];
+        const auto has_roughness = !d_options.roughness_models.empty();
+        const auto roughness_model =
+            has_roughness ? d_options.roughness_models[boundary_index]
+                          : TurbulenceWallRoughnessModel::Smooth;
+        const auto roughness_height =
+            has_roughness ? d_options.roughness_heights[boundary_index] : 0.0;
+        const auto roughness_constant =
+            has_roughness ? d_options.roughness_constants[boundary_index] : 0.0;
         int local_found = 0;
         for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
         {
@@ -432,7 +596,9 @@ void TurbulenceWallTreatment<Pack, Policy>::initialize(
             if (d_mesh->boundary_batch_name(batch_id) == name)
             {
                 ++local_found;
-                d_local_wall_batches.push_back({batch_id, name});
+                d_local_wall_batches.push_back(
+                    {batch_id, name, roughness_model, roughness_height,
+                     roughness_constant});
             }
         }
         int global_found = 0;
@@ -510,7 +676,8 @@ template <TpetraTypePack Pack, class Policy>
 auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
     const field_type& turbulent_kinetic_energy, const velocity_field_type& velocity,
     const velocity_boundary_cache_type& velocity_boundary_cache, const material_type& material,
-    scalar_type reference_density, scalar_type turbulent_prandtl_number) const -> Evaluation
+    scalar_type reference_density, scalar_type turbulent_prandtl_number,
+    const Evaluation* accepted_evaluation) const -> Evaluation
 {
     turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence wall reference density");
@@ -535,6 +702,12 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
             if (&velocity.mesh() != d_mesh.get())
             {
                 throw std::invalid_argument("Turbulence wall treatment velocity mesh mismatch.");
+            }
+            if (accepted_evaluation != nullptr &&
+                accepted_evaluation->mesh_ptr().get() != d_mesh.get())
+            {
+                throw std::invalid_argument(
+                    "Accepted turbulence wall evaluation mesh mismatch.");
             }
             if (!std::isfinite(reference_density) || reference_density <= scalar_type{} ||
                 !std::isfinite(turbulent_prandtl_number) ||
@@ -626,22 +799,95 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
                     }
                     else
                     {
+                        scalar_type accepted_turbulent_nu{};
+                        if (accepted_evaluation != nullptr &&
+                            accepted_evaluation->contains_face(wall_batch.id, in_batch_id))
+                        {
+                            accepted_turbulent_nu =
+                                accepted_evaluation->face(wall_batch.id, in_batch_id)
+                                    .turbulent_kinematic_viscosity;
+                        }
                         face_result = turbulence_wall_detail::evaluate_standard_k_epsilon_face(
-                            inputs, d_options, static_cast<scalar_type>(d_y_plus_lam));
+                            inputs, d_options, static_cast<scalar_type>(d_y_plus_lam),
+                            {wall_batch.roughness_model,
+                             static_cast<scalar_type>(wall_batch.roughness_height),
+                             static_cast<scalar_type>(wall_batch.roughness_constant),
+                             accepted_turbulent_nu});
+                    }
+
+                    const auto wall_prandtl = static_cast<scalar_type>(
+                        d_options.thermal_turbulent_prandtl_number.value_or(
+                            static_cast<real_t>(turbulent_prandtl_number)));
+                    if constexpr (std::is_same_v<Policy,
+                                                 StandardHighReKEpsilonWallPolicy>)
+                    {
+                        if (d_options.thermal_wall_law ==
+                            TurbulenceThermalWallLaw::Jayatilleke)
+                        {
+                            if (molecular_conductivity <= scalar_type{})
+                            {
+                                throw std::invalid_argument(
+                                    "Jayatilleke wall treatment requires positive "
+                                    "molecular thermal conductivity.");
+                            }
+                            const auto molecular_prandtl =
+                                molecular_viscosity * heat_capacity /
+                                molecular_conductivity;
+                            const auto prandtl_ratio =
+                                molecular_prandtl / wall_prandtl;
+                            face_result.jayatilleke_p =
+                                turbulence_wall_detail::jayatilleke_p(prandtl_ratio);
+                            face_result.thermal_y_plus_transition =
+                                turbulence_wall_detail::jayatilleke_y_plus_thermal(
+                                    face_result.jayatilleke_p, prandtl_ratio,
+                                    static_cast<scalar_type>(d_options.kappa),
+                                    static_cast<scalar_type>(d_options.log_layer_e));
+                            if (face_result.y_plus >
+                                face_result.thermal_y_plus_transition)
+                            {
+                                const auto temperature_plus =
+                                    wall_prandtl *
+                                    (std::log(std::max(
+                                         static_cast<scalar_type>(
+                                             d_options.log_layer_e) *
+                                             face_result.y_plus,
+                                         scalar_type{1.0001})) /
+                                         static_cast<scalar_type>(d_options.kappa) +
+                                     face_result.jayatilleke_p);
+                                face_result.turbulent_thermal_diffusivity =
+                                    molecular_nu *
+                                    std::max(face_result.y_plus / temperature_plus -
+                                                 scalar_type{1} /
+                                                     molecular_prandtl,
+                                             scalar_type{});
+                            }
+                        }
+                        else
+                        {
+                            face_result.turbulent_thermal_diffusivity =
+                                face_result.turbulent_kinematic_viscosity /
+                                wall_prandtl;
+                        }
                     }
 
                     face_result.effective_dynamic_viscosity =
                         molecular_viscosity +
                         reference_density * face_result.turbulent_kinematic_viscosity;
                     face_result.effective_thermal_conductivity =
-                        molecular_conductivity + density * heat_capacity *
-                                                     face_result.turbulent_kinematic_viscosity /
-                                                     turbulent_prandtl_number;
+                        molecular_conductivity +
+                        density * heat_capacity *
+                            face_result.turbulent_thermal_diffusivity;
 
                     const scalar_type finite_values[] = {
                         face_result.wall_distance,
                         face_result.y_plus,
+                        face_result.roughness_height,
+                        face_result.roughness_constant,
+                        face_result.roughness_height_plus,
+                        face_result.effective_log_layer_e,
                         face_result.turbulent_kinematic_viscosity,
+                        face_result.turbulent_thermal_diffusivity,
+                        face_result.thermal_y_plus_transition,
                         face_result.effective_dynamic_viscosity,
                         face_result.effective_thermal_conductivity,
                         static_cast<scalar_type>(face_result.turbulent_kinetic_energy.value),
@@ -653,6 +899,12 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
                             throw std::overflow_error("Turbulence wall treatment produced "
                                                       "a non-finite or negative value.");
                         }
+                    }
+                    if (!std::isfinite(face_result.jayatilleke_p))
+                    {
+                        throw std::overflow_error(
+                            "Turbulence wall treatment produced a non-finite "
+                            "Jayatilleke offset.");
                     }
                     if ((face_result.secondary_constraint.has_value() &&
                          (!std::isfinite(*face_result.secondary_constraint) ||

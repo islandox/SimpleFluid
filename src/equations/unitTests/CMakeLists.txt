@@ -101,4 +101,24 @@ if(MPIEXEC_EXECUTABLE
     LABELS "mpi;turbulence"
     PROCESSORS 2
     TIMEOUT 120)
+
+  add_test(
+    NAME WallDistanceEquation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testWallDistanceEquation>")
+  set_tests_properties(WallDistanceEquation_2procs PROPERTIES
+    LABELS "mpi;turbulence;wall_distance"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME TurbulenceBuoyancy_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testTurbulenceBuoyancy>")
+  set_tests_properties(TurbulenceBuoyancy_2procs PROPERTIES
+    LABELS "mpi;turbulence;buoyancy"
+    PROCESSORS 2
+    TIMEOUT 120)
 endif()

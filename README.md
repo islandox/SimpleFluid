@@ -33,6 +33,7 @@ in part and remains under verification.**
 | Physical heat sources & material-property fields | ✅ |
 | Prescribed fission power-density profiles | ✅ |
 | Baseline ideal-gas radiolytic source | ✅ |
+| Six two-equation RANS closures and wall treatments | ✅ |
 | Scalar void, boiling, feedback, and precursor infrastructure | 🚧 |
 | Two-population radiolytic-bubble model | 🚧 |
 | TH/neutronics multiphysics coupling | ⬜ |
@@ -133,6 +134,32 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - `BelosLinearSolver` — unified interface to Trilinos iterative solvers
 - Runtime residual reporting for momentum, pressure, and continuity
 - Named volumetric heat sources and updateable physical material fields
+
+### RANS Turbulence and Wall Treatment
+
+- Runtime standard, RNG, and realizable k-epsilon plus standard, BSL, and SST
+  k-omega closures, with laminar mode retaining no turbulence state
+- Automatic distributed Poisson wall distance for BSL/SST; an explicit
+  positive uniform override remains available for controlled comparisons
+- Resolved low-Re SST treatment with smooth walls and molecular wall heat
+  transport
+- Standard high-Re k-epsilon treatment with smooth or equivalent sand-grain
+  roughness and either constant turbulent-Prandtl or Jayatilleke heat transfer
+- Optional signed OpenFOAM-style Boussinesq production,
+  $G_b=C_b\beta(\nu_t/Pr_t)\mathbf{g}\cdot\nabla T$, with stable production
+  and destruction splitting in both transported equations; the epsilon C3
+  orientation follows OpenFOAM's incompressible `buoyancyTurbSource`, not its
+  opposite compressible `buoyantKEpsilon` convention
+- Globally reduced per-patch y+ statistics and a rebuild-only boundary-layer
+  controller with damping, height bounds, and distributed mesh-quality gates
+
+The principal database selectors are `turbulence_model`, `wall_treatment`,
+`wall_boundaries`, `wall_distance_boundaries`,
+`wall_distance_non_orthogonal_treatment`, `wall_roughness_model`,
+`wall_roughness_heights`, `wall_roughness_constants`, `wall_thermal_law`, and
+`turbulence_buoyancy_model`. Roughness arrays are aligned with
+`wall_boundaries`. Automatic distance always includes every configured no-slip
+velocity patch; explicit names augment that set and must also be no-slip.
 
 ### FVM Operators
 

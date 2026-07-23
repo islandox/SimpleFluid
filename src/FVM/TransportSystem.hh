@@ -19,14 +19,18 @@
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_RCP.hpp>
 
 #include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +50,121 @@ struct PreparedTransportMatrix
     Teuchos::RCP<typename Pack::matrix_type> matrix;
     bool reused = false;
 };
+
+/**
+ * @brief Validated matrix/RHS fractions for a non-orthogonal treatment.
+ * @tparam Scalar Scalar type used by the transport system.
+ */
+template<class Scalar>
+struct NonOrthogonalTransportWeights
+{
+    Scalar implicit{};
+    Scalar explicit_{};
+};
+
+/**
+ * @brief Collectively validate the lagged-field and treatment selection.
+ *
+ * Partition-gradient reconstruction synchronizes a gradient field. Every
+ * rank must therefore differentiate the same category of input field and
+ * enter the same explicit, implicit, or hybrid branch. The field-state code
+ * also folds mesh validation into the same packed reduction so a foreign
+ * field on one rank cannot make only that rank throw before another enters
+ * a gradient synchronization.
+ *
+ * @tparam Pack Tpetra type pack defining the communicator and scalar type.
+ * @tparam Field Transported cell-field type.
+ * @param mesh Mesh shared by the transported and correction fields.
+ * @param treatment Requested non-orthogonal treatment.
+ * @param correction_field Optional lagged correction field.
+ * @param context Assembly routine name used in diagnostics.
+ * @return Validated implicit and explicit treatment fractions.
+ * @throws std::invalid_argument collectively if the treatment is invalid,
+ *         ranks disagree on the treatment or correction-field selection, or
+ *         a supplied correction field belongs to another mesh.
+ */
+template<TpetraTypePack Pack, class Field>
+NonOrthogonalTransportWeights<typename Pack::scalar_type>
+validate_non_orthogonal_transport_selection(
+    const Mesh<Pack>& mesh,
+    NonOrthogonalTreatment treatment,
+    const Field* correction_field,
+    std::string_view context)
+{
+    using scalar_type = typename Pack::scalar_type;
+
+    int treatment_state = 3;
+    switch (treatment)
+    {
+        case NonOrthogonalTreatment::Explicit:
+            treatment_state = 0;
+            break;
+        case NonOrthogonalTreatment::Implicit:
+            treatment_state = 1;
+            break;
+        case NonOrthogonalTreatment::Hybrid:
+            treatment_state = 2;
+            break;
+    }
+
+    const int correction_state =
+        correction_field == nullptr
+            ? 0
+            : (&correction_field->mesh() == &mesh ? 1 : 2);
+    const int local_state[] = {
+        treatment_state,
+        -treatment_state,
+        correction_state,
+        -correction_state};
+    int maximum_state[4] = {
+        local_state[0], local_state[1],
+        local_state[2], local_state[3]};
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    if (communicator->getSize() > 1)
+    {
+        Teuchos::reduceAll(
+            *communicator, Teuchos::REDUCE_MAX, 4,
+            local_state, maximum_state);
+    }
+
+    const auto prefix = std::string(context);
+    if (maximum_state[0] == 3)
+    {
+        throw std::invalid_argument(
+            prefix + " received an unknown non-orthogonal treatment.");
+    }
+    if (-maximum_state[1] != maximum_state[0])
+    {
+        throw std::invalid_argument(
+            prefix + " requires every rank to use the same "
+                     "non-orthogonal treatment.");
+    }
+    if (-maximum_state[3] != maximum_state[2])
+    {
+        throw std::invalid_argument(
+            prefix + " requires every rank to select the same category "
+                     "of correction field.");
+    }
+    if (maximum_state[2] == 2)
+    {
+        throw std::invalid_argument(
+            prefix + " requires the correction field on the "
+                     "transported-field mesh.");
+    }
+
+    switch (treatment)
+    {
+        case NonOrthogonalTreatment::Explicit:
+            return {scalar_type{}, scalar_type{1}};
+        case NonOrthogonalTreatment::Implicit:
+            return {scalar_type{1}, scalar_type{}};
+        case NonOrthogonalTreatment::Hybrid:
+            return {scalar_type{0.5}, scalar_type{0.5}};
+    }
+
+    throw std::invalid_argument(
+        prefix + " received an unknown non-orthogonal treatment.");
+}
 
 /**
  * @brief Constrains a callable that supplies boundary-condition records.
@@ -954,7 +1073,8 @@ transport_system(const VectorCellField<Pack>& old_values,
  * @param boundary_diffusion Selects boundary faces with viscous diffusion.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If fields use different meshes, the time step
- *         is not positive, or diffusivity is negative.
+ *         is not positive, diffusivity is negative, or ranks disagree on the
+ *         correction-field or non-orthogonal-treatment selection.
  */
 template<TpetraTypePack Pack,
          class BoundaryValueProvider,
@@ -982,16 +1102,14 @@ non_orthogonal_transport_system(
     constexpr size_t num_components = VectorCellField<Pack>::num_components;
 
     const auto& mesh = old_values.mesh();
+    const auto non_orthogonal_weights =
+        detail::validate_non_orthogonal_transport_selection<Pack>(
+            mesh, treatment, correction_field,
+            "non_orthogonal_transport_system");
     if (&face_fluxes.mesh() != &mesh)
     {
         throw std::invalid_argument(
             "non_orthogonal_transport_system requires face fluxes on the old-value mesh.");
-    }
-    if (correction_field != nullptr
-        && &correction_field->mesh() != &mesh)
-    {
-        throw std::invalid_argument(
-            "non_orthogonal_transport_system requires correction field on the old-value mesh.");
     }
     if (time_step <= scalar_type{0})
     {
@@ -1004,21 +1122,8 @@ non_orthogonal_transport_system(
             "non_orthogonal_transport_system requires non-negative diffusivity.");
     }
 
-    scalar_type implicit_weight = 0.0;
-    scalar_type explicit_weight = 0.0;
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            explicit_weight = 1.0;
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            implicit_weight = 1.0;
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            implicit_weight = 0.5;
-            explicit_weight = 0.5;
-            break;
-    }
+    const auto implicit_weight = non_orthogonal_weights.implicit;
+    const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
     typename geometry_cache_type::interior_stencils_type
@@ -1042,6 +1147,19 @@ non_orthogonal_transport_system(
     const auto& boundary_locations = geometry_cache == nullptr
         ? local_boundary_locations
         : geometry_cache->boundary_locations();
+
+    std::unique_ptr<TensorCellField<Pack>> partition_gradients;
+    if (implicit_weight > scalar_type{})
+    {
+        partition_gradients = std::make_unique<TensorCellField<Pack>>(
+            old_values.mesh_ptr(),
+            "partition_vector_non_orthogonal_gradient");
+        const auto& lagged_field =
+            correction_field == nullptr ? old_values : *correction_field;
+        detail::evaluate_vector_interior_gradients(
+            lagged_field, gradient_stencils, *partition_gradients);
+        partition_gradients->sync_ghosts();
+    }
 
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
@@ -1168,10 +1286,30 @@ non_orthogonal_transport_system(
                     add_non_orthogonal_stencil(
                         other, scalar_type{0.5}, tangential_area);
                 }
-                else
+                else if (implicit_weight > scalar_type{})
                 {
                     add_non_orthogonal_stencil(
-                        cell_lid, scalar_type{1}, tangential_area);
+                        cell_lid, scalar_type{0.5}, tangential_area);
+                    if (partition_gradients == nullptr)
+                    {
+                        throw std::logic_error(
+                            "Partition-face implicit vector reconstruction "
+                            "requires synchronized remote gradients.");
+                    }
+                    const auto remote_gradient =
+                        partition_gradients->local_value(other);
+                    for (size_t component = 0;
+                         component < num_components;
+                         ++component)
+                    {
+                        rhs->sumIntoLocalValue(
+                            cell_lid,
+                            component,
+                            implicit_weight * diffusivity
+                          * scalar_type{0.5}
+                          * remote_gradient[component].dot(
+                                tangential_area));
+                    }
                 }
                 continue;
             }
@@ -1263,7 +1401,8 @@ non_orthogonal_transport_system(
  * @param fixed_cell_value Optional finite values imposed as exact identity rows.
  * @param boundary_diffusivity Optional compatible boundary-face coefficients.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
- * @throws std::invalid_argument If field/cache meshes are incompatible or a
+ * @throws std::invalid_argument If field/cache meshes are incompatible,
+ *         ranks disagree on correction-field or treatment selection, or a
  *         validated time step, coefficient, sink, or fixed value is invalid.
  * @throws std::runtime_error For a Robin boundary condition, which is not yet
  *         implemented by this assembly path.
@@ -1297,12 +1436,14 @@ weighted_scalar_transport_system(
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_values.mesh();
+    const auto non_orthogonal_weights =
+        detail::validate_non_orthogonal_transport_selection<Pack>(
+            mesh, treatment, correction_field,
+            "weighted_scalar_transport_system");
     if (&face_fluxes.mesh() != &mesh
         || &storage_weight.mesh() != &mesh
         || &advection_weight.mesh() != &mesh
-        || &diffusivity.mesh() != &mesh
-        || (correction_field != nullptr
-            && &correction_field->mesh() != &mesh))
+        || &diffusivity.mesh() != &mesh)
     {
         throw std::invalid_argument(
             "weighted_scalar_transport_system requires all fields on "
@@ -1345,21 +1486,8 @@ weighted_scalar_transport_system(
         }
     }
 
-    scalar_type implicit_weight{};
-    scalar_type explicit_weight{};
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            explicit_weight = scalar_type{1};
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            implicit_weight = scalar_type{1};
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            implicit_weight = scalar_type{0.5};
-            explicit_weight = scalar_type{0.5};
-            break;
-    }
+    const auto implicit_weight = non_orthogonal_weights.implicit;
+    const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
     typename geometry_cache_type::boundary_locations_type
@@ -1381,6 +1509,20 @@ weighted_scalar_transport_system(
     const auto& boundary_locations = geometry_cache == nullptr
         ? local_boundary_locations
         : geometry_cache->boundary_locations();
+
+    std::unique_ptr<VectorCellField<Pack>> partition_gradients;
+    if (implicit_weight > scalar_type{})
+    {
+        partition_gradients = std::make_unique<VectorCellField<Pack>>(
+            old_values.mesh_ptr(),
+            "partition_scalar_non_orthogonal_gradient");
+        const auto& lagged_field =
+            correction_field == nullptr ? old_values : *correction_field;
+        detail::evaluate_scalar_affine_gradients(
+            lagged_field, gradient_stencils, *partition_gradients);
+        partition_gradients->sync_ghosts();
+    }
+
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
@@ -1549,11 +1691,23 @@ weighted_scalar_transport_system(
                         other, scalar_type{0.5},
                         face_diffusivity, tangential_area);
                 }
-                else
+                else if (implicit_weight > scalar_type{})
                 {
                     add_non_orthogonal_stencil(
-                        cell_lid, scalar_type{1},
+                        cell_lid, scalar_type{0.5},
                         face_diffusivity, tangential_area);
+                    if (partition_gradients == nullptr)
+                    {
+                        throw std::logic_error(
+                            "Partition-face implicit scalar reconstruction "
+                            "requires synchronized remote gradients.");
+                    }
+                    rhs->sumIntoLocalValue(
+                        cell_lid,
+                        implicit_weight * face_diffusivity
+                      * scalar_type{0.5}
+                      * partition_gradients->local_value(other).dot(
+                            tangential_area));
                 }
                 continue;
             }
@@ -1683,7 +1837,8 @@ weighted_scalar_transport_system(
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_thermal_conductivity Optional compatible boundary-face values.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
- * @throws std::invalid_argument If field/cache meshes are incompatible or the
+ * @throws std::invalid_argument If field/cache meshes are incompatible,
+ *         ranks disagree on correction-field or treatment selection, or the
  *         time step is not positive.
  * @throws std::runtime_error For a Robin boundary condition, which is not yet
  *         implemented by this assembly path.
@@ -1713,12 +1868,14 @@ physical_temperature_transport_system(
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_temperature.mesh();
+    const auto non_orthogonal_weights =
+        detail::validate_non_orthogonal_transport_selection<Pack>(
+            mesh, treatment, correction_field,
+            "physical_temperature_transport_system");
     if (&face_fluxes.mesh() != &mesh
         || &density.mesh() != &mesh
         || &specific_heat_capacity.mesh() != &mesh
-        || &thermal_conductivity.mesh() != &mesh
-        || (correction_field != nullptr
-            && &correction_field->mesh() != &mesh))
+        || &thermal_conductivity.mesh() != &mesh)
     {
         throw std::invalid_argument(
             "physical_temperature_transport_system requires all fields on "
@@ -1747,21 +1904,8 @@ physical_temperature_transport_system(
             owner_cell_value);
     };
 
-    scalar_type implicit_weight{};
-    scalar_type explicit_weight{};
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            explicit_weight = scalar_type{1};
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            implicit_weight = scalar_type{1};
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            implicit_weight = scalar_type{0.5};
-            explicit_weight = scalar_type{0.5};
-            break;
-    }
+    const auto implicit_weight = non_orthogonal_weights.implicit;
+    const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
     typename geometry_cache_type::boundary_locations_type
@@ -1783,6 +1927,22 @@ physical_temperature_transport_system(
     const auto& boundary_locations = geometry_cache == nullptr
         ? local_boundary_locations
         : geometry_cache->boundary_locations();
+
+    std::unique_ptr<VectorCellField<Pack>> partition_gradients;
+    if (implicit_weight > scalar_type{})
+    {
+        partition_gradients = std::make_unique<VectorCellField<Pack>>(
+            old_temperature.mesh_ptr(),
+            "partition_temperature_non_orthogonal_gradient");
+        const auto& lagged_field =
+            correction_field == nullptr
+                ? old_temperature
+                : *correction_field;
+        detail::evaluate_scalar_affine_gradients(
+            lagged_field, gradient_stencils, *partition_gradients);
+        partition_gradients->sync_ghosts();
+    }
+
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
@@ -1936,11 +2096,24 @@ physical_temperature_transport_system(
                         other, scalar_type{0.5},
                         face_conductivity, tangential_area);
                 }
-                else
+                else if (implicit_weight > scalar_type{})
                 {
                     add_non_orthogonal_stencil(
-                        cell_lid, scalar_type{1},
+                        cell_lid, scalar_type{0.5},
                         face_conductivity, tangential_area);
+                    if (partition_gradients == nullptr)
+                    {
+                        throw std::logic_error(
+                            "Partition-face implicit temperature "
+                            "reconstruction requires synchronized remote "
+                            "gradients.");
+                    }
+                    rhs->sumIntoLocalValue(
+                        cell_lid,
+                        implicit_weight * face_conductivity
+                      * scalar_type{0.5}
+                      * partition_gradients->local_value(other).dot(
+                            tangential_area));
                 }
                 continue;
             }
@@ -2046,7 +2219,8 @@ physical_temperature_transport_system(
  * @param boundary_diffusion Selects boundary faces with viscous diffusion.
  * @param boundary_dynamic_viscosity Optional compatible boundary-face values.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
- * @throws std::invalid_argument If field/cache meshes are incompatible or the
+ * @throws std::invalid_argument If field/cache meshes are incompatible,
+ *         ranks disagree on correction-field or treatment selection, or the
  *         time step or reference density is not positive.
  */
 template<TpetraTypePack Pack,
@@ -2076,10 +2250,12 @@ physical_momentum_transport_system(
         VectorCellField<Pack>::num_components;
 
     const auto& mesh = old_velocity.mesh();
+    const auto non_orthogonal_weights =
+        detail::validate_non_orthogonal_transport_selection<Pack>(
+            mesh, treatment, correction_field,
+            "physical_momentum_transport_system");
     if (&face_fluxes.mesh() != &mesh
-        || &dynamic_viscosity.mesh() != &mesh
-        || (correction_field != nullptr
-            && &correction_field->mesh() != &mesh))
+        || &dynamic_viscosity.mesh() != &mesh)
     {
         throw std::invalid_argument(
             "physical_momentum_transport_system requires all fields on "
@@ -2109,21 +2285,8 @@ physical_momentum_transport_system(
             owner_cell_value);
     };
 
-    scalar_type implicit_weight{};
-    scalar_type explicit_weight{};
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            explicit_weight = scalar_type{1};
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            implicit_weight = scalar_type{1};
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            implicit_weight = scalar_type{0.5};
-            explicit_weight = scalar_type{0.5};
-            break;
-    }
+    const auto implicit_weight = non_orthogonal_weights.implicit;
+    const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
     typename geometry_cache_type::boundary_locations_type
@@ -2145,6 +2308,22 @@ physical_momentum_transport_system(
     const auto& boundary_locations = geometry_cache == nullptr
         ? local_boundary_locations
         : geometry_cache->boundary_locations();
+
+    std::unique_ptr<TensorCellField<Pack>> partition_gradients;
+    if (implicit_weight > scalar_type{})
+    {
+        partition_gradients = std::make_unique<TensorCellField<Pack>>(
+            old_velocity.mesh_ptr(),
+            "partition_momentum_non_orthogonal_gradient");
+        const auto& lagged_field =
+            correction_field == nullptr
+                ? old_velocity
+                : *correction_field;
+        detail::evaluate_vector_affine_gradients(
+            lagged_field, gradient_stencils, *partition_gradients);
+        partition_gradients->sync_ghosts();
+    }
+
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
@@ -2309,12 +2488,32 @@ physical_momentum_transport_system(
                         face_kinematic_viscosity,
                         tangential_area);
                 }
-                else
+                else if (implicit_weight > scalar_type{})
                 {
                     add_non_orthogonal_stencil(
-                        cell_lid, scalar_type{1},
+                        cell_lid, scalar_type{0.5},
                         face_kinematic_viscosity,
                         tangential_area);
+                    if (partition_gradients == nullptr)
+                    {
+                        throw std::logic_error(
+                            "Partition-face implicit momentum reconstruction "
+                            "requires synchronized remote gradients.");
+                    }
+                    const auto remote_gradient =
+                        partition_gradients->local_value(other);
+                    for (size_t component = 0;
+                         component < components;
+                         ++component)
+                    {
+                        rhs->sumIntoLocalValue(
+                            cell_lid,
+                            component,
+                            implicit_weight * face_kinematic_viscosity
+                          * scalar_type{0.5}
+                          * remote_gradient[component].dot(
+                                tangential_area));
+                    }
                 }
                 continue;
             }
