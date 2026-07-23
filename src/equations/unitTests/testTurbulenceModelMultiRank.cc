@@ -252,6 +252,55 @@ TEST(TurbulenceModelMultiRankTest, StandardKEpsilonAndSSTAdvanceUniformDistribut
     }
 }
 
+/**
+ * @brief Wall-distance replacement ignores stale caller ghosts and imports owned values.
+ */
+TEST(TurbulenceModelMultiRankTest, WallDistanceReplacementSynchronizesOwnedInputBeforeValidation)
+{
+    auto mesh = make_distributed_mesh();
+    require_multiple_ranks(*mesh);
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    Model model(mesh, boundaries);
+    SimpleFluid::TurbulenceModelOptions options;
+    options.model = SimpleFluid::TurbulenceModelType::SSTKOmega;
+    options.initial_turbulent_kinetic_energy = 0.1;
+    options.initial_specific_dissipation_rate = 1.0;
+    options.initial_wall_distance = 0.25;
+    model.configure(options, material, 1.0);
+
+    FieldType replacement(mesh, 0.4, "replacement_wall_distance");
+    long long local_stale_ghosts = 0;
+    for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(local);
+        if (mesh->is_owned_cell(cell_lid))
+        {
+            continue;
+        }
+        replacement.overlap_data().replaceLocalValue(
+            cell_lid, std::numeric_limits<double>::quiet_NaN());
+        ++local_stale_ghosts;
+    }
+    long long global_stale_ghosts = 0;
+    Teuchos::reduceAll(
+        *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1,
+        &local_stale_ghosts, &global_stale_ghosts);
+    ASSERT_GT(global_stale_ghosts, 0);
+
+    ASSERT_NO_THROW(
+        model.set_wall_distance(replacement, material, 1.0));
+    ASSERT_NE(model.wall_distance(), nullptr);
+    for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(local);
+        EXPECT_DOUBLE_EQ(
+            model.wall_distance()->local_value(cell_lid), 0.4);
+    }
+}
+
 /** @brief Verifies both wall treatments across partitioned wall batches. */
 TEST(TurbulenceModelMultiRankTest, BothWallTreatmentsAdvanceAcrossPartitionedWallBatches)
 {

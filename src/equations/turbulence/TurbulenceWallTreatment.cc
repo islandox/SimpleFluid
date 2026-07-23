@@ -19,6 +19,50 @@
 namespace SimpleFluid
 {
 
+std::string_view to_string(TurbulenceWallRoughnessModel model) noexcept
+{
+    switch (model)
+    {
+    case TurbulenceWallRoughnessModel::Smooth:
+        return "smooth";
+    case TurbulenceWallRoughnessModel::SandGrain:
+        return "sandGrain";
+    }
+    return "unknown";
+}
+
+TurbulenceWallRoughnessModel parse_turbulence_wall_roughness_model(
+    const std::string& value)
+{
+    if (value == "smooth" || value == "none")
+        return TurbulenceWallRoughnessModel::Smooth;
+    if (value == "sandGrain" || value == "sand-grain" || value == "rough")
+        return TurbulenceWallRoughnessModel::SandGrain;
+    throw std::invalid_argument("Unknown turbulence wall roughness model '" + value + "'.");
+}
+
+std::string_view to_string(TurbulenceThermalWallLaw law) noexcept
+{
+    switch (law)
+    {
+    case TurbulenceThermalWallLaw::TurbulentPrandtl:
+        return "turbulentPrandtl";
+    case TurbulenceThermalWallLaw::Jayatilleke:
+        return "Jayatilleke";
+    }
+    return "unknown";
+}
+
+TurbulenceThermalWallLaw parse_turbulence_thermal_wall_law(
+    const std::string& value)
+{
+    if (value == "turbulentPrandtl" || value == "constantPrt")
+        return TurbulenceThermalWallLaw::TurbulentPrandtl;
+    if (value == "Jayatilleke" || value == "jayatilleke")
+        return TurbulenceThermalWallLaw::Jayatilleke;
+    throw std::invalid_argument("Unknown turbulence thermal wall law '" + value + "'.");
+}
+
 /**
  * @brief Validate selected wall patches and policy-independent constants.
  * @param options Wall-treatment options to validate.
@@ -44,6 +88,51 @@ void validate_turbulence_wall_treatment_options(const TurbulenceWallTreatmentOpt
         }
     }
 
+    const auto has_roughness_configuration =
+        !options.roughness_models.empty() || !options.roughness_heights.empty() ||
+        !options.roughness_constants.empty();
+    if (has_roughness_configuration &&
+        (options.roughness_models.size() != options.boundary_names.size() ||
+         options.roughness_heights.size() != options.boundary_names.size() ||
+         options.roughness_constants.size() != options.boundary_names.size()))
+    {
+        throw std::invalid_argument(
+            "Turbulence wall roughness modes, heights, and constants must all be "
+            "patch aligned.");
+    }
+    for (size_t index = 0; index < options.roughness_heights.size(); ++index)
+    {
+        if (options.roughness_models[index] !=
+                TurbulenceWallRoughnessModel::Smooth &&
+            options.roughness_models[index] !=
+                TurbulenceWallRoughnessModel::SandGrain)
+        {
+            throw std::invalid_argument(
+                "Turbulence wall roughness model is invalid.");
+        }
+        const auto height = options.roughness_heights[index];
+        const auto constant = options.roughness_constants[index];
+        if (!std::isfinite(height) || height < 0.0 || !std::isfinite(constant) ||
+            constant < 0.0)
+        {
+            throw std::invalid_argument(
+                "Turbulence wall roughness heights and constants must be finite "
+                "and non-negative.");
+        }
+        if (options.roughness_models[index] == TurbulenceWallRoughnessModel::Smooth &&
+            height != 0.0)
+        {
+            throw std::invalid_argument(
+                "A smooth turbulence wall cannot have non-zero roughness height.");
+        }
+    }
+    if (options.thermal_wall_law !=
+            TurbulenceThermalWallLaw::TurbulentPrandtl &&
+        options.thermal_wall_law != TurbulenceThermalWallLaw::Jayatilleke)
+    {
+        throw std::invalid_argument("Turbulence thermal wall law is invalid.");
+    }
+
     const real_t constants[] = {options.c_mu, options.kappa, options.log_layer_e,
                                 options.sst_beta_1, options.sst_omega_wall_coefficient};
     for (const auto value : constants)
@@ -52,6 +141,13 @@ void validate_turbulence_wall_treatment_options(const TurbulenceWallTreatmentOpt
         {
             throw std::invalid_argument("Turbulence wall constants must be finite and positive.");
         }
+    }
+    if (options.thermal_turbulent_prandtl_number.has_value() &&
+        (!std::isfinite(*options.thermal_turbulent_prandtl_number) ||
+         *options.thermal_turbulent_prandtl_number <= 0.0))
+    {
+        throw std::invalid_argument(
+            "Turbulence thermal wall Prandtl number must be finite and positive.");
     }
 }
 
