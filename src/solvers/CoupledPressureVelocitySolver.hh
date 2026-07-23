@@ -1050,6 +1050,7 @@ public:
         d_cached_pressure_graph_signature.clear();
         d_preconditioner = Teuchos::null;
         d_belos_solver = Teuchos::null;
+        d_last_belos_matrix = nullptr;
         d_solution = Teuchos::null;
     }
 
@@ -1259,10 +1260,22 @@ private:
         const momentum_system_type& momentum,
         const pressure_graph_signature_type& pressure_signature) const
     {
+        // BlockGmresSolMgr retains its last iteration object after
+        // setProblem(null), and that object retains the previous coupled
+        // operator until the next solve rebuilds the iteration.  Permit that
+        // one dormant internal owner, but do not mutate a matrix still held
+        // by a caller through a previously returned system.
+        const auto dormant_belos_owns_cached_matrix =
+            !d_belos_solver.is_null()
+            && d_last_belos_matrix
+                   == d_cached_system.matrix.getRawPtr();
+        const auto internal_owner_limit =
+            dormant_belos_owns_cached_matrix ? 2 : 1;
         return d_rebuild_policy
                    == CoupledRebuildPolicy::OnOperatorGraphChange
             && !d_cached_system.matrix.is_null()
-            && d_cached_system.matrix.strong_count() == 1
+            && d_cached_system.matrix.strong_count()
+                   <= internal_owner_limit
             && momentum.matrix->getCrsGraph().getRawPtr()
                == d_cached_momentum_graph
             && pressure_signature == d_cached_pressure_graph_signature;
@@ -2024,6 +2037,7 @@ public:
         }
         const auto converged =
             d_belos_solver->solve() == Belos::Converged;
+        d_last_belos_matrix = system.matrix.getRawPtr();
         const auto iterations = d_belos_solver->getNumIters();
         const auto achieved_tolerance = d_belos_solver->achievedTol();
         d_cache_statistics.preconditioner_scratch_allocations +=
@@ -2074,6 +2088,7 @@ private:
         d_cached_pressure_graph_signature;
     mutable Teuchos::RCP<preconditioner_type> d_preconditioner;
     mutable Teuchos::RCP<solver_type> d_belos_solver;
+    mutable const matrix_type* d_last_belos_matrix = nullptr;
     mutable Teuchos::RCP<vector_type> d_solution;
 };
 

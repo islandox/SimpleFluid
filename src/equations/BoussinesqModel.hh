@@ -867,6 +867,9 @@ private:
             "nu_t",
             "mu_eff",
             "lambda_eff",
+            "wall_distance",
+            "wall_y_plus",
+            "buoyancy_production",
             "qdot_fission"};
         return reserved.contains(name);
     }

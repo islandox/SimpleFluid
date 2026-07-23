@@ -32,6 +32,7 @@ verification items below mean the foundation as a whole is not yet complete.
   - [x] Explicit non-orthogonal correction
   - [x] Fully implicit non-orthogonal diffusion
   - [x] Hybrid implicit/explicit non-orthogonal treatment
+  - [x] MPI partition-face implicit gradients with synchronized remote halves
   - [x] Scalar/vector transport systems
   - [x] Boundary-condition-aware diffusion in transport systems
   - [x] First-order upwind convection
@@ -98,6 +99,15 @@ mistaken for foundation or Phase 9 completion.
 - [x] Couple eddy viscosity to momentum and gradient-diffusion turbulent
       transport to temperature.
 - [x] Add resolved low-Re SST and standard high-Re k-epsilon wall treatments.
+- [x] Add smooth/sand-grain high-Re momentum wall laws, constant-Prandtl and
+      Jayatilleke thermal wall laws, and resolved-SST compatibility checks.
+- [x] Add distributed Poisson wall distance with configurable non-orthogonal
+      and linear-solver controls; BSL/SST automatically include every no-slip
+      wall.
+- [x] Add globally reduced wall-y+ diagnostics and a rebuild-only
+      boundary-layer adaptation driver with mesh-quality rejection.
+- [x] Couple signed OpenFOAM-style Boussinesq production/destruction into both
+      transported turbulence equations.
 - [x] Add formula, option-validation, transport, wall-treatment, solver, and
       MPI consistency tests.
 - [x] Add the transient `pitz_daily` standard-k-epsilon example and the
@@ -105,19 +115,14 @@ mistaken for foundation or Phase 9 completion.
 
 ### Remaining work and acceptance
 
-- [ ] Add a distributed wall-distance solver. BSL and SST currently require a
-      caller-supplied positive wall-distance field or configured constant.
-- [ ] Couple buoyancy production/destruction into the turbulence transport
-      equations; current production is shear-only.
 - [ ] Establish a converged pitzDaily reference configuration and checked-in
       velocity-profile tolerances. The current workflow reports errors and
       accepts optional user thresholds, but has no default pass/fail tolerance.
 - [ ] Add quantitative validation for every closure before describing the
       turbulence program as validated rather than implemented and tested.
 
-**Status:** substantial implementation with focused serial/MPI tests; the
-distributed wall-distance, buoyancy-production, and validation criteria remain
-open.
+**Status:** substantial implementation with focused serial/MPI tests;
+quantitative external-reference validation criteria remain open.
 
 ---
 
@@ -1161,13 +1166,11 @@ open model, turbulence-validation, and documentation criteria remain.
 - [x] Documentation clearly states which models are engineering placeholders and which are verified numerical capabilities.
 - [ ] Complete the Phase 18 key/default/unit reference.
 - [ ] Satisfy every acceptance criterion in the non-deferred roadmap phases.
-- [ ] Close the RANS wall-distance, buoyancy-production, and quantitative
-      validation criteria.
+- [ ] Close the remaining quantitative RANS validation criteria.
 
 ## Suggested immediate Codex task order
 
-1. Add a distributed RANS wall-distance solver, buoyancy production, and a
-   tolerance-gated pitzDaily reference case.
+1. Add a tolerance-gated pitzDaily reference case.
 2. Add the Phase 20 feedback-field registry, mapped-feedback export path, and placeholder outer-coupling driver.
 3. Add Phase 19 liquid-velocity precursor transport, precursor inventory diagnostics, and the corresponding conservative transport test.
 4. Decide whether Phase 14's optional scalar-void transport/slip path is still needed now that Phase 14.1 owns bubble transport; implement it or explicitly defer it.

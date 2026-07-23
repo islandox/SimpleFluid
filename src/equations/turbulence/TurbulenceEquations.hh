@@ -25,3 +25,4 @@
 #include "equations/turbulence/StandardKOmegaEquation.hh"
 #include "equations/turbulence/TurbulenceScalarTransportEquation.hh"
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
+#include "equations/turbulence/WallDistanceEquation.hh"

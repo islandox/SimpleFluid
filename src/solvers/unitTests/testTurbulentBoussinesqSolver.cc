@@ -11,10 +11,14 @@
 
 #include <gtest/gtest.h>
 
+#include "geometry/YPlusBoundaryLayerController.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -52,6 +56,22 @@ SimpleFluid::BoundaryConditionSet single_wall_box_boundaries()
     auto boundaries = slip_box_boundaries();
     boundaries.velocity["xmin"] = {
         SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    return boundaries;
+}
+
+/** @brief Build a side-heated box with a linear-temperature boundary set. */
+SimpleFluid::BoundaryConditionSet buoyant_box_boundaries()
+{
+    auto boundaries = slip_box_boundaries();
+    boundaries.temperature["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 2.0};
+    boundaries.temperature["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    for (const auto* name : {"ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.temperature[name] = {
+            SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    }
     return boundaries;
 }
 
@@ -200,6 +220,66 @@ TEST(TurbulentBoussinesqSolverTest,
     }
 }
 
+/**
+ * @brief Verify that the solver supplies its Boussinesq state to turbulence.
+ */
+TEST(TurbulentBoussinesqSolverTest,
+     PassesDirectBuoyancyContextThroughSegregatedAndCoupledSolvers)
+{
+    for (const auto coupling :
+         {SimpleFluid::PressureVelocityCoupling::PISO,
+          SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
+    {
+        SCOPED_TRACE(
+            "coupling=" + std::to_string(static_cast<int>(coupling)));
+        auto mesh = SimpleFluid::test::build_mesh<Pack>(
+            SimpleFluid::test::make_2x2x2_database());
+        auto time_options = stable_time_options(coupling);
+        time_options.time_step = 1.0e-4;
+        time_options.thermal_expansion = 1.0e-2;
+        time_options.gravity_x = -1.0;
+        SimpleFluid::LinearSolverOptions linear_options;
+        linear_options.tolerance = 1.0e-11;
+        linear_options.max_iterations = 400;
+        SimpleFluid::BoussinesqSolver<Pack> solver(
+            mesh, buoyant_box_boundaries(), time_options,
+            linear_options);
+        solver.initialize_heated_box(2.0, 0.0);
+
+        auto options = standard_k_epsilon_options();
+        options.buoyancy_model =
+            SimpleFluid::TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+        auto& model = solver.configure_turbulence(options);
+        ASSERT_NE(model.buoyancy_production(), nullptr);
+        ASSERT_NO_THROW(solver.step());
+        ASSERT_TRUE(solver.last_step_statistics().converged);
+
+        const auto* production = model.buoyancy_production();
+        ASSERT_NE(production, nullptr);
+        EXPECT_EQ(
+            model.output_fields().at("buoyancy_production"),
+            production);
+        double maximum_production = 0.0;
+        for (size_t owned = 0;
+             owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            const auto value = production->value(cell_lid);
+            EXPECT_TRUE(std::isfinite(value));
+            EXPECT_GE(value, 0.0);
+            maximum_production = std::max(maximum_production, value);
+        }
+        double global_maximum_production = 0.0;
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(),
+            Teuchos::REDUCE_MAX, 1,
+            &maximum_production,
+            &global_maximum_production);
+        EXPECT_GT(global_maximum_production, 0.0);
+    }
+}
+
 /** @brief Enable turbulence after a laminar implicit non-orthogonal step. */
 TEST(TurbulentBoussinesqSolverTest,
      EnablesTurbulenceAfterLaminarStepWithImplicitNonOrthogonalAssembly)
@@ -302,6 +382,14 @@ TEST(TurbulentBoussinesqSolverTest,
             ASSERT_NE(model.wall_y_plus(), nullptr);
             ASSERT_NE(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
             ASSERT_NE(model.effective_thermal_conductivity_boundary_cache(), nullptr);
+            const auto& wall_statistics =
+                model.wall_y_plus_statistics();
+            ASSERT_EQ(wall_statistics.size(), 1U);
+            EXPECT_EQ(
+                wall_statistics.front().boundary_name, "xmin");
+            EXPECT_EQ(
+                wall_statistics.front().global_face_count, 4U);
+            EXPECT_GT(wall_statistics.front().maximum, 0.0);
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
             {
                 const auto lid = static_cast<MeshType::local_ordinal_type>(owned);
@@ -314,6 +402,26 @@ TEST(TurbulentBoussinesqSolverTest,
                 ASSERT_NE(secondary, nullptr);
                 EXPECT_TRUE(std::isfinite(secondary->value(lid)));
                 EXPECT_GT(secondary->value(lid), 0.0);
+            }
+            if (wall_case.model
+                == SimpleFluid::TurbulenceModelType::SSTKOmega)
+            {
+                SimpleFluid::YPlusBoundaryLayerControllerOptions
+                    controller_options;
+                controller_options.target_y_plus =
+                    0.5 * wall_statistics.front().maximum;
+                controller_options.adaptation_exponent = 1.0;
+                controller_options.minimum_height_ratio = 0.1;
+                controller_options.relative_tolerance = 0.0;
+                const SimpleFluid::YPlusBoundaryLayerController
+                    controller(controller_options);
+                const auto update = controller.update_layer_specs(
+                    {{"xmin", 4, 0.5, 1.2}},
+                    wall_statistics);
+                ASSERT_EQ(update.layer_specs.size(), 1U);
+                EXPECT_NEAR(
+                    update.layer_specs.front().first_cell_height,
+                    0.25, 1.0e-14);
             }
         }
     }

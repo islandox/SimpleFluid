@@ -12,11 +12,32 @@
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "equations/turbulence/TurbulenceModel.tcc"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
 namespace SimpleFluid
 {
+
+namespace
+{
+
+LinearPreconditioner wall_distance_preconditioner_from_string(
+    const std::string& value)
+{
+    if (value == "none" || value == "off")
+    {
+        return LinearPreconditioner::None;
+    }
+    if (value == "MueLu" || value == "muelu")
+    {
+        return LinearPreconditioner::MueLu;
+    }
+    throw std::invalid_argument(
+        "Unknown wall-distance linear preconditioner '" + value + "'.");
+}
+
+} // namespace
 
 /**
  * @brief Return the canonical database name of a turbulence model.
@@ -108,6 +129,33 @@ TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
         "Unknown turbulence wall treatment '" + value + "'.");
 }
 
+std::string_view to_string(TurbulenceBuoyancyModel model) noexcept
+{
+    switch (model)
+    {
+    case TurbulenceBuoyancyModel::None:
+        return "none";
+    case TurbulenceBuoyancyModel::OpenFOAMBoussinesq:
+        return "OpenFOAMBoussinesq";
+    }
+    return "unknown";
+}
+
+TurbulenceBuoyancyModel parse_turbulence_buoyancy_model(
+    const std::string& value)
+{
+    if (value == "none" || value == "off")
+        return TurbulenceBuoyancyModel::None;
+    if (value == "OpenFOAMBoussinesq"
+        || value == "openFOAMBoussinesq"
+        || value == "boussinesq")
+    {
+        return TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+    }
+    throw std::invalid_argument(
+        "Unknown turbulence buoyancy model '" + value + "'.");
+}
+
 /**
  * @brief Validate model floors, wall distance, and closure-policy pairing.
  * @param options Turbulence model options to validate.
@@ -143,12 +191,50 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
     {
         throw std::invalid_argument("Turbulence wall distance must be finite and positive.");
     }
-    if ((options.model == TurbulenceModelType::BSLKOmega ||
-         options.model == TurbulenceModelType::SSTKOmega) &&
-        !options.initial_wall_distance.has_value())
+    if (!std::isfinite(options.buoyancy_coefficient)
+        || options.buoyancy_coefficient <= 0.0)
     {
-        throw std::invalid_argument("BSL and SST k-omega models require a positive wall distance.");
+        throw std::invalid_argument(
+            "Turbulence buoyancy coefficient must be finite and positive.");
     }
+    if (options.model == TurbulenceModelType::Laminar
+        && options.buoyancy_model != TurbulenceBuoyancyModel::None)
+    {
+        throw std::invalid_argument(
+            "A turbulence buoyancy model requires an active turbulence "
+            "closure.");
+    }
+    const auto menter_model =
+        options.model == TurbulenceModelType::BSLKOmega
+        || options.model == TurbulenceModelType::SSTKOmega;
+    if (!menter_model && !options.wall_distance_boundaries.empty())
+    {
+        throw std::invalid_argument(
+            "Wall-distance boundaries are only used by BSL and SST "
+            "k-omega models.");
+    }
+    auto sorted_wall_distance_boundaries = options.wall_distance_boundaries;
+    for (const auto& name : sorted_wall_distance_boundaries)
+    {
+        if (name.empty())
+        {
+            throw std::invalid_argument(
+                "Wall-distance boundary names cannot be empty.");
+        }
+    }
+    std::sort(
+        sorted_wall_distance_boundaries.begin(),
+        sorted_wall_distance_boundaries.end());
+    if (std::adjacent_find(
+            sorted_wall_distance_boundaries.begin(),
+            sorted_wall_distance_boundaries.end())
+        != sorted_wall_distance_boundaries.end())
+    {
+        throw std::invalid_argument(
+            "Wall-distance boundary names must be unique.");
+    }
+    validate_wall_distance_equation_options(
+        options.wall_distance_equation);
 
     switch (options.wall_treatment)
     {
@@ -166,6 +252,21 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
                 "resolvedLowReSST wall treatment requires the SST k-omega model.");
         }
         validate_turbulence_wall_treatment_options(options.wall_options);
+        if (options.wall_options.thermal_wall_law !=
+            TurbulenceThermalWallLaw::TurbulentPrandtl ||
+            std::any_of(options.wall_options.roughness_models.begin(),
+                        options.wall_options.roughness_models.end(),
+                        [](const auto model)
+                        {
+                            return model != TurbulenceWallRoughnessModel::Smooth;
+                        }) ||
+            std::any_of(options.wall_options.roughness_heights.begin(),
+                        options.wall_options.roughness_heights.end(),
+                        [](const auto height) { return height != 0.0; }))
+        {
+            throw std::invalid_argument(
+                "resolvedLowReSST requires smooth walls and molecular wall heat transport.");
+        }
         {
             auto coefficients = SSTKOmegaEquation::Coefficients{};
             coefficients.beta_1 = options.wall_options.sst_beta_1;
@@ -213,11 +314,85 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
     {
         options.initial_wall_distance = database.get<real_t>("wall_distance");
     }
+    if (database.contains("wall_distance_boundaries"))
+    {
+        options.wall_distance_boundaries =
+            database.get<ArrString>("wall_distance_boundaries");
+    }
+    options.wall_distance_equation.non_orthogonal_treatment =
+        FVM::non_orthogonal_treatment_from_string(
+            detail::database_value_or<std::string>(
+                database,
+                "wall_distance_non_orthogonal_treatment",
+                std::string{FVM::to_string(
+                    options.wall_distance_equation
+                        .non_orthogonal_treatment)}));
+    options.wall_distance_equation.non_orthogonal_correctors =
+        detail::database_value_or<int>(
+            database,
+            "wall_distance_non_orthogonal_correctors",
+            options.wall_distance_equation.non_orthogonal_correctors);
+    options.wall_distance_equation.linear_solver.max_iterations =
+        detail::database_value_or<int>(
+            database,
+            "wall_distance_linear_solver_max_iterations",
+            options.wall_distance_equation.linear_solver.max_iterations);
+    options.wall_distance_equation.linear_solver.tolerance =
+        detail::database_value_or<real_t>(
+            database,
+            "wall_distance_linear_solver_tolerance",
+            options.wall_distance_equation.linear_solver.tolerance);
+    options.wall_distance_equation.linear_solver.verbosity =
+        detail::database_value_or<int>(
+            database,
+            "wall_distance_linear_solver_verbosity",
+            options.wall_distance_equation.linear_solver.verbosity);
+    options.wall_distance_equation.linear_solver.preconditioner =
+        wall_distance_preconditioner_from_string(
+            detail::database_value_or<std::string>(
+                database,
+                "wall_distance_linear_solver_preconditioner",
+                std::string{to_string(
+                    options.wall_distance_equation.linear_solver
+                        .preconditioner)}));
+    options.wall_distance_equation.linear_solver.reuse_preconditioner =
+        detail::database_value_or<bool>(
+            database,
+            "wall_distance_linear_solver_reuse_preconditioner",
+            options.wall_distance_equation.linear_solver
+                .reuse_preconditioner);
+    options.buoyancy_model = parse_turbulence_buoyancy_model(
+        detail::database_value_or<std::string>(
+            database, "turbulence_buoyancy_model", "none"));
+    options.buoyancy_coefficient = detail::database_value_or<real_t>(
+        database, "turbulence_buoyancy_coefficient",
+        options.buoyancy_coefficient);
     options.wall_treatment = parse_turbulence_wall_treatment_type(
         detail::database_value_or<std::string>(database, "wall_treatment", "none"));
     if (database.contains("wall_boundaries"))
     {
         options.wall_options.boundary_names = database.get<ArrString>("wall_boundaries");
+    }
+    if (database.contains("wall_roughness_model"))
+    {
+        const auto configured_models =
+            database.get<ArrString>("wall_roughness_model");
+        options.wall_options.roughness_models.reserve(configured_models.size());
+        for (const auto& model : configured_models)
+        {
+            options.wall_options.roughness_models.push_back(
+                parse_turbulence_wall_roughness_model(model));
+        }
+    }
+    if (database.contains("wall_roughness_heights"))
+    {
+        options.wall_options.roughness_heights =
+            database.get<ArrReal>("wall_roughness_heights");
+    }
+    if (database.contains("wall_roughness_constants"))
+    {
+        options.wall_options.roughness_constants =
+            database.get<ArrReal>("wall_roughness_constants");
     }
     options.wall_options.c_mu = detail::database_value_or<real_t>(
         database, "wall_c_mu", options.wall_options.c_mu);
@@ -225,6 +400,15 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
         database, "wall_kappa", options.wall_options.kappa);
     options.wall_options.log_layer_e = detail::database_value_or<real_t>(
         database, "wall_e", options.wall_options.log_layer_e);
+    options.wall_options.thermal_wall_law = parse_turbulence_thermal_wall_law(
+        detail::database_value_or<std::string>(
+            database, "wall_thermal_law",
+            std::string{to_string(options.wall_options.thermal_wall_law)}));
+    if (database.contains("wall_thermal_turbulent_prandtl_number"))
+    {
+        options.wall_options.thermal_turbulent_prandtl_number =
+            database.get<real_t>("wall_thermal_turbulent_prandtl_number");
+    }
     options.wall_options.epsilon_low_re_correction =
         detail::database_value_or<bool>(
             database, "wall_epsilon_low_re_correction",

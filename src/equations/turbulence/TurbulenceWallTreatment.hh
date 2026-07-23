@@ -29,16 +29,66 @@
 namespace SimpleFluid
 {
 
+/** @brief Momentum wall-law roughness applied to a configured no-slip patch. */
+enum class TurbulenceWallRoughnessModel
+{
+    Smooth,
+    SandGrain
+};
+
+/** @brief Return the canonical database name of a wall roughness model. */
+std::string_view to_string(TurbulenceWallRoughnessModel model) noexcept;
+
+/** @brief Parse `smooth` or `sandGrain`. */
+TurbulenceWallRoughnessModel parse_turbulence_wall_roughness_model(
+    const std::string& value);
+
+/** @brief Thermal wall-law closure applied by a high-Re wall treatment. */
+enum class TurbulenceThermalWallLaw
+{
+    TurbulentPrandtl,
+    Jayatilleke
+};
+
+/** @brief Return the canonical database name of a thermal wall law. */
+std::string_view to_string(TurbulenceThermalWallLaw law) noexcept;
+
+/** @brief Parse `turbulentPrandtl` or `Jayatilleke`. */
+TurbulenceThermalWallLaw parse_turbulence_thermal_wall_law(
+    const std::string& value);
+
 /** @brief Constants and explicitly selected no-slip patches for wall treatment.
  */
 struct TurbulenceWallTreatmentOptions
 {
     ArrString boundary_names;
+    /**
+     * @brief Patch-aligned roughness modes.
+     *
+     * An empty vector selects smooth walls on every configured patch.
+     * Otherwise this, `roughness_heights`, and `roughness_constants` must each
+     * have exactly `boundary_names.size()` entries.
+     */
+    Arr<TurbulenceWallRoughnessModel> roughness_models;
+    /** Equivalent sand-grain roughness height @f$K_s@f$ [m], patch aligned. */
+    ArrReal roughness_heights;
+    /** Sand-grain roughness constant @f$C_s@f$, patch aligned. */
+    ArrReal roughness_constants;
     /** Standard k-epsilon Cmu, shared with that closure when selected. */
     real_t c_mu = 0.09;
     /** Wall-law kappa, also shared with the resolved SST closure. */
     real_t kappa = 0.41;
     real_t log_layer_e = 9.8; ///< Wall-law logarithmic-layer constant.
+    /** Thermal wall law; the default preserves the prior constant-Prt flux. */
+    TurbulenceThermalWallLaw thermal_wall_law =
+        TurbulenceThermalWallLaw::TurbulentPrandtl;
+    /**
+     * @brief Optional wall-specific turbulent Prandtl number.
+     *
+     * When absent, `evaluate()` uses the turbulence-model Prt passed by the
+     * caller. The same value enters the Jayatilleke correlation.
+     */
+    std::optional<real_t> thermal_turbulent_prandtl_number;
     /** Match OpenFOAM.com's optional epsilonWallFunction low-Re correction. */
     bool epsilon_low_re_correction = false;
     /** SST inner beta coefficient, shared with the paired closure. */
@@ -78,7 +128,14 @@ template <class Scalar> struct TurbulenceWallFaceEvaluation
     BoundaryCondition secondary{}; ///< Wall condition for @f$\epsilon@f$ or @f$\omega@f$.
     Scalar wall_distance{};
     Scalar y_plus{};
+    Scalar roughness_height{};
+    Scalar roughness_constant{};
+    Scalar roughness_height_plus{};
+    Scalar effective_log_layer_e{};
     Scalar turbulent_kinematic_viscosity{};
+    Scalar turbulent_thermal_diffusivity{};
+    Scalar jayatilleke_p{};
+    Scalar thermal_y_plus_transition{};
     Scalar effective_dynamic_viscosity{};
     Scalar effective_thermal_conductivity{};
     /** Per-face contribution before equal-count corner averaging. */
@@ -192,7 +249,8 @@ public:
                         const velocity_field_type& velocity,
                         const velocity_boundary_cache_type& velocity_boundary_cache,
                         const material_type& material, scalar_type reference_density,
-                        scalar_type turbulent_prandtl_number) const;
+                        scalar_type turbulent_prandtl_number,
+                        const Evaluation* accepted_evaluation = nullptr) const;
 
     const TurbulenceWallTreatmentOptions& options() const noexcept { return d_options; }
 
@@ -205,6 +263,10 @@ private:
     {
         int id{};
         std::string name;
+        TurbulenceWallRoughnessModel roughness_model =
+            TurbulenceWallRoughnessModel::Smooth;
+        real_t roughness_height{};
+        real_t roughness_constant{};
     };
 
     void initialize(const std::unordered_map<std::string, BoundaryConditionType>& boundary_types);
