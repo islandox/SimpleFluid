@@ -6,35 +6,37 @@ FoamFile
 }
 solvers
 {
-    p_rgh
+    "p_rgh.*"
     {
-        solver          GAMG;
-        tolerance       1e-8;
-        relTol          0.05;
-        smoother        GaussSeidel;
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-9;
+        relTol          0;
+        maxIter         2000;
     }
-    "(U|T)"
+    "(U|T).*"
     {
-        solver          smoothSolver;
-        smoother        symGaussSeidel;
-        tolerance       1e-8;
-        relTol          0.05;
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-9;
+        relTol          0;
+        maxIter         2000;
+    }
+    "(k|epsilon).*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-9;
+        relTol          0;
+        maxIter         2000;
     }
 }
-SIMPLE
+PIMPLE
 {
+    momentumPredictor          yes;
+    nOuterCorrectors           1;
+    nCorrectors                2;
     nNonOrthogonalCorrectors 0;
     pRefCell       0;
     pRefValue      0;
-    residualControl
-    {
-        p_rgh       1e-6;
-        U           1e-6;
-        T           1e-6;
-    }
-}
-relaxationFactors
-{
-    fields { p_rgh 0.3; }
-    equations { U 0.7; T 0.7; }
 }

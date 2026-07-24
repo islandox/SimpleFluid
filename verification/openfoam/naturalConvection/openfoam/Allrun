@@ -14,22 +14,31 @@ command -v blockMesh >/dev/null 2>&1 || {
     echo "OpenFOAM is not loaded; source its etc/bashrc first." >&2
     exit 1
 }
-command -v buoyantBoussinesqSimpleFoam >/dev/null 2>&1 || {
-    echo "This case requires buoyantBoussinesqSimpleFoam." >&2
+command -v buoyantBoussinesqPimpleFoam >/dev/null 2>&1 || {
+    echo "This case requires buoyantBoussinesqPimpleFoam." >&2
     exit 1
 }
 
 cd "$(dirname "$0")"
-rm -rf processor* postProcessing [1-9]* log.*
-foamDictionary system/decomposeParDict \
-    -entry numberOfSubdomains -set "$np"
+rm -rf processor* postProcessing [1-9]* 0.[0-9]* log.*
+default_np=6
+if [ "$np" -ne "$default_np" ]; then
+    restore_decomposition()
+    {
+        foamDictionary system/decomposeParDict \
+            -entry numberOfSubdomains -set "$default_np" >/dev/null
+    }
+    trap restore_decomposition EXIT HUP INT TERM
+    foamDictionary system/decomposeParDict \
+        -entry numberOfSubdomains -set "$np"
+fi
 blockMesh > log.blockMesh 2>&1
 checkMesh > log.checkMesh 2>&1
 
 if [ "$np" -eq 1 ]; then
-    buoyantBoussinesqSimpleFoam > log.solver 2>&1
+    buoyantBoussinesqPimpleFoam > log.solver 2>&1
 else
     decomposePar -force > log.decomposePar 2>&1
-    mpirun -np "$np" buoyantBoussinesqSimpleFoam -parallel > log.solver 2>&1
+    mpirun -np "$np" buoyantBoussinesqPimpleFoam -parallel > log.solver 2>&1
     reconstructPar -latestTime > log.reconstructPar 2>&1
 fi

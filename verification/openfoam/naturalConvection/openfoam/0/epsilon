@@ -1,0 +1,38 @@
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    object      epsilon;
+}
+dimensions      [0 2 -3 0 0 0 0];
+internalField   uniform 0.00075;
+boundaryField
+{
+    pipeWall
+    {
+        type    epsilonWallFunction;
+        value   uniform 0.00075;
+    }
+    tunnelWall
+    {
+        type    epsilonWallFunction;
+        value   uniform 0.00075;
+    }
+    downWall
+    {
+        type    epsilonWallFunction;
+        value   uniform 0.00075;
+    }
+    inlet
+    {
+        type    epsilonWallFunction;
+        value   uniform 0.00075;
+    }
+    outlet
+    {
+        type    epsilonWallFunction;
+        value   uniform 0.00075;
+    }
+    cyclicLeft  { type cyclic; }
+    cyclicRight { type cyclic; }
+}

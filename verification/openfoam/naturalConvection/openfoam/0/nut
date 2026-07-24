@@ -2,40 +2,35 @@ FoamFile
 {
     format      ascii;
     class       volScalarField;
-    object      alphat;
+    object      nut;
 }
 dimensions      [0 2 -1 0 0 0 0];
-internalField   uniform 0.00198529411765;
+internalField   uniform 0.0016875;
 boundaryField
 {
     pipeWall
     {
-        type    alphatJayatillekeWallFunction;
-        Prt     0.85;
+        type    nutkWallFunction;
         value   uniform 0;
     }
     tunnelWall
     {
-        type    alphatJayatillekeWallFunction;
-        Prt     0.85;
+        type    nutkWallFunction;
         value   uniform 0;
     }
     downWall
     {
-        type    alphatJayatillekeWallFunction;
-        Prt     0.85;
+        type    nutkWallFunction;
         value   uniform 0;
     }
     inlet
     {
-        type    alphatJayatillekeWallFunction;
-        Prt     0.85;
+        type    nutkWallFunction;
         value   uniform 0;
     }
     outlet
     {
-        type    alphatJayatillekeWallFunction;
-        Prt     0.85;
+        type    nutkWallFunction;
         value   uniform 0;
     }
     cyclicLeft  { type cyclic; }
