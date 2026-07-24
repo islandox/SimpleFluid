@@ -75,7 +75,7 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using source_type = std::function<scalar_type(local_ordinal_type)>;
-    /** @brief Pressure solve statistics and corrected face-flux field. */
+    /** @brief Pressure-correction solve and continuity statistics. */
     struct ProjectionResult
     {
         scalar_type pressure_correction = {}; ///< L2 norm of the Pa update.
@@ -110,6 +110,30 @@ public:
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         velocity_field_type& velocity);
 
+    /**
+     * @brief Project velocity while accumulating a physical pressure field.
+     *
+     * The predictor face flux is reconstructed from @p pressure before the
+     * homogeneous correction is solved.  On return, @p pressure includes the
+     * correction stored in @p pressure_correction, and
+     * corrected_face_fluxes() is consistent with both updated fields.
+     *
+     * @param[in,out] pressure Accumulated physical gauge pressure in Pa.
+     * @param[out] pressure_correction Physical pressure correction in Pa.
+     * @param time_step Positive time-step size.
+     * @param reference_density Positive pressure-normalization density.
+     * @param velocity_boundary_cache Cached velocity boundary conditions.
+     * @param[in,out] velocity Pressure-corrected cell velocity.
+     * @return Correction, continuity, and linear-solve statistics.
+     */
+    ProjectionResult project(
+        field_type& pressure,
+        field_type& pressure_correction,
+        scalar_type time_step,
+        scalar_type reference_density,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        velocity_field_type& velocity);
+
     ProjectionResult project(
         field_type& pressure,
         scalar_type time_step,
@@ -118,11 +142,31 @@ public:
         velocity_field_type& velocity,
         const source_type& right_hand_source);
 
+    /**
+     * @brief Return the total-pressure-consistent flux from the latest project().
+     *
+     * The reference remains valid until the next project() call or equation
+     * destruction.
+     */
+    const face_flux_field_type& corrected_face_fluxes() const noexcept
+    {
+        return d_cached_face_fluxes;
+    }
+
 private:
     friend struct detail::PressureProjectionEquationTestAccess<Pack>;
 
     static Teuchos::RCP<const map_type> require_owned_cell_map(
         const SP<const mesh_type>& mesh);
+
+    ProjectionResult project_impl(
+        field_type& pressure_correction,
+        scalar_type time_step,
+        scalar_type reference_density,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        velocity_field_type& velocity,
+        const source_type& right_hand_source,
+        field_type* accumulated_pressure);
 
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
