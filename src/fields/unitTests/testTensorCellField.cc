@@ -84,6 +84,30 @@ TEST(TensorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
     EXPECT_EQ(gradient.local_value(1), sample_tensor(10.0));
 }
 
+/** @brief Verifies row-major tensor components through bulk host views. */
+TEST(TensorCellFieldTest, ExposesRowMajorHostViews)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType gradient(mesh, "gradient");
+
+    {
+        auto owned = gradient.owned_write_view();
+        ASSERT_EQ(owned.extent(1), FieldType::num_components);
+        for (size_t component = 0;
+             component < FieldType::num_components; ++component)
+        {
+            owned(0, component) =
+                static_cast<double>(component + 1);
+        }
+    }
+
+    gradient.sync_ghosts();
+    const auto local = gradient.local_read_view();
+    EXPECT_DOUBLE_EQ(local(0, 0), 1.0);
+    EXPECT_DOUBLE_EQ(local(0, 5), 6.0);
+    EXPECT_DOUBLE_EQ(local(0, 8), 9.0);
+}
+
 /** @brief Verifies periodic synchronization copies all tensor components. */
 TEST(TensorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
 {

@@ -134,6 +134,7 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
         correction_field);
 
+    const auto old_velocity_values = old_velocity.local_read_view();
     auto boundary_value =
         [&](int boundary_id, local_ordinal_type boundary_face_id)
     {
@@ -150,8 +151,11 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
-            return old_velocity.local_value(
-                d_mesh->owner_cell(face_lid));
+            const auto owner = d_mesh->owner_cell(face_lid);
+            return typename velocity_field_type::vec_type{
+                old_velocity_values(owner, 0),
+                old_velocity_values(owner, 1),
+                old_velocity_values(owner, 2)};
         }
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
@@ -165,13 +169,42 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
             && type != BoundaryConditionType::Neumann;
     };
 
-    auto system = FVM::non_orthogonal_transport_system<Pack>(
-        old_velocity, face_fluxes, options.time_step,
-        options.kinematic_viscosity, boundary_value, right_hand_source,
-        options.non_orthogonal_treatment, correction_field,
-        d_cached_transport_matrix, boundary_diffusion,
-        &d_transport_geometry_cache);
+    const auto requires_non_orthogonal_graph =
+        options.non_orthogonal_treatment
+            != FVM::NonOrthogonalTreatment::Explicit;
+    if (requires_non_orthogonal_graph
+        && !d_cached_graph_supports_non_orthogonal_correction)
+    {
+        d_cached_transport_matrix = Teuchos::null;
+    }
+    auto system = [&]() -> system_type
+    {
+        try
+        {
+            return FVM::non_orthogonal_transport_system<Pack>(
+                old_velocity, face_fluxes, options.time_step,
+                options.kinematic_viscosity, boundary_value,
+                right_hand_source,
+                options.non_orthogonal_treatment, correction_field,
+                d_cached_transport_matrix, boundary_diffusion,
+                &d_transport_geometry_cache);
+        }
+        catch (...)
+        {
+            // A reused Tpetra matrix is left in resume-fill mode if
+            // assembly exits early.  Do not offer that partial matrix, or
+            // its graph-support claim, to the next assembly.
+            d_cached_transport_matrix = Teuchos::null;
+            d_cached_graph_supports_non_orthogonal_correction = false;
+            throw;
+        }
+    }();
     d_cached_transport_matrix = system.matrix;
+    if (requires_non_orthogonal_graph
+        && options.kinematic_viscosity > scalar_type{})
+    {
+        d_cached_graph_supports_non_orthogonal_correction = true;
+    }
     return system;
 }
 
@@ -240,11 +273,24 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
     if (&old_velocity == &velocity
         && options.n_non_orthogonal_correctors > 0)
     {
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            old_velocity_snapshot.set_value(
-                cell_lid, old_velocity.value(cell_lid));
+            const auto old_values = old_velocity.owned_read_view();
+            auto snapshot_values =
+                old_velocity_snapshot.owned_write_view();
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                for (size_t component = 0;
+                     component <
+                         velocity_field_type::num_components;
+                     ++component)
+                {
+                    snapshot_values(cell_lid, component) =
+                        old_values(cell_lid, component);
+                }
+            }
         }
         old_velocity_snapshot.sync_ghosts();
         transport_old_velocity = &old_velocity_snapshot;
@@ -283,21 +329,25 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
                 "did not converge.");
         }
 
-        for (size_t component = 0;
-             component < velocity_field_type::num_components;
-             ++component)
         {
-            const auto solution_data =
-                velocity.owned_data().getData(component);
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            const auto solution_values =
+                velocity.owned_read_view();
+            for (size_t component = 0;
+                 component < velocity_field_type::num_components;
+                 ++component)
             {
-                const auto cell_lid =
-                    static_cast<local_ordinal_type>(owned);
-                if (!std::isfinite(solution_data[cell_lid]))
+                for (size_t owned = 0;
+                     owned < d_mesh->num_owned_cells(); ++owned)
                 {
-                    throw std::runtime_error(
-                        "IncompressibleMomentumEquation velocity transport "
-                        "solve produced a non-finite value.");
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    if (!std::isfinite(
+                            solution_values(cell_lid, component)))
+                    {
+                        throw std::runtime_error(
+                            "IncompressibleMomentumEquation velocity "
+                            "transport solve produced a non-finite value.");
+                    }
                 }
             }
         }
@@ -364,6 +414,7 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
             "density.");
     }
 
+    const auto old_velocity_values = old_velocity.local_read_view();
     auto boundary_value =
         [&](int boundary_id, local_ordinal_type boundary_face_id)
     {
@@ -380,8 +431,11 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
-            return old_velocity.local_value(
-                d_mesh->owner_cell(face_lid));
+            const auto owner = d_mesh->owner_cell(face_lid);
+            return typename velocity_field_type::vec_type{
+                old_velocity_values(owner, 0),
+                old_velocity_values(owner, 1),
+                old_velocity_values(owner, 2)};
         }
         return velocity_boundary_cache.value.at(boundary_id)[face];
     };
@@ -400,11 +454,13 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         options.non_orthogonal_treatment
             != FVM::NonOrthogonalTreatment::Explicit;
     bool all_viscosities_positive = true;
+    const auto viscosity_values =
+        dynamic_viscosity.local_read_view();
     for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(local);
         all_viscosities_positive = all_viscosities_positive
-            && dynamic_viscosity.local_value(cell_lid) > scalar_type{};
+            && viscosity_values(cell_lid, 0) > scalar_type{};
     }
     if (requires_non_orthogonal_graph
         && !d_cached_physical_graph_supports_non_orthogonal_correction)
@@ -412,12 +468,26 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         d_cached_physical_transport_matrix = Teuchos::null;
     }
 
-    auto system = FVM::physical_momentum_transport_system<Pack>(
-        old_velocity, face_fluxes, options.time_step, dynamic_viscosity,
-        reference_density, boundary_value, acceleration_source,
-        options.non_orthogonal_treatment, correction_field,
-        d_cached_physical_transport_matrix, boundary_diffusion,
-        boundary_dynamic_viscosity, &d_transport_geometry_cache);
+    auto system = [&]() -> system_type
+    {
+        try
+        {
+            return FVM::physical_momentum_transport_system<Pack>(
+                old_velocity, face_fluxes, options.time_step,
+                dynamic_viscosity, reference_density, boundary_value,
+                acceleration_source, options.non_orthogonal_treatment,
+                correction_field, d_cached_physical_transport_matrix,
+                boundary_diffusion, boundary_dynamic_viscosity,
+                &d_transport_geometry_cache);
+        }
+        catch (...)
+        {
+            d_cached_physical_transport_matrix = Teuchos::null;
+            d_cached_physical_graph_supports_non_orthogonal_correction =
+                false;
+            throw;
+        }
+    }();
     d_cached_physical_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_viscosities_positive)
     {
@@ -466,10 +536,23 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
     if (&old_velocity == &velocity
         && options.n_non_orthogonal_correctors > 0)
     {
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            old_snapshot.set_value(cell_lid, old_velocity.value(cell_lid));
+            const auto old_values = old_velocity.owned_read_view();
+            auto snapshot_values = old_snapshot.owned_write_view();
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                for (size_t component = 0;
+                     component <
+                         velocity_field_type::num_components;
+                     ++component)
+                {
+                    snapshot_values(cell_lid, component) =
+                        old_values(cell_lid, component);
+                }
+            }
         }
         old_snapshot.sync_ghosts();
         transport_old = &old_snapshot;

@@ -13,6 +13,7 @@
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
+#include <Tpetra_Access.hpp>
 
 #include <cstddef>
 #include <stdexcept>
@@ -78,6 +79,44 @@ public:
     const std::vector<local_ordinal_type>& owned_face_ids() const noexcept
     {
         return d_owned_face_ids;
+    }
+
+    /**
+     * @brief Return the Tpetra row for an owned mesh-local face ID.
+     *
+     * Face-field construction verifies that owned face IDs and owned rows
+     * have identical ordering.  The lookup therefore reduces to the face ID
+     * after preserving the usual bounds and ownership checks.
+     *
+     * @param face_lid Mesh-local ID of an owned face.
+     * @return Row in owned face-field storage.
+     * @throws std::out_of_range if @p face_lid is invalid or not owned.
+     */
+    local_ordinal_type owned_row(local_ordinal_type face_lid) const
+    {
+        return owned_row_for_face(face_lid);
+    }
+
+    /**
+     * @brief Acquire a read-only host view of owned face storage.
+     *
+     * Use owned_row() to translate a checked mesh-local face ID to the first
+     * view index.  The second index is the field component.
+     */
+    auto owned_read_view() const
+    {
+        return d_data.getLocalViewHost(Tpetra::Access::ReadOnly);
+    }
+
+    /**
+     * @brief Acquire a read-write host view of owned face storage.
+     *
+     * Use owned_row() to translate a checked mesh-local face ID to the first
+     * view index.  The second index is the field component.
+     */
+    auto owned_write_view()
+    {
+        return d_data.getLocalViewHost(Tpetra::Access::ReadWrite);
     }
 
     // -------- global-ID mapping --------

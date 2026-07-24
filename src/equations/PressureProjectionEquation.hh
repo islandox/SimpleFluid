@@ -19,6 +19,7 @@
 
 #include <Teuchos_RCP.hpp>
 
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -26,6 +27,9 @@
 
 namespace SimpleFluid
 {
+
+template<TpetraTypePack Pack>
+class FluidSolver;
 
 namespace detail
 {
@@ -155,9 +159,25 @@ public:
 
 private:
     friend struct detail::PressureProjectionEquationTestAccess<Pack>;
+    friend class FluidSolver<Pack>;
 
     static Teuchos::RCP<const map_type> require_owned_cell_map(
         const SP<const mesh_type>& mesh);
+
+    /**
+     * @brief Project using the final face flux cached by the preceding
+     *        accumulated-pressure projection as this predictor.
+     *
+     * This is restricted to FluidSolver's adjacent PISO correctors: pressure
+     * and velocity must be unchanged since the preceding project() returned.
+     */
+    ProjectionResult project_reusing_cached_predictor(
+        field_type& pressure,
+        field_type& pressure_correction,
+        scalar_type time_step,
+        scalar_type reference_density,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        velocity_field_type& velocity);
 
     ProjectionResult project_impl(
         field_type& pressure_correction,
@@ -166,7 +186,8 @@ private:
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         velocity_field_type& velocity,
         const source_type& right_hand_source,
-        field_type* accumulated_pressure);
+        field_type* accumulated_pressure,
+        bool reuse_cached_predictor_flux = false);
 
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
@@ -178,6 +199,8 @@ private:
     mutable face_flux_workspace_type d_face_flux_workspace;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
+    bool d_cached_predictor_flux_valid = false;
+    std::size_t d_cached_predictor_flux_reuse_count = 0;
     BelosLinearSolver<Pack> d_linear_solver;
 };
 

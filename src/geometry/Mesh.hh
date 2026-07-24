@@ -197,6 +197,9 @@ public:
         ArrLO face_lids;
     };
 
+    /** @brief Compact host-resident operator views of mesh geometry. */
+    struct HostViews;
+
     /** @brief Device-resident mirrors of mesh connectivity and geometry. */
     struct DeviceViews;
 
@@ -217,6 +220,7 @@ protected:
     void assign_contiguous_tpetra_gids();
     void reset_contiguous_tpetra_gids() noexcept;
     void create_cell_face_distances();
+    void create_host_views();
     void create_device_views();
 
     void prefer_owned_face_owners();
@@ -237,6 +241,15 @@ protected:
 
 //----------------------------- accessors ------------------------------------//
 public:
+    /**
+     * @brief Return compact host-side topology and geometry arrays.
+     *
+     * The returned reference remains valid until the mesh is assembled again.
+     * Keeping topology and geometry in separate structure-of-arrays groups
+     * lets host operators read only the data required by a particular sweep.
+     */
+    const HostViews& host_views() const noexcept { return d_host_views; }
+
     DeviceViews device_views() const noexcept { return d_device_views; }
 
     const ArrLO& owned_cell_ids() const noexcept { return d_owned_cell_ids; }
@@ -364,6 +377,11 @@ public:
 //----------------------------- device views ---------------------------------//
 protected:
     template <class T>
+    static inline kokkos_1dview<T>
+    make_mutable_vector_view(
+        const std::string& name, const std::vector<T>& data);
+
+    template <class T>
     static inline kokkos_1dview<const T> 
     make_vector_view(const std::string& name, const std::vector<T>& data);
 
@@ -422,7 +440,49 @@ protected:
     RCP<const map_type> d_owned_face_map;
     RCP<const map_type> d_boundary_face_map;
 
+    HostViews d_host_views;
+    kokkos_1dview<local_ordinal_type> d_face_neighbor_device;
     DeviceViews d_device_views;
+};
+
+/**
+ * @brief Compact host-side storage used by finite-volume operator loops.
+ *
+ * The owning vectors mirror the device-side SoA layout while separating
+ * topology from geometry. Full metadata records remain available for setup,
+ * node connectivity, and source compatibility.
+ */
+template<TpetraTypePack Pack>
+struct Mesh<Pack>::HostViews
+{
+    /** @brief Cell geometry read by hot operator loops. */
+    struct CellGeometry
+    {
+        ArrReal volume;
+        ArrVec3 centroid;
+    } cell_geometry;
+
+    /** @brief Compact face connectivity and boundary classification. */
+    struct FaceTopology
+    {
+        ArrLO owner;
+        ArrLO neighbor;
+        ArrInt type;
+        ArrInt boundary_id;
+    } face_topology;
+
+    /** @brief Face geometry grouped separately from connectivity. */
+    struct FaceGeometry
+    {
+        ArrReal area;
+        ArrVec3 unit_normal_from_owner;
+        ArrVec3 area_vector;
+        ArrVec3 centroid;
+        ArrVec3 owner_to_neighbor;
+        ArrReal owner_to_face_distance;
+        ArrReal neighbor_to_face_distance;
+        ArrReal cell_center_distance;
+    } face_geometry;
 };
 
 /**

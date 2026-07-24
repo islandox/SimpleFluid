@@ -54,6 +54,40 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
+/** @brief Verifies flat row staging accumulates through direct column slots. */
+TEST(FvmOperatorDetailsTest, FlatMatrixRowUsesDirectColumnSlots)
+{
+    SimpleFluid::FVM::detail::FlatMatrixRow<int, double> row(8, 3);
+    row.add(7, 1.25);
+    row.add(2, 4.0);
+    row.add(7, -0.5);
+    row.ensure(5);
+
+    ASSERT_EQ(row.size(), 3U);
+    EXPECT_EQ(row.column_data()[0], 7);
+    EXPECT_EQ(row.column_data()[1], 2);
+    EXPECT_EQ(row.column_data()[2], 5);
+    EXPECT_DOUBLE_EQ(row.value_data()[0], 0.75);
+    EXPECT_DOUBLE_EQ(row.value_data()[1], 4.0);
+    EXPECT_DOUBLE_EQ(row.value_data()[2], 0.0);
+
+    row.fill(0.0);
+    row.set(5, 3.0);
+    EXPECT_DOUBLE_EQ(row.value_data()[0], 0.0);
+    EXPECT_DOUBLE_EQ(row.value_data()[1], 0.0);
+    EXPECT_DOUBLE_EQ(row.value_data()[2], 3.0);
+
+    row.clear();
+    row.ensure(1);
+    row.add(4, 2.0);
+    ASSERT_EQ(row.size(), 2U);
+    EXPECT_EQ(row.column_data()[0], 1);
+    EXPECT_EQ(row.column_data()[1], 4);
+    EXPECT_DOUBLE_EQ(row.value_data()[0], 0.0);
+    EXPECT_DOUBLE_EQ(row.value_data()[1], 2.0);
+    EXPECT_THROW(row.add(8, 1.0), std::out_of_range);
+}
+
 SimpleFluid::SP<MeshType> make_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
@@ -2234,6 +2268,252 @@ TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
     }
 }
 
+/**
+ * @brief Reversing zero-diffusivity upwind flow preserves cached graph reuse.
+ *
+ * The first flux direction inserts an off-diagonal coefficient in only one
+ * of the two adjacent rows.  Reversing it exercises the opposite row's
+ * preinserted zero neighbor entry.
+ */
+TEST(FvmOperatorsTest,
+     ReusesZeroDiffusivityVectorGraphAfterFluxReversal)
+{
+    auto mesh = make_mesh();
+    VectorFieldType old_values(
+        mesh, MeshType::Vec3{1.0, -2.0, 3.0}, "old_values");
+    old_values.sync_ghosts();
+    SimpleFluid::FaceField<Pack> face_fluxes(
+        mesh, 0.0, "face_fluxes");
+
+    MeshType::local_ordinal_type interior_face = -1;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<MeshType::local_ordinal_type>(face);
+        if (mesh->is_owned_face(face_lid)
+            && mesh->is_interior_face(face_lid))
+        {
+            interior_face = face_lid;
+            break;
+        }
+    }
+    ASSERT_GE(interior_face, 0);
+
+    auto boundary_value = [](int, size_t) -> MeshType::Vec3
+    {
+        return {};
+    };
+    auto source = [](MeshType::local_ordinal_type) -> MeshType::Vec3
+    {
+        return {};
+    };
+    auto assemble =
+        [&](Teuchos::RCP<Pack::matrix_type> cached_matrix)
+    {
+        return SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(
+            old_values,
+            face_fluxes,
+            0.25,
+            0.0,
+            boundary_value,
+            source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+            nullptr,
+            std::move(cached_matrix));
+    };
+
+    face_fluxes.set_value(interior_face, 0.75);
+    auto first = assemble(Teuchos::null);
+    const auto* const cached_storage = first.matrix.getRawPtr();
+
+    face_fluxes.set_value(interior_face, -0.75);
+    const auto reused = assemble(first.matrix);
+    const auto fresh = assemble(Teuchos::null);
+    EXPECT_EQ(reused.matrix.getRawPtr(), cached_storage);
+
+    for (MeshType::local_ordinal_type row = 0;
+         row < static_cast<MeshType::local_ordinal_type>(
+             mesh->num_owned_cells());
+         ++row)
+    {
+        for (MeshType::local_ordinal_type column = 0;
+             column < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_local_cells());
+             ++column)
+        {
+            EXPECT_EQ(
+                local_matrix_entry(*reused.matrix, row, column),
+                local_matrix_entry(*fresh.matrix, row, column));
+        }
+        for (size_t component = 0;
+             component < VectorFieldType::num_components;
+             ++component)
+        {
+            EXPECT_EQ(
+                reused.rhs->getData(component)[row],
+                fresh.rhs->getData(component)[row]);
+        }
+    }
+}
+
+/**
+ * @brief Verifies the weighted and physical transport paths retain exact
+ *        coefficients when reusing an expanded matrix graph.
+ */
+TEST(FvmOperatorsTest, ReusesWeightedAndPhysicalTransportMatrices)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType scalar(mesh, 2.0, "scalar");
+    FieldType unit(mesh, 1.0, "unit");
+    FieldType diffusivity(mesh, 0.75, "diffusivity");
+    VectorFieldType velocity(
+        mesh, SimpleFluid::vec3{1.0, -0.5, 0.25}, "velocity");
+    scalar.sync_ghosts();
+    unit.sync_ghosts();
+    diffusivity.sync_ghosts();
+    velocity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "zero_fluxes");
+
+    auto boundary_condition =
+        [](int, size_t) -> SimpleFluid::BoundaryCondition
+    {
+        return {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto scalar_boundary = [](int, size_t)
+    {
+        return Pack::scalar_type{};
+    };
+    auto vector_boundary = [](int, size_t)
+    {
+        return MeshType::Vec3{};
+    };
+    auto scalar_source = [](MeshType::local_ordinal_type)
+    {
+        return Pack::scalar_type{};
+    };
+    auto vector_source = [](MeshType::local_ordinal_type)
+    {
+        return MeshType::Vec3{};
+    };
+
+    auto expect_matrix_equal =
+        [&](const Pack::matrix_type& expected,
+            const Pack::matrix_type& actual)
+    {
+        for (MeshType::local_ordinal_type row = 0;
+             row < static_cast<MeshType::local_ordinal_type>(
+                 mesh->num_owned_cells());
+             ++row)
+        {
+            for (MeshType::local_ordinal_type column = 0;
+                 column < static_cast<MeshType::local_ordinal_type>(
+                     mesh->num_local_cells());
+                 ++column)
+            {
+                EXPECT_EQ(
+                    local_matrix_entry(actual, row, column),
+                    local_matrix_entry(expected, row, column));
+            }
+        }
+    };
+    auto expect_scalar_rhs_equal =
+        [&](const Pack::vector_type& expected,
+            const Pack::vector_type& actual)
+    {
+        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        {
+            EXPECT_EQ(actual.getData()[cell], expected.getData()[cell]);
+        }
+    };
+    auto expect_vector_rhs_equal =
+        [&](const Pack::multi_vector_type& expected,
+            const Pack::multi_vector_type& actual)
+    {
+        for (size_t component = 0;
+             component < VectorFieldType::num_components;
+             ++component)
+        {
+            for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+            {
+                EXPECT_EQ(
+                    actual.getData(component)[cell],
+                    expected.getData(component)[cell]);
+            }
+        }
+    };
+
+    auto assemble_weighted =
+        [&](Pack::scalar_type time_step,
+            Teuchos::RCP<Pack::matrix_type> cached_matrix)
+    {
+        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            scalar, zero_fluxes, time_step, unit, unit, diffusivity,
+            boundary_condition, scalar_boundary, scalar_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr, std::move(cached_matrix));
+    };
+    auto weighted_first = assemble_weighted(1.0, Teuchos::null);
+    auto weighted_reused =
+        assemble_weighted(0.5, weighted_first.matrix);
+    const auto weighted_fresh =
+        assemble_weighted(0.5, Teuchos::null);
+    EXPECT_EQ(
+        weighted_reused.matrix.getRawPtr(),
+        weighted_first.matrix.getRawPtr());
+    expect_matrix_equal(
+        *weighted_fresh.matrix, *weighted_reused.matrix);
+    expect_scalar_rhs_equal(
+        *weighted_fresh.rhs, *weighted_reused.rhs);
+
+    auto assemble_temperature =
+        [&](Pack::scalar_type time_step,
+            Teuchos::RCP<Pack::matrix_type> cached_matrix)
+    {
+        return SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+            scalar, zero_fluxes, time_step, unit, unit, diffusivity,
+            boundary_condition, scalar_boundary, scalar_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr, std::move(cached_matrix));
+    };
+    auto temperature_first =
+        assemble_temperature(1.0, Teuchos::null);
+    auto temperature_reused =
+        assemble_temperature(0.25, temperature_first.matrix);
+    const auto temperature_fresh =
+        assemble_temperature(0.25, Teuchos::null);
+    EXPECT_EQ(
+        temperature_reused.matrix.getRawPtr(),
+        temperature_first.matrix.getRawPtr());
+    expect_matrix_equal(
+        *temperature_fresh.matrix, *temperature_reused.matrix);
+    expect_scalar_rhs_equal(
+        *temperature_fresh.rhs, *temperature_reused.rhs);
+
+    auto assemble_momentum =
+        [&](Pack::scalar_type time_step,
+            Teuchos::RCP<Pack::matrix_type> cached_matrix)
+    {
+        return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+            velocity, zero_fluxes, time_step, diffusivity, 1.0,
+            vector_boundary, vector_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr, std::move(cached_matrix));
+    };
+    auto momentum_first = assemble_momentum(1.0, Teuchos::null);
+    auto momentum_reused =
+        assemble_momentum(0.125, momentum_first.matrix);
+    const auto momentum_fresh =
+        assemble_momentum(0.125, Teuchos::null);
+    EXPECT_EQ(
+        momentum_reused.matrix.getRawPtr(),
+        momentum_first.matrix.getRawPtr());
+    expect_matrix_equal(
+        *momentum_fresh.matrix, *momentum_reused.matrix);
+    expect_vector_rhs_equal(
+        *momentum_fresh.rhs, *momentum_reused.rhs);
+}
+
 // =========================================================================
 //  Periodic Boundary Condition Tests
 // =========================================================================
@@ -2268,6 +2548,34 @@ SimpleFluid::SP<MeshType> make_periodic_box_mesh()
     mesh->set_periodic_face(xmax_face, owner0);
 
     return mesh;
+}
+
+/** @brief Verifies post-assembly periodic pairing keeps host/device topology aligned. */
+TEST(FvmOperatorsTest, CompactTopologyTracksPeriodicPairing)
+{
+    const auto mesh = make_periodic_box_mesh();
+    const auto device_views = mesh->device_views();
+    const auto device_neighbors =
+        Kokkos::create_mirror_view_and_copy(
+            Kokkos::HostSpace{}, device_views.face_neighbor);
+
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        const auto& name = mesh->boundary_batch_name(batch_id);
+        if (name != "xmin" && name != "xmax")
+        {
+            continue;
+        }
+        ASSERT_FALSE(batch.face_lids.empty());
+        const auto face_lid = batch.face_lids.front();
+        const auto face_index = static_cast<size_t>(face_lid);
+        EXPECT_EQ(
+            mesh->host_views().face_topology.neighbor[face_index],
+            mesh->neighbor_cell(face_lid));
+        EXPECT_EQ(
+            device_neighbors(face_index),
+            mesh->neighbor_cell(face_lid));
+    }
 }
 
 /** @brief Verifies fused periodic face fluxes match the face-velocity composition. */
