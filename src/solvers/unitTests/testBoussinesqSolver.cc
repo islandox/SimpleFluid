@@ -176,6 +176,19 @@ SimpleFluid::SP<MeshType> make_split_sphere_mesh()
     return factory.template build<Pack>();
 }
 
+/** @brief Expose the transport face flux for solver-state regressions. */
+class InspectableBoussinesqSolver
+    : public SimpleFluid::BoussinesqSolver<Pack>
+{
+public:
+    using SimpleFluid::BoussinesqSolver<Pack>::BoussinesqSolver;
+
+    const SimpleFluid::FaceField<Pack>& transport_face_fluxes()
+    {
+        return SimpleFluid::FluidSolver<Pack>::projected_face_fluxes();
+    }
+};
+
 /**
  * @brief Assert that all primary solution values are finite.
  *
@@ -542,6 +555,8 @@ TEST(BoussinesqSolverTest, RunsBoundaryLayerBoxWithThreeDirectionGravity)
 TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 {
     double simple_continuity = std::numeric_limits<double>::infinity();
+    double piso_continuity = std::numeric_limits<double>::infinity();
+    double pimple_continuity = std::numeric_limits<double>::infinity();
     double coupled_continuity = std::numeric_limits<double>::infinity();
     const std::vector<SimpleFluid::PressureVelocityCoupling> modes{
         SimpleFluid::PressureVelocityCoupling::SIMPLE,
@@ -565,7 +580,7 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
 
         SimpleFluid::TimeStepperOptions time_options;
         time_options.time_step = 1.0e-2;
-        time_options.steps = 1;
+        time_options.steps = 2;
         time_options.thermal_diffusivity = 0.0;
         time_options.kinematic_viscosity = 1.0e-2;
         time_options.thermal_expansion = 1.0;
@@ -581,23 +596,54 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         linear_options.tolerance = 1.0e-12;
         linear_options.max_iterations = 200;
 
-        SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options,
-                                                   linear_options);
+        InspectableBoussinesqSolver solver(
+            mesh, bcs, time_options, linear_options);
         solver.initialize_heated_box(1.0, 0.0);
 
         const auto cache =
             SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
                 mesh, bcs);
         solver.step();
+        solver.step();
 
         const auto after = continuity_imbalance_norm(
             solver.velocity(), solver.pressure(),
             time_options.time_step, cache, bcs.pressure);
+        SimpleFluid::FaceField<Pack> independent_fluxes(
+            mesh, "independent_final_face_fluxes");
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            solver.velocity(),
+            solver.pressure(),
+            time_options.time_step,
+            cache,
+            bcs.pressure,
+            independent_fluxes);
+        const auto& transport_fluxes = solver.transport_face_fluxes();
+        for (size_t face = 0; face < mesh->num_faces(); ++face)
+        {
+            const auto face_lid =
+                static_cast<MeshType::local_ordinal_type>(face);
+            if (!transport_fluxes.is_owned_face(face_lid))
+            {
+                continue;
+            }
+            EXPECT_NEAR(
+                transport_fluxes.value(face_lid),
+                independent_fluxes.value(face_lid),
+                1.0e-12);
+        }
         const auto residuals = solver.last_pressure_velocity_residuals();
         const auto statistics = solver.last_step_statistics();
 
-        EXPECT_EQ(solver.step_index(), 1);
+        EXPECT_EQ(solver.step_index(), 2);
         expect_finite_solution(*mesh, solver);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<MeshType::local_ordinal_type>(owned);
+            EXPECT_GE(solver.temperature().value(cell_lid), -1.0e-9);
+            EXPECT_LE(solver.temperature().value(cell_lid), 1.0 + 1.0e-9);
+        }
         EXPECT_NEAR(after, residuals.continuity, 1.0e-10);
         EXPECT_TRUE(std::isfinite(residuals.momentum));
         EXPECT_TRUE(std::isfinite(residuals.pressure));
@@ -616,6 +662,14 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         {
             simple_continuity = residuals.continuity;
         }
+        if (mode == SimpleFluid::PressureVelocityCoupling::PISO)
+        {
+            piso_continuity = residuals.continuity;
+        }
+        if (mode == SimpleFluid::PressureVelocityCoupling::PIMPLE)
+        {
+            pimple_continuity = residuals.continuity;
+        }
         if (mode == SimpleFluid::PressureVelocityCoupling::CoupledKrylov)
         {
             coupled_continuity = residuals.continuity;
@@ -626,6 +680,8 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
     }
 
     EXPECT_LT(simple_continuity, 1.0e-10);
+    EXPECT_LT(piso_continuity, 1.0e-10);
+    EXPECT_LT(pimple_continuity, 1.0e-10);
     EXPECT_LT(coupled_continuity, 1.0e-10);
 }
 

@@ -200,6 +200,43 @@ auto PressureProjectionEquation<Pack>::project(
 }
 
 /**
+ * @brief Perform a pressure projection against accumulated physical pressure.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param[in,out] pressure Accumulated physical gauge pressure in Pa.
+ * @param[out] pressure_correction Physical pressure correction in Pa.
+ * @param time_step Time-step size.
+ * @param reference_density Density used to normalize pressure internally.
+ * @param velocity_boundary_cache Cached velocity boundary conditions.
+ * @param[in,out] velocity Velocity field corrected by the pressure update.
+ * @return Projection statistics and the norm of the physical correction.
+ */
+template<TpetraTypePack Pack>
+auto PressureProjectionEquation<Pack>::project(
+    field_type& pressure,
+    field_type& pressure_correction,
+    scalar_type time_step,
+    scalar_type reference_density,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    velocity_field_type& velocity) -> ProjectionResult
+{
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    return project_impl(
+        pressure_correction,
+        time_step,
+        reference_density,
+        velocity_boundary_cache,
+        velocity,
+        zero_source,
+        &pressure);
+}
+
+/**
  * @brief Perform the pressure projection step: compute face velocities,
  *        assemble the pressure-Poisson RHS, solve for pressure, and
  *        correct the velocity field.
@@ -225,10 +262,59 @@ auto PressureProjectionEquation<Pack>::project(
     velocity_field_type& velocity,
     const source_type& right_hand_source) -> ProjectionResult
 {
-    EquationValidation::require_mesh_match(*d_mesh, pressure,
+    return project_impl(
+        pressure,
+        time_step,
+        reference_density,
+        velocity_boundary_cache,
+        velocity,
+        right_hand_source,
+        nullptr);
+}
+
+/**
+ * @brief Shared pressure-correction implementation.
+ *
+ * When @p accumulated_pressure is non-null, the Rhie-Chow predictor uses the
+ * current physical pressure and the final flux is reconstructed from the
+ * updated total pressure.  This makes the Poisson RHS, corrected velocity,
+ * stored pressure, and transport face flux one consistent discrete state.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param[out] pressure_correction Correction field, normalized internally.
+ * @param time_step Positive time-step size.
+ * @param reference_density Positive pressure-normalization density.
+ * @param velocity_boundary_cache Cached velocity boundary conditions.
+ * @param[in,out] velocity Velocity field corrected by the pressure update.
+ * @param right_hand_source Per-cell scalar source provider.
+ * @param[in,out] accumulated_pressure Optional physical pressure in Pa.
+ * @return Projection statistics.
+ */
+template<TpetraTypePack Pack>
+auto PressureProjectionEquation<Pack>::project_impl(
+    field_type& pressure_correction,
+    scalar_type time_step,
+    scalar_type reference_density,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    velocity_field_type& velocity,
+    const source_type& right_hand_source,
+    field_type* accumulated_pressure) -> ProjectionResult
+{
+    EquationValidation::require_mesh_match(*d_mesh, pressure_correction,
                                            "PressureProjectionEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity,
                                            "PressureProjectionEquation");
+    if (accumulated_pressure != nullptr)
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, *accumulated_pressure, "PressureProjectionEquation");
+        if (accumulated_pressure == &pressure_correction)
+        {
+            throw std::invalid_argument(
+                "PressureProjectionEquation requires distinct accumulated "
+                "and correction pressure fields.");
+        }
+    }
     if (time_step <= 0.0)
     {
         throw std::invalid_argument("PressureProjectionEquation requires a positive time step.");
@@ -240,16 +326,30 @@ auto PressureProjectionEquation<Pack>::project(
             "PressureProjectionEquation requires a finite positive "
             "reference density.");
     }
-    pressure.owned_data().putScalar(0.0);
-    d_mesh->sync_periodic_boundaries(pressure);
-    FVM::pressure_weighted_face_fluxes(
-        velocity,
-        pressure,
-        time_step,
-        velocity_boundary_cache,
-        d_pressure_correction_boundary_conditions,
-        d_face_flux_workspace,
-        d_cached_face_fluxes);
+    pressure_correction.owned_data().putScalar(0.0);
+    d_mesh->sync_periodic_boundaries(pressure_correction);
+    if (accumulated_pressure != nullptr)
+    {
+        FVM::pressure_weighted_face_fluxes(
+            velocity,
+            *accumulated_pressure,
+            time_step / reference_density,
+            velocity_boundary_cache,
+            d_pressure_boundary_conditions,
+            d_face_flux_workspace,
+            d_cached_face_fluxes);
+    }
+    else
+    {
+        FVM::pressure_weighted_face_fluxes(
+            velocity,
+            pressure_correction,
+            time_step,
+            velocity_boundary_cache,
+            d_pressure_correction_boundary_conditions,
+            d_face_flux_workspace,
+            d_cached_face_fluxes);
+    }
     const auto owned_map = require_owned_cell_map(d_mesh);
     if (d_cached_pressure_matrix.is_null())
     {
@@ -287,25 +387,25 @@ auto PressureProjectionEquation<Pack>::project(
         d_cached_pressure_matrix;
     const auto linear_statistics =
         d_linear_solver.solve_with_statistics(
-            const_matrix, *d_cached_rhs, pressure.owned_data(),
+            const_matrix, *d_cached_rhs, pressure_correction.owned_data(),
             d_linear_options);
     if (!linear_statistics.converged)
     {
         throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
     }
-    d_mesh->sync_periodic_boundaries(pressure);
+    d_mesh->sync_periodic_boundaries(pressure_correction);
 
     scalar_type pressure_norm_squared = {};
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto correction = pressure.value(cell_lid);
+        const auto correction = pressure_correction.value(cell_lid);
         pressure_norm_squared += correction * correction
                                * d_mesh->cell_volume(cell_lid);
     }
 
     FVM::cell_gradient(
-        pressure,
+        pressure_correction,
         d_pressure_correction_boundary_conditions,
         d_face_flux_workspace.pressure_gradient());
     velocity.owned_data().update(
@@ -315,15 +415,39 @@ auto PressureProjectionEquation<Pack>::project(
 
     d_mesh->sync_periodic_boundaries(velocity);
 
-    FVM::pressure_weighted_face_fluxes(
-        velocity,
-        pressure,
-        d_face_flux_workspace.pressure_gradient(),
-        time_step,
-        velocity_boundary_cache,
-        d_pressure_correction_boundary_conditions,
-        d_face_flux_workspace,
-        d_cached_face_fluxes);
+    if (accumulated_pressure != nullptr)
+    {
+        pressure_correction.owned_data().scale(reference_density);
+        d_mesh->sync_periodic_boundaries(pressure_correction);
+        accumulated_pressure->owned_data().update(
+            scalar_type{1},
+            pressure_correction.owned_data(),
+            scalar_type{1});
+        d_mesh->sync_periodic_boundaries(*accumulated_pressure);
+
+        FVM::pressure_weighted_face_fluxes(
+            velocity,
+            *accumulated_pressure,
+            time_step / reference_density,
+            velocity_boundary_cache,
+            d_pressure_boundary_conditions,
+            d_face_flux_workspace,
+            d_cached_face_fluxes);
+    }
+    else
+    {
+        FVM::pressure_weighted_face_fluxes(
+            velocity,
+            pressure_correction,
+            d_face_flux_workspace.pressure_gradient(),
+            time_step,
+            velocity_boundary_cache,
+            d_pressure_correction_boundary_conditions,
+            d_face_flux_workspace,
+            d_cached_face_fluxes);
+        pressure_correction.owned_data().scale(reference_density);
+        d_mesh->sync_periodic_boundaries(pressure_correction);
+    }
 
     scalar_type continuity_norm_squared = {};
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
@@ -344,9 +468,6 @@ auto PressureProjectionEquation<Pack>::project(
         2,
         local_norms_squared.data(),
         global_norms_squared.data());
-
-    pressure.owned_data().scale(reference_density);
-    d_mesh->sync_periodic_boundaries(pressure);
 
     using std::sqrt;
     return {

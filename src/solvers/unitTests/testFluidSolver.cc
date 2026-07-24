@@ -224,19 +224,13 @@ TEST(FluidSolverTest,
             mesh, bcs, time_options, linear_options);
         solver.step();
 
-        const auto corrections =
-            coupling == SimpleFluid::PressureVelocityCoupling::SIMPLE
-          ? 1
-          : time_options.n_pressure_correctors;
-        const auto remaining_fraction =
-            std::pow(0.5, corrections);
         EXPECT_NEAR(
             solver.pressure().value(0),
-            1000.0 * (1.0 - remaining_fraction),
+            1000.0,
             1.0e-8);
         const auto velocity = solver.velocity().value(0);
         EXPECT_NEAR(
-            velocity.x, -0.1 * remaining_fraction, 1.0e-10);
+            velocity.x, 0.0, 1.0e-10);
         EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);
         EXPECT_NEAR(velocity.z, 0.0, 1.0e-12);
         const auto cache =

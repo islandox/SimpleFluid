@@ -595,16 +595,21 @@ template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::run_pressure_correction()
     -> typename PressureProjectionEquation<Pack>::ProjectionResult
 {
+    auto& projection = pressure_projection();
     const auto result =
-        pressure_projection().project(
+        projection.project(
+            pressure(),
             pressure_correction(),
             d_problem.time_options().time_step,
             pressure_reference_density(),
             velocity_boundary_cache(),
             velocity());
-    pressure().owned_data().update(
-        1.0, pressure_correction().owned_data(), 1.0);
-    d_mesh->sync_periodic_boundaries(pressure());
+    // Downstream transport must use the same conservative face-flux field
+    // whose balance produced result.continuity.
+    projected_face_fluxes().data().update(
+        scalar_type{1},
+        projection.corrected_face_fluxes().data(),
+        scalar_type{0});
     return result;
 }
 
@@ -765,26 +770,6 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
         d_last_step_statistics.krylov_iterations;
     pressure_velocity_residuals().achieved_tolerance =
         d_last_step_statistics.achieved_tolerance;
-
-    FVM::pressure_weighted_face_fluxes(
-        velocity(), pressure(),
-        d_problem.time_options().time_step
-            / pressure_reference_density(),
-        velocity_boundary_cache(),
-        d_problem.boundary_conditions().pressure,
-        pressure_face_flux_workspace(),
-        projected_face_fluxes());
-    scalar_type continuity_norm_squared = {};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto balance =
-            FVM::cell_flux_balance<Pack>(
-                *d_mesh, projected_face_fluxes(), cell_lid);
-        continuity_norm_squared += balance * balance;
-    }
-    pressure_velocity_residuals().continuity =
-        std::sqrt(global_sum(continuity_norm_squared));
 }
 
 /**
