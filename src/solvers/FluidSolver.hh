@@ -179,7 +179,7 @@ private:
         ProgressStream& progress_output,
         int total_steps) const;
     typename PressureProjectionEquation<Pack>::ProjectionResult
-    run_pressure_correction();
+    run_pressure_correction(bool reuse_cached_predictor_flux);
     void solve_coupled_krylov();
 };
 

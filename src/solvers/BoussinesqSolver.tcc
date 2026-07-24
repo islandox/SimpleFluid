@@ -1370,20 +1370,45 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
     FVM::cell_gradient(
         pressure(),
         d_problem.boundary_conditions().pressure,
-        predictor_pressure_gradient());
+        predictor_pressure_gradient(),
+        this->pressure_face_flux_workspace().gradient_cache());
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
     const auto* turbulence = find_turbulence_model();
+    const auto pressure_gradient_values =
+        predictor_pressure_gradient().owned_read_view();
+    using gradient_view_type =
+        decltype(predictor_pressure_gradient().owned_read_view());
+    std::optional<gradient_view_type> turbulent_gradient_values;
+    if (turbulence != nullptr)
+    {
+        turbulent_gradient_values.emplace(
+            turbulence->turbulent_kinetic_energy_gradient()
+                .owned_read_view());
+    }
     auto pressure_source =
         [&](local_ordinal_type cell_lid) -> vec_type
     {
-        auto acceleration = predictor_pressure_gradient().value(cell_lid)
-                          * (-inverse_reference_density);
-        if (turbulence != nullptr)
+        vec_type acceleration{
+            pressure_gradient_values(cell_lid, 0)
+                * (-inverse_reference_density),
+            pressure_gradient_values(cell_lid, 1)
+                * (-inverse_reference_density),
+            pressure_gradient_values(cell_lid, 2)
+                * (-inverse_reference_density)};
+        if (turbulent_gradient_values)
         {
-            acceleration = acceleration +
-                turbulence->turbulent_kinetic_energy_gradient().value(cell_lid)
-                * scalar_type{-2.0 / 3.0};
+            constexpr scalar_type turbulent_pressure_factor{
+                -2.0 / 3.0};
+            acceleration.x +=
+                (*turbulent_gradient_values)(cell_lid, 0)
+                * turbulent_pressure_factor;
+            acceleration.y +=
+                (*turbulent_gradient_values)(cell_lid, 1)
+                * turbulent_pressure_factor;
+            acceleration.z +=
+                (*turbulent_gradient_values)(cell_lid, 2)
+                * turbulent_pressure_factor;
         }
         return acceleration;
     };

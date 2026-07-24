@@ -309,6 +309,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
                                              "TemperatureDiffusionEquation");
 
+    const auto old_temperature_values =
+        old_temperature.local_read_view();
     auto boundary_condition =
         [&](int batch_id, size_t)
     {
@@ -331,14 +333,25 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
         const auto face_lid =
             d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto owner = d_mesh->owner_cell(face_lid);
-        return old_temperature.local_value(owner);
+        return old_temperature_values(owner, 0);
     };
 
-    auto system = FVM::transport_system<Pack>(
-        old_temperature, face_fluxes, time_step,
-        thermal_diffusivity, boundary_condition, boundary_value,
-        right_hand_source,
-        d_cached_transport_matrix);
+    auto system = [&]()
+    {
+        try
+        {
+            return FVM::transport_system<Pack>(
+                old_temperature, face_fluxes, time_step,
+                thermal_diffusivity, boundary_condition, boundary_value,
+                right_hand_source, d_cached_transport_matrix);
+        }
+        catch (...)
+        {
+            // Failed reuse leaves the matrix in resume-fill mode.
+            d_cached_transport_matrix = Teuchos::null;
+            throw;
+        }
+    }();
 
     if (d_cached_transport_matrix.is_null())
     {
@@ -420,6 +433,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     const auto& thermal_conductivity = thermal_conductivity_override == nullptr
         ? material.thermal_conductivity
         : *thermal_conductivity_override;
+    const auto conductivity_values =
+        thermal_conductivity.local_read_view();
     if (thermal_conductivity_override != nullptr)
     {
         EquationValidation::require_mesh_match(
@@ -428,7 +443,7 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            const auto value = thermal_conductivity.value(cell_lid);
+            const auto value = conductivity_values(cell_lid, 0);
             if (!std::isfinite(value) || value < scalar_type{})
             {
                 throw std::invalid_argument(
@@ -448,6 +463,8 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
             "TemperatureDiffusionEquation requires a power-density provider.");
     }
 
+    const auto old_temperature_values =
+        old_temperature.local_read_view();
     auto boundary_condition =
         [&](int batch_id, size_t)
     {
@@ -470,7 +487,7 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
         const auto face_lid =
             d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto owner = d_mesh->owner_cell(face_lid);
-        return old_temperature.local_value(owner);
+        return old_temperature_values(owner, 0);
     };
 
     bool all_conductivities_positive = true;
@@ -478,7 +495,7 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     {
         const auto cell_lid = static_cast<local_ordinal_type>(local);
         all_conductivities_positive = all_conductivities_positive
-            && thermal_conductivity.local_value(cell_lid) > scalar_type{};
+            && conductivity_values(cell_lid, 0) > scalar_type{};
     }
     const auto* correction_field =
         treatment == FVM::NonOrthogonalTreatment::Implicit
@@ -491,22 +508,34 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     {
         d_cached_physical_transport_matrix = Teuchos::null;
     }
-    auto system =
-        FVM::physical_temperature_transport_system<Pack>(
-            old_temperature,
-            face_fluxes,
-            time_step,
-            material.density,
-            material.specific_heat_capacity,
-            thermal_conductivity,
-            boundary_condition,
-            boundary_value,
-            power_density,
-            treatment,
-            correction_field,
-            d_cached_physical_transport_matrix,
-            boundary_thermal_conductivity,
-            &d_transport_geometry_cache);
+    auto system = [&]()
+    {
+        try
+        {
+            return FVM::physical_temperature_transport_system<Pack>(
+                old_temperature,
+                face_fluxes,
+                time_step,
+                material.density,
+                material.specific_heat_capacity,
+                thermal_conductivity,
+                boundary_condition,
+                boundary_value,
+                power_density,
+                treatment,
+                correction_field,
+                d_cached_physical_transport_matrix,
+                boundary_thermal_conductivity,
+                &d_transport_geometry_cache);
+        }
+        catch (...)
+        {
+            d_cached_physical_transport_matrix = Teuchos::null;
+            d_cached_physical_graph_supports_non_orthogonal_correction =
+                false;
+            throw;
+        }
+    }();
     d_cached_physical_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_conductivities_positive)
     {

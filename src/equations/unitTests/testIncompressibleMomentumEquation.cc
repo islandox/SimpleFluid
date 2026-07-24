@@ -18,6 +18,7 @@
 #include "utils/testing_environment.hh"
 
 #include <array>
+#include <stdexcept>
 #include <vector>
 
 namespace
@@ -184,9 +185,12 @@ TEST(IncompressibleMomentumEquationTest,
         1.0e-12);
 }
 
-/** @brief Repeated assembly reuses persistent storage without changing values. */
+/**
+ * @brief Explicit-to-hybrid transition rebuilds the graph, then reuses it
+ *        without changing assembled values.
+ */
 TEST(IncompressibleMomentumEquationTest,
-     RepeatedNonOrthogonalAssemblyIsNumericallyEquivalent)
+     RebuildsAndReusesNonOrthogonalAssemblyGraph)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     VectorFieldType velocity(mesh, "cached_momentum_velocity");
@@ -219,11 +223,18 @@ TEST(IncompressibleMomentumEquationTest,
     options.time_step = 0.2;
     options.kinematic_viscosity = 0.7;
     options.non_orthogonal_treatment =
-        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid;
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit;
 
     SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    const auto orthogonal = equation.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options, &velocity);
+    const auto* const orthogonal_storage = orthogonal.matrix.get();
+
+    options.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid;
     const auto first = equation.assemble_system(
         velocity, zero_fluxes, boundary_cache, options, &velocity);
+    EXPECT_NE(first.matrix.get(), orthogonal_storage);
     std::vector<std::array<Pack::scalar_type, 3>> first_rhs(
         mesh->num_owned_cells());
     for (size_t component = 0; component < 3; ++component)
@@ -282,4 +293,70 @@ TEST(IncompressibleMomentumEquationTest,
                 1.0e-12);
         }
     }
+
+    // A zero-diffusivity implicit assembly has only the compact graph.  A
+    // later positive coefficient must therefore rebuild before it can cache
+    // and reuse the expanded non-orthogonal graph.
+    SimpleFluid::IncompressibleMomentumEquation<Pack>
+        coefficient_transition(mesh);
+    options.kinematic_viscosity = 0.0;
+    const auto zero_diffusion = coefficient_transition.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options, &velocity);
+    options.kinematic_viscosity = 0.7;
+    const auto positive_diffusion =
+        coefficient_transition.assemble_system(
+            velocity, zero_fluxes, boundary_cache, options, &velocity);
+    EXPECT_NE(
+        positive_diffusion.matrix.get(),
+        zero_diffusion.matrix.get());
+}
+
+/**
+ * @brief A failed cached assembly is discarded so the following call can
+ *        rebuild a complete transport matrix.
+ */
+TEST(IncompressibleMomentumEquationTest,
+     RecoversAfterCachedTransportAssemblyThrows)
+{
+    auto mesh = make_single_hex_mesh();
+    VectorFieldType velocity(mesh, "recovery_velocity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.1;
+    options.kinematic_viscosity = 0.5;
+    options.non_orthogonal_treatment =
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
+
+    auto zero_source =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        return {};
+    };
+    auto throwing_source =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        throw std::runtime_error("intentional assembly failure");
+    };
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    const auto first = equation.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options, zero_source);
+    ASSERT_TRUE(first.matrix->isFillComplete());
+    const auto* const first_storage = first.matrix.get();
+
+    EXPECT_THROW(
+        equation.assemble_system(
+            velocity, zero_fluxes, boundary_cache, options,
+            throwing_source),
+        std::runtime_error);
+
+    const auto third = equation.assemble_system(
+        velocity, zero_fluxes, boundary_cache, options, zero_source);
+    EXPECT_TRUE(third.matrix->isFillComplete());
+    EXPECT_NE(third.matrix.get(), first_storage);
 }

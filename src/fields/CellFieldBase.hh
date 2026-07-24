@@ -13,6 +13,7 @@
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
+#include <Tpetra_Access.hpp>
 #include <Tpetra_CombineMode.hpp>
 
 #include <cstddef>
@@ -64,6 +65,54 @@ public:
 
     vector_type& overlap_data() noexcept { return d_overlap_data; }
     const vector_type& overlap_data() const noexcept { return d_overlap_data; }
+
+    /**
+     * @brief Acquire a read-only host view of authoritative owned storage.
+     *
+     * The first extent is indexed directly by an owned mesh-local cell ID;
+     * the second extent is the field component.  Keeping the returned view
+     * alive across a loop avoids repeated Tpetra access and reference-count
+     * machinery.
+     */
+    auto owned_read_view() const
+    {
+        return d_data.getLocalViewHost(Tpetra::Access::ReadOnly);
+    }
+
+    /**
+     * @brief Acquire a read-only host view of overlap storage.
+     *
+     * The first extent is indexed directly by any mesh-local cell ID,
+     * including synchronized ghosts; the second extent is the field
+     * component.
+     */
+    auto local_read_view() const
+    {
+        return d_overlap_data.getLocalViewHost(Tpetra::Access::ReadOnly);
+    }
+
+    /**
+     * @brief Acquire a read-write host view of authoritative owned storage.
+     *
+     * Writes do not update overlap storage.  Call sync_ghosts() before a
+     * subsequent local_read_view() must observe them.
+     */
+    auto owned_write_view()
+    {
+        return d_data.getLocalViewHost(Tpetra::Access::ReadWrite);
+    }
+
+    /**
+     * @brief Acquire a read-write host view of overlap storage.
+     *
+     * Overlap storage is not authoritative.  This accessor is intended for
+     * algorithms that deliberately update local/ghost data; sync_ghosts()
+     * will replace those values from owned storage.
+     */
+    auto local_write_view()
+    {
+        return d_overlap_data.getLocalViewHost(Tpetra::Access::ReadWrite);
+    }
 
     size_t num_owned_cells() const
     {

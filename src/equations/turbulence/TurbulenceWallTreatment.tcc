@@ -722,6 +722,15 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
     Arr<size_t> face_counts(d_mesh->num_owned_cells(), 0);
     Arr<scalar_type> secondary_sums(d_mesh->num_owned_cells(), scalar_type{});
     Arr<scalar_type> production_sums(d_mesh->num_owned_cells(), scalar_type{});
+    const auto k_values = turbulent_kinetic_energy.local_read_view();
+    const auto density_values = material.density.local_read_view();
+    const auto heat_capacity_values =
+        material.specific_heat_capacity.local_read_view();
+    const auto molecular_viscosity_values =
+        material.dynamic_viscosity.local_read_view();
+    const auto molecular_conductivity_values =
+        material.thermal_conductivity.local_read_view();
+    const auto velocity_values = velocity.local_read_view();
 
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence wall face evaluation",
@@ -753,13 +762,18 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
                     const auto owner = d_mesh->owner_cell(face_lid);
                     const auto distance = static_cast<scalar_type>(
                         FVM::detail::boundary_normal_distance(*d_mesh, face_lid, owner));
-                    const auto k = turbulent_kinetic_energy.local_value(owner);
-                    const auto density = material.density.local_value(owner);
-                    const auto heat_capacity = material.specific_heat_capacity.local_value(owner);
-                    const auto molecular_viscosity = material.dynamic_viscosity.local_value(owner);
+                    const auto k = k_values(owner, 0);
+                    const auto density = density_values(owner, 0);
+                    const auto heat_capacity =
+                        heat_capacity_values(owner, 0);
+                    const auto molecular_viscosity =
+                        molecular_viscosity_values(owner, 0);
                     const auto molecular_conductivity =
-                        material.thermal_conductivity.local_value(owner);
-                    const auto owner_velocity = velocity.local_value(owner);
+                        molecular_conductivity_values(owner, 0);
+                    const typename velocity_field_type::vec_type
+                        owner_velocity{velocity_values(owner, 0),
+                                       velocity_values(owner, 1),
+                                       velocity_values(owner, 2)};
                     const auto wall_velocity =
                         velocity_boundary_cache.value.at(wall_batch.id).at(in_batch_id);
                     const auto outward_normal = d_mesh->face_normal_outward(face_lid, owner);

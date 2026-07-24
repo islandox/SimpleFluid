@@ -349,18 +349,18 @@ auto packed_cell_local_id(const MeshType& mesh, CellID cell_id)
  * are unavailable, the ordinary harmonic mean is used.
  * @throws std::invalid_argument if either cell coefficient is negative.
  */
-template<class MeshType, class FieldType>
+template<class MeshType>
 inline auto harmonic_face_value(
     const MeshType& mesh,
     typename MeshType::local_ordinal_type face_lid,
     typename MeshType::local_ordinal_type cell_lid,
     typename MeshType::local_ordinal_type other_lid,
-    const FieldType& field) -> typename MeshType::scalar_type
+    typename MeshType::scalar_type cell_value,
+    typename MeshType::scalar_type other_value)
+    -> typename MeshType::scalar_type
 {
     using scalar_type = typename MeshType::scalar_type;
 
-    const auto cell_value = field.local_value(cell_lid);
-    const auto other_value = field.local_value(other_lid);
     if (cell_value < scalar_type{} || other_value < scalar_type{})
     {
         throw std::invalid_argument(
@@ -388,6 +388,25 @@ inline auto harmonic_face_value(
 
     return scalar_type{2} * cell_value * other_value
          / (cell_value + other_value);
+}
+
+/**
+ * @brief Field-based convenience overload for harmonic interpolation.
+ *
+ * Hot loops should prefer the scalar-value overload after acquiring one local
+ * field view for the whole operator.
+ */
+template<class MeshType, class FieldType>
+inline auto harmonic_face_value(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::local_ordinal_type other_lid,
+    const FieldType& field) -> typename MeshType::scalar_type
+{
+    return harmonic_face_value(
+        mesh, face_lid, cell_lid, other_lid,
+        field.local_value(cell_lid), field.local_value(other_lid));
 }
 
 /**
@@ -1271,13 +1290,148 @@ vector_affine_gradient_stencils(
 }
 
 /**
- * @brief Accumulate a matrix entry into a sparse row map.
+ * @brief Reusable direct-slot scratch storage for one sparse matrix row.
+ *
+ * A single overlap-sized column-to-slot table makes both first insertion and
+ * repeated accumulation constant time.  `clear()` invalidates only the
+ * columns used by the preceding row, while the compact column and value
+ * buffers retain their capacity.  After growing to the widest encountered
+ * row, assembly performs no per-row allocations.  The buffers can be passed
+ * directly to Tpetra, avoiding hash nodes, sorting, and map-to-array copies.
  *
  * @tparam LocalOrdinal Local ordinal type.
- * @tparam Scalar Scalar type.
- * @param[in,out] row_values Map from column LID to accumulated value.
- * @param column Column LID.
- * @param value Value to add.
+ * @tparam Scalar Matrix scalar type.
+ */
+template<class LocalOrdinal, class Scalar>
+class FlatMatrixRow
+{
+public:
+    /**
+     * @param num_local_columns Number of columns in the overlap map.
+     * @param capacity Expected maximum row width.
+     */
+    explicit FlatMatrixRow(size_t num_local_columns,
+                           size_t capacity = 0)
+        : d_column_slots(
+              num_local_columns,
+              std::numeric_limits<size_t>::max())
+    {
+        d_columns.reserve(capacity);
+        d_values.reserve(capacity);
+    }
+
+    /** @brief Remove row entries while retaining all allocated storage. */
+    void clear() noexcept
+    {
+        for (const auto column : d_columns)
+        {
+            d_column_slots[static_cast<size_t>(column)] =
+                std::numeric_limits<size_t>::max();
+        }
+        d_columns.clear();
+        d_values.clear();
+    }
+
+    /** @brief Ensure a column is present with an initial zero value. */
+    void ensure(LocalOrdinal column)
+    {
+        (void)find_or_insert(column);
+    }
+
+    /** @brief Accumulate a coefficient through its direct row slot. */
+    void add(LocalOrdinal column, Scalar value)
+    {
+        d_values[find_or_insert(column)] += value;
+    }
+
+    /** @brief Assign a coefficient through its direct row slot. */
+    void set(LocalOrdinal column, Scalar value)
+    {
+        d_values[find_or_insert(column)] = value;
+    }
+
+    /** @brief Assign the same value to every stored coefficient. */
+    void fill(Scalar value)
+    {
+        std::fill(d_values.begin(), d_values.end(), value);
+    }
+
+    [[nodiscard]] size_t size() const noexcept
+    {
+        return d_columns.size();
+    }
+
+    [[nodiscard]] const LocalOrdinal* column_data() const noexcept
+    {
+        return d_columns.data();
+    }
+
+    [[nodiscard]] const Scalar* value_data() const noexcept
+    {
+        return d_values.data();
+    }
+
+private:
+    [[nodiscard]] size_t column_index(LocalOrdinal column) const
+    {
+        if constexpr (std::numeric_limits<LocalOrdinal>::is_signed)
+        {
+            if (column < LocalOrdinal{})
+            {
+                throw std::out_of_range(
+                    "transport matrix column is negative.");
+            }
+        }
+        const auto index = static_cast<size_t>(column);
+        if (index >= d_column_slots.size())
+        {
+            throw std::out_of_range(
+                "transport matrix column is outside the overlap map.");
+        }
+        return index;
+    }
+
+    [[nodiscard]] size_t find_or_insert(LocalOrdinal column)
+    {
+        const auto column_id = column_index(column);
+        auto& position = d_column_slots[column_id];
+        if (position == std::numeric_limits<size_t>::max())
+        {
+            const auto new_position = d_columns.size();
+            d_columns.push_back(column);
+            try
+            {
+                d_values.push_back(Scalar{});
+            }
+            catch (...)
+            {
+                d_columns.pop_back();
+                throw;
+            }
+            position = new_position;
+        }
+        return position;
+    }
+
+    std::vector<LocalOrdinal> d_columns;
+    std::vector<Scalar> d_values;
+    std::vector<size_t> d_column_slots;
+};
+
+/** @brief Accumulate a matrix entry through a direct row slot. */
+template<class LocalOrdinal, class Scalar>
+void add_matrix_entry(FlatMatrixRow<LocalOrdinal, Scalar>& row_values,
+                      LocalOrdinal column,
+                      Scalar value)
+{
+    row_values.add(column, value);
+}
+
+/**
+ * @brief Accumulate a matrix entry into a legacy sparse row map.
+ *
+ * Non-transport assembly paths still use map staging. This overload keeps
+ * their existing behavior while transport rows use FlatMatrixRow.
  */
 template<class LocalOrdinal, class Scalar>
 void add_matrix_entry(std::unordered_map<LocalOrdinal, Scalar>& row_values,

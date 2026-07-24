@@ -123,6 +123,8 @@ private:
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
+    mutable bool
+        d_cached_graph_supports_non_orthogonal_correction = false;
     mutable Teuchos::RCP<typename Pack::matrix_type>
         d_cached_physical_transport_matrix;
     mutable bool

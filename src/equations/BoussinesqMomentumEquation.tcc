@@ -157,13 +157,14 @@ auto BoussinesqMomentumEquation<Pack>::assemble_system(
         this->mesh(), temperature, "BoussinesqMomentumEquation");
 
     const auto gravity = options.gravity_vector();
+    const auto temperature_values = temperature.owned_read_view();
     auto combined_source =
         [&](local_ordinal_type cell_lid)
             -> typename velocity_field_type::vec_type
     {
         const auto source_scale =
             options.thermal_expansion
-          * (temperature.value(cell_lid)
+          * (temperature_values(cell_lid, 0)
              - options.reference_temperature);
         return gravity * (-source_scale) + right_hand_source(cell_lid);
     };
@@ -203,13 +204,14 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity(
         this->mesh(), temperature, "BoussinesqMomentumEquation");
 
     const auto gravity = options.gravity_vector();
+    const auto temperature_values = temperature.owned_read_view();
     auto combined_source =
         [&](local_ordinal_type cell_lid)
             -> typename velocity_field_type::vec_type
     {
         const auto source_scale =
             options.thermal_expansion
-          * (temperature.value(cell_lid)
+          * (temperature_values(cell_lid, 0)
              - options.reference_temperature);
         return gravity * (-source_scale) + right_hand_source(cell_lid);
     };
@@ -261,6 +263,8 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
         material, dynamic_viscosity_override);
 
     const auto gravity = options.gravity_vector();
+    const auto temperature_values = temperature.owned_read_view();
+    const auto density_values = material.density.owned_read_view();
     auto acceleration =
         [&](local_ordinal_type cell_lid)
             -> typename velocity_field_type::vec_type
@@ -269,7 +273,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
         if (density_feedback_enabled)
         {
             const auto scale =
-                (material.density.value(cell_lid) - reference_density)
+                (density_values(cell_lid, 0) - reference_density)
               / reference_density;
             buoyancy = gravity * scale;
         }
@@ -277,7 +281,7 @@ auto BoussinesqMomentumEquation<Pack>::assemble_physical_system(
         {
             const auto scale =
                 options.thermal_expansion
-              * (temperature.value(cell_lid)
+              * (temperature_values(cell_lid, 0)
                  - options.reference_temperature);
             buoyancy = gravity * (-scale);
         }
@@ -335,6 +339,8 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
         material, dynamic_viscosity_override);
 
     const auto gravity = options.gravity_vector();
+    const auto temperature_values = temperature.owned_read_view();
+    const auto density_values = material.density.owned_read_view();
     auto acceleration =
         [&](local_ordinal_type cell_lid)
             -> typename velocity_field_type::vec_type
@@ -343,7 +349,7 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
         if (density_feedback_enabled)
         {
             const auto scale =
-                (material.density.value(cell_lid) - reference_density)
+                (density_values(cell_lid, 0) - reference_density)
               / reference_density;
             buoyancy = gravity * scale;
         }
@@ -351,7 +357,7 @@ auto BoussinesqMomentumEquation<Pack>::advance_velocity_physical(
         {
             const auto scale =
                 options.thermal_expansion
-              * (temperature.value(cell_lid)
+              * (temperature_values(cell_lid, 0)
                  - options.reference_temperature);
             buoyancy = gravity * (-scale);
         }

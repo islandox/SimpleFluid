@@ -69,6 +69,31 @@ TEST(VectorCellFieldTest, InitialValueConstructorFillsOwnedAndOverlapData)
     EXPECT_EQ(velocity.local_value(1), (SimpleFluid::vec3{4.0, 5.0, 6.0}));
 }
 
+/** @brief Verifies component-wise bulk host access without per-value Tpetra calls. */
+TEST(VectorCellFieldTest, ExposesComponentWiseHostViews)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType velocity(mesh, "velocity");
+
+    {
+        auto owned = velocity.owned_write_view();
+        ASSERT_EQ(owned.extent(0), 2u);
+        ASSERT_EQ(owned.extent(1), FieldType::num_components);
+        for (size_t component = 0;
+             component < FieldType::num_components; ++component)
+        {
+            owned(1, component) =
+                10.0 + static_cast<double>(component);
+        }
+    }
+
+    velocity.sync_ghosts();
+    const auto local = velocity.local_read_view();
+    EXPECT_DOUBLE_EQ(local(1, 0), 10.0);
+    EXPECT_DOUBLE_EQ(local(1, 1), 11.0);
+    EXPECT_DOUBLE_EQ(local(1, 2), 12.0);
+}
+
 /** @brief Verifies periodic synchronization copies every vector component. */
 TEST(VectorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
 {

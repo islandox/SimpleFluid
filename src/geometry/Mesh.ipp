@@ -192,7 +192,8 @@ inline auto Mesh<Pack>::node_coord(global_ordinal_type node_gid) const -> const 
 template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_owned_cell(local_ordinal_type lid) const
 {
-    return cell(lid).owned;
+    check_cell(lid);
+    return static_cast<size_t>(lid) < num_owned_cells();
 }
 
 template<TpetraTypePack Pack>
@@ -216,40 +217,48 @@ inline auto Mesh<Pack>::face_distances(local_ordinal_type cell_lid) const -> con
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::cell_volume(local_ordinal_type lid) const
 {
-    return cell(lid).volume;
+    check_cell(lid);
+    return d_host_views.cell_geometry.volume[static_cast<size_t>(lid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_centroid(local_ordinal_type lid) const -> const Vec3&
 {
-    return cell(lid).center;
+    check_cell(lid);
+    return d_host_views.cell_geometry.centroid[static_cast<size_t>(lid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::owner_cell(local_ordinal_type fid) const -> local_ordinal_type
 {
-    return face(fid).owner;
+    check_face(fid);
+    return d_host_views.face_topology.owner[static_cast<size_t>(fid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::neighbor_cell(local_ordinal_type fid) const -> local_ordinal_type
 {
-    return face(fid).neighbor;
+    check_face(fid);
+    return d_host_views.face_topology.neighbor[static_cast<size_t>(fid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::opposite_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const -> local_ordinal_type
 {
-    const auto& info = face(fid);
+    check_face(fid);
     check_cell(cell_lid);
+    const auto index = static_cast<size_t>(fid);
+    const auto owner = d_host_views.face_topology.owner[index];
+    const auto neighbor = d_host_views.face_topology.neighbor[index];
 
-    if (info.owner == cell_lid)
+    if (owner == cell_lid)
     {
-        return neighbor_cell(fid);
+        return neighbor;
     }
-    if (info.neighbor != invalid_id<local_ordinal_type>() && info.neighbor == cell_lid)
+    if (neighbor != invalid_id<local_ordinal_type>()
+        && neighbor == cell_lid)
     {
-        return info.owner;
+        return owner;
     }
 
     throw std::invalid_argument("Cell is not adjacent to requested face.");
@@ -259,16 +268,20 @@ template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::opposite_or_periodic_neighbor_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const
  -> local_ordinal_type
 {
-    const auto& info = face(fid);
+    check_face(fid);
     check_cell(cell_lid);
+    const auto index = static_cast<size_t>(fid);
+    const auto owner = d_host_views.face_topology.owner[index];
+    const auto neighbor = d_host_views.face_topology.neighbor[index];
 
-    if (info.owner == cell_lid)
+    if (owner == cell_lid)
     {
-        return info.neighbor;
+        return neighbor;
     }
-    if (info.neighbor != invalid_id<local_ordinal_type>() && info.neighbor == cell_lid)
+    if (neighbor != invalid_id<local_ordinal_type>()
+        && neighbor == cell_lid)
     {
-        return info.owner;
+        return owner;
     }
 
     throw std::invalid_argument("Cell is not adjacent to requested face.");
@@ -313,34 +326,61 @@ inline void Mesh<Pack>::sync_periodic_boundaries(TensorCellField<Pack>& field) c
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::face_area(local_ordinal_type fid) const
 {
-    return face(fid).area;
+    check_face(fid);
+    return d_host_views.face_geometry.area[static_cast<size_t>(fid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_area_vector(local_ordinal_type fid) const -> Vec3
 {
-    return face_normal(fid) * face_area(fid);
+    check_face(fid);
+    return d_host_views.face_geometry.area_vector[static_cast<size_t>(fid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_area_vector_outward(local_ordinal_type fid,
                                                  local_ordinal_type cell_lid) const -> Vec3
 {
-    return face_normal_outward(fid, cell_lid) * face_area(fid);
+    check_face(fid);
+    check_cell(cell_lid);
+    const auto index = static_cast<size_t>(fid);
+    if (d_host_views.face_topology.owner[index] == cell_lid)
+    {
+        return d_host_views.face_geometry.area_vector[index];
+    }
+    if (d_host_views.face_topology.neighbor[index] == cell_lid)
+    {
+        return d_host_views.face_geometry.area_vector[index] * -1.0;
+    }
+
+    throw std::invalid_argument("Cell is not adjacent to requested face.");
 }
 
 template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::face_cell_center_distance(local_ordinal_type fid) const
 {
-    return face(fid).cell_center_distance;
+    check_face(fid);
+    return d_host_views.face_geometry
+        .cell_center_distance[static_cast<size_t>(fid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::cell_center_vector(local_ordinal_type fid,
                                            local_ordinal_type cell_lid) const -> Vec3
 {
-    const auto other = opposite_or_periodic_neighbor_cell(fid, cell_lid);
-    return cell_centroid(other) - cell_centroid(cell_lid);
+    check_face(fid);
+    check_cell(cell_lid);
+    const auto index = static_cast<size_t>(fid);
+    if (d_host_views.face_topology.owner[index] == cell_lid)
+    {
+        return d_host_views.face_geometry.owner_to_neighbor[index];
+    }
+    if (d_host_views.face_topology.neighbor[index] == cell_lid)
+    {
+        return d_host_views.face_geometry.owner_to_neighbor[index] * -1.0;
+    }
+
+    throw std::invalid_argument("Cell is not adjacent to requested face.");
 }
 
 /**
@@ -356,16 +396,17 @@ template<TpetraTypePack Pack>
 inline real_t Mesh<Pack>::cell_to_face_distance(local_ordinal_type fid,
                                                 local_ordinal_type cell_lid) const
 {
-    const auto& info = face(fid);
+    check_face(fid);
     check_cell(cell_lid);
+    const auto index = static_cast<size_t>(fid);
 
-    if (info.owner == cell_lid)
+    if (d_host_views.face_topology.owner[index] == cell_lid)
     {
-        return info.owner_to_face_distance;
+        return d_host_views.face_geometry.owner_to_face_distance[index];
     }
-    if (info.neighbor != invalid_id<local_ordinal_type>() && info.neighbor == cell_lid)
+    if (d_host_views.face_topology.neighbor[index] == cell_lid)
     {
-        return info.neighbor_to_face_distance;
+        return d_host_views.face_geometry.neighbor_to_face_distance[index];
     }
 
     throw std::invalid_argument("Cell is not adjacent to requested face.");
@@ -374,13 +415,16 @@ inline real_t Mesh<Pack>::cell_to_face_distance(local_ordinal_type fid,
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_normal(local_ordinal_type fid) const -> const Vec3&
 {
-    return face(fid).unit_normal_from_owner;
+    check_face(fid);
+    return d_host_views.face_geometry
+        .unit_normal_from_owner[static_cast<size_t>(fid)];
 }
 
 template<TpetraTypePack Pack>
 inline auto Mesh<Pack>::face_centroid(local_ordinal_type fid) const -> const Vec3&
 {
-    return face(fid).center;
+    check_face(fid);
+    return d_host_views.face_geometry.centroid[static_cast<size_t>(fid)];
 }
 
 /**
@@ -414,13 +458,13 @@ inline auto Mesh<Pack>::face_normal_outward(local_ordinal_type fid,
 template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_exterior_face(local_ordinal_type fid) const
 {
-    return face(fid).neighbor == invalid_id<local_ordinal_type>();
+    return neighbor_cell(fid) == invalid_id<local_ordinal_type>();
 }
 
 template<TpetraTypePack Pack>
 inline bool Mesh<Pack>::is_interior_face(local_ordinal_type fid) const
 {
-    return face(fid).neighbor != invalid_id<local_ordinal_type>();
+    return neighbor_cell(fid) != invalid_id<local_ordinal_type>();
 }
 
 /**
@@ -439,6 +483,8 @@ template<TpetraTypePack Pack>
 inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
                                            local_ordinal_type paired_cell_lid)
 {
+    check_face(face_lid);
+    check_cell(paired_cell_lid);
     auto& info = d_faces[static_cast<size_t>(face_lid)];
     const auto& owner_center = d_cells[static_cast<size_t>(info.owner)].center;
     const auto& paired_center = d_cells[static_cast<size_t>(paired_cell_lid)].center;
@@ -479,12 +525,29 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
 
     info.neighbor = paired_cell_lid;
     info.cell_center_distance = periodic_distance;
+
+    const auto face_index = static_cast<size_t>(face_lid);
+    if (d_host_views.face_topology.neighbor.size() == d_faces.size())
+    {
+        d_host_views.face_topology.neighbor[face_index] = paired_cell_lid;
+        d_host_views.face_geometry.cell_center_distance[face_index] =
+            periodic_distance;
+        d_host_views.face_geometry.owner_to_neighbor[face_index] =
+            paired_center - owner_center;
+    }
+    if (d_face_neighbor_device.extent(0) == d_faces.size())
+    {
+        Kokkos::deep_copy(
+            Kokkos::subview(d_face_neighbor_device, face_index),
+            paired_cell_lid);
+    }
 }
 
 template<TpetraTypePack Pack>
 inline int Mesh<Pack>::boundary_id(local_ordinal_type fid) const
 {
-    return face(fid).boundary_id;
+    check_face(fid);
+    return d_host_views.face_topology.boundary_id[static_cast<size_t>(fid)];
 }
 
 /**
@@ -610,6 +673,27 @@ std::string Mesh<Pack>::make_face_key(ArrGO node_ids)
 }
 
 /**
+ * @brief Create a mutable 1D Kokkos device view from a host vector.
+ */
+template<TpetraTypePack Pack>
+template <class T>
+auto Mesh<Pack>::make_mutable_vector_view(
+    const std::string& name,
+    const std::vector<T>& data) -> kokkos_1dview<T>
+{
+    kokkos_1dview<T> view(name, data.size());
+    auto host_view = Kokkos::create_mirror_view(view);
+
+    for (size_t i = 0; i < data.size(); ++i)
+    {
+        host_view(i) = data[i];
+    }
+
+    Kokkos::deep_copy(view, host_view);
+    return view;
+}
+
+/**
  * @brief Create a 1D Kokkos device view from a host vector.
  *
  * Copies the host data to a mirror view, then deep-copies to the device.
@@ -625,16 +709,7 @@ template <class T>
 auto Mesh<Pack>::make_vector_view(const std::string& name, const std::vector<T>& data)
     -> kokkos_1dview<const T>
 {
-    kokkos_1dview<T> view(name, data.size());
-    auto host_view = Kokkos::create_mirror_view(view);
-
-    for (size_t i = 0; i < data.size(); ++i)
-    {
-        host_view(i) = data[i];
-    }
-
-    Kokkos::deep_copy(view, host_view);
-    return view;
+    return make_mutable_vector_view(name, data);
 }
 
 /**

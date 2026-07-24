@@ -112,6 +112,30 @@ TEST(VectorFaceFieldTest, InitialValueConstructorFillsAllComponents)
     }
 }
 
+/** @brief Verifies component-wise bulk host access on owned faces. */
+TEST(VectorFaceFieldTest, ExposesComponentWiseHostViews)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType velocity(mesh, "face_velocity");
+
+    {
+        auto values = velocity.owned_write_view();
+        const auto row = velocity.owned_row(0);
+        for (size_t component = 0;
+             component < FieldType::num_components; ++component)
+        {
+            values(row, component) =
+                static_cast<double>(component + 1);
+        }
+    }
+
+    const auto values = velocity.owned_read_view();
+    const auto row = velocity.owned_row(0);
+    EXPECT_DOUBLE_EQ(values(row, 0), 1.0);
+    EXPECT_DOUBLE_EQ(values(row, 1), 2.0);
+    EXPECT_DOUBLE_EQ(values(row, 2), 3.0);
+}
+
 /** @brief Checks that the face map follows owner-cell ownership. */
 TEST(VectorFaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 {

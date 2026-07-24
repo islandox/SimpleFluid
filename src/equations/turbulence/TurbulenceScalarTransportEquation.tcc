@@ -80,6 +80,10 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
         d_mesh->num_owned_cells());
     std::vector<PreparedBoundaryData> prepared_boundaries(
         d_mesh->num_faces());
+    const auto old_state_values = old_state.local_read_view();
+    const auto diffusivity_values =
+        effective_diffusivity.local_read_view();
+    const auto face_flux_values = face_fluxes.owned_read_view();
     turbulence_detail::collective_local_validation(
         *d_mesh, "Turbulence scalar transport input validation",
         [&]
@@ -123,7 +127,9 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
 
             for (const auto face_lid : face_fluxes.owned_face_ids())
             {
-                if (!std::isfinite(face_fluxes.value(face_lid)))
+                if (!std::isfinite(
+                        face_flux_values(
+                            face_fluxes.owned_row(face_lid), 0)))
                 {
                     throw std::invalid_argument("TurbulenceScalarTransportEquation requires finite "
                                                 "face fluxes.");
@@ -133,14 +139,15 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
             for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
             {
                 const auto cell_lid = static_cast<local_ordinal_type>(local);
-                const auto old_value = old_state.local_value(cell_lid);
+                const auto old_value = old_state_values(cell_lid, 0);
                 if (!std::isfinite(old_value) || old_value < positive_floor)
                 {
                     throw std::invalid_argument(
                         "TurbulenceScalarTransportEquation requires accepted "
                         "state values at or above the positive floor.");
                 }
-                const auto diffusivity = effective_diffusivity.local_value(cell_lid);
+                const auto diffusivity =
+                    diffusivity_values(cell_lid, 0);
                 if (!std::isfinite(diffusivity) || diffusivity < scalar_type{})
                 {
                     throw std::invalid_argument("TurbulenceScalarTransportEquation requires finite "
@@ -260,7 +267,7 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
                     {
                         const auto owner =
                             d_mesh->owner_cell(face_lid);
-                        value = old_state.local_value(owner) +
+                        value = old_state_values(owner, 0) +
                                 condition.value * static_cast<scalar_type>(
                                     FVM::detail::boundary_normal_distance(
                                         *d_mesh, face_lid, owner));
@@ -304,7 +311,8 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     {
         const auto cell_lid = static_cast<local_ordinal_type>(local);
         all_diffusivities_positive = all_diffusivities_positive &&
-                                     effective_diffusivity.local_value(cell_lid) > scalar_type{};
+                                     diffusivity_values(cell_lid, 0) >
+                                         scalar_type{};
     }
 
     auto boundary_condition = [&](int batch_id, size_t in_batch_id)
@@ -344,15 +352,28 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
         d_cached_transport_matrix = Teuchos::null;
     }
 
-    auto system = FVM::weighted_scalar_transport_system<Pack>(
-        old_state, face_fluxes, time_step, d_unit_weight, d_unit_weight, effective_diffusivity,
-        boundary_condition, boundary_value, source, treatment, correction_field,
-        d_cached_transport_matrix, std::move(sink),
-        std::move(fixed_cell_value),
-        boundary_overrides != nullptr
-            ? boundary_overrides->boundary_diffusivity
-            : nullptr,
-        &d_transport_geometry_cache);
+    auto system = [&]()
+    {
+        try
+        {
+            return FVM::weighted_scalar_transport_system<Pack>(
+                old_state, face_fluxes, time_step, d_unit_weight,
+                d_unit_weight, effective_diffusivity, boundary_condition,
+                boundary_value, source, treatment, correction_field,
+                d_cached_transport_matrix, std::move(sink),
+                std::move(fixed_cell_value),
+                boundary_overrides != nullptr
+                    ? boundary_overrides->boundary_diffusivity
+                    : nullptr,
+                &d_transport_geometry_cache);
+        }
+        catch (...)
+        {
+            d_cached_transport_matrix = Teuchos::null;
+            d_cached_graph_supports_non_orthogonal_correction = false;
+            throw;
+        }
+    }();
     d_cached_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_diffusivities_positive)
     {
@@ -363,29 +384,36 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto statistics = d_linear_solver.solve_with_statistics(
         matrix, *system.rhs, candidate.owned_data(), linear_options);
-    turbulence_detail::collective_local_validation(
-        *d_mesh, "Turbulence scalar transport candidate validation",
-        [&]
-        {
-            if (!statistics.converged)
+    {
+        auto candidate_values = candidate.owned_write_view();
+        turbulence_detail::collective_local_validation(
+            *d_mesh, "Turbulence scalar transport candidate validation",
+            [&]
             {
-                throw std::runtime_error("Turbulence scalar transport solve did not converge.");
-            }
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto cell_lid = static_cast<local_ordinal_type>(owned);
-                const auto value = candidate.value(cell_lid);
-                if (!std::isfinite(value))
+                if (!statistics.converged)
                 {
-                    throw std::runtime_error("Turbulence scalar transport produced a non-finite "
-                                             "value.");
+                    throw std::runtime_error(
+                        "Turbulence scalar transport solve did not converge.");
                 }
-                if (value < positive_floor)
+                for (size_t owned = 0;
+                     owned < d_mesh->num_owned_cells(); ++owned)
                 {
-                    candidate.set_owned_value(cell_lid, positive_floor);
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto value = candidate_values(cell_lid, 0);
+                    if (!std::isfinite(value))
+                    {
+                        throw std::runtime_error(
+                            "Turbulence scalar transport produced a "
+                            "non-finite value.");
+                    }
+                    if (value < positive_floor)
+                    {
+                        candidate_values(cell_lid, 0) = positive_floor;
+                    }
                 }
-            }
-        });
+            });
+    }
 
     state.owned_data().update(scalar_type{1}, candidate.owned_data(), scalar_type{0});
     d_mesh->sync_periodic_boundaries(state);

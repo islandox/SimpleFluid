@@ -270,9 +270,33 @@ TEST_F(MeshMethodTest, IdentifierMapping)
     EXPECT_EQ(mesh_->global_to_local_cell(999999999),
               SimpleFluid::invalid_id<lid_t>());
 
-    // Maps and device views
+    // Maps and compact host/device views
     EXPECT_FALSE(mesh_->owned_cell_map().is_null());
     EXPECT_FALSE(mesh_->overlap_cell_map().is_null());
+    const auto& host_views = mesh_->host_views();
+    EXPECT_EQ(
+        host_views.cell_geometry.volume.size(),
+        mesh_->num_local_cells());
+    EXPECT_EQ(
+        host_views.face_topology.owner.size(),
+        mesh_->num_faces());
+    EXPECT_EQ(
+        host_views.face_geometry.area_vector.size(),
+        mesh_->num_faces());
+    for (size_t face = 0; face < mesh_->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<lid_t>(face);
+        EXPECT_EQ(
+            host_views.face_topology.owner[face],
+            mesh_->face(face_lid).owner);
+        EXPECT_EQ(
+            host_views.face_topology.neighbor[face],
+            mesh_->face(face_lid).neighbor);
+        EXPECT_EQ(
+            host_views.face_geometry.area_vector[face],
+            mesh_->face(face_lid).unit_normal_from_owner
+                * mesh_->face(face_lid).area);
+    }
     const auto views = mesh_->device_views();
     EXPECT_NO_THROW(static_cast<void>(views.cell_volume.extent(0)));
 }

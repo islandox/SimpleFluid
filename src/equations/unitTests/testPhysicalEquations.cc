@@ -58,6 +58,31 @@ struct PressureProjectionEquationTestAccess
         return BelosLinearSolverTestAccess<Pack>::
             preconditioner_setup_count(equation.d_linear_solver);
     }
+
+    static std::size_t predictor_flux_reuse_count(
+        const PressureProjectionEquation<Pack>& equation) noexcept
+    {
+        return equation.d_cached_predictor_flux_reuse_count;
+    }
+
+    static auto project_reusing_cached_predictor(
+        PressureProjectionEquation<Pack>& equation,
+        CellField<Pack>& pressure,
+        CellField<Pack>& pressure_correction,
+        typename Pack::scalar_type time_step,
+        typename Pack::scalar_type reference_density,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        VectorCellField<Pack>& velocity)
+        -> typename PressureProjectionEquation<Pack>::ProjectionResult
+    {
+        return equation.project_reusing_cached_predictor(
+            pressure,
+            pressure_correction,
+            time_step,
+            reference_density,
+            velocity_boundary_cache,
+            velocity);
+    }
 };
 
 } // namespace SimpleFluid::detail
@@ -529,6 +554,72 @@ TEST(PhysicalEquationsTest,
     }
 }
 
+/**
+ * @brief A failed reused variable-coefficient assembly is discarded before
+ *        the next physical-temperature advance.
+ */
+TEST(PhysicalEquationsTest,
+     PhysicalTemperatureRecoversAfterCachedAssemblyThrows)
+{
+    auto mesh = make_single_hex_mesh();
+    constexpr double initial_temperature = 275.0;
+    FieldType temperature(
+        mesh, initial_temperature, "recovery_temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.density = 4.0;
+    model_options.reference_density = 4.0;
+    model_options.specific_heat_capacity = 5.0;
+    model_options.thermal_conductivity = 1.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    auto zero_power =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    auto throwing_power =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        throw std::runtime_error("intentional assembly failure");
+    };
+
+    equation.advance_physical(
+        temperature,
+        zero_fluxes,
+        0.1,
+        material,
+        temperature,
+        zero_power,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+
+    EXPECT_THROW(
+        equation.advance_physical(
+            temperature,
+            zero_fluxes,
+            0.1,
+            material,
+            temperature,
+            throwing_power,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit),
+        std::runtime_error);
+
+    const auto statistics = equation.advance_physical(
+        temperature,
+        zero_fluxes,
+        0.1,
+        material,
+        temperature,
+        zero_power,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_NEAR(temperature.value(0), initial_temperature, 1.0e-12);
+}
+
 /** @brief Verifies conversion of a Neumann gradient into prescribed wall heat flux. */
 TEST(PhysicalEquationsTest,
      PhysicalTemperatureNeumannGradientAddsPrescribedWallHeatFlux)
@@ -739,6 +830,138 @@ TEST(PhysicalEquationsTest,
     equation.rebuild_matrix();
     equation.project(pressure, 0.1, 1.0, cache, velocity);
     EXPECT_EQ(setup_count(), 2U);
+}
+
+/**
+ * @brief Verify an adjacent PISO corrector reuses the preceding final flux
+ *        without changing pressure, velocity, fluxes, or linear iterations.
+ */
+TEST(PhysicalEquationsTest,
+     PressureProjectionCachedPredictorMatchesReconstruction)
+{
+    auto mesh = make_2x2x2_mesh();
+    FieldType reconstructed_pressure(mesh, "reconstructed_pressure");
+    FieldType reused_pressure(mesh, "reused_pressure");
+    FieldType reconstructed_correction(mesh, "reconstructed_correction");
+    FieldType reused_correction(mesh, "reused_correction");
+    VectorFieldType reconstructed_velocity(
+        mesh, "reconstructed_velocity");
+    VectorFieldType reused_velocity(mesh, "reused_velocity");
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        const auto pressure_value =
+            2.0 * center.x - 0.5 * center.y + 0.25 * center.z;
+        const SimpleFluid::vec3 velocity_value{
+            center.x, -0.5 * center.y, 0.25 * center.z};
+        reconstructed_pressure.set_value(cell_lid, pressure_value);
+        reused_pressure.set_value(cell_lid, pressure_value);
+        reconstructed_velocity.set_value(cell_lid, velocity_value);
+        reused_velocity.set_value(cell_lid, velocity_value);
+    }
+    mesh->sync_periodic_boundaries(reconstructed_pressure);
+    mesh->sync_periodic_boundaries(reused_pressure);
+    mesh->sync_periodic_boundaries(reconstructed_velocity);
+    mesh->sync_periodic_boundaries(reused_velocity);
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    const auto velocity_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> reconstructed_equation(
+        mesh, options, bcs.pressure);
+    SimpleFluid::PressureProjectionEquation<Pack> reused_equation(
+        mesh, options, bcs.pressure);
+
+    constexpr double time_step = 0.1;
+    constexpr double reference_density = 1000.0;
+    reconstructed_equation.project(
+        reconstructed_pressure,
+        reconstructed_correction,
+        time_step,
+        reference_density,
+        velocity_cache,
+        reconstructed_velocity);
+    reused_equation.project(
+        reused_pressure,
+        reused_correction,
+        time_step,
+        reference_density,
+        velocity_cache,
+        reused_velocity);
+
+    const auto reconstructed_result =
+        reconstructed_equation.project(
+            reconstructed_pressure,
+            reconstructed_correction,
+            time_step,
+            reference_density,
+            velocity_cache,
+            reconstructed_velocity);
+    const auto reused_result =
+        SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::
+            project_reusing_cached_predictor(
+                reused_equation,
+                reused_pressure,
+                reused_correction,
+                time_step,
+                reference_density,
+                velocity_cache,
+                reused_velocity);
+
+    EXPECT_EQ(
+        SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::
+            predictor_flux_reuse_count(reused_equation),
+        1U);
+    EXPECT_EQ(
+        reconstructed_result.linear_solve.iterations,
+        reused_result.linear_solve.iterations);
+    EXPECT_DOUBLE_EQ(
+        reconstructed_result.pressure_correction,
+        reused_result.pressure_correction);
+    EXPECT_DOUBLE_EQ(
+        reconstructed_result.continuity,
+        reused_result.continuity);
+
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        EXPECT_DOUBLE_EQ(
+            reconstructed_pressure.value(cell_lid),
+            reused_pressure.value(cell_lid));
+        EXPECT_DOUBLE_EQ(
+            reconstructed_correction.value(cell_lid),
+            reused_correction.value(cell_lid));
+        const auto reconstructed_value =
+            reconstructed_velocity.value(cell_lid);
+        const auto reused_value = reused_velocity.value(cell_lid);
+        EXPECT_DOUBLE_EQ(reconstructed_value.x, reused_value.x);
+        EXPECT_DOUBLE_EQ(reconstructed_value.y, reused_value.y);
+        EXPECT_DOUBLE_EQ(reconstructed_value.z, reused_value.z);
+    }
+
+    const auto& reconstructed_fluxes =
+        reconstructed_equation.corrected_face_fluxes();
+    const auto& reused_fluxes = reused_equation.corrected_face_fluxes();
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<MeshType::local_ordinal_type>(face);
+        if (!reconstructed_fluxes.is_owned_face(face_lid))
+        {
+            continue;
+        }
+        EXPECT_DOUBLE_EQ(
+            reconstructed_fluxes.value(face_lid),
+            reused_fluxes.value(face_lid));
+    }
 }
 
 /**

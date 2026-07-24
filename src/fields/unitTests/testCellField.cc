@@ -104,6 +104,44 @@ TEST(CellFieldTest, SynchronizesOwnedValuesIntoOverlapStorage)
     EXPECT_DOUBLE_EQ(temperature.local_value(1), 20.0);
 }
 
+/** @brief Verifies bulk host views preserve owned/overlap synchronization. */
+TEST(CellFieldTest, ExposesBulkOwnedAndLocalHostViews)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType temperature(mesh, "temperature");
+
+    {
+        auto owned = temperature.owned_write_view();
+        ASSERT_EQ(owned.extent(0), 2u);
+        ASSERT_EQ(owned.extent(1), 1u);
+        owned(0, 0) = 12.0;
+        owned(1, 0) = 24.0;
+    }
+
+    {
+        const auto owned = temperature.owned_read_view();
+        EXPECT_DOUBLE_EQ(owned(0, 0), 12.0);
+        EXPECT_DOUBLE_EQ(owned(1, 0), 24.0);
+    }
+
+    temperature.sync_ghosts();
+    {
+        const auto local = temperature.local_read_view();
+        EXPECT_DOUBLE_EQ(local(0, 0), 12.0);
+        EXPECT_DOUBLE_EQ(local(1, 0), 24.0);
+    }
+
+    {
+        auto local = temperature.local_write_view();
+        local(0, 0) = -1.0;
+    }
+    EXPECT_DOUBLE_EQ(temperature.value(0), 12.0);
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), -1.0);
+
+    temperature.sync_ghosts();
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), 12.0);
+}
+
 /** @brief Verifies periodic synchronization refreshes the overlap vector. */
 TEST(CellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
 {
