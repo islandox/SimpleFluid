@@ -4,13 +4,16 @@ FoamFile
     class       dictionary;
     object      fvSchemes;
 }
-ddtSchemes { default steadyState; }
+ddtSchemes { default Euler; }
 gradSchemes { default Gauss linear; }
 divSchemes
 {
     default                             none;
     div(phi,U)                          bounded Gauss upwind;
     div(phi,T)                          bounded Gauss upwind;
+    turbulence                          bounded Gauss upwind;
+    div(phi,k)                          $turbulence;
+    div(phi,epsilon)                    $turbulence;
     div((nuEff*dev2(T(grad(U)))))       Gauss linear;
 }
 laplacianSchemes { default Gauss linear corrected; }

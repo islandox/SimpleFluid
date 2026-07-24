@@ -1,0 +1,38 @@
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0.00375;
+boundaryField
+{
+    pipeWall
+    {
+        type    kqRWallFunction;
+        value   uniform 0.00375;
+    }
+    tunnelWall
+    {
+        type    kqRWallFunction;
+        value   uniform 0.00375;
+    }
+    downWall
+    {
+        type    kqRWallFunction;
+        value   uniform 0.00375;
+    }
+    inlet
+    {
+        type    kqRWallFunction;
+        value   uniform 0.00375;
+    }
+    outlet
+    {
+        type    kqRWallFunction;
+        value   uniform 0.00375;
+    }
+    cyclicLeft  { type cyclic; }
+    cyclicRight { type cyclic; }
+}

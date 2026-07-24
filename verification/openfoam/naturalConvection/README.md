@@ -4,9 +4,10 @@ This fixture implements the final closed-cavity configuration in
 `NC_Tutorial_Shiri.pdf`. The heated vertical pipe is at 360 K; the outer,
 bottom, and top walls are at 290 K; all physical walls are no-slip. The
 OpenFOAM case retains the tutorial's 45-degree cyclic wedge and four-block
-mesh. The SimpleFluid executable uses the same 45-degree annular sector with
-symmetry (slip/zero-gradient) side planes, which is equivalent for the intended
-axisymmetric solution and can be distributed over MPI.
+mesh. The SimpleFluid executable uses the same radial and axial block edges in
+a 45-degree annular sector with symmetry (slip/zero-gradient) side planes.
+Those planes are equivalent to the OpenFOAM cyclic pair while the computed
+solution remains axisymmetric.
 
 The tutorial is internally inconsistent about pipe size: its prose says a
 0.15 m radius, while every inner vertex in `blockMeshDict` is at 75 mm. This
@@ -15,7 +16,7 @@ fixture follows the executable geometry, hence an inner radius of 0.075 m.
 ## Run
 
 Load an OpenFOAM installation that provides
-`buoyantBoussinesqSimpleFoam`, then run both solvers on up to six ranks:
+`buoyantBoussinesqPimpleFoam`, then run both solvers on up to six ranks:
 
 ```sh
 verification/openfoam/naturalConvection/run_comparison.sh 6
@@ -31,9 +32,12 @@ verification/openfoam/naturalConvection/run_simplefluid.sh 6
 The SimpleFluid launcher builds `RelWithDebInfo` by default. Set
 `SIMPLEFLUID_BUILD_CONFIG=Debug` only when a debug comparison is needed.
 
-The OpenFOAM case defaults to 2000 steady SIMPLE iterations. SimpleFluid
-defaults to a `40 x 20 x 100` annular mesh, 200 transient steps, and a 0.002 s
-step size. Override the SimpleFluid resolution or duration with:
+Both cases start from the same quiescent 290 K field and the tutorial's
+`k=0.00375 m2/s2`, `epsilon=0.00075 m2/s3` turbulence state. They advance
+200 transient steps with a 0.002 s step size to the matched comparison time
+`t=0.4 s`. SimpleFluid defaults to the OpenFOAM mesh's `40 x 20 x 100`
+radial, angular, and axial cell counts. Override a standalone SimpleFluid
+resolution or duration with:
 
 ```sh
 SIMPLEFLUID_SHIRI_NR=40 \
@@ -44,27 +48,73 @@ SIMPLEFLUID_SHIRI_DT=0.002 \
   verification/openfoam/naturalConvection/run_simplefluid.sh 6
 ```
 
+The default mesh, step count, and step size are required for the supplied
+comparison. The comparator requires the latest OpenFOAM profile at `t=0.4 s`,
+the fixed OpenFOAM sample radius `r=0.0800000443 m`, and 80,000 unique
+SimpleFluid cells forming the complete `40 x 20 x 100` mesh. The overrides are
+for standalone experiments and are rejected by `run_comparison.sh`; a
+different matched run requires updating both cases and the comparator
+expectations. Because the SimpleFluid cell CSV does not encode time, invoke
+the comparator through that launcher to guarantee a fresh matched-time pair.
+
 Results are written under `profiles/` as one VTU and one cell CSV per rank.
 During the SimpleFluid solve, MPI rank zero prints one flushed convergence
 summary per physical step by wrapping `std::cout` in a `ProgressStream` and
-passing it through the solver's `run(steps, progress)` interface.
-OpenFOAM samples `T` and `U` on an axial line at `r=0.080 m`. The comparison
-script selects the nearest SimpleFluid radial cell layer, averages its sector
-theta cells, interpolates the OpenFOAM profile to the SimpleFluid axial cell
-centres, and reports L2 and maximum absolute differences.
+passing it through the solver's `run(steps, progress)` interface. OpenFOAM
+uses `cellPoint` to sample `T`, `U`, `k`, `epsilon`, `nut`, and `alphat` on
+one axial line at the fixed radius and one sector angle. The comparator
+theta-averages SimpleFluid cell-centred values on the two bracketing radial
+layers, linearly interpolates them to that radius, and interpolates the
+OpenFOAM line axially at the SimpleFluid cell centres. Radial, azimuthal, and
+axial velocity components are all compared.
+
+The reported `axial_rms` is a trapezoidal, axial-space-weighted RMS over the
+overlapping line span; it is not a volume or full-domain norm. `linf` is the
+maximum pointwise absolute difference. `relative_axial_rms` divides by the
+corresponding axial RMS of the OpenFOAM field. For temperature that
+normalization uses `T - 290 K`, so it measures error relative to the
+temperature rise; the other fields are unshifted. Per-field maximum theta
+spreads on both SimpleFluid radial layers and the maximum selected-layer
+`|u_theta|` expose departures from the axisymmetry needed to compare a theta
+average with OpenFOAM's single-theta sample. Both solvers also emit
+wall-y-plus diagnostics. The comparator also reports the global SimpleFluid
+temperature range and warns if it leaves the imposed 290--360 K bounds.
+
+The interior turbulent thermal-diffusivity metric derives `nut/Prt` with
+`Prt=0.85` on both sides after their respective sampling and interpolation; it
+does not compare raw OpenFOAM `alphat`. The raw `alphat` boundary value remains
+relevant to the Jayatilleke wall heat flux and is a separate wall-treatment
+check.
 
 ## Interpretation
 
-The PDF used compressible `buoyantSimpleFoam` with a k-epsilon RAS model. This
-fixture deliberately uses laminar Boussinesq physics in OpenFOAM because that
-is the model implemented by SimpleFluid. At the tutorial dimensions and 70 K
-temperature difference the Rayleigh number is large, so these laminar results
-are a code-to-code discretization check, not a validated turbulent prediction.
-No pass/fail tolerance is imposed until a mesh- and time-converged reference is
-established.
+Both fixtures use the modern incompressible Boussinesq standard k-epsilon
+model with `Cmu=0.09`, `C1=1.44`, `C2=1.92`, `sigmak=1.0`, and
+`sigmaEps=1.3`. They use smooth `kqRWallFunction`,
+`epsilonWallFunction`, and `nutkWallFunction` equivalents plus the
+Jayatilleke thermal wall law at `Prt=0.85`. OpenFOAM's
+`buoyancyTurbSource` and SimpleFluid's `OpenFOAMBoussinesq` option apply the
+same temperature-gradient production to `k` and `epsilon`.
+
+The continuum closures are aligned, but the segregated update order is not.
+OpenFOAM advances velocity and temperature with lagged `nut`, corrects
+pressure, then updates `epsilon` and `k` using the new temperature.
+SimpleFluid corrects velocity and pressure, advances `k` and `epsilon` from
+the accepted temperature state, then advances temperature with the updated
+`nut`. Fixed-step differences therefore include first-order operator-splitting
+error; timestep refinement is required before attributing them solely to the
+spatial discretizations.
+
+The PDF instead used the legacy compressible `buoyantSimpleFoam` closure, so
+this fixture is not an exact reproduction of its density-based buoyant
+k-epsilon model. Reported wall `y+` values on parts of this mesh fall below
+the log layer required by the high-Re wall functions. The matched `t=0.4 s`
+output is therefore a code-to-code transient agreement check, not a
+physically resolved RANS prediction. No pass/fail tolerance is imposed until
+temporal and mesh convergence are established.
 
 The OpenFOAM dictionaries target releases that still ship
-`buoyantBoussinesqSimpleFoam`; newer modular OpenFOAM releases may require
+`buoyantBoussinesqPimpleFoam`; newer modular OpenFOAM releases may require
 solver-dictionary migration.
 
 ## Profile the SimpleFluid solve
