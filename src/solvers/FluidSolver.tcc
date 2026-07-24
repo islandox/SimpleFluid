@@ -490,11 +490,21 @@ auto FluidSolver<Pack>::velocity_update_norm(
         *d_mesh, after, "FluidSolver");
 
     scalar_type norm_squared = {};
+    const auto before_values = before.owned_read_view();
+    const auto after_values = after.owned_read_view();
+    const auto& volumes = d_mesh->host_views().cell_geometry.volume;
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto delta = after.value(cell_lid) - before.value(cell_lid);
-        norm_squared += delta.dot(delta) * d_mesh->cell_volume(cell_lid);
+        const auto delta_x =
+            after_values(cell_lid, 0) - before_values(cell_lid, 0);
+        const auto delta_y =
+            after_values(cell_lid, 1) - before_values(cell_lid, 1);
+        const auto delta_z =
+            after_values(cell_lid, 2) - before_values(cell_lid, 2);
+        norm_squared +=
+            (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z)
+            * volumes[owned];
     }
 
     using std::sqrt;
@@ -534,14 +544,22 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
     FVM::cell_gradient(
         pressure(),
         d_problem.boundary_conditions().pressure,
-        predictor_pressure_gradient());
+        predictor_pressure_gradient(),
+        pressure_face_flux_workspace().gradient_cache());
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
+    const auto pressure_gradient_values =
+        predictor_pressure_gradient().owned_read_view();
     auto pressure_source =
         [&](local_ordinal_type cell_lid) -> vec_type
     {
-        return predictor_pressure_gradient().value(cell_lid)
-             * (-inverse_reference_density);
+        return {
+            pressure_gradient_values(cell_lid, 0)
+                * (-inverse_reference_density),
+            pressure_gradient_values(cell_lid, 1)
+                * (-inverse_reference_density),
+            pressure_gradient_values(cell_lid, 2)
+                * (-inverse_reference_density)};
     };
 
     return momentum_equation().advance_velocity(
@@ -563,11 +581,20 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
 {
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        predictor_velocity().set_value(
-            cell_lid, velocity().value(cell_lid));
+        const auto velocity_values = velocity().owned_read_view();
+        auto predictor_values = predictor_velocity().owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            predictor_values(cell_lid, 0) =
+                velocity_values(cell_lid, 0);
+            predictor_values(cell_lid, 1) =
+                velocity_values(cell_lid, 1);
+            predictor_values(cell_lid, 2) =
+                velocity_values(cell_lid, 2);
+        }
     }
     d_mesh->sync_periodic_boundaries(predictor_velocity());
 
@@ -592,12 +619,21 @@ auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
  * @return Pressure projection result for the current corrector.
  */
 template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::run_pressure_correction()
+auto FluidSolver<Pack>::run_pressure_correction(
+    bool reuse_cached_predictor_flux)
     -> typename PressureProjectionEquation<Pack>::ProjectionResult
 {
     auto& projection = pressure_projection();
     const auto result =
-        projection.project(
+        reuse_cached_predictor_flux
+      ? projection.project_reusing_cached_predictor(
+            pressure(),
+            pressure_correction(),
+            d_problem.time_options().time_step,
+            pressure_reference_density(),
+            velocity_boundary_cache(),
+            velocity())
+      : projection.project(
             pressure(),
             pressure_correction(),
             d_problem.time_options().time_step,
@@ -643,11 +679,20 @@ auto FluidSolver<Pack>::assemble_coupled_system()
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_coupled_krylov()
 {
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        predictor_velocity().set_value(
-            cell_lid, velocity().value(cell_lid));
+        const auto velocity_values = velocity().owned_read_view();
+        auto predictor_values = predictor_velocity().owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            predictor_values(cell_lid, 0) =
+                velocity_values(cell_lid, 0);
+            predictor_values(cell_lid, 1) =
+                velocity_values(cell_lid, 1);
+            predictor_values(cell_lid, 2) =
+                velocity_values(cell_lid, 2);
+        }
     }
     d_mesh->sync_periodic_boundaries(predictor_velocity());
 
@@ -695,13 +740,23 @@ void FluidSolver<Pack>::solve_coupled_krylov()
         pressure_face_flux_workspace(),
         projected_face_fluxes());
     scalar_type continuity_norm_squared = {};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto balance =
-            FVM::cell_flux_balance<Pack>(
-                *d_mesh, projected_face_fluxes(), cell_lid);
-        continuity_norm_squared += balance * balance;
+        const auto projected_flux_values =
+            projected_face_fluxes().owned_read_view();
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto balance =
+                FVM::cell_flux_balance<Pack>(
+                    *d_mesh,
+                    projected_face_fluxes(),
+                    projected_flux_values,
+                    cell_lid);
+            continuity_norm_squared += balance * balance;
+        }
     }
     using std::sqrt;
     pressure_velocity_residuals().continuity =
@@ -757,7 +812,7 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
              corrector < pressure_corrections;
              ++corrector)
         {
-            result = run_pressure_correction();
+            result = run_pressure_correction(corrector != 0);
             d_last_step_statistics.add(result.linear_solve);
         }
 

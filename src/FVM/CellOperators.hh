@@ -17,6 +17,7 @@
 #include "fields/VectorCellField.hh"
 #include "FVM/OperatorDetails.hh"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <concepts>
@@ -29,8 +30,537 @@
 namespace SimpleFluid::FVM
 {
 
+/**
+ * @brief Mesh-bound least-squares weights for repeated cell gradients.
+ *
+ * The cache owns a shared reference to the mesh and precomputes two
+ * reconstruction variants: an interior-neighbor-only stencil and a
+ * boundary-aware stencil. Boundary condition types and values remain dynamic;
+ * only topology, directions, normal distances, and least-squares weights are
+ * cached. Rebuild the cache after any mesh topology or geometry revision.
+ *
+ * Cached data are immutable after construction, so one cache may be read by
+ * concurrent evaluations provided their fields and callbacks are independent.
+ *
+ * @tparam Pack Tpetra type pack used by the mesh and fields.
+ */
+template<TpetraTypePack Pack>
+class CellGradientCache
+{
+public:
+    using mesh_type = Mesh<Pack>;
+    using local_ordinal_type = typename mesh_type::local_ordinal_type;
+    using vec_type = typename mesh_type::Vec3;
+    using boundary_location_type =
+        detail::BoundaryFaceLocation<mesh_type>;
+
+    /** @brief One cached interior-neighbor contribution. */
+    struct InteriorSample
+    {
+        local_ordinal_type other_lid{};
+        vec_type weight{};
+    };
+
+    /** @brief One cached boundary-face contribution. */
+    struct BoundarySample
+    {
+        boundary_location_type location{};
+        vec_type weight{};
+        real_t normal_distance{};
+    };
+
+    /** @brief Face-ordered weights for one owned cell. */
+    struct CellGeometry
+    {
+        std::vector<InteriorSample> interior_samples;
+        std::vector<BoundarySample> boundary_samples;
+    };
+
+    /**
+     * @brief Precompute least-squares weights for an assembled mesh.
+     * @param mesh Shared mesh whose lifetime and geometry the cache retains.
+     * @throws std::invalid_argument if @p mesh is null.
+     */
+    explicit CellGradientCache(SP<const mesh_type> mesh)
+        : d_mesh(require_mesh(std::move(mesh))),
+          d_boundary_locations(
+              detail::boundary_face_locations(*d_mesh)),
+          d_interior_geometry(
+              build_geometry(
+                  *d_mesh, d_boundary_locations, false)),
+          d_boundary_geometry(
+              build_geometry(
+                  *d_mesh, d_boundary_locations, true))
+    {
+    }
+
+    CellGradientCache(const CellGradientCache&) = delete;
+    CellGradientCache& operator=(const CellGradientCache&) = delete;
+    CellGradientCache(CellGradientCache&&) = default;
+    CellGradientCache& operator=(CellGradientCache&&) = default;
+
+    /** @brief Return the mesh retained by this cache. */
+    const SP<const mesh_type>& mesh_ptr() const noexcept
+    {
+        return d_mesh;
+    }
+
+    /**
+     * @brief Throw unless @p mesh is the exact cached mesh instance.
+     */
+    void require_mesh(const mesh_type& mesh) const
+    {
+        if (&mesh != d_mesh.get())
+        {
+            throw std::invalid_argument(
+                "Cell-gradient cache belongs to another mesh.");
+        }
+    }
+
+    /** @brief Return interior-neighbor-only reconstruction weights. */
+    const std::vector<CellGeometry>&
+    interior_geometry() const noexcept
+    {
+        return d_interior_geometry;
+    }
+
+    /** @brief Return boundary-aware reconstruction weights. */
+    const std::vector<CellGeometry>&
+    boundary_geometry() const noexcept
+    {
+        return d_boundary_geometry;
+    }
+
+    /** @brief Return the cached per-face boundary lookup. */
+    const std::vector<boundary_location_type>&
+    boundary_locations() const noexcept
+    {
+        return d_boundary_locations;
+    }
+
+private:
+    static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
+    {
+        if (!mesh)
+        {
+            throw std::invalid_argument(
+                "CellGradientCache requires a non-null mesh.");
+        }
+        return mesh;
+    }
+
+    static std::array<vec_type, 3> inverse_columns(
+        const std::array<std::array<real_t, 3>, 3>& normal)
+    {
+        std::array<vec_type, 3> inverse{};
+        for (size_t column = 0; column < inverse.size(); ++column)
+        {
+            auto local_normal = normal;
+            vec_type direction{};
+            direction.component(column) = real_t{1};
+            inverse[column] =
+                detail::solve_3x3(local_normal, direction);
+        }
+        return inverse;
+    }
+
+    static vec_type apply_inverse(
+        const std::array<vec_type, 3>& inverse,
+        const vec_type& direction)
+    {
+        return inverse[0] * direction.x
+             + inverse[1] * direction.y
+             + inverse[2] * direction.z;
+    }
+
+    static std::vector<CellGeometry> build_geometry(
+        const mesh_type& mesh,
+        const std::vector<boundary_location_type>& boundary_locations,
+        bool include_boundary_samples)
+    {
+        std::vector<CellGeometry> geometry(mesh.num_owned_cells());
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            if (include_boundary_samples)
+            {
+                const auto has_boundary_sample =
+                    std::any_of(
+                        mesh.faces(cell_lid).begin(),
+                        mesh.faces(cell_lid).end(),
+                        [&](const auto face_lid)
+                        {
+                            return mesh.is_boundary_face(face_lid)
+                                && boundary_locations.at(
+                                       static_cast<size_t>(face_lid))
+                                       .active;
+                        });
+                if (!has_boundary_sample)
+                {
+                    continue;
+                }
+            }
+            std::array<std::array<real_t, 3>, 3> normal{};
+            auto add_direction = [&](const vec_type& direction)
+            {
+                normal[0][0] += direction.x * direction.x;
+                normal[0][1] += direction.x * direction.y;
+                normal[0][2] += direction.x * direction.z;
+                normal[1][1] += direction.y * direction.y;
+                normal[1][2] += direction.y * direction.z;
+                normal[2][2] += direction.z * direction.z;
+            };
+
+            for (const auto face_lid : mesh.faces(cell_lid))
+            {
+                if (mesh.is_interior_face(face_lid))
+                {
+                    add_direction(
+                        mesh.cell_center_vector(face_lid, cell_lid));
+                }
+                else if (include_boundary_samples
+                         && mesh.is_boundary_face(face_lid))
+                {
+                    const auto location = boundary_locations.at(
+                        static_cast<size_t>(face_lid));
+                    if (location.active)
+                    {
+                        add_direction(
+                            mesh.face_centroid(face_lid)
+                            - mesh.cell_centroid(cell_lid));
+                    }
+                }
+            }
+            normal[1][0] = normal[0][1];
+            normal[2][0] = normal[0][2];
+            normal[2][1] = normal[1][2];
+
+            const auto inverse = inverse_columns(normal);
+            auto& cell_geometry = geometry[owned];
+            cell_geometry.interior_samples.reserve(
+                mesh.faces(cell_lid).size());
+            if (include_boundary_samples)
+            {
+                cell_geometry.boundary_samples.reserve(
+                    mesh.faces(cell_lid).size());
+            }
+
+            for (const auto face_lid : mesh.faces(cell_lid))
+            {
+                if (mesh.is_interior_face(face_lid))
+                {
+                    const auto direction =
+                        mesh.cell_center_vector(face_lid, cell_lid);
+                    cell_geometry.interior_samples.push_back({
+                        mesh.opposite_or_periodic_neighbor_cell(
+                            face_lid, cell_lid),
+                        apply_inverse(inverse, direction)});
+                    continue;
+                }
+                if (!include_boundary_samples
+                    || !mesh.is_boundary_face(face_lid))
+                {
+                    continue;
+                }
+                const auto location = boundary_locations.at(
+                    static_cast<size_t>(face_lid));
+                if (!location.active)
+                {
+                    continue;
+                }
+                const auto direction =
+                    mesh.face_centroid(face_lid)
+                    - mesh.cell_centroid(cell_lid);
+                cell_geometry.boundary_samples.push_back({
+                    location,
+                    apply_inverse(inverse, direction),
+                    static_cast<real_t>(
+                        detail::boundary_normal_distance(
+                            mesh, face_lid, cell_lid))});
+            }
+        }
+        return geometry;
+    }
+
+    SP<const mesh_type> d_mesh;
+    std::vector<boundary_location_type> d_boundary_locations;
+    std::vector<CellGeometry> d_interior_geometry;
+    std::vector<CellGeometry> d_boundary_geometry;
+};
+
 namespace detail
 {
+
+/** @brief Validate fields and a cached reconstruction share one mesh. */
+template<TpetraTypePack Pack, class GradientField>
+void require_cached_gradient_mesh(
+    const CellField<Pack>& field,
+    const GradientField& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    const auto& mesh = field.mesh();
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_gradient requires input and output fields on one mesh.");
+    }
+    cache.require_mesh(mesh);
+}
+
+/** @brief Evaluate cached interior-only scalar reconstruction weights. */
+template<TpetraTypePack Pack>
+void cached_scalar_cell_gradient(
+    const CellField<Pack>& field,
+    VectorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    require_cached_gradient_mesh(field, gradients, cache);
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
+    const auto& geometry = cache.interior_geometry();
+    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        const auto value_p = owned_values(cell_lid, 0);
+        typename Mesh<Pack>::Vec3 gradient{};
+        for (const auto& sample : geometry[owned].interior_samples)
+        {
+            const auto delta =
+                local_values(sample.other_lid, 0) - value_p;
+            gradient.x += sample.weight.x * delta;
+            gradient.y += sample.weight.y * delta;
+            gradient.z += sample.weight.z * delta;
+        }
+        gradient_values(cell_lid, 0) =
+            static_cast<scalar_type>(gradient.x);
+        gradient_values(cell_lid, 1) =
+            static_cast<scalar_type>(gradient.y);
+        gradient_values(cell_lid, 2) =
+            static_cast<scalar_type>(gradient.z);
+    }
+}
+
+/** @brief Evaluate cached boundary-aware scalar reconstruction weights. */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+void cached_scalar_cell_gradient(
+    const CellField<Pack>& field,
+    BoundaryConditionProvider& boundary_condition,
+    BoundaryValueProvider& boundary_value,
+    VectorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    require_cached_gradient_mesh(field, gradients, cache);
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
+    const auto& interior_geometry = cache.interior_geometry();
+    const auto& boundary_geometry = cache.boundary_geometry();
+    for (size_t owned = 0;
+         owned < boundary_geometry.size();
+         ++owned)
+    {
+        const auto& cell_geometry =
+            boundary_geometry[owned].boundary_samples.empty()
+          ? interior_geometry[owned]
+          : boundary_geometry[owned];
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        const auto value_p = owned_values(cell_lid, 0);
+        typename Mesh<Pack>::Vec3 gradient{};
+        for (const auto& sample : cell_geometry.interior_samples)
+        {
+            const auto delta =
+                local_values(sample.other_lid, 0) - value_p;
+            gradient.x += sample.weight.x * delta;
+            gradient.y += sample.weight.y * delta;
+            gradient.z += sample.weight.z * delta;
+        }
+        for (const auto& sample : cell_geometry.boundary_samples)
+        {
+            const auto condition = boundary_condition(
+                sample.location.batch_id,
+                sample.location.in_batch_id);
+            scalar_type delta{};
+            if (condition.type == BoundaryConditionType::Dirichlet)
+            {
+                delta = static_cast<scalar_type>(boundary_value(
+                            sample.location.batch_id,
+                            sample.location.in_batch_id))
+                      - value_p;
+            }
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
+                delta =
+                    static_cast<scalar_type>(condition.value)
+                  * static_cast<scalar_type>(sample.normal_distance);
+            }
+            else
+            {
+                throw std::invalid_argument(
+                    "cell_gradient supports only Dirichlet and Neumann "
+                    "scalar boundary conditions.");
+            }
+            gradient.x += sample.weight.x * delta;
+            gradient.y += sample.weight.y * delta;
+            gradient.z += sample.weight.z * delta;
+        }
+        gradient_values(cell_lid, 0) =
+            static_cast<scalar_type>(gradient.x);
+        gradient_values(cell_lid, 1) =
+            static_cast<scalar_type>(gradient.y);
+        gradient_values(cell_lid, 2) =
+            static_cast<scalar_type>(gradient.z);
+    }
+}
+
+/** @brief Evaluate cached interior-only vector reconstruction weights. */
+template<TpetraTypePack Pack>
+void cached_vector_cell_gradient(
+    const VectorCellField<Pack>& field,
+    TensorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    const auto& mesh = field.mesh();
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_gradient requires input and output fields on one mesh.");
+    }
+    cache.require_mesh(mesh);
+
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
+    const auto& geometry = cache.interior_geometry();
+    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        std::array<typename Mesh<Pack>::Vec3, 3> gradient{};
+        for (const auto& sample : geometry[owned].interior_samples)
+        {
+            for (size_t component = 0;
+                 component < VectorCellField<Pack>::num_components;
+                 ++component)
+            {
+                const auto delta =
+                    local_values(sample.other_lid, component)
+                  - owned_values(cell_lid, component);
+                gradient[component].x += sample.weight.x * delta;
+                gradient[component].y += sample.weight.y * delta;
+                gradient[component].z += sample.weight.z * delta;
+            }
+        }
+        for (size_t component = 0;
+             component < VectorCellField<Pack>::num_components;
+             ++component)
+        {
+            gradient_values(cell_lid, component * 3) =
+                static_cast<scalar_type>(gradient[component].x);
+            gradient_values(cell_lid, component * 3 + 1) =
+                static_cast<scalar_type>(gradient[component].y);
+            gradient_values(cell_lid, component * 3 + 2) =
+                static_cast<scalar_type>(gradient[component].z);
+        }
+    }
+}
+
+/** @brief Evaluate cached boundary-aware vector reconstruction weights. */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+void cached_vector_cell_gradient(
+    const VectorCellField<Pack>& field,
+    BoundaryValueProvider& boundary_value,
+    TensorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    const auto& mesh = field.mesh();
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "cell_gradient requires input and output fields on one mesh.");
+    }
+    cache.require_mesh(mesh);
+
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
+    const auto& interior_geometry = cache.interior_geometry();
+    const auto& boundary_geometry = cache.boundary_geometry();
+    for (size_t owned = 0;
+         owned < boundary_geometry.size();
+         ++owned)
+    {
+        const auto& cell_geometry =
+            boundary_geometry[owned].boundary_samples.empty()
+          ? interior_geometry[owned]
+          : boundary_geometry[owned];
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        std::array<typename Mesh<Pack>::Vec3, 3> gradient{};
+        for (const auto& sample : cell_geometry.interior_samples)
+        {
+            for (size_t component = 0;
+                 component < VectorCellField<Pack>::num_components;
+                 ++component)
+            {
+                const auto delta =
+                    local_values(sample.other_lid, component)
+                  - owned_values(cell_lid, component);
+                gradient[component].x += sample.weight.x * delta;
+                gradient[component].y += sample.weight.y * delta;
+                gradient[component].z += sample.weight.z * delta;
+            }
+        }
+        for (const auto& sample : cell_geometry.boundary_samples)
+        {
+            const auto value = static_cast<
+                typename VectorCellField<Pack>::vec_type>(
+                    boundary_value(
+                        sample.location.batch_id,
+                        sample.location.in_batch_id));
+            for (size_t component = 0;
+                 component < VectorCellField<Pack>::num_components;
+                 ++component)
+            {
+                const auto delta =
+                    static_cast<scalar_type>(
+                        value.component(component))
+                  - owned_values(cell_lid, component);
+                gradient[component].x += sample.weight.x * delta;
+                gradient[component].y += sample.weight.y * delta;
+                gradient[component].z += sample.weight.z * delta;
+            }
+        }
+        for (size_t component = 0;
+             component < VectorCellField<Pack>::num_components;
+             ++component)
+        {
+            gradient_values(cell_lid, component * 3) =
+                static_cast<scalar_type>(gradient[component].x);
+            gradient_values(cell_lid, component * 3 + 1) =
+                static_cast<scalar_type>(gradient[component].y);
+            gradient_values(cell_lid, component * 3 + 2) =
+                static_cast<scalar_type>(gradient[component].z);
+        }
+    }
+}
 
 /**
  * @brief Reconstruct scalar gradients with optional boundary samples.
@@ -76,10 +606,13 @@ void scalar_cell_gradient(
         throw std::invalid_argument(
             "cell_gradient received boundary locations for another mesh.");
     }
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto phi_p = field.value(cell_lid);
+        const auto phi_p = owned_values(cell_lid, 0);
 
         std::array<std::array<real_t, 3>, 3> normal{};
         typename mesh_type::Vec3 rhs{};
@@ -94,7 +627,7 @@ void scalar_cell_gradient(
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
                 d = mesh.cell_center_vector(face_lid, cell_lid);
-                phi_delta = field.local_value(other) - phi_p;
+                phi_delta = local_values(other, 0) - phi_p;
             }
             else
             {
@@ -153,8 +686,10 @@ void scalar_cell_gradient(
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
-        gradients.set_owned_value(
-            cell_lid, solve_3x3(normal, rhs));
+        const auto gradient = solve_3x3(normal, rhs);
+        gradient_values(cell_lid, 0) = gradient.x;
+        gradient_values(cell_lid, 1) = gradient.y;
+        gradient_values(cell_lid, 2) = gradient.z;
     }
 }
 
@@ -213,6 +748,27 @@ void cell_gradient(const CellField<Pack>& field,
 }
 
 /**
+ * @brief Compute an interior-only scalar gradient from cached mesh weights.
+ *
+ * This overload performs no reconstruction-system solves or dynamic
+ * allocations. The caller owns the cache so its construction can be hoisted
+ * to the same lifetime as the equation or solver workspace.
+ *
+ * @param field Scalar cell field whose gradient is computed.
+ * @param[out] gradients Vector cell field receiving the gradient.
+ * @param cache Mesh-bound least-squares weights.
+ */
+template<TpetraTypePack Pack>
+void cell_gradient(
+    const CellField<Pack>& field,
+    VectorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    detail::cached_scalar_cell_gradient(
+        field, gradients, cache);
+}
+
+/**
  * @brief Compute a least-squares scalar gradient including boundary data.
  *
  * Dirichlet values are sampled at boundary-face centroids. Neumann values
@@ -254,6 +810,48 @@ void cell_gradient(
 }
 
 /**
+ * @brief Compute a boundary-aware scalar gradient from cached mesh weights.
+ *
+ * Boundary condition values remain dynamic and are evaluated on each call;
+ * only mesh-dependent reconstruction weights are reused.
+ *
+ * @param field Scalar cell field whose gradient is computed.
+ * @param boundary_conditions Boundary conditions keyed by mesh batch name.
+ * @param[out] gradients Vector cell field receiving the gradient.
+ * @param cache Mesh-bound least-squares weights.
+ */
+template<TpetraTypePack Pack>
+void cell_gradient(
+    const CellField<Pack>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    auto boundary_condition =
+        [&](int batch_id, size_t)
+    {
+        const auto& name =
+            field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    auto boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_condition(
+            batch_id, in_batch_id).value;
+    };
+    detail::cached_scalar_cell_gradient(
+        field,
+        boundary_condition,
+        boundary_value,
+        gradients,
+        cache);
+}
+
+/**
  * @brief Compute a scalar gradient using dynamic per-face boundary data.
  *
  * Dirichlet values are supplied independently from the condition object so
@@ -287,6 +885,43 @@ void cell_gradient(const CellField<Pack>& field,
 }
 
 /**
+ * @brief Compute a dynamic-boundary scalar gradient from cached weights.
+ *
+ * @param field Scalar field whose gradient is reconstructed.
+ * @param boundary_condition Dynamic boundary-condition provider.
+ * @param boundary_value Dynamic Dirichlet-value provider.
+ * @param[out] gradients Reconstructed owned-cell gradients.
+ * @param cache Mesh-bound least-squares weights.
+ */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+    requires requires(BoundaryConditionProvider condition,
+                      BoundaryValueProvider value,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { condition(batch_id, in_batch_id) }
+            -> std::convertible_to<BoundaryCondition>;
+        { value(batch_id, in_batch_id) }
+            -> std::convertible_to<typename Pack::scalar_type>;
+    }
+void cell_gradient(
+    const CellField<Pack>& field,
+    BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value,
+    VectorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    detail::cached_scalar_cell_gradient(
+        field,
+        boundary_condition,
+        boundary_value,
+        gradients,
+        cache);
+}
+
+/**
  * @brief Compute least-squares cell-centered gradients for each component
  *        of a vector field.
  *
@@ -314,10 +949,12 @@ void cell_gradient(const VectorCellField<Pack>& field,
             "cell_gradient requires input and output fields on one mesh.");
     }
 
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto value_p = field.value(cell_lid);
 
         std::array<std::array<real_t, 3>, 3> normal{};
         tensor_type rhs{};
@@ -332,7 +969,6 @@ void cell_gradient(const VectorCellField<Pack>& field,
             const auto other =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
             const auto d = mesh.cell_center_vector(face_lid, cell_lid);
-            const auto value_delta = field.local_value(other) - value_p;
 
             normal[0][0] += d.x * d.x;
             normal[0][1] += d.x * d.y;
@@ -345,7 +981,9 @@ void cell_gradient(const VectorCellField<Pack>& field,
                  component < VectorCellField<Pack>::num_components;
                  ++component)
             {
-                const auto delta = value_delta.component(component);
+                const auto delta =
+                    local_values(other, component)
+                  - owned_values(cell_lid, component);
                 rhs[component].x += d.x * delta;
                 rhs[component].y += d.y * delta;
                 rhs[component].z += d.z * delta;
@@ -363,9 +1001,31 @@ void cell_gradient(const VectorCellField<Pack>& field,
             auto component_normal = normal;
             gradient[component] =
                 detail::solve_3x3(component_normal, rhs[component]);
+            gradient_values(cell_lid, component * 3) =
+                gradient[component].x;
+            gradient_values(cell_lid, component * 3 + 1) =
+                gradient[component].y;
+            gradient_values(cell_lid, component * 3 + 2) =
+                gradient[component].z;
         }
-        gradients.set_owned_value(cell_lid, gradient);
     }
+}
+
+/**
+ * @brief Compute interior-only vector gradients from cached mesh weights.
+ *
+ * @param field Vector field whose component gradients are reconstructed.
+ * @param[out] gradients Row-major tensor field receiving the gradients.
+ * @param cache Mesh-bound least-squares weights.
+ */
+template<TpetraTypePack Pack>
+void cell_gradient(
+    const VectorCellField<Pack>& field,
+    TensorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    detail::cached_vector_cell_gradient(
+        field, gradients, cache);
 }
 
 /**
@@ -408,10 +1068,16 @@ void cell_gradient(const VectorCellField<Pack>& field,
 
     const auto boundary_locations =
         detail::boundary_face_locations(mesh);
+    const auto owned_values = field.owned_read_view();
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto value_p = field.value(cell_lid);
+        const vec_type value_p{
+            owned_values(cell_lid, 0),
+            owned_values(cell_lid, 1),
+            owned_values(cell_lid, 2)};
 
         std::array<std::array<real_t, 3>, 3> normal{};
         tensor_type rhs{};
@@ -426,7 +1092,11 @@ void cell_gradient(const VectorCellField<Pack>& field,
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
                 d = mesh.cell_center_vector(face_lid, cell_lid);
-                value_delta = field.local_value(other) - value_p;
+                value_delta = vec_type{
+                    local_values(other, 0),
+                    local_values(other, 1),
+                    local_values(other, 2)}
+                            - value_p;
             }
             else
             {
@@ -480,9 +1150,41 @@ void cell_gradient(const VectorCellField<Pack>& field,
             auto component_normal = normal;
             gradient[component] =
                 detail::solve_3x3(component_normal, rhs[component]);
+            gradient_values(cell_lid, component * 3) =
+                gradient[component].x;
+            gradient_values(cell_lid, component * 3 + 1) =
+                gradient[component].y;
+            gradient_values(cell_lid, component * 3 + 2) =
+                gradient[component].z;
         }
-        gradients.set_owned_value(cell_lid, gradient);
     }
+}
+
+/**
+ * @brief Compute boundary-aware vector gradients from cached mesh weights.
+ *
+ * @param field Vector field whose component gradients are reconstructed.
+ * @param boundary_value Dynamic boundary-face value provider.
+ * @param[out] gradients Row-major tensor field receiving the gradients.
+ * @param cache Mesh-bound least-squares weights.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+    requires requires(BoundaryValueProvider provider,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { provider(batch_id, in_batch_id) }
+            -> std::convertible_to<
+                typename VectorCellField<Pack>::vec_type>;
+    }
+void cell_gradient(
+    const VectorCellField<Pack>& field,
+    BoundaryValueProvider boundary_value,
+    TensorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache)
+{
+    detail::cached_vector_cell_gradient(
+        field, boundary_value, gradients, cache);
 }
 
 /**
@@ -495,10 +1197,11 @@ void cell_gradient(const VectorCellField<Pack>& field,
  * @param cell_lid Local ID of the cell whose balance is computed.
  * @return Sum of outward-positive fluxes around @p cell_lid.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack, class FaceValues>
 typename Pack::scalar_type cell_flux_balance(
     const Mesh<Pack>& mesh,
     const FaceField<Pack>& face_fluxes,
+    const FaceValues& face_values,
     typename Pack::local_ordinal_type cell_lid)
 {
     typename Pack::scalar_type balance = 0.0;
@@ -510,10 +1213,24 @@ typename Pack::scalar_type cell_flux_balance(
         }
 
         const auto sign = mesh.owner_cell(face_lid) == cell_lid ? 1.0 : -1.0;
-        balance += sign * face_fluxes.value(face_lid);
+        balance += sign * face_values(face_lid, 0);
     }
 
     return balance;
+}
+
+/**
+ * @brief Compute one cell's flux balance using a one-shot face-field view.
+ */
+template<TpetraTypePack Pack>
+typename Pack::scalar_type cell_flux_balance(
+    const Mesh<Pack>& mesh,
+    const FaceField<Pack>& face_fluxes,
+    typename Pack::local_ordinal_type cell_lid)
+{
+    const auto face_values = face_fluxes.owned_read_view();
+    return cell_flux_balance(
+        mesh, face_fluxes, face_values, cell_lid);
 }
 
 /**
@@ -532,12 +1249,15 @@ cell_divergence_from_fluxes(
     const FaceField<Pack>& face_fluxes)
 {
     std::vector<typename Pack::scalar_type> divergence(mesh.num_owned_cells(), 0.0);
+    const auto face_values = face_fluxes.owned_read_view();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid =
             static_cast<typename Pack::local_ordinal_type>(owned);
-        divergence[owned] = cell_flux_balance(mesh, face_fluxes, cell_lid)
-                          / mesh.cell_volume(cell_lid);
+        divergence[owned] =
+            cell_flux_balance(
+                mesh, face_fluxes, face_values, cell_lid)
+            / mesh.cell_volume(cell_lid);
     }
 
     return divergence;

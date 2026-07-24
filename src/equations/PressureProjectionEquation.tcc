@@ -233,7 +233,42 @@ auto PressureProjectionEquation<Pack>::project(
         velocity_boundary_cache,
         velocity,
         zero_source,
-        &pressure);
+        &pressure,
+        false);
+}
+
+/**
+ * @brief Reuse the preceding correction's final flux as the next PISO
+ *        predictor.
+ *
+ * Consecutive pressure correctors do not change pressure or velocity between
+ * calls. The preceding final Rhie--Chow reconstruction is therefore exactly
+ * the next predictor flux, including its cached pressure gradient.
+ */
+template<TpetraTypePack Pack>
+auto PressureProjectionEquation<Pack>::project_reusing_cached_predictor(
+    field_type& pressure,
+    field_type& pressure_correction,
+    scalar_type time_step,
+    scalar_type reference_density,
+    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    velocity_field_type& velocity) -> ProjectionResult
+{
+    auto zero_source =
+        [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+
+    return project_impl(
+        pressure_correction,
+        time_step,
+        reference_density,
+        velocity_boundary_cache,
+        velocity,
+        zero_source,
+        &pressure,
+        true);
 }
 
 /**
@@ -269,7 +304,8 @@ auto PressureProjectionEquation<Pack>::project(
         velocity_boundary_cache,
         velocity,
         right_hand_source,
-        nullptr);
+        nullptr,
+        false);
 }
 
 /**
@@ -288,6 +324,8 @@ auto PressureProjectionEquation<Pack>::project(
  * @param[in,out] velocity Velocity field corrected by the pressure update.
  * @param right_hand_source Per-cell scalar source provider.
  * @param[in,out] accumulated_pressure Optional physical pressure in Pa.
+ * @param reuse_cached_predictor_flux Whether to reuse the final flux from the
+ *        immediately preceding accumulated-pressure projection.
  * @return Projection statistics.
  */
 template<TpetraTypePack Pack>
@@ -298,7 +336,8 @@ auto PressureProjectionEquation<Pack>::project_impl(
     const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
     velocity_field_type& velocity,
     const source_type& right_hand_source,
-    field_type* accumulated_pressure) -> ProjectionResult
+    field_type* accumulated_pressure,
+    bool reuse_cached_predictor_flux) -> ProjectionResult
 {
     EquationValidation::require_mesh_match(*d_mesh, pressure_correction,
                                            "PressureProjectionEquation");
@@ -326,9 +365,22 @@ auto PressureProjectionEquation<Pack>::project_impl(
             "PressureProjectionEquation requires a finite positive "
             "reference density.");
     }
+    if (reuse_cached_predictor_flux
+        && (accumulated_pressure == nullptr
+            || !d_cached_predictor_flux_valid))
+    {
+        throw std::logic_error(
+            "PressureProjectionEquation cannot reuse a predictor flux "
+            "without an adjacent accumulated-pressure projection.");
+    }
+
+    // Any failure after this point invalidates reuse. A successful
+    // accumulated-pressure projection publishes a new final flux below.
+    d_cached_predictor_flux_valid = false;
     pressure_correction.owned_data().putScalar(0.0);
     d_mesh->sync_periodic_boundaries(pressure_correction);
-    if (accumulated_pressure != nullptr)
+    if (!reuse_cached_predictor_flux
+        && accumulated_pressure != nullptr)
     {
         FVM::pressure_weighted_face_fluxes(
             velocity,
@@ -339,7 +391,7 @@ auto PressureProjectionEquation<Pack>::project_impl(
             d_face_flux_workspace,
             d_cached_face_fluxes);
     }
-    else
+    else if (!reuse_cached_predictor_flux)
     {
         FVM::pressure_weighted_face_fluxes(
             velocity,
@@ -365,22 +417,34 @@ auto PressureProjectionEquation<Pack>::project_impl(
         d_cached_rhs->putScalar(0.0);
     }
 
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid = owned_map->getGlobalElement(cell_lid);
-        const auto is_pressure_gauge =
-            d_pressure_gauge_gid
-            && row_gid == *d_pressure_gauge_gid;
-        const auto rhs_value =
-            is_pressure_gauge
-          ? scalar_type{}
-          : -FVM::cell_flux_balance<Pack>(
-                *d_mesh, d_cached_face_fluxes, cell_lid)
-                / time_step
-            + d_mesh->cell_volume(cell_lid)
-                * right_hand_source(cell_lid);
-        d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
+        const auto predictor_flux_values =
+            d_cached_face_fluxes.owned_read_view();
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto row_gid =
+                owned_map->getGlobalElement(cell_lid);
+            const auto is_pressure_gauge =
+                d_pressure_gauge_gid
+                && row_gid == *d_pressure_gauge_gid;
+            const auto rhs_value =
+                is_pressure_gauge
+              ? scalar_type{}
+              : -FVM::cell_flux_balance<Pack>(
+                    *d_mesh,
+                    d_cached_face_fluxes,
+                    predictor_flux_values,
+                    cell_lid)
+                    / time_step
+                + d_mesh->cell_volume(cell_lid)
+                    * right_hand_source(cell_lid);
+            d_cached_rhs->replaceLocalValue(
+                cell_lid, rhs_value);
+        }
     }
 
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix =
@@ -396,18 +460,29 @@ auto PressureProjectionEquation<Pack>::project_impl(
     d_mesh->sync_periodic_boundaries(pressure_correction);
 
     scalar_type pressure_norm_squared = {};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto correction = pressure_correction.value(cell_lid);
-        pressure_norm_squared += correction * correction
-                               * d_mesh->cell_volume(cell_lid);
+        const auto correction_values =
+            pressure_correction.owned_read_view();
+        const auto& volumes =
+            d_mesh->host_views().cell_geometry.volume;
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto correction =
+                correction_values(cell_lid, 0);
+            pressure_norm_squared +=
+                correction * correction * volumes[owned];
+        }
     }
 
     FVM::cell_gradient(
         pressure_correction,
         d_pressure_correction_boundary_conditions,
-        d_face_flux_workspace.pressure_gradient());
+        d_face_flux_workspace.pressure_gradient(),
+        d_face_flux_workspace.gradient_cache());
     velocity.owned_data().update(
         -time_step,
         d_face_flux_workspace.pressure_gradient().owned_data(),
@@ -450,12 +525,23 @@ auto PressureProjectionEquation<Pack>::project_impl(
     }
 
     scalar_type continuity_norm_squared = {};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto balance =
-            FVM::cell_flux_balance<Pack>(*d_mesh, d_cached_face_fluxes, cell_lid);
-        continuity_norm_squared += balance * balance;
+        const auto corrected_flux_values =
+            d_cached_face_fluxes.owned_read_view();
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto balance =
+                FVM::cell_flux_balance<Pack>(
+                    *d_mesh,
+                    d_cached_face_fluxes,
+                    corrected_flux_values,
+                    cell_lid);
+            continuity_norm_squared += balance * balance;
+        }
     }
 
     const std::array<scalar_type, 2> local_norms_squared{
@@ -468,6 +554,15 @@ auto PressureProjectionEquation<Pack>::project_impl(
         2,
         local_norms_squared.data(),
         global_norms_squared.data());
+
+    if (reuse_cached_predictor_flux)
+    {
+        ++d_cached_predictor_flux_reuse_count;
+    }
+    if (accumulated_pressure != nullptr)
+    {
+        d_cached_predictor_flux_valid = true;
+    }
 
     using std::sqrt;
     return {

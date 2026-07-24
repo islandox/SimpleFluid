@@ -32,7 +32,6 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <unordered_map>
 #include <vector>
 
 namespace SimpleFluid::FVM
@@ -264,6 +263,34 @@ void add_transport_values(
     }
 }
 
+/**
+ * @brief Insert or update one accumulated flat row.
+ * @tparam Pack Tpetra type pack providing matrix scalar and ordinal types.
+ * @param prepared Matrix and graph-reuse state.
+ * @param row Local matrix row.
+ * @param row_values Unique columns and accumulated coefficients.
+ */
+template<TpetraTypePack Pack>
+void add_transport_values(
+    const PreparedTransportMatrix<Pack>& prepared,
+    typename Pack::local_ordinal_type row,
+    const FlatMatrixRow<typename Pack::local_ordinal_type,
+                        typename Pack::scalar_type>& row_values)
+{
+    const auto row_size =
+        SimpleFluid::detail::checked_size_to_ordinal<Teuchos::Ordinal>(
+            row_values.size(), "transport row entry count");
+    add_transport_values<Pack>(
+        prepared,
+        row,
+        Teuchos::arrayView(
+            row_values.column_data(),
+            row_size),
+        Teuchos::arrayView(
+            row_values.value_data(),
+            row_size));
+}
+
 } // namespace detail
 
 /**
@@ -313,7 +340,6 @@ public:
         detail::BoundaryFaceLocation<MeshType>>;
     using boundary_geometry_type = std::vector<
         detail::BoundaryAwareGradientCellGeometry<MeshType>>;
-
     explicit TransportGeometryCache(const MeshType& mesh)
         : d_mesh(&mesh),
           d_interior_stencils(
@@ -458,13 +484,11 @@ transport_system(const CellField<Pack>& old_values,
     const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(
         new typename Pack::vector_type(mesh.owned_cell_map(), true));
+    const auto old_value_data = old_values.owned_read_view();
+    const auto face_flux_data = face_fluxes.owned_read_view();
 
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(32);
-    vals.reserve(32);
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(32);
+    detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(
+        mesh.num_local_cells(), 32);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -472,7 +496,7 @@ transport_system(const CellField<Pack>& old_values,
 
         const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
-        const auto old_value = old_values.value(cell_lid);
+        const auto old_value = old_value_data(cell_lid, 0);
         scalar_type rhs_value =
             transient * old_value + volume * right_hand_source(cell_lid);
         row_values.clear();
@@ -491,7 +515,8 @@ transport_system(const CellField<Pack>& old_values,
             // === advection (upwind) ===
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
                                     ? owner_oriented_flux
@@ -513,7 +538,7 @@ transport_system(const CellField<Pack>& old_values,
                 continue;
             }
 
-            row_values.try_emplace(other, scalar_type{});
+            row_values.ensure(other);
             if (diffusivity <= scalar_type{0})
             {
                 continue;
@@ -526,15 +551,8 @@ transport_system(const CellField<Pack>& old_values,
             detail::add_matrix_entry(row_values, other, -coeff);
         }
 
-        cols.clear();
-        vals.clear();
-        for (const auto& [column, value] : row_values)
-        {
-            cols.push_back(column);
-            vals.push_back(value);
-        }
         detail::add_transport_values<Pack>(
-            prepared, cell_lid, cols(), vals());
+            prepared, cell_lid, row_values);
         rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
@@ -559,7 +577,8 @@ transport_system(const CellField<Pack>& old_values,
             // Advective boundary flux
             const auto out_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
 
             const auto boundary_face_value =
@@ -813,13 +832,11 @@ transport_system(const VectorCellField<Pack>& old_values,
     auto rhs = Teuchos::rcp(
         new typename Pack::multi_vector_type(
             mesh.owned_cell_map(), num_components, true));
+    const auto old_value_data = old_values.owned_read_view();
+    const auto face_flux_data = face_fluxes.owned_read_view();
 
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(32);
-    vals.reserve(32);
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(32);
+    detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(
+        mesh.num_local_cells(), 32);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -827,7 +844,6 @@ transport_system(const VectorCellField<Pack>& old_values,
 
         const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
-        const auto old_value = old_values.value(cell_lid);
         const auto source_value = right_hand_source(cell_lid);
         row_values.clear();
         detail::add_matrix_entry(row_values, cell_lid, transient);
@@ -844,7 +860,8 @@ transport_system(const VectorCellField<Pack>& old_values,
 
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
                                     ? owner_oriented_flux
@@ -865,7 +882,7 @@ transport_system(const VectorCellField<Pack>& old_values,
                 continue;
             }
 
-            row_values.try_emplace(other, scalar_type{});
+            row_values.ensure(other);
             if (diffusivity <= scalar_type{0})
             {
                 continue;
@@ -878,19 +895,13 @@ transport_system(const VectorCellField<Pack>& old_values,
             detail::add_matrix_entry(row_values, other, -coeff);
         }
 
-        cols.clear();
-        vals.clear();
-        for (const auto& [column, value] : row_values)
-        {
-            cols.push_back(column);
-            vals.push_back(value);
-        }
         detail::add_transport_values<Pack>(
-            prepared, cell_lid, cols(), vals());
+            prepared, cell_lid, row_values);
         for (size_t comp = 0; comp < num_components; ++comp)
         {
             rhs->replaceLocalValue(cell_lid, comp,
-                                   transient * old_value.component(comp)
+                                   transient
+                                     * old_value_data(cell_lid, comp)
                                  + volume * source_value.component(comp));
         }
     }
@@ -913,7 +924,8 @@ transport_system(const VectorCellField<Pack>& old_values,
             const auto owner = mesh.owner_cell(face_lid);
             const auto out_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
 
             const auto boundary_face_value =
@@ -1168,20 +1180,25 @@ non_orthogonal_transport_system(
         new typename Pack::multi_vector_type(
             mesh.owned_cell_map(), num_components, true));
 
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(64);
-    vals.reserve(64);
-
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(64);
+    detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(
+        mesh.num_local_cells(), 64);
+    const auto old_value_data = old_values.owned_read_view();
+    const auto face_flux_data = face_fluxes.owned_read_view();
+    using partition_gradient_view_type =
+        decltype(partition_gradients->local_read_view());
+    std::optional<partition_gradient_view_type>
+        partition_gradient_data;
+    if (partition_gradients != nullptr)
+    {
+        partition_gradient_data.emplace(
+            partition_gradients->local_read_view());
+    }
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
-        const auto old_value = old_values.value(cell_lid);
         const auto source_value = right_hand_source(cell_lid);
 
         row_values.clear();
@@ -1190,7 +1207,8 @@ non_orthogonal_transport_system(
         for (size_t comp = 0; comp < num_components; ++comp)
         {
             rhs->replaceLocalValue(cell_lid, comp,
-                                   transient * old_value.component(comp)
+                                   transient
+                                     * old_value_data(cell_lid, comp)
                                  + volume * source_value.component(comp));
         }
 
@@ -1220,9 +1238,23 @@ non_orthogonal_transport_system(
 
         for (const auto face_lid : mesh.faces(cell_lid))
         {
+            const auto is_interior =
+                mesh.is_interior_face(face_lid);
+            local_ordinal_type other{};
+            if (is_interior)
+            {
+                other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                // Keep the cached graph independent of the current flux
+                // direction, including the zero-diffusivity case.
+                row_values.ensure(other);
+            }
+
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
             const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
                                     ? owner_oriented_flux
@@ -1232,10 +1264,8 @@ non_orthogonal_transport_system(
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux);
             }
-            else if (mesh.is_interior_face(face_lid))
+            else if (is_interior)
             {
-                const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
             else if (mesh.is_boundary_face(face_lid)
@@ -1260,11 +1290,8 @@ non_orthogonal_transport_system(
                 continue;
             }
 
-            if (mesh.is_interior_face(face_lid))
+            if (is_interior)
             {
-                const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                row_values.try_emplace(other, scalar_type{});
                 const auto coeff =
                     detail::interior_diffusion_coefficient(
                         mesh, face_lid, cell_lid, other, diffusivity);
@@ -1290,14 +1317,15 @@ non_orthogonal_transport_system(
                 {
                     add_non_orthogonal_stencil(
                         cell_lid, scalar_type{0.5}, tangential_area);
-                    if (partition_gradients == nullptr)
+                    if (!partition_gradient_data)
                     {
                         throw std::logic_error(
                             "Partition-face implicit vector reconstruction "
                             "requires synchronized remote gradients.");
                     }
                     const auto remote_gradient =
-                        partition_gradients->local_value(other);
+                        detail::tensor_view_value<Pack>(
+                            *partition_gradient_data, other);
                     for (size_t component = 0;
                          component < num_components;
                          ++component)
@@ -1353,18 +1381,8 @@ non_orthogonal_transport_system(
             add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
         }
 
-        cols.clear();
-        vals.clear();
-        cols.reserve(row_values.size());
-        vals.reserve(row_values.size());
-        for (const auto& [column, value] : row_values)
-        {
-            cols.push_back(column);
-            vals.push_back(value);
-        }
-
         detail::add_transport_values<Pack>(
-            prepared, cell_lid, cols(), vals());
+            prepared, cell_lid, row_values);
     }
 
     if (correction_field != nullptr && explicit_weight > scalar_type{0})
@@ -1529,12 +1547,22 @@ weighted_scalar_transport_system(
     auto rhs = Teuchos::rcp(
         new typename Pack::vector_type(mesh.owned_cell_map(), true));
 
-    Teuchos::Array<local_ordinal_type> columns;
-    Teuchos::Array<scalar_type> values;
-    columns.reserve(64);
-    values.reserve(64);
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(64);
+    detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(
+        mesh.num_local_cells(), 64);
+    const auto old_value_data = old_values.owned_read_view();
+    const auto face_flux_data = face_fluxes.owned_read_view();
+    const auto storage_data = storage_weight.local_read_view();
+    const auto advection_data = advection_weight.local_read_view();
+    const auto diffusivity_data = diffusivity.local_read_view();
+    using partition_gradient_view_type =
+        decltype(partition_gradients->local_read_view());
+    std::optional<partition_gradient_view_type>
+        partition_gradient_data;
+    if (partition_gradients != nullptr)
+    {
+        partition_gradient_data.emplace(
+            partition_gradients->local_read_view());
+    }
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -1542,9 +1570,9 @@ weighted_scalar_transport_system(
             static_cast<local_ordinal_type>(owned);
         const auto volume = mesh.cell_volume(cell_lid);
         const auto cell_storage =
-            storage_weight.local_value(cell_lid);
+            storage_data(cell_lid, 0);
         const auto cell_advection =
-            advection_weight.local_value(cell_lid);
+            advection_data(cell_lid, 0);
         const auto transient =
             cell_storage * volume / time_step;
         const auto sink = implicit_sink
@@ -1571,7 +1599,7 @@ weighted_scalar_transport_system(
             row_values, cell_lid, transient + volume * sink);
         rhs->replaceLocalValue(
             cell_lid,
-            transient * old_values.value(cell_lid)
+            transient * old_value_data(cell_lid, 0)
           + volume * source(cell_lid));
 
         auto add_non_orthogonal_stencil =
@@ -1611,7 +1639,8 @@ weighted_scalar_transport_system(
         {
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
             const auto out_flux =
                 mesh.owner_cell(face_lid) == cell_lid
@@ -1630,7 +1659,7 @@ weighted_scalar_transport_system(
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
                 const auto other_advection =
-                    advection_weight.local_value(other);
+                    advection_data(other, 0);
                 detail::add_matrix_entry(
                     row_values,
                     other,
@@ -1658,11 +1687,12 @@ weighted_scalar_transport_system(
                 const auto other =
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
-                row_values.try_emplace(other, scalar_type{});
+                row_values.ensure(other);
                 const auto face_diffusivity =
                     detail::harmonic_face_value(
                         mesh, face_lid, cell_lid, other,
-                        diffusivity);
+                        diffusivity_data(cell_lid, 0),
+                        diffusivity_data(other, 0));
                 if (face_diffusivity <= scalar_type{})
                     continue;
                 const auto coefficient =
@@ -1696,7 +1726,7 @@ weighted_scalar_transport_system(
                     add_non_orthogonal_stencil(
                         cell_lid, scalar_type{0.5},
                         face_diffusivity, tangential_area);
-                    if (partition_gradients == nullptr)
+                    if (!partition_gradient_data)
                     {
                         throw std::logic_error(
                             "Partition-face implicit scalar reconstruction "
@@ -1706,7 +1736,8 @@ weighted_scalar_transport_system(
                         cell_lid,
                         implicit_weight * face_diffusivity
                       * scalar_type{0.5}
-                      * partition_gradients->local_value(other).dot(
+                      * detail::vector_view_value<Pack>(
+                            *partition_gradient_data, other).dot(
                             tangential_area));
                 }
                 continue;
@@ -1728,7 +1759,7 @@ weighted_scalar_transport_system(
             const auto face_diffusivity =
                 boundary_face_diffusivity(
                     location.batch_id, location.in_batch_id,
-                    diffusivity.local_value(cell_lid));
+                    diffusivity_data(cell_lid, 0));
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coefficient =
@@ -1775,24 +1806,13 @@ weighted_scalar_transport_system(
             // entries) so a cached matrix remains reusable if constraints
             // change between calls, but make the constrained equation an
             // exact identity row.
-            for (auto& [column, value] : row_values)
-            {
-                static_cast<void>(column);
-                value = scalar_type{};
-            }
-            row_values[cell_lid] = scalar_type{1};
+            row_values.fill(scalar_type{});
+            row_values.set(cell_lid, scalar_type{1});
             rhs->replaceLocalValue(cell_lid, *fixed_cell_values[owned]);
         }
 
-        columns.clear();
-        values.clear();
-        for (const auto& [column, value] : row_values)
-        {
-            columns.push_back(column);
-            values.push_back(value);
-        }
         detail::add_transport_values<Pack>(
-            prepared, cell_lid, columns(), values());
+            prepared, cell_lid, row_values);
     }
 
     if (correction_field != nullptr
@@ -1950,12 +1970,25 @@ physical_temperature_transport_system(
         new typename Pack::vector_type(
             mesh.owned_cell_map(), true));
 
-    Teuchos::Array<local_ordinal_type> columns;
-    Teuchos::Array<scalar_type> values;
-    columns.reserve(64);
-    values.reserve(64);
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(64);
+    detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(
+        mesh.num_local_cells(), 64);
+    const auto old_temperature_data =
+        old_temperature.owned_read_view();
+    const auto face_flux_data = face_fluxes.owned_read_view();
+    const auto density_data = density.local_read_view();
+    const auto heat_capacity_data =
+        specific_heat_capacity.local_read_view();
+    const auto conductivity_data =
+        thermal_conductivity.local_read_view();
+    using partition_gradient_view_type =
+        decltype(partition_gradients->local_read_view());
+    std::optional<partition_gradient_view_type>
+        partition_gradient_data;
+    if (partition_gradients != nullptr)
+    {
+        partition_gradient_data.emplace(
+            partition_gradients->local_read_view());
+    }
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -1963,8 +1996,8 @@ physical_temperature_transport_system(
             static_cast<local_ordinal_type>(owned);
         const auto volume = mesh.cell_volume(cell_lid);
         const auto cell_capacity =
-            density.local_value(cell_lid)
-          * specific_heat_capacity.local_value(cell_lid);
+            density_data(cell_lid, 0)
+          * heat_capacity_data(cell_lid, 0);
         const auto transient =
             cell_capacity * volume / time_step;
         row_values.clear();
@@ -1972,7 +2005,7 @@ physical_temperature_transport_system(
             row_values, cell_lid, transient);
         rhs->replaceLocalValue(
             cell_lid,
-            transient * old_temperature.value(cell_lid)
+            transient * old_temperature_data(cell_lid, 0)
           + volume * power_density(cell_lid));
 
         auto add_non_orthogonal_stencil =
@@ -2012,7 +2045,8 @@ physical_temperature_transport_system(
         {
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
             const auto out_flux =
                 mesh.owner_cell(face_lid) == cell_lid
@@ -2032,8 +2066,8 @@ physical_temperature_transport_system(
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
                 const auto other_capacity =
-                    density.local_value(other)
-                  * specific_heat_capacity.local_value(other);
+                    density_data(other, 0)
+                  * heat_capacity_data(other, 0);
                 detail::add_matrix_entry(
                     row_values,
                     other,
@@ -2061,11 +2095,12 @@ physical_temperature_transport_system(
                 const auto other =
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
-                row_values.try_emplace(other, scalar_type{});
+                row_values.ensure(other);
                 const auto face_conductivity =
                     detail::harmonic_face_value(
                         mesh, face_lid, cell_lid, other,
-                        thermal_conductivity);
+                        conductivity_data(cell_lid, 0),
+                        conductivity_data(other, 0));
                 if (face_conductivity <= scalar_type{})
                 {
                     continue;
@@ -2101,7 +2136,7 @@ physical_temperature_transport_system(
                     add_non_orthogonal_stencil(
                         cell_lid, scalar_type{0.5},
                         face_conductivity, tangential_area);
-                    if (partition_gradients == nullptr)
+                    if (!partition_gradient_data)
                     {
                         throw std::logic_error(
                             "Partition-face implicit temperature "
@@ -2112,7 +2147,8 @@ physical_temperature_transport_system(
                         cell_lid,
                         implicit_weight * face_conductivity
                       * scalar_type{0.5}
-                      * partition_gradients->local_value(other).dot(
+                      * detail::vector_view_value<Pack>(
+                            *partition_gradient_data, other).dot(
                             tangential_area));
                 }
                 continue;
@@ -2135,7 +2171,7 @@ physical_temperature_transport_system(
                 boundary_conductivity(
                     location.batch_id,
                     location.in_batch_id,
-                    thermal_conductivity.local_value(cell_lid));
+                    conductivity_data(cell_lid, 0));
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coefficient =
@@ -2178,15 +2214,8 @@ physical_temperature_transport_system(
             }
         }
 
-        columns.clear();
-        values.clear();
-        for (const auto& [column, value] : row_values)
-        {
-            columns.push_back(column);
-            values.push_back(value);
-        }
         detail::add_transport_values<Pack>(
-            prepared, cell_lid, columns(), values());
+            prepared, cell_lid, row_values);
     }
 
     if (correction_field != nullptr
@@ -2331,12 +2360,21 @@ physical_momentum_transport_system(
         new typename Pack::multi_vector_type(
             mesh.owned_cell_map(), components, true));
 
-    Teuchos::Array<local_ordinal_type> columns;
-    Teuchos::Array<scalar_type> values;
-    columns.reserve(64);
-    values.reserve(64);
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(64);
+    detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(
+        mesh.num_local_cells(), 64);
+    const auto old_velocity_data = old_velocity.owned_read_view();
+    const auto face_flux_data = face_fluxes.owned_read_view();
+    const auto viscosity_data =
+        dynamic_viscosity.local_read_view();
+    using partition_gradient_view_type =
+        decltype(partition_gradients->local_read_view());
+    std::optional<partition_gradient_view_type>
+        partition_gradient_data;
+    if (partition_gradients != nullptr)
+    {
+        partition_gradient_data.emplace(
+            partition_gradients->local_read_view());
+    }
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -2344,7 +2382,6 @@ physical_momentum_transport_system(
             static_cast<local_ordinal_type>(owned);
         const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
-        const auto old_value = old_velocity.value(cell_lid);
         const auto source_value = acceleration_source(cell_lid);
 
         row_values.clear();
@@ -2357,7 +2394,7 @@ physical_momentum_transport_system(
             rhs->replaceLocalValue(
                 cell_lid,
                 component,
-                transient * old_value.component(component)
+                transient * old_velocity_data(cell_lid, component)
               + volume * source_value.component(component));
         }
 
@@ -2402,7 +2439,8 @@ physical_momentum_transport_system(
         {
             const auto owner_oriented_flux =
                 face_fluxes.is_owned_face(face_lid)
-                    ? face_fluxes.value(face_lid)
+                    ? face_flux_data(
+                          face_fluxes.owned_row(face_lid), 0)
                     : scalar_type{};
             const auto out_flux =
                 mesh.owner_cell(face_lid) == cell_lid
@@ -2450,11 +2488,12 @@ physical_momentum_transport_system(
                 const auto other =
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
-                row_values.try_emplace(other, scalar_type{});
+                row_values.ensure(other);
                 const auto face_kinematic_viscosity =
                     detail::harmonic_face_value(
                         mesh, face_lid, cell_lid, other,
-                        dynamic_viscosity)
+                        viscosity_data(cell_lid, 0),
+                        viscosity_data(other, 0))
                   / reference_density;
                 if (face_kinematic_viscosity <= scalar_type{})
                 {
@@ -2494,14 +2533,15 @@ physical_momentum_transport_system(
                         cell_lid, scalar_type{0.5},
                         face_kinematic_viscosity,
                         tangential_area);
-                    if (partition_gradients == nullptr)
+                    if (!partition_gradient_data)
                     {
                         throw std::logic_error(
                             "Partition-face implicit momentum reconstruction "
                             "requires synchronized remote gradients.");
                     }
                     const auto remote_gradient =
-                        partition_gradients->local_value(other);
+                        detail::tensor_view_value<Pack>(
+                            *partition_gradient_data, other);
                     for (size_t component = 0;
                          component < components;
                          ++component)
@@ -2537,7 +2577,7 @@ physical_momentum_transport_system(
                 boundary_viscosity(
                     location.batch_id,
                     location.in_batch_id,
-                    dynamic_viscosity.local_value(cell_lid))
+                    viscosity_data(cell_lid, 0))
               / reference_density;
             const auto coefficient =
                 detail::boundary_diffusion_coefficient(
@@ -2574,15 +2614,8 @@ physical_momentum_transport_system(
                 tangential_area);
         }
 
-        columns.clear();
-        values.clear();
-        for (const auto& [column, value] : row_values)
-        {
-            columns.push_back(column);
-            values.push_back(value);
-        }
         detail::add_transport_values<Pack>(
-            prepared, cell_lid, columns(), values());
+            prepared, cell_lid, row_values);
     }
 
     if (correction_field != nullptr

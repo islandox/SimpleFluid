@@ -45,6 +45,40 @@ struct OwnerCellBoundaryCoefficient
 struct OmitBoundaryGradientSamples
 {};
 
+/** @brief Reconstruct one three-component value from a cached field view. */
+template<TpetraTypePack Pack, class View>
+inline auto vector_view_value(
+    const View& values,
+    typename Pack::local_ordinal_type cell_lid)
+    -> typename VectorCellField<Pack>::vec_type
+{
+    return {values(cell_lid, 0),
+            values(cell_lid, 1),
+            values(cell_lid, 2)};
+}
+
+/** @brief Reconstruct one row-major 3x3 value from a cached field view. */
+template<TpetraTypePack Pack, class View>
+inline auto tensor_view_value(
+    const View& values,
+    typename Pack::local_ordinal_type cell_lid)
+    -> typename TensorCellField<Pack>::tensor_type
+{
+    return {
+        typename VectorCellField<Pack>::vec_type{
+            values(cell_lid, 0),
+            values(cell_lid, 1),
+            values(cell_lid, 2)},
+        typename VectorCellField<Pack>::vec_type{
+            values(cell_lid, 3),
+            values(cell_lid, 4),
+            values(cell_lid, 5)},
+        typename VectorCellField<Pack>::vec_type{
+            values(cell_lid, 6),
+            values(cell_lid, 7),
+            values(cell_lid, 8)}};
+}
+
 /** @brief Evaluate cached scalar affine reconstruction coefficients. */
 template<TpetraTypePack Pack>
 void evaluate_scalar_affine_gradients(
@@ -58,18 +92,22 @@ void evaluate_scalar_affine_gradients(
         throw std::invalid_argument(
             "Scalar gradient stencil cache is incompatible with the mesh.");
     }
+    const auto field_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         auto gradient = stencils[owned].constant;
         for (const auto& entry : stencils[owned].entries)
         {
-            const auto value = field.local_value(entry.cell_lid);
+            const auto value = field_values(entry.cell_lid, 0);
             gradient.x += entry.coefficient.x * value;
             gradient.y += entry.coefficient.y * value;
             gradient.z += entry.coefficient.z * value;
         }
-        gradients.set_owned_value(cell_lid, gradient);
+        gradient_values(cell_lid, 0) = gradient.x;
+        gradient_values(cell_lid, 1) = gradient.y;
+        gradient_values(cell_lid, 2) = gradient.z;
     }
 }
 
@@ -82,31 +120,33 @@ void evaluate_vector_affine_gradients(
     TensorCellField<Pack>& gradients)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using tensor_type = typename TensorCellField<Pack>::tensor_type;
     if (stencils.size() != field.mesh().num_owned_cells())
     {
         throw std::invalid_argument(
             "Vector gradient stencil cache is incompatible with the mesh.");
     }
+    const auto field_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        tensor_type gradient{};
         for (size_t component = 0;
              component < VectorCellField<Pack>::num_components;
              ++component)
         {
-            gradient[component] = stencils[owned].constants[component];
+            auto gradient = stencils[owned].constants[component];
             for (const auto& entry : stencils[owned].entries)
             {
                 const auto value =
-                    field.local_value(entry.cell_lid).component(component);
-                gradient[component].x += entry.coefficient.x * value;
-                gradient[component].y += entry.coefficient.y * value;
-                gradient[component].z += entry.coefficient.z * value;
+                    field_values(entry.cell_lid, component);
+                gradient.x += entry.coefficient.x * value;
+                gradient.y += entry.coefficient.y * value;
+                gradient.z += entry.coefficient.z * value;
             }
+            gradient_values(cell_lid, component * 3) = gradient.x;
+            gradient_values(cell_lid, component * 3 + 1) = gradient.y;
+            gradient_values(cell_lid, component * 3 + 2) = gradient.z;
         }
-        gradients.set_owned_value(cell_lid, gradient);
     }
 }
 
@@ -117,34 +157,40 @@ void evaluate_vector_interior_gradients(
     const std::vector<LeastSquaresGradientStencil<Mesh<Pack>>>& stencils,
     TensorCellField<Pack>& gradients)
 {
+    using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using tensor_type = typename TensorCellField<Pack>::tensor_type;
     if (stencils.size() != field.mesh().num_owned_cells())
     {
         throw std::invalid_argument(
             "Interior gradient stencil cache is incompatible with the mesh.");
     }
+    const auto field_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        tensor_type gradient{};
+        for (size_t component = 0;
+             component < TensorCellField<Pack>::num_components;
+             ++component)
+        {
+            gradient_values(cell_lid, component) = scalar_type{};
+        }
         for (const auto& entry : stencils[owned])
         {
-            const auto value = field.local_value(entry.cell_lid);
             for (size_t component = 0;
                  component < VectorCellField<Pack>::num_components;
                  ++component)
             {
-                const auto component_value = value.component(component);
-                gradient[component].x +=
+                const auto component_value =
+                    field_values(entry.cell_lid, component);
+                gradient_values(cell_lid, component * 3) +=
                     entry.coefficient.x * component_value;
-                gradient[component].y +=
+                gradient_values(cell_lid, component * 3 + 1) +=
                     entry.coefficient.y * component_value;
-                gradient[component].z +=
+                gradient_values(cell_lid, component * 3 + 2) +=
                     entry.coefficient.z * component_value;
             }
         }
-        gradients.set_owned_value(cell_lid, gradient);
     }
 }
 
@@ -195,13 +241,16 @@ void add_explicit_non_orthogonal_correction(
         correction_field.mesh_ptr(), "non_orthogonal_gradient");
     cell_gradient(correction_field, gradients);
     gradients.sync_ghosts();
+    const auto gradient_values = gradients.local_read_view();
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        return (gradients.local_value(cell_lid)
-                + gradients.local_value(other_lid))
+        return (detail::vector_view_value<Pack>(
+                    gradient_values, cell_lid)
+                + detail::vector_view_value<Pack>(
+                    gradient_values, other_lid))
              / scalar_type{2};
     };
 
@@ -255,7 +304,9 @@ void add_explicit_non_orthogonal_correction(
                 mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(area_vector, d);
-            const auto gradient = gradients.value(owner);
+            const auto gradient =
+                detail::vector_view_value<Pack>(
+                    gradient_values, owner);
 
             rhs.sumIntoLocalValue(
                 owner,
@@ -324,14 +375,18 @@ void add_explicit_non_orthogonal_correction(
             correction_field, *gradient_stencils, gradients);
     }
     gradients.sync_ghosts();
+    const auto gradient_values = gradients.local_read_view();
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid)
             -> typename TensorCellField<Pack>::tensor_type
     {
-        auto gradient = gradients.local_value(cell_lid);
-        const auto other_gradient = gradients.local_value(other_lid);
+        auto gradient = detail::tensor_view_value<Pack>(
+            gradient_values, cell_lid);
+        const auto other_gradient =
+            detail::tensor_view_value<Pack>(
+                gradient_values, other_lid);
         for (size_t component = 0;
              component < num_components;
              ++component)
@@ -397,7 +452,9 @@ void add_explicit_non_orthogonal_correction(
                 mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(area_vector, d);
-            const auto gradient = gradients.value(owner);
+            const auto gradient =
+                detail::tensor_view_value<Pack>(
+                    gradient_values, owner);
 
             for (size_t component = 0;
                  component < num_components;
@@ -477,6 +534,9 @@ void add_variable_explicit_non_orthogonal_correction(
             correction_field, boundary_condition, boundary_value, gradients);
     }
     gradients.sync_ghosts();
+    const auto gradient_values = gradients.local_read_view();
+    const auto coefficient_values =
+        coefficient_field.local_read_view();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -492,13 +552,16 @@ void add_variable_explicit_non_orthogonal_correction(
                 mesh.opposite_or_periodic_neighbor_cell(
                     face_lid, cell_lid);
             const auto gradient =
-                (gradients.local_value(cell_lid)
-                 + gradients.local_value(other))
+                (detail::vector_view_value<Pack>(
+                     gradient_values, cell_lid)
+                 + detail::vector_view_value<Pack>(
+                     gradient_values, other))
               / scalar_type{2};
             const auto face_coefficient =
                 detail::harmonic_face_value(
                     mesh, face_lid, cell_lid, other,
-                    coefficient_field);
+                    coefficient_values(cell_lid, 0),
+                    coefficient_values(other, 0));
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(
                     mesh.face_area_vector_outward(face_lid, cell_lid),
@@ -537,8 +600,10 @@ void add_variable_explicit_non_orthogonal_correction(
               * boundary_coefficient(
                     batch_id,
                     in_batch_id,
-                    coefficient_field.local_value(owner))
-              * gradients.value(owner).dot(tangential_area));
+                    coefficient_values(owner, 0))
+              * detail::vector_view_value<Pack>(
+                    gradient_values, owner)
+                    .dot(tangential_area));
         }
     }
 }
@@ -635,6 +700,9 @@ void add_variable_explicit_non_orthogonal_correction(
         cell_gradient(correction_field, boundary_value, gradients);
     }
     gradients.sync_ghosts();
+    const auto gradient_values = gradients.local_read_view();
+    const auto coefficient_values =
+        coefficient_field.local_read_view();
 
     std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>
         local_boundary_locations;
@@ -675,8 +743,9 @@ void add_variable_explicit_non_orthogonal_correction(
                             - mesh.cell_centroid(cell_lid));
 
             scalar_type face_coefficient =
-                coefficient_field.local_value(cell_lid);
-            auto gradient = gradients.local_value(cell_lid);
+                coefficient_values(cell_lid, 0);
+            auto gradient = detail::tensor_view_value<Pack>(
+                gradient_values, cell_lid);
             if (mesh.is_interior_face(face_lid))
             {
                 const auto other =
@@ -685,8 +754,11 @@ void add_variable_explicit_non_orthogonal_correction(
                 face_coefficient =
                     detail::harmonic_face_value(
                         mesh, face_lid, cell_lid, other,
-                        coefficient_field);
-                const auto other_gradient = gradients.local_value(other);
+                        coefficient_values(cell_lid, 0),
+                        coefficient_values(other, 0));
+                const auto other_gradient =
+                    detail::tensor_view_value<Pack>(
+                        gradient_values, other);
                 for (size_t component = 0;
                      component < components;
                      ++component)
@@ -829,6 +901,9 @@ void add_explicit_deviatoric_transpose_gradient_stress(
             old_velocity, *gradient_stencils, gradients);
     }
     gradients.sync_ghosts();
+    const auto gradient_values = gradients.local_read_view();
+    const auto viscosity_values =
+        dynamic_viscosity.local_read_view();
 
     std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>
         local_boundary_locations;
@@ -849,9 +924,11 @@ void add_explicit_deviatoric_transpose_gradient_stress(
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            auto face_gradient = gradients.local_value(cell_lid);
+            auto face_gradient =
+                detail::tensor_view_value<Pack>(
+                    gradient_values, cell_lid);
             auto face_viscosity =
-                dynamic_viscosity.local_value(cell_lid);
+                viscosity_values(cell_lid, 0);
 
             if (mesh.is_interior_face(face_lid))
             {
@@ -859,7 +936,8 @@ void add_explicit_deviatoric_transpose_gradient_stress(
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
                 const auto other_gradient =
-                    gradients.local_value(other);
+                    detail::tensor_view_value<Pack>(
+                        gradient_values, other);
                 for (size_t component = 0;
                      component < components;
                      ++component)
@@ -871,7 +949,8 @@ void add_explicit_deviatoric_transpose_gradient_stress(
                 }
                 face_viscosity = detail::harmonic_face_value(
                     mesh, face_lid, cell_lid, other,
-                    dynamic_viscosity);
+                    viscosity_values(cell_lid, 0),
+                    viscosity_values(other, 0));
             }
             else
             {
@@ -1404,20 +1483,24 @@ full_diffusion_residual(
         field.mesh_ptr(), "full_diffusion_gradient");
     cell_gradient(field, gradients);
     gradients.sync_ghosts();
+    const auto field_values = field.local_read_view();
+    const auto gradient_values = gradients.local_read_view();
 
     auto gradient_for_face =
         [&](local_ordinal_type cell_lid,
             local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
     {
-        return (gradients.local_value(cell_lid)
-                + gradients.local_value(other_lid))
+        return (detail::vector_view_value<Pack>(
+                    gradient_values, cell_lid)
+                + detail::vector_view_value<Pack>(
+                    gradient_values, other_lid))
              / scalar_type{2};
     };
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto phi_p = field.value(cell_lid);
+        const auto phi_p = field_values(cell_lid, 0);
         scalar_type value = 0.0;
 
         for (const auto face_lid : mesh.faces(cell_lid))
@@ -1436,7 +1519,7 @@ full_diffusion_residual(
                     detail::non_orthogonal_area_vector(area_vector, d);
                 const auto gradient = gradient_for_face(cell_lid, other);
 
-                value += coeff * (phi_p - field.local_value(other))
+                value += coeff * (phi_p - field_values(other, 0))
                        - diffusivity * gradient.dot(tangential_area);
                 continue;
             }
@@ -1465,7 +1548,9 @@ full_diffusion_residual(
                   - mesh.cell_centroid(cell_lid);
                 const auto tangential_area =
                     detail::non_orthogonal_area_vector(area_vector, d);
-                const auto gradient = gradients.value(cell_lid);
+                const auto gradient =
+                    detail::vector_view_value<Pack>(
+                        gradient_values, cell_lid);
 
                 value += coeff * (phi_p - bc.value)
                        - diffusivity * gradient.dot(tangential_area);

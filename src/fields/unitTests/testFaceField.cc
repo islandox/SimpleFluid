@@ -133,6 +133,33 @@ TEST(FaceFieldTest, InitialValueConstructorFillsVector)
     }
 }
 
+/** @brief Verifies checked face rows and bulk host-view access. */
+TEST(FaceFieldTest, ExposesOwnedRowsAndBulkHostViews)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType flux(mesh, "flux");
+
+    {
+        auto values = flux.owned_write_view();
+        ASSERT_EQ(values.extent(0), flux.num_owned_faces());
+        ASSERT_EQ(values.extent(1), 1u);
+        for (const auto face_lid : flux.owned_face_ids())
+        {
+            const auto row = flux.owned_row(face_lid);
+            EXPECT_EQ(row, face_lid);
+            values(row, 0) = static_cast<double>(face_lid) + 0.5;
+        }
+    }
+
+    const auto values = flux.owned_read_view();
+    for (const auto face_lid : flux.owned_face_ids())
+    {
+        EXPECT_DOUBLE_EQ(
+            values(flux.owned_row(face_lid), 0),
+            static_cast<double>(face_lid) + 0.5);
+    }
+}
+
 /**
  * @brief Ensures only faces whose owner cell is locally owned appear in the field map.
  */
@@ -148,6 +175,7 @@ TEST(FaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
     EXPECT_EQ(flux.owned_face_ids()[0], 0);
     EXPECT_TRUE(flux.is_owned_face(0));
     EXPECT_FALSE(flux.is_owned_face(1));
+    EXPECT_THROW(flux.owned_row(1), std::out_of_range);
     EXPECT_THROW(flux.face_global_id(1), std::out_of_range);
     EXPECT_EQ(flux.map()->getLocalNumElements(), 1u);
 
