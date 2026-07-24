@@ -12,9 +12,14 @@ fi
 
 case_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$case_dir/../../.." && pwd)
+invocation_dir=$(pwd -P)
 build_config=${SIMPLEFLUID_BUILD_CONFIG:-RelWithDebInfo}
 executable="$repo_dir/build/bin/$build_config/natural_convection_shiri"
 output_dir=${SIMPLEFLUID_SHIRI_OUTPUT_DIR:-"$case_dir/profiles"}
+case "$output_dir" in
+    /*) ;;
+    *) output_dir="$invocation_dir/$output_dir" ;;
+esac
 
 (
     cd "$repo_dir"
@@ -23,8 +28,13 @@ output_dir=${SIMPLEFLUID_SHIRI_OUTPUT_DIR:-"$case_dir/profiles"}
 )
 mkdir -p "$output_dir"
 rm -f "$output_dir"/simplefluid_cells_rank*.csv \
-      "$output_dir"/natural_convection_shiri*.vtu
+      "$output_dir"/natural_convection_shiri*.vtu \
+      "$output_dir"/natural_convection_shiri*.pvtu
 
 cd "$output_dir"
 export SIMPLEFLUID_SHIRI_OUTPUT_PREFIX="$output_dir/simplefluid_cells"
-mpiexec -n "$np" "$executable"
+if [ "$np" -eq 1 ]; then
+    "$executable"
+else
+    mpiexec -n "$np" "$executable"
+fi

@@ -16,6 +16,7 @@
 
 #include <Tpetra_Core.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -94,36 +95,90 @@ SimpleFluid::ArrReal uniform_edges(double lower, double upper, int cells)
 }
 
 /**
- * @brief Generate radially graded annulus edges concentrated near the wall.
+ * @brief Generate geometrically graded coordinates over one mesh block.
  *
- * @param cells Number of radial cells.
- * @return Radial edge coordinates from the inner to outer cylinder.
+ * @param lower Lower interval endpoint.
+ * @param upper Upper interval endpoint.
+ * @param cells Number of cells.
+ * @param expansion_ratio Last-cell width divided by first-cell width.
+ * @return Coordinate vector containing @p cells plus one edges.
  */
-SimpleFluid::ArrReal wall_graded_radial_edges(int cells)
+SimpleFluid::ArrReal graded_edges(
+    double lower, double upper, int cells, double expansion_ratio)
 {
-    constexpr double inner_radius = 0.075;
-    constexpr double outer_radius = 0.600;
-    constexpr double grading = 3.0;
-
     SimpleFluid::ArrReal edges;
     edges.reserve(static_cast<size_t>(cells) + 1);
-    edges.push_back(inner_radius);
+    edges.push_back(lower);
     if (cells == 1)
     {
-        edges.push_back(outer_radius);
+        edges.push_back(upper);
         return edges;
     }
-    const double ratio = std::pow(grading, 1.0 / (cells - 1));
-    const double first_width = (outer_radius - inner_radius)
-                             * (ratio - 1.0)
-                             / (std::pow(ratio, cells) - 1.0);
+
+    if (expansion_ratio == 1.0)
+        return uniform_edges(lower, upper, cells);
+
+    const double ratio =
+        std::pow(expansion_ratio, 1.0 / static_cast<double>(cells - 1));
+    const double first_width =
+        (upper - lower) * (ratio - 1.0)
+        / (std::pow(ratio, cells) - 1.0);
     double width = first_width;
     for (int cell = 0; cell < cells; ++cell)
     {
         edges.push_back(edges.back() + width);
         width *= ratio;
     }
-    edges.back() = outer_radius;
+    edges.back() = upper;
+    return edges;
+}
+
+/**
+ * @brief Append a graded block without duplicating its shared first edge.
+ */
+void append_block(
+    SimpleFluid::ArrReal& edges,
+    double lower,
+    double upper,
+    int cells,
+    double expansion_ratio)
+{
+    auto block = graded_edges(
+        lower, upper, cells, expansion_ratio);
+    edges.insert(edges.end(), block.begin() + 1, block.end());
+}
+
+/**
+ * @brief Reproduce the two radial blocks in the OpenFOAM Shiri mesh.
+ */
+SimpleFluid::ArrReal shiri_radial_edges(int cells)
+{
+    if (cells == 1)
+        return uniform_edges(0.075, 0.600, cells);
+
+    const int inner_cells = cells / 2;
+    const int outer_cells = cells - inner_cells;
+    auto edges = graded_edges(
+        0.075, 0.2625, inner_cells, 3.0);
+    append_block(
+        edges, 0.2625, 0.600, outer_cells, 1.0);
+    return edges;
+}
+
+/**
+ * @brief Reproduce the lower and upper axial blocks in the OpenFOAM mesh.
+ */
+SimpleFluid::ArrReal shiri_axial_edges(int cells)
+{
+    if (cells == 1)
+        return uniform_edges(0.0, 1.5, cells);
+
+    const int lower_cells = std::max(1, cells / 5);
+    const int upper_cells = cells - lower_cells;
+    auto edges = graded_edges(
+        0.0, 0.120, lower_cells, 2.0);
+    append_block(
+        edges, 0.120, 1.5, upper_cells, 1.5);
     return edges;
 }
 
@@ -133,6 +188,7 @@ SimpleFluid::ArrReal wall_graded_radial_edges(int cells)
  * @tparam Pack Tpetra type pack used by the mesh and solver.
  * @param mesh Mesh providing owned cell centers.
  * @param solver Solver providing temperature, velocity, and pressure fields.
+ * @param turbulence Standard k-epsilon state used by the comparison.
  * @param rank MPI rank used in the output filename.
  * @throws std::runtime_error if the output file cannot be opened.
  */
@@ -140,6 +196,7 @@ template<class Pack>
 void write_profile_cells(
     const SimpleFluid::MeshHandle<Pack>& mesh,
     const SimpleFluid::BoussinesqSolver<Pack>& solver,
+    const SimpleFluid::TurbulenceModel<Pack>& turbulence,
     int rank)
 {
     const char* configured_prefix = std::getenv("SIMPLEFLUID_SHIRI_OUTPUT_PREFIX");
@@ -152,7 +209,22 @@ void write_profile_cells(
     if (!output)
         throw std::runtime_error("Cannot open " + filename + " for writing.");
 
-    output << "r,theta,z,temperature,ur,utheta,uz,pressure\n";
+    const auto* epsilon = turbulence.dissipation_rate();
+    if (epsilon == nullptr)
+        throw std::logic_error(
+            "Shiri standard k-epsilon output requires an epsilon field.");
+    const auto* buoyancy_production =
+        turbulence.buoyancy_production();
+    const auto* wall_y_plus =
+        turbulence.wall_y_plus();
+    if (buoyancy_production == nullptr || wall_y_plus == nullptr)
+        throw std::logic_error(
+            "Shiri turbulent output requires buoyancy and wall diagnostics.");
+    const double turbulent_prandtl =
+        turbulence.options().turbulent_prandtl_number;
+
+    output << "r,theta,z,temperature,ur,utheta,uz,pressure,"
+              "k,epsilon,nut,alphat,buoyancy_production,wall_y_plus\n";
     output << std::setprecision(17);
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -164,10 +236,17 @@ void write_profile_cells(
         const double sine = std::sin(theta);
         const double radial_velocity = velocity.x * cosine + velocity.y * sine;
         const double azimuthal_velocity = -velocity.x * sine + velocity.y * cosine;
+        const double turbulent_viscosity =
+            turbulence.turbulent_kinematic_viscosity().value(lid);
         output << std::hypot(center.x, center.y) << ',' << theta << ','
                << center.z << ',' << solver.temperature().value(lid) << ','
                << radial_velocity << ',' << azimuthal_velocity << ','
-               << velocity.z << ',' << solver.pressure().value(lid) << '\n';
+               << velocity.z << ',' << solver.pressure().value(lid) << ','
+               << turbulence.turbulent_kinetic_energy().value(lid) << ','
+               << epsilon->value(lid) << ',' << turbulent_viscosity << ','
+               << turbulent_viscosity / turbulent_prandtl << ','
+               << buoyancy_production->value(lid) << ','
+               << wall_y_plus->value(lid) << '\n';
     }
 }
 
@@ -202,11 +281,11 @@ int main(int argc, char** argv)
     database->set(
         "domain_type",
         static_cast<int>(SimpleFluid::MeshFactory::DomainType::ANNULUS));
-    database->set("R", wall_graded_radial_edges(radial_cells));
+    database->set("R", shiri_radial_edges(radial_cells));
     database->set(
         "Theta", uniform_edges(
             0.0, 0.25 * std::numbers::pi, theta_cells));
-    database->set("Z", uniform_edges(0.0, 1.5, axial_cells));
+    database->set("Z", shiri_axial_edges(axial_cells));
     database->set(
         "domain_exterior_face_types",
         SimpleFluid::ArrString{
@@ -266,13 +345,37 @@ int main(int argc, char** argv)
     SimpleFluid::BoussinesqSolver<Pack> solver(
         mesh, bcs, time_options, linear_options, model_options);
     solver.initialize_heated_box(290.0, 290.0);
+
+    SimpleFluid::TurbulenceModelOptions turbulence_options;
+    turbulence_options.model =
+        SimpleFluid::TurbulenceModelType::StandardKEpsilon;
+    turbulence_options.initial_turbulent_kinetic_energy = 0.00375;
+    turbulence_options.initial_dissipation_rate = 0.00075;
+    turbulence_options.turbulent_prandtl_number = 0.85;
+    turbulence_options.buoyancy_model =
+        SimpleFluid::TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+    turbulence_options.buoyancy_coefficient = 1.0;
+    turbulence_options.wall_treatment =
+        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    turbulence_options.wall_options.boundary_names = {
+        "rmin", "rmax", "zmin", "zmax"};
+    turbulence_options.wall_options.thermal_wall_law =
+        SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke;
+    turbulence_options.wall_options
+        .thermal_turbulent_prandtl_number = 0.85;
+    auto& turbulence =
+        solver.configure_turbulence(turbulence_options);
+
     SimpleFluid::ProgressStream progress(std::cout);
     solver.run(steps, progress);
 
     const auto comm = Tpetra::getDefaultComm();
     const int rank = comm->getRank();
-    solver.write_parallel_solution_vtu("natural_convection_shiri.vtu");
-    write_profile_cells(*mesh, solver, rank);
+    SimpleFluid::SolutionOutputOptions output_options;
+    output_options.include_turbulence_fields = true;
+    solver.write_parallel_solution_vtu(
+        "natural_convection_shiri.vtu", output_options);
+    write_profile_cells(*mesh, solver, turbulence, rank);
 
     if (rank == 0)
     {
@@ -280,6 +383,16 @@ int main(int argc, char** argv)
                   << 'x' << axial_cells << " cells, " << steps
                   << " steps, t=" << solver.time() << ", MPI ranks="
                   << comm->getSize() << '\n';
+        for (const auto& statistics :
+             turbulence.wall_y_plus_statistics())
+        {
+            std::cout << "wall_y_plus[" << statistics.boundary_name
+                      << "]: min=" << statistics.minimum
+                      << ", mean=" << statistics.area_weighted_mean
+                      << ", max=" << statistics.maximum
+                      << ", faces=" << statistics.global_face_count
+                      << '\n';
+        }
     }
     return 0;
 }
