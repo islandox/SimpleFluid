@@ -40,6 +40,12 @@ SimpleFluid::SP<MeshType> make_single_hex_mesh()
         SimpleFluid::test::make_single_hex_database());
 }
 
+SimpleFluid::SP<MeshType> make_2x2x2_mesh()
+{
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_2x2x2_database());
+}
+
 Pack::scalar_type local_matrix_entry(
     const Pack::matrix_type& matrix,
     MeshType::local_ordinal_type row,
@@ -131,6 +137,154 @@ TEST(IncompressibleMomentumEquationTest, AdvancesPhysicalMomentum)
     EXPECT_NEAR(velocity.value(0).x, -0.4, 1.0e-12);
     EXPECT_NEAR(velocity.value(0).y, 0.2, 1.0e-12);
     EXPECT_NEAR(velocity.value(0).z, 0.1, 1.0e-12);
+}
+
+/**
+ * @brief An accepted physical velocity that already solves the new system is
+ *        passed to Belos as the initial guess.
+ */
+TEST(IncompressibleMomentumEquationTest,
+     WarmStartsPhysicalMomentumFromAcceptedVelocity)
+{
+    auto mesh = make_single_hex_mesh();
+    const VectorFieldType::vec_type accepted{1.0, 2.0, 3.0};
+    VectorFieldType old_velocity(mesh, accepted, "old_velocity");
+    VectorFieldType velocity(
+        mesh, VectorFieldType::vec_type{9.0, 8.0, 7.0}, "velocity");
+    FieldType dynamic_viscosity(mesh, 0.0, "dynamic_viscosity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.2;
+    auto zero_acceleration =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        return {};
+    };
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 1;
+    linear_options.tolerance = 1.0e-12;
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    const auto summary = equation.advance_velocity_physical(
+        old_velocity, zero_fluxes, boundary_cache, options,
+        dynamic_viscosity, 10.0, velocity, zero_acceleration,
+        linear_options);
+
+    EXPECT_TRUE(summary.converged);
+    EXPECT_EQ(summary.iterations, 0);
+    EXPECT_DOUBLE_EQ(velocity.value(0).x, accepted.x);
+    EXPECT_DOUBLE_EQ(velocity.value(0).y, accepted.y);
+    EXPECT_DOUBLE_EQ(velocity.value(0).z, accepted.z);
+}
+
+/**
+ * @brief A zero RHS column remains solvable when its warm start is nonzero,
+ *        alongside nonzero RHS columns in the same pseudo-block solve.
+ */
+TEST(IncompressibleMomentumEquationTest,
+     WarmStartHandlesMixedZeroAndNonzeroMomentumRhsColumns)
+{
+    auto mesh = make_single_hex_mesh();
+    const VectorFieldType::vec_type accepted{1.0, 2.0, 3.0};
+    VectorFieldType velocity(mesh, accepted, "velocity");
+    FieldType dynamic_viscosity(mesh, 0.0, "dynamic_viscosity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.2;
+    auto acceleration =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        // Cancels the transient RHS in X, advances Y, and leaves Z at its
+        // exact warm start.
+        return {-5.0, 1.0, 0.0};
+    };
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 5;
+    linear_options.tolerance = 1.0e-12;
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    const auto summary = equation.advance_velocity_physical(
+        velocity, zero_fluxes, boundary_cache, options,
+        dynamic_viscosity, 10.0, velocity, acceleration,
+        linear_options);
+
+    EXPECT_TRUE(summary.converged);
+    EXPECT_NEAR(velocity.value(0).x, 0.0, 1.0e-12);
+    EXPECT_NEAR(velocity.value(0).y, 2.2, 1.0e-12);
+    EXPECT_NEAR(velocity.value(0).z, 3.0, 1.0e-12);
+}
+
+/**
+ * @brief A rejected physical momentum solve leaves aliased accepted velocity
+ *        unchanged.
+ */
+TEST(IncompressibleMomentumEquationTest,
+     PhysicalSolveRejectionPreservesAliasedAcceptedVelocity)
+{
+    auto mesh = make_2x2x2_mesh();
+    VectorFieldType velocity(mesh, "accepted_velocity");
+    std::vector<VectorFieldType::vec_type> accepted(
+        mesh->num_local_cells());
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto index = static_cast<double>(owned + 1);
+        velocity.set_owned_value(
+            cell_lid, {1.0 + index * index,
+                       2.0 + index * index * index,
+                       3.0 + index * index * index * index});
+    }
+    velocity.sync_ghosts();
+    for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+    {
+        accepted[local] = velocity.local_value(
+            static_cast<MeshType::local_ordinal_type>(local));
+    }
+
+    FieldType dynamic_viscosity(mesh, 1.0, "dynamic_viscosity");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 1.0;
+    auto zero_acceleration =
+        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+    {
+        return {};
+    };
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 1;
+    linear_options.tolerance = 1.0e-14;
+
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    EXPECT_THROW(
+        equation.advance_velocity_physical(
+            velocity, zero_fluxes, boundary_cache, options,
+            dynamic_viscosity, 1.0, velocity, zero_acceleration,
+            linear_options),
+        std::runtime_error);
+
+    for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+    {
+        const auto actual = velocity.local_value(
+            static_cast<MeshType::local_ordinal_type>(local));
+        EXPECT_DOUBLE_EQ(actual.x, accepted[local].x);
+        EXPECT_DOUBLE_EQ(actual.y, accepted[local].y);
+        EXPECT_DOUBLE_EQ(actual.z, accepted[local].z);
+    }
 }
 
 /** @brief Verifies that slip boundaries add no diffusive momentum diagonal. */

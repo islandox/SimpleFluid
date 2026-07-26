@@ -18,6 +18,9 @@
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Tpetra_Core.hpp>
 
+#include <array>
+#include <limits>
+
 namespace SimpleFluid::detail
 {
 
@@ -34,6 +37,15 @@ struct BelosLinearSolverTestAccess
     {
         return solver.d_preconditioner_setup_count;
     }
+
+    static real_t true_relative_residual(
+        const BelosLinearSolver<Pack>& solver,
+        const Teuchos::RCP<const typename Pack::operator_type>& matrix,
+        const typename Pack::multi_vector_type& rhs,
+        const typename Pack::multi_vector_type& solution)
+    {
+        return solver.true_relative_residual(matrix, rhs, solution);
+    }
 };
 
 } // namespace SimpleFluid::detail
@@ -49,7 +61,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /**
- * @brief Read the number of MueLu hierarchy constructions from a solver.
+ * @brief Read the number of preconditioner constructions from a solver.
  *
  * @param solver Solver instance under test.
  * @return Number of completed preconditioner setups.
@@ -60,6 +72,18 @@ std::size_t preconditioner_setup_count(
     using Access =
         SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
     return Access::preconditioner_setup_count(solver);
+}
+
+double true_relative_residual(
+    const SimpleFluid::BelosLinearSolver<Pack>& solver,
+    const Teuchos::RCP<const Pack::operator_type>& matrix,
+    const Pack::multi_vector_type& rhs,
+    const Pack::multi_vector_type& solution)
+{
+    using Access =
+        SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+    return Access::true_relative_residual(
+        solver, matrix, rhs, solution);
 }
 
 /** @brief Minimal identity operator used to test non-CRS Belos inputs. */
@@ -177,6 +201,221 @@ TEST(BelosLinearSolverTest, SolvesMultiVectorIdentitySystem)
     }
 }
 
+/** @brief Verify stable names and accepted configuration aliases. */
+TEST(BelosLinearSolverTest, ParsesBackendAndPreconditionerNames)
+{
+    using SimpleFluid::LinearPreconditioner;
+    using SimpleFluid::LinearSolverBackend;
+
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_solver_backend("gmres"),
+        LinearSolverBackend::Gmres);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_solver_backend("CG"),
+        LinearSolverBackend::Cg);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_solver_backend("BiCGStab"),
+        LinearSolverBackend::BiCGStab);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_preconditioner("none"),
+        LinearPreconditioner::None);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_preconditioner("jacobi"),
+        LinearPreconditioner::Jacobi);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_preconditioner("RILUK"),
+        LinearPreconditioner::ILU0);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_preconditioner("ILUT"),
+        LinearPreconditioner::ILUT);
+    EXPECT_EQ(
+        SimpleFluid::parse_linear_preconditioner("MueLu"),
+        LinearPreconditioner::MueLu);
+
+    EXPECT_EQ(
+        SimpleFluid::to_string(LinearSolverBackend::BiCGStab),
+        "bicgstab");
+    EXPECT_EQ(
+        SimpleFluid::to_string(LinearPreconditioner::ILU0),
+        "ilu0");
+    EXPECT_THROW(
+        SimpleFluid::parse_linear_solver_backend("direct"),
+        std::invalid_argument);
+    EXPECT_THROW(
+        SimpleFluid::parse_linear_preconditioner("DILU"),
+        std::invalid_argument);
+}
+
+/** @brief Verify every exposed backend solves scalar and multi-RHS systems. */
+TEST(BelosLinearSolverTest, SupportsSelectableBackendsForMultipleRightHandSides)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 4, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+
+    Pack::multi_vector_type rhs(map, 3, true);
+    for (size_t column = 0; column < rhs.getNumVectors(); ++column)
+    {
+        auto values = rhs.getDataNonConst(column);
+        std::fill(
+            values.begin(), values.end(),
+            static_cast<double>(column + 1));
+    }
+
+    constexpr std::array backends{
+        SimpleFluid::LinearSolverBackend::Gmres,
+        SimpleFluid::LinearSolverBackend::Cg,
+        SimpleFluid::LinearSolverBackend::BiCGStab};
+    for (const auto backend : backends)
+    {
+        SCOPED_TRACE(SimpleFluid::to_string(backend));
+        Pack::multi_vector_type solution(map, 3, true);
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = backend;
+        options.tolerance = 1.0e-12;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto statistics =
+            solver.solve_with_statistics(op, rhs, solution, options);
+        ASSERT_TRUE(statistics.converged);
+        for (size_t column = 0; column < rhs.getNumVectors(); ++column)
+        {
+            const auto expected = static_cast<double>(column + 1);
+            for (const auto value : solution.getData(column))
+            {
+                EXPECT_NEAR(value, expected, 1.0e-12);
+            }
+        }
+    }
+}
+
+/** @brief Verify changing the backend recreates compatible retained state. */
+TEST(BelosLinearSolverTest, SwitchesBackendWithCompatibleMaps)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 4, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+
+    constexpr std::array backends{
+        SimpleFluid::LinearSolverBackend::Gmres,
+        SimpleFluid::LinearSolverBackend::BiCGStab,
+        SimpleFluid::LinearSolverBackend::Cg};
+    for (size_t index = 0; index < backends.size(); ++index)
+    {
+        options.backend = backends[index];
+        const auto expected = static_cast<double>(index + 2);
+        rhs.putScalar(expected);
+        solution.putScalar(0.0);
+        ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+        for (const auto value : solution.getData())
+        {
+            EXPECT_NEAR(value, expected, 1.0e-12);
+        }
+    }
+}
+
+/**
+ * @brief A cancellation-small but already acceptable warm residual is scaled
+ *        by the RHS instead of by itself.
+ */
+TEST(BelosLinearSolverTest, UsesRhsScaledResidualForWarmStart)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(1.0);
+    solution.putScalar(1.0 + 1.0e-12);
+
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    options.tolerance = 1.0e-10;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto statistics =
+        solver.solve_with_statistics(op, rhs, solution, options);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_EQ(statistics.iterations, 0);
+    EXPECT_LT(statistics.achieved_tolerance, options.tolerance);
+}
+
+/**
+ * @brief Zero-RHS columns use absolute scaling and discard a harmful nonzero
+ *        guess without disturbing helpful columns.
+ */
+TEST(BelosLinearSolverTest, HandlesMixedZeroRhsColumns)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::multi_vector_type rhs(map, 2, true);
+    Pack::multi_vector_type solution(map, 2, true);
+    {
+        auto values = rhs.getDataNonConst(0);
+        std::fill(values.begin(), values.end(), 2.0);
+    }
+    {
+        auto values = solution.getDataNonConst(0);
+        std::fill(values.begin(), values.end(), 2.0);
+    }
+    {
+        auto values = solution.getDataNonConst(1);
+        std::fill(values.begin(), values.end(), 7.0);
+    }
+
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto statistics =
+        solver.solve_with_statistics(op, rhs, solution, options);
+
+    ASSERT_TRUE(statistics.converged);
+    for (const auto value : solution.getData(0))
+        EXPECT_DOUBLE_EQ(value, 2.0);
+    for (const auto value : solution.getData(1))
+        EXPECT_DOUBLE_EQ(value, 0.0);
+}
+
+/** @brief A non-finite residual column can never report convergence. */
+TEST(BelosLinearSolverTest, RejectsNonFiniteTrueResidual)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::multi_vector_type rhs(map, 1, true);
+    Pack::multi_vector_type solution(map, 1, true);
+    rhs.putScalar(std::numeric_limits<double>::quiet_NaN());
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    EXPECT_FALSE(std::isfinite(
+        true_relative_residual(solver, op, rhs, solution)));
+}
+
 /** @brief Verify retained solver state handles a changed right-hand side. */
 TEST(BelosLinearSolverTest, ReusesSolverForChangedRightHandSide)
 {
@@ -259,6 +498,41 @@ TEST(BelosLinearSolverTest, SupportsMueLuForCrsMatrices)
 
     EXPECT_TRUE(statistics.converged);
     EXPECT_GE(statistics.iterations, 0);
+}
+
+/** @brief Verify all exposed Ifpack2 preconditioners solve CRS systems. */
+TEST(BelosLinearSolverTest, SupportsIfpack2PreconditionersForCrsMatrices)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 8, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::vector_type rhs(map, true);
+    rhs.putScalar(3.0);
+
+    constexpr std::array preconditioners{
+        SimpleFluid::LinearPreconditioner::Jacobi,
+        SimpleFluid::LinearPreconditioner::ILU0,
+        SimpleFluid::LinearPreconditioner::ILUT};
+    for (const auto preconditioner : preconditioners)
+    {
+        SCOPED_TRACE(SimpleFluid::to_string(preconditioner));
+        Pack::vector_type solution(map, true);
+        SimpleFluid::LinearSolverOptions options;
+        options.backend =
+            SimpleFluid::LinearSolverBackend::BiCGStab;
+        options.preconditioner = preconditioner;
+        options.tolerance = 1.0e-12;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto statistics =
+            solver.solve_with_statistics(op, rhs, solution, options);
+        ASSERT_TRUE(statistics.converged);
+        for (const auto value : solution.getData())
+            EXPECT_NEAR(value, 3.0, 1.0e-12);
+    }
 }
 
 /** @brief Verify MueLu is rebuilt between solves unless reuse is enabled. */
@@ -361,4 +635,33 @@ TEST(BelosLinearSolverTest, RejectsMueLuForNonCrsOperators)
     EXPECT_THROW(
         solver.solve_with_statistics(op, rhs, solution, options),
         std::invalid_argument);
+}
+
+/** @brief Verify Ifpack2 preconditioners reject non-CRS operators. */
+TEST(BelosLinearSolverTest, RejectsIfpack2ForNonCrsOperators)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    Teuchos::RCP<const Pack::operator_type> op =
+        Teuchos::rcp(new IdentityOperator(map));
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(1.0);
+
+    constexpr std::array preconditioners{
+        SimpleFluid::LinearPreconditioner::Jacobi,
+        SimpleFluid::LinearPreconditioner::ILU0,
+        SimpleFluid::LinearPreconditioner::ILUT};
+    for (const auto preconditioner : preconditioners)
+    {
+        SCOPED_TRACE(SimpleFluid::to_string(preconditioner));
+        SimpleFluid::LinearSolverOptions options;
+        options.preconditioner = preconditioner;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        EXPECT_THROW(
+            solver.solve_with_statistics(op, rhs, solution, options),
+            std::invalid_argument);
+    }
 }

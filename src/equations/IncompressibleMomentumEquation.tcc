@@ -29,7 +29,9 @@ IncompressibleMomentumEquation<Pack>::IncompressibleMomentumEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "IncompressibleMomentumEquation")),
-      d_transport_geometry_cache(*d_mesh)
+      d_transport_geometry_cache(*d_mesh),
+      d_candidate_velocity(
+          d_mesh, "momentum_velocity_candidate", false)
 {
 }
 
@@ -267,34 +269,11 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
     EquationValidation::require_mesh_match(
         *d_mesh, velocity, "IncompressibleMomentumEquation");
 
-    velocity_field_type old_velocity_snapshot(
-        old_velocity.mesh_ptr(), "momentum_old_velocity_snapshot", false);
-    const velocity_field_type* transport_old_velocity = &old_velocity;
-    if (&old_velocity == &velocity
-        && options.n_non_orthogonal_correctors > 0)
-    {
-        {
-            const auto old_values = old_velocity.owned_read_view();
-            auto snapshot_values =
-                old_velocity_snapshot.owned_write_view();
-            for (size_t owned = 0;
-                 owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto cell_lid =
-                    static_cast<local_ordinal_type>(owned);
-                for (size_t component = 0;
-                     component <
-                         velocity_field_type::num_components;
-                     ++component)
-                {
-                    snapshot_values(cell_lid, component) =
-                        old_values(cell_lid, component);
-                }
-            }
-        }
-        old_velocity_snapshot.sync_ghosts();
-        transport_old_velocity = &old_velocity_snapshot;
-    }
+    // Solve into a warm-started candidate so a rejected solve cannot modify
+    // the caller's last accepted velocity, even when both arguments alias.
+    auto& candidate_velocity = d_candidate_velocity;
+    candidate_velocity.owned_data().update(
+        scalar_type{1}, old_velocity.owned_data(), scalar_type{0});
 
     LinearSolveSummary summary;
     auto solve_system =
@@ -310,17 +289,17 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
                 {
                     return norm > scalar_type{};
                 });
-        velocity.owned_data().putScalar(0.0);
         if (!has_nonzero_rhs)
         {
-            d_mesh->sync_periodic_boundaries(velocity);
+            candidate_velocity.owned_data().putScalar(0.0);
             return;
         }
 
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto statistics =
             d_linear_solver.solve_with_statistics(
-                matrix, *system.rhs, velocity.owned_data(), linear_options);
+                matrix, *system.rhs, candidate_velocity.owned_data(),
+                linear_options);
         summary.add(statistics);
         if (!statistics.converged)
         {
@@ -331,7 +310,7 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
 
         {
             const auto solution_values =
-                velocity.owned_read_view();
+                candidate_velocity.owned_read_view();
             for (size_t component = 0;
                  component < velocity_field_type::num_components;
                  ++component)
@@ -351,17 +330,20 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
                 }
             }
         }
-        d_mesh->sync_periodic_boundaries(velocity);
     };
 
     for (int corrector = 0;
          corrector <= options.n_non_orthogonal_correctors;
          ++corrector)
     {
+        if (corrector > 0)
+        {
+            d_mesh->sync_periodic_boundaries(candidate_velocity);
+        }
         const auto* correction_field =
-            corrector == 0 ? nullptr : &velocity;
+            corrector == 0 ? nullptr : &candidate_velocity;
         const auto system = assemble_system(
-            *transport_old_velocity, face_fluxes, velocity_boundary_cache,
+            old_velocity, face_fluxes, velocity_boundary_cache,
             options, right_hand_source, correction_field);
         solve_system(system);
 
@@ -371,6 +353,9 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
             break;
         }
     }
+    velocity.owned_data().update(
+        scalar_type{1}, candidate_velocity.owned_data(), scalar_type{0});
+    d_mesh->sync_periodic_boundaries(velocity);
     return summary;
 }
 
@@ -530,50 +515,32 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
     EquationValidation::require_mesh_match(
         *d_mesh, velocity, "IncompressibleMomentumEquation");
 
-    velocity_field_type old_snapshot(
-        old_velocity.mesh_ptr(), "physical_momentum_old_velocity", false);
-    const velocity_field_type* transport_old = &old_velocity;
-    if (&old_velocity == &velocity
-        && options.n_non_orthogonal_correctors > 0)
-    {
-        {
-            const auto old_values = old_velocity.owned_read_view();
-            auto snapshot_values = old_snapshot.owned_write_view();
-            for (size_t owned = 0;
-                 owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto cell_lid =
-                    static_cast<local_ordinal_type>(owned);
-                for (size_t component = 0;
-                     component <
-                         velocity_field_type::num_components;
-                     ++component)
-                {
-                    snapshot_values(cell_lid, component) =
-                        old_values(cell_lid, component);
-                }
-            }
-        }
-        old_snapshot.sync_ghosts();
-        transport_old = &old_snapshot;
-    }
+    // Keep the accepted velocity intact until every correction solve
+    // succeeds.  The old state is also the physically relevant warm start.
+    auto& candidate_velocity = d_candidate_velocity;
+    candidate_velocity.owned_data().update(
+        scalar_type{1}, old_velocity.owned_data(), scalar_type{0});
 
     LinearSolveSummary summary;
     for (int corrector = 0;
          corrector <= options.n_non_orthogonal_correctors;
          ++corrector)
     {
+        if (corrector > 0)
+        {
+            d_mesh->sync_periodic_boundaries(candidate_velocity);
+        }
         const auto* correction_field =
-            corrector == 0 ? nullptr : &velocity;
+            corrector == 0 ? nullptr : &candidate_velocity;
         const auto system = assemble_physical_system(
-            *transport_old, face_fluxes, velocity_boundary_cache, options,
+            old_velocity, face_fluxes, velocity_boundary_cache, options,
             dynamic_viscosity, reference_density, acceleration_source,
             correction_field, boundary_dynamic_viscosity);
-        velocity.owned_data().putScalar(0.0);
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto statistics =
             d_linear_solver.solve_with_statistics(
-                matrix, *system.rhs, velocity.owned_data(), linear_options);
+                matrix, *system.rhs, candidate_velocity.owned_data(),
+                linear_options);
         summary.add(statistics);
         if (!statistics.converged)
         {
@@ -581,13 +548,15 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
                 "IncompressibleMomentumEquation physical transport solve "
                 "did not converge.");
         }
-        d_mesh->sync_periodic_boundaries(velocity);
         if (options.non_orthogonal_treatment
             == FVM::NonOrthogonalTreatment::Implicit)
         {
             break;
         }
     }
+    velocity.owned_data().update(
+        scalar_type{1}, candidate_velocity.owned_data(), scalar_type{0});
+    d_mesh->sync_periodic_boundaries(velocity);
     return summary;
 }
 

@@ -117,6 +117,7 @@ private:
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     BoundaryConditionMap d_boundary_conditions;
     field_type d_unit_weight;
+    mutable field_type d_candidate;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable bool d_cached_graph_supports_non_orthogonal_correction = false;
     mutable BelosLinearSolver<Pack> d_linear_solver;

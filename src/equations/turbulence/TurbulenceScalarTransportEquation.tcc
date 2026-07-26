@@ -34,7 +34,8 @@ TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
                                                        "TurbulenceScalarTransportEquation")),
       d_transport_geometry_cache(*d_mesh),
       d_boundary_conditions(std::move(boundary_conditions)),
-      d_unit_weight(d_mesh, scalar_type{1}, "turbulence_scalar_unit_weight")
+      d_unit_weight(d_mesh, scalar_type{1}, "turbulence_scalar_unit_weight"),
+      d_candidate(d_mesh, "turbulence_scalar_candidate", false)
 {
 }
 
@@ -380,7 +381,9 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
         d_cached_graph_supports_non_orthogonal_correction = true;
     }
 
-    field_type candidate(d_mesh, "turbulence_scalar_candidate");
+    auto& candidate = d_candidate;
+    candidate.owned_data().update(
+        scalar_type{1}, old_state.owned_data(), scalar_type{0});
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto statistics = d_linear_solver.solve_with_statistics(
         matrix, *system.rhs, candidate.owned_data(), linear_options);

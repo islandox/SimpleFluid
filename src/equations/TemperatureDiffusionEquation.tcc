@@ -29,6 +29,8 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "TemperatureDiffusionEquation")),
       d_transport_geometry_cache(*d_mesh),
+      d_candidate_temperature(
+          d_mesh, "temperature_candidate", false),
       d_boundary_condition(std::make_shared<BoundaryConditionMap>(boundary_conditions.temperature))
 {
     refresh_boundary_cache();
@@ -366,10 +368,9 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
     }
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-    // A warm start can make Belos scale convergence by a cancellation-small
-    // transient residual; use the RHS-scaled zero guess used by the physical path.
-    field_type candidate_temperature(
-        d_mesh, "temperature_candidate");
+    auto& candidate_temperature = d_candidate_temperature;
+    candidate_temperature.owned_data().update(
+        scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
     const auto statistics =
         d_linear_solver.solve_with_statistics(
             matrix, *system.rhs,
@@ -542,8 +543,9 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
         d_cached_physical_graph_supports_non_orthogonal_correction = true;
     }
 
-    field_type candidate_temperature(
-        d_mesh, "temperature_candidate");
+    auto& candidate_temperature = d_candidate_temperature;
+    candidate_temperature.owned_data().update(
+        scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
     Teuchos::RCP<const typename Pack::matrix_type> matrix =
         system.matrix;
     const auto statistics =

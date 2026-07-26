@@ -99,6 +99,7 @@ public:
 private:
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
+    mutable field_type d_candidate_temperature;
     BoundaryCache<Pack> d_face_boundary_temperature;
     SP<BoundaryConditionMap>  d_boundary_condition;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;

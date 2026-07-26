@@ -2012,6 +2012,10 @@ public:
         parameters->set("Maximum Iterations", options.max_iterations);
         parameters->set("Convergence Tolerance", options.tolerance);
         parameters->set("Verbosity", options.verbosity);
+        parameters->set(
+            "Implicit Residual Scaling", "Norm of RHS");
+        parameters->set(
+            "Explicit Residual Scaling", "Norm of RHS");
         parameters->set("Flexible Gmres", true);
         parameters->set("Block Size", 4);
         parameters->set(

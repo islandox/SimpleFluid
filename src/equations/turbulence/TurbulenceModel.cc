@@ -19,26 +19,6 @@
 namespace SimpleFluid
 {
 
-namespace
-{
-
-LinearPreconditioner wall_distance_preconditioner_from_string(
-    const std::string& value)
-{
-    if (value == "none" || value == "off")
-    {
-        return LinearPreconditioner::None;
-    }
-    if (value == "MueLu" || value == "muelu")
-    {
-        return LinearPreconditioner::MueLu;
-    }
-    throw std::invalid_argument(
-        "Unknown wall-distance linear preconditioner '" + value + "'.");
-}
-
-} // namespace
-
 /**
  * @brief Return the canonical database name of a turbulence model.
  * @param model Runtime model identifier.
@@ -347,8 +327,16 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
             database,
             "wall_distance_linear_solver_verbosity",
             options.wall_distance_equation.linear_solver.verbosity);
+    options.wall_distance_equation.linear_solver.backend =
+        parse_linear_solver_backend(
+            detail::database_value_or<std::string>(
+                database,
+                "wall_distance_linear_solver_backend",
+                std::string{to_string(
+                    options.wall_distance_equation.linear_solver
+                        .backend)}));
     options.wall_distance_equation.linear_solver.preconditioner =
-        wall_distance_preconditioner_from_string(
+        parse_linear_preconditioner(
             detail::database_value_or<std::string>(
                 database,
                 "wall_distance_linear_solver_preconditioner",

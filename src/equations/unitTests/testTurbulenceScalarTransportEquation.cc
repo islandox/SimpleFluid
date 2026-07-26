@@ -77,6 +77,34 @@ TEST(TurbulenceScalarTransportEquationTest, AdvancesAcceptedStateWithExplicitSou
     EXPECT_NEAR(state.value(0), 7.0 / 6.0, 1.0e-12);
 }
 
+/**
+ * @brief An accepted scalar state that already solves the new transport
+ *        system is passed to Belos as the initial guess.
+ */
+TEST(TurbulenceScalarTransportEquationTest,
+     WarmStartsFromAcceptedState)
+{
+    auto mesh = make_single_cell_mesh();
+    FieldType old_state(mesh, 2.0, "old_state");
+    FieldType state(mesh, 9.0, "state");
+    FieldType diffusivity(mesh, 0.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
+    Equation equation(mesh);
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 1;
+    linear_options.tolerance = 1.0e-12;
+
+    const auto statistics = equation.advance(
+        old_state, zero_flux, 0.5, diffusivity, state,
+        zero_provider(), zero_provider(), 1.0e-12,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+        linear_options);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_EQ(statistics.iterations, 0);
+    EXPECT_DOUBLE_EQ(state.value(0), 2.0);
+}
+
 /** @brief Verifies variable diffusion and conservation under zero-flux boundaries. */
 TEST(TurbulenceScalarTransportEquationTest,
      UsesVariableDiffusivityAndConservesWithZeroFluxBoundaries)

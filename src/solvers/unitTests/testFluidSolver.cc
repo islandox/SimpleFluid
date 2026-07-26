@@ -112,6 +112,69 @@ static_assert(std::is_base_of_v<
               SimpleFluid::BoussinesqSolver<Pack>>);
 
 /**
+ * @brief Verify transport and pressure policies are independently selectable.
+ */
+TEST(FluidSolverTest, ExposesIndependentLinearSolverPolicies)
+{
+    auto mesh = make_single_cell_mesh();
+
+    SimpleFluid::LinearSolverOptions transport_options;
+    transport_options.backend =
+        SimpleFluid::LinearSolverBackend::BiCGStab;
+    transport_options.preconditioner =
+        SimpleFluid::LinearPreconditioner::ILU0;
+    TestFluidSolver solver(mesh, {}, {}, transport_options);
+
+    EXPECT_EQ(
+        solver.linear_solver_options().backend,
+        SimpleFluid::LinearSolverBackend::BiCGStab);
+    EXPECT_EQ(
+        solver.linear_solver_options().preconditioner,
+        SimpleFluid::LinearPreconditioner::ILU0);
+    EXPECT_EQ(
+        solver.pressure_linear_solver_options().backend,
+        SimpleFluid::LinearSolverBackend::BiCGStab);
+    EXPECT_EQ(
+        solver.pressure_linear_solver_options().preconditioner,
+        SimpleFluid::LinearPreconditioner::MueLu);
+    EXPECT_TRUE(
+        solver.pressure_linear_solver_options().reuse_preconditioner);
+
+    auto replacement_transport = solver.linear_solver_options();
+    replacement_transport.backend =
+        SimpleFluid::LinearSolverBackend::Gmres;
+    replacement_transport.preconditioner =
+        SimpleFluid::LinearPreconditioner::Jacobi;
+    solver.set_linear_solver_options(replacement_transport);
+
+    EXPECT_EQ(
+        solver.linear_solver_options().backend,
+        SimpleFluid::LinearSolverBackend::Gmres);
+    EXPECT_EQ(
+        solver.linear_solver_options().preconditioner,
+        SimpleFluid::LinearPreconditioner::Jacobi);
+    EXPECT_EQ(
+        solver.pressure_linear_solver_options().preconditioner,
+        SimpleFluid::LinearPreconditioner::MueLu);
+
+    auto replacement_pressure =
+        solver.pressure_linear_solver_options();
+    replacement_pressure.preconditioner =
+        SimpleFluid::LinearPreconditioner::Jacobi;
+    replacement_pressure.reuse_preconditioner = false;
+    solver.set_pressure_linear_solver_options(replacement_pressure);
+
+    EXPECT_EQ(
+        solver.pressure_linear_solver_options().backend,
+        SimpleFluid::LinearSolverBackend::BiCGStab);
+    EXPECT_EQ(
+        solver.pressure_linear_solver_options().preconditioner,
+        SimpleFluid::LinearPreconditioner::Jacobi);
+    EXPECT_FALSE(
+        solver.pressure_linear_solver_options().reuse_preconditioner);
+}
+
+/**
  * @brief Verify that FluidSolver advances pressure and velocity over two
  *        time steps on a single-cell mesh with zero viscosity.
  */
