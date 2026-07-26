@@ -12,17 +12,16 @@ fi
 
 case_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$case_dir/../../.." && pwd)
-build_config=${SIMPLEFLUID_BUILD_CONFIG:-RelWithDebInfo}
-executable="$repo_dir/build/bin/$build_config/pitz_daily"
+. "$repo_dir/verification/environments.sh"
+export_build_env "$repo_dir"
 output_dir=${SIMPLEFLUID_PITZ_OUTPUT_DIR:-"$case_dir/profiles"}
 
-(
-    cd "$repo_dir"
-    cmake --build --preset "$build_config" -j "$np" --target pitz_daily
-)
+simplefluid_build_target pitz_daily "$np"
+executable="$(simplefluid_executable pitz_daily)"
 mkdir -p "$output_dir"
 rm -f "$output_dir"/simplefluid_cells_rank*.csv \
-      "$output_dir"/pitz_daily*.vtu
+      "$output_dir"/pitz_daily*.vtu \
+      "$output_dir"/pitz_daily*.pvtu
 
 cd "$output_dir"
 export SIMPLEFLUID_PITZ_OUTPUT_PREFIX="$output_dir/simplefluid_cells"

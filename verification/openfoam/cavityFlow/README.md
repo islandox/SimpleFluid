@@ -15,9 +15,7 @@ Generate matching SimpleFluid centerline CSV files with the test-only
 `VelocityProfileCsv` helper by running:
 
 ```sh
-SIMPLEFLUID_PROFILE_OUTPUT_DIR="$PWD/profiles" \
-  build/bin/Debug/testVerificationCases \
-  --gtest_filter=VerificationCasesTest.LidDrivenCavityRe1000
+verification/openfoam/cavityFlow/run_simplefluid.sh
 ```
 
 This writes:
@@ -34,9 +32,13 @@ may also need a larger pressure-solver budget through
 SIMPLEFLUID_CAVITY_MESH_CELLS=64 \
 SIMPLEFLUID_CAVITY_MAX_LINEAR_ITERATIONS=2000 \
 SIMPLEFLUID_PROFILE_OUTPUT_DIR="$PWD/profiles-64" \
-  build/bin/RelWithDebInfo/testVerificationCases \
-  --gtest_filter=VerificationCasesTest.LidDrivenCavityRe1000
+  verification/openfoam/cavityFlow/run_simplefluid.sh
 ```
+
+The launcher sources `verification/environments.sh` and builds the
+`GCC-RelWithDebInfo` preset by default. Set `SIMPLEFLUID_COMPILER=LLVM` to use
+the corresponding LLVM preset, `SIMPLEFLUID_BUILD_CONFIG=Debug` for a debug
+run, or `SIMPLEFLUID_BUILD_DIR` for a custom, already-configured build tree.
 
 The helper samples the nearest cell-center line and volume-averages symmetric
 ties, which handles even structured grids where the geometric centerline lies

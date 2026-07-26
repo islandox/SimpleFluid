@@ -4,9 +4,9 @@ set -eu
 case_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$case_dir/../../.." && pwd)
 invocation_dir=$(pwd -P)
-build_config=${SIMPLEFLUID_BUILD_CONFIG:-RelWithDebInfo}
+. "$repo_dir/verification/environments.sh"
+export_build_env "$repo_dir"
 build_jobs=${SIMPLEFLUID_BUILD_JOBS:-4}
-executable="$repo_dir/build/bin/$build_config/natural_convection_shiri"
 profile_dir=${SIMPLEFLUID_SHIRI_PROFILE_DIR:-"$case_dir/profiles/callgrind"}
 case "$profile_dir" in
     /*) ;;
@@ -32,11 +32,8 @@ if [ "$build_jobs" -lt 1 ]; then
     exit 2
 fi
 
-(
-    cd "$repo_dir"
-    cmake --build --preset "$build_config" -j "$build_jobs" \
-        --target natural_convection_shiri
-)
+simplefluid_build_target natural_convection_shiri "$build_jobs"
+executable="$(simplefluid_executable natural_convection_shiri)"
 
 mkdir -p "$profile_dir"
 rm -f "$profile_data" "$profile_report" \
