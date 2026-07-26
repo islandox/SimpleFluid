@@ -13,19 +13,16 @@ fi
 case_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$case_dir/../../.." && pwd)
 invocation_dir=$(pwd -P)
-build_config=${SIMPLEFLUID_BUILD_CONFIG:-RelWithDebInfo}
-executable="$repo_dir/build/bin/$build_config/natural_convection_shiri"
+. "$repo_dir/verification/environments.sh"
+export_build_env "$repo_dir"
 output_dir=${SIMPLEFLUID_SHIRI_OUTPUT_DIR:-"$case_dir/profiles"}
 case "$output_dir" in
     /*) ;;
     *) output_dir="$invocation_dir/$output_dir" ;;
 esac
 
-(
-    cd "$repo_dir"
-    cmake --build --preset "$build_config" -j "$np" \
-        --target natural_convection_shiri
-)
+simplefluid_build_target natural_convection_shiri "$np"
+executable="$(simplefluid_executable natural_convection_shiri)"
 mkdir -p "$output_dir"
 rm -f "$output_dir"/simplefluid_cells_rank*.csv \
       "$output_dir"/natural_convection_shiri*.vtu \
