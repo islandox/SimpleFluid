@@ -348,8 +348,11 @@ TEST(TurbulenceModelOptionsTest, DatabaseReadsWallDistanceEquationControls)
         SimpleFluid::real_t{2.5e-12});
     database.set("wall_distance_linear_solver_verbosity", 7);
     database.set(
+        "wall_distance_linear_solver_backend",
+        std::string{"cg"});
+    database.set(
         "wall_distance_linear_solver_preconditioner",
-        std::string{"MueLu"});
+        std::string{"jacobi"});
     database.set(
         "wall_distance_linear_solver_reuse_preconditioner", true);
 
@@ -367,8 +370,11 @@ TEST(TurbulenceModelOptionsTest, DatabaseReadsWallDistanceEquationControls)
     EXPECT_EQ(
         options.wall_distance_equation.linear_solver.verbosity, 7);
     EXPECT_EQ(
+        options.wall_distance_equation.linear_solver.backend,
+        SimpleFluid::LinearSolverBackend::Cg);
+    EXPECT_EQ(
         options.wall_distance_equation.linear_solver.preconditioner,
-        SimpleFluid::LinearPreconditioner::MueLu);
+        SimpleFluid::LinearPreconditioner::Jacobi);
     EXPECT_TRUE(
         options.wall_distance_equation.linear_solver
             .reuse_preconditioner);
@@ -417,6 +423,17 @@ TEST(TurbulenceModelOptionsTest, RejectsInvalidWallDistanceEquationControls)
     EXPECT_THROW(
         SimpleFluid::turbulence_model_options_from_database(
             invalid_preconditioner),
+        std::invalid_argument);
+
+    SimpleFluid::Database invalid_backend;
+    invalid_backend.set(
+        "turbulence_model", std::string{"SSTKOmega"});
+    invalid_backend.set(
+        "wall_distance_linear_solver_backend",
+        std::string{"direct"});
+    EXPECT_THROW(
+        SimpleFluid::turbulence_model_options_from_database(
+            invalid_backend),
         std::invalid_argument);
 }
 

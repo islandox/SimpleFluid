@@ -88,6 +88,23 @@ Three non-orthogonal treatments, selectable at runtime:
 The coupled Krylov solver uses Belos **block GMRES** with an Ifpack2/MueLu
 block-preconditioning strategy for robust convergence on challenging meshes.
 
+### Segregated Linear Solves
+
+Segregated momentum, temperature, turbulence-scalar, and pressure equations
+use RHS-norm-scaled convergence. Momentum, temperature, and turbulence
+scalars retain the preceding accepted field as the next initial guess.
+`LinearSolverOptions` selects `gmres`, `bicgstab`, or `cg` and the `none`,
+`jacobi`, `ilu0`, `ilut`, or `MueLu` preconditioner. CG must only be selected
+when both the matrix and preconditioner preserve a symmetric positive-definite
+system; ILU0 and ILUT are not generally CG-compatible. The general transport
+operators and the row-gauge-fixed pressure operator can be nonsymmetric.
+
+`FluidSolver::set_linear_solver_options()` changes subsequent momentum and
+transported-scalar solves. Pressure projection has an independent policy
+through `set_pressure_linear_solver_options()`, allowing its cached matrix and
+preconditioner to be reused without forcing the same choice on changing
+transport matrices.
+
 ### Rhie–Chow Stabilization
 
 Pressure-weighted face-flux interpolation prevents checkerboard pressure modes

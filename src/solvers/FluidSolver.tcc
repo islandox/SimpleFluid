@@ -310,6 +310,30 @@ auto FluidSolver<Pack>::last_pressure_velocity_residuals() const noexcept
 }
 
 /**
+ * @brief Return the independently configurable pressure solver policy.
+ */
+template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::pressure_linear_solver_options() const noexcept
+    -> const LinearSolverOptions&
+{
+    return d_problem.template object<
+        PressureProjectionEquation<Pack>>(
+            "pressure_projection").linear_solver_options();
+}
+
+/**
+ * @brief Replace the pressure solver policy without changing transport
+ *        equation choices.
+ */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::set_pressure_linear_solver_options(
+    LinearSolverOptions options)
+{
+    pressure_projection().set_linear_solver_options(
+        std::move(options));
+}
+
+/**
  * @brief Return the Problem-owned base momentum equation.
  *
  * @tparam Pack Tpetra type pack.

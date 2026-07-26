@@ -36,10 +36,15 @@
 #include <variant>
 #include <vector>
 
+#include <BelosBiCGStabSolMgr.hpp>
 #include <BelosLinearProblem.hpp>
+#include <BelosPseudoBlockCGSolMgr.hpp>
 #include <BelosPseudoBlockGmresSolMgr.hpp>
+#include <BelosSolverManager.hpp>
 #include <BelosTpetraAdapter.hpp>
 #include <BelosTypes.hpp>
+#include <Ifpack2_Factory.hpp>
+#include <Ifpack2_Preconditioner.hpp>
 #include <Kokkos_Core.hpp>
 #include <Teuchos_Array.hpp>
 #include <Teuchos_Comm.hpp>

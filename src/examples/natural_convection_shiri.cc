@@ -74,6 +74,32 @@ double positive_environment_real(const char* name, double fallback)
 }
 
 /**
+ * @brief Read a Belos backend name from an environment variable.
+ */
+SimpleFluid::LinearSolverBackend environment_linear_solver_backend(
+    const char* name,
+    SimpleFluid::LinearSolverBackend fallback)
+{
+    const char* text = std::getenv(name);
+    return text == nullptr
+        ? fallback
+        : SimpleFluid::parse_linear_solver_backend(text);
+}
+
+/**
+ * @brief Read a linear preconditioner name from an environment variable.
+ */
+SimpleFluid::LinearPreconditioner environment_linear_preconditioner(
+    const char* name,
+    SimpleFluid::LinearPreconditioner fallback)
+{
+    const char* text = std::getenv(name);
+    return text == nullptr
+        ? fallback
+        : SimpleFluid::parse_linear_preconditioner(text);
+}
+
+/**
  * @brief Generate uniformly spaced coordinates over an interval.
  *
  * @param lower Lower interval endpoint.
@@ -333,6 +359,12 @@ int main(int argc, char** argv)
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 500;
     linear_options.tolerance = 1.0e-9;
+    linear_options.backend = environment_linear_solver_backend(
+        "SIMPLEFLUID_SHIRI_LINEAR_SOLVER_BACKEND",
+        SimpleFluid::LinearSolverBackend::BiCGStab);
+    linear_options.preconditioner = environment_linear_preconditioner(
+        "SIMPLEFLUID_SHIRI_LINEAR_PRECONDITIONER",
+        SimpleFluid::LinearPreconditioner::Jacobi);
 
     SimpleFluid::BoussinesqModelOptions model_options;
     model_options.reference_density = reference_density;
@@ -344,6 +376,21 @@ int main(int argc, char** argv)
 
     SimpleFluid::BoussinesqSolver<Pack> solver(
         mesh, bcs, time_options, linear_options, model_options);
+    auto pressure_linear_options =
+        solver.pressure_linear_solver_options();
+    pressure_linear_options.backend =
+        environment_linear_solver_backend(
+            "SIMPLEFLUID_SHIRI_PRESSURE_LINEAR_SOLVER_BACKEND",
+            SimpleFluid::LinearSolverBackend::BiCGStab);
+    pressure_linear_options.preconditioner =
+        environment_linear_preconditioner(
+            "SIMPLEFLUID_SHIRI_PRESSURE_LINEAR_PRECONDITIONER",
+            SimpleFluid::LinearPreconditioner::MueLu);
+    pressure_linear_options.reuse_preconditioner =
+        pressure_linear_options.preconditioner
+            != SimpleFluid::LinearPreconditioner::None;
+    solver.set_pressure_linear_solver_options(
+        pressure_linear_options);
     solver.initialize_heated_box(290.0, 290.0);
 
     SimpleFluid::TurbulenceModelOptions turbulence_options;
@@ -366,11 +413,24 @@ int main(int argc, char** argv)
     auto& turbulence =
         solver.configure_turbulence(turbulence_options);
 
+    const auto comm = Tpetra::getDefaultComm();
+    const int rank = comm->getRank();
+    if (rank == 0)
+    {
+        std::cout
+            << "linear_solver: transport="
+            << SimpleFluid::to_string(linear_options.backend) << '/'
+            << SimpleFluid::to_string(linear_options.preconditioner)
+            << ", pressure="
+            << SimpleFluid::to_string(pressure_linear_options.backend)
+            << '/'
+            << SimpleFluid::to_string(
+                   pressure_linear_options.preconditioner)
+            << '\n';
+    }
     SimpleFluid::ProgressStream progress(std::cout);
     solver.run(steps, progress);
 
-    const auto comm = Tpetra::getDefaultComm();
-    const int rank = comm->getRank();
     SimpleFluid::SolutionOutputOptions output_options;
     output_options.include_turbulence_fields = true;
     solver.write_parallel_solution_vtu(

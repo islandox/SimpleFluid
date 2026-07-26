@@ -45,15 +45,8 @@ void validate_wall_distance_equation_options(
             "Poisson wall-distance linear solver requires positive "
             "iterations and tolerance.");
     }
-    switch (options.linear_solver.preconditioner)
-    {
-        case LinearPreconditioner::None:
-        case LinearPreconditioner::MueLu:
-            break;
-        default:
-            throw std::invalid_argument(
-                "Poisson wall-distance linear preconditioner is invalid.");
-    }
+    static_cast<void>(to_string(options.linear_solver.backend));
+    static_cast<void>(to_string(options.linear_solver.preconditioner));
 }
 
 template class PoissonWallDistanceEquation<DefaultTpetraTypes>;

@@ -52,6 +52,22 @@ SIMPLEFLUID_SHIRI_DT=0.002 \
   verification/openfoam/naturalConvection/run_simplefluid.sh 6
 ```
 
+The Shiri executable defaults transported equations to `bicgstab/jacobi` and
+pressure projection to `bicgstab/MueLu`. Override either policy independently:
+
+```sh
+SIMPLEFLUID_SHIRI_LINEAR_SOLVER_BACKEND=gmres \
+SIMPLEFLUID_SHIRI_LINEAR_PRECONDITIONER=jacobi \
+SIMPLEFLUID_SHIRI_PRESSURE_LINEAR_SOLVER_BACKEND=bicgstab \
+SIMPLEFLUID_SHIRI_PRESSURE_LINEAR_PRECONDITIONER=MueLu \
+  verification/openfoam/naturalConvection/run_simplefluid.sh 1
+```
+
+Supported backend names are `gmres`, `bicgstab`, and `cg`; supported
+preconditioners are `none`, `jacobi`, `ilu0`, `ilut`, and `MueLu`. Do not use
+CG for this case: the pressure gauge is imposed by replacing one matrix row,
+so the resulting operator is not symmetric.
+
 The default mesh, step count, and step size are required for the supplied
 comparison. The comparator requires the latest OpenFOAM profile at `t=0.4 s`,
 the fixed OpenFOAM sample radius `r=0.0800000443 m`, and 80,000 unique

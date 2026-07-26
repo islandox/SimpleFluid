@@ -97,6 +97,34 @@ public:
         return d_last_step_statistics;
     }
 
+    /**
+     * @brief Return the options shared by segregated momentum and transported
+     *        scalar equations.
+     */
+    const LinearSolverOptions& linear_solver_options() const noexcept
+    {
+        return d_problem.linear_options();
+    }
+
+    /**
+     * @brief Replace options for subsequent segregated momentum and scalar
+     *        solves.
+     *
+     * Pressure projection keeps a separate policy; use
+     * set_pressure_linear_solver_options() to change it.
+     */
+    void set_linear_solver_options(LinearSolverOptions options)
+    {
+        d_problem.linear_options() = std::move(options);
+    }
+
+    /** @brief Return the pressure-projection linear-solver policy. */
+    const LinearSolverOptions&
+    pressure_linear_solver_options() const noexcept;
+
+    /** @brief Replace the pressure-projection policy for subsequent solves. */
+    void set_pressure_linear_solver_options(LinearSolverOptions options);
+
     void write_vtu(const std::string& filename) const
     {
         d_mesh->export_vtu(filename);
