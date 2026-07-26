@@ -433,6 +433,68 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
     EXPECT_NEAR(temperature.value(0), 2.3, 1.0e-12);
 }
 
+/**
+ * @brief An accepted temperature that already solves the new transport
+ *        system is passed to Belos as the initial guess.
+ */
+TEST(PhysicalEquationsTest,
+     TemperatureSemiImplicitWarmStartsFromAcceptedField)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType old_temperature(mesh, 2.0, "old_temperature");
+    FieldType temperature(mesh, 9.0, "temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.max_iterations = 1;
+    options.tolerance = 1.0e-12;
+
+    const auto statistics = equation.advance_semi_implicit(
+        old_temperature, zero_fluxes, 0.1, 0.0, temperature, options);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_EQ(statistics.iterations, 0);
+    EXPECT_DOUBLE_EQ(temperature.value(0), 2.0);
+}
+
+/**
+ * @brief Physical temperature transport also seeds its candidate from the
+ *        accepted field rather than from caller output storage.
+ */
+TEST(PhysicalEquationsTest,
+     TemperaturePhysicalWarmStartsFromAcceptedField)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType old_temperature(mesh, 275.0, "old_temperature");
+    FieldType temperature(mesh, 9.0, "temperature");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    SimpleFluid::MaterialPropertyFields<Pack> material(
+        mesh, model_options, time_options);
+    auto zero_power =
+        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    {
+        return 0.0;
+    };
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 1;
+    linear_options.tolerance = 1.0e-12;
+
+    const auto statistics = equation.advance_physical(
+        old_temperature, zero_fluxes, 0.1, material, temperature,
+        zero_power,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+        linear_options);
+
+    EXPECT_TRUE(statistics.converged);
+    EXPECT_EQ(statistics.iterations, 0);
+    EXPECT_DOUBLE_EQ(temperature.value(0), 275.0);
+}
+
 /** @brief Verifies that a rejected semi-implicit solve preserves aliased accepted state. */
 TEST(PhysicalEquationsTest,
      TemperatureSemiImplicitRejectionPreservesAliasedAcceptedField)
