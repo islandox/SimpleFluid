@@ -86,6 +86,8 @@ std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept
         return "resolvedLowReSST";
     case TurbulenceWallTreatmentType::StandardHighReKEpsilon:
         return "standardHighReKEpsilon";
+    case TurbulenceWallTreatmentType::ResolvedLowReKEpsilon:
+        return "resolvedLowReKEpsilon";
     }
     return "unknown";
 }
@@ -103,6 +105,8 @@ TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
         return TurbulenceWallTreatmentType::None;
     if (value == "resolvedLowReSST" || value == "resolvedSST")
         return TurbulenceWallTreatmentType::ResolvedLowReSST;
+    if (value == "resolvedLowReKEpsilon" || value == "resolvedKEpsilon")
+        return TurbulenceWallTreatmentType::ResolvedLowReKEpsilon;
     if (value == "standardHighReKEpsilon" || value == "OpenFOAMKEpsilon")
         return TurbulenceWallTreatmentType::StandardHighReKEpsilon;
     throw std::invalid_argument(
@@ -261,6 +265,32 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
                 "standardHighReKEpsilon wall treatment requires the standard k-epsilon model.");
         }
         validate_turbulence_wall_treatment_options(options.wall_options);
+        break;
+    case TurbulenceWallTreatmentType::ResolvedLowReKEpsilon:
+        if (options.model != TurbulenceModelType::StandardKEpsilon &&
+            options.model != TurbulenceModelType::RealizableKEpsilon)
+        {
+            throw std::invalid_argument(
+                "resolvedLowReKEpsilon wall treatment requires the standard or "
+                "realizable k-epsilon model.");
+        }
+        validate_turbulence_wall_treatment_options(options.wall_options);
+        if (options.wall_options.thermal_wall_law !=
+                TurbulenceThermalWallLaw::TurbulentPrandtl ||
+            std::any_of(options.wall_options.roughness_models.begin(),
+                        options.wall_options.roughness_models.end(),
+                        [](const auto model)
+                        {
+                            return model != TurbulenceWallRoughnessModel::Smooth;
+                        }) ||
+            std::any_of(options.wall_options.roughness_heights.begin(),
+                        options.wall_options.roughness_heights.end(),
+                        [](const auto height) { return height != 0.0; }))
+        {
+            throw std::invalid_argument(
+                "resolvedLowReKEpsilon requires smooth walls and molecular wall "
+                "heat transport.");
+        }
         break;
     }
 }

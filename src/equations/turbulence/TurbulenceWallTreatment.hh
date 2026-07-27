@@ -111,6 +111,19 @@ struct ResolvedLowReSSTWallPolicy
     static constexpr std::string_view name = "resolvedLowReSST";
 };
 
+/**
+ * @brief Tag selecting resolved viscous-sublayer k-epsilon boundary data.
+ *
+ * This policy supplies @f$k=0@f$ at the wall, the adjacent-cell constraint
+ * @f$\epsilon=2\nu k/y^2@f$, zero wall-adjacent shear production, and
+ * molecular-only wall transport. It is intended for near-wall meshes with
+ * @f$y^+\approx 1@f$.
+ */
+struct ResolvedLowReKEpsilonWallPolicy
+{
+    static constexpr std::string_view name = "resolvedLowReKEpsilon";
+};
+
 /** @brief Tag selecting the OpenFOAM.com v2606 stepwise high-Re k-epsilon
  * wall-function set. */
 struct StandardHighReKEpsilonWallPolicy
@@ -145,7 +158,7 @@ template <class Scalar> struct TurbulenceWallFaceEvaluation
 };
 
 /**
- * @brief Policy-based evaluator for resolved SST and standard k-epsilon walls.
+ * @brief Policy-based evaluator for resolved SST and k-epsilon walls.
  *
  * The object owns immutable geometry/configuration only. `evaluate()` creates
  * an independent, copyable staging object so a caller can preserve accepted
@@ -239,11 +252,13 @@ public:
      * @brief Evaluate all configured local wall faces without mutating prior
      * data.
      *
-     * SST uses k=0 and omega=60 nu/(beta1 y^2) at the face. Standard k-epsilon
-     * uses homogeneous-Neumann k/epsilon face data, v2606 stepwise nut, and
-     * equal-face-count epsilon/G constraints in adjacent owned cells. The
-     * epsilon low-Re correction is optional and disabled by default, as in
-     * OpenFOAM.com v2606.
+     * SST uses k=0 and omega=60 nu/(beta1 y^2) at the face. Resolved k-epsilon
+     * uses k=0, homogeneous-Neumann epsilon, molecular wall transport, and the
+     * viscous-sublayer epsilon/G constraints in adjacent owned cells. High-Re
+     * standard k-epsilon uses homogeneous-Neumann k/epsilon face data, v2606
+     * stepwise nut, and equal-face-count epsilon/G constraints. Its optional
+     * epsilon low-Re correction is disabled by default, as in OpenFOAM.com
+     * v2606.
      */
     Evaluation evaluate(const field_type& turbulent_kinetic_energy,
                         const velocity_field_type& velocity,
@@ -280,6 +295,10 @@ private:
 
 template <TpetraTypePack Pack = DefaultTpetraTypes>
 using ResolvedLowReSSTWallTreatment = TurbulenceWallTreatment<Pack, ResolvedLowReSSTWallPolicy>;
+
+template <TpetraTypePack Pack = DefaultTpetraTypes>
+using ResolvedLowReKEpsilonWallTreatment =
+    TurbulenceWallTreatment<Pack, ResolvedLowReKEpsilonWallPolicy>;
 
 template <TpetraTypePack Pack = DefaultTpetraTypes>
 using StandardHighReKEpsilonWallTreatment =

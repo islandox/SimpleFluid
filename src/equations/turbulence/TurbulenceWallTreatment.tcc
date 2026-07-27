@@ -28,8 +28,20 @@ namespace turbulence_wall_detail
 {
 
 template <class Policy>
-inline constexpr bool supported_policy_v = std::is_same_v<Policy, ResolvedLowReSSTWallPolicy> ||
-                                           std::is_same_v<Policy, StandardHighReKEpsilonWallPolicy>;
+inline constexpr bool supported_policy_v =
+    std::is_same_v<Policy, ResolvedLowReSSTWallPolicy> ||
+    std::is_same_v<Policy, ResolvedLowReKEpsilonWallPolicy> ||
+    std::is_same_v<Policy, StandardHighReKEpsilonWallPolicy>;
+
+template <class Policy>
+inline constexpr bool resolved_wall_policy_v =
+    std::is_same_v<Policy, ResolvedLowReSSTWallPolicy> ||
+    std::is_same_v<Policy, ResolvedLowReKEpsilonWallPolicy>;
+
+template <class Policy>
+inline constexpr bool epsilon_wall_policy_v =
+    std::is_same_v<Policy, ResolvedLowReKEpsilonWallPolicy> ||
+    std::is_same_v<Policy, StandardHighReKEpsilonWallPolicy>;
 
 /**
  * @brief Test whether every component of a vector is finite.
@@ -87,6 +99,23 @@ template <class Scalar> struct RoughnessInputs
 };
 
 /**
+ * @brief Compute a shear-based resolved-wall y+ using molecular viscosity.
+ */
+template <class Scalar, class Vec>
+Scalar resolved_wall_y_plus(const FaceInputs<Scalar, Vec>& input)
+{
+    const auto velocity_difference = input.owner_velocity - input.wall_velocity;
+    const auto normal_velocity =
+        input.outward_normal * velocity_difference.dot(input.outward_normal);
+    const auto tangential_velocity = velocity_difference - normal_velocity;
+    const auto tangential_gradient_magnitude =
+        tangential_velocity.norm() / input.wall_distance;
+    const auto friction_velocity =
+        std::sqrt(input.molecular_nu * tangential_gradient_magnitude);
+    return input.wall_distance * friction_velocity / input.molecular_nu;
+}
+
+/**
  * @brief Evaluate integration-to-the-wall SST boundary data.
  * @tparam Scalar Floating-point scalar type.
  * @tparam Vec Three-component vector type.
@@ -108,14 +137,31 @@ evaluate_resolved_sst_face(const FaceInputs<Scalar, Vec>& input,
                              static_cast<real_t>(input.wall_distance))};
     result.wall_distance = input.wall_distance;
     result.turbulent_kinematic_viscosity = Scalar{};
+    result.y_plus = resolved_wall_y_plus(input);
+    return result;
+}
 
-    const auto velocity_difference = input.owner_velocity - input.wall_velocity;
-    const auto normal_velocity =
-        input.outward_normal * velocity_difference.dot(input.outward_normal);
-    const auto tangential_velocity = velocity_difference - normal_velocity;
-    const auto tangential_gradient_magnitude = tangential_velocity.norm() / input.wall_distance;
-    const auto friction_velocity = std::sqrt(input.molecular_nu * tangential_gradient_magnitude);
-    result.y_plus = input.wall_distance * friction_velocity / input.molecular_nu;
+/**
+ * @brief Evaluate resolved viscous-sublayer k-epsilon boundary data.
+ * @tparam Scalar Floating-point scalar type.
+ * @tparam Vec Three-component vector type.
+ * @param input Validated physical face inputs.
+ * @return Staged resolved k-epsilon wall values and cell constraints.
+ */
+template <class Scalar, class Vec>
+TurbulenceWallFaceEvaluation<Scalar>
+evaluate_resolved_k_epsilon_face(const FaceInputs<Scalar, Vec>& input)
+{
+    TurbulenceWallFaceEvaluation<Scalar> result;
+    result.turbulent_kinetic_energy = {BoundaryConditionType::Dirichlet, 0.0};
+    result.secondary = {BoundaryConditionType::Neumann, 0.0};
+    result.wall_distance = input.wall_distance;
+    result.y_plus = resolved_wall_y_plus(input);
+    result.turbulent_kinematic_viscosity = Scalar{};
+    result.secondary_constraint =
+        Scalar{2} * input.k * input.molecular_nu /
+        (input.wall_distance * input.wall_distance);
+    result.production_override = Scalar{};
     return result;
 }
 
@@ -530,10 +576,10 @@ void TurbulenceWallTreatment<Pack, Policy>::initialize(
     turbulence_detail::require_uniform_real(*d_mesh, d_options.sst_omega_wall_coefficient,
                                             "Turbulence wall omega coefficient");
 
-    if constexpr (std::is_same_v<Policy, ResolvedLowReSSTWallPolicy>)
+    if constexpr (turbulence_wall_detail::resolved_wall_policy_v<Policy>)
     {
         turbulence_detail::collective_local_validation(
-            *d_mesh, "Resolved SST wall-law compatibility",
+            *d_mesh, "Resolved wall-treatment compatibility",
             [&]
             {
                 const auto has_unresolved_roughness =
@@ -550,13 +596,15 @@ void TurbulenceWallTreatment<Pack, Policy>::initialize(
                 if (has_unresolved_roughness)
                 {
                     throw std::invalid_argument(
-                        "Resolved low-Re SST does not accept an unresolved rough-wall law.");
+                        "Resolved low-Re wall treatment does not accept an "
+                        "unresolved rough-wall law.");
                 }
                 if (d_options.thermal_wall_law !=
                     TurbulenceThermalWallLaw::TurbulentPrandtl)
                 {
                     throw std::invalid_argument(
-                        "Resolved low-Re SST requires molecular wall heat transport.");
+                        "Resolved low-Re wall treatment requires molecular wall "
+                        "heat transport.");
                 }
             });
     }
@@ -811,6 +859,12 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
                         face_result =
                             turbulence_wall_detail::evaluate_resolved_sst_face(inputs, d_options);
                     }
+                    else if constexpr (
+                        std::is_same_v<Policy, ResolvedLowReKEpsilonWallPolicy>)
+                    {
+                        face_result =
+                            turbulence_wall_detail::evaluate_resolved_k_epsilon_face(inputs);
+                    }
                     else
                     {
                         scalar_type accepted_turbulent_nu{};
@@ -958,7 +1012,7 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
                 }
             }
 
-            if constexpr (std::is_same_v<Policy, StandardHighReKEpsilonWallPolicy>)
+            if constexpr (turbulence_wall_detail::epsilon_wall_policy_v<Policy>)
             {
                 for (size_t owned = 0; owned < face_counts.size(); ++owned)
                 {

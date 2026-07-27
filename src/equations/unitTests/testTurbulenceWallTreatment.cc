@@ -124,6 +124,58 @@ TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesMenterFaceValueAndMolecularWall
                 1.0e-6, 1.0e-18);
 }
 
+/**
+ * @brief Verifies viscous-sublayer epsilon data and molecular wall transport.
+ */
+TEST(TurbulenceWallTreatmentTest,
+     ResolvedKEpsilonUsesViscousSublayerConstraintAndMolecularWallTransport)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto boundaries = wall_boundaries();
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundaries);
+    constexpr double nu = 1.0e-3;
+    constexpr double k_value = 0.2;
+    auto material = make_material(mesh, nu);
+    Field k(mesh, k_value, "k");
+    Velocity velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {0.0, 2.0, 0.0});
+    velocity.sync_ghosts();
+
+    SimpleFluid::TurbulenceWallTreatmentOptions options;
+    options.boundary_names = {"xmin"};
+    SimpleFluid::ResolvedLowReKEpsilonWallTreatment<Pack> treatment(
+        mesh, options, boundaries.velocity);
+    const auto evaluation =
+        treatment.evaluate(k, velocity, cache, material, 1.0, 0.9);
+
+    const auto id = boundary_id(*mesh, "xmin");
+    const auto& face = evaluation.face(id, 0);
+    constexpr double wall_distance = 0.5;
+    const auto expected_epsilon =
+        2.0 * nu * k_value / (wall_distance * wall_distance);
+    const auto expected_y_plus =
+        wall_distance * std::sqrt(nu * (2.0 / wall_distance)) / nu;
+    EXPECT_EQ(face.turbulent_kinetic_energy.type, Type::Dirichlet);
+    EXPECT_DOUBLE_EQ(face.turbulent_kinetic_energy.value, 0.0);
+    EXPECT_EQ(face.secondary.type, Type::Neumann);
+    EXPECT_DOUBLE_EQ(face.secondary.value, 0.0);
+    EXPECT_DOUBLE_EQ(face.turbulent_kinematic_viscosity, 0.0);
+    EXPECT_NEAR(face.y_plus, expected_y_plus, 1.0e-13);
+    ASSERT_TRUE(evaluation.secondary_constraint(0).has_value());
+    EXPECT_NEAR(*evaluation.secondary_constraint(0), expected_epsilon,
+                1.0e-15);
+    ASSERT_TRUE(evaluation.production_override(0).has_value());
+    EXPECT_DOUBLE_EQ(*evaluation.production_override(0), 0.0);
+    EXPECT_NEAR(face.effective_dynamic_viscosity, nu, 1.0e-18);
+    EXPECT_NEAR(face.effective_thermal_conductivity, 0.6, 1.0e-14);
+    EXPECT_NEAR(
+        evaluation.boundary_scalar_diffusivity().value.at(id).at(0), nu,
+        1.0e-18);
+}
+
 /** @brief Verifies resolved SST treatment with skewed STK wall geometry. */
 TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesSkewedSTKWallGeometry)
 {
@@ -690,7 +742,7 @@ TEST(TurbulenceWallTreatmentTest,
     EXPECT_GE(face.turbulent_thermal_diffusivity, 0.0);
 }
 
-/** @brief Verifies roughness alignment and resolved-SST compatibility checks. */
+/** @brief Verifies roughness alignment and resolved-wall compatibility checks. */
 TEST(TurbulenceWallTreatmentTest, RejectsInvalidRoughAndResolvedThermalWallOptions)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
@@ -713,12 +765,18 @@ TEST(TurbulenceWallTreatmentTest, RejectsInvalidRoughAndResolvedThermalWallOptio
     EXPECT_THROW((SimpleFluid::ResolvedLowReSSTWallTreatment<Pack>(
                      mesh, rough, boundaries.velocity)),
                  std::invalid_argument);
+    EXPECT_THROW((SimpleFluid::ResolvedLowReKEpsilonWallTreatment<Pack>(
+                     mesh, rough, boundaries.velocity)),
+                 std::invalid_argument);
 
     SimpleFluid::TurbulenceWallTreatmentOptions thermal;
     thermal.boundary_names = {"xmin"};
     thermal.thermal_wall_law =
         SimpleFluid::TurbulenceThermalWallLaw::Jayatilleke;
     EXPECT_THROW((SimpleFluid::ResolvedLowReSSTWallTreatment<Pack>(
+                     mesh, thermal, boundaries.velocity)),
+                 std::invalid_argument);
+    EXPECT_THROW((SimpleFluid::ResolvedLowReKEpsilonWallTreatment<Pack>(
                      mesh, thermal, boundaries.velocity)),
                  std::invalid_argument);
 
