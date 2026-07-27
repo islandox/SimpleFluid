@@ -6,9 +6,9 @@ set(SIMPLEFLUID_PUBLIC_INCLUDE_DIRS
 
 set(SIMPLEFLUID_EXTERNAL_LIBRARIES
     Trilinos::all_selected_libs
-    MPI::MPI_CXX
     Zoltan2Core::all_libs
     ${Trilinos_TPL_LIBRARIES}
+    MPI::MPI_CXX
 )
 
 function(simplefluid_configure_library target_name)
