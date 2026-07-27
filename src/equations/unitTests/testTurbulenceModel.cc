@@ -1140,6 +1140,77 @@ TEST(TurbulenceModelTest, HighReWallTreatmentConstrainsEpsilonAndPublishesFacePr
 }
 
 /**
+ * @brief Verifies resolved standard/realizable k-epsilon wall coupling.
+ */
+TEST(TurbulenceModelTest,
+     ResolvedKEpsilonWallTreatmentConstrainsEpsilonForSupportedClosures)
+{
+    for (const auto model_type :
+         {ModelType::StandardKEpsilon, ModelType::RealizableKEpsilon})
+    {
+        SCOPED_TRACE(std::string(SimpleFluid::to_string(model_type)));
+        auto mesh = make_single_cell_mesh();
+        auto material = make_material(mesh);
+        SimpleFluid::BoundaryConditionSet boundary_conditions;
+        boundary_conditions.velocity["xmin"] = {
+            SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+        auto options = make_model_options(model_type);
+        options.wall_treatment =
+            SimpleFluid::TurbulenceWallTreatmentType::
+                ResolvedLowReKEpsilon;
+        options.wall_options.boundary_names = {"xmin"};
+        Model model(mesh, boundary_conditions);
+        model.configure(options, material, reference_density);
+
+        const auto* wall_mu =
+            model.effective_dynamic_viscosity_boundary_cache();
+        const auto* wall_lambda =
+            model.effective_thermal_conductivity_boundary_cache();
+        ASSERT_NE(wall_mu, nullptr);
+        ASSERT_NE(wall_lambda, nullptr);
+        EXPECT_NEAR(wall_mu->value.begin()->second.at(0),
+                    molecular_viscosity, 1.0e-15);
+        EXPECT_NEAR(wall_lambda->value.begin()->second.at(0),
+                    molecular_conductivity, 1.0e-15);
+
+        VectorFieldType velocity(mesh, "velocity");
+        velocity.set_owned_value(0, {0.0, 2.0e-6, 0.0});
+        velocity.sync_ghosts();
+        const auto velocity_cache =
+            SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+                mesh, boundary_conditions);
+        SimpleFluid::FaceField<Pack> zero_fluxes(
+            mesh, 0.0, "projected_face_fluxes");
+        constexpr double wall_distance = 0.5;
+        const auto molecular_nu =
+            molecular_viscosity / reference_density;
+        const auto expected_epsilon =
+            2.0 * molecular_nu *
+            options.initial_turbulent_kinetic_energy /
+            (wall_distance * wall_distance);
+        const auto summary = model.advance(
+            velocity, zero_fluxes, velocity_cache, 1.0e-6, material,
+            reference_density,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+
+        ASSERT_TRUE(summary.converged);
+        ASSERT_NE(model.dissipation_rate(), nullptr);
+        EXPECT_NEAR(model.dissipation_rate()->value(0), expected_epsilon,
+                    1.0e-14);
+        EXPECT_GT(model.turbulent_kinetic_energy().value(0), 0.0);
+        ASSERT_NE(model.wall_y_plus(), nullptr);
+        EXPECT_GT(model.wall_y_plus()->value(0), 0.0);
+        EXPECT_NEAR(model.effective_dynamic_viscosity_boundary_cache()
+                        ->value.begin()->second.at(0),
+                    molecular_viscosity, 1.0e-15);
+        EXPECT_NEAR(model.effective_thermal_conductivity_boundary_cache()
+                        ->value.begin()->second.at(0),
+                    molecular_conductivity, 1.0e-15);
+    }
+}
+
+/**
  * @brief A late effective-property failure preserves accepted wall publication.
  */
 TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailure)
@@ -1295,8 +1366,8 @@ TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailu
     }
 }
 
-/** @brief Verifies propagation of high-Re wall C-mu into the standard k-epsilon closure. */
-TEST(TurbulenceModelTest, HighReWallCmuAlsoConfiguresItsStandardKEpsilonClosure)
+/** @brief Verifies propagation of wall C-mu into the standard k-epsilon closure. */
+TEST(TurbulenceModelTest, KEpsilonWallCmuAlsoConfiguresItsStandardClosure)
 {
     auto mesh = make_single_cell_mesh();
     auto material = make_material(mesh);
@@ -1304,22 +1375,27 @@ TEST(TurbulenceModelTest, HighReWallCmuAlsoConfiguresItsStandardKEpsilonClosure)
     boundary_conditions.velocity["xmin"] = {
         SimpleFluid::BoundaryConditionType::NoSlip, {}};
 
-    auto options = make_model_options(ModelType::StandardKEpsilon);
-    options.wall_treatment =
-        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
-    options.wall_options.boundary_names = {"xmin"};
-    options.wall_options.c_mu = 0.08;
+    for (const auto treatment :
+         {SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon,
+          SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReKEpsilon})
+    {
+        SCOPED_TRACE(std::string(SimpleFluid::to_string(treatment)));
+        auto options = make_model_options(ModelType::StandardKEpsilon);
+        options.wall_treatment = treatment;
+        options.wall_options.boundary_names = {"xmin"};
+        options.wall_options.c_mu = 0.08;
 
-    Model model(mesh, boundary_conditions);
-    model.configure(options, material, reference_density);
+        Model model(mesh, boundary_conditions);
+        model.configure(options, material, reference_density);
 
-    const auto expected_nu_t =
-        options.wall_options.c_mu *
-        options.initial_turbulent_kinetic_energy *
-        options.initial_turbulent_kinetic_energy /
-        options.initial_dissipation_rate;
-    EXPECT_DOUBLE_EQ(model.turbulent_kinematic_viscosity().value(0),
-                     expected_nu_t);
+        const auto expected_nu_t =
+            options.wall_options.c_mu *
+            options.initial_turbulent_kinetic_energy *
+            options.initial_turbulent_kinetic_energy /
+            options.initial_dissipation_rate;
+        EXPECT_DOUBLE_EQ(model.turbulent_kinematic_viscosity().value(0),
+                         expected_nu_t);
+    }
 }
 
 /** @brief Verifies molecular wall transport under resolved SST treatment. */

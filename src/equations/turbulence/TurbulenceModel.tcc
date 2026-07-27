@@ -37,12 +37,17 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
     using closure_type =
         std::variant<StandardKEpsilonEquation, RNGKEpsilonEquation, RealizableKEpsilonEquation,
                      StandardKOmegaEquation, BSLKOmegaEquation, SSTKOmegaEquation>;
-    using resolved_wall_type = ResolvedLowReSSTWallTreatment<Pack>;
+    using resolved_sst_wall_type = ResolvedLowReSSTWallTreatment<Pack>;
+    using resolved_k_epsilon_wall_type =
+        ResolvedLowReKEpsilonWallTreatment<Pack>;
     using high_re_wall_type = StandardHighReKEpsilonWallTreatment<Pack>;
     using wall_treatment_type =
-        std::variant<std::monostate, resolved_wall_type, high_re_wall_type>;
+        std::variant<std::monostate, resolved_sst_wall_type,
+                     resolved_k_epsilon_wall_type, high_re_wall_type>;
     using wall_evaluation_type =
-        std::variant<std::monostate, typename resolved_wall_type::Evaluation,
+        std::variant<std::monostate,
+                     typename resolved_sst_wall_type::Evaluation,
+                     typename resolved_k_epsilon_wall_type::Evaluation,
                      typename high_re_wall_type::Evaluation>;
     struct wall_publication_type
     {
@@ -176,7 +181,9 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
         {
             auto coefficients = StandardKEpsilonEquation::Coefficients{};
             if (options.wall_treatment ==
-                TurbulenceWallTreatmentType::StandardHighReKEpsilon)
+                    TurbulenceWallTreatmentType::StandardHighReKEpsilon ||
+                options.wall_treatment ==
+                    TurbulenceWallTreatmentType::ResolvedLowReKEpsilon)
             {
                 coefficients.c_mu = options.wall_options.c_mu;
             }
@@ -216,11 +223,14 @@ template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
         case TurbulenceWallTreatmentType::None:
             return std::monostate{};
         case TurbulenceWallTreatmentType::ResolvedLowReSST:
-            return resolved_wall_type(mesh, options.wall_options,
-                                      velocity_boundary_conditions);
+            return resolved_sst_wall_type(
+                mesh, options.wall_options, velocity_boundary_conditions);
         case TurbulenceWallTreatmentType::StandardHighReKEpsilon:
             return high_re_wall_type(mesh, options.wall_options,
                                      velocity_boundary_conditions);
+        case TurbulenceWallTreatmentType::ResolvedLowReKEpsilon:
+            return resolved_k_epsilon_wall_type(
+                mesh, options.wall_options, velocity_boundary_conditions);
         }
         throw std::logic_error("Unknown turbulence wall-treatment type.");
     }
@@ -1811,7 +1821,12 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
                             molecular_nu};
                         nu_t = closure.turbulent_kinematic_viscosity(local, invariants);
                         const auto diffusion = closure.diffusivities(local, invariants);
-                        const auto production = nu_t * strain_magnitude * strain_magnitude;
+                        const auto production =
+                            State::wall_production_override(
+                                wall_evaluation, cell_lid)
+                                .value_or(
+                                    nu_t * strain_magnitude *
+                                    strain_magnitude);
                         const auto epsilon_denominator = k + std::sqrt(molecular_nu * secondary);
                         const auto& coefficients = closure.coefficients();
                         k_diffusivity = diffusion.k;
@@ -2127,7 +2142,9 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         };
         k_wall_overrides.allow_zero_dirichlet =
             d_options.wall_treatment ==
-            TurbulenceWallTreatmentType::ResolvedLowReSST;
+                TurbulenceWallTreatmentType::ResolvedLowReSST ||
+            d_options.wall_treatment ==
+                TurbulenceWallTreatmentType::ResolvedLowReKEpsilon;
         k_wall_overrides.boundary_diffusivity =
             State::boundary_scalar_diffusivity(
                 current_wall_evaluation);
