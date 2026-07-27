@@ -98,9 +98,10 @@ mistaken for foundation or Phase 9 completion.
 - [x] Preserve a laminar selection that allocates no turbulence state.
 - [x] Couple eddy viscosity to momentum and gradient-diffusion turbulent
       transport to temperature.
-- [x] Add resolved low-Re SST and standard high-Re k-epsilon wall treatments.
+- [x] Add resolved low-Re SST, resolved standard/realizable k-epsilon, and
+      standard high-Re k-epsilon wall treatments.
 - [x] Add smooth/sand-grain high-Re momentum wall laws, constant-Prandtl and
-      Jayatilleke thermal wall laws, and resolved-SST compatibility checks.
+      Jayatilleke thermal wall laws, and resolved-wall compatibility checks.
 - [x] Add distributed Poisson wall distance with configurable non-orthogonal
       and linear-solver controls; BSL/SST automatically include every no-slip
       wall.

@@ -84,6 +84,8 @@ TEST(TurbulenceModelOptionsTest, ParsesAndFormatsWallTreatmentNames)
     const std::pair<const char*, TurbulenceWallTreatmentType> treatments[] = {
         {"none", TurbulenceWallTreatmentType::None},
         {"resolvedLowReSST", TurbulenceWallTreatmentType::ResolvedLowReSST},
+        {"resolvedLowReKEpsilon",
+         TurbulenceWallTreatmentType::ResolvedLowReKEpsilon},
         {"standardHighReKEpsilon",
          TurbulenceWallTreatmentType::StandardHighReKEpsilon}};
     for (const auto& [name, treatment] : treatments)
@@ -93,6 +95,9 @@ TEST(TurbulenceModelOptionsTest, ParsesAndFormatsWallTreatmentNames)
     }
     EXPECT_EQ(SimpleFluid::parse_turbulence_wall_treatment_type("resolvedSST"),
               TurbulenceWallTreatmentType::ResolvedLowReSST);
+    EXPECT_EQ(
+        SimpleFluid::parse_turbulence_wall_treatment_type("resolvedKEpsilon"),
+        TurbulenceWallTreatmentType::ResolvedLowReKEpsilon);
     EXPECT_EQ(SimpleFluid::parse_turbulence_wall_treatment_type("OpenFOAMKEpsilon"),
               TurbulenceWallTreatmentType::StandardHighReKEpsilon);
     EXPECT_THROW(SimpleFluid::parse_turbulence_wall_treatment_type("automatic"),
@@ -556,6 +561,16 @@ TEST(TurbulenceModelOptionsTest, WallTreatmentRequiresCompatibleClosureAndExplic
     options.wall_options.boundary_names = {"wall"};
     EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
 
+    options.model = TurbulenceModelType::RNGKEpsilon;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
+                 std::invalid_argument);
+
+    options.wall_treatment =
+        TurbulenceWallTreatmentType::ResolvedLowReKEpsilon;
+    options.model = TurbulenceModelType::StandardKEpsilon;
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
+    options.model = TurbulenceModelType::RealizableKEpsilon;
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
     options.model = TurbulenceModelType::RNGKEpsilon;
     EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options),
                  std::invalid_argument);

@@ -62,14 +62,18 @@ TurbulenceModelType parse_turbulence_model_type(const std::string& value);
 enum class TurbulenceWallTreatmentType
 {
     None,
-    ResolvedLowReSST,           ///< Resolve SST through the viscous sublayer.
-    StandardHighReKEpsilon      ///< Apply high-Re k-epsilon wall functions.
+    ResolvedLowReSST,              ///< Resolve SST through the viscous sublayer.
+    StandardHighReKEpsilon,        ///< Apply high-Re k-epsilon wall functions.
+    ResolvedLowReKEpsilon          ///< Resolve k-epsilon through the viscous sublayer.
 };
 
 /** @brief Return the canonical database name of a wall treatment. */
 std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept;
 
-/** @brief Parse `none`, `resolvedLowReSST`, or `standardHighReKEpsilon`. */
+/**
+ * @brief Parse `none`, `resolvedLowReSST`, `resolvedLowReKEpsilon`, or
+ * `standardHighReKEpsilon`.
+ */
 TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
     const std::string& value);
 
@@ -164,9 +168,10 @@ struct TurbulenceBuoyancyContext
  * publishes separate effective viscosity and conductivity fields for the
  * momentum and temperature equations. The implemented closures use shear
  * production and a gradient-diffusion turbulent heat flux. Optional resolved
- * SST and high-Re standard-k-epsilon wall treatments provide dynamic scalar
- * data and face transport coefficients. Optional signed Boussinesq production
- * is coupled to both transported turbulence equations.
+ * SST, resolved standard/realizable k-epsilon, and high-Re standard-k-epsilon
+ * wall treatments provide dynamic scalar data and face transport coefficients.
+ * Optional signed Boussinesq production is coupled to both transported
+ * turbulence equations.
  * The isotropic Reynolds stress is supplied explicitly as
  * @f$-2/3\,\nabla k@f$, so the solver pressure remains mechanical pressure.
  * @tparam Pack Tpetra type pack used for mesh and field storage.

@@ -158,8 +158,9 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   k-omega closures, with laminar mode retaining no turbulence state
 - Automatic distributed Poisson wall distance for BSL/SST; an explicit
   positive uniform override remains available for controlled comparisons
-- Resolved low-Re SST treatment with smooth walls and molecular wall heat
-  transport
+- Resolved low-Re SST and standard/realizable k-epsilon treatments with smooth
+  walls and molecular wall transport; resolved k-epsilon applies
+  $\epsilon=2\nu k/y^2$ in wall-adjacent cells
 - Standard high-Re k-epsilon treatment with smooth or equivalent sand-grain
   roughness and either constant turbulent-Prandtl or Jayatilleke heat transfer
 - Optional signed OpenFOAM-style Boussinesq production,

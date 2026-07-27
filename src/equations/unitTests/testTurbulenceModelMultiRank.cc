@@ -301,8 +301,9 @@ TEST(TurbulenceModelMultiRankTest, WallDistanceReplacementSynchronizesOwnedInput
     }
 }
 
-/** @brief Verifies both wall treatments across partitioned wall batches. */
-TEST(TurbulenceModelMultiRankTest, BothWallTreatmentsAdvanceAcrossPartitionedWallBatches)
+/** @brief Verifies wall-treatment/closure pairings across partitioned walls. */
+TEST(TurbulenceModelMultiRankTest,
+     WallTreatmentClosurePairingsAdvanceAcrossPartitionedWallBatches)
 {
     /** @brief Wall-treatment case and the closure used to exercise it. */
     struct WallCase
@@ -313,6 +314,10 @@ TEST(TurbulenceModelMultiRankTest, BothWallTreatmentsAdvanceAcrossPartitionedWal
     const WallCase cases[] = {
         {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
          SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon},
+        {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
+         SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReKEpsilon},
+        {SimpleFluid::TurbulenceModelType::RealizableKEpsilon,
+         SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReKEpsilon},
         {SimpleFluid::TurbulenceModelType::SSTKOmega,
          SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST}};
 

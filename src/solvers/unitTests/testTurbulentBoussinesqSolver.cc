@@ -326,9 +326,9 @@ TEST(TurbulentBoussinesqSolverTest, ExpandsZeroDiffusivityPhysicalGraphsWhenTurb
     expect_positive_turbulence_fields(turbulence);
 }
 
-/** @brief Exercise both wall treatments through segregated and coupled solvers. */
+/** @brief Exercise all wall-treatment/closure pairings through both solvers. */
 TEST(TurbulentBoussinesqSolverTest,
-     AdvancesBothWallTreatmentsThroughSegregatedAndCoupledSolvers)
+     AdvancesWallTreatmentClosurePairingsThroughSegregatedAndCoupledSolvers)
 {
     /** @brief Turbulence model and compatible wall treatment under test. */
     struct WallCase
@@ -339,6 +339,10 @@ TEST(TurbulentBoussinesqSolverTest,
     const WallCase wall_cases[] = {
         {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
          SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon},
+        {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
+         SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReKEpsilon},
+        {SimpleFluid::TurbulenceModelType::RealizableKEpsilon,
+         SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReKEpsilon},
         {SimpleFluid::TurbulenceModelType::SSTKOmega,
          SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST}};
 

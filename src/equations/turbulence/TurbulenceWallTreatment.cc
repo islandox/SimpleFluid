@@ -179,6 +179,7 @@ real_t openfoam_y_plus_lam(real_t kappa, real_t log_layer_e)
 }
 
 template class TurbulenceWallTreatment<DefaultTpetraTypes, ResolvedLowReSSTWallPolicy>;
+template class TurbulenceWallTreatment<DefaultTpetraTypes, ResolvedLowReKEpsilonWallPolicy>;
 template class TurbulenceWallTreatment<DefaultTpetraTypes, StandardHighReKEpsilonWallPolicy>;
 
 } // namespace SimpleFluid
