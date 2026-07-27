@@ -58,6 +58,24 @@ public:
     {
         return fluid_solution_writer();
     }
+
+    int set_partition_interface_flux(Pack::scalar_type value)
+    {
+        auto& flux = projected_face_fluxes();
+        flux.put_scalar(0.0);
+        int interface_faces = 0;
+        for (const auto face_lid : flux.owned_face_ids())
+        {
+            const auto neighbor = d_mesh->neighbor_cell(face_lid);
+            if (neighbor >= 0
+                && !d_mesh->is_owned_cell(neighbor))
+            {
+                flux.set_value(face_lid, value);
+                ++interface_faces;
+            }
+        }
+        return interface_faces;
+    }
 };
 
 /**
@@ -91,6 +109,30 @@ SimpleFluid::SP<MeshType> distributed_line_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+}
+
+/** @brief Build a line mesh with smaller cells after the rank interface. */
+SimpleFluid::SP<MeshType> graded_distributed_line_mesh()
+{
+    auto database = std::make_shared<SimpleFluid::Database>();
+    database->set("dimension", 3);
+    database->set("mesh_size", SimpleFluid::real_t{1.0});
+    database->set(
+        "domain_type",
+        static_cast<int>(
+            SimpleFluid::MeshFactory::DomainType::BOX));
+    database->set(
+        "X",
+        SimpleFluid::ArrReal{
+            0.0, 1.0, 2.0, 3.0, 4.0,
+            4.1, 4.2, 4.3, 4.4});
+    database->set("Y", SimpleFluid::ArrReal{0.0, 1.0});
+    database->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
+    database->set(
+        "domain_exterior_face_types",
+        SimpleFluid::ArrString{
+            "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
+    return SimpleFluid::MeshFactory(database).build<Pack>();
 }
 
 /**
@@ -172,6 +214,42 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
         solver.update_norm(before, after),
         expected,
         std::max(1.0e-14, expected * 1.0e-12));
+}
+
+/**
+ * @brief Verify Courant accumulation reaches the cell across a rank interface.
+ */
+TEST(FluidSolverMultiRankTest,
+     MaximumCourantNumberIncludesPartitionInterfaceFlux)
+{
+    auto mesh = graded_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.25;
+    ExposedFluidSolver solver(mesh, {}, time_options);
+    const int local_interface_faces =
+        solver.set_partition_interface_flux(2.0);
+    int global_interface_faces = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_interface_faces,
+        &global_interface_faces);
+    // Partition interfaces are represented once on each adjacent rank, with
+    // the local owned cell preferred as face owner.
+    ASSERT_EQ(global_interface_faces, 2);
+
+    // The face owner has unit volume. The neighboring cell on the other rank
+    // has volume 0.1 and therefore controls the global maximum:
+    // 0.5 * 0.25 * 2.0 / 0.1 = 2.5.
+    EXPECT_NEAR(
+        solver.maximum_courant_number(), 2.5, 1.0e-12);
 }
 
 /** @brief Verify rank-local VTU pieces omit overlap ghost cells. */

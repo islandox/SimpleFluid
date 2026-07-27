@@ -52,6 +52,58 @@ SIMPLEFLUID_SHIRI_DT=0.002 \
   verification/openfoam/naturalConvection/run_simplefluid.sh 6
 ```
 
+## Search for a steady state
+
+The fixed-step transient remains the default. Enable adaptive
+pseudo-transient continuation explicitly when the desired result is a steady
+state rather than the matched `t=0.4 s` comparison:
+
+```sh
+SIMPLEFLUID_SHIRI_STEADY_STATE=1 \
+SIMPLEFLUID_SHIRI_STEPS=5000 \
+SIMPLEFLUID_SHIRI_DT=0.002 \
+SIMPLEFLUID_SHIRI_STEADY_MIN_DT=0.000125 \
+SIMPLEFLUID_SHIRI_STEADY_MAX_DT=0.05 \
+SIMPLEFLUID_SHIRI_STEADY_TARGET_COURANT=0.8 \
+SIMPLEFLUID_SHIRI_STEADY_TOLERANCE=1e-4 \
+  verification/openfoam/naturalConvection/run_simplefluid.sh 1
+```
+
+`SIMPLEFLUID_SHIRI_STEPS` is the maximum search length and
+`SIMPLEFLUID_SHIRI_DT` is the initial pseudo-time step. After every accepted
+step, the controller computes the maximum cell Courant number from the
+pressure-projected face flux and ramps the next step toward the target,
+limited to 1.5 times the preceding step by default. The maximum and growth
+factor can be overridden with `SIMPLEFLUID_SHIRI_STEADY_MAX_DT` and
+`SIMPLEFLUID_SHIRI_STEADY_DT_GROWTH`. The minimum defaults to one sixteenth
+of the initial step and can be set with
+`SIMPLEFLUID_SHIRI_STEADY_MIN_DT`.
+
+A rejected transactional momentum solve is retried at half the preceding
+pseudo-time step, up to four retries. Configure those safeguards with
+`SIMPLEFLUID_SHIRI_STEADY_DT_REDUCTION` and
+`SIMPLEFLUID_SHIRI_STEADY_MAX_RETRIES`. Rejected attempts do not advance
+pseudo-time, consume the accepted-step limit, or update the steady-state
+confirmation window. Failures after a solver stage has published state are
+not retried; they remain fatal rather than risk continuing from a partially
+advanced solution.
+
+Steady convergence uses actual volume-weighted changes in velocity,
+temperature rise, `k`, and `epsilon`, not the linear solver's internal
+residual. Each change is normalized by the current field scale and by the
+accepted pseudo-time step, so the reported `update_rates` have inverse-time
+units. The maximum rate must remain below
+`SIMPLEFLUID_SHIRI_STEADY_TOLERANCE` for five consecutive steps after at
+least 20 steps. Override those guards with
+`SIMPLEFLUID_SHIRI_STEADY_CONSECUTIVE_STEPS` and
+`SIMPLEFLUID_SHIRI_STEADY_MIN_STEPS`.
+
+The executable writes the latest fields even when the maximum step count is
+reached, reports `steady_state_search: reached=no`, and returns exit status 2
+so an unconverged search cannot be mistaken for a steady solution. Adaptive
+mode is deliberately rejected by `run_comparison.sh`, whose OpenFOAM
+reference is a fixed-time transient.
+
 The Shiri executable defaults transported equations to `bicgstab/jacobi` and
 pressure projection to `bicgstab/MueLu`. Override either policy independently:
 
