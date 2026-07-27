@@ -83,6 +83,30 @@ public:
 
     scalar_type time() const noexcept { return d_time; }
     int step_index() const noexcept { return d_step_index; }
+    /** @brief Return the physical or pseudo-time step used by the next step. */
+    scalar_type time_step() const noexcept
+    {
+        return static_cast<scalar_type>(
+            d_problem.time_options().time_step);
+    }
+    /**
+     * @brief Replace the time step used by subsequent equation assemblies.
+     *
+     * This supports adaptive pseudo-transient continuation. It does not alter
+     * the configured maximum step count.
+     *
+     * @throws std::invalid_argument if @p time_step is non-finite or
+     *         non-positive.
+     */
+    void set_time_step(scalar_type time_step);
+    /**
+     * @brief Return the maximum cell Courant number of the accepted face flux.
+     *
+     * The definition is
+     * @f$Co_c=\Delta t\sum_{f\in c}|\phi_f|/(2V_c)@f$ and is reduced across
+     * the mesh communicator.
+     */
+    scalar_type maximum_courant_number() const;
 
     /** @brief Physical gauge-pressure field in Pa. */
     const field_type& pressure() const noexcept;
