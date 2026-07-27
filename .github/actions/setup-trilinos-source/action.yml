@@ -72,6 +72,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: |
+          ${{ github.workspace }}/_deps/partitioners_install
           ${{ github.workspace }}/_deps/trilinos_install
         key: ${{ inputs.trilinos-version }}-install-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix }}
 
@@ -87,10 +88,83 @@ runs:
           ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-
           trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-
 
+    - name: Build METIS and ParMETIS from source
+      if: steps.cache-trilinos.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
+        mkdir -p "$PARTITIONER_PREFIX"
+
+        clone_pinned() {
+          local repository_url="$1"
+          local checkout_dir="$2"
+          local revision="$3"
+
+          git init "$checkout_dir"
+          git -C "$checkout_dir" remote add origin "$repository_url"
+          git -C "$checkout_dir" fetch --depth 1 origin "$revision"
+          git -C "$checkout_dir" checkout --detach FETCH_HEAD
+        }
+
+        clone_pinned \
+          https://github.com/KarypisLab/GKlib.git \
+          "${{ github.workspace }}/_deps/GKlib" \
+          3b7d61b9f885063c89901f3901fb4426f9cfb58f
+        clone_pinned \
+          https://github.com/KarypisLab/METIS.git \
+          "${{ github.workspace }}/_deps/METIS" \
+          272d4a91c5f66c92327493339a476c553ebf1f5d
+        clone_pinned \
+          https://github.com/KarypisLab/ParMETIS.git \
+          "${{ github.workspace }}/_deps/ParMETIS" \
+          7436de671433c248e4203e1640a65b778845e6fc
+
+        if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
+          export OMPI_CC="$(command -v clang)"
+          export OMPI_CXX="$(command -v clang++)"
+        elif [ "${{ inputs.compiler-id }}" = "GCC" ]; then
+          export OMPI_CC="$(command -v gcc)"
+          export OMPI_CXX="$(command -v g++)"
+        fi
+
+        make -C "${{ github.workspace }}/_deps/GKlib" config \
+          shared=1 \
+          cc="${{ inputs.c-compiler }}" \
+          prefix="$PARTITIONER_PREFIX"
+        make -C "${{ github.workspace }}/_deps/GKlib" --jobs 2
+        make -C "${{ github.workspace }}/_deps/GKlib" install
+
+        make -C "${{ github.workspace }}/_deps/METIS" config \
+          shared=1 \
+          cc="${{ inputs.c-compiler }}" \
+          prefix="$PARTITIONER_PREFIX" \
+          gklib_path="$PARTITIONER_PREFIX"
+        make -C "${{ github.workspace }}/_deps/METIS" --jobs 2
+        make -C "${{ github.workspace }}/_deps/METIS" install
+
+        export LD_LIBRARY_PATH="$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+        make -C "${{ github.workspace }}/_deps/ParMETIS" config \
+          shared=1 \
+          cc=mpicc \
+          prefix="$PARTITIONER_PREFIX" \
+          gklib_path="$PARTITIONER_PREFIX" \
+          metis_path="$PARTITIONER_PREFIX"
+        make -C "${{ github.workspace }}/_deps/ParMETIS" --jobs 2
+        make -C "${{ github.workspace }}/_deps/ParMETIS" install
+
+        test -f "$PARTITIONER_PREFIX/include/parmetis.h"
+        test -e "$PARTITIONER_PREFIX/lib/libGKlib.so"
+        test -e "$PARTITIONER_PREFIX/lib/libmetis.so"
+        test -e "$PARTITIONER_PREFIX/lib/libparmetis.so"
+
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
+        export LD_LIBRARY_PATH="$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
         git clone --depth 1 --branch ${{ inputs.trilinos-version }} \
           https://github.com/trilinos/Trilinos.git \
           ${{ github.workspace }}/_deps/Trilinos
@@ -131,10 +205,10 @@ runs:
           export OMPI_CC="$(command -v clang)"
           export OMPI_CXX="$(command -v clang++)"
           export OMPI_FC="$FC_PATH"
-        elif [ "{{ inputs.compiler-id }}" = "GCC" ]; then
-          export OMPI_CC=$(command -v gcc)
-          export OMPI_CXX=$(command -v g++)
-          export OMPI_FC=$(command -v gfortran)
+        elif [ "${{ inputs.compiler-id }}" = "GCC" ]; then
+          export OMPI_CC="$(command -v gcc)"
+          export OMPI_CXX="$(command -v g++)"
+          export OMPI_FC="$(command -v gfortran)"
         fi
 
         echo "NETCDF_INCLUDE_DIR=$NETCDF_INCLUDE_DIR"
@@ -153,6 +227,12 @@ runs:
           -D TPL_ENABLE_MPI=ON \
           -D TPL_ENABLE_BLAS=ON \
           -D TPL_ENABLE_LAPACK=ON \
+          -D TPL_ENABLE_METIS=ON \
+          -D TPL_METIS_INCLUDE_DIRS="$PARTITIONER_PREFIX/include" \
+          -D TPL_METIS_LIBRARIES="$PARTITIONER_PREFIX/lib/libmetis.so;$PARTITIONER_PREFIX/lib/libGKlib.so" \
+          -D TPL_ENABLE_ParMETIS=ON \
+          -D TPL_ParMETIS_INCLUDE_DIRS="$PARTITIONER_PREFIX/include" \
+          -D TPL_ParMETIS_LIBRARIES="$PARTITIONER_PREFIX/lib/libparmetis.so;$PARTITIONER_PREFIX/lib/libmetis.so;$PARTITIONER_PREFIX/lib/libGKlib.so" \
           -D TPL_ENABLE_BOOST=ON \
           -D TPL_ENABLE_HDF5=ON \
           -D TPL_ENABLE_Netcdf=ON \
@@ -167,6 +247,8 @@ runs:
           -D Trilinos_ENABLE_Belos=ON \
           -D Trilinos_ENABLE_Ifpack2=ON \
           -D Trilinos_ENABLE_MueLu=ON \
+          -D Trilinos_ENABLE_Zoltan=ON \
+          -D Trilinos_ENABLE_Zoltan2=ON \
           -D Trilinos_ENABLE_STK=ON \
           -D Trilinos_ENABLE_SEACAS=ON \
           -D numbers_EXE_DISABLE=ON \
@@ -178,5 +260,9 @@ runs:
     - name: Export Trilinos prefix
       shell: bash
       run: |
-        echo "CMAKE_PREFIX_PATH=${{ github.workspace }}/_deps/trilinos_install:$CMAKE_PREFIX_PATH" >> "$GITHUB_ENV"
-        echo "Trilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos" >> "$GITHUB_ENV"
+        PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
+        TRILINOS_PREFIX="${{ github.workspace }}/_deps/trilinos_install"
+
+        echo "CMAKE_PREFIX_PATH=$PARTITIONER_PREFIX:$TRILINOS_PREFIX:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        echo "Trilinos_DIR=$TRILINOS_PREFIX/lib/cmake/Trilinos" >> "$GITHUB_ENV"
