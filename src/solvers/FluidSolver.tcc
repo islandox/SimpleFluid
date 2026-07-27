@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -883,6 +884,98 @@ void FluidSolver<Pack>::finish_step()
     d_mesh->sync_periodic_boundaries(velocity());
     d_time += d_problem.time_options().time_step;
     ++d_step_index;
+}
+
+/**
+ * @brief Replace the time step used by subsequent solver steps.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time_step Finite positive physical or pseudo-time step.
+ */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::set_time_step(
+    scalar_type time_step)
+{
+    if (!std::isfinite(time_step)
+        || time_step <= scalar_type{})
+    {
+        throw std::invalid_argument(
+            "FluidSolver requires a finite positive time step.");
+    }
+    d_problem.time_options().time_step =
+        static_cast<real_t>(time_step);
+}
+
+/**
+ * @brief Compute the communicator-wide maximum accepted cell Courant number.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @return Maximum cell Courant number for the current time step and projected
+ *         face flux.
+ */
+template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::maximum_courant_number() const
+    -> scalar_type
+{
+    const auto& flux =
+        d_problem.template object<face_flux_field_type>(
+            "projected_face_flux");
+    const auto flux_values = flux.owned_read_view();
+    const auto& owned_face_ids = flux.owned_face_ids();
+    const auto& topology =
+        d_mesh->host_views().face_topology;
+    std::vector<scalar_type> absolute_flux_sum(
+        d_mesh->num_owned_cells(), scalar_type{});
+
+    for (size_t row = 0;
+         row < owned_face_ids.size();
+         ++row)
+    {
+        const auto face = owned_face_ids[row];
+        const auto magnitude =
+            std::abs(flux_values(
+                static_cast<local_ordinal_type>(row), 0));
+        const auto owner = topology.owner[face];
+        const auto neighbor = topology.neighbor[face];
+        if (owner >= 0
+            && static_cast<size_t>(owner)
+                < d_mesh->num_owned_cells())
+        {
+            absolute_flux_sum[static_cast<size_t>(owner)]
+                += magnitude;
+        }
+        if (neighbor >= 0
+            && static_cast<size_t>(neighbor)
+                < d_mesh->num_owned_cells())
+        {
+            absolute_flux_sum[static_cast<size_t>(neighbor)]
+                += magnitude;
+        }
+    }
+
+    scalar_type local_maximum{};
+    const auto& volumes =
+        d_mesh->host_views().cell_geometry.volume;
+    const auto current_time_step = time_step();
+    for (size_t owned = 0;
+         owned < d_mesh->num_owned_cells();
+         ++owned)
+    {
+        local_maximum = std::max(
+            local_maximum,
+            scalar_type{0.5} * current_time_step
+                * absolute_flux_sum[owned]
+                / static_cast<scalar_type>(volumes[owned]));
+    }
+
+    scalar_type global_maximum{};
+    Teuchos::reduceAll(
+        *d_mesh->owned_cell_map()->getComm(),
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_maximum,
+        &global_maximum);
+    return global_maximum;
 }
 
 /**
