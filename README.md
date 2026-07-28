@@ -16,6 +16,11 @@ gaps and later multiphysics acceptance work remain tracked in `TODO.md`.
 **The advanced Phase 14.1 two-population radiolytic-bubble model is implemented
 in part and remains under verification.**
 
+**Turbulent bubbly-flow scope:** the single-continuum RANS models and the
+radiolytic bubble-population model can run in the same `BoussinesqSolver` with
+sequential void-to-density/buoyancy feedback. This is not a full Euler–Euler
+two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
+
 | Capability | Status |
 | ---------- | ------ |
 | Mesh & geometry infrastructure | ✅ |
@@ -36,6 +41,8 @@ in part and remains under verification.**
 | Six two-equation RANS closures and wall treatments | ✅ |
 | Scalar void, boiling, feedback, and precursor infrastructure | 🚧 |
 | Two-population radiolytic-bubble model | 🚧 |
+| Weakly coupled RANS plus radiolytic bubble populations | 🚧 |
+| Full turbulent Euler–Euler bubbly flow | ⬜ |
 | TH/neutronics multiphysics coupling | ⬜ |
 
 ## Governing Equations
@@ -179,6 +186,29 @@ The principal database selectors are `turbulence_model`, `wall_treatment`,
 `wall_boundaries`. Automatic distance always includes every configured no-slip
 velocity patch; explicit names augment that set and must also be no-slip.
 
+### Turbulent Bubble-Flow Scope
+
+`BoussinesqSolver` can configure a RANS closure and
+`sheng2024TwoPopulation` radiolysis together. The pressure–velocity and RANS
+systems advance first; the bubble inventories then use the projected liquid
+face flux plus the configured rise/slip velocity, after which reconstructed
+void can refresh mixture density and buoyancy feedback for subsequent solver
+operations.
+
+This is a loose, single-continuum coupling. The current turbulence equations
+use full-cell storage and liquid face-flux advection rather than
+liquid-volume-fraction-weighted phase equations. There is no separate gas
+velocity or continuity equation, or interphase momentum-source closures for
+drag, lift, virtual mass, and wall lubrication. Turbulent dispersion,
+bubble-induced turbulence, and a full bubble-size distribution are likewise
+absent. Those capabilities belong to the deferred Euler–Euler program in
+`TODO.md`.
+
+The shipped `pitz_daily` example exercises RANS without radiolytic bubbles,
+while the fissile-solution examples exercise radiolysis without RANS. No
+checked-in example or regression test currently advances both subsystems in a
+nontrivial flow.
+
 ### FVM Operators
 
 - `DiffusionSystem` — scalar/vector orthogonal diffusion assembly
@@ -225,6 +255,10 @@ short-running physical smoke cases:
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
 
+The turbulence and radiolytic-bubble subsystems have separate focused serial
+and MPI coverage. A permanent combined RANS-plus-bubble regression and a
+quantitative turbulent bubbly-flow benchmark remain open.
+
 The cavity smoke tests do not currently assert agreement with Ghia et al. or
 with bundled OpenFOAM profile data. See
 `verification/openfoam/cavityFlow/README.md` for the cavity workflow and
@@ -245,7 +279,8 @@ Pre-built example executables:
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 
 Each example is configured via a `Database` object and runs a short transient
-simulation with VTU output.
+simulation with VTU output. None is currently a combined turbulent
+radiolytic-bubble example.
 
 ## Build
 
@@ -269,8 +304,8 @@ generation.
 
 ```bash
 # Using CMake presets (recommended)
-cmake --preset Local
-cmake --build --preset Release
+cmake --preset GCC-ninja-multi
+cmake --build --preset GCC-Release
 
 # Or manually
 cmake -B build -G "Ninja Multi-Config" \
@@ -281,15 +316,15 @@ cmake --build build --config Release
 ### Run Tests
 
 ```bash
-cmake --build --preset Debug
-ctest --preset Debug
+cmake --build --preset GCC-Debug
+ctest --preset GCC-Debug
 ```
 
 ### Run Examples
 
 ```bash
-./build/bin/Release/natural_convection_box
-./build/bin/Release/natural_convection_cylinder
+./build-gcc/bin/Release/natural_convection_box
+./build-gcc/bin/Release/natural_convection_cylinder
 ```
 
 ## Performance Benchmarks
@@ -297,8 +332,8 @@ ctest --preset Debug
 Build the standalone benchmark executable and run the local Debug-safe suite:
 
 ```bash
-cmake --build build --config Debug --target simplefluid_benchmark
-ctest --test-dir build -C Debug -L benchmark --output-on-failure
+cmake --build --preset GCC-Debug --target simplefluid_benchmark
+ctest --preset GCC-Debug -L benchmark
 ```
 
 The benchmark writes one CSV row per measured repetition. Rows include solver
@@ -323,26 +358,26 @@ rebuild policy remains available for comparison and diagnosis.
 Run the larger profiling preset with frame pointers and debug symbols:
 
 ```bash
-cmake --build build --config RelWithDebInfo --target simplefluid_benchmark
-./build/bin/RelWithDebInfo/simplefluid_benchmark \
+cmake --build --preset GCC-RelWithDebInfo --target simplefluid_benchmark
+./build-gcc/bin/RelWithDebInfo/simplefluid_benchmark \
   --preset release-profile \
-  --output build/benchmarks/release-profile.csv
+  --output build-gcc/benchmarks/release-profile.csv
 ```
 
 Run strong-scaling measurements sequentially:
 
 ```bash
-mpiexec -n 1 ./build/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/benchmarks/mpi-strong.csv
-mpiexec -n 2 ./build/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/benchmarks/mpi-strong.csv
-mpiexec -n 4 ./build/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/benchmarks/mpi-strong.csv
+mpiexec -n 1 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
+mpiexec -n 2 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
+mpiexec -n 4 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
 ```
 
 Run weak-scaling measurements with approximately `32x32x8` cells per rank:
 
 ```bash
-mpiexec -n 1 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/benchmarks/mpi-weak.csv
-mpiexec -n 2 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/benchmarks/mpi-weak.csv
-mpiexec -n 4 ./build/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/benchmarks/mpi-weak.csv
+mpiexec -n 1 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
+mpiexec -n 2 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
+mpiexec -n 4 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
 ```
 
 Use `--case`, `--configuration`, `--nx`, `--ny`, `--nz`, `--shear`,
@@ -440,13 +475,14 @@ for the scalar void, boiling, feedback, precursor, and output workflow.
 
 The fissile-solution tank smoke cases build as `fissile_solution_tank_demo`
 and `constant_power_cylinder_vessel`.
-After `cmake --build --preset Debug`, run
-`build/bin/Debug/fissile_solution_tank_demo` or
-`build/bin/Debug/constant_power_cylinder_vessel` and inspect the generated VTU
-files in ParaView. The Gaussian tank demo keeps boiling disabled by default;
-the constant-power cylinder variant enables radiolytic gas plus bulk and wall
-boiling so the generated VTU contains the coupled gas-source and latent-heat
-fields.
+After `cmake --build --preset GCC-Debug`, run
+`build-gcc/bin/Debug/fissile_solution_tank_demo` or
+`build-gcc/bin/Debug/constant_power_cylinder_vessel` and inspect the generated
+VTU files in ParaView. Use the corresponding `LLVM-Debug` preset and
+`build-llvm/bin/Debug` path for the LLVM build. The Gaussian tank demo keeps
+boiling disabled by default; the constant-power cylinder variant enables
+radiolytic gas plus bulk and wall boiling so the generated VTU contains the
+coupled gas-source and latent-heat fields.
 
 ## Dependencies
 

@@ -113,6 +113,8 @@ mistaken for foundation or Phase 9 completion.
       MPI consistency tests.
 - [x] Add the transient `pitz_daily` standard-k-epsilon example and the
       OpenFOAM profile-comparison workflow.
+- [x] Document that the current RANS variables use single-continuum, full-cell
+      transport rather than phase-volume-fraction-weighted equations.
 
 ### Remaining work and acceptance
 
@@ -121,9 +123,13 @@ mistaken for foundation or Phase 9 completion.
       accepts optional user thresholds, but has no default pass/fail tolerance.
 - [ ] Add quantitative validation for every closure before describing the
       turbulence program as validated rather than implemented and tested.
+- [ ] Define and validate the applicability range of single-continuum RANS in
+      void-bearing cases. Liquid-volume-fraction weighting, interphase
+      turbulence transfer, and bubble-induced turbulence belong to Phase 21.
 
 **Status:** substantial implementation with focused serial/MPI tests;
-quantitative external-reference validation criteria remain open.
+quantitative external-reference validation criteria and a phase-aware
+turbulent bubbly-flow formulation remain open.
 
 ---
 
@@ -475,8 +481,8 @@ Phase 12 remains the low-cost source model. Phase 14 remains the lower-order sca
 
 **Status:** broad implementation with focused conservation, transport, and MPI
 tests. End-to-end reproduction of the paper results, extrapolation warnings,
-source-Jacobian hooks, and an allocation-free Kokkos-compatible local update
-remain open.
+source-Jacobian hooks, an allocation-free Kokkos-compatible local update, and
+permanent combined RANS-plus-bubble coverage remain open.
 
 ### Model selection and scope
 
@@ -832,6 +838,11 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] Serial/MPI consistency of global H₂ and void inventories.
 - [x] Finite-Courant serial/MPI escape balances and rate-field integrals.
 - [x] Globally reduce advanced-model event counters across MPI ranks.
+- [ ] Add a permanent serial integration test with nonzero liquid shear, an
+      active RANS closure, advected dissolved/bubble inventories, bubble slip,
+      fission production, and void-dependent density feedback.
+- [ ] Add an MPI counterpart after the serial combined test defines conserved
+      inventory and bounded-field acceptance checks.
 
 ### Phase 14.1 acceptance criteria
 
@@ -861,6 +872,10 @@ Known limitations:
 - [ ] Bubble rise velocity strongly affects late-time local void fraction.
 - [ ] Axial/prescribed bubble motion is not a replacement for a gas momentum equation.
 - [ ] A later Euler–Euler phase should solve gas velocity and use validated drag closures.
+- [ ] Current RANS transport is not weighted by liquid volume fraction and has
+      no bubble-induced-turbulence or interphase turbulence-transfer closure.
+- [ ] No checked-in example or regression currently exercises RANS and the
+      advanced bubble model together in a nontrivial flow.
 
 ---
 
@@ -1028,6 +1043,8 @@ those details remain distributed across implementation headers and model docs.
   - [x] `rhoFeedback`
   - [x] delayed-neutron `C_i` and `S_C_i` fields
 - [x] Add a short section to `README.md` linking the new model document and demo.
+- [x] Document the weakly coupled RANS-plus-bubble scope and distinguish it
+      from phase-aware turbulent Euler–Euler bubbly flow.
 
 ### Phase 18 acceptance criteria
 
@@ -1123,6 +1140,12 @@ This phase is explicitly deferred until the scalar void-fraction source model an
 **Status:** deferred by design; none of its implementation or validation
 criteria are claimed complete.
 
+The ability to configure RANS and radiolytic bubbles in the same
+`BoussinesqSolver` does not complete this phase. The current bubble populations
+follow liquid flux plus prescribed/correlated slip, void feeds momentum only
+through loose material-density/buoyancy feedback, and the RANS equations are
+not liquid-volume-fraction weighted.
+
 - [ ] Add separate gas velocity field `U_g`.
 - [ ] Add gas-phase continuity equation.
 - [ ] Add liquid/gas momentum coupling.
@@ -1135,6 +1158,10 @@ criteria are claimed complete.
 - [ ] Add gas/liquid heat-transfer closure.
 - [ ] Add optional bubble diameter field.
 - [ ] Add optional full size-distribution population-balance model.
+- [ ] Formulate liquid-phase turbulence transport with consistent phase-volume
+      and density weighting and recover the existing single-phase limit.
+- [ ] Add bubble-induced turbulence and interphase turbulence-transfer model
+      interfaces with documented validity ranges.
 - [ ] Validate against a bubbly-plume or bubble-column benchmark before applying to criticality accident analysis.
 
 ### Phase 21 acceptance criteria
@@ -1142,6 +1169,10 @@ criteria are claimed complete.
 - [ ] Scalar `alpha_g` model remains available as a lower-order option.
 - [ ] Two-fluid equations conserve phase volume/mass under controlled tests.
 - [ ] Drag-law unit tests reproduce expected limiting behavior.
+- [ ] Phase-aware turbulence equations recover the current RANS solutions as
+      `alpha_g` approaches zero.
+- [ ] Bubble-induced-turbulence and interphase-transfer closures reproduce
+      selected reference limits.
 - [ ] Full model is validated against at least one non-neutronic bubbly-flow benchmark.
 
 ---
@@ -1151,9 +1182,9 @@ criteria are claimed complete.
 **Overall status: not met.** The build/test/tooling criteria are satisfied, but
 open model, turbulence-validation, and documentation criteria remain.
 
-- [x] `cmake --preset Local` succeeds.
-- [x] `cmake --build --preset Debug` succeeds.
-- [x] `ctest --preset Debug` passes, including registered MPI tests, in the
+- [x] `cmake --preset GCC-ninja-multi` succeeds.
+- [x] `cmake --build --preset GCC-Debug` succeeds.
+- [x] `ctest --preset GCC-Debug` passes, including registered MPI tests, in the
       supported local development environment.
 - [x] Require a representative GCC Debug configure/build/test job in CI while
       retaining GCC and LLVM Release coverage.
