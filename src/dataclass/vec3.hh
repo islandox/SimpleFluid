@@ -15,7 +15,6 @@
 #include <array>
 #include <cstddef>
 #include <cmath>
-#include <limits>
 
 namespace SimpleFluid
 {

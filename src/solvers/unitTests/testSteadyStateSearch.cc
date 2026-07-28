@@ -211,8 +211,9 @@ TEST(SteadyStateProgressLineFormatterTest, FormatsAdaptiveAndPhysicalDiagnostics
     SimpleFluid::FluidStepStatistics<double> solver_statistics;
     solver_statistics.krylov_iterations = 17;
     solver_statistics.achieved_tolerance = 1.0e-9;
-    const SimpleFluid::SteadyStateProgressLineFormatter formatter;
-    const auto line = formatter.format(statistics, solver_statistics);
+
+    using Formatter = SimpleFluid::SteadyStateProgressLineFormatter<double>;
+    const auto line = Formatter::format(statistics, solver_statistics);
 
     EXPECT_NE(line.find("steady_step=3/20"), std::string::npos);
     EXPECT_NE(line.find("max_Co=6.000000e-01"), std::string::npos);
@@ -221,7 +222,7 @@ TEST(SteadyStateProgressLineFormatterTest, FormatsAdaptiveAndPhysicalDiagnostics
     EXPECT_NE(line.find("krylov_iterations=17"), std::string::npos);
 
     const auto retry_line =
-        formatter.format_retry(4, 1, 3, 0.7, 0.2, 0.1, "transport did not converge");
+        Formatter::format_retry(4, 1, 3, 0.7, 0.2, 0.1, "transport did not converge");
     EXPECT_NE(retry_line.find("steady_step=4 rejected=yes retry=1/3"), std::string::npos);
     EXPECT_NE(retry_line.find("next_dt=1.000000e-01"), std::string::npos);
     EXPECT_NE(retry_line.find("transport did not converge"), std::string::npos);

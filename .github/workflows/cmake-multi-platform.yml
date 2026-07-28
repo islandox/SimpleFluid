@@ -89,7 +89,7 @@ jobs:
         c-compiler: ${{ matrix.c_compiler }}
         cxx-compiler: ${{ matrix.cpp_compiler }}
         fortran-compiler: ${{ matrix.fortran_compiler }}
-        cache-suffix: v4
+        cache-suffix: v5
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
