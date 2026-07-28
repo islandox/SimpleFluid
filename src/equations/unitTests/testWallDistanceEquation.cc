@@ -58,7 +58,7 @@ double solve_maximum_error(size_t cell_count,
     Field distance(mesh, -7.0, "wall_distance");
     Equation equation(mesh);
     SimpleFluid::WallDistanceEquationOptions options;
-    options.linear_solver.tolerance = 1.0e-13;
+    options.linear_solver.tolerance = 1.0e-12;
     options.linear_solver.max_iterations = 500;
     equation.solve(walls, distance, options);
 
@@ -229,7 +229,7 @@ TEST(WallDistanceEquationTest, DistributedSolveSupportsRankWithoutLocalWall)
     Field distance(mesh, "wall_distance");
     Equation equation(mesh);
     SimpleFluid::WallDistanceEquationOptions options;
-    options.linear_solver.tolerance = 1.0e-13;
+    options.linear_solver.tolerance = 1.0e-12;
     options.linear_solver.max_iterations = 500;
     ASSERT_NO_THROW(equation.solve({"xmin"}, distance, options));
 

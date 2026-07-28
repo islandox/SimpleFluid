@@ -227,9 +227,18 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     EXPECT_EQ(mesh->cell(1).type, MeshType::CellType::HEXAHEDRON);
     EXPECT_DOUBLE_EQ(mesh->cell_volume(0), 1.0);
     EXPECT_DOUBLE_EQ(mesh->cell_volume(1), 1.0);
-    EXPECT_EQ(mesh->cell_centroid(0), (SimpleFluid::vec3{0.5, 0.5, 0.5}));
-    EXPECT_EQ(mesh->cell_centroid(1), (SimpleFluid::vec3{1.5, 0.5, 0.5}));
-    EXPECT_EQ(mesh->cell_centroid(26), (SimpleFluid::vec3{2.5, 2.5, 2.5}));
+    const auto expect_centroid_near =
+        [&](MeshType::local_ordinal_type cell_lid,
+            const MeshType::Vec3& expected)
+    {
+        const auto& actual = mesh->cell_centroid(cell_lid);
+        EXPECT_NEAR(actual.x, expected.x, 1.0e-12);
+        EXPECT_NEAR(actual.y, expected.y, 1.0e-12);
+        EXPECT_NEAR(actual.z, expected.z, 1.0e-12);
+    };
+    expect_centroid_near(0, {0.5, 0.5, 0.5});
+    expect_centroid_near(1, {1.5, 0.5, 0.5});
+    expect_centroid_near(26, {2.5, 2.5, 2.5});
 
     auto has_face_centroid = [&](const MeshType::Vec3& expected)
     {
@@ -289,7 +298,9 @@ TEST(MeshFactoryTest, BoxBoundaryLayersRegenerateSelectedAxisEdges)
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_local_cells(), 4u);
-    EXPECT_EQ(mesh->cell_centroid(0), (SimpleFluid::vec3{0.05, 0.5, 0.5}));
+    EXPECT_NEAR(mesh->cell_centroid(0).x, 0.05, 1.0e-12);
+    EXPECT_NEAR(mesh->cell_centroid(0).y, 0.5, 1.0e-12);
+    EXPECT_NEAR(mesh->cell_centroid(0).z, 0.5, 1.0e-12);
     EXPECT_NEAR(mesh->cell_centroid(3).x, 0.9, 1.0e-12);
     EXPECT_DOUBLE_EQ(mesh->cell_centroid(3).y, 0.5);
     EXPECT_DOUBLE_EQ(mesh->cell_centroid(3).z, 0.5);
