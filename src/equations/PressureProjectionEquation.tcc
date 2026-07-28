@@ -34,7 +34,8 @@ template<TpetraTypePack Pack>
 PressureProjectionEquation<Pack>::PressureProjectionEquation(
     SP<const mesh_type> mesh,
     LinearSolverOptions linear_options,
-    BoundaryConditionMap pressure_boundary_conditions)
+    BoundaryConditionMap pressure_boundary_conditions,
+    FVM::CellGradientScheme gradient_scheme)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "PressureProjectionEquation")),
       d_linear_options(linear_options),
@@ -42,6 +43,7 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
           std::move(pressure_boundary_conditions)),
       d_pressure_correction_boundary_conditions(
           d_pressure_boundary_conditions),
+      d_gradient_scheme(gradient_scheme),
       d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"),
       d_face_flux_workspace(d_mesh)
 {
@@ -389,7 +391,8 @@ auto PressureProjectionEquation<Pack>::project_impl(
             velocity_boundary_cache,
             d_pressure_boundary_conditions,
             d_face_flux_workspace,
-            d_cached_face_fluxes);
+            d_cached_face_fluxes,
+            d_gradient_scheme);
     }
     else if (!reuse_cached_predictor_flux)
     {
@@ -400,7 +403,8 @@ auto PressureProjectionEquation<Pack>::project_impl(
             velocity_boundary_cache,
             d_pressure_correction_boundary_conditions,
             d_face_flux_workspace,
-            d_cached_face_fluxes);
+            d_cached_face_fluxes,
+            d_gradient_scheme);
     }
     const auto owned_map = require_owned_cell_map(d_mesh);
     if (d_cached_pressure_matrix.is_null())
@@ -482,7 +486,8 @@ auto PressureProjectionEquation<Pack>::project_impl(
         pressure_correction,
         d_pressure_correction_boundary_conditions,
         d_face_flux_workspace.pressure_gradient(),
-        d_face_flux_workspace.gradient_cache());
+        d_face_flux_workspace.gradient_cache(),
+        d_gradient_scheme);
     velocity.owned_data().update(
         -time_step,
         d_face_flux_workspace.pressure_gradient().owned_data(),
@@ -507,7 +512,8 @@ auto PressureProjectionEquation<Pack>::project_impl(
             velocity_boundary_cache,
             d_pressure_boundary_conditions,
             d_face_flux_workspace,
-            d_cached_face_fluxes);
+            d_cached_face_fluxes,
+            d_gradient_scheme);
     }
     else
     {

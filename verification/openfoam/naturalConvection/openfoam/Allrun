@@ -42,3 +42,4 @@ else
     mpirun -np "$np" buoyantBoussinesqPimpleFoam -parallel > log.solver 2>&1
     reconstructPar -latestTime > log.reconstructPar 2>&1
 fi
+postProcess -func writeCellCentres -latestTime > log.cellCentres 2>&1

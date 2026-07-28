@@ -15,6 +15,7 @@
 #include "fields/FaceField.hh"
 #include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/CellGradientScheme.hh"
 #include "FVM/OperatorDetails.hh"
 
 #include <algorithm>
@@ -1185,6 +1186,277 @@ void cell_gradient(
 {
     detail::cached_vector_cell_gradient(
         field, boundary_value, gradients, cache);
+}
+
+/**
+ * @brief Compute a Gauss-linear scalar gradient with dynamic boundary data.
+ *
+ * Interior face values use distance-weighted linear interpolation. Dirichlet
+ * faces use their prescribed value, while Neumann faces extrapolate from the
+ * owner cell using the prescribed outward-normal derivative.
+ */
+template<TpetraTypePack Pack,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+void gauss_linear_cell_gradient(
+    const CellField<Pack>& field,
+    BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value,
+    VectorCellField<Pack>& gradients)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    const auto& mesh = field.mesh();
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "gauss_linear_cell_gradient requires input and output fields "
+            "on one mesh.");
+    }
+    const auto boundary_locations =
+        detail::boundary_face_locations(mesh);
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        const auto cell_value = local_values(cell_lid, 0);
+        typename VectorCellField<Pack>::vec_type gradient{};
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            scalar_type face_value = cell_value;
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                const auto cell_distance =
+                    mesh.cell_to_face_distance(face_lid, cell_lid);
+                const auto other_distance =
+                    mesh.cell_to_face_distance(face_lid, other);
+                const auto total_distance =
+                    cell_distance + other_distance;
+                face_value =
+                    total_distance > scalar_type{}
+                  ? (other_distance * cell_value
+                     + cell_distance * local_values(other, 0))
+                        / total_distance
+                  : scalar_type{0.5}
+                        * (cell_value + local_values(other, 0));
+            }
+            else if (mesh.is_boundary_face(face_lid))
+            {
+                const auto location = boundary_locations.at(
+                    static_cast<size_t>(face_lid));
+                if (location.active)
+                {
+                    const auto condition = boundary_condition(
+                        location.batch_id, location.in_batch_id);
+                    switch (condition.type)
+                    {
+                        case BoundaryConditionType::Dirichlet:
+                            face_value = boundary_value(
+                                location.batch_id,
+                                location.in_batch_id);
+                            break;
+                        case BoundaryConditionType::Neumann:
+                            face_value =
+                                cell_value
+                              + static_cast<scalar_type>(
+                                    condition.value)
+                              * static_cast<scalar_type>(
+                                    detail::boundary_normal_distance(
+                                        mesh, face_lid, cell_lid));
+                            break;
+                        default:
+                            throw std::invalid_argument(
+                                "Gauss-linear scalar gradients support only "
+                                "Dirichlet and Neumann boundaries.");
+                    }
+                }
+            }
+            gradient =
+                gradient
+              + mesh.face_area_vector_outward(face_lid, cell_lid)
+                    * face_value;
+        }
+        gradient =
+            gradient
+          / static_cast<scalar_type>(
+                mesh.cell_volume(cell_lid));
+        gradient_values(cell_lid, 0) = gradient.x;
+        gradient_values(cell_lid, 1) = gradient.y;
+        gradient_values(cell_lid, 2) = gradient.z;
+    }
+}
+
+/** @brief Compute a Gauss-linear scalar gradient from a boundary map. */
+template<TpetraTypePack Pack>
+void gauss_linear_cell_gradient(
+    const CellField<Pack>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellField<Pack>& gradients)
+{
+    auto boundary_condition = [&](int batch_id, size_t)
+    {
+        const auto& name =
+            field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        return static_cast<typename Pack::scalar_type>(
+            boundary_condition(batch_id, in_batch_id).value);
+    };
+    gauss_linear_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/** @brief Compute an interior Gauss-linear gradient with zero-normal walls. */
+template<TpetraTypePack Pack>
+void gauss_linear_cell_gradient(
+    const CellField<Pack>& field,
+    VectorCellField<Pack>& gradients)
+{
+    auto boundary_condition = [](int, size_t)
+    {
+        return BoundaryCondition{};
+    };
+    auto boundary_value = [](int, size_t)
+    {
+        return typename Pack::scalar_type{};
+    };
+    gauss_linear_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/**
+ * @brief Reconstruct a boundary-aware scalar gradient with a selected scheme.
+ *
+ * The least-squares path reuses @p cache.  Gauss-linear reconstruction does
+ * not need the cache, but accepts the same call surface so solver-level
+ * gradient selection remains scoped and explicit.
+ */
+template<TpetraTypePack Pack>
+void cell_gradient(
+    const CellField<Pack>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellField<Pack>& gradients,
+    const CellGradientCache<Pack>& cache,
+    CellGradientScheme scheme)
+{
+    if (scheme == CellGradientScheme::GaussLinear)
+    {
+        gauss_linear_cell_gradient(
+            field, boundary_conditions, gradients);
+        return;
+    }
+    cell_gradient(
+        field, boundary_conditions, gradients, cache);
+}
+
+/**
+ * @brief Compute a Gauss-linear vector gradient using boundary face values.
+ */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+void gauss_linear_cell_gradient(
+    const VectorCellField<Pack>& field,
+    BoundaryValueProvider boundary_value,
+    TensorCellField<Pack>& gradients)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using vec_type = typename VectorCellField<Pack>::vec_type;
+
+    const auto& mesh = field.mesh();
+    if (&gradients.mesh() != &mesh)
+    {
+        throw std::invalid_argument(
+            "gauss_linear_cell_gradient requires input and output fields "
+            "on one mesh.");
+    }
+    const auto boundary_locations =
+        detail::boundary_face_locations(mesh);
+    const auto local_values = field.local_read_view();
+    auto gradient_values = gradients.owned_write_view();
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<local_ordinal_type>(owned);
+        const vec_type cell_value{
+            local_values(cell_lid, 0),
+            local_values(cell_lid, 1),
+            local_values(cell_lid, 2)};
+        typename TensorCellField<Pack>::tensor_type gradient{};
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            auto face_value = cell_value;
+            if (mesh.is_interior_face(face_lid))
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                const auto cell_distance =
+                    mesh.cell_to_face_distance(face_lid, cell_lid);
+                const auto other_distance =
+                    mesh.cell_to_face_distance(face_lid, other);
+                const auto total_distance =
+                    cell_distance + other_distance;
+                const vec_type other_value{
+                    local_values(other, 0),
+                    local_values(other, 1),
+                    local_values(other, 2)};
+                face_value =
+                    total_distance > scalar_type{}
+                  ? (cell_value * other_distance
+                     + other_value * cell_distance)
+                        / total_distance
+                  : (cell_value + other_value)
+                        / scalar_type{2};
+            }
+            else if (mesh.is_boundary_face(face_lid))
+            {
+                const auto location = boundary_locations.at(
+                    static_cast<size_t>(face_lid));
+                if (location.active)
+                {
+                    face_value = boundary_value(
+                        location.batch_id,
+                        location.in_batch_id);
+                }
+            }
+            const auto area =
+                mesh.face_area_vector_outward(face_lid, cell_lid);
+            gradient[0] =
+                gradient[0] + area * face_value.x;
+            gradient[1] =
+                gradient[1] + area * face_value.y;
+            gradient[2] =
+                gradient[2] + area * face_value.z;
+        }
+        const auto inverse_volume =
+            scalar_type{1}
+          / static_cast<scalar_type>(
+                mesh.cell_volume(cell_lid));
+        for (size_t component = 0;
+             component < VectorCellField<Pack>::num_components;
+             ++component)
+        {
+            gradient[component] =
+                gradient[component] * inverse_volume;
+            gradient_values(cell_lid, component * 3) =
+                gradient[component].x;
+            gradient_values(cell_lid, component * 3 + 1) =
+                gradient[component].y;
+            gradient_values(cell_lid, component * 3 + 2) =
+                gradient[component].z;
+        }
+    }
 }
 
 /**

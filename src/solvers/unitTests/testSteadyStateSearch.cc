@@ -64,6 +64,8 @@ TEST(AdaptiveSteadyStateControllerTest, RampsByCourantAndRequiresSustainedUpdate
     options.target_courant_number = 0.8;
     options.time_step_growth_factor = 2.0;
     options.time_step_reduction_factor = 0.5;
+    options.rejection_recovery_steps = 2;
+    options.rejection_time_step_safety_factor = 0.9;
 
     SimpleFluid::AdaptiveSteadyStateController controller(options, 0.1);
     const SimpleFluid::SteadyStateUpdateRates<double> small_updates{0.05, 0.04, 0.03};
@@ -88,7 +90,26 @@ TEST(AdaptiveSteadyStateControllerTest, RampsByCourantAndRequiresSustainedUpdate
     EXPECT_FALSE(failed.steady);
     EXPECT_DOUBLE_EQ(failed.next_time_step, 0.2);
     EXPECT_DOUBLE_EQ(controller.rejected_time_step(0.2), 0.1);
-    EXPECT_DOUBLE_EQ(controller.rejected_time_step(0.01), 0.01);
+    SimpleFluid::AdaptiveSteadyStateController floor_controller(
+        options, 0.1);
+    EXPECT_DOUBLE_EQ(
+        floor_controller.rejected_time_step(0.01), 0.01);
+
+    const auto first_recovery =
+        controller.observe(1.2, 0.1, 0.1, small_updates, true);
+    EXPECT_DOUBLE_EQ(first_recovery.next_time_step, 0.1);
+    const auto second_recovery =
+        controller.observe(1.3, 0.1, 0.1, small_updates, true);
+    EXPECT_DOUBLE_EQ(second_recovery.next_time_step, 0.1);
+    const auto recovered =
+        controller.observe(1.4, 0.1, 0.1, small_updates, true);
+    EXPECT_DOUBLE_EQ(recovered.next_time_step, 0.18);
+
+    EXPECT_DOUBLE_EQ(
+        controller.rejected_time_step(0.18), 0.09);
+    const auto lower_ceiling =
+        controller.observe(1.49, 0.09, 0.1, small_updates, true);
+    EXPECT_DOUBLE_EQ(lower_ceiling.next_time_step, 0.09);
 }
 
 TEST(AdaptiveSteadyStateControllerTest, RejectsInvalidControlsAndObservations)
@@ -100,6 +121,16 @@ TEST(AdaptiveSteadyStateControllerTest, RejectsInvalidControlsAndObservations)
 
     options = {};
     options.maximum_retries_per_step = -1;
+    EXPECT_THROW(SimpleFluid::AdaptiveSteadyStateController(options, 1.0e-3),
+                 std::invalid_argument);
+
+    options = {};
+    options.rejection_recovery_steps = -1;
+    EXPECT_THROW(SimpleFluid::AdaptiveSteadyStateController(options, 1.0e-3),
+                 std::invalid_argument);
+
+    options = {};
+    options.rejection_time_step_safety_factor = 1.0;
     EXPECT_THROW(SimpleFluid::AdaptiveSteadyStateController(options, 1.0e-3),
                  std::invalid_argument);
 

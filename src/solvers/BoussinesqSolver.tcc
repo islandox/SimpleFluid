@@ -1371,7 +1371,8 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
         pressure(),
         d_problem.boundary_conditions().pressure,
         predictor_pressure_gradient(),
-        this->pressure_face_flux_workspace().gradient_cache());
+        this->pressure_face_flux_workspace().gradient_cache(),
+        d_problem.time_options().pressure_gradient_scheme);
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
     const auto* turbulence = find_turbulence_model();
@@ -1776,7 +1777,8 @@ void BoussinesqSolver<Pack>::step()
                     : nullptr,
                 turbulence != nullptr
                     ? turbulence->effective_thermal_conductivity_boundary_cache()
-                    : nullptr);
+                    : nullptr,
+                d_problem.time_options().coefficient_interpolation);
     }
     else
     {
