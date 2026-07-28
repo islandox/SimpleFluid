@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <type_traits>
 
 namespace SimpleFluid
 {

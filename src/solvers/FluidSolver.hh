@@ -23,9 +23,7 @@
 #include "solvers/CoupledPressureVelocitySolver.hh"
 #include "solvers/SolverProgress.hh"
 
-#include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 namespace SimpleFluid
