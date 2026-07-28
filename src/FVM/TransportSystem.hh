@@ -1448,7 +1448,9 @@ weighted_scalar_transport_system(
     std::function<std::optional<typename Pack::scalar_type>(
         typename Pack::local_ordinal_type)> fixed_cell_value = {},
     const BoundaryCache<Pack>* boundary_diffusivity = nullptr,
-    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation =
+        FaceCoefficientInterpolation::Harmonic)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1689,10 +1691,11 @@ weighted_scalar_transport_system(
                         face_lid, cell_lid);
                 row_values.ensure(other);
                 const auto face_diffusivity =
-                    detail::harmonic_face_value(
+                    detail::face_coefficient_value(
                         mesh, face_lid, cell_lid, other,
                         diffusivity_data(cell_lid, 0),
-                        diffusivity_data(other, 0));
+                        diffusivity_data(other, 0),
+                        coefficient_interpolation);
                 if (face_diffusivity <= scalar_type{})
                     continue;
                 const auto coefficient =
@@ -1826,7 +1829,8 @@ weighted_scalar_transport_system(
             *rhs,
             explicit_weight,
             boundary_face_diffusivity,
-            &gradient_stencils);
+            &gradient_stencils,
+            coefficient_interpolation);
     }
     // An explicit correction is an RHS update, so restore constrained values
     // after it to keep fixed rows exactly equal to phi = phi_fixed.
@@ -1882,7 +1886,9 @@ physical_temperature_transport_system(
     const CellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     const BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr,
-    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation =
+        FaceCoefficientInterpolation::Harmonic)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -2097,10 +2103,11 @@ physical_temperature_transport_system(
                         face_lid, cell_lid);
                 row_values.ensure(other);
                 const auto face_conductivity =
-                    detail::harmonic_face_value(
+                    detail::face_coefficient_value(
                         mesh, face_lid, cell_lid, other,
                         conductivity_data(cell_lid, 0),
-                        conductivity_data(other, 0));
+                        conductivity_data(other, 0),
+                        coefficient_interpolation);
                 if (face_conductivity <= scalar_type{})
                 {
                     continue;
@@ -2229,7 +2236,8 @@ physical_temperature_transport_system(
             *rhs,
             explicit_weight,
             boundary_conductivity,
-            &gradient_stencils);
+            &gradient_stencils,
+            coefficient_interpolation);
     }
 
     matrix->fillComplete();
@@ -2271,7 +2279,9 @@ physical_momentum_transport_system(
     BoundaryDiffusionProvider boundary_diffusion =
         BoundaryDiffusionProvider{},
     const BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr,
-    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr)
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation =
+        FaceCoefficientInterpolation::Harmonic)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -2490,10 +2500,11 @@ physical_momentum_transport_system(
                         face_lid, cell_lid);
                 row_values.ensure(other);
                 const auto face_kinematic_viscosity =
-                    detail::harmonic_face_value(
+                    detail::face_coefficient_value(
                         mesh, face_lid, cell_lid, other,
                         viscosity_data(cell_lid, 0),
-                        viscosity_data(other, 0))
+                        viscosity_data(other, 0),
+                        coefficient_interpolation)
                   / reference_density;
                 if (face_kinematic_viscosity <= scalar_type{})
                 {
@@ -2630,7 +2641,8 @@ physical_momentum_transport_system(
             boundary_diffusion,
             boundary_viscosity,
             &gradient_stencils,
-            &boundary_locations);
+            &boundary_locations,
+            coefficient_interpolation);
     }
 
     add_explicit_deviatoric_transpose_gradient_stress<Pack>(
@@ -2642,7 +2654,8 @@ physical_momentum_transport_system(
         boundary_diffusion,
         boundary_viscosity,
         &gradient_stencils,
-        &boundary_locations);
+        &boundary_locations,
+        coefficient_interpolation);
 
     matrix->fillComplete();
     return {matrix, rhs};

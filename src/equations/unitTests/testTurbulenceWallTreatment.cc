@@ -379,8 +379,11 @@ TEST(TurbulenceWallTreatmentTest,
     EXPECT_GT(*logarithmic.production_override(0), 0.0);
 }
 
-/** @brief Verifies equal face-count averaging for high-Re corner cells. */
-TEST(TurbulenceWallTreatmentTest, HighReCornerCellsUseEqualFaceCountAveraging)
+/**
+ * @brief Verifies OpenFOAM combined distance and equal-count corner averaging.
+ */
+TEST(TurbulenceWallTreatmentTest,
+     HighReCornerCellsUseCombinedWallDistanceAndEqualFaceCountAveraging)
 {
     auto mesh = rectangular_single_cell_mesh();
     auto boundaries = wall_boundaries();
@@ -407,6 +410,10 @@ TEST(TurbulenceWallTreatmentTest, HighReCornerCellsUseEqualFaceCountAveraging)
     ASSERT_TRUE(yface.secondary_constraint.has_value());
     ASSERT_TRUE(xface.production_override.has_value());
     ASSERT_TRUE(yface.production_override.has_value());
+    EXPECT_DOUBLE_EQ(xface.wall_distance, 0.5);
+    EXPECT_DOUBLE_EQ(yface.wall_distance, 0.5);
+    EXPECT_DOUBLE_EQ(*xface.secondary_constraint,
+                     *yface.secondary_constraint);
     EXPECT_NEAR(*evaluation.secondary_constraint(0),
                 0.5 * (*xface.secondary_constraint + *yface.secondary_constraint),
                 1.0e-13);

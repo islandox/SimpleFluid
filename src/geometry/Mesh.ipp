@@ -489,6 +489,10 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
     const auto& owner_center = d_cells[static_cast<size_t>(info.owner)].center;
     const auto& paired_center = d_cells[static_cast<size_t>(paired_cell_lid)].center;
     auto periodic_distance = (paired_center - owner_center).norm();
+    auto periodic_neighbor_to_face_distance =
+        periodic_distance > info.owner_to_face_distance
+            ? periodic_distance - info.owner_to_face_distance
+            : info.owner_to_face_distance;
 
     // Prefer the wrapped distance through the paired exterior face.  The
     // Euclidean fallback preserves the previous behavior for ad hoc pairings.
@@ -519,17 +523,24 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
                     : candidate.neighbor_to_face_distance;
             periodic_distance =
                 info.owner_to_face_distance + paired_face_distance;
+            periodic_neighbor_to_face_distance =
+                paired_face_distance;
             break;
         }
     }
 
     info.neighbor = paired_cell_lid;
+    info.neighbor_to_face_distance =
+        periodic_neighbor_to_face_distance;
     info.cell_center_distance = periodic_distance;
 
     const auto face_index = static_cast<size_t>(face_lid);
     if (d_host_views.face_topology.neighbor.size() == d_faces.size())
     {
         d_host_views.face_topology.neighbor[face_index] = paired_cell_lid;
+        d_host_views.face_geometry
+            .neighbor_to_face_distance[face_index] =
+            periodic_neighbor_to_face_distance;
         d_host_views.face_geometry.cell_center_distance[face_index] =
             periodic_distance;
         d_host_views.face_geometry.owner_to_neighbor[face_index] =

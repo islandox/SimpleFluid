@@ -242,8 +242,8 @@ TEST(TurbulenceBuoyancyTest,
     // OpenFOAM fv::buoyancyTurbSource uses
     // C3 = tanh((|U_perpendicular| + SMALL) / |U_parallel|).
     EXPECT_NEAR(parallel.second, baseline.second, 1.0e-13);
-    EXPECT_GT(perpendicular.second - baseline.second, 1.0e-12);
-    EXPECT_GT(zero.second - baseline.second, 1.0e-12);
+    EXPECT_LT(perpendicular.second - baseline.second, -1.0e-12);
+    EXPECT_LT(zero.second - baseline.second, -1.0e-12);
     EXPECT_NEAR(perpendicular.second, zero.second, 1.0e-13);
 
     // C3 modifies only epsilon; buoyancy production in k is orientation-free.
@@ -251,7 +251,9 @@ TEST(TurbulenceBuoyancyTest,
     EXPECT_NEAR(parallel.first, zero.first, 1.0e-13);
 }
 
-/** @brief Every closure publishes the signed OpenFOAM Boussinesq source. */
+/**
+ * @brief Every closure publishes OpenFOAM's signed equation contribution.
+ */
 TEST(TurbulenceBuoyancyTest,
      EveryClosureMatchesSignedTemperatureGradientProduction)
 {
@@ -313,7 +315,7 @@ TEST(TurbulenceBuoyancyTest,
                 const auto nu_t =
                     model.turbulent_kinematic_viscosity().value(cell_lid);
                 const auto expected =
-                    buoyancy_coefficient * thermal_expansion
+                    -buoyancy_coefficient * thermal_expansion
                   * (nu_t / turbulent_prandtl)
                   * gravity_x * temperature_slope;
                 const auto actual = production->value(cell_lid);
@@ -322,11 +324,11 @@ TEST(TurbulenceBuoyancyTest,
                     std::max(1.0e-13, std::abs(expected) * 1.0e-10));
                 if (gravity_x > 0.0)
                 {
-                    EXPECT_GT(actual, 0.0);
+                    EXPECT_LT(actual, 0.0);
                 }
                 else
                 {
-                    EXPECT_LT(actual, 0.0);
+                    EXPECT_GT(actual, 0.0);
                 }
 
                 const auto k =
@@ -358,7 +360,7 @@ TEST(TurbulenceBuoyancyTest,
                         secondary->value(cell_lid)
                         - baseline_secondary->value(cell_lid)),
                     1.0e-13);
-                if (gravity_x < 0.0)
+                if (gravity_x > 0.0)
                 {
                     EXPECT_LT(
                         k,

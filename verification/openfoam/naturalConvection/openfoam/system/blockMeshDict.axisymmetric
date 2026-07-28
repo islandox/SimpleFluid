@@ -1,0 +1,89 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+scale 0.001;
+
+// One 2.25-degree sector has the same angular cell width as the full
+// 45-degree, 20-cell comparison mesh.  Symmetry planes remove azimuthal
+// modes while preserving the R-Z discretisation used by each full-mesh
+// sector.
+vertices
+(
+    (75 0 0)       (262.5 0 0)       (600 0 0)
+    (75 0 120)     (262.5 0 120)     (600 0 120)
+    (75 0 1500)    (262.5 0 1500)    (600 0 1500)
+    (74.9421777181 2.94448618193 0)
+    (262.297622013 10.3057016368 0)
+    (599.537421744 23.5558894554 0)
+    (74.9421777181 2.94448618193 120)
+    (262.297622013 10.3057016368 120)
+    (599.537421744 23.5558894554 120)
+    (74.9421777181 2.94448618193 1500)
+    (262.297622013 10.3057016368 1500)
+    (599.537421744 23.5558894554 1500)
+);
+
+blocks
+(
+    hex (0 1 10 9 3 4 13 12) (20 1 20) simpleGrading (3 1 2)
+    hex (1 2 11 10 4 5 14 13) (20 1 20) simpleGrading (1 1 2)
+    hex (3 4 13 12 6 7 16 15) (20 1 80) simpleGrading (3 1 1.5)
+    hex (4 5 14 13 7 8 17 16) (20 1 80) simpleGrading (1 1 1.5)
+);
+
+edges
+(
+    arc 0 9 (74.9855430362 1.47252693455 0)
+    arc 1 10 (262.449400627 5.15384427091 0)
+    arc 11 2 (599.884344289 11.7802154764 0)
+    arc 3 12 (74.9855430362 1.47252693455 120)
+    arc 4 13 (262.449400627 5.15384427091 120)
+    arc 14 5 (599.884344289 11.7802154764 120)
+    arc 6 15 (74.9855430362 1.47252693455 1500)
+    arc 7 16 (262.449400627 5.15384427091 1500)
+    arc 17 8 (599.884344289 11.7802154764 1500)
+);
+
+boundary
+(
+    pipeWall
+    {
+        type wall;
+        faces ((0 9 12 3) (3 12 15 6));
+    }
+    tunnelWall
+    {
+        type wall;
+        faces ((5 8 17 14));
+    }
+    downWall
+    {
+        type wall;
+        faces ((0 1 10 9) (1 2 11 10));
+    }
+    inlet
+    {
+        type wall;
+        faces ((2 5 14 11));
+    }
+    outlet
+    {
+        type wall;
+        faces ((6 15 16 7) (7 16 17 8));
+    }
+    cyclicLeft
+    {
+        type symmetryPlane;
+        faces ((0 3 4 1) (1 4 5 2) (3 6 7 4) (4 7 8 5));
+    }
+    cyclicRight
+    {
+        type symmetryPlane;
+        faces ((9 10 13 12) (10 11 14 13) (12 13 16 15) (13 14 17 16));
+    }
+);
+
+mergePatchPairs ();

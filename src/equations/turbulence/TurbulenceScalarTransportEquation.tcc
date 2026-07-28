@@ -64,7 +64,9 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
     scalar_type positive_floor, FVM::NonOrthogonalTreatment treatment,
     const LinearSolverOptions& linear_options,
-    const boundary_overrides_type* boundary_overrides) const -> LinearSolveStatistics
+    const boundary_overrides_type* boundary_overrides,
+    FVM::FaceCoefficientInterpolation coefficient_interpolation) const
+    -> LinearSolveStatistics
 {
     constexpr const char* class_name = "TurbulenceScalarTransportEquation";
     /** @brief Validated boundary condition prepared for transport assembly. */
@@ -366,7 +368,8 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
                 boundary_overrides != nullptr
                     ? boundary_overrides->boundary_diffusivity
                     : nullptr,
-                &d_transport_geometry_cache);
+                &d_transport_geometry_cache,
+                coefficient_interpolation);
         }
         catch (...)
         {

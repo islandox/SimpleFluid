@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <stdexcept>
 #include <type_traits>
@@ -770,6 +771,9 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
     Arr<size_t> face_counts(d_mesh->num_owned_cells(), 0);
     Arr<scalar_type> secondary_sums(d_mesh->num_owned_cells(), scalar_type{});
     Arr<scalar_type> production_sums(d_mesh->num_owned_cells(), scalar_type{});
+    Arr<scalar_type> combined_wall_distances(
+        d_mesh->num_local_cells(),
+        std::numeric_limits<scalar_type>::infinity());
     const auto k_values = turbulent_kinetic_energy.local_read_view();
     const auto density_values = material.density.local_read_view();
     const auto heat_capacity_values =
@@ -784,6 +788,46 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
         *d_mesh, "Turbulence wall face evaluation",
         [&]
         {
+            if constexpr (
+                std::is_same_v<Policy,
+                               StandardHighReKEpsilonWallPolicy>)
+            {
+                // OpenFOAM's nearWallDist searches one combined wall patch.
+                // For a cell incident on multiple configured wall faces this
+                // makes every face use the nearest incident-wall distance.
+                for (const auto& wall_batch : d_local_wall_batches)
+                {
+                    const auto& batch =
+                        d_mesh->boundary_batches().at(wall_batch.id);
+                    for (const auto face_lid : batch.face_lids)
+                    {
+                        if (!d_mesh->is_boundary_face(face_lid))
+                        {
+                            throw std::invalid_argument(
+                                "Configured turbulence wall batch contains "
+                                "a non-boundary face.");
+                        }
+                        const auto owner = d_mesh->owner_cell(face_lid);
+                        const auto distance =
+                            static_cast<scalar_type>(
+                                FVM::detail::boundary_normal_distance(
+                                    *d_mesh, face_lid, owner));
+                        if (!std::isfinite(distance)
+                            || distance <= scalar_type{})
+                        {
+                            throw std::invalid_argument(
+                                "Turbulence wall treatment requires a "
+                                "finite positive wall distance.");
+                        }
+                        auto& combined_distance =
+                            combined_wall_distances.at(
+                                static_cast<size_t>(owner));
+                        combined_distance =
+                            std::min(combined_distance, distance);
+                    }
+                }
+            }
+
             for (const auto& wall_batch : d_local_wall_batches)
             {
                 const auto& batch = d_mesh->boundary_batches().at(wall_batch.id);
@@ -808,8 +852,17 @@ auto TurbulenceWallTreatment<Pack, Policy>::evaluate(
                                                     "contains a non-boundary face.");
                     }
                     const auto owner = d_mesh->owner_cell(face_lid);
-                    const auto distance = static_cast<scalar_type>(
-                        FVM::detail::boundary_normal_distance(*d_mesh, face_lid, owner));
+                    auto distance = static_cast<scalar_type>(
+                        FVM::detail::boundary_normal_distance(
+                            *d_mesh, face_lid, owner));
+                    if constexpr (
+                        std::is_same_v<
+                            Policy,
+                            StandardHighReKEpsilonWallPolicy>)
+                    {
+                        distance = combined_wall_distances.at(
+                            static_cast<size_t>(owner));
+                    }
                     const auto k = k_values(owner, 0);
                     const auto density = density_values(owner, 0);
                     const auto heat_capacity =

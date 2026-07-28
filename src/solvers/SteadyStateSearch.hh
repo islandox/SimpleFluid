@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -69,6 +70,15 @@ struct SteadyStateSearchOptions
     real_t target_courant_number = 0.8;
     real_t time_step_growth_factor = 1.5;
     real_t time_step_reduction_factor = 0.5;
+    int rejection_recovery_steps = 5;
+    /**
+     * @brief Persistent ceiling learned from a rejected step.
+     *
+     * After a failed attempt at dt, later growth is capped at this fraction
+     * of dt so the controller does not repeatedly rediscover the same
+     * unstable step size.
+     */
+    real_t rejection_time_step_safety_factor = 0.9;
     SteadyStateUpdateScales update_scales;
 };
 
@@ -101,6 +111,11 @@ inline void validate_steady_state_search_options(const SteadyStateSearchOptions&
     if (options.maximum_retries_per_step < 0)
     {
         throw std::invalid_argument("Steady-state maximum retries per step cannot be negative.");
+    }
+    if (options.rejection_recovery_steps < 0)
+    {
+        throw std::invalid_argument(
+            "Steady-state rejection recovery steps cannot be negative.");
     }
     if (!finite_positive(options.relative_update_tolerance))
     {
@@ -135,6 +150,13 @@ inline void validate_steady_state_search_options(const SteadyStateSearchOptions&
         options.time_step_reduction_factor <= 0.0 || options.time_step_reduction_factor >= 1.0)
     {
         throw std::invalid_argument("Steady-state time-step reduction factor must lie in (0, 1).");
+    }
+    if (!std::isfinite(options.rejection_time_step_safety_factor) ||
+        options.rejection_time_step_safety_factor <= 0.0 ||
+        options.rejection_time_step_safety_factor >= 1.0)
+    {
+        throw std::invalid_argument(
+            "Steady-state rejection safety factor must lie in (0, 1).");
     }
     if (!finite_positive(options.update_scales.velocity) ||
         !finite_positive(options.update_scales.temperature) ||
@@ -223,8 +245,15 @@ public:
             d_consecutive_converged_steps = 0;
         }
 
-        const auto next_time_step =
+        auto next_time_step =
             adapted_time_step(time_step, maximum_courant_number, solver_converged);
+        if (d_rejection_recovery_steps_remaining > 0)
+        {
+            next_time_step = std::min(next_time_step, time_step);
+            --d_rejection_recovery_steps_remaining;
+        }
+        next_time_step = std::min(
+            next_time_step, d_rejection_time_step_ceiling);
         return {d_iterations,
                 d_options.maximum_steps,
                 d_consecutive_converged_steps,
@@ -241,15 +270,28 @@ public:
     /**
      * @brief Reduce a rejected pseudo-time step without accepting an iteration.
      */
-    real_t rejected_time_step(real_t time_step) const
+    real_t rejected_time_step(real_t time_step)
     {
         if (!std::isfinite(time_step) || time_step <= 0.0)
         {
             throw std::invalid_argument(
                 "Rejected steady-state time step must be finite and positive.");
         }
-        return std::clamp(time_step * d_options.time_step_reduction_factor,
-                          d_options.minimum_time_step, d_options.maximum_time_step);
+        d_rejection_recovery_steps_remaining =
+            d_options.rejection_recovery_steps;
+        d_rejection_time_step_ceiling = std::min(
+            d_rejection_time_step_ceiling,
+            std::clamp(
+                time_step
+                    * d_options.rejection_time_step_safety_factor,
+                d_options.minimum_time_step,
+                d_options.maximum_time_step));
+        return std::min(
+            std::clamp(
+                time_step * d_options.time_step_reduction_factor,
+                d_options.minimum_time_step,
+                d_options.maximum_time_step),
+            d_rejection_time_step_ceiling);
     }
 
 private:
@@ -274,6 +316,9 @@ private:
     SteadyStateSearchOptions d_options;
     int d_iterations = 0;
     int d_consecutive_converged_steps = 0;
+    int d_rejection_recovery_steps_remaining = 0;
+    real_t d_rejection_time_step_ceiling =
+        std::numeric_limits<real_t>::infinity();
 };
 
 /**

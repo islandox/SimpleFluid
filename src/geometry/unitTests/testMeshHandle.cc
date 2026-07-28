@@ -140,6 +140,9 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
     EXPECT_EQ(handle.owned_face_map(), legacy->owned_face_map());
     EXPECT_EQ(handle.cell_global_id(0),
               legacy->owned_cell_map()->getGlobalElement(0));
+    EXPECT_EQ(
+        handle.cell_geometry_global_id(0),
+        legacy->cell_global_id(0));
     EXPECT_EQ(handle.face_global_id(0),
               legacy->owned_face_map()->getGlobalElement(0));
     EXPECT_EQ(handle.num_owned_cells(), legacy->num_owned_cells());

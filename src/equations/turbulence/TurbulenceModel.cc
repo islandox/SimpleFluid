@@ -147,6 +147,24 @@ TurbulenceBuoyancyModel parse_turbulence_buoyancy_model(
  */
 void validate_turbulence_model_options(const TurbulenceModelOptions& options)
 {
+    switch (options.gradient_scheme)
+    {
+        case FVM::CellGradientScheme::LeastSquares:
+        case FVM::CellGradientScheme::GaussLinear:
+            break;
+        default:
+            throw std::invalid_argument(
+                "Unknown turbulence cell-gradient scheme.");
+    }
+    switch (options.coefficient_interpolation)
+    {
+        case FVM::FaceCoefficientInterpolation::Harmonic:
+        case FVM::FaceCoefficientInterpolation::Linear:
+            break;
+        default:
+            throw std::invalid_argument(
+                "Unknown turbulence face-coefficient interpolation.");
+    }
     const real_t positive_values[] = {options.initial_turbulent_kinetic_energy,
                                       options.initial_dissipation_rate,
                                       options.initial_specific_dissipation_rate,

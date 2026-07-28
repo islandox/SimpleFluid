@@ -497,7 +497,9 @@ void add_variable_explicit_non_orthogonal_correction(
         BoundaryCoefficientProvider{},
     const std::vector<
         detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>>*
-        gradient_stencils = nullptr)
+        gradient_stencils = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation =
+        FaceCoefficientInterpolation::Harmonic)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -558,10 +560,11 @@ void add_variable_explicit_non_orthogonal_correction(
                      gradient_values, other))
               / scalar_type{2};
             const auto face_coefficient =
-                detail::harmonic_face_value(
+                detail::face_coefficient_value(
                     mesh, face_lid, cell_lid, other,
                     coefficient_values(cell_lid, 0),
-                    coefficient_values(other, 0));
+                    coefficient_values(other, 0),
+                    coefficient_interpolation);
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(
                     mesh.face_area_vector_outward(face_lid, cell_lid),
@@ -660,7 +663,9 @@ void add_variable_explicit_non_orthogonal_correction(
         detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>*
         gradient_stencils = nullptr,
     const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>*
-        cached_boundary_locations = nullptr)
+        cached_boundary_locations = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation =
+        FaceCoefficientInterpolation::Harmonic)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -752,10 +757,11 @@ void add_variable_explicit_non_orthogonal_correction(
                     mesh.opposite_or_periodic_neighbor_cell(
                         face_lid, cell_lid);
                 face_coefficient =
-                    detail::harmonic_face_value(
+                    detail::face_coefficient_value(
                         mesh, face_lid, cell_lid, other,
                         coefficient_values(cell_lid, 0),
-                        coefficient_values(other, 0));
+                        coefficient_values(other, 0),
+                        coefficient_interpolation);
                 const auto other_gradient =
                     detail::tensor_view_value<Pack>(
                         gradient_values, other);
@@ -861,7 +867,9 @@ void add_explicit_deviatoric_transpose_gradient_stress(
         detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>*
         gradient_stencils = nullptr,
     const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>*
-        cached_boundary_locations = nullptr)
+        cached_boundary_locations = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation =
+        FaceCoefficientInterpolation::Harmonic)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -947,10 +955,11 @@ void add_explicit_deviatoric_transpose_gradient_stress(
                          + other_gradient[component])
                       / scalar_type{2};
                 }
-                face_viscosity = detail::harmonic_face_value(
+                face_viscosity = detail::face_coefficient_value(
                     mesh, face_lid, cell_lid, other,
                     viscosity_values(cell_lid, 0),
-                    viscosity_values(other, 0));
+                    viscosity_values(other, 0),
+                    coefficient_interpolation);
             }
             else
             {

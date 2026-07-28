@@ -149,6 +149,14 @@ public:
     /** @brief Replace the pressure-projection policy for subsequent solves. */
     void set_pressure_linear_solver_options(LinearSolverOptions options);
 
+    /** @brief Return the current pressure-corrected volumetric face fluxes. */
+    const face_flux_field_type&
+    pressure_corrected_face_fluxes() const
+    {
+        return d_problem.template object<face_flux_field_type>(
+            "projected_face_flux");
+    }
+
     void write_vtu(const std::string& filename) const
     {
         d_mesh->export_vtu(filename);

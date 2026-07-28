@@ -328,7 +328,7 @@ TEST_F(MeshMethodTest, DistanceComputations)
 // ===========================================================================
 
 /**
- * @brief Verifies tetrahedron, hexahedron, and wedge volume computations and point averaging.
+ * @brief Verifies volume, centroid, and point-average geometry utilities.
  */
 TEST(MeshUtilsTest, VolumeComputations)
 {
@@ -359,6 +359,15 @@ TEST(MeshUtilsTest, VolumeComputations)
         SimpleFluid::MeshUtils::tetra_volume(
             Vec3{0, 0, 0}, Vec3{1, 0, 0}, Vec3{0, 1, 0}, Vec3{1, 1, 0}),
         0.0);
+    {
+        const auto centroid =
+            SimpleFluid::MeshUtils::tetra_centroid(
+                Vec3{0, 0, 0}, Vec3{1, 0, 0},
+                Vec3{0, 1, 0}, Vec3{0, 0, 1});
+        EXPECT_DOUBLE_EQ(centroid.x, 0.25);
+        EXPECT_DOUBLE_EQ(centroid.y, 0.25);
+        EXPECT_DOUBLE_EQ(centroid.z, 0.25);
+    }
 
     // Hexahedron volume (unit cube)
     {
@@ -366,6 +375,33 @@ TEST(MeshUtilsTest, VolumeComputations)
             {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
             {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
         EXPECT_DOUBLE_EQ(SimpleFluid::MeshUtils::hex_volume(cube), 1.0);
+        const auto centroid = SimpleFluid::MeshUtils::hex_centroid(cube);
+        EXPECT_DOUBLE_EQ(centroid.x, 0.5);
+        EXPECT_DOUBLE_EQ(centroid.y, 0.5);
+        EXPECT_DOUBLE_EQ(centroid.z, 0.5);
+    }
+
+    // Graded annular-sector analogue: vertex averaging would give x=1.5,
+    // while the exact trapezoidal-prism centroid is x=14/9.
+    {
+        const std::vector<Vec3> graded_sector = {
+            {1, -1, 0}, {2, -2, 0}, {2, 2, 0}, {1, 1, 0},
+            {1, -1, 1}, {2, -2, 1}, {2, 2, 1}, {1, 1, 1}};
+        EXPECT_DOUBLE_EQ(
+            SimpleFluid::MeshUtils::hex_volume(graded_sector), 3.0);
+        const auto centroid =
+            SimpleFluid::MeshUtils::hex_centroid(graded_sector);
+        EXPECT_NEAR(centroid.x, 14.0 / 9.0, 1.0e-14);
+        EXPECT_NEAR(centroid.y, 0.0, 1.0e-14);
+        EXPECT_NEAR(centroid.z, 0.5, 1.0e-14);
+
+        const std::vector<Vec3> graded_face(
+            graded_sector.begin(), graded_sector.begin() + 4);
+        const auto face_centroid =
+            SimpleFluid::MeshUtils::face_centroid(graded_face);
+        EXPECT_NEAR(face_centroid.x, 14.0 / 9.0, 1.0e-14);
+        EXPECT_NEAR(face_centroid.y, 0.0, 1.0e-14);
+        EXPECT_DOUBLE_EQ(face_centroid.z, 0.0);
     }
 
     // Wedge volume
@@ -374,6 +410,11 @@ TEST(MeshUtilsTest, VolumeComputations)
             {0, 0, 0}, {1, 0, 0}, {0, 1, 0},
             {0, 0, 1}, {1, 0, 1}, {0, 1, 1}};
         EXPECT_DOUBLE_EQ(SimpleFluid::MeshUtils::wedge_volume(wedge), 0.5);
+        const auto centroid =
+            SimpleFluid::MeshUtils::wedge_centroid(wedge);
+        EXPECT_NEAR(centroid.x, 1.0 / 3.0, 1.0e-14);
+        EXPECT_NEAR(centroid.y, 1.0 / 3.0, 1.0e-14);
+        EXPECT_DOUBLE_EQ(centroid.z, 0.5);
     }
 }
 

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "FVM/CellGradientScheme.hh"
 #include "FVM/FaceFlux.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/vec3.hh"
@@ -102,6 +103,10 @@ struct TurbulenceModelOptions
     real_t min_dissipation_rate = 1.0e-12; ///< Positive @f$\epsilon@f$ floor.
     real_t min_specific_dissipation_rate = 1.0e-12; ///< Positive @f$\omega@f$ floor.
     real_t turbulent_prandtl_number = 0.9;
+    FVM::CellGradientScheme gradient_scheme =
+        FVM::CellGradientScheme::LeastSquares;
+    FVM::FaceCoefficientInterpolation coefficient_interpolation =
+        FVM::FaceCoefficientInterpolation::Harmonic;
     /** Optional uniform override; otherwise BSL/SST solve wall distance. */
     std::optional<real_t> initial_wall_distance;
     /**
@@ -239,6 +244,21 @@ public:
     void refresh_effective_properties(const material_type& material, scalar_type reference_density);
 
     /**
+     * @brief Transactionally restore transported and eddy-viscosity fields.
+     *
+     * This restart-oriented operation validates and publishes k, epsilon or
+     * omega, and nu_t together, then rebuilds gradients, wall data, and
+     * effective properties from the supplied accepted velocity.
+     */
+    void restore_transported_state(
+        const field_type& turbulent_kinetic_energy,
+        const field_type& secondary,
+        const field_type& turbulent_kinematic_viscosity,
+        const velocity_field_type& velocity,
+        const material_type& material,
+        scalar_type reference_density);
+
+    /**
      * @brief Replace the positive BSL/SST wall-distance field and refresh derived properties.
      *
      * The replacement distance, closure eddy viscosity, and effective
@@ -260,6 +280,14 @@ public:
     const field_type& effective_thermal_conductivity() const;
     /** Signed accepted buoyancy production, or null when disabled. */
     const field_type* buoyancy_production() const noexcept;
+    /** Explicit source assembled for the accepted k transport state. */
+    const field_type* turbulent_kinetic_energy_source() const noexcept;
+    /** Implicit sink coefficient assembled for the accepted k state. */
+    const field_type* turbulent_kinetic_energy_sink() const noexcept;
+    /** Explicit source assembled for epsilon or omega transport. */
+    const field_type* secondary_source() const noexcept;
+    /** Implicit sink coefficient assembled for epsilon or omega transport. */
+    const field_type* secondary_sink() const noexcept;
     /** Reconstructed or explicitly supplied Menter wall distance, if active. */
     const field_type* wall_distance() const noexcept;
 

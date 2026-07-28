@@ -9,17 +9,22 @@ if [ "${SIMPLEFLUID_SHIRI_NR+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_NZ+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEPS+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_DT+x}" = x ] \
+    || [ "${SIMPLEFLUID_SHIRI_RESTART_PREFIX+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_STATE+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_TOLERANCE+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_MIN_STEPS+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_CONSECUTIVE_STEPS+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_MAX_RETRIES+x}" = x ] \
+    || [ "${SIMPLEFLUID_SHIRI_STEADY_REJECTION_RECOVERY_STEPS+x}" = x ] \
+    || [ "${SIMPLEFLUID_SHIRI_STEADY_REJECTION_SAFETY+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_MIN_DT+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_MAX_DT+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_TARGET_COURANT+x}" = x ] \
     || [ "${SIMPLEFLUID_SHIRI_STEADY_DT_GROWTH+x}" = x ] \
-    || [ "${SIMPLEFLUID_SHIRI_STEADY_DT_REDUCTION+x}" = x ]; then
-    echo "Mesh/time/steady overrides are only supported by run_simplefluid.sh;" >&2
+    || [ "${SIMPLEFLUID_SHIRI_STEADY_DT_REDUCTION+x}" = x ] \
+    || [ "${SIMPLEFLUID_SHIRI_ENFORCE_AXISYMMETRY+x}" = x ] \
+    || [ "${SIMPLEFLUID_SHIRI_PRESSURE_VELOCITY_COUPLING+x}" = x ]; then
+    echo "Mesh/time/restart/steady overrides are only supported by run_simplefluid.sh;" >&2
     echo "the matched comparison requires the default 40x20x100, t=0.4 setup." >&2
     exit 2
 fi

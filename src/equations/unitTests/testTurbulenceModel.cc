@@ -218,6 +218,53 @@ TEST(TurbulenceModelTest, EveryClosureInitializesPositiveEddyViscosityAndEffecti
     }
 }
 
+/** @brief Verifies restart publication and dependent-property reconstruction. */
+TEST(TurbulenceModelTest, RestoresTransportedStateTransactionally)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    Model model(mesh, boundary_conditions);
+    const auto options =
+        make_model_options(ModelType::StandardKEpsilon);
+    model.configure(options, material, reference_density);
+
+    FieldType k(mesh, 0.4, "restart_k");
+    FieldType epsilon(mesh, 0.08, "restart_epsilon");
+    FieldType nu_t(mesh, 0.012, "restart_nu_t");
+    VectorFieldType velocity(
+        mesh, VectorFieldType::vec_type{0.5, -0.25, 0.1},
+        "restart_velocity");
+    model.restore_transported_state(
+        k, epsilon, nu_t, velocity, material,
+        reference_density);
+
+    EXPECT_DOUBLE_EQ(
+        model.turbulent_kinetic_energy().value(0), 0.4);
+    ASSERT_NE(model.dissipation_rate(), nullptr);
+    EXPECT_DOUBLE_EQ(
+        model.dissipation_rate()->value(0), 0.08);
+    EXPECT_DOUBLE_EQ(
+        model.turbulent_kinematic_viscosity().value(0), 0.012);
+    EXPECT_DOUBLE_EQ(
+        model.effective_dynamic_viscosity().value(0),
+        molecular_viscosity + reference_density * 0.012);
+    EXPECT_DOUBLE_EQ(
+        model.effective_thermal_conductivity().value(0),
+        molecular_conductivity
+      + density * heat_capacity * 0.012
+            / turbulent_prandtl_number);
+
+    FieldType invalid_k(mesh, -1.0, "invalid_restart_k");
+    EXPECT_THROW(
+        model.restore_transported_state(
+            invalid_k, epsilon, nu_t, velocity, material,
+            reference_density),
+        std::invalid_argument);
+    EXPECT_DOUBLE_EQ(
+        model.turbulent_kinetic_energy().value(0), 0.4);
+}
+
 /** @brief Verifies configuration rollback after effective-property overflow. */
 TEST(TurbulenceModelTest, ConfigureRejectsEffectivePropertyOverflowAndPreservesActiveModel)
 {

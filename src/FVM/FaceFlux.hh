@@ -215,6 +215,38 @@ namespace detail
 {
 
 /**
+ * @brief Geometric linear-interpolation weights for an interior face.
+ *
+ * The owner value is weighted by the neighbor-to-face distance and vice
+ * versa. Equal cell-to-face distances recover the arithmetic average.
+ */
+template<class MeshType>
+auto interior_face_linear_weights(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type owner,
+    typename MeshType::local_ordinal_type neighbor)
+    -> std::pair<typename MeshType::scalar_type,
+                 typename MeshType::scalar_type>
+{
+    using scalar_type = typename MeshType::scalar_type;
+    const auto owner_distance = static_cast<scalar_type>(
+        mesh.cell_to_face_distance(face_lid, owner));
+    const auto neighbor_distance = static_cast<scalar_type>(
+        mesh.cell_to_face_distance(face_lid, neighbor));
+    const auto total_distance = owner_distance + neighbor_distance;
+    if (!std::isfinite(owner_distance)
+        || !std::isfinite(neighbor_distance)
+        || total_distance <= scalar_type{})
+    {
+        return {scalar_type{0.5}, scalar_type{0.5}};
+    }
+    return {
+        neighbor_distance / total_distance,
+        owner_distance / total_distance};
+}
+
+/**
  * @brief Validate that the optional boundary cache matches the velocity
  *        field mesh.
  *
@@ -398,7 +430,11 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
         {
             const auto neighbor =
                 mesh.opposite_or_periodic_neighbor_cell(face_lid, owner);
-            value = (value + velocity.local_value(neighbor)) / 2.0;
+            const auto [owner_weight, neighbor_weight] =
+                interior_face_linear_weights(
+                    mesh, face_lid, owner, neighbor);
+            value = value * owner_weight
+                  + velocity.local_value(neighbor) * neighbor_weight;
             face_velocity.set_value(face_lid, value);
         }
     }
@@ -448,13 +484,16 @@ void assemble_normal_face_fluxes(
             continue;
         }
 
+        const auto [owner_weight, neighbor_weight] =
+            interior_face_linear_weights(
+                mesh, face_lid, owner, neighbor);
         const typename VectorCellField<Pack>::vec_type face_velocity{
-            (velocity_values(owner, 0)
-             + velocity_values(neighbor, 0)) / scalar_type{2},
-            (velocity_values(owner, 1)
-             + velocity_values(neighbor, 1)) / scalar_type{2},
-            (velocity_values(owner, 2)
-             + velocity_values(neighbor, 2)) / scalar_type{2}};
+            owner_weight * velocity_values(owner, 0)
+                + neighbor_weight * velocity_values(neighbor, 0),
+            owner_weight * velocity_values(owner, 1)
+                + neighbor_weight * velocity_values(neighbor, 1),
+            owner_weight * velocity_values(owner, 2)
+                + neighbor_weight * velocity_values(neighbor, 2)};
         flux_values(face_lid, 0) =
             face_velocity.dot(
                 face_geometry.unit_normal_from_owner[face])
@@ -697,7 +736,9 @@ void pressure_weighted_face_fluxes_impl(
     const BoundaryConditionMap* pressure_boundary_conditions,
     PressureWeightedFaceFluxWorkspace<Pack>& workspace,
     VectorCellField<Pack>* precomputed_pressure_gradient,
-    FaceField<Pack>& fluxes)
+    FaceField<Pack>& fluxes,
+    CellGradientScheme gradient_scheme =
+        CellGradientScheme::LeastSquares)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
@@ -750,10 +791,18 @@ void pressure_weighted_face_fluxes_impl(
     if (precomputed_pressure_gradient == nullptr
         && pressure_boundary_conditions == nullptr)
     {
-        cell_gradient(
-            pressure,
-            pressure_gradient,
-            workspace.gradient_cache());
+        if (gradient_scheme == CellGradientScheme::GaussLinear)
+        {
+            gauss_linear_cell_gradient(
+                pressure, pressure_gradient);
+        }
+        else
+        {
+            cell_gradient(
+                pressure,
+                pressure_gradient,
+                workspace.gradient_cache());
+        }
     }
     else if (precomputed_pressure_gradient == nullptr)
     {
@@ -761,7 +810,8 @@ void pressure_weighted_face_fluxes_impl(
             pressure,
             *pressure_boundary_conditions,
             pressure_gradient,
-            workspace.gradient_cache());
+            workspace.gradient_cache(),
+            gradient_scheme);
     }
     pressure_gradient.sync_ghosts();
     const auto& boundary_locations = workspace.boundary_locations();
@@ -862,17 +912,20 @@ void pressure_weighted_face_fluxes_impl(
             (pressure_values(neighbor, 0)
              - pressure_values(owner, 0))
             * area_vector.dot(center_delta) / distance_squared;
+        const auto [owner_weight, neighbor_weight] =
+            interior_face_linear_weights(
+                mesh, face_lid, owner, neighbor);
         const typename VectorCellField<Pack>::vec_type
             interpolated_gradient{
-                (pressure_gradient_values(owner, 0)
-                 + pressure_gradient_values(neighbor, 0))
-                    / scalar_type{2},
-                (pressure_gradient_values(owner, 1)
-                 + pressure_gradient_values(neighbor, 1))
-                    / scalar_type{2},
-                (pressure_gradient_values(owner, 2)
-                 + pressure_gradient_values(neighbor, 2))
-                    / scalar_type{2}};
+                owner_weight * pressure_gradient_values(owner, 0)
+                    + neighbor_weight
+                    * pressure_gradient_values(neighbor, 0),
+                owner_weight * pressure_gradient_values(owner, 1)
+                    + neighbor_weight
+                    * pressure_gradient_values(neighbor, 1),
+                owner_weight * pressure_gradient_values(owner, 2)
+                    + neighbor_weight
+                    * pressure_gradient_values(neighbor, 2)};
         const auto interpolated_gradient_flux =
             interpolated_gradient.dot(area_vector);
 
@@ -902,12 +955,15 @@ void pressure_weighted_face_fluxes(
     typename Pack::scalar_type pressure_coefficient,
     const VelocityBoundaryCache<Pack>& boundary_cache,
     PressureWeightedFaceFluxWorkspace<Pack>& workspace,
-    FaceField<Pack>& fluxes)
+    FaceField<Pack>& fluxes,
+    CellGradientScheme gradient_scheme =
+        CellGradientScheme::LeastSquares)
 {
     detail::pressure_weighted_face_fluxes_impl(
         velocity, pressure, pressure_coefficient,
         boundary_cache, nullptr, workspace,
-        static_cast<VectorCellField<Pack>*>(nullptr), fluxes);
+        static_cast<VectorCellField<Pack>*>(nullptr), fluxes,
+        gradient_scheme);
 }
 
 /**
@@ -956,12 +1012,15 @@ void pressure_weighted_face_fluxes(
     const VelocityBoundaryCache<Pack>& boundary_cache,
     const BoundaryConditionMap& pressure_boundary_conditions,
     PressureWeightedFaceFluxWorkspace<Pack>& workspace,
-    FaceField<Pack>& fluxes)
+    FaceField<Pack>& fluxes,
+    CellGradientScheme gradient_scheme =
+        CellGradientScheme::LeastSquares)
 {
     detail::pressure_weighted_face_fluxes_impl(
         velocity, pressure, pressure_coefficient,
         boundary_cache, &pressure_boundary_conditions, workspace,
-        static_cast<VectorCellField<Pack>*>(nullptr), fluxes);
+        static_cast<VectorCellField<Pack>*>(nullptr), fluxes,
+        gradient_scheme);
 }
 
 /**

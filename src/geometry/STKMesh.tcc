@@ -385,15 +385,15 @@ void STKMesh<Pack>::compute_cell_geometry()
         const auto coords = element_node_coords(d_stk.cell_entities[lid]);
         auto& cell_info = d_cells[lid];
 
-        cell_info.center = MeshUtils::average(coords);
-
         if (cell_info.type == CellType::HEXAHEDRON)
         {
             cell_info.volume = MeshUtils::hex_volume(coords);
+            cell_info.center = MeshUtils::hex_centroid(coords);
         }
         else if (cell_info.type == CellType::TRIPRISM)
         {
             cell_info.volume = MeshUtils::wedge_volume(coords);
+            cell_info.center = MeshUtils::wedge_centroid(coords);
         }
         else
         {
@@ -601,7 +601,7 @@ void STKMesh<Pack>::compute_face_geometry()
             coords.push_back(Base::node_coord(node_id));
         }
 
-        face_info.center = MeshUtils::average(coords);
+        face_info.center = MeshUtils::face_centroid(coords);
 
         auto area_vector = MeshUtils::face_area_vector(coords);
         face_info.area = area_vector.norm();

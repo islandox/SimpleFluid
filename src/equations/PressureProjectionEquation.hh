@@ -14,6 +14,7 @@
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/CellGradientScheme.hh"
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -91,7 +92,9 @@ public:
         SP<const mesh_type> mesh,
         LinearSolverOptions linear_options =
             pressure_projection_linear_solver_options(),
-        BoundaryConditionMap pressure_boundary_conditions = {});
+        BoundaryConditionMap pressure_boundary_conditions = {},
+        FVM::CellGradientScheme gradient_scheme =
+            FVM::CellGradientScheme::LeastSquares);
 
     void set_linear_solver_options(LinearSolverOptions options)
     {
@@ -193,6 +196,8 @@ private:
     LinearSolverOptions d_linear_options;
     BoundaryConditionMap d_pressure_boundary_conditions;
     BoundaryConditionMap d_pressure_correction_boundary_conditions;
+    FVM::CellGradientScheme d_gradient_scheme =
+        FVM::CellGradientScheme::LeastSquares;
     mutable std::optional<typename Pack::global_ordinal_type>
         d_pressure_gauge_gid;
     mutable face_flux_field_type d_cached_face_fluxes;

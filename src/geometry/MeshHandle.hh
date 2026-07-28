@@ -253,6 +253,26 @@ public:
         return d_indexer.cell_global_id(cell_lid);
     }
 
+    /**
+     * @brief Return the partition-independent geometry identifier of a cell.
+     *
+     * Unlike cell_global_id(), this identifier is not the contiguous Tpetra
+     * map ID and remains attached to the same geometric cell after
+     * repartitioning.
+     */
+    global_ordinal_type cell_geometry_global_id(
+        local_ordinal_type cell_lid) const
+    {
+        check_cell(cell_lid);
+        if (const auto legacy = legacy_mesh())
+        {
+            return legacy->cell_global_id(
+                checked_local(static_cast<size_t>(
+                    geometry_cell_lid(cell_lid))));
+        }
+        return d_indexer.cell_global_id(cell_lid);
+    }
+
     global_ordinal_type face_global_id(local_ordinal_type face_lid) const
     {
         check_face(face_lid);

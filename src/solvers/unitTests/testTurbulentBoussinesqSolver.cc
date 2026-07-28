@@ -259,7 +259,7 @@ TEST(TurbulentBoussinesqSolverTest,
         EXPECT_EQ(
             model.output_fields().at("buoyancy_production"),
             production);
-        double maximum_production = 0.0;
+        double minimum_production = 0.0;
         for (size_t owned = 0;
              owned < mesh->num_owned_cells(); ++owned)
         {
@@ -267,16 +267,16 @@ TEST(TurbulentBoussinesqSolverTest,
                 static_cast<MeshType::local_ordinal_type>(owned);
             const auto value = production->value(cell_lid);
             EXPECT_TRUE(std::isfinite(value));
-            EXPECT_GE(value, 0.0);
-            maximum_production = std::max(maximum_production, value);
+            EXPECT_LE(value, 0.0);
+            minimum_production = std::min(minimum_production, value);
         }
-        double global_maximum_production = 0.0;
+        double global_minimum_production = 0.0;
         Teuchos::reduceAll(
             *mesh->owned_cell_map()->getComm(),
-            Teuchos::REDUCE_MAX, 1,
-            &maximum_production,
-            &global_maximum_production);
-        EXPECT_GT(global_maximum_production, 0.0);
+            Teuchos::REDUCE_MIN, 1,
+            &minimum_production,
+            &global_minimum_production);
+        EXPECT_LT(global_minimum_production, 0.0);
     }
 }
 

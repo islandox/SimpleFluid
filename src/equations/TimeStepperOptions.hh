@@ -12,6 +12,8 @@
 
 #include "dataclass/vec3.hh"
 #include "dataclass/typedefs.hh"
+#include "FVM/CellGradientScheme.hh"
+#include "FVM/FaceCoefficientInterpolation.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "equations/PressureVelocityCoupling.hh"
 
@@ -34,6 +36,10 @@ struct TimeStepperOptions
     real_t reference_temperature = 0.5;
     FVM::NonOrthogonalTreatment non_orthogonal_treatment =
         FVM::NonOrthogonalTreatment::Implicit;
+    FVM::CellGradientScheme pressure_gradient_scheme =
+        FVM::CellGradientScheme::LeastSquares;
+    FVM::FaceCoefficientInterpolation coefficient_interpolation =
+        FVM::FaceCoefficientInterpolation::Harmonic;
     int n_non_orthogonal_correctors = 0;
     PressureVelocityCoupling pressure_velocity_coupling =
         PressureVelocityCoupling::PISO;

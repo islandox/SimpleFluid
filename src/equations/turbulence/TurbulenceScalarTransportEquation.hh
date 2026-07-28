@@ -104,7 +104,9 @@ public:
             scalar_type positive_floor,
             FVM::NonOrthogonalTreatment treatment = FVM::NonOrthogonalTreatment::Explicit,
             const LinearSolverOptions& linear_options = {},
-            const boundary_overrides_type* boundary_overrides = nullptr) const;
+            const boundary_overrides_type* boundary_overrides = nullptr,
+            FVM::FaceCoefficientInterpolation coefficient_interpolation =
+                FVM::FaceCoefficientInterpolation::Harmonic) const;
 
     /** @brief Return the configured scalar boundary conditions. */
     const BoundaryConditionMap& boundary_conditions() const noexcept
