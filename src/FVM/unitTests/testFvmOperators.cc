@@ -360,6 +360,73 @@ TEST(FvmOperatorsTest,
     EXPECT_NEAR(gradient[2].z, 1.0, 1.0e-12);
 }
 
+/** @brief Verifies Gauss-linear gradients use boundary face values exactly. */
+TEST(FvmOperatorsTest, GaussLinearRecoversAffineBoundaryGradients)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_single_hex_database());
+    auto scalar_value = [](const MeshType::Vec3& point)
+    {
+        return 0.25 + 2.0 * point.x
+             - 3.0 * point.y + 4.0 * point.z;
+    };
+    auto vector_value = [](const MeshType::Vec3& point)
+    {
+        return MeshType::Vec3{
+            1.0 + 2.0 * point.x - 3.0 * point.y + 4.0 * point.z,
+            -2.0 + point.x + 0.5 * point.y - 1.5 * point.z,
+            3.0 - 4.0 * point.x + 2.0 * point.y + point.z};
+    };
+
+    FieldType scalar(mesh, "scalar");
+    scalar.set_value(0, scalar_value(mesh->cell_centroid(0)));
+    VectorFieldType scalar_gradient(mesh, "scalar_gradient");
+    auto boundary_condition = [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    auto scalar_boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id)
+                .face_lids[in_batch_id];
+        return scalar_value(mesh->face_centroid(face_lid));
+    };
+    SimpleFluid::FVM::gauss_linear_cell_gradient(
+        scalar, boundary_condition, scalar_boundary_value,
+        scalar_gradient);
+    const auto actual_scalar = scalar_gradient.value(0);
+    EXPECT_NEAR(actual_scalar.x, 2.0, 1.0e-12);
+    EXPECT_NEAR(actual_scalar.y, -3.0, 1.0e-12);
+    EXPECT_NEAR(actual_scalar.z, 4.0, 1.0e-12);
+
+    VectorFieldType vector(mesh, "vector");
+    vector.set_value(0, vector_value(mesh->cell_centroid(0)));
+    TensorFieldType vector_gradient(mesh, "vector_gradient");
+    auto vector_boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        const auto face_lid =
+            mesh->boundary_face_batch(batch_id)
+                .face_lids[in_batch_id];
+        return vector_value(mesh->face_centroid(face_lid));
+    };
+    SimpleFluid::FVM::gauss_linear_cell_gradient(
+        vector, vector_boundary_value, vector_gradient);
+    const auto actual_vector = vector_gradient.value(0);
+    EXPECT_NEAR(actual_vector[0].x, 2.0, 1.0e-12);
+    EXPECT_NEAR(actual_vector[0].y, -3.0, 1.0e-12);
+    EXPECT_NEAR(actual_vector[0].z, 4.0, 1.0e-12);
+    EXPECT_NEAR(actual_vector[1].x, 1.0, 1.0e-12);
+    EXPECT_NEAR(actual_vector[1].y, 0.5, 1.0e-12);
+    EXPECT_NEAR(actual_vector[1].z, -1.5, 1.0e-12);
+    EXPECT_NEAR(actual_vector[2].x, -4.0, 1.0e-12);
+    EXPECT_NEAR(actual_vector[2].y, 2.0, 1.0e-12);
+    EXPECT_NEAR(actual_vector[2].z, 1.0, 1.0e-12);
+}
+
 /** @brief Verifies face-area vectors decompose into orthogonal and tangential parts. */
 TEST(FvmOperatorsTest, DecomposesFaceAreaIntoOrthogonalAndTangentialParts)
 {
@@ -1752,9 +1819,7 @@ TEST(FvmOperatorsTest,
         std::invalid_argument);
 }
 
-/**
- * @brief Verifies interior face velocities are the arithmetic average of owner and neighbor cell values.
- */
+/** @brief Verifies geometric linear interpolation on uniform interior faces. */
 TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
 {
     auto mesh = make_mesh();
@@ -1798,6 +1863,52 @@ TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
     }
 
     EXPECT_TRUE(saw_interior_face);
+}
+
+/** @brief Verifies linear face interpolation on a nonuniform mesh. */
+TEST(FvmOperatorsTest, FaceVelocitiesWeightNonuniformCellDistances)
+{
+    auto database = SimpleFluid::test::make_single_hex_database();
+    auto graded_database =
+        std::make_shared<SimpleFluid::Database>(*database);
+    graded_database->set(
+        "X", SimpleFluid::ArrReal{0.0, 1.0, 3.0});
+    auto mesh =
+        SimpleFluid::test::build_mesh<Pack>(graded_database);
+    VectorFieldType velocity(mesh, "velocity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell_lid);
+        velocity.set_owned_value(
+            cell_lid, {center.x, 2.0 * center.x, -center.x});
+    }
+    velocity.sync_ghosts();
+
+    SimpleFluid::VectorFaceField<Pack> face_velocity(
+        mesh, "face_velocity");
+    SimpleFluid::FVM::face_velocities(
+        velocity, face_velocity);
+
+    bool checked = false;
+    for (MeshType::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<MeshType::local_ordinal_type>(
+                        mesh->num_faces());
+         ++face_lid)
+    {
+        if (!mesh->is_interior_face(face_lid)
+            || std::abs(mesh->face_normal(face_lid).x) < 0.5)
+        {
+            continue;
+        }
+        const auto value = face_velocity.value(face_lid);
+        EXPECT_NEAR(value.x, 1.0, 1.0e-12);
+        EXPECT_NEAR(value.y, 2.0, 1.0e-12);
+        EXPECT_NEAR(value.z, -1.0, 1.0e-12);
+        checked = true;
+    }
+    EXPECT_TRUE(checked);
 }
 
 /** @brief Verifies no-slip boundaries produce zero face velocity. */
@@ -3676,6 +3787,62 @@ TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
             -1.6,
             1.0e-12);
     }
+}
+
+/** @brief Verifies callers can select OpenFOAM-style linear coefficients. */
+TEST(FvmOperatorsTest, PhysicalTransportSupportsLinearMaterialCoefficients)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    FieldType temperature(mesh, 0.0, "temperature");
+    FieldType density(mesh, 1.0, "density");
+    FieldType heat_capacity(mesh, 1.0, "heat_capacity");
+    FieldType conductivity(mesh, "conductivity");
+    conductivity.set_value(0, 1.0);
+    conductivity.set_value(1, 4.0);
+    conductivity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_fluxes(
+        mesh, 0.0, "face_flux");
+
+    auto boundary_condition = [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{};
+    };
+    auto boundary_value = [](int, size_t)
+    {
+        return Pack::scalar_type{};
+    };
+    auto zero_source = [](MeshType::local_ordinal_type)
+    {
+        return Pack::scalar_type{};
+    };
+
+    const auto system =
+        SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+            temperature,
+            zero_fluxes,
+            1.0,
+            density,
+            heat_capacity,
+            conductivity,
+            boundary_condition,
+            boundary_value,
+            zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+            nullptr,
+            Teuchos::null,
+            nullptr,
+            nullptr,
+            SimpleFluid::FVM::FaceCoefficientInterpolation::Linear);
+
+    EXPECT_NEAR(
+        local_matrix_entry(*system.matrix, 0, 1),
+        -2.5,
+        1.0e-12);
+    EXPECT_NEAR(
+        local_matrix_entry(*system.matrix, 1, 0),
+        -2.5,
+        1.0e-12);
 }
 
 /** @brief Verifies physical transport consumes sparse boundary coefficient caches. */

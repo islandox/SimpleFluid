@@ -463,7 +463,8 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
                 acceleration_source, options.non_orthogonal_treatment,
                 correction_field, d_cached_physical_transport_matrix,
                 boundary_diffusion, boundary_dynamic_viscosity,
-                &d_transport_geometry_cache);
+                &d_transport_geometry_cache,
+                options.coefficient_interpolation);
         }
         catch (...)
         {

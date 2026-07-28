@@ -223,7 +223,8 @@ FluidSolver<Pack>::FluidSolver(
         "pressure_projection",
         d_mesh,
         pressure_linear_options,
-        d_problem.boundary_conditions().pressure);
+        d_problem.boundary_conditions().pressure,
+        d_problem.time_options().pressure_gradient_scheme);
     d_problem.template emplace_object<CoupledPressureVelocitySolver<Pack>>(
         "coupled_pressure_velocity_solver", d_mesh);
     d_problem.template emplace_object<field_type>(
@@ -570,7 +571,8 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
         pressure(),
         d_problem.boundary_conditions().pressure,
         predictor_pressure_gradient(),
-        pressure_face_flux_workspace().gradient_cache());
+        pressure_face_flux_workspace().gradient_cache(),
+        d_problem.time_options().pressure_gradient_scheme);
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
     const auto pressure_gradient_values =
@@ -630,7 +632,8 @@ auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
         velocity_boundary_cache(),
         d_problem.boundary_conditions().pressure,
         pressure_face_flux_workspace(),
-        old_face_fluxes());
+        old_face_fluxes(),
+        d_problem.time_options().pressure_gradient_scheme);
     const auto linear_summary = advance_momentum();
     pressure_velocity_residuals().momentum =
         velocity_update_norm(predictor_velocity(), velocity());
@@ -728,7 +731,8 @@ void FluidSolver<Pack>::solve_coupled_krylov()
         velocity_boundary_cache(),
         d_problem.boundary_conditions().pressure,
         pressure_face_flux_workspace(),
-        old_face_fluxes());
+        old_face_fluxes(),
+        d_problem.time_options().pressure_gradient_scheme);
     const auto system = assemble_coupled_system();
     const auto result =
         coupled_pressure_velocity_solver().solve(
@@ -763,7 +767,8 @@ void FluidSolver<Pack>::solve_coupled_krylov()
         velocity_boundary_cache(),
         d_problem.boundary_conditions().pressure,
         pressure_face_flux_workspace(),
-        projected_face_fluxes());
+        projected_face_fluxes(),
+        d_problem.time_options().pressure_gradient_scheme);
     scalar_type continuity_norm_squared = {};
     {
         const auto projected_flux_values =

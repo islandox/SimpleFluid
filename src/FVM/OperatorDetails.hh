@@ -11,6 +11,7 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
+#include "FVM/FaceCoefficientInterpolation.hh"
 #include "geometry/MeshUtils.hh"
 
 #include <algorithm>
@@ -407,6 +408,77 @@ inline auto harmonic_face_value(
     return harmonic_face_value(
         mesh, face_lid, cell_lid, other_lid,
         field.local_value(cell_lid), field.local_value(other_lid));
+}
+
+/**
+ * @brief Distance-weighted linear interpolation of a non-negative cell field
+ *        to an interior face.
+ */
+template<class MeshType>
+inline auto linear_face_value(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::local_ordinal_type other_lid,
+    typename MeshType::scalar_type cell_value,
+    typename MeshType::scalar_type other_value)
+    -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+    if (cell_value < scalar_type{} || other_value < scalar_type{})
+    {
+        throw std::invalid_argument(
+            "linear_face_value requires non-negative cell values.");
+    }
+
+    const auto face_id = query_face_id(mesh, face_lid);
+    const auto cell_distance = static_cast<scalar_type>(
+        mesh.cell_to_face_distance(
+            face_id, query_cell_id(mesh, cell_lid)));
+    const auto other_distance = static_cast<scalar_type>(
+        mesh.cell_to_face_distance(
+            face_id, query_cell_id(mesh, other_lid)));
+    const auto total_distance = cell_distance + other_distance;
+    if (cell_distance >= scalar_type{}
+        && other_distance >= scalar_type{}
+        && total_distance > scalar_type{})
+    {
+        return (
+            other_distance * cell_value
+            + cell_distance * other_value) / total_distance;
+    }
+    return scalar_type{0.5} * (cell_value + other_value);
+}
+
+/**
+ * @brief Interpolate a non-negative transport coefficient to an interior face.
+ * @throws std::invalid_argument for an unknown interpolation selection or a
+ *         negative coefficient.
+ */
+template<class MeshType>
+inline auto face_coefficient_value(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::local_ordinal_type other_lid,
+    typename MeshType::scalar_type cell_value,
+    typename MeshType::scalar_type other_value,
+    FaceCoefficientInterpolation interpolation)
+    -> typename MeshType::scalar_type
+{
+    switch (interpolation)
+    {
+        case FaceCoefficientInterpolation::Harmonic:
+            return harmonic_face_value(
+                mesh, face_lid, cell_lid, other_lid,
+                cell_value, other_value);
+        case FaceCoefficientInterpolation::Linear:
+            return linear_face_value(
+                mesh, face_lid, cell_lid, other_lid,
+                cell_value, other_value);
+    }
+    throw std::invalid_argument(
+        "Unknown face-coefficient interpolation.");
 }
 
 /**

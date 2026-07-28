@@ -66,6 +66,7 @@ SIMPLEFLUID_SHIRI_STEADY_MIN_DT=0.000125 \
 SIMPLEFLUID_SHIRI_STEADY_MAX_DT=0.05 \
 SIMPLEFLUID_SHIRI_STEADY_TARGET_COURANT=0.8 \
 SIMPLEFLUID_SHIRI_STEADY_TOLERANCE=1e-4 \
+SIMPLEFLUID_SHIRI_ENFORCE_AXISYMMETRY=1 \
   verification/openfoam/naturalConvection/run_simplefluid.sh 1
 ```
 
@@ -79,14 +80,32 @@ factor can be overridden with `SIMPLEFLUID_SHIRI_STEADY_MAX_DT` and
 of the initial step and can be set with
 `SIMPLEFLUID_SHIRI_STEADY_MIN_DT`.
 
+Steady searches use `SIMPLE` pressure-velocity coupling by default, matching
+the OpenFOAM reference, while fixed-step transient runs retain `PISO`.
+Set `SIMPLEFLUID_SHIRI_PRESSURE_VELOCITY_COUPLING` to `SIMPLE`, `PISO`,
+`PIMPLE`, or `coupledKrylov` to override that selection explicitly.
+
+`SIMPLEFLUID_SHIRI_ENFORCE_AXISYMMETRY=1` projects temperature, pressure,
+cylindrical velocity, `k`, `epsilon`, and `nut` onto their theta averages
+after every accepted pseudo-step. This is a steady-search-only option for
+following the axisymmetric RANS branch represented by the tutorial profile;
+leave it disabled when three-dimensional azimuthal instabilities are part of
+the intended solution.
+
 A rejected transactional momentum solve is retried at half the preceding
 pseudo-time step, up to four retries. Configure those safeguards with
 `SIMPLEFLUID_SHIRI_STEADY_DT_REDUCTION` and
-`SIMPLEFLUID_SHIRI_STEADY_MAX_RETRIES`. Rejected attempts do not advance
-pseudo-time, consume the accepted-step limit, or update the steady-state
-confirmation window. Failures after a solver stage has published state are
-not retried; they remain fatal rather than risk continuing from a partially
-advanced solution.
+`SIMPLEFLUID_SHIRI_STEADY_MAX_RETRIES`. After a rejection, the reduced step
+is held for five accepted steps before growth resumes, avoiding an immediate
+retry of the unstable step size. Override that recovery interval with
+`SIMPLEFLUID_SHIRI_STEADY_REJECTION_RECOVERY_STEPS`. A rejected step also
+sets a persistent growth ceiling at 90% of the failed size, preventing
+repeated retries at a step already known to be unstable. Configure that
+margin with `SIMPLEFLUID_SHIRI_STEADY_REJECTION_SAFETY`. Rejected attempts
+do not advance pseudo-time, consume the accepted-step limit, or update the
+steady-state confirmation window. Failures after a solver stage has
+published state are not retried; they remain fatal rather than risk
+continuing from a partially advanced solution.
 
 Steady convergence uses actual volume-weighted changes in velocity,
 temperature rise, `k`, and `epsilon`, not the linear solver's internal
@@ -97,6 +116,19 @@ units. The maximum rate must remain below
 least 20 steps. Override those guards with
 `SIMPLEFLUID_SHIRI_STEADY_CONSECUTIVE_STEPS` and
 `SIMPLEFLUID_SHIRI_STEADY_MIN_STEPS`.
+
+Long searches can resume from the cell CSVs written by an earlier run:
+
+```sh
+SIMPLEFLUID_SHIRI_RESTART_PREFIX=/path/to/simplefluid_cells \
+SIMPLEFLUID_SHIRI_STEADY_STATE=1 \
+  verification/openfoam/naturalConvection/run_simplefluid.sh 6
+```
+
+The restart must use the same mesh and MPI rank count. Every process reads
+the rank-file set so a changed partition does not misplace state: new CSVs
+map cells by partition-independent geometry ID, while CSVs written before
+that column was added are matched by their cylindrical cell centers.
 
 The executable writes the latest fields even when the maximum step count is
 reached, reports `steady_state_search: reached=no`, and returns exit status 2
@@ -157,6 +189,28 @@ The interior turbulent thermal-diffusivity metric derives `nut/Prt` with
 does not compare raw OpenFOAM `alphat`. The raw `alphat` boundary value remains
 relevant to the Jayatilleke wall heat flux and is a separate wall-treatment
 check.
+
+## Plot the matched R-Z fields
+
+Generate dependency-free SVG figures from a reconstructed OpenFOAM time and
+the corresponding SimpleFluid rank CSVs with:
+
+```sh
+python3 verification/openfoam/naturalConvection/plot_rz_comparison.py \
+  --openfoam-case /path/to/openfoam-case \
+  --simplefluid-glob '/path/to/simplefluid_cells_rank*.csv' \
+  --expected-time 23540 \
+  --expected-ranks 6 \
+  --expected-openfoam-theta-cells 1 \
+  --output-directory \
+    verification/openfoam/naturalConvection/profiles/steady-rz
+```
+
+The renderer uses the comparator's exact cell readers, theta averages, and
+matched R-Z coordinates. It writes a common-scale OpenFOAM/SimpleFluid
+temperature distribution, signed and logarithmic absolute-error maps, and the
+matched values as CSV. The SVGs can be converted with `rsvg-convert` when PNG
+or PDF copies are desired.
 
 ## Interpretation
 

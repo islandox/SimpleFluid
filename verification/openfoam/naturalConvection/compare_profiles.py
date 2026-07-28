@@ -152,6 +152,124 @@ def read_openfoam(path: Path) -> list[ProfileRow]:
     return rows
 
 
+def openfoam_time_directory(case: Path, expected_time: float) -> Path:
+    candidates: list[tuple[float, Path]] = []
+    for path in case.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            time_value = float(path.name)
+        except ValueError:
+            continue
+        if all((path / field).is_file() for field in ("C", "T", "U", "k", "epsilon", "nut", "alphat")):
+            candidates.append((time_value, path))
+    matches = [
+        path
+        for time_value, path in candidates
+        if math.isclose(time_value, expected_time, rel_tol=0.0, abs_tol=1.0e-12)
+    ]
+    if len(matches) != 1:
+        raise FileNotFoundError(
+            "expected one reconstructed OpenFOAM cell-field directory at "
+            f"time {expected_time}, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def read_openfoam_internal_field(
+    path: Path, expected_kind: str
+) -> list[float] | list[tuple[float, float, float]]:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"internalField\s+nonuniform\s+List<(scalar|vector)>\s+"
+        r"([0-9]+)\s*\((.*?)\)\s*;",
+        text,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        raise ValueError(
+            f"{path} does not contain an ASCII nonuniform internal field"
+        )
+    kind = match.group(1)
+    if kind != expected_kind:
+        raise ValueError(
+            f"{path} contains a {kind} internal field; expected {expected_kind}"
+        )
+    expected_count = int(match.group(2))
+    body = match.group(3)
+    if kind == "scalar":
+        values: list[float] | list[tuple[float, float, float]] = [
+            float(token) for token in body.split()
+        ]
+    else:
+        values = []
+        for token in re.findall(r"\(([^()]*)\)", body):
+            components = tuple(float(value) for value in token.split())
+            if len(components) != 3:
+                raise ValueError(f"{path} contains a malformed vector value")
+            values.append(components)
+    if len(values) != expected_count:
+        raise ValueError(
+            f"{path} declares {expected_count} internal values, "
+            f"but contains {len(values)}"
+        )
+    return values
+
+
+def read_openfoam_cells(case: Path, expected_time: float) -> list[ProfileRow]:
+    time_directory = openfoam_time_directory(case, expected_time)
+    coordinates = read_openfoam_internal_field(time_directory / "C", "vector")
+    velocity = read_openfoam_internal_field(time_directory / "U", "vector")
+    scalar_fields = {
+        field: read_openfoam_internal_field(time_directory / filename, "scalar")
+        for field, filename in (
+            ("temperature", "T"),
+            ("k", "k"),
+            ("epsilon", "epsilon"),
+            ("nut", "nut"),
+            ("alphat", "alphat"),
+            ("p_rgh", "p_rgh"),
+        )
+    }
+    count = len(coordinates)
+    if len(velocity) != count or any(
+        len(values) != count for values in scalar_fields.values()
+    ):
+        raise ValueError(
+            f"{time_directory} reconstructed fields have different cell counts"
+        )
+
+    rows: list[ProfileRow] = []
+    for index in range(count):
+        x, y, z = coordinates[index]
+        ux, uy, uz = velocity[index]
+        radius = math.hypot(x, y)
+        theta = math.atan2(y, x)
+        cosine = math.cos(theta)
+        sine = math.sin(theta)
+        row: ProfileRow = {
+            "r": radius,
+            "theta": theta,
+            "z": z,
+            "temperature": scalar_fields["temperature"][index],
+            "ur": ux * cosine + uy * sine,
+            "utheta": -ux * sine + uy * cosine,
+            "uz": uz,
+            "k": scalar_fields["k"][index],
+            "epsilon": scalar_fields["epsilon"][index],
+            "nut": scalar_fields["nut"][index],
+            "alphat": scalar_fields["alphat"][index],
+            "p_rgh": scalar_fields["p_rgh"][index],
+            "turbulent_diffusivity": scalar_fields["alphat"][index],
+        }
+        if any(not math.isfinite(value) for value in row.values()):
+            raise ValueError(
+                f"{time_directory} contains a non-finite cell value"
+            )
+        rows.append(row)
+    return rows
+
+
 def read_simplefluid(
     patterns: list[str],
     target_radius: float,
@@ -166,6 +284,7 @@ def read_simplefluid(
     float,
     ProfileRow,
     tuple[float, float],
+    list[ProfileRow],
 ]:
     paths = sorted({Path(path) for pattern in patterns for path in glob.glob(pattern)})
     if not paths:
@@ -356,6 +475,105 @@ def read_simplefluid(
         maximum_azimuthal_velocity,
         theta_spreads,
         temperature_range,
+        cells,
+    )
+
+
+def rz_averages(
+    cells: list[ProfileRow],
+    expected_theta_cells: int | None,
+) -> dict[tuple[float, float], ProfileRow]:
+    candidate_fields = (
+        "temperature", "ur", "utheta", "uz", "k", "epsilon", "nut",
+        "alphat", "p_rgh", "turbulent_diffusivity",
+    )
+    averaged_fields = tuple(
+        field
+        for field in candidate_fields
+        if all(field in cell for cell in cells)
+    )
+    grouped: dict[tuple[float, float], list[ProfileRow]] = {}
+    for cell in cells:
+        key = (round(cell["r"], 6), round(cell["z"], 6))
+        grouped.setdefault(key, []).append(cell)
+
+    result: dict[tuple[float, float], ProfileRow] = {}
+    for (radius, z), values in grouped.items():
+        if expected_theta_cells is not None and len(values) != expected_theta_cells:
+            raise ValueError(
+                f"expected {expected_theta_cells} theta cells at "
+                f"r={radius}, z={z}; found {len(values)}"
+            )
+        row: ProfileRow = {"r": radius, "z": z}
+        for field in averaged_fields:
+            row[field] = sum(value[field] for value in values) / len(values)
+        result[(radius, z)] = row
+    return result
+
+
+def radial_profile_from_rz(
+    rows: dict[tuple[float, float], ProfileRow],
+    target_radius: float,
+) -> list[ProfileRow]:
+    radii = sorted({radius for radius, _ in rows})
+    if not radii or target_radius < radii[0] or target_radius > radii[-1]:
+        raise ValueError(
+            f"target radius {target_radius} lies outside R-Z cell centres"
+        )
+    lower_radius = max(radius for radius in radii if radius <= target_radius)
+    upper_radius = min(radius for radius in radii if radius >= target_radius)
+    lower_z = {z for radius, z in rows if radius == lower_radius}
+    upper_z = {z for radius, z in rows if radius == upper_radius}
+    if lower_z != upper_z:
+        raise ValueError("R-Z radial layers have different axial coordinates")
+    fraction = (
+        0.0
+        if lower_radius == upper_radius
+        else (target_radius - lower_radius) / (upper_radius - lower_radius)
+    )
+    candidate_fields = (
+        "temperature", "ur", "utheta", "uz", "k", "epsilon", "nut",
+        "alphat", "p_rgh", "turbulent_diffusivity",
+    )
+    fields = tuple(
+        field
+        for field in candidate_fields
+        if all(field in row for row in rows.values())
+    )
+    profile: list[ProfileRow] = []
+    for z in sorted(lower_z):
+        row: ProfileRow = {"z": z}
+        lower = rows[(lower_radius, z)]
+        upper = rows[(upper_radius, z)]
+        for field in fields:
+            row[field] = lower[field] + fraction * (
+                upper[field] - lower[field]
+            )
+        profile.append(row)
+    return profile
+
+
+def discrete_rz_error_norms(
+    reference: dict[tuple[float, float], ProfileRow],
+    result: dict[tuple[float, float], ProfileRow],
+    field: str,
+) -> tuple[float, float]:
+    if reference.keys() != result.keys():
+        missing = len(reference.keys() - result.keys())
+        extra = len(result.keys() - reference.keys())
+        raise ValueError(
+            "OpenFOAM and SimpleFluid R-Z coordinates differ "
+            f"(missing={missing}, extra={extra})"
+        )
+    errors = [
+        result[key][field] - reference[key][field]
+        for key in reference
+    ]
+    if not errors:
+        raise ValueError("R-Z comparison contains no cells")
+    return (
+        math.sqrt(sum(error * error for error in errors) / len(errors)),
+        max(abs(error) for error in errors),
     )
 
 
@@ -421,8 +639,15 @@ def main() -> int:
     parser.add_argument("--expected-ranks", type=int)
     parser.add_argument("--expected-cells", type=int, default=80000)
     parser.add_argument("--expected-theta-cells", type=int, default=20)
+    parser.add_argument("--expected-openfoam-theta-cells", type=int)
     parser.add_argument("--expected-radial-cells", type=int, default=40)
     parser.add_argument("--expected-axial-cells", type=int, default=100)
+    parser.add_argument("--temperature-rz-rms-tolerance", type=float)
+    parser.add_argument(
+        "--cell-centre-only",
+        action="store_true",
+        help="skip the OpenFOAM sampled-line comparison",
+    )
     arguments = parser.parse_args()
 
     if not math.isclose(
@@ -435,16 +660,20 @@ def main() -> int:
             f"requested radius {arguments.radius} does not match the fixed "
             f"OpenFOAM sample radius {OPENFOAM_SAMPLE_RADIUS}"
         )
-    openfoam_path = latest_openfoam_profile(
-        arguments.openfoam_case, arguments.expected_time
-    )
-    openfoam = read_openfoam(openfoam_path)
+    openfoam_path: Path | None = None
+    openfoam: list[ProfileRow] = []
+    if not arguments.cell_centre_only:
+        openfoam_path = latest_openfoam_profile(
+            arguments.openfoam_case, arguments.expected_time
+        )
+        openfoam = read_openfoam(openfoam_path)
     (
         radial_bracket,
         simplefluid,
         maximum_azimuthal_velocity,
         theta_spreads,
         temperature_range,
+        simplefluid_cells,
     ) = read_simplefluid(
         arguments.simplefluid_glob,
         arguments.radius,
@@ -455,7 +684,8 @@ def main() -> int:
         arguments.expected_axial_cells,
     )
 
-    print(f"OpenFOAM profile: {openfoam_path}")
+    if openfoam_path is not None:
+        print(f"OpenFOAM profile: {openfoam_path}")
     print(
         "SimpleFluid radial interpolation: "
         f"target={arguments.radius:.12g} m, "
@@ -478,30 +708,84 @@ def main() -> int:
             "WARNING: SimpleFluid temperature violates the [290, 360] K "
             "initial/boundary bounds."
         )
-    for name, field, units, reference_offset in (
-        ("temperature", "temperature", "K", 290.0),
-        ("radial velocity", "ur", "m/s", 0.0),
-        ("azimuthal velocity", "utheta", "m/s", 0.0),
-        ("axial velocity", "uz", "m/s", 0.0),
-        ("turbulent kinetic energy", "k", "m2/s2", 0.0),
-        ("dissipation rate", "epsilon", "m2/s3", 0.0),
-        ("turbulent viscosity", "nut", "m2/s", 0.0),
-        (
-            "interior turbulent thermal diffusivity (nut/Prt)",
-            "turbulent_diffusivity",
-            "m2/s",
-            0.0,
-        ),
-    ):
-        axial_rms, linf, relative_rms = error_norms(
-            openfoam, simplefluid, field, reference_offset
-        )
+    if not arguments.cell_centre_only:
+        for name, field, units, reference_offset in (
+            ("temperature", "temperature", "K", 290.0),
+            ("radial velocity", "ur", "m/s", 0.0),
+            ("azimuthal velocity", "utheta", "m/s", 0.0),
+            ("axial velocity", "uz", "m/s", 0.0),
+            ("turbulent kinetic energy", "k", "m2/s2", 0.0),
+            ("dissipation rate", "epsilon", "m2/s3", 0.0),
+            ("turbulent viscosity", "nut", "m2/s", 0.0),
+            (
+                "interior turbulent thermal diffusivity (nut/Prt)",
+                "turbulent_diffusivity",
+                "m2/s",
+                0.0,
+            ),
+        ):
+            axial_rms, linf, relative_rms = error_norms(
+                openfoam, simplefluid, field, reference_offset
+            )
+            print(
+                f"{name}: axial_rms={axial_rms:.12g} {units}, "
+                f"linf={linf:.12g} {units}, "
+                f"relative_axial_rms={relative_rms:.6%}, "
+                f"max_theta_spread={theta_spreads[field]:.12g} {units}"
+            )
+
+    openfoam_cells = read_openfoam_cells(
+        arguments.openfoam_case, arguments.expected_time
+    )
+    openfoam_rz = rz_averages(
+        openfoam_cells,
+        arguments.expected_openfoam_theta_cells
+        if arguments.expected_openfoam_theta_cells is not None
+        else arguments.expected_theta_cells,
+    )
+    simplefluid_rz = rz_averages(
+        simplefluid_cells, arguments.expected_theta_cells
+    )
+    temperature_rz_rms, temperature_rz_linf = discrete_rz_error_norms(
+        openfoam_rz, simplefluid_rz, "temperature"
+    )
+    openfoam_cell_profile = radial_profile_from_rz(
+        openfoam_rz, arguments.radius
+    )
+    simplefluid_cell_profile = radial_profile_from_rz(
+        simplefluid_rz, arguments.radius
+    )
+    cell_axial_rms, cell_linf, cell_relative_rms = error_norms(
+        openfoam_cell_profile,
+        simplefluid_cell_profile,
+        "temperature",
+        290.0,
+    )
+    print(
+        "temperature matched cell-centre R-Z: "
+        f"discrete_rms={temperature_rz_rms:.12g} K, "
+        f"linf={temperature_rz_linf:.12g} K"
+    )
+    print(
+        "temperature matched cell-centre near-pipe: "
+        f"axial_rms={cell_axial_rms:.12g} K, "
+        f"linf={cell_linf:.12g} K, "
+        f"relative_axial_rms={cell_relative_rms:.6%}"
+    )
+    if arguments.temperature_rz_rms_tolerance is not None:
+        tolerance = arguments.temperature_rz_rms_tolerance
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError(
+                "--temperature-rz-rms-tolerance must be finite and positive"
+            )
+        passed = temperature_rz_rms <= tolerance
         print(
-            f"{name}: axial_rms={axial_rms:.12g} {units}, "
-            f"linf={linf:.12g} {units}, "
-            f"relative_axial_rms={relative_rms:.6%}, "
-            f"max_theta_spread={theta_spreads[field]:.12g} {units}"
+            "temperature R-Z criterion: "
+            f"rms={temperature_rz_rms:.12g} K <= "
+            f"{tolerance:.12g} K: {'PASS' if passed else 'FAIL'}"
         )
+        if not passed:
+            return 1
     return 0
 
 

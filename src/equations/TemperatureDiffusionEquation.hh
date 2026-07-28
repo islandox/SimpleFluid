@@ -94,7 +94,9 @@ public:
         FVM::NonOrthogonalTreatment treatment,
         const LinearSolverOptions& linear_options = {},
         const field_type* thermal_conductivity_override = nullptr,
-        const FVM::BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr) const;
+        const FVM::BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr,
+        FVM::FaceCoefficientInterpolation coefficient_interpolation =
+            FVM::FaceCoefficientInterpolation::Harmonic) const;
 
 private:
     SP<const mesh_type> d_mesh;
