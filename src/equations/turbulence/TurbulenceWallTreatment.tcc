@@ -19,7 +19,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <set>
 #include <stdexcept>
 #include <type_traits>
 

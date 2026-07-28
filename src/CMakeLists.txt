@@ -79,8 +79,8 @@ simplefluid_configure_library(SimpleFluidMesh)
 set_target_properties(SimpleFluidMesh PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 
-# Fields and FVM are currently header-only. Interface targets still isolate
-# their dependency surfaces and let consumers avoid linking higher layers.
+# Fields remain header-only. FVM compiles the deliberately supported template
+# pack so consumers do not repeatedly instantiate the large assembly kernels.
 add_library(SimpleFluidFields INTERFACE)
 add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
 target_include_directories(SimpleFluidFields INTERFACE
@@ -88,21 +88,24 @@ target_include_directories(SimpleFluidFields INTERFACE
 )
 target_link_libraries(SimpleFluidFields INTERFACE SimpleFluidMesh)
 
-add_library(SimpleFluidFVM INTERFACE)
-add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
-target_include_directories(SimpleFluidFVM INTERFACE
-    ${SIMPLEFLUID_PUBLIC_INCLUDE_DIRS}
+add_library(SimpleFluidFVM STATIC
+    FVM/NonOrthogonalCorrection.cc
+    FVM/TransportSystem.cc
 )
-target_link_libraries(SimpleFluidFVM INTERFACE SimpleFluidFields)
+add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
+simplefluid_configure_library(SimpleFluidFVM)
+set_target_properties(SimpleFluidFVM PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 
 # Trilinos installations used by SimpleFluid commonly provide static archives
 # that are not position-independent (notably MueLu).  Keep the compiled upper
 # layers static so a clean build never embeds those archives in a shared object.
 # The public SimpleFluid::* aliases below preserve the downstream link API.
-add_library(SimpleFluidEquations STATIC
+add_library(SimpleFluidEquations SHARED
     equations/BoussinesqMomentumEquation.cc
     equations/IncompressibleMomentumEquation.cc
     equations/PressureProjectionEquation.cc
+    equations/RadiolyticGasPhysics.cc
     equations/RadiolyticGasProperties.cc
     equations/TemperatureDiffusionEquation.cc
     equations/turbulence/TurbulenceModel.cc
@@ -115,9 +118,11 @@ simplefluid_configure_library(SimpleFluidEquations)
 set_target_properties(SimpleFluidEquations PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(SimpleFluidEquations PUBLIC SimpleFluidFVM)
 
-add_library(SimpleFluidSolvers STATIC
+add_library(SimpleFluidSolvers SHARED
     solvers/BoussinesqSolver.cc
+    solvers/CoupledPressureVelocitySolver.cc
     solvers/FluidSolver.cc
+    solvers/SteadyStateSearch.cc
 )
 add_library(SimpleFluid::Solvers ALIAS SimpleFluidSolvers)
 simplefluid_configure_library(SimpleFluidSolvers)
@@ -132,6 +137,7 @@ target_link_libraries(SimpleFluid INTERFACE SimpleFluidSolvers)
 # Build one PCH and reuse it for all compiled modules and test executables.
 target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidPch)
 target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidPch)
+target_precompile_headers(SimpleFluidFVM REUSE_FROM SimpleFluidPch)
 target_precompile_headers(SimpleFluidEquations REUSE_FROM SimpleFluidPch)
 target_precompile_headers(SimpleFluidSolvers REUSE_FROM SimpleFluidPch)
 
