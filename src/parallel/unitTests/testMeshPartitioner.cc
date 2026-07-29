@@ -196,6 +196,11 @@ public:
 class ReplicatedLegacyMesh final : public MeshType
 {
 public:
+    ReplicatedLegacyMesh()
+    {
+        d_spatial_dim = 3;
+    }
+
     explicit ReplicatedLegacyMesh(const UnstructuredMesh& source)
     {
         d_spatial_dim = static_cast<int>(source.spatial_dimension());
@@ -392,6 +397,9 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
     packet.face_global_ids = {101, 307};
     packet.face_boundary_ids = {
         MeshType::invalid_boundary_id, 4};
+    packet.face_neighbor_gids = {
+        SimpleFluid::invalid_id<Pack::global_ordinal_type>(), 23};
+    packet.face_neighbor_ranks = {-1, 2};
 
     const auto bytes = Packet::serialize_packets({packet});
     const auto restored =
@@ -401,6 +409,149 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
     EXPECT_EQ(restored.front().face_node_keys, packet.face_node_keys);
     EXPECT_EQ(restored.front().face_global_ids, packet.face_global_ids);
     EXPECT_EQ(restored.front().face_boundary_ids, packet.face_boundary_ids);
+    EXPECT_EQ(
+        restored.front().face_neighbor_gids,
+        packet.face_neighbor_gids);
+    EXPECT_EQ(
+        restored.front().face_neighbor_ranks,
+        packet.face_neighbor_ranks);
+
+    const auto views =
+        Packet::view_packets(bytes.data(), bytes.size());
+    ASSERT_EQ(views.size(), 1U);
+    EXPECT_EQ(
+        views.front().data(),
+        bytes.data() + sizeof(std::uint32_t));
+    EXPECT_EQ(views.front().gid(), packet.gid);
+
+    std::vector<std::vector<Pack::global_ordinal_type>>
+        viewed_face_nodes;
+    std::vector<Pack::global_ordinal_type>
+        viewed_face_global_ids;
+    std::vector<int> viewed_face_neighbor_ranks;
+    views.front().for_each_face(
+        [&](const Packet::View::Face& face)
+        {
+            viewed_face_nodes.emplace_back(
+                face.node_gids.begin(),
+                face.node_gids.begin() + face.node_count);
+            viewed_face_global_ids.push_back(face.global_id);
+            viewed_face_neighbor_ranks.push_back(
+                face.neighbor_rank);
+        });
+    EXPECT_EQ(viewed_face_nodes, packet.face_node_keys);
+    EXPECT_EQ(
+        viewed_face_global_ids,
+        packet.face_global_ids);
+    EXPECT_EQ(
+        viewed_face_neighbor_ranks,
+        packet.face_neighbor_ranks);
+}
+
+/**
+ * @brief Partitions a legacy mesh whose complete source geometry exists only
+ *        on rank zero.
+ */
+TEST(MeshPartitionerTest, PartitionsRootOnlySourceGeometry)
+{
+    constexpr unsigned cell_count = 8;
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    std::shared_ptr<ReplicatedLegacyMesh> mesh;
+    if (comm->getRank() == 0)
+    {
+        const auto source =
+            make_unstructured_hex_line(cell_count);
+        mesh =
+            std::make_shared<ReplicatedLegacyMesh>(*source);
+        ASSERT_EQ(mesh->num_owned_cells(), cell_count);
+    }
+    else
+    {
+        mesh = std::make_shared<ReplicatedLegacyMesh>();
+        ASSERT_EQ(mesh->num_owned_cells(), 0U);
+        ASSERT_EQ(mesh->num_local_cells(), 0U);
+    }
+
+    EXPECT_TRUE(
+        SimpleFluid::MeshPartitioner<Pack>::partition(
+            *mesh, comm));
+    if (comm->getSize() <= static_cast<int>(cell_count))
+    {
+        EXPECT_GT(mesh->num_owned_cells(), 0U);
+    }
+
+    using GO = Pack::global_ordinal_type;
+    std::vector<GO> local_gids(
+        mesh->owned_cell_global_ids().begin(),
+        mesh->owned_cell_global_ids().end());
+    const int local_count =
+        static_cast<int>(local_gids.size());
+    std::vector<int> counts(
+        static_cast<size_t>(comm->getSize()), 0);
+    my_mpi::allgather(
+        &local_count, 1, counts.data(), 1);
+    std::vector<int> displacements(counts.size(), 0);
+    for (size_t rank = 1; rank < counts.size(); ++rank)
+    {
+        displacements[rank] =
+            displacements[rank - 1] + counts[rank - 1];
+    }
+    const int global_count =
+        displacements.back() + counts.back();
+    std::vector<GO> global_gids(
+        static_cast<size_t>(global_count));
+    my_mpi::allgatherv(
+        local_gids.data(),
+        local_count,
+        global_gids.data(),
+        counts.data(),
+        displacements.data());
+
+    EXPECT_EQ(global_count, static_cast<int>(cell_count));
+    EXPECT_EQ(
+        std::set<GO>(global_gids.begin(), global_gids.end()).size(),
+        static_cast<size_t>(cell_count));
+
+    for (size_t cell = 0;
+         cell < mesh->num_owned_cells();
+         ++cell)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(cell);
+        EXPECT_FALSE(mesh->cell(cell_lid).faces.empty());
+        for (const auto node_gid : mesh->cell(cell_lid).node_gids)
+        {
+            EXPECT_NO_THROW((void)mesh->node_coord(node_gid));
+        }
+    }
+}
+
+/**
+ * @brief Confirms MeshFactory releases its root-only STK construction source
+ *        after exposing a distributed finite-volume mesh.
+ */
+TEST(MeshPartitionerTest, FactoryReleasesRootOnlySTKSourceAfterPartition)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    const auto mesh = make_4x4x4_box_mesh();
+    const auto stk_mesh =
+        std::dynamic_pointer_cast<SimpleFluid::STKMesh<Pack>>(mesh);
+    ASSERT_NE(stk_mesh, nullptr);
+
+    EXPECT_EQ(stk_mesh->meta(), nullptr);
+    EXPECT_EQ(stk_mesh->bulk(), nullptr);
+    EXPECT_GT(mesh->num_owned_cells(), 0U);
+    EXPECT_LT(mesh->num_owned_cells(), 64U);
 }
 
 /** @brief Keeps owner resolution collective when only some ranks have ghosts. */

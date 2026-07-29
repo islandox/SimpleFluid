@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -192,6 +193,8 @@ TEST(STKMeshTest, AssembleMeshWithoutThrowing)
 
     mesh.assemble();
 
+    EXPECT_EQ(mesh.meta(), nullptr);
+    EXPECT_EQ(mesh.bulk(), nullptr);
     EXPECT_EQ(mesh.num_local_cells(), 2u);
     EXPECT_EQ(mesh.num_owned_cells(), 2u);
     EXPECT_EQ(mesh.num_faces(), 11u);
@@ -199,6 +202,7 @@ TEST(STKMeshTest, AssembleMeshWithoutThrowing)
     EXPECT_DOUBLE_EQ(mesh.cell_volume(1), 1.0);
     EXPECT_EQ(mesh.global_to_local_cell(1), 0);
     EXPECT_EQ(mesh.global_to_local_cell(2), 1);
+    EXPECT_THROW(mesh.assemble(), std::logic_error);
 }
 
 /**

@@ -50,6 +50,19 @@ inline Ordinal checked_size_to_ordinal(size_t value, std::string_view label)
 } // namespace detail
 
 /**
+ * @brief Return the cached device representation, creating it when first used.
+ */
+template<TpetraTypePack Pack>
+inline auto Mesh<Pack>::device_views() const -> DeviceViews
+{
+    if (!d_device_views_created)
+    {
+        create_device_views();
+    }
+    return d_device_views;
+}
+
+/**
  * @brief Validate a local cell ordinal when runtime checks are enabled.
  * @tparam Pack Tpetra type pack.
  * @param lid Local cell ordinal.

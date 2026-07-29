@@ -23,7 +23,9 @@ namespace SimpleFluid
  * @brief Factory that constructs mesh instances from database configuration.
  *
  * The factory reads mesh shape, size, and boundary metadata from a
- * Database and produces a concrete Mesh implementation.
+ * Database and produces a concrete Mesh implementation. In parallel,
+ * programmatic global geometry is constructed only on rank zero and then
+ * partitioned into rank-local owned and ghost cells.
  */
 class MeshFactory
 {

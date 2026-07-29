@@ -147,7 +147,18 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
               legacy->owned_face_map()->getGlobalElement(0));
     EXPECT_EQ(handle.num_owned_cells(), legacy->num_owned_cells());
     EXPECT_EQ(handle.cell_centroid(0), legacy->cell_centroid(0));
-    EXPECT_EQ(handle.faces(0).size(), legacy->faces(0).size());
+    const auto handle_faces = handle.faces(0);
+    const auto& legacy_faces = legacy->faces(0);
+    EXPECT_EQ(handle_faces.size(), legacy_faces.size());
+    ASSERT_FALSE(handle_faces.empty());
+    EXPECT_EQ(handle_faces.data(), &legacy_faces[0]);
+
+    // The historical indexer API remains available, but is no longer needed
+    // by normal legacy geometry and field access.
+    EXPECT_EQ(
+        handle.indexer().num_local_cells(),
+        legacy->num_local_cells());
+    EXPECT_EQ(handle.indexer().num_local_faces(), legacy->num_faces());
 }
 
 /**
