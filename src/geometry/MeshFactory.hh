@@ -89,6 +89,7 @@ private:
     real_t d_mesh_size;
     real_t d_radius;
     real_t d_cylinder_height;
+    real_t d_cylinder_circumferential_mesh_size = 0.0;
     std::string d_external_mesh_file;
 
     // types of exterior faces for each boundary part, used for setting BCs in assembly

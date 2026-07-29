@@ -204,10 +204,10 @@ bubble-induced turbulence, and a full bubble-size distribution are likewise
 absent. Those capabilities belong to the deferred Euler–Euler program in
 `TODO.md`.
 
-The shipped `pitz_daily` example exercises RANS without radiolytic bubbles,
-while the fissile-solution examples exercise radiolysis without RANS. No
-checked-in example or regression test currently advances both subsystems in a
-nontrivial flow.
+The shipped `pitz_daily` and `fissile_solution_tank_sst` examples exercise
+RANS without radiolytic bubbles, while the fissile-solution smoke examples
+exercise radiolysis without RANS. No checked-in example or regression test
+currently advances both subsystems in a nontrivial flow.
 
 ### FVM Operators
 
@@ -254,6 +254,7 @@ short-running physical smoke cases:
 | Natural convection cavity | Differentially heated square cavity |
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
+| OpenFOAM Gaussian tank | 100 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
 and MPI coverage. A permanent combined RANS-plus-bubble regression and a
@@ -262,7 +263,9 @@ quantitative turbulent bubbly-flow benchmark remain open.
 The cavity smoke tests do not currently assert agreement with Ghia et al. or
 with bundled OpenFOAM profile data. See
 `verification/openfoam/cavityFlow/README.md` for the cavity workflow and
-`verification/openfoam/pitzDaily/README.md` for the pitzDaily workflow.
+`verification/openfoam/pitzDaily/README.md` for the pitzDaily workflow. The
+matched Gaussian tank workflow and its interpretation are documented in
+`verification/openfoam/fissileSolutionTank/README.md`.
 
 ## Examples
 
@@ -276,6 +279,7 @@ Pre-built example executables:
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
 | `pitz_daily` | OpenFOAM pitzDaily geometry with transient standard k-epsilon transport |
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
+| `fissile_solution_tank_sst` | 100 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 
 Each example is configured via a `Database` object and runs a short transient

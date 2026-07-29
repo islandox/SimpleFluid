@@ -204,6 +204,12 @@ target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
 
 add_executable(
+    fissile_solution_tank_sst
+    examples/fissile_solution_tank_sst.cc)
+target_link_libraries(fissile_solution_tank_sst PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_sst)
+
+add_executable(
     constant_power_cylinder_vessel
     examples/constant_power_cylinder_vessel.cc)
 target_link_libraries(constant_power_cylinder_vessel PRIVATE SimpleFluid)
@@ -217,6 +223,7 @@ foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_shiri
     pitz_daily
     fissile_solution_tank_demo
+    fissile_solution_tank_sst
     constant_power_cylinder_vessel)
   add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
   set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
@@ -227,6 +234,10 @@ endforeach()
 set_tests_properties(natural_convection_shiri_smoke PROPERTIES
     ENVIRONMENT
         "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
+
+set_tests_properties(fissile_solution_tank_sst_smoke PROPERTIES
+    ENVIRONMENT
+        "SIMPLEFLUID_TANK_RZ_SPACING=0.05;SIMPLEFLUID_TANK_CIRCUMFERENTIAL_SPACING=0.1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_COUNT=1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_FIRST_HEIGHT=0.01;SIMPLEFLUID_TANK_STEPS=1;SIMPLEFLUID_TANK_DT=0.001")
 
 set_tests_properties(pitz_daily_smoke PROPERTIES
     ENVIRONMENT

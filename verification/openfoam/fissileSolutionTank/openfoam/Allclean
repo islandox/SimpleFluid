@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+command -v foamListTimes >/dev/null 2>&1 || {
+    echo "OpenFOAM is not loaded; source its etc/bashrc first." >&2
+    exit 1
+}
+
+cd "$(dirname "$0")"
+foamListTimes -rm -noZero >/dev/null 2>&1 || true
+rm -rf processor* postProcessing constant/polyMesh dynamicCode log.*

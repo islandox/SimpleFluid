@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+case "${1:-12}" in
+    ''|*[!0-9]*)
+        echo "MPI rank count must be an integer from 1 to 12" >&2
+        exit 2
+        ;;
+esac
+np="${1:-12}"
+if [ "$np" -lt 1 ] || [ "$np" -gt 12 ]; then
+    echo "MPI rank count must be from 1 to 12" >&2
+    exit 2
+fi
+
+command -v blockMesh >/dev/null 2>&1 || {
+    echo "OpenFOAM is not loaded; source its etc/bashrc first." >&2
+    exit 1
+}
+command -v buoyantBoussinesqPimpleFoam >/dev/null 2>&1 || {
+    echo "This case requires buoyantBoussinesqPimpleFoam." >&2
+    exit 1
+}
+
+cd "$(dirname "$0")"
+foamListTimes -rm -noZero >/dev/null 2>&1 || true
+rm -rf processor* postProcessing log.*
+
+default_np=12
+if [ "$np" -ne "$default_np" ]; then
+    restore_decomposition()
+    {
+        foamDictionary system/decomposeParDict \
+            -entry numberOfSubdomains -set "$default_np" >/dev/null
+    }
+    trap restore_decomposition EXIT HUP INT TERM
+    foamDictionary system/decomposeParDict \
+        -entry numberOfSubdomains -set "$np" >/dev/null
+fi
+
+blockMesh > log.blockMesh 2>&1
+checkMesh > log.checkMesh 2>&1
+if [ "$np" -eq 1 ]; then
+    buoyantBoussinesqPimpleFoam > log.solver 2>&1
+else
+    decomposePar -force > log.decomposePar 2>&1
+    mpirun --use-hwthread-cpus -np "$np" \
+        buoyantBoussinesqPimpleFoam -parallel > log.solver 2>&1
+    reconstructPar -latestTime > log.reconstructPar 2>&1
+fi
+postProcess -func writeCellCentres -latestTime > log.cellCentres 2>&1
+postProcess -func writeCellVolumes -latestTime > log.cellVolumes 2>&1
+
+grep -E \
+    'Gaussian fission source:|Courant Number|patch .* y\\+' \
+    log.solver | tail -n 12

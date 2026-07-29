@@ -113,6 +113,8 @@ mistaken for foundation or Phase 9 completion.
       MPI consistency tests.
 - [x] Add the transient `pitz_daily` standard-k-epsilon example and the
       OpenFOAM profile-comparison workflow.
+- [x] Add the matched 100 W Gaussian fissile-solution-tank SST comparison,
+      including 2 mm R-Z spacing, wall-layer refinement, and R-Z error figures.
 - [x] Document that the current RANS variables use single-continuum, full-cell
       transport rather than phase-volume-fraction-weighted equations.
 

@@ -1,0 +1,97 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvOptions;
+}
+
+fissionHeating
+{
+    type            scalarCodedSource;
+    active          true;
+    name            gaussianFissionHeating;
+
+    scalarCodedSourceCoeffs
+    {
+        selectionMode   all;
+        fields          (T);
+
+        codeInclude
+        #{
+            #include "PstreamReduceOps.H"
+        #};
+
+        codeCorrect
+        #{
+        #};
+
+        codeAddSup
+        #{
+            constexpr scalar fullTankPower = 100.0;
+            constexpr scalar sectorFraction = 5.0/360.0;
+            constexpr scalar rhoCp = 1000.0*4200.0;
+            constexpr scalar radialWidth = 0.03;
+            constexpr scalar axialWidth = 0.075;
+            constexpr scalar axialCenter = 0.15;
+
+            const vectorField& centres =
+                mesh_.C().primitiveField();
+            const scalarField& volumes = mesh_.V();
+            scalarField weights(centres.size(), Zero);
+            scalar localShapeIntegral = 0.0;
+            forAll(centres, celli)
+            {
+                const scalar radial =
+                    hypot(centres[celli].x(), centres[celli].y());
+                const scalar radialCoordinate = radial/radialWidth;
+                const scalar axialCoordinate =
+                    (centres[celli].z() - axialCenter)/axialWidth;
+                weights[celli] =
+                    exp(-0.5*
+                        (sqr(radialCoordinate)
+                       + sqr(axialCoordinate)));
+                localShapeIntegral +=
+                    weights[celli]*volumes[celli];
+            }
+
+            scalar sectorShapeIntegral = localShapeIntegral;
+            reduce(sectorShapeIntegral, sumOp<scalar>());
+            const scalar powerDensityScale =
+                fullTankPower*sectorFraction/sectorShapeIntegral;
+            scalarField& source = eqn.source();
+            forAll(source, celli)
+            {
+                source[celli] -=
+                    powerDensityScale*weights[celli]
+                   *volumes[celli]/rhoCp;
+            }
+
+            static bool reported = false;
+            if (!reported && Pstream::master())
+            {
+                Info<< "Gaussian fission source: fullTankPower="
+                    << fullTankPower
+                    << " W, sectorPower="
+                    << fullTankPower*sectorFraction
+                    << " W, sectorShapeIntegral="
+                    << sectorShapeIntegral
+                    << " m3, powerDensityScale="
+                    << powerDensityScale << " W/m3" << endl;
+                reported = true;
+            }
+        #};
+
+        codeConstrain
+        #{
+        #};
+    }
+}
+
+buoyancyTurbulence
+{
+    type            buoyancyTurbSource;
+    selectionMode   all;
+    beta            2.1e-4;
+    alphat          alphat;
+    T               T;
+}

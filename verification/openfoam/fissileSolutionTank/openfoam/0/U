@@ -1,0 +1,16 @@
+FoamFile
+{
+    format      ascii;
+    class       volVectorField;
+    object      U;
+}
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform (0 0 0);
+boundaryField
+{
+    sideWall   { type fixedValue; value uniform (0 0 0); }
+    bottomWall { type fixedValue; value uniform (0 0 0); }
+    topWall    { type fixedValue; value uniform (0 0 0); }
+    wedgeFront { type wedge; }
+    wedgeBack  { type wedge; }
+}
