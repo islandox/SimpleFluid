@@ -302,6 +302,11 @@ MeshFactory::MeshFactory(SP<const Database> db)
     {
         d_radius = db->get<real_t>("radius");
         d_cylinder_height = db->get<real_t>("height");
+        d_cylinder_circumferential_mesh_size =
+            db->contains("cylinder_circumferential_mesh_size")
+                ? db->get<real_t>(
+                      "cylinder_circumferential_mesh_size")
+                : d_mesh_size;
     }
     else if (d_domain_type == DomainType::ANNULUS)
     {
@@ -679,6 +684,13 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     {
         throw std::runtime_error("CYLINDER MeshFactory requires positive radius and height.");
     }
+    if (!(d_cylinder_circumferential_mesh_size > 0.0)
+        || !std::isfinite(d_cylinder_circumferential_mesh_size))
+    {
+        throw std::runtime_error(
+            "CYLINDER MeshFactory requires a finite positive "
+            "cylinder_circumferential_mesh_size.");
+    }
     if (d_domain_exterior_face_types.size() < 3)
     {
         throw std::runtime_error("CYLINDER MeshFactory requires boundary names {radial,zmin,zmax}.");
@@ -723,7 +735,9 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
     // Place nodes on circular fronts (including prescribed radial boundary
     // layers), then let the shared XY Delaunay kernel determine connectivity.
     const auto xy_mesh = Meshes::FrontalDelaunay2D::triangulate_disk(
-        radial_edges, d_mesh_size, d_domain_exterior_face_types[0]);
+        radial_edges,
+        d_cylinder_circumferential_mesh_size,
+        d_domain_exterior_face_types[0]);
     const auto nodes_per_layer = xy_mesh.nodes.size();
 
     auto meta = mesh->meta();
