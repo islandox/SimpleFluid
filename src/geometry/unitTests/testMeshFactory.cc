@@ -362,6 +362,34 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
 }
 
 /**
+ * @brief Verifies cylinder radial/axial spacing can be decoupled from the
+ * circumferential point-front spacing.
+ */
+TEST(MeshFactoryTest, CylinderAcceptsIndependentCircumferentialSpacing)
+{
+    auto db = std::const_pointer_cast<SimpleFluid::Database>(
+        make_cylinder_database());
+    db->set(
+        "cylinder_circumferential_mesh_size",
+        SimpleFluid::real_t{0.5});
+
+    auto mesh = SimpleFluid::MeshFactory(db).template build<>();
+
+    ASSERT_TRUE(mesh != nullptr);
+    // One radial ring has ceil(2 pi / 0.5) = 13 triangles and the height has
+    // two layers.
+    EXPECT_EQ(mesh->num_owned_cells(), 26u);
+    for (MeshType::local_ordinal_type lid = 0;
+         lid < static_cast<MeshType::local_ordinal_type>(
+                   mesh->num_local_cells());
+         ++lid)
+    {
+        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::TRIPRISM);
+        EXPECT_GT(mesh->cell_volume(lid), 0.0);
+    }
+}
+
+/**
  * @brief Verifies a full annulus is meshed periodically while retaining its
  * radial and axial physical boundary parts.
  */
