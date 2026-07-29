@@ -15,6 +15,9 @@ namespace SimpleFluid
 {
 
 template class detail::CoupledSchurPreconditioner<DefaultTpetraTypes>;
+template auto detail::pressure_gradient_stencils<DefaultTpetraTypes>(const Mesh<DefaultTpetraTypes>&,
+    const BoundaryConditionMap&, DefaultTpetraTypes::scalar_type)
+    -> std::vector<detail::AffinePressureGradientStencil<DefaultTpetraTypes>>;
 template class CoupledPressureVelocitySolver<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

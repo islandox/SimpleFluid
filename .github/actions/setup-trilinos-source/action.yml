@@ -17,14 +17,18 @@ inputs:
   fortran-compiler:
     required: false
     default: mpifort
-  cache-suffix:
+  cache-suffix-install:
+    required: false
+    default: v1
+  cache-suffix-build:
     required: false
     default: v1
 
 runs:
   using: composite
   steps:
-    - name: Install build dependencies
+    - name: Install build dependencies on Ubuntu
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         sudo apt-get update
@@ -47,7 +51,25 @@ runs:
           libgmock-dev \
           zlib1g-dev
 
-    - name: Inspect HDF5 and NetCDF
+    - name: Install build dependencies on macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        brew install \
+          boost \
+          googletest \
+          hdf5-mpi \
+          open-mpi
+
+        brew list --versions boost googletest hdf5-mpi open-mpi
+        clang --version
+        clang++ --version
+        mpicc --showme:command
+        mpicxx --showme:command
+        mpifort --showme:command
+
+    - name: Inspect HDF5 and NetCDF on Ubuntu
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         which h5pcc || true
@@ -67,14 +89,46 @@ runs:
 
         dpkg -l | grep -Ei 'hdf5|netcdf|pnetcdf' || true
 
+    - name: Inspect MPI HDF5 on macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        HDF5_PREFIX="$(brew --prefix hdf5-mpi)"
+
+        echo "HDF5_PREFIX=$HDF5_PREFIX"
+        test -f "$HDF5_PREFIX/include/hdf5.h"
+        test -x "$HDF5_PREFIX/bin/h5pcc"
+        "$HDF5_PREFIX/bin/h5pcc" -showconfig
+        "$HDF5_PREFIX/bin/h5pcc" -showconfig |
+          grep -Eiq 'Parallel HDF5:[[:space:]]*(yes|on)'
+
     - name: Restore Trilinos install cache
       id: cache-trilinos
       uses: actions/cache@v5
       with:
         path: |
+          ${{ github.workspace }}/_deps/netcdf_install
           ${{ github.workspace }}/_deps/partitioners_install
           ${{ github.workspace }}/_deps/trilinos_install
-        key: ${{ inputs.trilinos-version }}-install-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix }}
+        key: ${{ inputs.trilinos-version }}-install-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-install }}
+
+    - name: Restore NetCDF install cache
+      id: cache-netcdf
+      if: runner.os == 'macOS' && steps.cache-trilinos.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ github.workspace }}/_deps/netcdf_install
+        key: netcdf-v4.10.1-install-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-install }}
+
+    - name: Restore partitioners install cache
+      id: cache-partitioners
+      if: steps.cache-trilinos.outputs.cache-hit != 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          ${{ github.workspace }}/_deps/partitioners_install
+        key: partitioners-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-install }}
 
     - name: Restore Trilinos build cache
       id: cache-trilinos-build
@@ -83,13 +137,59 @@ runs:
       with:
         path: |
           ${{ github.workspace }}/_deps/trilinos_build
-        key: ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix }}
+        key: ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-build }}
         restore-keys: |
           ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-
           trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-
 
+    - name: Build NetCDF with MPI HDF5
+      if: runner.os == 'macOS' && steps.cache-trilinos.outputs.cache-hit != 'true' && steps.cache-netcdf.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        HDF5_PREFIX="$(brew --prefix hdf5-mpi)"
+        NETCDF_PREFIX="${{ github.workspace }}/_deps/netcdf_install"
+
+        export OMPI_CC="$(command -v clang)"
+
+        git clone --depth 1 --branch v4.10.1 \
+          https://github.com/Unidata/netcdf-c.git \
+          ${{ github.workspace }}/_deps/netcdf-c
+
+        cmake -S ${{ github.workspace }}/_deps/netcdf-c \
+          -B ${{ github.workspace }}/_deps/netcdf_build \
+          -G Ninja \
+          -D CMAKE_BUILD_TYPE=Release \
+          -D CMAKE_C_COMPILER=mpicc \
+          -D CMAKE_INSTALL_PREFIX="$NETCDF_PREFIX" \
+          -D CMAKE_PREFIX_PATH="$HDF5_PREFIX" \
+          -D CMAKE_OSX_ARCHITECTURES=arm64 \
+          -D CMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
+          -D NETCDF_ENABLE_HDF5=ON \
+          -D NETCDF_ENABLE_DAP=OFF \
+          -D NETCDF_ENABLE_DOXYGEN=OFF \
+          -D NETCDF_ENABLE_TESTS=OFF \
+          -D BUILD_SHARED_LIBS=ON
+
+        cmake --build ${{ github.workspace }}/_deps/netcdf_build --parallel 2
+        cmake --install ${{ github.workspace }}/_deps/netcdf_build
+
+    - name: Inspect MPI NetCDF on macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        NETCDF_PREFIX="${{ github.workspace }}/_deps/netcdf_install"
+
+        echo "NETCDF_PREFIX=$NETCDF_PREFIX"
+        test -f "$NETCDF_PREFIX/include/netcdf.h"
+        test -e "$NETCDF_PREFIX/lib/libnetcdf.dylib"
+        test "$("$NETCDF_PREFIX/bin/nc-config" --has-nc4)" = "yes"
+        test "$("$NETCDF_PREFIX/bin/nc-config" --has-parallel4)" = "yes"
+        "$NETCDF_PREFIX/bin/nc-config" --version
+        "$NETCDF_PREFIX/bin/nc-config" --libs
+        "$NETCDF_PREFIX/bin/nc-config" --cflags
+
     - name: Build METIS and ParMETIS from source
-      if: steps.cache-trilinos.outputs.cache-hit != 'true'
+      if: steps.cache-trilinos.outputs.cache-hit != 'true' && steps.cache-partitioners.outputs.cache-hit != 'true'
       shell: bash
       run: |
         PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
@@ -127,25 +227,33 @@ runs:
           export OMPI_CXX="$(command -v g++)"
         fi
 
+        SHARED_LIBRARIES=1
+        PARTITIONER_LIBRARY_SUFFIX=so
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          PARTITIONER_LIBRARY_SUFFIX=dylib
+        fi
+
         make -C "${{ github.workspace }}/_deps/GKlib" config \
-          shared=1 \
+          shared="$SHARED_LIBRARIES" \
           cc="${{ inputs.c-compiler }}" \
           prefix="$PARTITIONER_PREFIX"
         make -C "${{ github.workspace }}/_deps/GKlib" --jobs 2
         make -C "${{ github.workspace }}/_deps/GKlib" install
 
         make -C "${{ github.workspace }}/_deps/METIS" config \
-          shared=1 \
+          shared="$SHARED_LIBRARIES" \
           cc="${{ inputs.c-compiler }}" \
           prefix="$PARTITIONER_PREFIX" \
           gklib_path="$PARTITIONER_PREFIX"
         make -C "${{ github.workspace }}/_deps/METIS" --jobs 2
         make -C "${{ github.workspace }}/_deps/METIS" install
 
-        export LD_LIBRARY_PATH="$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          export LD_LIBRARY_PATH="$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+        fi
 
         make -C "${{ github.workspace }}/_deps/ParMETIS" config \
-          shared=1 \
+          shared="$SHARED_LIBRARIES" \
           cc=mpicc \
           prefix="$PARTITIONER_PREFIX" \
           gklib_path="$PARTITIONER_PREFIX" \
@@ -154,16 +262,36 @@ runs:
         make -C "${{ github.workspace }}/_deps/ParMETIS" install
 
         test -f "$PARTITIONER_PREFIX/include/parmetis.h"
-        test -e "$PARTITIONER_PREFIX/lib/libGKlib.so"
-        test -e "$PARTITIONER_PREFIX/lib/libmetis.so"
-        test -e "$PARTITIONER_PREFIX/lib/libparmetis.so"
+        test -e "$PARTITIONER_PREFIX/lib/libGKlib.$PARTITIONER_LIBRARY_SUFFIX"
+        test -e "$PARTITIONER_PREFIX/lib/libmetis.$PARTITIONER_LIBRARY_SUFFIX"
+        test -e "$PARTITIONER_PREFIX/lib/libparmetis.$PARTITIONER_LIBRARY_SUFFIX"
 
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
       shell: bash
       run: |
         PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
-        export LD_LIBRARY_PATH="$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+        PARTITIONER_LIBRARY_SUFFIX=so
+        TRILINOS_CMAKE_PREFIX_PATH=""
+        TRILINOS_PLATFORM_OPTIONS=()
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          PARTITIONER_LIBRARY_SUFFIX=dylib
+          BREW_PREFIX="$(brew --prefix)"
+          HDF5_PREFIX="$(brew --prefix hdf5-mpi)"
+          NETCDF_PREFIX="${{ github.workspace }}/_deps/netcdf_install"
+          HDF5_LIBRARIES="$HDF5_PREFIX/lib/libhdf5_hl.dylib;$HDF5_PREFIX/lib/libhdf5.dylib"
+          test -e "$HDF5_PREFIX/lib/libhdf5_hl.dylib"
+          test -e "$HDF5_PREFIX/lib/libhdf5.dylib"
+          TRILINOS_CMAKE_PREFIX_PATH="$HDF5_PREFIX;$NETCDF_PREFIX;$BREW_PREFIX"
+          TRILINOS_PLATFORM_OPTIONS+=(
+            -D CMAKE_PREFIX_PATH="$TRILINOS_CMAKE_PREFIX_PATH"
+            -D CMAKE_OSX_ARCHITECTURES=arm64
+            -D TPL_HDF5_INCLUDE_DIRS="$HDF5_PREFIX/include"
+            -D TPL_HDF5_LIBRARIES="$HDF5_LIBRARIES"
+          )
+        else
+          export LD_LIBRARY_PATH="$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+        fi
 
         git clone --depth 1 --branch ${{ inputs.trilinos-version }} \
           https://github.com/trilinos/Trilinos.git \
@@ -175,36 +303,78 @@ runs:
         if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
           TEUCHOS_SCALAR_TRAITS="${{ github.workspace }}/_deps/Trilinos/packages/teuchos/core/src/Teuchos_ScalarTraitsDecl.hpp"
           if [ -f "$TEUCHOS_SCALAR_TRAITS" ]; then
-            sed -i '120s/return 0/return {}/' "$TEUCHOS_SCALAR_TRAITS"
+            perl -pi -e 'if ($. == 120) { s/return 0/return {}/ }' \
+              "$TEUCHOS_SCALAR_TRAITS"
             echo "Patched Teuchos_ScalarTraitsDecl.hpp for LLVM"
           else
             echo "WARNING: Teuchos_ScalarTraitsDecl.hpp not found at expected path"
           fi
         fi
 
-        NETCDF_INCLUDE_DIR="$(dpkg -L libnetcdf-mpi-dev | grep '/netcdf.h$' | head -n 1 | xargs dirname)"
-        NETCDF_LIBRARY="$(dpkg -L libnetcdf-mpi-dev | grep '/libnetcdf.so$' | head -n 1)"
+        # Backport the dependent-template fix present on Trilinos master.
+        # Apple Clang 21 rejects these calls in the pinned 17.1.1 release.
+        if [ "$RUNNER_OS" = "macOS" ] && \
+           [ "${{ inputs.trilinos-version }}" = "trilinos-release-17-1-1" ]; then
+          MUELU_MAXWELL="${{ github.workspace }}/_deps/Trilinos/packages/muelu/src/Operators/MueLu_Maxwell1_def.hpp"
+          MISSING_TEMPLATE_PATTERN='parameterList_\.sublist\("maxwell1: (11|22)list"\)\.get<std::string>'
+          PATCHED_TEMPLATE_PATTERN='parameterList_\.sublist\("maxwell1: (11|22)list"\)\.template get<std::string>'
+
+          MISSING_TEMPLATE_COUNT="$(
+            grep -Eo "$MISSING_TEMPLATE_PATTERN" "$MUELU_MAXWELL" |
+              wc -l |
+              tr -d '[:space:]'
+          )"
+          test "$MISSING_TEMPLATE_COUNT" = "4"
+
+          perl -pi -e \
+            's/(parameterList_\.sublist\("maxwell1: (?:11|22)list"\))\.get<std::string>/$1.template get<std::string>/g' \
+            "$MUELU_MAXWELL"
+
+          if grep -Eq "$MISSING_TEMPLATE_PATTERN" "$MUELU_MAXWELL"; then
+            echo "Failed to patch dependent MueLu ParameterList calls"
+            exit 1
+          fi
+
+          PATCHED_TEMPLATE_COUNT="$(
+            grep -Eo "$PATCHED_TEMPLATE_PATTERN" "$MUELU_MAXWELL" |
+              wc -l |
+              tr -d '[:space:]'
+          )"
+          test "$PATCHED_TEMPLATE_COUNT" = "4"
+          echo "Backported MueLu dependent-template fix for Apple Clang 21"
+        fi
+
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          NETCDF_PREFIX="${{ github.workspace }}/_deps/netcdf_install"
+          NETCDF_INCLUDE_DIR="$NETCDF_PREFIX/include"
+          NETCDF_LIBRARY="$NETCDF_PREFIX/lib/libnetcdf.dylib"
+        else
+          NETCDF_INCLUDE_DIR="$(dpkg -L libnetcdf-mpi-dev | grep '/netcdf.h$' | head -n 1 | xargs dirname)"
+          NETCDF_LIBRARY="$(dpkg -L libnetcdf-mpi-dev | grep '/libnetcdf.so$' | head -n 1)"
+        fi
 
         if [ -z "$NETCDF_INCLUDE_DIR" ] || [ -z "$NETCDF_LIBRARY" ]; then
-          echo "Could not locate NetCDF MPI headers/library"
-          dpkg -L libnetcdf-mpi-dev
+          echo "Could not locate NetCDF headers/library"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            dpkg -L libnetcdf-mpi-dev
+          fi
           exit 1
         fi
 
         if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
-          if command -v flang-new >/dev/null 2>&1; then
-            FC_PATH="$(command -v flang-new)"
+          export OMPI_CC="$(command -v clang)"
+          export OMPI_CXX="$(command -v clang++)"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            mpifort --showme:command
+          elif command -v flang-new >/dev/null 2>&1; then
+            export OMPI_FC="$(command -v flang-new)"
           elif command -v flang >/dev/null 2>&1; then
-            FC_PATH="$(command -v flang)"
+            export OMPI_FC="$(command -v flang)"
           else
             echo "No LLVM flang found"
             find /usr/bin -maxdepth 1 -name '*flang*' -print
             exit 1
           fi
-
-          export OMPI_CC="$(command -v clang)"
-          export OMPI_CXX="$(command -v clang++)"
-          export OMPI_FC="$FC_PATH"
         elif [ "${{ inputs.compiler-id }}" = "GCC" ]; then
           export OMPI_CC="$(command -v gcc)"
           export OMPI_CXX="$(command -v g++)"
@@ -224,16 +394,18 @@ runs:
           -D CMAKE_Fortran_COMPILER=mpifort \
           -D CMAKE_CXX_STANDARD=20 \
           -D CMAKE_CXX_EXTENSIONS=OFF \
+          "${TRILINOS_PLATFORM_OPTIONS[@]}" \
           -D CMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -D CMAKE_INSTALL_RPATH_USE_LINK_PATH=ON \
           -D TPL_ENABLE_MPI=ON \
           -D TPL_ENABLE_BLAS=ON \
           -D TPL_ENABLE_LAPACK=ON \
           -D TPL_ENABLE_METIS=ON \
           -D TPL_METIS_INCLUDE_DIRS="$PARTITIONER_PREFIX/include" \
-          -D TPL_METIS_LIBRARIES="$PARTITIONER_PREFIX/lib/libmetis.so;$PARTITIONER_PREFIX/lib/libGKlib.so" \
+          -D TPL_METIS_LIBRARIES="$PARTITIONER_PREFIX/lib/libmetis.$PARTITIONER_LIBRARY_SUFFIX;$PARTITIONER_PREFIX/lib/libGKlib.$PARTITIONER_LIBRARY_SUFFIX" \
           -D TPL_ENABLE_ParMETIS=ON \
           -D TPL_ParMETIS_INCLUDE_DIRS="$PARTITIONER_PREFIX/include" \
-          -D TPL_ParMETIS_LIBRARIES="$PARTITIONER_PREFIX/lib/libparmetis.so;$PARTITIONER_PREFIX/lib/libmetis.so;$PARTITIONER_PREFIX/lib/libGKlib.so" \
+          -D TPL_ParMETIS_LIBRARIES="$PARTITIONER_PREFIX/lib/libparmetis.$PARTITIONER_LIBRARY_SUFFIX;$PARTITIONER_PREFIX/lib/libmetis.$PARTITIONER_LIBRARY_SUFFIX;$PARTITIONER_PREFIX/lib/libGKlib.$PARTITIONER_LIBRARY_SUFFIX" \
           -D TPL_ENABLE_BOOST=ON \
           -D TPL_ENABLE_HDF5=ON \
           -D TPL_ENABLE_Netcdf=ON \
@@ -264,6 +436,14 @@ runs:
         PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
         TRILINOS_PREFIX="${{ github.workspace }}/_deps/trilinos_install"
 
-        echo "CMAKE_PREFIX_PATH=$PARTITIONER_PREFIX:$TRILINOS_PREFIX:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
-        echo "LD_LIBRARY_PATH=$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          BREW_PREFIX="$(brew --prefix)"
+          HDF5_PREFIX="$(brew --prefix hdf5-mpi)"
+          NETCDF_PREFIX="${{ github.workspace }}/_deps/netcdf_install"
+          echo "CMAKE_PREFIX_PATH=$PARTITIONER_PREFIX:$TRILINOS_PREFIX:$HDF5_PREFIX:$NETCDF_PREFIX:$BREW_PREFIX:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
+          echo "DYLD_FALLBACK_LIBRARY_PATH=$PARTITIONER_PREFIX/lib:$TRILINOS_PREFIX/lib:$HDF5_PREFIX/lib:$NETCDF_PREFIX/lib:$BREW_PREFIX/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        else
+          echo "CMAKE_PREFIX_PATH=$PARTITIONER_PREFIX:$TRILINOS_PREFIX:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+        fi
         echo "Trilinos_DIR=$TRILINOS_PREFIX/lib/cmake/Trilinos" >> "$GITHUB_ENV"
