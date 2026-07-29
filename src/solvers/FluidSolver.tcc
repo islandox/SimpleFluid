@@ -190,7 +190,7 @@ FluidSolver<Pack>::FluidSolver(
     LinearSolverOptions linear_options,
     bool register_momentum_equation)
     : d_mesh(require_legacy_mesh(mesh)),
-      d_problem(std::make_shared<MeshHandle<Pack>>(d_mesh),
+      d_problem(std::move(mesh),
                 std::move(boundary_conditions),
                 time_options,
                 linear_options)

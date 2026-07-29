@@ -57,12 +57,23 @@ MeshHandle<Pack>::cell_centroid(local_ordinal_type cell_lid) const -> Vec3
 /// @brief Returns a span over the local-ids of the faces bounding the given cell.
 /// @param cell_lid  Local index of the query cell.
 /// @return A `std::span` over the local-ids of the bounding faces.
-/// @note Uses CSR-style offset and lid arrays stored on the handle.
+/// @note Legacy meshes return a zero-copy view of their existing connectivity
+///       when face ordering is already owned-first.
 template<TpetraTypePack Pack>
 inline std::span<const typename MeshHandle<Pack>::local_ordinal_type>
 MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const
 {
     check_cell(cell_lid);
+    if (d_cell_face_offsets.empty())
+    {
+        if (const auto legacy = legacy_mesh())
+        {
+            const auto& face_lids = legacy->faces(cell_lid);
+            return {
+                face_lids.empty() ? nullptr : &face_lids[0],
+                face_lids.size()};
+        }
+    }
     const auto local = static_cast<size_t>(cell_lid);
     const auto begin = d_cell_face_offsets[local];
     const auto end   = d_cell_face_offsets[local + 1];

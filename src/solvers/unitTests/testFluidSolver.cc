@@ -90,6 +90,11 @@ public:
         return pressure_projection()
             .linear_solver_options().reuse_preconditioner;
     }
+
+    auto runtime_mesh_handle() const
+    {
+        return d_problem.mesh_ptr();
+    }
 };
 
 /** @brief Override pressure normalization to represent water-density scaling. */
@@ -110,6 +115,17 @@ protected:
 static_assert(std::is_base_of_v<
               SimpleFluid::FluidSolver<Pack>,
               SimpleFluid::BoussinesqSolver<Pack>>);
+
+/** @brief A supplied runtime handle is shared rather than reconstructed. */
+TEST(FluidSolverTest, ReusesProvidedRuntimeMeshHandle)
+{
+    auto legacy = make_single_cell_mesh();
+    auto handle =
+        std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy);
+    TestFluidSolver solver(handle, {});
+
+    EXPECT_EQ(solver.runtime_mesh_handle(), handle);
+}
 
 /**
  * @brief Verify transport and pressure policies are independently selectable.

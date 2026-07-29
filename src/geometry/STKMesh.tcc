@@ -119,7 +119,24 @@ STKMesh<Pack>::STKMesh()
 {
     d_stk.meta = stkmesh_detail::make_stk_meta_data();
     d_stk.bulk = stkmesh_detail::make_stk_bulk_data(d_stk.meta);
-    d_stk.io.set_bulk_data(*d_stk.bulk);
+    d_stk.io->set_bulk_data(*d_stk.bulk);
+    d_spatial_dim = static_cast<int>(d_stk.meta->spatial_dimension());
+}
+
+/**
+ * @brief Construct an empty STK-based mesh with boundary options.
+ *
+ * @param options Boundary-name mapping and automatic-ID policy used during
+ * assembly.
+ */
+template<TpetraTypePack Pack>
+STKMesh<Pack>::STKMesh(const Options& options)
+    : Mesh<Pack>()
+{
+    d_stk.options = options;
+    d_stk.meta = stkmesh_detail::make_stk_meta_data();
+    d_stk.bulk = stkmesh_detail::make_stk_bulk_data(d_stk.meta);
+    d_stk.io->set_bulk_data(*d_stk.bulk);
     d_spatial_dim = static_cast<int>(d_stk.meta->spatial_dimension());
 }
 
@@ -141,15 +158,16 @@ STKMesh<Pack>::STKMesh(const std::string& mesh_filename, const Options& options)
     d_stk.options = options;
     d_stk.meta = stkmesh_detail::make_stk_meta_data();
     d_stk.bulk = stkmesh_detail::make_stk_bulk_data(d_stk.meta);
-    d_stk.io.set_bulk_data(*d_stk.bulk);
-    d_stk.io.add_mesh_database(mesh_filename, "exodus", stk::io::READ_MESH);
-    d_stk.io.create_input_mesh();
-    d_stk.io.populate_bulk_data();
+    d_stk.io->set_bulk_data(*d_stk.bulk);
+    d_stk.io->add_mesh_database(
+        mesh_filename, "exodus", stk::io::READ_MESH);
+    d_stk.io->create_input_mesh();
+    d_stk.io->populate_bulk_data();
     d_spatial_dim = static_cast<int>(d_stk.meta->spatial_dimension());
 }
 
 /**
- * @brief Assemble the mesh geometry and connectivity into host and device views.
+ * @brief Assemble geometry and connectivity into compact host storage.
  *
  * Assembly order:
  * 1. `initialize_boundary_id_maps()` — read STK side-set / part metadata.
@@ -168,28 +186,46 @@ STKMesh<Pack>::STKMesh(const std::string& mesh_filename, const Options& options)
  *    geometry internally.
  * 7. `prefer_owned_face_owners()` — ensure face owners point to locally
  *    owned cells where possible.
- * 8. `assign_boundary_ids_from_stk_side_parts()` — tag exterior faces
- *    with STK side-set boundary IDs.
- * 9. `create_cell_face_distances()` — compute cell-centroid-to-face-
+ * 8. `create_cell_face_distances()` — compute cell-centroid-to-face-
  *    centroid distances for each cell–face pair.
+ * 9. `rebuild_boundary_face_batches()` — reconstruct local boundary batches
+ *    from the boundary IDs carried by partition packets.
  * 10. `check_connectivity()` — validate the assembled mesh.
- * 11. `create_maps()` — build Tpetra owned and overlap maps.
- * 12. `create_device_views()` — mirror host data to Kokkos device views.
+ * 11. `create_maps()` — build Tpetra owned and overlap maps plus compact
+ *     host operator views. Device views are materialized lazily on request.
  *
  * @pre The STK mesh database has been populated (bulk data, coordinates).
- * @post d_cells, d_faces, d_device_views, and all CRS-like adjacency
- *       arrays are fully populated and consistent.
+ * @post d_cells, d_faces, compact host views, and all CRS-like adjacency
+ *       arrays are fully populated and consistent. The STK source is released;
+ *       device views remain unallocated until requested.
  */
 template<TpetraTypePack Pack>
 void STKMesh<Pack>::assemble()
 {
+    if (d_stk.meta == nullptr || d_stk.bulk == nullptr
+        || d_stk.io == nullptr)
+    {
+        throw std::logic_error(
+            "STKMesh source geometry has already been released.");
+    }
+
     initialize_boundary_id_maps();
     build_cell_list();
     compute_cell_geometry();
     build_face_table();
     assign_boundary_ids_from_stk_side_parts();
 
-    // Partition replicated programmatic meshes for parallel runs.
+    // Face matching is complete. Do not carry one string/hash allocation per
+    // global face into the partition packet exchange.
+    decltype(d_face_key_to_face){}.swap(d_face_key_to_face);
+
+    // The legacy arrays now contain every topology, coordinate, and boundary
+    // datum needed for partitioning and output. Destroy the heavyweight STK
+    // source before packet redistribution reaches its peak memory use.
+    d_stk.release_source_geometry();
+
+    // Partition programmatic source geometry for parallel runs. MeshFactory
+    // holds the complete source only on rank zero.
     // Returns true if partitioning occurred (face geometry already computed).
     const bool was_partitioned =
         MeshPartitioner<Pack>::partition(*this, Tpetra::getDefaultComm());
@@ -199,12 +235,11 @@ void STKMesh<Pack>::assemble()
         compute_face_geometry();
     }
     prefer_owned_face_owners();
-    assign_boundary_ids_from_stk_side_parts();
     create_cell_face_distances();
+    rebuild_boundary_face_batches();
 
     check_connectivity();
     create_maps();
-    create_device_views();
 }
 
 /**
@@ -907,75 +942,69 @@ void STKMesh<Pack>::export_vtu(const std::string& filename) const
         return filename + "_rank" + std::to_string(myrank);
     }();
 
-    std::unordered_map<EntityId, global_index_t> node_lid;
+    std::unordered_map<global_ordinal_type, global_index_t> node_lid;
+    node_lid.reserve(d_node_coords.size());
     VTUWriter::VectorData node_coords;
+    node_coords.reserve(d_node_coords.size());
     VTUWriter::Int64Data cell_node_offsets;
     VTUWriter::Int64Data cell_node_ids;
     VTUWriter::UInt8Data vtu_cell_types;
+    VTUWriter::Int64Data cell_gids;
+    VTUWriter::IntData cell_types;
+    VTUWriter::ScalarData cell_volumes;
+    VTUWriter::VectorData cell_centroids;
 
-    auto append_node = [&](stk::mesh::Entity node) -> global_index_t
+    auto append_node =
+        [&](global_ordinal_type node_gid) -> global_index_t
     {
-        const auto node_id = d_stk.bulk->identifier(node);
-        const auto iter = node_lid.find(node_id);
+        const auto iter = node_lid.find(node_gid);
         if (iter != node_lid.end())
         {
             return iter->second;
         }
 
         const auto lid = static_cast<global_index_t>(node_coords.size());
-        node_lid.emplace(node_id, lid);
-        node_coords.push_back(node_coord(node));
+        node_lid.emplace(node_gid, lid);
+        node_coords.push_back(Base::node_coord(node_gid));
         return lid;
     };
 
-    // Export only owned cells in parallel; all cells in serial
+    // Export only owned cells in parallel; all locally visible cells in serial.
     const bool export_all = (nranks <= 1);
-    for (size_t cell_lid = 0; cell_lid < d_stk.cell_entities.size(); ++cell_lid)
-    {
-        if (!export_all && !d_cells[cell_lid].owned) continue;
-        const auto elem = d_stk.cell_entities[cell_lid];
-        const auto num_nodes = d_stk.bulk->num_nodes(elem);
-        const auto* nodes = d_stk.bulk->begin_nodes(elem);
+    const auto exported_cell_count =
+        export_all ? d_cells.size() : d_owned_cell_global_ids.size();
+    cell_node_offsets.reserve(exported_cell_count);
+    vtu_cell_types.reserve(exported_cell_count);
+    cell_gids.reserve(exported_cell_count);
+    cell_types.reserve(exported_cell_count);
+    cell_volumes.reserve(exported_cell_count);
+    cell_centroids.reserve(exported_cell_count);
 
-        for (unsigned i = 0; i < num_nodes; ++i)
+    for (size_t cell_index = 0; cell_index < d_cells.size(); ++cell_index)
+    {
+        if (!export_all && cell_index >= d_owned_cell_global_ids.size())
         {
-            cell_node_ids.push_back(append_node(nodes[i]));
+            continue;
+        }
+
+        const auto cell_lid =
+            detail::checked_size_to_ordinal<local_ordinal_type>(
+                cell_index, "VTU cell local id");
+        const auto& cell_info = d_cells[cell_index];
+        for (const auto node_gid : cell_info.node_gids)
+        {
+            cell_node_ids.push_back(append_node(node_gid));
         }
 
         cell_node_offsets.push_back(
             static_cast<global_index_t>(cell_node_ids.size()));
         vtu_cell_types.push_back(static_cast<std::uint8_t>(
-            MeshUtils::vtu_cell_type_code(d_cells[cell_lid].type)));
-    }
-
-    VTUWriter::Int64Data cell_gids;
-    VTUWriter::IntData cell_types;
-    VTUWriter::ScalarData cell_volumes;
-    VTUWriter::VectorData cell_centroids;
-    cell_gids.reserve(d_cells.size());
-    cell_types.reserve(d_cells.size());
-    cell_volumes.reserve(d_cells.size());
-    cell_centroids.reserve(d_cells.size());
-
-    if (export_all)
-    {
-        for (auto gid : d_owned_cell_global_ids)
-            cell_gids.push_back(static_cast<global_index_t>(gid));
-        for (auto gid : d_ghost_cell_global_ids)
-            cell_gids.push_back(static_cast<global_index_t>(gid));
-    }
-    else
-    {
-        for (auto gid : d_owned_cell_global_ids)
-            cell_gids.push_back(static_cast<global_index_t>(gid));
-    }
-
-    for (size_t lid = 0; lid < d_cells.size(); ++lid)
-    {
-        if (!export_all && !d_cells[lid].owned) continue;
-        cell_types.push_back(static_cast<int>(d_cells[lid].type));
-        cell_volumes.push_back(d_cells[lid].volume);
-        cell_centroids.push_back(d_cells[lid].center);
+            MeshUtils::vtu_cell_type_code(cell_info.type)));
+        cell_gids.push_back(static_cast<global_index_t>(
+            Base::cell_global_id(cell_lid)));
+        cell_types.push_back(static_cast<int>(cell_info.type));
+        cell_volumes.push_back(cell_info.volume);
+        cell_centroids.push_back(cell_info.center);
     }
 
     VTUWriter writer;

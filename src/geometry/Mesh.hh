@@ -208,8 +208,10 @@ public:
 //-------------------------------- assemble ----------------------------------//
 public:
     /**
-     * @brief Finalize connectivity, distributed maps, and device-side mirrors
+     * @brief Finalize connectivity, distributed maps, and compact host views
      *        after the concrete mesh has been populated.
+     *
+     * Device mirrors are created by device_views() only when requested.
      */
     virtual void assemble() = 0;
 
@@ -219,9 +221,11 @@ protected:
     void create_maps();
     void assign_contiguous_tpetra_gids();
     void reset_contiguous_tpetra_gids() noexcept;
+    void rebuild_boundary_face_batches();
     void create_cell_face_distances();
     void create_host_views();
-    void create_device_views();
+    void create_device_views() const;
+    void reset_device_views() const noexcept;
 
     void prefer_owned_face_owners();
 
@@ -250,7 +254,14 @@ public:
      */
     const HostViews& host_views() const noexcept { return d_host_views; }
 
-    DeviceViews device_views() const noexcept { return d_device_views; }
+    /**
+     * @brief Return device-accessible mesh arrays, materializing them on demand.
+     *
+     * Host-only solver paths avoid allocating a second copy of all mesh
+     * geometry and connectivity. The first caller that needs device data pays
+     * the construction cost and subsequent calls reuse the cached views.
+     */
+    DeviceViews device_views() const;
 
     const ArrLO& owned_cell_ids() const noexcept { return d_owned_cell_ids; }
     const ArrGO& owned_cell_global_ids() const noexcept { return d_owned_cell_global_ids; }
@@ -441,8 +452,9 @@ protected:
     RCP<const map_type> d_boundary_face_map;
 
     HostViews d_host_views;
-    kokkos_1dview<local_ordinal_type> d_face_neighbor_device;
-    DeviceViews d_device_views;
+    mutable kokkos_1dview<local_ordinal_type> d_face_neighbor_device;
+    mutable DeviceViews d_device_views;
+    mutable bool d_device_views_created = false;
 };
 
 /**

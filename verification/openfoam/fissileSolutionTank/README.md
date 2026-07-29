@@ -65,9 +65,16 @@ The SimpleFluid launcher uses `GCC-RelWithDebInfo` by default. The usual
 accepted by `run_simplefluid.sh`, but `run_comparison.sh` rejects them because
 they would no longer match the checked-in OpenFOAM case.
 
-The legacy cylinder generator constructs substantial geometry on every rank
-before partitioning, so this half-million-cell case needs several GiB of
-memory. Reducing the MPI rank count may be preferable on memory-limited hosts.
+The programmatic cylinder generator constructs the global geometry only on
+rank 0. After conversion to compact legacy arrays it releases the STK source,
+scatters cell-adjacency rows for partitioning, and sends owned and ghost cell
+packets to every rank. Cell data is serialized directly into exact-size MPI
+buffers; the complete partition map exists only transiently on rank 0, while
+neighbor ownership travels in each packet. Rebuilds release global vector
+capacities promptly, host-only runs allocate Kokkos device mirrors only if
+requested, and the solver's legacy `MeshHandle` views existing IDs and
+connectivity instead of duplicating them. Rank 0 still needs the most headroom
+during global construction and redistribution.
 
 ## Outputs
 

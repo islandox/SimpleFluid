@@ -178,7 +178,21 @@ public:
     explicit MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh);
 
     const variant_type& variant() const noexcept { return d_mesh; }
-    const indexer_type& indexer() const noexcept { return d_indexer; }
+    /**
+     * @brief Return the local/global indexer.
+     *
+     * Legacy meshes use their existing ordinal-indexed storage directly.
+     * Calling this compatibility accessor materializes the otherwise-unused
+     * legacy lookup tables on demand.
+     */
+    const indexer_type& indexer() const
+    {
+        if (is_stk())
+        {
+            materialize_legacy_indexer();
+        }
+        return d_indexer;
+    }
 
     /**
      * @brief Invoke a visitor with the concrete mesh object.
@@ -213,31 +227,58 @@ public:
     size_t spatial_dimension() const noexcept { return 3; }
     size_t num_owned_cells() const noexcept
     {
+        if (const auto legacy = legacy_mesh())
+        {
+            return legacy->num_owned_cells();
+        }
         return d_indexer.num_owned_cells();
     }
     size_t num_local_cells() const noexcept
     {
+        if (const auto legacy = legacy_mesh())
+        {
+            return legacy->num_local_cells();
+        }
         return d_indexer.num_local_cells();
     }
     size_t num_cells() const noexcept { return num_local_cells(); }
     size_t num_owned_faces() const noexcept
     {
+        if (const auto legacy = legacy_mesh())
+        {
+            const auto map = legacy->owned_face_map();
+            return map.is_null() ? 0 : map->getLocalNumElements();
+        }
         return d_indexer.num_owned_faces();
     }
     size_t num_faces() const noexcept
     {
+        if (const auto legacy = legacy_mesh())
+        {
+            return legacy->num_faces();
+        }
         return d_indexer.num_local_faces();
     }
 
     bool is_owned_cell(local_ordinal_type cell_lid) const
     {
         check_cell(cell_lid);
+        if (const auto legacy = legacy_mesh())
+        {
+            return legacy->is_owned_cell(cell_lid);
+        }
         return d_indexer.is_owned_cell(cell_lid);
     }
 
     bool is_owned_face(local_ordinal_type face_lid) const
     {
         check_face(face_lid);
+        if (const auto legacy = legacy_mesh())
+        {
+            return legacy->is_owned_face(
+                checked_local(static_cast<size_t>(
+                    geometry_face_lid(face_lid))));
+        }
         return d_indexer.is_owned_face(face_lid);
     }
 
@@ -458,7 +499,8 @@ private:
         local_ordinal_type local_id) const
     {
         check_cell(local_id);
-        if (std::holds_alternative<UnstructuredPtr>(d_mesh))
+        if (std::holds_alternative<UnstructuredPtr>(d_mesh)
+            || is_stk())
         {
             return static_cast<global_ordinal_type>(local_id);
         }
@@ -469,6 +511,14 @@ private:
         local_ordinal_type local_id) const
     {
         check_face(local_id);
+        if (is_stk())
+        {
+            const auto local = static_cast<size_t>(local_id);
+            return d_legacy_face_geometry_lids.empty()
+                ? static_cast<global_ordinal_type>(local)
+                : static_cast<global_ordinal_type>(
+                      d_legacy_face_geometry_lids[local]);
+        }
         if (std::holds_alternative<UnstructuredPtr>(d_mesh))
         {
             return static_cast<global_ordinal_type>(local_id);
@@ -566,6 +616,8 @@ private:
     void initialize_indexer(indexer_type indexer);
 
     void initialize_cell_faces();
+
+    void materialize_legacy_indexer() const;
 
     template<class MeshType>
     void initialize_boundary_batches(const MeshType& mesh);
@@ -685,9 +737,10 @@ private:
     local_ordinal_type geometry_to_local_cell(
         size_t geometry_lid) const noexcept
     {
-        if (std::holds_alternative<UnstructuredPtr>(d_mesh))
+        if (std::holds_alternative<UnstructuredPtr>(d_mesh)
+            || is_stk())
         {
-            if (geometry_lid >= d_indexer.num_local_cells()
+            if (geometry_lid >= num_local_cells()
                 || geometry_lid > static_cast<size_t>(
                     std::numeric_limits<local_ordinal_type>::max()))
             {
@@ -707,6 +760,18 @@ private:
     local_ordinal_type geometry_to_local_face(
         size_t geometry_lid) const noexcept
     {
+        if (is_stk())
+        {
+            if (geometry_lid >= num_faces()
+                || geometry_lid > static_cast<size_t>(
+                    std::numeric_limits<local_ordinal_type>::max()))
+            {
+                return invalid_local_id();
+            }
+            return d_legacy_face_local_lids.empty()
+                ? static_cast<local_ordinal_type>(geometry_lid)
+                : d_legacy_face_local_lids[geometry_lid];
+        }
         if (std::holds_alternative<UnstructuredPtr>(d_mesh))
         {
             if (geometry_lid >= d_indexer.num_local_faces()
@@ -722,7 +787,10 @@ private:
     }
 
     variant_type d_mesh;
-    indexer_type d_indexer;
+    mutable indexer_type d_indexer;
+    mutable bool d_legacy_indexer_materialized = false;
+    std::vector<local_ordinal_type> d_legacy_face_geometry_lids;
+    std::vector<local_ordinal_type> d_legacy_face_local_lids;
     std::vector<size_t> d_cell_face_offsets;
     std::vector<local_ordinal_type> d_cell_face_lids;
     std::unordered_map<int, std::string> d_boundary_names;

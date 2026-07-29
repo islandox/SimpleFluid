@@ -12,6 +12,7 @@
 #include "MeshPartitioner.hh"
 
 #include <map>
+#include <type_traits>
 
 #include <Zoltan2_PartitioningProblem.hpp>
 #include <Zoltan2_PartitioningSolution.hpp>
@@ -21,7 +22,7 @@ using namespace SimpleFluid;
 
 
 /**
- * @brief Main entry point — partition a replicated mesh across MPI ranks.
+ * @brief Main entry point — partition source mesh cells across MPI ranks.
  *
  * Five-phase algorithm:
  * 1. **Zoltan2/ParMETIS partition** — build a CRS graph from cell
@@ -31,12 +32,14 @@ using namespace SimpleFluid;
  * 3. **Ghost detection** — for each owned cell, identify adjacent
  *    off-rank cells that are not already owned.
  * 4. **Ghost exchange** — request ghost packets from the ranks that
- *    own them, receive and deserialise.
+ *    own them and validate non-owning views over the received bytes.
  * 5. **Mesh rebuild** — reconstruct the per-rank d_cells, d_faces,
  *    node tables, and face geometry from owned + ghost packets.
  *
  * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
- * @param mesh The replicated mesh to partition (modified in place).
+ * Source cells may be replicated, distributed, or held only on rank zero.
+ *
+ * @param mesh The source mesh to partition (modified in place).
  * @param comm Teuchos MPI communicator.
  * @return true if partitioning occurred, false if single-rank or
  *         already partitioned.
@@ -47,243 +50,454 @@ bool MeshPartitioner<Pack>::partition(Mesh<Pack>& mesh, const Teuchos::RCP<const
     const int nranks = comm->getSize();
     const int myrank = comm->getRank();
     if (nranks <= 1) return false;
-    if (!mesh.d_ghost_cell_global_ids.empty()) return false;
+    const int local_already_partitioned =
+        mesh.d_ghost_cell_global_ids.empty() ? 0 : 1;
+    int any_already_partitioned = 0;
+    MPI_Allreduce(
+        &local_already_partitioned,
+        &any_already_partitioned,
+        1,
+        MPI_INT,
+        MPI_MAX,
+        get_mpi_comm(*comm));
+    if (any_already_partitioned != 0) return false;
 
-    auto orig_node_coords = mesh.d_node_coords;
-    auto orig_node_gid_to_lid = mesh.d_node_gid_to_lid;
-    auto gid_to_rank = compute_gid_to_rank_map(mesh, comm);
+    auto source_selection =
+        compute_source_selection(mesh, comm);
+    auto gid_to_rank =
+        compute_gid_to_rank_map(mesh, source_selection, comm);
 
-    auto unique_packets_by_gid = [](std::vector<Packet>& pkts)
+    auto unique_packets_by_gid = [](std::vector<PacketView>& pkts)
     {
         std::unordered_set<GO> seen;
         pkts.erase(
             std::remove_if(pkts.begin(), pkts.end(),
-                [&](const Packet& p) { return !seen.insert(p.gid).second; }),
+                [&](const PacketView& packet)
+                {
+                    return !seen.insert(packet.gid()).second;
+                }),
             pkts.end());
     };
 
-    std::unordered_map<GO, int> source_rank_for_gid;
+    std::vector<char> owned_packet_storage;
+    std::vector<PacketView> owned_pkts;
     {
-        const int my_count = static_cast<int>(mesh.d_owned_cell_global_ids.size());
-        std::vector<int> counts(static_cast<size_t>(nranks), 0);
-        MPI_Allgather(&my_count, 1, MPI_INT, counts.data(), 1, MPI_INT,
-                      get_mpi_comm(*comm));
-
-        std::vector<int> displs(static_cast<size_t>(nranks), 0);
-        for (int r = 1; r < nranks; ++r) {
-            displs[static_cast<size_t>(r)] =
-                displs[static_cast<size_t>(r - 1)]
-                + counts[static_cast<size_t>(r - 1)];
+        std::vector<std::uint32_t> packet_counts(
+            static_cast<size_t>(nranks), 0);
+        std::vector<size_t> body_bytes(
+            static_cast<size_t>(nranks), 0);
+        for (size_t index = 0;
+             index < mesh.d_owned_cell_global_ids.size();
+             ++index)
+        {
+            const auto gid = mesh.d_owned_cell_global_ids[index];
+            if (!source_selection.provides(gid, myrank))
+            {
+                continue;
+            }
+            const auto destination = gid_to_rank.find(gid);
+            if (destination == gid_to_rank.end())
+            {
+                throw std::runtime_error(
+                    "MeshPartitioner source rank is missing the "
+                    "partition assignment for cell GID "
+                    + std::to_string(gid));
+            }
+            const auto rank_index =
+                static_cast<size_t>(destination->second);
+            if (rank_index >= static_cast<size_t>(nranks))
+            {
+                throw std::runtime_error(
+                    "MeshPartitioner produced an invalid destination "
+                    "rank.");
+            }
+            ++packet_counts[rank_index];
+            body_bytes[rank_index] +=
+                Packet::serialized_mesh_cell_size(
+                    mesh, mesh.d_owned_cell_ids[index]);
         }
 
-        const int total_count = displs.back() + counts.back();
-        std::vector<GO> gathered_gids(static_cast<size_t>(std::max(total_count, 1)));
-        MPI_Allgatherv(mesh.d_owned_cell_global_ids.data(), my_count, mpi_go_type(),
-                       gathered_gids.data(), counts.data(), displs.data(), mpi_go_type(),
-                       get_mpi_comm(*comm));
+        std::vector<int> scnt(nranks, 0);
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            if (packet_counts[rank_index] == 0)
+            {
+                continue;
+            }
+            const auto bytes =
+                sizeof(std::uint32_t) + body_bytes[rank_index];
+            if (bytes > static_cast<size_t>(
+                    std::numeric_limits<int>::max()))
+            {
+                throw std::overflow_error(
+                    "MeshPartitioner send buffer exceeds MPI int "
+                    "count capacity.");
+            }
+            scnt[rank_index] = static_cast<int>(bytes);
+        }
+
+        std::vector<int> rcnt(nranks, 0);
+        MPI_Alltoall(scnt.data(), 1, MPI_INT, rcnt.data(), 1, MPI_INT, get_mpi_comm(*comm));
+        std::vector<int> sd(nranks, 0), rd(nranks, 0);
+        for (int r = 1; r < nranks; ++r) {
+            sd[static_cast<size_t>(r)] = sd[static_cast<size_t>(r - 1)] + scnt[static_cast<size_t>(r - 1)];
+            rd[static_cast<size_t>(r)] = rd[static_cast<size_t>(r - 1)] + rcnt[static_cast<size_t>(r - 1)];
+        }
+
+        const auto total_send = sd.back() + scnt.back();
+        std::vector<char> flat_s(
+            static_cast<size_t>(std::max(total_send, 1)));
+        std::vector<size_t> write_offsets(
+            static_cast<size_t>(nranks), 0);
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            if (packet_counts[rank_index] == 0)
+            {
+                continue;
+            }
+            const auto offset =
+                static_cast<size_t>(sd[rank_index]);
+            std::memcpy(
+                flat_s.data() + offset,
+                &packet_counts[rank_index],
+                sizeof(std::uint32_t));
+            write_offsets[rank_index] =
+                offset + sizeof(std::uint32_t);
+        }
+
+        for (size_t index = 0;
+             index < mesh.d_owned_cell_global_ids.size();
+             ++index)
+        {
+            const auto gid = mesh.d_owned_cell_global_ids[index];
+            if (!source_selection.provides(gid, myrank))
+            {
+                continue;
+            }
+            const auto destination = gid_to_rank.at(gid);
+            const auto rank_index =
+                static_cast<size_t>(destination);
+            const auto lid = mesh.d_owned_cell_ids[index];
+            const auto bytes =
+                Packet::serialized_mesh_cell_size(mesh, lid);
+            Packet::serialize_mesh_cell(
+                flat_s.data() + write_offsets[rank_index],
+                bytes,
+                mesh,
+                lid,
+                gid,
+                [&](GO neighbor_gid)
+                {
+                    const auto neighbor =
+                        gid_to_rank.find(neighbor_gid);
+                    if (neighbor == gid_to_rank.end())
+                    {
+                        throw std::runtime_error(
+                            "MeshPartitioner source rank is missing "
+                            "the partition assignment for neighboring "
+                            "cell GID "
+                            + std::to_string(neighbor_gid));
+                    }
+                    return neighbor->second;
+                });
+            write_offsets[rank_index] += bytes;
+        }
+
+        owned_packet_storage.resize(
+            static_cast<size_t>(std::max(rd.back() + rcnt.back(), 1)));
+        MPI_Alltoallv(flat_s.data(), scnt.data(), sd.data(), MPI_CHAR,
+                     owned_packet_storage.data(), rcnt.data(), rd.data(), MPI_CHAR,
+                     get_mpi_comm(*comm));
+        std::vector<char>{}.swap(flat_s);
 
         for (int r = 0; r < nranks; ++r) {
-            const int begin = displs[static_cast<size_t>(r)];
-            const int end = begin + counts[static_cast<size_t>(r)];
-            for (int i = begin; i < end; ++i) {
-                auto [it, inserted] = source_rank_for_gid.emplace(gathered_gids[static_cast<size_t>(i)], r);
-                if (!inserted) it->second = std::min(it->second, r);
-            }
-        }
-
-        for (const auto& [gid, dest] : gid_to_rank) {
-            (void)dest;
-            if (source_rank_for_gid.find(gid) == source_rank_for_gid.end()) {
-                throw std::runtime_error("MeshPartitioner missing source rank for cell GID "
-                                       + std::to_string(gid));
-            }
+            int sz = rcnt[static_cast<size_t>(r)];
+            if (sz <= 0) continue;
+            auto pkts = Packet::view_packets(
+                owned_packet_storage.data()
+                    + rd[static_cast<size_t>(r)],
+                static_cast<size_t>(sz));
+            owned_pkts.insert(
+                owned_pkts.end(),
+                pkts.begin(),
+                pkts.end());
         }
     }
-
-    std::vector<std::vector<Packet>> send_p(nranks);
-    std::unordered_set<GO> packed_gids;
-    for (size_t i = 0; i < mesh.d_owned_cell_global_ids.size(); ++i) {
-        GO gid = mesh.d_owned_cell_global_ids[i];
-        if (source_rank_for_gid.at(gid) != myrank || !packed_gids.insert(gid).second) continue;
-
-        LO lid = mesh.d_owned_cell_ids[i];
-        auto& cell = mesh.d_cells[static_cast<size_t>(lid)];
-        int dest = gid_to_rank.at(gid);
-        Packet p;
-        p.gid = gid; p.cell_type = cell.type; p.center = cell.center; p.volume = cell.volume;
-        p.node_gids.assign(cell.node_gids.begin(), cell.node_gids.end());
-        p.node_coords.reserve(p.node_gids.size());
-        for (const auto node_gid : p.node_gids) {
-            p.node_coords.push_back(mesh.node_coord(node_gid));
-        }
-        for (auto fid : cell.faces) {
-            auto& face = mesh.d_faces[static_cast<size_t>(fid)];
-            std::vector<GO> fn(face.node_gids.begin(), face.node_gids.end());
-            p.face_node_keys.push_back(std::move(fn));
-            p.face_global_ids.push_back(mesh.face_global_id(fid));
-            p.face_boundary_ids.push_back(face.boundary_id);
-        }
-        send_p[static_cast<size_t>(dest)].push_back(std::move(p));
-    }
-
-    // Serialize and exchange
-    std::vector<std::vector<char>> sbufs(nranks);
-    std::vector<int> scnt(nranks, 0);
-    for (int r = 0; r < nranks; ++r) {
-        if (send_p[static_cast<size_t>(r)].empty()) continue;
-        sbufs[static_cast<size_t>(r)] = Packet::serialize_packets(send_p[static_cast<size_t>(r)]);
-        scnt[static_cast<size_t>(r)] = static_cast<int>(sbufs[static_cast<size_t>(r)].size());
-    }
-
-    std::vector<int> rcnt(nranks, 0);
-    MPI_Alltoall(scnt.data(), 1, MPI_INT, rcnt.data(), 1, MPI_INT, get_mpi_comm(*comm));
-    std::vector<int> sd(nranks, 0), rd(nranks, 0);
-    for (int r = 1; r < nranks; ++r) {
-        sd[static_cast<size_t>(r)] = sd[static_cast<size_t>(r - 1)] + scnt[static_cast<size_t>(r - 1)];
-        rd[static_cast<size_t>(r)] = rd[static_cast<size_t>(r - 1)] + rcnt[static_cast<size_t>(r - 1)];
-    }
-    std::vector<char> flat_s;
-    { size_t off = 0; for (int r = 0; r < nranks; ++r) {
-        auto& b = sbufs[static_cast<size_t>(r)]; if (b.empty()) continue;
-        flat_s.resize(off + b.size()); std::memcpy(flat_s.data() + off, b.data(), b.size()); off += b.size();
-    } if (flat_s.empty()) flat_s.resize(1); }
-    std::vector<char> rbuf(static_cast<size_t>(std::max(rd.back() + rcnt.back(), 1)));
-    MPI_Alltoallv(flat_s.data(), scnt.data(), sd.data(), MPI_CHAR,
-                    rbuf.data(), rcnt.data(), rd.data(), MPI_CHAR, get_mpi_comm(*comm));
-
-    std::vector<Packet> owned_pkts;
-    { size_t off = 0; for (int r = 0; r < nranks; ++r) {
-        int sz = rcnt[static_cast<size_t>(r)]; if (sz <= 0) continue;
-        auto pkts = Packet::deserialize_packets(rbuf.data() + off, static_cast<size_t>(sz));
-        owned_pkts.insert(owned_pkts.end(), std::make_move_iterator(pkts.begin()), std::make_move_iterator(pkts.end()));
-        off += static_cast<size_t>(sz);
-    }}
+    std::vector<GO>{}.swap(source_selection.local_source_gids);
+    decltype(gid_to_rank){}.swap(gid_to_rank);
     unique_packets_by_gid(owned_pkts);
 
-    // Determine ghosts
-    std::unordered_set<GO> owned_set;
-    for (auto& p : owned_pkts) owned_set.insert(p.gid);
-    std::unordered_map<std::string, std::pair<GO, GO>> fk2cells;
-    for (size_t fid = 0; fid < mesh.d_faces.size(); ++fid) {
-        auto& face = mesh.d_faces[fid];
-        if (face.neighbor == invalid_lid) continue;
-        GO og = mesh.cell_global_id(face.owner);
-        GO ng = mesh.cell_global_id(face.neighbor);
-        std::vector<GO> fns(face.node_gids.begin(), face.node_gids.end());
-        std::sort(fns.begin(), fns.end());
-        fk2cells[mesh.make_face_key(typename Mesh<Pack>::ViewGO(const_cast<GO*>(fns.data()), fns.size()))] = {og, ng};
-    }
-    std::unordered_set<GO> ghost_set;
-    for (auto& p : owned_pkts) {
-        for (auto& fn : p.face_node_keys) {
-            std::string key = mesh.make_face_key(typename Mesh<Pack>::ViewGO(const_cast<GO*>(fn.data()), fn.size()));
-            auto it = fk2cells.find(key);
-            if (it == fk2cells.end()) continue;
-            auto [g1, g2] = it->second;
-            GO other = (g1 != p.gid) ? g1 : g2;
-            if (other != p.gid && owned_set.find(other) == owned_set.end()) ghost_set.insert(other);
-        }
-    }
+    // All source cells are now represented by packets on their destination
+    // ranks. Release the global legacy arrays before ghost responses create
+    // additional packet copies and serialized buffers.
+    release_rebuildable_storage(mesh);
 
-    // Periodic faces are represented as boundary-marked faces with a valid
-    // neighbour.  They still need a face-key -> paired-cell-GID map because
-    // the paired cell does not share the same topological face nodes.
-    std::unordered_map<std::string, GO> original_periodic_pairs;
-    for (size_t fid = 0; fid < mesh.d_faces.size(); ++fid)
+    std::vector<char> ghost_packet_storage;
+    std::vector<PacketView> ghost_pkts;
     {
-        auto& face = mesh.d_faces[fid];
-        if (face.boundary_id == Mesh<Pack>::invalid_boundary_id) continue;
-        const auto pid = face.neighbor;
-        if (pid == invalid_lid) continue;
-
-        auto pgid = mesh.cell_global_id(pid);
-        std::vector<GO> fns(face.node_gids.begin(), face.node_gids.end());
-        std::sort(fns.begin(), fns.end());
-        auto key = mesh.make_face_key(
-            typename Mesh<Pack>::ViewGO(const_cast<GO*>(fns.data()), fns.size()));
-        original_periodic_pairs[key] = pgid;
-
-        if (owned_set.find(pgid) == owned_set.end())
+        std::vector<std::vector<GO>> greq(nranks);
         {
-            ghost_set.insert(pgid);
+            // Determine ghosts, build their requests, then release the hash
+            // sets before packet response serialization.
+            std::unordered_set<GO> owned_set;
+            for (const auto& packet : owned_pkts)
+            {
+                owned_set.insert(packet.gid());
+            }
+            std::unordered_map<GO, int> ghost_ranks;
+            for (const auto& packet : owned_pkts)
+            {
+                packet.for_each_face(
+                    [&](const typename PacketView::Face& face)
+                    {
+                        const auto neighbor_gid =
+                            face.neighbor_gid;
+                        if (neighbor_gid != invalid_id<GO>()
+                            && owned_set.find(neighbor_gid)
+                                == owned_set.end())
+                        {
+                            const auto neighbor_rank =
+                                face.neighbor_rank;
+                            if (neighbor_rank < 0
+                                || neighbor_rank >= nranks)
+                            {
+                                throw std::runtime_error(
+                                    "MeshPartitioner cell packet has an "
+                                    "invalid neighboring rank.");
+                            }
+                            const auto [entry, inserted] =
+                                ghost_ranks.emplace(
+                                    neighbor_gid, neighbor_rank);
+                            if (!inserted
+                                && entry->second != neighbor_rank)
+                            {
+                                throw std::runtime_error(
+                                    "MeshPartitioner received inconsistent "
+                                    "owner ranks for a ghost cell.");
+                            }
+                        }
+                    });
+            }
+            for (const auto& [gid, rank] : ghost_ranks)
+            {
+                greq[static_cast<size_t>(rank)]
+                    .push_back(gid);
+            }
+        }
+
+        // Request ghosts.
+        std::vector<int> req_c(nranks, 0), resp_c(nranks, 0);
+        for (int r = 0; r < nranks; ++r) req_c[static_cast<size_t>(r)] = static_cast<int>(greq[static_cast<size_t>(r)].size());
+        MPI_Alltoall(req_c.data(), 1, MPI_INT, resp_c.data(), 1, MPI_INT, get_mpi_comm(*comm));
+        std::vector<int> req_d(nranks, 0), resp_d(nranks, 0);
+        for (int r = 1; r < nranks; ++r) {
+            req_d[static_cast<size_t>(r)] = req_d[static_cast<size_t>(r - 1)] + req_c[static_cast<size_t>(r - 1)];
+            resp_d[static_cast<size_t>(r)] = resp_d[static_cast<size_t>(r - 1)] + resp_c[static_cast<size_t>(r - 1)];
+        }
+        const auto total_requests = req_d.back() + req_c.back();
+        std::vector<GO> flat_rq(
+            static_cast<size_t>(std::max(total_requests, 1)));
+        for (int r = 0; r < nranks; ++r)
+        {
+            auto& requests = greq[static_cast<size_t>(r)];
+            std::copy(
+                requests.begin(),
+                requests.end(),
+                flat_rq.begin() + req_d[static_cast<size_t>(r)]);
+            std::vector<GO>{}.swap(requests);
+        }
+        std::vector<std::vector<GO>>{}.swap(greq);
+        std::vector<GO> flat_rs(static_cast<size_t>(std::max(resp_d.back() + resp_c.back(), 1)));
+        MPI_Alltoallv(flat_rq.data(), req_c.data(), req_d.data(), mpi_go_type(),
+                      flat_rs.data(), resp_c.data(), resp_d.data(), mpi_go_type(),
+                      get_mpi_comm(*comm));
+        std::vector<GO>{}.swap(flat_rq);
+
+        std::unordered_map<GO, const PacketView*> owned_lookup;
+        owned_lookup.reserve(owned_pkts.size());
+        for (const auto& packet : owned_pkts)
+        {
+            owned_lookup[packet.gid()] = &packet;
+        }
+
+        std::vector<std::uint32_t> response_packet_counts(
+            static_cast<size_t>(nranks), 0);
+        std::vector<size_t> response_body_bytes(
+            static_cast<size_t>(nranks), 0);
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            const auto count = resp_c[rank_index];
+            const GO* requested =
+                flat_rs.data() + resp_d[rank_index];
+            for (int request = 0; request < count; ++request)
+            {
+                const auto packet =
+                    owned_lookup.find(requested[request]);
+                if (packet == owned_lookup.end())
+                {
+                    throw std::runtime_error(
+                        "MeshPartitioner received a ghost request for "
+                        "a cell not owned on this rank.");
+                }
+                ++response_packet_counts[rank_index];
+                response_body_bytes[rank_index] +=
+                    packet->second->serialized_size();
+            }
+        }
+
+        std::vector<int> gr_scnt(nranks, 0);
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            if (response_packet_counts[rank_index] == 0)
+            {
+                continue;
+            }
+            const auto bytes =
+                sizeof(std::uint32_t)
+              + response_body_bytes[rank_index];
+            if (bytes > static_cast<size_t>(
+                    std::numeric_limits<int>::max()))
+            {
+                throw std::overflow_error(
+                    "MeshPartitioner ghost send buffer exceeds MPI "
+                    "int count capacity.");
+            }
+            gr_scnt[rank_index] = static_cast<int>(bytes);
+        }
+
+        std::vector<int> gr_rcnt(nranks, 0);
+        MPI_Alltoall(gr_scnt.data(), 1, MPI_INT, gr_rcnt.data(), 1, MPI_INT, get_mpi_comm(*comm));
+        std::vector<int> gr_sd(nranks, 0), gr_rd(nranks, 0);
+        for (int r = 1; r < nranks; ++r) {
+            gr_sd[static_cast<size_t>(r)] = gr_sd[static_cast<size_t>(r - 1)] + gr_scnt[static_cast<size_t>(r - 1)];
+            gr_rd[static_cast<size_t>(r)] = gr_rd[static_cast<size_t>(r - 1)] + gr_rcnt[static_cast<size_t>(r - 1)];
+        }
+
+        const auto ghost_total_send = gr_sd.back() + gr_scnt.back();
+        std::vector<char> gr_flat_s(
+            static_cast<size_t>(std::max(ghost_total_send, 1)));
+        std::vector<size_t> response_write_offsets(
+            static_cast<size_t>(nranks), 0);
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            if (response_packet_counts[rank_index] == 0)
+            {
+                continue;
+            }
+            const auto offset =
+                static_cast<size_t>(gr_sd[rank_index]);
+            std::memcpy(
+                gr_flat_s.data() + offset,
+                &response_packet_counts[rank_index],
+                sizeof(std::uint32_t));
+            response_write_offsets[rank_index] =
+                offset + sizeof(std::uint32_t);
+        }
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            const auto count = resp_c[rank_index];
+            const GO* requested =
+                flat_rs.data() + resp_d[rank_index];
+            for (int request = 0; request < count; ++request)
+            {
+                const auto& packet =
+                    *owned_lookup.at(requested[request]);
+                const auto bytes =
+                    packet.serialized_size();
+                std::memcpy(
+                    gr_flat_s.data()
+                        + response_write_offsets[rank_index],
+                    packet.data(),
+                    bytes);
+                response_write_offsets[rank_index] += bytes;
+            }
+        }
+        std::vector<GO>{}.swap(flat_rs);
+        decltype(owned_lookup){}.swap(owned_lookup);
+
+        ghost_packet_storage.resize(
+            static_cast<size_t>(
+                std::max(gr_rd.back() + gr_rcnt.back(), 1)));
+        MPI_Alltoallv(
+            gr_flat_s.data(), gr_scnt.data(), gr_sd.data(), MPI_CHAR,
+            ghost_packet_storage.data(),
+            gr_rcnt.data(),
+            gr_rd.data(),
+            MPI_CHAR,
+            get_mpi_comm(*comm));
+        std::vector<char>{}.swap(gr_flat_s);
+
+        for (int r = 0; r < nranks; ++r) {
+            int sz = gr_rcnt[static_cast<size_t>(r)];
+            if (sz <= 0) continue;
+            auto pkts = Packet::view_packets(
+                ghost_packet_storage.data()
+                    + gr_rd[static_cast<size_t>(r)],
+                static_cast<size_t>(sz));
+            ghost_pkts.insert(
+                ghost_pkts.end(),
+                pkts.begin(),
+                pkts.end());
         }
     }
-
-    // Request ghosts
-    std::vector<std::vector<GO>> greq(nranks);
-    for (GO g : ghost_set) greq[static_cast<size_t>(gid_to_rank.at(g))].push_back(g);
-    std::vector<int> req_c(nranks, 0), resp_c(nranks, 0);
-    for (int r = 0; r < nranks; ++r) req_c[static_cast<size_t>(r)] = static_cast<int>(greq[static_cast<size_t>(r)].size());
-    MPI_Alltoall(req_c.data(), 1, MPI_INT, resp_c.data(), 1, MPI_INT, get_mpi_comm(*comm));
-    std::vector<int> req_d(nranks, 0), resp_d(nranks, 0);
-    for (int r = 1; r < nranks; ++r) {
-        req_d[static_cast<size_t>(r)] = req_d[static_cast<size_t>(r - 1)] + req_c[static_cast<size_t>(r - 1)];
-        resp_d[static_cast<size_t>(r)] = resp_d[static_cast<size_t>(r - 1)] + resp_c[static_cast<size_t>(r - 1)];
-    }
-    std::vector<GO> flat_rq;
-    for (int r = 0; r < nranks; ++r) { auto& gr = greq[static_cast<size_t>(r)]; flat_rq.insert(flat_rq.end(), gr.begin(), gr.end()); }
-    if (flat_rq.empty()) flat_rq.resize(1);
-    std::vector<GO> flat_rs(static_cast<size_t>(std::max(resp_d.back() + resp_c.back(), 1)));
-    MPI_Alltoallv(flat_rq.data(), req_c.data(), req_d.data(), mpi_go_type(),
-                    flat_rs.data(), resp_c.data(), resp_d.data(), mpi_go_type(), get_mpi_comm(*comm));
-
-    std::unordered_map<GO, const Packet*> olu;
-    for (auto& p : owned_pkts) olu[p.gid] = &p;
-    std::vector<std::vector<Packet>> gresp(nranks);
-    for (int r = 0; r < nranks; ++r) {
-        int cnt = resp_c[static_cast<size_t>(r)]; if (cnt <= 0) continue;
-        GO* rs = flat_rs.data() + resp_d[static_cast<size_t>(r)];
-        for (int i = 0; i < cnt; ++i) { auto it = olu.find(rs[i]); if (it != olu.end()) gresp[static_cast<size_t>(r)].push_back(*it->second); }
-    }
-
-    std::vector<std::vector<char>> gr_sbufs(nranks);
-    std::vector<int> gr_scnt(nranks, 0);
-    for (int r = 0; r < nranks; ++r) {
-        if (gresp[static_cast<size_t>(r)].empty()) continue;
-        gr_sbufs[static_cast<size_t>(r)] = Packet::serialize_packets(gresp[static_cast<size_t>(r)]);
-        gr_scnt[static_cast<size_t>(r)] = static_cast<int>(gr_sbufs[static_cast<size_t>(r)].size());
-    }
-    std::vector<int> gr_rcnt(nranks, 0);
-    MPI_Alltoall(gr_scnt.data(), 1, MPI_INT, gr_rcnt.data(), 1, MPI_INT, get_mpi_comm(*comm));
-    std::vector<int> gr_sd(nranks, 0), gr_rd(nranks, 0);
-    for (int r = 1; r < nranks; ++r) {
-        gr_sd[static_cast<size_t>(r)] = gr_sd[static_cast<size_t>(r - 1)] + gr_scnt[static_cast<size_t>(r - 1)];
-        gr_rd[static_cast<size_t>(r)] = gr_rd[static_cast<size_t>(r - 1)] + gr_rcnt[static_cast<size_t>(r - 1)];
-    }
-    std::vector<char> gr_flat_s;
-    { size_t off = 0; for (int r = 0; r < nranks; ++r) {
-        auto& b = gr_sbufs[static_cast<size_t>(r)]; if (b.empty()) continue;
-        gr_flat_s.resize(off + b.size()); std::memcpy(gr_flat_s.data() + off, b.data(), b.size()); off += b.size();
-    } if (gr_flat_s.empty()) gr_flat_s.resize(1); }
-    std::vector<char> gr_rbuf(static_cast<size_t>(std::max(gr_rd.back() + gr_rcnt.back(), 1)));
-    MPI_Alltoallv(gr_flat_s.data(), gr_scnt.data(), gr_sd.data(), MPI_CHAR,
-                    gr_rbuf.data(), gr_rcnt.data(), gr_rd.data(), MPI_CHAR, get_mpi_comm(*comm));
-
-    std::vector<Packet> ghost_pkts;
-    { size_t off = 0; for (int r = 0; r < nranks; ++r) {
-        int sz = gr_rcnt[static_cast<size_t>(r)]; if (sz <= 0) continue;
-        auto pkts = Packet::deserialize_packets(gr_rbuf.data() + off, static_cast<size_t>(sz));
-        ghost_pkts.insert(ghost_pkts.end(), std::make_move_iterator(pkts.begin()), std::make_move_iterator(pkts.end()));
-        off += static_cast<size_t>(sz);
-    }}
 
     // Remove ghost packets whose GID is already owned (can happen
     // when the partition assigns adjacent cells that share a face to
     // the same rank, but the ghost detection still flags them).
     {
         std::unordered_set<GO> owned_gids;
-        for (auto& p : owned_pkts) owned_gids.insert(p.gid);
+        for (const auto& packet : owned_pkts)
+        {
+            owned_gids.insert(packet.gid());
+        }
         std::unordered_set<GO> ghost_gids;
         ghost_pkts.erase(
             std::remove_if(ghost_pkts.begin(), ghost_pkts.end(),
-                [&](const Packet& p) {
-                    return owned_gids.count(p.gid) > 0 || !ghost_gids.insert(p.gid).second;
+                [&](const PacketView& packet) {
+                    const auto gid = packet.gid();
+                    return owned_gids.count(gid) > 0
+                        || !ghost_gids.insert(gid).second;
                 }),
             ghost_pkts.end());
     }
 
-    rebuild(mesh, owned_pkts, ghost_pkts, orig_node_coords,
-            orig_node_gid_to_lid, original_periodic_pairs);
+    // Periodic boundary faces retain a valid neighbor but use distinct node
+    // keys on the paired sides. Recreate the face-key mapping from packets so
+    // ranks that never held the source geometry can restore those neighbors.
+    std::unordered_map<std::string, GO> periodic_pairs;
+    auto collect_periodic_pairs =
+        [&](const std::vector<PacketView>& packets)
+        {
+            for (const auto& packet : packets)
+            {
+                packet.for_each_face(
+                    [&](const typename PacketView::Face& face)
+                    {
+                        if (face.boundary_id
+                                == Mesh<Pack>::invalid_boundary_id
+                            || face.neighbor_gid == invalid_id<GO>())
+                        {
+                            return;
+                        }
+                        periodic_pairs[mesh.make_face_key(
+                            typename Mesh<Pack>::ViewGO(
+                                const_cast<GO*>(
+                                    face.node_gids.data()),
+                                face.node_count))] =
+                            face.neighbor_gid;
+                    });
+            }
+        };
+    collect_periodic_pairs(owned_pkts);
+    collect_periodic_pairs(ghost_pkts);
+
+    rebuild(mesh, owned_pkts, ghost_pkts, periodic_pairs);
     return true;
 }
 
@@ -323,26 +537,33 @@ auto MeshPartitioner<Pack>::partition(
  * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  * @param mesh Mesh whose owned-cell adjacency is distributed into graph rows.
  * @param comm Communicator defining graph row ownership.
- * @return Local graph rows plus the replicated column ID set.
+ * @return Local graph rows plus their local and remote column IDs.
  */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::build_partition_graph(
     const Mesh<Pack>& mesh,
+    const SourceSelection& source_selection,
     const Teuchos::RCP<const comm_type>& comm) -> PartitionGraph
 {
     const auto nranks = comm->getSize();
     const auto myrank = comm->getRank();
-    PartitionGraph graph;
     const auto cell_count = mesh.d_owned_cell_global_ids.size();
 
-    std::unordered_map<GO, std::vector<GO>> adjacency_by_gid;
-    graph.column_gids.reserve(cell_count);
+    // ParMETIS expects graph rows to be distributed. The selected source
+    // rank derives each row from its local geometry, then sends only that
+    // compact adjacency row to the historical modulo row owner. This keeps
+    // full geometry on rank zero while avoiding an all-rows-on-root graph.
+    std::vector<std::vector<GO>> rows_by_rank(
+        static_cast<size_t>(nranks));
     for (size_t i = 0; i < cell_count; ++i)
     {
         const auto gid = mesh.d_owned_cell_global_ids[i];
-        const auto lid = mesh.d_owned_cell_ids[i];
-        graph.column_gids.push_back(gid);
+        if (!source_selection.provides(gid, myrank))
+        {
+            continue;
+        }
 
+        const auto lid = mesh.d_owned_cell_ids[i];
         const auto& cell = mesh.d_cells[static_cast<size_t>(lid)];
         std::unordered_set<GO> neighbors;
         for (const auto face_lid : cell.faces)
@@ -358,22 +579,157 @@ auto MeshPartitioner<Pack>::build_partition_graph(
             }
         }
 
-        auto& adjacency = adjacency_by_gid[gid];
-        adjacency.assign(neighbors.begin(), neighbors.end());
+        std::vector<GO> adjacency(
+            neighbors.begin(), neighbors.end());
         std::sort(adjacency.begin(), adjacency.end());
+
+        const int row_rank = static_cast<int>(
+            static_cast<size_t>(gid)
+            % static_cast<size_t>(nranks));
+        auto& row_buffer =
+            rows_by_rank[static_cast<size_t>(row_rank)];
+        row_buffer.push_back(gid);
+        row_buffer.push_back(
+            static_cast<GO>(adjacency.size()));
+        row_buffer.insert(
+            row_buffer.end(),
+            adjacency.begin(),
+            adjacency.end());
     }
 
-    for (const auto gid : graph.column_gids)
+    std::vector<int> send_counts(
+        static_cast<size_t>(nranks), 0);
+    std::vector<int> receive_counts(
+        static_cast<size_t>(nranks), 0);
+    for (int rank = 0; rank < nranks; ++rank)
     {
-        if (static_cast<int>(
-                static_cast<size_t>(gid) % static_cast<size_t>(nranks))
-            != myrank)
-        {
-            continue;
-        }
-        graph.row_gids.push_back(gid);
-        graph.row_adjacency.push_back(adjacency_by_gid.at(gid));
+        send_counts[static_cast<size_t>(rank)] =
+            static_cast<int>(
+                rows_by_rank[static_cast<size_t>(rank)].size());
     }
+    MPI_Alltoall(
+        send_counts.data(),
+        1,
+        MPI_INT,
+        receive_counts.data(),
+        1,
+        MPI_INT,
+        get_mpi_comm(*comm));
+
+    std::vector<int> send_displacements(
+        static_cast<size_t>(nranks), 0);
+    std::vector<int> receive_displacements(
+        static_cast<size_t>(nranks), 0);
+    for (int rank = 1; rank < nranks; ++rank)
+    {
+        send_displacements[static_cast<size_t>(rank)] =
+            send_displacements[static_cast<size_t>(rank - 1)]
+          + send_counts[static_cast<size_t>(rank - 1)];
+        receive_displacements[static_cast<size_t>(rank)] =
+            receive_displacements[static_cast<size_t>(rank - 1)]
+          + receive_counts[static_cast<size_t>(rank - 1)];
+    }
+
+    const int total_send =
+        send_displacements.back() + send_counts.back();
+    const int total_receive =
+        receive_displacements.back() + receive_counts.back();
+    std::vector<GO> flat_send(
+        static_cast<size_t>(std::max(total_send, 1)));
+    size_t send_offset = 0;
+    for (const auto& rank_rows : rows_by_rank)
+    {
+        std::copy(
+            rank_rows.begin(),
+            rank_rows.end(),
+            flat_send.begin()
+                + static_cast<std::ptrdiff_t>(send_offset));
+        send_offset += rank_rows.size();
+    }
+    std::vector<GO> flat_receive(
+        static_cast<size_t>(std::max(total_receive, 1)));
+    MPI_Alltoallv(
+        flat_send.data(),
+        send_counts.data(),
+        send_displacements.data(),
+        mpi_go_type(),
+        flat_receive.data(),
+        receive_counts.data(),
+        receive_displacements.data(),
+        mpi_go_type(),
+        get_mpi_comm(*comm));
+
+    std::vector<std::pair<GO, std::vector<GO>>> local_rows;
+    std::unordered_set<GO> column_gids;
+    for (int source_rank = 0;
+         source_rank < nranks;
+         ++source_rank)
+    {
+        size_t offset = static_cast<size_t>(
+            receive_displacements[
+                static_cast<size_t>(source_rank)]);
+        const size_t end = offset + static_cast<size_t>(
+            receive_counts[static_cast<size_t>(source_rank)]);
+        while (offset < end)
+        {
+            if (end - offset < 2)
+            {
+                throw std::runtime_error(
+                    "MeshPartitioner received a truncated graph row.");
+            }
+            const auto gid = flat_receive[offset++];
+            const auto raw_neighbor_count =
+                flat_receive[offset++];
+            if constexpr (std::is_signed_v<GO>)
+            {
+                if (raw_neighbor_count < 0)
+                {
+                    throw std::runtime_error(
+                        "MeshPartitioner received an invalid graph row size.");
+                }
+            }
+            const size_t neighbor_count =
+                static_cast<size_t>(raw_neighbor_count);
+            if (neighbor_count > end - offset)
+            {
+                throw std::runtime_error(
+                    "MeshPartitioner received a truncated graph adjacency.");
+            }
+
+            std::vector<GO> adjacency(
+                flat_receive.begin()
+                    + static_cast<std::ptrdiff_t>(offset),
+                flat_receive.begin()
+                    + static_cast<std::ptrdiff_t>(
+                        offset + neighbor_count));
+            offset += neighbor_count;
+            local_rows.emplace_back(gid, std::move(adjacency));
+        }
+    }
+
+    std::sort(
+        local_rows.begin(),
+        local_rows.end(),
+        [](const auto& left, const auto& right)
+        {
+            return left.first < right.first;
+        });
+
+    PartitionGraph graph;
+    graph.row_gids.reserve(local_rows.size());
+    graph.row_adjacency.reserve(local_rows.size());
+    for (auto& [gid, adjacency] : local_rows)
+    {
+        graph.row_gids.push_back(gid);
+        column_gids.insert(gid);
+        for (const auto neighbor_gid : adjacency)
+        {
+            column_gids.insert(neighbor_gid);
+        }
+        graph.row_adjacency.push_back(std::move(adjacency));
+    }
+    graph.column_gids.assign(column_gids.begin(), column_gids.end());
+    std::sort(graph.column_gids.begin(), graph.column_gids.end());
     return graph;
 }
 
@@ -435,15 +791,25 @@ auto MeshPartitioner<Pack>::build_partition_graph(
  * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  * @param partition_graph Local graph rows and referenced columns.
  * @param comm Communicator used by Tpetra, Zoltan2, and the result gather.
- * @return Global map from cell ID to destination rank.
+ * @param gather_root Rank that receives the complete result, or -1 to
+ *        replicate it on all ranks.
+ * @return Global map from cell ID to destination rank on the requested
+ *         recipients.
  */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::solve_partition_graph(
     const PartitionGraph& partition_graph,
-    const Teuchos::RCP<const comm_type>& comm)
+    const Teuchos::RCP<const comm_type>& comm,
+    int gather_root)
     -> std::unordered_map<GO, int>
 {
     const auto nranks = comm->getSize();
+    const auto myrank = comm->getRank();
+    if (gather_root >= nranks)
+    {
+        throw std::invalid_argument(
+            "MeshPartitioner partition-result root is invalid.");
+    }
     const auto invalid_size =
         Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
 
@@ -540,26 +906,79 @@ auto MeshPartitioner<Pack>::solve_partition_graph(
     const auto my_pair_count =
         static_cast<int>(local_pairs.size());
     std::vector<int> counts(static_cast<size_t>(nranks), 0);
-    MPI_Allgather(&my_pair_count, 1, MPI_INT,
-                  counts.data(), 1, MPI_INT,
-                  get_mpi_comm(*comm));
+    if (gather_root >= 0)
+    {
+        MPI_Gather(
+            &my_pair_count,
+            1,
+            MPI_INT,
+            counts.data(),
+            1,
+            MPI_INT,
+            gather_root,
+            get_mpi_comm(*comm));
+    }
+    else
+    {
+        MPI_Allgather(
+            &my_pair_count,
+            1,
+            MPI_INT,
+            counts.data(),
+            1,
+            MPI_INT,
+            get_mpi_comm(*comm));
+    }
 
     std::vector<int> displacements(static_cast<size_t>(nranks), 0);
-    for (int r = 1; r < nranks; ++r)
+    if (gather_root < 0 || myrank == gather_root)
     {
-        displacements[static_cast<size_t>(r)] =
-            displacements[static_cast<size_t>(r - 1)]
-          + counts[static_cast<size_t>(r - 1)];
+        for (int r = 1; r < nranks; ++r)
+        {
+            displacements[static_cast<size_t>(r)] =
+                displacements[static_cast<size_t>(r - 1)]
+              + counts[static_cast<size_t>(r - 1)];
+        }
     }
 
     const auto total_pairs =
         displacements.back() + counts.back();
     std::vector<GO> gathered_pairs(
-        static_cast<size_t>(std::max(total_pairs, 1)));
-    MPI_Allgatherv(local_pairs.data(), my_pair_count, mpi_go_type(),
-                   gathered_pairs.data(), counts.data(),
-                   displacements.data(), mpi_go_type(),
-                   get_mpi_comm(*comm));
+        static_cast<size_t>(
+            std::max(
+                gather_root < 0 || myrank == gather_root
+                    ? total_pairs
+                    : 0,
+                1)));
+    if (gather_root >= 0)
+    {
+        MPI_Gatherv(
+            local_pairs.data(),
+            my_pair_count,
+            mpi_go_type(),
+            gathered_pairs.data(),
+            counts.data(),
+            displacements.data(),
+            mpi_go_type(),
+            gather_root,
+            get_mpi_comm(*comm));
+        if (myrank != gather_root)
+        {
+            return {};
+        }
+    }
+    else
+    {
+        MPI_Allgatherv(
+            local_pairs.data(),
+            my_pair_count,
+            mpi_go_type(),
+            gathered_pairs.data(),
+            counts.data(),
+            displacements.data(),
+            mpi_go_type(),
+            get_mpi_comm(*comm));
+    }
 
     local_parts.clear();
     for (int pair = 0; pair + 1 < total_pairs; pair += 2)
@@ -1079,20 +1498,432 @@ auto MeshPartitioner<Pack>::rebuild(
  *
  * Builds a Tpetra CRS graph from face-based cell adjacency, wraps it in
  * a Zoltan2 row-graph adapter, and solves the partitioning problem with
- * ParMETIS.  Results are gathered across all ranks via MPI_Allgatherv.
+ * ParMETIS. The complete partition result is gathered only to rank zero,
+ * which returns each source rank's own and adjacent assignments.
  *
- * @param mesh The replicated mesh whose owned cells are to be mapped.
+ * @param mesh The source mesh whose owned cells are to be mapped.
+ * @param source_selection Cells this rank is responsible for providing.
  * @param comm Teuchos MPI communicator.
- * @return Unordered map from cell GID to destination rank.
+ * @return Assignments required to serialize source cells on this rank.
  * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  */
 template<TpetraTypePack Pack>
 auto MeshPartitioner<Pack>::compute_gid_to_rank_map(
-    const Mesh<Pack>& mesh, const Teuchos::RCP<const comm_type>& comm) -> std::unordered_map<GO, int>
+    const Mesh<Pack>& mesh,
+    const SourceSelection& source_selection,
+    const Teuchos::RCP<const comm_type>& comm)
+    -> std::unordered_map<GO, int>
 {
-    return solve_partition_graph(build_partition_graph(mesh, comm), comm);
+    constexpr int coordinator = 0;
+    const auto nranks = comm->getSize();
+    const auto myrank = comm->getRank();
+    auto full_partition = solve_partition_graph(
+        build_partition_graph(mesh, source_selection, comm),
+        comm,
+        coordinator);
+
+    // The production path has all source geometry on rank zero. It can retain
+    // the root-only result directly; every other rank stores no global
+    // partition metadata.
+    if (source_selection.is_single_source()
+        && source_selection.single_source_rank == coordinator)
+    {
+        return full_partition;
+    }
+
+    // A source rank needs destinations only for cells it serializes and for
+    // their direct neighbors, whose ranks are embedded in outgoing packets.
+    std::vector<GO> needed_gids;
+    for (size_t index = 0;
+         index < mesh.d_owned_cell_global_ids.size();
+         ++index)
+    {
+        const auto gid = mesh.d_owned_cell_global_ids[index];
+        if (!source_selection.provides(gid, myrank))
+        {
+            continue;
+        }
+        needed_gids.push_back(gid);
+        const auto lid = mesh.d_owned_cell_ids[index];
+        const auto& cell = mesh.d_cells[static_cast<size_t>(lid)];
+        for (const auto face_lid : cell.faces)
+        {
+            const auto& face =
+                mesh.d_faces[static_cast<size_t>(face_lid)];
+            if (face.owner == lid && face.neighbor != invalid_lid)
+            {
+                needed_gids.push_back(
+                    mesh.cell_global_id(face.neighbor));
+            }
+            else if (face.neighbor == lid)
+            {
+                needed_gids.push_back(
+                    mesh.cell_global_id(face.owner));
+            }
+        }
+    }
+    std::sort(needed_gids.begin(), needed_gids.end());
+    needed_gids.erase(
+        std::unique(needed_gids.begin(), needed_gids.end()),
+        needed_gids.end());
+    if (needed_gids.size()
+        > static_cast<size_t>(std::numeric_limits<int>::max()))
+    {
+        throw std::overflow_error(
+            "MeshPartitioner local partition request exceeds MPI int "
+            "count capacity.");
+    }
+
+    const int needed_count = static_cast<int>(needed_gids.size());
+    std::vector<int> request_counts(
+        static_cast<size_t>(nranks), 0);
+    MPI_Gather(
+        &needed_count,
+        1,
+        MPI_INT,
+        request_counts.data(),
+        1,
+        MPI_INT,
+        coordinator,
+        get_mpi_comm(*comm));
+
+    std::vector<int> request_displacements(
+        static_cast<size_t>(nranks), 0);
+    if (myrank == coordinator)
+    {
+        for (int rank = 1; rank < nranks; ++rank)
+        {
+            request_displacements[static_cast<size_t>(rank)] =
+                request_displacements[static_cast<size_t>(rank - 1)]
+              + request_counts[static_cast<size_t>(rank - 1)];
+        }
+    }
+    const auto total_requests =
+        request_displacements.back() + request_counts.back();
+    std::vector<GO> gathered_requests(
+        static_cast<size_t>(
+            std::max(myrank == coordinator ? total_requests : 0, 1)));
+    MPI_Gatherv(
+        needed_gids.data(),
+        needed_count,
+        mpi_go_type(),
+        gathered_requests.data(),
+        request_counts.data(),
+        request_displacements.data(),
+        mpi_go_type(),
+        coordinator,
+        get_mpi_comm(*comm));
+    std::vector<GO>{}.swap(needed_gids);
+
+    std::vector<int> response_counts(
+        static_cast<size_t>(nranks), 0);
+    std::vector<int> response_displacements(
+        static_cast<size_t>(nranks), 0);
+    std::vector<GO> response_pairs;
+    int missing_assignment = 0;
+    if (myrank == coordinator)
+    {
+        response_pairs.reserve(
+            static_cast<size_t>(total_requests) * 2);
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const auto rank_index = static_cast<size_t>(rank);
+            response_displacements[rank_index] =
+                static_cast<int>(response_pairs.size());
+            const auto begin = request_displacements[rank_index];
+            const auto end = begin + request_counts[rank_index];
+            for (int request = begin; request < end; ++request)
+            {
+                const auto gid =
+                    gathered_requests[static_cast<size_t>(request)];
+                const auto assignment = full_partition.find(gid);
+                if (assignment == full_partition.end())
+                {
+                    missing_assignment = 1;
+                    continue;
+                }
+                response_pairs.push_back(gid);
+                response_pairs.push_back(
+                    static_cast<GO>(assignment->second));
+            }
+            response_counts[rank_index] =
+                static_cast<int>(response_pairs.size())
+              - response_displacements[rank_index];
+        }
+    }
+    MPI_Bcast(
+        &missing_assignment,
+        1,
+        MPI_INT,
+        coordinator,
+        get_mpi_comm(*comm));
+    if (missing_assignment != 0)
+    {
+        throw std::runtime_error(
+            "MeshPartitioner did not assign every source neighbor.");
+    }
+    decltype(full_partition){}.swap(full_partition);
+
+    int local_pair_count = 0;
+    MPI_Scatter(
+        response_counts.data(),
+        1,
+        MPI_INT,
+        &local_pair_count,
+        1,
+        MPI_INT,
+        coordinator,
+        get_mpi_comm(*comm));
+    std::vector<GO> local_pairs(
+        static_cast<size_t>(std::max(local_pair_count, 1)));
+    MPI_Scatterv(
+        response_pairs.data(),
+        response_counts.data(),
+        response_displacements.data(),
+        mpi_go_type(),
+        local_pairs.data(),
+        local_pair_count,
+        mpi_go_type(),
+        coordinator,
+        get_mpi_comm(*comm));
+
+    std::unordered_map<GO, int> local_partition;
+    local_partition.reserve(
+        static_cast<size_t>(local_pair_count / 2));
+    for (int pair = 0; pair + 1 < local_pair_count; pair += 2)
+    {
+        local_partition.emplace(
+            local_pairs[static_cast<size_t>(pair)],
+            static_cast<int>(
+                local_pairs[static_cast<size_t>(pair + 1)]));
+    }
+    return local_partition;
 }
 
+/**
+ * @brief Select one rank to provide each legacy cell to the partitioner.
+ *
+ * A single source is represented by one rank number. Fully replicated input
+ * selects the modulo row owner, while general sparse input selects an actual
+ * holder. Only rank zero temporarily sees the complete selection; selected
+ * GIDs are scattered back to their source ranks.
+ *
+ * @param mesh Mesh containing zero or more source cells on this rank.
+ * @param comm Communicator participating in partitioning.
+ * @return Source cells represented locally or by one source rank.
+ */
+template<TpetraTypePack Pack>
+auto MeshPartitioner<Pack>::compute_source_selection(
+    const Mesh<Pack>& mesh,
+    const Teuchos::RCP<const comm_type>& comm)
+    -> SourceSelection
+{
+    constexpr int coordinator = 0;
+    const int nranks = comm->getSize();
+    const int myrank = comm->getRank();
+    if (mesh.d_owned_cell_global_ids.size()
+        > static_cast<size_t>(std::numeric_limits<int>::max()))
+    {
+        throw std::overflow_error(
+            "MeshPartitioner local source exceeds MPI int count "
+            "capacity.");
+    }
+    const int my_count =
+        static_cast<int>(mesh.d_owned_cell_global_ids.size());
+    std::vector<int> counts(static_cast<size_t>(nranks), 0);
+    MPI_Allgather(
+        &my_count,
+        1,
+        MPI_INT,
+        counts.data(),
+        1,
+        MPI_INT,
+        get_mpi_comm(*comm));
+
+    int source_rank_count = 0;
+    int single_source_rank = -1;
+    for (int rank = 0; rank < nranks; ++rank)
+    {
+        if (counts[static_cast<size_t>(rank)] > 0)
+        {
+            ++source_rank_count;
+            single_source_rank = rank;
+        }
+    }
+    if (source_rank_count == 0)
+    {
+        throw std::runtime_error(
+            "MeshPartitioner requires at least one source cell.");
+    }
+    if (source_rank_count == 1)
+    {
+        SourceSelection selection;
+        selection.single_source_rank = single_source_rank;
+        return selection;
+    }
+
+    std::vector<int> displacements(static_cast<size_t>(nranks), 0);
+    for (int rank = 1; rank < nranks; ++rank)
+    {
+        displacements[static_cast<size_t>(rank)] =
+            displacements[static_cast<size_t>(rank - 1)]
+          + counts[static_cast<size_t>(rank - 1)];
+    }
+
+    const int total_count =
+        displacements.back() + counts.back();
+    std::vector<GO> gathered_gids(
+        static_cast<size_t>(
+            std::max(myrank == coordinator ? total_count : 0, 1)));
+    MPI_Gatherv(
+        mesh.d_owned_cell_global_ids.data(),
+        my_count,
+        mpi_go_type(),
+        gathered_gids.data(),
+        counts.data(),
+        displacements.data(),
+        mpi_go_type(),
+        coordinator,
+        get_mpi_comm(*comm));
+
+    std::vector<int> selected_counts(
+        static_cast<size_t>(nranks), 0);
+    std::vector<int> selected_displacements(
+        static_cast<size_t>(nranks), 0);
+    std::vector<GO> selected_flat;
+    if (myrank == coordinator)
+    {
+        std::unordered_map<GO, int> source_rank_for_gid;
+        source_rank_for_gid.reserve(static_cast<size_t>(total_count));
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const int begin = displacements[static_cast<size_t>(rank)];
+            const int end = begin + counts[static_cast<size_t>(rank)];
+            for (int index = begin; index < end; ++index)
+            {
+                source_rank_for_gid.emplace(
+                    gathered_gids[static_cast<size_t>(index)],
+                    rank);
+            }
+        }
+
+        // Prefer the modulo row owner when that rank holds the cell. Sparse
+        // cells remain on their lowest actual holder.
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            const int begin = displacements[static_cast<size_t>(rank)];
+            const int end = begin + counts[static_cast<size_t>(rank)];
+            for (int index = begin; index < end; ++index)
+            {
+                const auto gid =
+                    gathered_gids[static_cast<size_t>(index)];
+                const int preferred_rank = static_cast<int>(
+                    static_cast<size_t>(gid)
+                    % static_cast<size_t>(nranks));
+                if (rank == preferred_rank)
+                {
+                    source_rank_for_gid[gid] = rank;
+                }
+            }
+        }
+
+        std::vector<std::vector<GO>> selected_by_rank(
+            static_cast<size_t>(nranks));
+        for (const auto& [gid, rank] : source_rank_for_gid)
+        {
+            selected_by_rank[static_cast<size_t>(rank)]
+                .push_back(gid);
+        }
+        for (int rank = 0; rank < nranks; ++rank)
+        {
+            auto& gids =
+                selected_by_rank[static_cast<size_t>(rank)];
+            std::sort(gids.begin(), gids.end());
+            selected_counts[static_cast<size_t>(rank)] =
+                static_cast<int>(gids.size());
+            if (rank > 0)
+            {
+                selected_displacements[static_cast<size_t>(rank)] =
+                    selected_displacements[
+                        static_cast<size_t>(rank - 1)]
+                  + selected_counts[
+                        static_cast<size_t>(rank - 1)];
+            }
+            selected_flat.insert(
+                selected_flat.end(), gids.begin(), gids.end());
+        }
+    }
+
+    int local_selected_count = 0;
+    MPI_Scatter(
+        selected_counts.data(),
+        1,
+        MPI_INT,
+        &local_selected_count,
+        1,
+        MPI_INT,
+        coordinator,
+        get_mpi_comm(*comm));
+    SourceSelection selection;
+    selection.local_source_gids.resize(
+        static_cast<size_t>(local_selected_count));
+    MPI_Scatterv(
+        selected_flat.data(),
+        selected_counts.data(),
+        selected_displacements.data(),
+        mpi_go_type(),
+        selection.local_source_gids.data(),
+        local_selected_count,
+        mpi_go_type(),
+        coordinator,
+        get_mpi_comm(*comm));
+    return selection;
+}
+
+
+/**
+ * @brief Release all legacy storage replaced by a local packet rebuild.
+ */
+template<TpetraTypePack Pack>
+void MeshPartitioner<Pack>::release_rebuildable_storage(
+    Mesh<Pack>& mesh)
+{
+    auto release_container = []<class Container>(Container& container)
+    {
+        Container{}.swap(container);
+    };
+
+    // Root may still own allocations sized for the complete source mesh.
+    // Replace every rebuildable container rather than clear()ing it so local
+    // reserve() calls cannot retain global capacities or hash buckets.
+    release_container(mesh.d_cells);
+    release_container(mesh.d_faces);
+    release_container(mesh.d_owned_cell_ids);
+    release_container(mesh.d_owned_cell_global_ids);
+    release_container(mesh.d_ghost_cell_global_ids);
+    release_container(mesh.d_owned_face_global_ids);
+    release_container(mesh.d_cell_gid_to_lid);
+    release_container(mesh.d_node_gid_to_lid);
+    release_container(mesh.d_node_coords);
+    release_container(mesh.d_cell_owned_face_ids);
+    release_container(mesh.d_cell_face_distances);
+    release_container(mesh.d_cell_owned_node_global_ids);
+    release_container(mesh.d_face_owned_node_global_ids);
+    release_container(mesh.d_face_key_to_face);
+    release_container(mesh.d_boundary_id_to_face_batch);
+    release_container(mesh.d_ghost_cell_tpetra_gids);
+    release_container(mesh.d_mesh_gid_to_tpetra_gid);
+    release_container(mesh.d_tpetra_gid_to_mesh_gid);
+    mesh.d_host_views = typename Mesh<Pack>::HostViews{};
+    mesh.reset_device_views();
+    mesh.d_owned_cell_map = Teuchos::null;
+    mesh.d_overlap_cell_map = Teuchos::null;
+    mesh.d_owned_face_map = Teuchos::null;
+    mesh.d_boundary_face_map = Teuchos::null;
+
+    // Clear contiguous Tpetra GID assignments; they will be recomputed by create_maps().
+    mesh.reset_contiguous_tpetra_gids();
+}
 
 /**
  * @brief Rebuild the mesh data structures from owned and ghost cell packets.
@@ -1105,23 +1936,18 @@ auto MeshPartitioner<Pack>::compute_gid_to_rank_map(
  * @param mesh Mesh instance to rebuild (modified in place).
  * @param owned_pkts Cell packets destined for this rank.
  * @param ghost_pkts Cell packets describing off-rank neighbours.
- * @param orig_coords Original node coordinates before partitioning.
- * @param orig_ng2l Original node GID-to-local-index map.
  * @param periodic_pairs Face-key → paired-GID map for periodic boundary faces.
  */
 template<TpetraTypePack Pack>
-void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>& owned_pkts, const std::vector<Packet>& ghost_pkts,
-                    const std::vector<Vec3>& orig_coords, const std::unordered_map<GO, LO>& orig_ng2l,
-                    const std::unordered_map<std::string, GO>& periodic_pairs) {
-    mesh.d_cells.clear(); mesh.d_faces.clear(); mesh.d_owned_cell_ids.clear();
-    mesh.d_owned_cell_global_ids.clear(); mesh.d_ghost_cell_global_ids.clear();
-    mesh.d_cell_gid_to_lid.clear(); mesh.d_node_gid_to_lid.clear(); mesh.d_node_coords.clear();
-    mesh.d_cell_owned_face_ids.clear(); mesh.d_cell_face_distances.clear();
-    mesh.d_cell_owned_node_global_ids.clear(); mesh.d_face_owned_node_global_ids.clear();
-    mesh.d_face_key_to_face.clear();
-    mesh.d_owned_face_global_ids.clear();
-    // Clear contiguous Tpetra GID assignments; they will be recomputed by create_maps().
-    mesh.reset_contiguous_tpetra_gids();
+void MeshPartitioner<Pack>::rebuild(
+    Mesh<Pack>& mesh,
+    const std::vector<PacketView>& owned_pkts,
+    const std::vector<PacketView>& ghost_pkts,
+    const std::unordered_map<std::string, GO>& periodic_pairs)
+{
+    // Idempotent for the normal path, which releases the source immediately
+    // after the owned-packet exchange.
+    release_rebuildable_storage(mesh);
 
     const auto total_cells = owned_pkts.size() + ghost_pkts.size();
     size_t total_cell_nodes = 0;
@@ -1130,11 +1956,12 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     {
         for (const auto& packet : *packets)
         {
-            total_cell_nodes += packet.node_gids.size();
-            for (const auto& face_nodes : packet.face_node_keys)
-            {
-                maximum_face_nodes += face_nodes.size();
-            }
+            total_cell_nodes += packet.header().node_count;
+            packet.for_each_face(
+                [&](const typename PacketView::Face& face)
+                {
+                    maximum_face_nodes += face.node_count;
+                });
         }
     }
     mesh.d_cells.reserve(total_cells);
@@ -1145,37 +1972,31 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
     mesh.d_face_owned_node_global_ids.reserve(maximum_face_nodes);
 
     std::unordered_map<GO, Vec3> needed_nodes;
-    for (const auto* packets : {&owned_pkts, &ghost_pkts}) {
-        for (const auto& packet : *packets) {
-            if (packet.node_gids.size() != packet.node_coords.size()) {
-                throw std::runtime_error(
-                    "MeshPartitioner cell packet has inconsistent node coordinates.");
-            }
-            if (packet.face_node_keys.size()
-                != packet.face_boundary_ids.size()) {
-                throw std::runtime_error(
-                    "MeshPartitioner cell packet has inconsistent boundary IDs.");
-            }
-            if (packet.face_node_keys.size()
-                != packet.face_global_ids.size()) {
-                throw std::runtime_error(
-                    "MeshPartitioner cell packet has inconsistent face global IDs.");
-            }
-            for (size_t node = 0; node < packet.node_gids.size(); ++node) {
-                needed_nodes.emplace(
-                    packet.node_gids[node], packet.node_coords[node]);
-            }
-            for (const auto& face_nodes : packet.face_node_keys) {
-                for (const auto node_gid : face_nodes) {
-                    if (needed_nodes.contains(node_gid)) continue;
-                    const auto original = orig_ng2l.find(node_gid);
-                    if (original != orig_ng2l.end()) {
-                        needed_nodes.emplace(
-                            node_gid,
-                            orig_coords[static_cast<size_t>(original->second)]);
+    for (const auto* packets : {&owned_pkts, &ghost_pkts})
+    {
+        for (const auto& packet : *packets)
+        {
+            packet.for_each_node(
+                [&](const typename PacketView::Node& node)
+                {
+                    needed_nodes.emplace(node.gid, node.coordinate);
+                });
+            packet.for_each_face(
+                [&](const typename PacketView::Face& face)
+                {
+                    for (std::uint32_t node = 0;
+                         node < face.node_count;
+                         ++node)
+                    {
+                        if (!needed_nodes.contains(
+                                face.node_gids[node]))
+                        {
+                            throw std::runtime_error(
+                                "MeshPartitioner cell packet is missing "
+                                "a face-node coordinate.");
+                        }
                     }
-                }
-            }
+                });
         }
     }
     mesh.d_node_coords.reserve(needed_nodes.size());
@@ -1185,75 +2006,138 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
         mesh.d_node_coords.push_back(coordinate);
     }
 
-    auto add_cell = [&](const Packet& p, bool owned) -> LO {
+    auto add_cell =
+        [&](const PacketView& packet, bool owned) -> LO
+    {
+        const auto header = packet.header();
         LO lid = static_cast<LO>(mesh.d_cells.size());
-        mesh.d_cell_gid_to_lid[p.gid] = lid;
+        mesh.d_cell_gid_to_lid[header.gid] = lid;
         CellInfo ci;
-        ci.owned = owned; ci.type = p.cell_type; ci.center = p.center; ci.volume = p.volume;
-        size_t off = mesh.d_cell_owned_node_global_ids.size();
-        mesh.d_cell_owned_node_global_ids.insert(mesh.d_cell_owned_node_global_ids.end(), p.node_gids.begin(), p.node_gids.end());
-        ci.node_gids = typename Mesh<Pack>::ViewGO(mesh.d_cell_owned_node_global_ids.data() + off, p.node_gids.size());
+        ci.owned = owned;
+        ci.type = header.cell_type;
+        ci.center = header.center;
+        ci.volume = header.volume;
+        const size_t offset =
+            mesh.d_cell_owned_node_global_ids.size();
+        packet.for_each_node(
+            [&](const typename PacketView::Node& node)
+            {
+                mesh.d_cell_owned_node_global_ids.push_back(node.gid);
+            });
+        ci.node_gids = typename Mesh<Pack>::ViewGO(
+            mesh.d_cell_owned_node_global_ids.data() + offset,
+            header.node_count);
         ci.faces = typename Mesh<Pack>::ViewLO(nullptr, 0);
         ci.face_distances = typename Mesh<Pack>::ViewReal(nullptr, 0);
         mesh.d_cells.push_back(std::move(ci));
         return lid;
     };
-    for (auto& p : owned_pkts) { LO lid = add_cell(p, true); mesh.d_owned_cell_ids.push_back(lid); mesh.d_owned_cell_global_ids.push_back(p.gid); }
-    for (auto& p : ghost_pkts) { add_cell(p, false); mesh.d_ghost_cell_global_ids.push_back(p.gid); }
+    for (const auto& packet : owned_pkts)
+    {
+        const auto lid = add_cell(packet, true);
+        mesh.d_owned_cell_ids.push_back(lid);
+        mesh.d_owned_cell_global_ids.push_back(packet.gid());
+    }
+    for (const auto& packet : ghost_pkts)
+    {
+        add_cell(packet, false);
+        mesh.d_ghost_cell_global_ids.push_back(packet.gid());
+    }
 
     // Build faces
     std::vector<std::vector<LO>> cfl(mesh.d_cells.size());
-    auto all = owned_pkts; all.insert(all.end(), ghost_pkts.begin(), ghost_pkts.end());
-    for (size_t ci = 0; ci < all.size(); ++ci) {
-        auto& p = all[ci]; LO cl = static_cast<LO>(ci);
-        for (size_t packet_face = 0;
-             packet_face < p.face_node_keys.size();
-             ++packet_face) {
-            auto& fn = p.face_node_keys[packet_face];
-            const auto boundary_id =
-                p.face_boundary_ids[packet_face];
-            const auto face_global_id =
-                p.face_global_ids[packet_face];
-            std::string key = Mesh<Pack>::make_face_key(typename Mesh<Pack>::ViewGO(const_cast<GO*>(fn.data()), fn.size()));
-            auto it = mesh.d_face_key_to_face.find(key);
-            if (it == mesh.d_face_key_to_face.end()) {
-                LO fid = static_cast<LO>(mesh.d_faces.size());
-                size_t off = mesh.d_face_owned_node_global_ids.size();
-                mesh.d_face_owned_node_global_ids.insert(mesh.d_face_owned_node_global_ids.end(), fn.begin(), fn.end());
-                FaceInfo fi;
-                fi.type = (fn.size() == 3) ? MeshUtils::FaceType::TRIANGLE : MeshUtils::FaceType::QUAD;
-                fi.boundary_id = boundary_id;
-                fi.owner = cl; fi.neighbor = invalid_lid;
-                fi.node_gids = typename Mesh<Pack>::ViewGO(mesh.d_face_owned_node_global_ids.data() + off, fn.size());
-                mesh.d_faces.push_back(std::move(fi));
-                mesh.d_owned_face_global_ids.push_back(face_global_id);
-                mesh.d_face_key_to_face[key] = fid;
-                cfl[static_cast<size_t>(cl)].push_back(fid);
-            } else {
-                LO fid = it->second;
-                if (mesh.d_owned_face_global_ids[static_cast<size_t>(fid)]
-                    != face_global_id)
-                {
-                    throw std::runtime_error(
-                        "MeshPartitioner received inconsistent global IDs for the same face.");
-                }
-                auto& fi = mesh.d_faces[static_cast<size_t>(fid)];
-                if (fi.boundary_id == Mesh<Pack>::invalid_boundary_id
-                    && boundary_id != Mesh<Pack>::invalid_boundary_id)
-                {
-                    fi.boundary_id = boundary_id;
-                }
-                if (fi.neighbor == invalid_lid) {
-                    fi.neighbor = cl;
-                    cfl[static_cast<size_t>(cl)].push_back(fid);
-                } else if (fi.owner == cl || fi.neighbor == cl) {
-                    // face already complete; only add if cell is owner/neighbor
-                    cfl[static_cast<size_t>(cl)].push_back(fid);
-                }
-                // else: third cell referencing same face (non-manifold) — skip
+    auto add_packet_faces =
+        [&](const std::vector<PacketView>& packets,
+            size_t cell_offset)
+        {
+            for (size_t packet_index = 0;
+                 packet_index < packets.size();
+                 ++packet_index)
+            {
+                const auto& packet = packets[packet_index];
+                const auto cl = static_cast<LO>(
+                    cell_offset + packet_index);
+                packet.for_each_face(
+                    [&](const typename PacketView::Face& face)
+                    {
+                        const auto key = Mesh<Pack>::make_face_key(
+                            typename Mesh<Pack>::ViewGO(
+                                const_cast<GO*>(
+                                    face.node_gids.data()),
+                                face.node_count));
+                        const auto existing =
+                            mesh.d_face_key_to_face.find(key);
+                        if (existing == mesh.d_face_key_to_face.end())
+                        {
+                            const auto fid =
+                                static_cast<LO>(mesh.d_faces.size());
+                            const auto node_offset =
+                                mesh.d_face_owned_node_global_ids.size();
+                            mesh.d_face_owned_node_global_ids.insert(
+                                mesh.d_face_owned_node_global_ids.end(),
+                                face.node_gids.begin(),
+                                face.node_gids.begin()
+                                    + face.node_count);
+                            FaceInfo face_info;
+                            face_info.type =
+                                face.node_count == 3
+                                    ? MeshUtils::FaceType::TRIANGLE
+                                    : MeshUtils::FaceType::QUAD;
+                            face_info.boundary_id = face.boundary_id;
+                            face_info.owner = cl;
+                            face_info.neighbor = invalid_lid;
+                            face_info.node_gids =
+                                typename Mesh<Pack>::ViewGO(
+                                    mesh.d_face_owned_node_global_ids.data()
+                                        + node_offset,
+                                    face.node_count);
+                            mesh.d_faces.push_back(std::move(face_info));
+                            mesh.d_owned_face_global_ids.push_back(
+                                face.global_id);
+                            mesh.d_face_key_to_face.emplace(key, fid);
+                            cfl[static_cast<size_t>(cl)].push_back(fid);
+                            return;
+                        }
+
+                        const auto fid = existing->second;
+                        if (mesh.d_owned_face_global_ids[
+                                static_cast<size_t>(fid)]
+                            != face.global_id)
+                        {
+                            throw std::runtime_error(
+                                "MeshPartitioner received inconsistent global "
+                                "IDs for the same face.");
+                        }
+                        auto& face_info =
+                            mesh.d_faces[static_cast<size_t>(fid)];
+                        if (face_info.boundary_id
+                                == Mesh<Pack>::invalid_boundary_id
+                            && face.boundary_id
+                                != Mesh<Pack>::invalid_boundary_id)
+                        {
+                            face_info.boundary_id =
+                                face.boundary_id;
+                        }
+                        if (face_info.neighbor == invalid_lid)
+                        {
+                            face_info.neighbor = cl;
+                            cfl[static_cast<size_t>(cl)]
+                                .push_back(fid);
+                        }
+                        else if (face_info.owner == cl
+                                 || face_info.neighbor == cl)
+                        {
+                            cfl[static_cast<size_t>(cl)]
+                                .push_back(fid);
+                        }
+                        // A third cell referencing the same face is
+                        // non-manifold and is intentionally omitted,
+                        // preserving prior behavior.
+                    });
             }
-        }
-    }
+        };
+    add_packet_faces(owned_pkts, 0);
+    add_packet_faces(ghost_pkts, owned_pkts.size());
 
     // Compute face geometry
     for (auto& fi : mesh.d_faces) {
@@ -1321,4 +2205,9 @@ void MeshPartitioner<Pack>::rebuild(Mesh<Pack>& mesh, const std::vector<Packet>&
         mesh.d_cell_owned_face_ids.insert(mesh.d_cell_owned_face_ids.end(), cf.begin(), cf.end());
         mesh.d_cells[ci].faces = typename Mesh<Pack>::ViewLO(mesh.d_cell_owned_face_ids.data() + off, cf.size());
     }
+
+    // Face matching is complete; retaining string keys would keep one
+    // allocation and one hash node per local face for the solver lifetime.
+    decltype(mesh.d_face_key_to_face){}.swap(
+        mesh.d_face_key_to_face);
 }
