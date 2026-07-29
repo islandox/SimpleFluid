@@ -362,36 +362,58 @@ template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
 {
     const auto& mesh = adapter->mesh();
-    std::vector<size_t> owned_cells;
-    std::vector<size_t> ghost_cells;
-    for (size_t lid = 0; lid < mesh.num_local_cells(); ++lid)
-    {
-        if (mesh.is_owned_cell(checked_local(lid)))
-        {
-            owned_cells.push_back(lid);
-        }
-        else
-        {
-            ghost_cells.push_back(lid);
-        }
-    }
-    initialize_cells(std::move(owned_cells), std::move(ghost_cells));
-
-    std::vector<size_t> owned_faces;
-    std::vector<size_t> overlap_faces;
+    bool identity_order = true;
+    bool saw_overlap_face = false;
     for (size_t lid = 0; lid < mesh.num_faces(); ++lid)
     {
         if (mesh.is_owned_face(checked_local(lid)))
         {
-            owned_faces.push_back(lid);
+            if (saw_overlap_face)
+            {
+                identity_order = false;
+                break;
+            }
         }
         else
         {
-            overlap_faces.push_back(lid);
+            saw_overlap_face = true;
         }
     }
-    initialize_faces(std::move(owned_faces), std::move(overlap_faces));
-    initialize_cell_faces();
+    if (!identity_order)
+    {
+        d_legacy_face_geometry_lids.reserve(mesh.num_faces());
+        for (size_t lid = 0; lid < mesh.num_faces(); ++lid)
+        {
+            if (mesh.is_owned_face(checked_local(lid)))
+            {
+                d_legacy_face_geometry_lids.push_back(
+                    checked_local(lid));
+            }
+        }
+        for (size_t lid = 0; lid < mesh.num_faces(); ++lid)
+        {
+            if (!mesh.is_owned_face(checked_local(lid)))
+            {
+                d_legacy_face_geometry_lids.push_back(
+                    checked_local(lid));
+            }
+        }
+        d_legacy_face_local_lids.resize(
+            d_legacy_face_geometry_lids.size());
+        for (size_t local = 0;
+             local < d_legacy_face_geometry_lids.size();
+             ++local)
+        {
+            d_legacy_face_local_lids[
+                static_cast<size_t>(
+                    d_legacy_face_geometry_lids[local])] =
+                checked_local(local);
+        }
+        // Interleaved ownership is uncommon. Preserve the established
+        // owned-first handle ordering with a compact permutation and
+        // materialize cell connectivity only for this fallback.
+        initialize_cell_faces();
+    }
     initialize_boundary_batches(*adapter);
 
     d_owned_cell_map = mesh.owned_cell_map();
@@ -399,11 +421,14 @@ void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
     d_owned_face_map = mesh.owned_face_map();
     d_boundary_face_map = mesh.boundary_face_map();
     std::vector<global_ordinal_type> overlap_face_gids;
-    overlap_face_gids.reserve(d_indexer.face_global_ids().size());
-    for (const auto face_lid : d_indexer.face_global_ids())
+    overlap_face_gids.reserve(num_faces());
+    for (size_t face_lid = 0; face_lid < num_faces(); ++face_lid)
     {
+        const auto geometry_lid =
+            geometry_face_lid(checked_local(face_lid));
         overlap_face_gids.push_back(
-            mesh.face_global_id(checked_local(face_lid)));
+            mesh.face_global_id(
+                checked_local(static_cast<size_t>(geometry_lid))));
     }
     d_overlap_face_map = make_map(
         Tpetra::getDefaultComm(), overlap_face_gids);
@@ -492,6 +517,63 @@ void MeshHandle<Pack>::initialize_indexer(indexer_type indexer)
 }
 
 /**
+ * @brief Lazily materialize legacy identity/permutation lookup tables.
+ *
+ * Production geometry and field paths use the wrapped mesh arrays directly;
+ * this preserves the historical indexer() API only for callers that request
+ * it explicitly.
+ */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::materialize_legacy_indexer() const
+{
+    if (d_legacy_indexer_materialized)
+    {
+        return;
+    }
+    const auto legacy = legacy_mesh();
+    if (!legacy)
+    {
+        return;
+    }
+
+    std::vector<size_t> owned_cells;
+    std::vector<size_t> ghost_cells;
+    owned_cells.reserve(legacy->num_owned_cells());
+    ghost_cells.reserve(
+        legacy->num_local_cells() - legacy->num_owned_cells());
+    for (size_t local = 0; local < legacy->num_local_cells(); ++local)
+    {
+        (local < legacy->num_owned_cells()
+             ? owned_cells
+             : ghost_cells)
+            .push_back(local);
+    }
+
+    std::vector<size_t> owned_faces;
+    std::vector<size_t> overlap_faces;
+    const auto owned_face_count = num_owned_faces();
+    owned_faces.reserve(owned_face_count);
+    overlap_faces.reserve(num_faces() - owned_face_count);
+    for (size_t local = 0; local < num_faces(); ++local)
+    {
+        const auto geometry = static_cast<size_t>(
+            geometry_face_lid(checked_local(local)));
+        (local < owned_face_count
+             ? owned_faces
+             : overlap_faces)
+            .push_back(geometry);
+    }
+
+    d_indexer = indexer_type(
+        checked_global_ids(std::move(owned_cells)),
+        checked_global_ids(std::move(ghost_cells)),
+        checked_global_ids(std::move(owned_faces)),
+        checked_global_ids(std::move(overlap_faces)),
+        std::vector<global_ordinal_type>{});
+    d_legacy_indexer_materialized = true;
+}
+
+/**
  * @brief Materialize cell-to-face connectivity in MeshHandle local IDs.
  *
  * Faces not present in the local overlap are omitted.
@@ -501,14 +583,14 @@ void MeshHandle<Pack>::initialize_cell_faces()
 {
     d_cell_face_offsets.clear();
     d_cell_face_lids.clear();
-    d_cell_face_offsets.reserve(d_indexer.num_local_cells() + 1);
+    d_cell_face_offsets.reserve(num_local_cells() + 1);
     d_cell_face_offsets.push_back(0);
 
     visit(
         [&](const auto& mesh)
         {
             for (size_t local_lid = 0;
-                 local_lid < d_indexer.num_local_cells();
+                 local_lid < num_local_cells();
                  ++local_lid)
             {
                 const auto geometry_lid = geometry_cell_lid(

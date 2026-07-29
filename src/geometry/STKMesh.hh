@@ -67,9 +67,25 @@ struct STKMeshContainer
     SP<MetaData> meta;
     SP<BulkData> bulk;
     
-    stk::io::StkMeshIoBroker io;
+    UP<stk::io::StkMeshIoBroker> io =
+        std::make_unique<stk::io::StkMeshIoBroker>();
 
     stk::mesh::Field<double>* coord_field = nullptr;
+
+    /**
+     * @brief Destroy the heavyweight STK source after conversion to Mesh data.
+     *
+     * Boundary options remain available, but metadata, bulk entities, the I/O
+     * broker, and cached entity handles are released.
+     */
+    void release_source_geometry() noexcept
+    {
+        coord_field = nullptr;
+        Arr<Entity>{}.swap(cell_entities);
+        io.reset();
+        bulk.reset();
+        meta.reset();
+    }
 };
 
 /**
@@ -129,16 +145,30 @@ public:
 public:
     STKMesh();
 
+    explicit STKMesh(const Options& options);
+
     STKMesh(const std::string& mesh_filename, const Options& options = Options());
 
     void assemble() override;
 
     void export_vtu(const std::string& filename) const override;
 
-    SP<const MetaData> meta() const noexcept { return d_stk.meta; }
-    SP<const BulkData> bulk() const noexcept { return d_stk.bulk; }
-    SP<MetaData> meta() noexcept { return d_stk.meta; }
-    SP<BulkData> bulk() noexcept { return d_stk.bulk; }
+    /**
+     * @brief Return non-owning construction-time metadata.
+     *
+     * The pointer is invalidated by assemble(), which returns future calls as
+     * null after releasing the STK source.
+     */
+    const MetaData* meta() const noexcept { return d_stk.meta.get(); }
+    /**
+     * @brief Return non-owning construction-time bulk data.
+     *
+     * The pointer is invalidated by assemble(), which returns future calls as
+     * null after releasing the STK source.
+     */
+    const BulkData* bulk() const noexcept { return d_stk.bulk.get(); }
+    MetaData* meta() noexcept { return d_stk.meta.get(); }
+    BulkData* bulk() noexcept { return d_stk.bulk.get(); }
 
 private:
     void build_face_table();
@@ -170,7 +200,6 @@ private:
     using Base::check_connectivity;
     using Base::create_cell_face_distances;
     using Base::create_maps;
-    using Base::create_device_views;
     using Base::d_boundary_id_to_face_batch;
     using Base::d_boundary_id_to_name;
     using Base::d_boundary_name_to_id;
@@ -179,7 +208,6 @@ private:
     using Base::d_cell_owned_face_ids;
     using Base::d_cell_owned_node_global_ids;
     using Base::d_cells;
-    using Base::d_device_views;
     using Base::d_face_key_to_face;
     using Base::d_face_owned_node_global_ids;
     using Base::d_faces;
@@ -195,6 +223,7 @@ private:
     using Base::make_vectorV3D_view;
     using Base::make_vector_view;
     using Base::prefer_owned_face_owners;
+    using Base::rebuild_boundary_face_batches;
     using Base::reset_contiguous_tpetra_gids;
 
     STKMeshContainer d_stk;

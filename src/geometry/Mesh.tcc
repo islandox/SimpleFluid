@@ -255,6 +255,33 @@ void Mesh<Pack>::reset_contiguous_tpetra_gids() noexcept
 }
 
 /**
+ * @brief Rebuild compact boundary batches from the finalized local faces.
+ *
+ * Partitioning changes face local ordinals, so batches produced while
+ * importing source geometry must not survive a local rebuild.
+ */
+template<TpetraTypePack Pack>
+void Mesh<Pack>::rebuild_boundary_face_batches()
+{
+    decltype(d_boundary_id_to_face_batch){}.swap(
+        d_boundary_id_to_face_batch);
+    for (size_t fid = 0; fid < d_faces.size(); ++fid)
+    {
+        const auto boundary_id = d_faces[fid].boundary_id;
+        if (boundary_id == invalid_boundary_id)
+        {
+            continue;
+        }
+
+        auto& face_batch = d_boundary_id_to_face_batch[boundary_id];
+        face_batch.id = boundary_id;
+        face_batch.face_lids.push_back(
+            detail::checked_size_to_ordinal<local_ordinal_type>(
+                fid, "boundary face local id"));
+    }
+}
+
+/**
  * @brief create Tpetra maps for owned and overlap cells based on the mesh connectivity information.
  * 
  * @tparam Pack 
@@ -268,20 +295,7 @@ void Mesh<Pack>::create_maps()
 
     if (d_boundary_id_to_face_batch.empty())
     {
-        for (size_t fid = 0; fid < d_faces.size(); ++fid)
-        {
-            const auto boundary_id = d_faces[fid].boundary_id;
-            if (boundary_id == invalid_boundary_id)
-            {
-                continue;
-            }
-
-            auto& face_batch = d_boundary_id_to_face_batch[boundary_id];
-            face_batch.id = boundary_id;
-            face_batch.face_lids.push_back(
-                detail::checked_size_to_ordinal<local_ordinal_type>(
-                    fid, "boundary face local id"));
-        }
+        rebuild_boundary_face_batches();
     }
 
     // Ensure contiguous Tpetra GIDs are assigned before building maps.
@@ -430,6 +444,9 @@ void Mesh<Pack>::create_cell_face_distances()
 template<TpetraTypePack Pack>
 void Mesh<Pack>::create_host_views()
 {
+    // Any previous device mirrors refer to the old host topology/geometry.
+    reset_device_views();
+
     auto& cell_geometry = d_host_views.cell_geometry;
     cell_geometry.volume.clear();
     cell_geometry.centroid.clear();
@@ -509,8 +526,20 @@ void Mesh<Pack>::create_host_views()
  * @tparam Pack 
  */
 template<TpetraTypePack Pack>
-void Mesh<Pack>::create_device_views()
+void Mesh<Pack>::create_device_views() const
 {
+    if (d_device_views_created)
+    {
+        return;
+    }
+
+    if (d_host_views.cell_geometry.volume.size() != d_cells.size()
+        || d_host_views.face_topology.owner.size() != d_faces.size())
+    {
+        throw std::logic_error(
+            "Device mesh views require finalized host mesh views.");
+    }
+
     ArrGO cell_gid;
     ArrInt cell_type;
     ArrLO cell_face_offset{0};
@@ -539,7 +568,6 @@ void Mesh<Pack>::create_device_views()
             cell_face_ids.size(), "cell-face connectivity"));
     }
 
-    ArrVec3 node_coord_values = d_node_coords;
     ArrLO cell_node_offset{0};
     ArrLO cell_node_ids;
     ArrLO face_node_offset{0};
@@ -597,13 +625,26 @@ void Mesh<Pack>::create_device_views()
     d_device_views.face_centroid = make_vectorV3D_view(
         "face_centroid", d_host_views.face_geometry.centroid);
 
-    d_device_views.node_coord = make_vectorV3D_view("node_coord", node_coord_values);
+    d_device_views.node_coord =
+        make_vectorV3D_view("node_coord", d_node_coords);
 
     d_device_views.cell_node_offset = make_vector_view("cell_node_offset", cell_node_offset);
     d_device_views.cell_node_ids = make_vector_view("cell_node_ids", cell_node_ids);
 
     d_device_views.face_node_offset = make_vector_view("face_node_offset", face_node_offset);
     d_device_views.face_node_ids = make_vector_view("face_node_ids", face_node_ids);
+    d_device_views_created = true;
+}
+
+/**
+ * @brief Release cached device mirrors after host topology changes.
+ */
+template<TpetraTypePack Pack>
+void Mesh<Pack>::reset_device_views() const noexcept
+{
+    d_device_views = DeviceViews{};
+    d_face_neighbor_device = kokkos_1dview<local_ordinal_type>{};
+    d_device_views_created = false;
 }
 
 /**

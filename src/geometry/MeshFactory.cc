@@ -13,6 +13,7 @@
 #include "STKMesh.hh"
 #include "geometry/mesh/FrontalDelaunay2D.hh"
 
+#include <Teuchos_CommHelpers.hpp>
 #include <stk_io/IossBridge.hpp>
 #include <stk_mesh/base/FEMHelpers.hpp>
 #include <stk_mesh/base/FieldBase.hpp>
@@ -22,7 +23,9 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -44,6 +47,68 @@ struct FactoryNodeTag
     size_t layer = 0;
     bool surface = false;
 };
+
+/**
+ * @brief Run a mesh-generation operation only on rank zero.
+ *
+ * Any root exception is converted to a message and broadcast so every rank
+ * exits the collective construction path coherently.
+ */
+template <class Operation>
+std::string run_on_root(const std::string& context, Operation&& operation)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    std::string error;
+    if (comm->getRank() == 0)
+    {
+        try
+        {
+            std::forward<Operation>(operation)();
+        }
+        catch (const std::exception& exception)
+        {
+            error = context + ": " + exception.what();
+        }
+        catch (...)
+        {
+            error = context + ": unknown exception";
+        }
+    }
+
+    int error_size =
+        comm->getRank() == 0 ? static_cast<int>(error.size()) : 0;
+    Teuchos::broadcast(*comm, 0, 1, &error_size);
+    std::string root_error(static_cast<size_t>(error_size), '\0');
+    if (comm->getRank() == 0)
+    {
+        root_error = std::move(error);
+    }
+    if (error_size != 0)
+    {
+        Teuchos::broadcast(
+            *comm, 0, error_size, root_error.data());
+    }
+    return root_error;
+}
+
+/**
+ * @brief Collectively open and close STK modification while rank zero
+ *        populates the global bulk geometry.
+ */
+template <class Operation>
+void populate_bulk_on_root(stk::mesh::BulkData& bulk,
+                           const std::string& context,
+                           Operation&& operation)
+{
+    bulk.modification_begin();
+    const auto error =
+        run_on_root(context, std::forward<Operation>(operation));
+    bulk.modification_end();
+    if (!error.empty())
+    {
+        throw std::runtime_error(error);
+    }
+}
 
 /**
  * @brief Compute the minimum positive cell count for a given length and mesh size.
@@ -446,7 +511,25 @@ void MeshFactory::validate_boundary_layer_names() const
 template <TpetraTypePack Pack>
 SP<Mesh<Pack>> MeshFactory::build()
 {
-    auto mesh = std::make_shared<STKMesh<Pack>>();
+    if (d_domain_type == DomainType::EXTERNAL)
+    {
+        auto mesh =
+            std::make_shared<STKMesh<Pack>>(d_external_mesh_file);
+        mesh->assemble();
+        return mesh;
+    }
+
+    typename STKMesh<Pack>::Options options;
+    int next_boundary_id = 1;
+    for (const auto& boundary_name : d_domain_exterior_face_types)
+    {
+        if (!options.boundary_name_to_id.contains(boundary_name))
+        {
+            options.boundary_name_to_id.emplace(
+                boundary_name, next_boundary_id++);
+        }
+    }
+    auto mesh = std::make_shared<STKMesh<Pack>>(options);
 
     if (d_domain_type == DomainType::BOX)
     {
@@ -463,11 +546,6 @@ SP<Mesh<Pack>> MeshFactory::build()
     else if (d_domain_type == DomainType::SPHERE)
     {
         build_sphere_mesh(mesh);
-    }
-    else if (d_domain_type == DomainType::EXTERNAL)
-    {
-        mesh = std::make_shared<STKMesh<Pack>>(d_external_mesh_file);
-        mesh->assemble();
     }
     else
     {
@@ -611,60 +689,78 @@ void MeshFactory::build_box_mesh(SP<STKMesh<Pack>>& mesh)
         bulk->declare_element_side(elem, side_ordinal, parts);
     };
 
-    bulk->modification_begin();
-
-    for (size_t k = 0; k < num_cells_z; ++k)
-    {
-        for (size_t j = 0; j < num_cells_y; ++j)
+    populate_bulk_on_root(
+        *bulk,
+        "BOX MeshFactory failed to construct root geometry",
+        [&]
         {
-            for (size_t i = 0; i < num_cells_x; ++i)
+            for (size_t k = 0; k < num_cells_z; ++k)
             {
-                const stk::mesh::EntityIdVector hex_nodes{
-                    node_id(i,     j,     k),
-                    node_id(i + 1, j,     k),
-                    node_id(i + 1, j + 1, k),
-                    node_id(i,     j + 1, k),
-                    node_id(i,     j,     k + 1),
-                    node_id(i + 1, j,     k + 1),
-                    node_id(i + 1, j + 1, k + 1),
-                    node_id(i,     j + 1, k + 1)
-                };
-
-                const auto elem = stk::mesh::declare_element(
-                    *bulk, hex_part, element_id(i, j, k), hex_nodes);
-
-                if (i == 0)               declare_boundary_side(elem, 3, boundary_parts[0]);
-                if (i + 1 == num_cells_x) declare_boundary_side(elem, 1, boundary_parts[1]);
-                if (j == 0)               declare_boundary_side(elem, 0, boundary_parts[2]);
-                if (j + 1 == num_cells_y) declare_boundary_side(elem, 2, boundary_parts[3]);
-                if (k == 0)               declare_boundary_side(elem, 4, boundary_parts[4]);
-                if (k + 1 == num_cells_z) declare_boundary_side(elem, 5, boundary_parts[5]);
-            }
-        }
-    }
-
-    for (size_t k = 0; k <= num_cells_z; ++k)
-    {
-        for (size_t j = 0; j <= num_cells_y; ++j)
-        {
-            for (size_t i = 0; i <= num_cells_x; ++i)
-            {
-                const auto node = bulk->get_entity(stk::topology::NODE_RANK,
-                                                    node_id(i, j, k));
-                double* coord = stk::mesh::field_data(coord_field, node);
-                if (coord == nullptr)
+                for (size_t j = 0; j < num_cells_y; ++j)
                 {
-                    throw std::runtime_error("BOX MeshFactory failed to write node coordinates.");
+                    for (size_t i = 0; i < num_cells_x; ++i)
+                    {
+                        const stk::mesh::EntityIdVector hex_nodes{
+                            node_id(i,     j,     k),
+                            node_id(i + 1, j,     k),
+                            node_id(i + 1, j + 1, k),
+                            node_id(i,     j + 1, k),
+                            node_id(i,     j,     k + 1),
+                            node_id(i + 1, j,     k + 1),
+                            node_id(i + 1, j + 1, k + 1),
+                            node_id(i,     j + 1, k + 1)
+                        };
+
+                        const auto elem = stk::mesh::declare_element(
+                            *bulk, hex_part,
+                            element_id(i, j, k), hex_nodes);
+
+                        if (i == 0)
+                            declare_boundary_side(
+                                elem, 3, boundary_parts[0]);
+                        if (i + 1 == num_cells_x)
+                            declare_boundary_side(
+                                elem, 1, boundary_parts[1]);
+                        if (j == 0)
+                            declare_boundary_side(
+                                elem, 0, boundary_parts[2]);
+                        if (j + 1 == num_cells_y)
+                            declare_boundary_side(
+                                elem, 2, boundary_parts[3]);
+                        if (k == 0)
+                            declare_boundary_side(
+                                elem, 4, boundary_parts[4]);
+                        if (k + 1 == num_cells_z)
+                            declare_boundary_side(
+                                elem, 5, boundary_parts[5]);
+                    }
                 }
-
-                coord[0] = box_cell_edges[X][i];
-                coord[1] = box_cell_edges[Y][j];
-                coord[2] = box_cell_edges[Z][k];
             }
-        }
-    }
 
-    bulk->modification_end();
+            for (size_t k = 0; k <= num_cells_z; ++k)
+            {
+                for (size_t j = 0; j <= num_cells_y; ++j)
+                {
+                    for (size_t i = 0; i <= num_cells_x; ++i)
+                    {
+                        const auto node = bulk->get_entity(
+                            stk::topology::NODE_RANK,
+                            node_id(i, j, k));
+                        double* coord =
+                            stk::mesh::field_data(coord_field, node);
+                        if (coord == nullptr)
+                        {
+                            throw std::runtime_error(
+                                "failed to write node coordinates");
+                        }
+
+                        coord[0] = box_cell_edges[X][i];
+                        coord[1] = box_cell_edges[Y][j];
+                        coord[2] = box_cell_edges[Z][k];
+                    }
+                }
+            }
+        });
     mesh->assemble();
 }
 
@@ -734,11 +830,25 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
 
     // Place nodes on circular fronts (including prescribed radial boundary
     // layers), then let the shared XY Delaunay kernel determine connectivity.
-    const auto xy_mesh = Meshes::FrontalDelaunay2D::triangulate_disk(
-        radial_edges,
-        d_cylinder_circumferential_mesh_size,
-        d_domain_exterior_face_types[0]);
-    const auto nodes_per_layer = xy_mesh.nodes.size();
+    // This is the dominant temporary geometry for the fissile-tank case, so
+    // keep it exclusively on rank zero.
+    std::optional<Meshes::FrontalDelaunay2D::Result> xy_mesh;
+    const auto triangulation_error = run_on_root(
+        "CYLINDER MeshFactory failed to triangulate root geometry",
+        [&]
+        {
+            xy_mesh.emplace(
+                Meshes::FrontalDelaunay2D::triangulate_disk(
+                    radial_edges,
+                    d_cylinder_circumferential_mesh_size,
+                    d_domain_exterior_face_types[0]));
+        });
+    if (!triangulation_error.empty())
+    {
+        throw std::runtime_error(triangulation_error);
+    }
+    const size_t nodes_per_layer =
+        xy_mesh.has_value() ? xy_mesh->nodes.size() : 0;
 
     auto meta = mesh->meta();
     auto bulk = mesh->bulk();
@@ -767,99 +877,145 @@ void MeshFactory::build_cylinder_mesh(SP<STKMesh<Pack>>& mesh)
             1 + layer * nodes_per_layer + node_index);
     };
 
-    std::unordered_map<stk::mesh::EntityId, FactoryNodeTag> node_tags;
-    node_tags.reserve((height_count + 1) * nodes_per_layer);
+    populate_bulk_on_root(
+        *bulk,
+        "CYLINDER MeshFactory failed to construct root geometry",
+        [&]
+        {
+            const auto& root_xy_mesh = xy_mesh.value();
+            std::unordered_map<stk::mesh::EntityId, FactoryNodeTag>
+                node_tags;
+            node_tags.reserve(
+                (height_count + 1) * nodes_per_layer);
 
-    ArrBool is_radial_boundary(nodes_per_layer, false);
-    for (const auto& edge : xy_mesh.boundary_edges)
-    {
-        is_radial_boundary[edge.node0] = true;
-        is_radial_boundary[edge.node1] = true;
-    }
-
-    bulk->modification_begin();
-
-    stk::mesh::EntityId next_element_id = 1;
-    auto declare_wedge = [&](size_t layer,
-                             const Meshes::FrontalDelaunay2D::Triangle& bottom_nodes)
-    {
-        const stk::mesh::EntityIdVector wedge_nodes{
-            node_id_from_layer_index(layer, bottom_nodes[0]),
-            node_id_from_layer_index(layer, bottom_nodes[1]),
-            node_id_from_layer_index(layer, bottom_nodes[2]),
-            node_id_from_layer_index(layer + 1, bottom_nodes[0]),
-            node_id_from_layer_index(layer + 1, bottom_nodes[1]),
-            node_id_from_layer_index(layer + 1, bottom_nodes[2])
-        };
-
-        const auto elem =
-            stk::mesh::declare_element(*bulk, wedge_part, next_element_id++, wedge_nodes);
-
-        declare_tagged_boundary_sides(
-            *bulk, elem, stk::topology::WEDGE_6, wedge_nodes, node_tags,
-            [&](const std::vector<FactoryNodeTag>& tags) -> stk::mesh::Part*
+            ArrBool is_radial_boundary(nodes_per_layer, false);
+            for (const auto& edge : root_xy_mesh.boundary_edges)
             {
-                const auto all_layer = [&](size_t layer_id)
-                {
-                    return std::all_of(tags.begin(), tags.end(),
-                                       [=](const FactoryNodeTag& tag)
-                                       { return tag.layer == layer_id; });
-                };
-                const auto all_surface = [&]()
-                {
-                    return std::all_of(tags.begin(), tags.end(),
-                                       [](const FactoryNodeTag& tag)
-                                       { return tag.surface; });
-                };
-
-                if (all_layer(0)) return zmin_part;
-                if (all_layer(height_count)) return zmax_part;
-                if (all_surface()) return radial_part;
-                return nullptr;
-            });
-    };
-
-    for (size_t layer = 0; layer <= height_count; ++layer)
-    {
-        for (size_t node = 0; node < nodes_per_layer; ++node)
-        {
-            node_tags.emplace(
-                node_id_from_layer_index(layer, node),
-                FactoryNodeTag{layer, is_radial_boundary[node]});
-        }
-    }
-
-    for (size_t layer = 0; layer < height_count; ++layer)
-    {
-        for (const auto& triangle : xy_mesh.triangles)
-        {
-            declare_wedge(layer, triangle);
-        }
-    }
-
-    for (size_t layer = 0; layer <= height_count; ++layer)
-    {
-        const auto z = z_edges[layer];
-        for (size_t node_index = 0;
-             node_index < nodes_per_layer; ++node_index)
-        {
-            const auto node = bulk->get_entity(
-                stk::topology::NODE_RANK,
-                node_id_from_layer_index(layer, node_index));
-            double* coord = stk::mesh::field_data(coord_field, node);
-            if (coord == nullptr)
-            {
-                throw std::runtime_error(
-                    "CYLINDER MeshFactory failed to write node coordinates.");
+                is_radial_boundary[edge.node0] = true;
+                is_radial_boundary[edge.node1] = true;
             }
 
-            coord[0] = xy_mesh.nodes[node_index].x;
-            coord[1] = xy_mesh.nodes[node_index].y;
-            coord[2] = z;
-        }
-    }
+            for (size_t layer = 0; layer <= height_count; ++layer)
+            {
+                for (size_t node = 0;
+                     node < nodes_per_layer;
+                     ++node)
+                {
+                    node_tags.emplace(
+                        node_id_from_layer_index(layer, node),
+                        FactoryNodeTag{
+                            layer, is_radial_boundary[node]});
+                }
+            }
 
-    bulk->modification_end();
+            stk::mesh::EntityId next_element_id = 1;
+            auto declare_wedge =
+                [&](size_t layer,
+                    const Meshes::FrontalDelaunay2D::Triangle&
+                        bottom_nodes)
+                {
+                    const stk::mesh::EntityIdVector wedge_nodes{
+                        node_id_from_layer_index(
+                            layer, bottom_nodes[0]),
+                        node_id_from_layer_index(
+                            layer, bottom_nodes[1]),
+                        node_id_from_layer_index(
+                            layer, bottom_nodes[2]),
+                        node_id_from_layer_index(
+                            layer + 1, bottom_nodes[0]),
+                        node_id_from_layer_index(
+                            layer + 1, bottom_nodes[1]),
+                        node_id_from_layer_index(
+                            layer + 1, bottom_nodes[2])
+                    };
+
+                    const auto elem = stk::mesh::declare_element(
+                        *bulk,
+                        wedge_part,
+                        next_element_id++,
+                        wedge_nodes);
+
+                    declare_tagged_boundary_sides(
+                        *bulk,
+                        elem,
+                        stk::topology::WEDGE_6,
+                        wedge_nodes,
+                        node_tags,
+                        [&](const std::vector<FactoryNodeTag>& tags)
+                            -> stk::mesh::Part*
+                        {
+                            const auto all_layer =
+                                [&](size_t layer_id)
+                                {
+                                    return std::all_of(
+                                        tags.begin(),
+                                        tags.end(),
+                                        [=](const FactoryNodeTag& tag)
+                                        {
+                                            return tag.layer
+                                                == layer_id;
+                                        });
+                                };
+                            const auto all_surface = [&]()
+                            {
+                                return std::all_of(
+                                    tags.begin(),
+                                    tags.end(),
+                                    [](const FactoryNodeTag& tag)
+                                    {
+                                        return tag.surface;
+                                    });
+                            };
+
+                            if (all_layer(0)) return zmin_part;
+                            if (all_layer(height_count))
+                                return zmax_part;
+                            if (all_surface()) return radial_part;
+                            return nullptr;
+                        });
+                };
+
+            for (size_t layer = 0;
+                 layer < height_count;
+                 ++layer)
+            {
+                for (const auto& triangle
+                     : root_xy_mesh.triangles)
+                {
+                    declare_wedge(layer, triangle);
+                }
+            }
+
+            for (size_t layer = 0;
+                 layer <= height_count;
+                 ++layer)
+            {
+                const auto z = z_edges[layer];
+                for (size_t node_index = 0;
+                     node_index < nodes_per_layer;
+                     ++node_index)
+                {
+                    const auto node = bulk->get_entity(
+                        stk::topology::NODE_RANK,
+                        node_id_from_layer_index(
+                            layer, node_index));
+                    double* coord =
+                        stk::mesh::field_data(coord_field, node);
+                    if (coord == nullptr)
+                    {
+                        throw std::runtime_error(
+                            "failed to write node coordinates");
+                    }
+
+                    coord[0] =
+                        root_xy_mesh.nodes[node_index].x;
+                    coord[1] =
+                        root_xy_mesh.nodes[node_index].y;
+                    coord[2] = z;
+                }
+            }
+        });
+    xy_mesh.reset();
     mesh->assemble();
 }
 
@@ -967,60 +1123,91 @@ void MeshFactory::build_annulus_mesh(SP<STKMesh<Pack>>& mesh)
             element, ordinal, stk::mesh::PartVector{part});
     };
 
-    bulk->modification_begin();
-    for (size_t k = 0; k < nz; ++k)
-    {
-        for (size_t j = 0; j < nt; ++j)
+    populate_bulk_on_root(
+        *bulk,
+        "ANNULUS MeshFactory failed to construct root geometry",
+        [&]
         {
-            const size_t next_j = (j + 1) % theta_nodes;
-            for (size_t i = 0; i < nr; ++i)
+            for (size_t k = 0; k < nz; ++k)
             {
-                const stk::mesh::EntityIdVector nodes{
-                    node_id(i, j, k), node_id(i + 1, j, k),
-                    node_id(i + 1, next_j, k), node_id(i, next_j, k),
-                    node_id(i, j, k + 1), node_id(i + 1, j, k + 1),
-                    node_id(i + 1, next_j, k + 1),
-                    node_id(i, next_j, k + 1)};
-                const auto element = stk::mesh::declare_element(
-                    *bulk, hex_part, element_id(i, j, k), nodes);
-                if (i == 0) declare_side(element, 3, boundary_parts[0]);
-                if (i + 1 == nr) declare_side(element, 1, boundary_parts[1]);
-                if (!periodic && j == 0)
-                    declare_side(element, 0, boundary_parts[2]);
-                if (!periodic && j + 1 == nt)
-                    declare_side(element, 2, boundary_parts[3]);
-                const size_t zmin_part = periodic ? 2 : 4;
-                const size_t zmax_part = periodic ? 3 : 5;
-                if (k == 0)
-                    declare_side(element, 4, boundary_parts[zmin_part]);
-                if (k + 1 == nz)
-                    declare_side(element, 5, boundary_parts[zmax_part]);
+                for (size_t j = 0; j < nt; ++j)
+                {
+                    const size_t next_j = (j + 1) % theta_nodes;
+                    for (size_t i = 0; i < nr; ++i)
+                    {
+                        const stk::mesh::EntityIdVector nodes{
+                            node_id(i, j, k),
+                            node_id(i + 1, j, k),
+                            node_id(i + 1, next_j, k),
+                            node_id(i, next_j, k),
+                            node_id(i, j, k + 1),
+                            node_id(i + 1, j, k + 1),
+                            node_id(i + 1, next_j, k + 1),
+                            node_id(i, next_j, k + 1)};
+                        const auto element =
+                            stk::mesh::declare_element(
+                                *bulk,
+                                hex_part,
+                                element_id(i, j, k),
+                                nodes);
+                        if (i == 0)
+                            declare_side(
+                                element, 3, boundary_parts[0]);
+                        if (i + 1 == nr)
+                            declare_side(
+                                element, 1, boundary_parts[1]);
+                        if (!periodic && j == 0)
+                            declare_side(
+                                element, 0, boundary_parts[2]);
+                        if (!periodic && j + 1 == nt)
+                            declare_side(
+                                element, 2, boundary_parts[3]);
+                        const size_t zmin_part =
+                            periodic ? 2 : 4;
+                        const size_t zmax_part =
+                            periodic ? 3 : 5;
+                        if (k == 0)
+                            declare_side(
+                                element,
+                                4,
+                                boundary_parts[zmin_part]);
+                        if (k + 1 == nz)
+                            declare_side(
+                                element,
+                                5,
+                                boundary_parts[zmax_part]);
+                    }
+                }
             }
-        }
-    }
 
-    for (size_t k = 0; k <= nz; ++k)
-    {
-        for (size_t j = 0; j < theta_nodes; ++j)
-        {
-            const auto cosine = std::cos(theta_edges[j]);
-            const auto sine = std::sin(theta_edges[j]);
-            for (size_t i = 0; i <= nr; ++i)
+            for (size_t k = 0; k <= nz; ++k)
             {
-                const auto node = bulk->get_entity(
-                    stk::topology::NODE_RANK, node_id(i, j, k));
-                double* coordinates =
-                    stk::mesh::field_data(coord_field, node);
-                if (coordinates == nullptr)
-                    throw std::runtime_error(
-                        "ANNULUS MeshFactory failed to write node coordinates.");
-                coordinates[0] = radial_edges[i] * cosine;
-                coordinates[1] = radial_edges[i] * sine;
-                coordinates[2] = z_edges[k];
+                for (size_t j = 0; j < theta_nodes; ++j)
+                {
+                    const auto cosine = std::cos(theta_edges[j]);
+                    const auto sine = std::sin(theta_edges[j]);
+                    for (size_t i = 0; i <= nr; ++i)
+                    {
+                        const auto node = bulk->get_entity(
+                            stk::topology::NODE_RANK,
+                            node_id(i, j, k));
+                        double* coordinates =
+                            stk::mesh::field_data(
+                                coord_field, node);
+                        if (coordinates == nullptr)
+                        {
+                            throw std::runtime_error(
+                                "failed to write node coordinates");
+                        }
+                        coordinates[0] =
+                            radial_edges[i] * cosine;
+                        coordinates[1] =
+                            radial_edges[i] * sine;
+                        coordinates[2] = z_edges[k];
+                    }
+                }
             }
-        }
-    }
-    bulk->modification_end();
+        });
     mesh->assemble();
 }
 
@@ -1121,106 +1308,163 @@ void MeshFactory::build_sphere_mesh(SP<STKMesh<Pack>>& mesh)
             1 + i + (cell_count + 1) * (j + (cell_count + 1) * k));
     };
 
-    std::unordered_map<stk::mesh::EntityId, FactoryNodeTag> node_tags;
-    node_tags.reserve((cell_count + 1) * (cell_count + 1) * (cell_count + 1));
-    for (size_t k = 0; k <= cell_count; ++k)
-    {
-        for (size_t j = 0; j <= cell_count; ++j)
+    populate_bulk_on_root(
+        *bulk,
+        "SPHERE MeshFactory failed to construct root geometry",
+        [&]
         {
-            for (size_t i = 0; i <= cell_count; ++i)
+            std::unordered_map<
+                stk::mesh::EntityId,
+                FactoryNodeTag> node_tags;
+            node_tags.reserve(
+                (cell_count + 1)
+                * (cell_count + 1)
+                * (cell_count + 1));
+            for (size_t k = 0; k <= cell_count; ++k)
             {
-                const bool surface = i == 0 || i == cell_count
-                                  || j == 0 || j == cell_count
-                                  || k == 0 || k == cell_count;
-                node_tags.emplace(node_id(i, j, k), FactoryNodeTag{k, surface});
-            }
-        }
-    }
-
-    bulk->modification_begin();
-
-    for (size_t k = 0; k < cell_count; ++k)
-    {
-        for (size_t j = 0; j < cell_count; ++j)
-        {
-            for (size_t i = 0; i < cell_count; ++i)
-            {
-                const stk::mesh::EntityIdVector hex_nodes{
-                    node_id(i,     j,     k),
-                    node_id(i + 1, j,     k),
-                    node_id(i + 1, j + 1, k),
-                    node_id(i,     j + 1, k),
-                    node_id(i,     j,     k + 1),
-                    node_id(i + 1, j,     k + 1),
-                    node_id(i + 1, j + 1, k + 1),
-                    node_id(i,     j + 1, k + 1)
-                };
-
-                const auto elem = stk::mesh::declare_element(
-                    *bulk, hex_part,
-                    static_cast<stk::mesh::EntityId>(
-                        1 + i + cell_count * (j + cell_count * k)),
-                    hex_nodes);
-
-                declare_tagged_boundary_sides(
-                    *bulk, elem, stk::topology::HEX_8, hex_nodes, node_tags,
-                    [=](const std::vector<FactoryNodeTag>& tags) -> stk::mesh::Part*
-                    {
-                        const auto all_surface =
-                            std::all_of(tags.begin(), tags.end(),
-                                        [](const FactoryNodeTag& tag)
-                                        { return tag.surface; });
-                        if (!all_surface)
-                        {
-                            return nullptr;
-                        }
-                        if (!split_surface)
-                        {
-                            return lower_surface_part;
-                        }
-
-                        size_t layer_sum = 0;
-                        for (const auto& tag : tags)
-                        {
-                            layer_sum += tag.layer;
-                        }
-                        const auto lower_side =
-                            layer_sum <= (cell_count * tags.size()) / 2;
-                        return lower_side ? lower_surface_part : upper_surface_part;
-                    });
-            }
-        }
-    }
-
-    for (size_t k = 0; k <= cell_count; ++k)
-    {
-        for (size_t j = 0; j <= cell_count; ++j)
-        {
-            for (size_t i = 0; i <= cell_count; ++i)
-            {
-                const real_t u = sphere_edges[i];
-                const real_t v = sphere_edges[j];
-                const real_t w = sphere_edges[k];
-                const auto norm = std::sqrt(u * u + v * v + w * w);
-                const auto cube_radius = std::max({std::abs(u), std::abs(v), std::abs(w)});
-                const auto scale = norm == 0.0 ? 0.0 : d_radius * cube_radius / norm;
-
-                const auto node = bulk->get_entity(stk::topology::NODE_RANK,
-                                                   node_id(i, j, k));
-                double* coord = stk::mesh::field_data(coord_field, node);
-                if (coord == nullptr)
+                for (size_t j = 0; j <= cell_count; ++j)
                 {
-                    throw std::runtime_error("SPHERE MeshFactory failed to write node coordinates.");
+                    for (size_t i = 0;
+                         i <= cell_count;
+                         ++i)
+                    {
+                        const bool surface =
+                            i == 0 || i == cell_count
+                            || j == 0 || j == cell_count
+                            || k == 0 || k == cell_count;
+                        node_tags.emplace(
+                            node_id(i, j, k),
+                            FactoryNodeTag{k, surface});
+                    }
                 }
-
-                coord[0] = u * scale;
-                coord[1] = v * scale;
-                coord[2] = w * scale;
             }
-        }
-    }
 
-    bulk->modification_end();
+            for (size_t k = 0; k < cell_count; ++k)
+            {
+                for (size_t j = 0; j < cell_count; ++j)
+                {
+                    for (size_t i = 0; i < cell_count; ++i)
+                    {
+                        const stk::mesh::EntityIdVector
+                            hex_nodes{
+                                node_id(i,     j,     k),
+                                node_id(i + 1, j,     k),
+                                node_id(i + 1, j + 1, k),
+                                node_id(i,     j + 1, k),
+                                node_id(i,     j,     k + 1),
+                                node_id(i + 1, j,     k + 1),
+                                node_id(i + 1, j + 1, k + 1),
+                                node_id(i,     j + 1, k + 1)
+                            };
+
+                        const auto elem =
+                            stk::mesh::declare_element(
+                                *bulk,
+                                hex_part,
+                                static_cast<
+                                    stk::mesh::EntityId>(
+                                    1 + i
+                                    + cell_count
+                                        * (j
+                                           + cell_count
+                                             * k)),
+                                hex_nodes);
+
+                        declare_tagged_boundary_sides(
+                            *bulk,
+                            elem,
+                            stk::topology::HEX_8,
+                            hex_nodes,
+                            node_tags,
+                            [=](
+                                const std::vector<
+                                    FactoryNodeTag>& tags)
+                                -> stk::mesh::Part*
+                            {
+                                const auto all_surface =
+                                    std::all_of(
+                                        tags.begin(),
+                                        tags.end(),
+                                        [](
+                                            const FactoryNodeTag&
+                                                tag)
+                                        {
+                                            return tag.surface;
+                                        });
+                                if (!all_surface)
+                                {
+                                    return nullptr;
+                                }
+                                if (!split_surface)
+                                {
+                                    return lower_surface_part;
+                                }
+
+                                size_t layer_sum = 0;
+                                for (const auto& tag : tags)
+                                {
+                                    layer_sum += tag.layer;
+                                }
+                                const auto lower_side =
+                                    layer_sum
+                                    <= (cell_count
+                                        * tags.size())
+                                       / 2;
+                                return lower_side
+                                    ? lower_surface_part
+                                    : upper_surface_part;
+                            });
+                    }
+                }
+            }
+
+            for (size_t k = 0; k <= cell_count; ++k)
+            {
+                for (size_t j = 0;
+                     j <= cell_count;
+                     ++j)
+                {
+                    for (size_t i = 0;
+                         i <= cell_count;
+                         ++i)
+                    {
+                        const real_t u = sphere_edges[i];
+                        const real_t v = sphere_edges[j];
+                        const real_t w = sphere_edges[k];
+                        const auto norm =
+                            std::sqrt(
+                                u * u + v * v + w * w);
+                        const auto cube_radius =
+                            std::max({
+                                std::abs(u),
+                                std::abs(v),
+                                std::abs(w)});
+                        const auto scale =
+                            norm == 0.0
+                                ? 0.0
+                                : d_radius
+                                  * cube_radius / norm;
+
+                        const auto node =
+                            bulk->get_entity(
+                                stk::topology::NODE_RANK,
+                                node_id(i, j, k));
+                        double* coord =
+                            stk::mesh::field_data(
+                                coord_field, node);
+                        if (coord == nullptr)
+                        {
+                            throw std::runtime_error(
+                                "failed to write node coordinates");
+                        }
+
+                        coord[0] = u * scale;
+                        coord[1] = v * scale;
+                        coord[2] = w * scale;
+                    }
+                }
+            }
+        });
     mesh->assemble();
 }
 
