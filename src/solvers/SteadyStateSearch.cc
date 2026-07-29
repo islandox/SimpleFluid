@@ -26,6 +26,7 @@ namespace SimpleFluid
 // Explicit instantiation of the default Tpetra type pack.
 
 template class SteadyStateFieldMonitor<DefaultTpetraTypes>;
+template class SteadyStateProgressLineFormatter<real_t>;
 
 template void SteadyStateProgressStream::write<real_t>(const SteadyStateStepStatistics<real_t>& statistics,
                                            const FluidStepStatistics<real_t>& solver_statistics);

@@ -10,20 +10,19 @@ on:
 
 jobs:
   build:
+    name: ${{ matrix.os }} ${{ matrix.build_type }} (${{ matrix.compiler_id }})
     runs-on: ${{ matrix.os }}
 
     strategy:
       # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
       fail-fast: false
 
-      # Keep Release coverage on both supported compiler families and add one
-      # representative GCC Debug acceptance job without multiplying the full
-      # compiler/build-type matrix.
+      # Exercise Release and Debug on both Linux compiler families, plus native
+      # AppleClang coverage on the macOS Arm64 runner.
       matrix:
 #        windows is skipped because trilinos is not fully tested on windows.
-#        os: [ubuntu-latest, windows-latest]
-        os: [ubuntu-26.04]
-        build_type: [Release]
+        os: [ubuntu-26.04, macos-26]
+        build_type: [Release, Debug]
         compiler_id: [GCC, LLVM]
         include:
 #          - os: windows-latest
@@ -34,23 +33,55 @@ jobs:
             c_compiler: gcc
             cpp_compiler: g++
             fortran_compiler: gfortran
+            cache_suffix: v5
           - os: ubuntu-26.04
             compiler_id: LLVM
             c_compiler: clang
             cpp_compiler: clang++
             fortran_compiler: flang
+            cache_suffix: v5
           - os: ubuntu-26.04
             build_type: Debug
             compiler_id: GCC
             c_compiler: gcc
             cpp_compiler: g++
             fortran_compiler: gfortran
+          - os: macos-26
+            build_type: Release
+            compiler_id: LLVM
+            c_compiler: clang
+            cpp_compiler: clang++
+            fortran_compiler: mpifort
+            cmake_platform_options: -DCMAKE_OSX_ARCHITECTURES=arm64
+            cache_suffix: v7
+          - os: macos-26
+            build_type: Debug
+            compiler_id: LLVM
+            c_compiler: clang
+            cpp_compiler: clang++
+            fortran_compiler: mpifort
+            cmake_platform_options: -DCMAKE_OSX_ARCHITECTURES=arm64
+            cache_suffix: v7
+        exclude:
+          - os: macos-26
+            compiler_id: GCC
 
     steps:
     - uses: actions/checkout@v6
 
+    - name: Verify Arm64 runner and toolchain
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        test "$(uname -m)" = "arm64"
+        sw_vers
+        clang --version
+        clang++ --version
+        cmake --version
+        ninja --version
+
     - name: Install LLVM compilers
-      if: matrix.compiler_id == 'LLVM'
+      if: runner.os == 'Linux' && matrix.compiler_id == 'LLVM'
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
@@ -70,7 +101,7 @@ jobs:
         fi
 
     - name: Install GCC compilers
-      if: matrix.compiler_id == 'GCC'
+      if: runner.os == 'Linux' && matrix.compiler_id == 'GCC'
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
@@ -80,8 +111,7 @@ jobs:
         g++ --version
         gfortran --version
 
-    - name: Install dependencies on Ubuntu
-      if: runner.os == 'Linux'
+    - name: Install dependencies
       uses: ./.github/actions/setup-trilinos-source
       with:
         trilinos-version: trilinos-release-17-1-1
@@ -89,7 +119,8 @@ jobs:
         c-compiler: ${{ matrix.c_compiler }}
         cxx-compiler: ${{ matrix.cpp_compiler }}
         fortran-compiler: ${{ matrix.fortran_compiler }}
-        cache-suffix: v5
+        cache-suffix-install: ${{ matrix.cache_suffix }}
+        cache-suffix-build: ${{ matrix.cache_suffix }}
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
@@ -105,6 +136,7 @@ jobs:
         cmake -B ${{ steps.strings.outputs.build-output-dir }}
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        ${{ matrix.cmake_platform_options }}
         -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
         -DSIMPLEFLUID_MAX_TEST_PROCS=2
         -G"Ninja Multi-Config"
