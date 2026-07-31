@@ -144,12 +144,24 @@ inline LinearPreconditioner parse_linear_preconditioner(
         "Unknown linear preconditioner '" + std::string(value) + "'.");
 }
 
+/**
+ * @brief Optional explicit-residual scaling for one linear solve.
+ *
+ * The true residual is divided by the larger of the current RHS norm and
+ * @p rhs_norm_floor.  A zero floor preserves the usual RHS-relative metric.
+ */
+struct LinearResidualScaling
+{
+    real_t rhs_norm_floor = {};
+};
+
 /** @brief Convergence statistics for one linear solve. */
 struct LinearSolveStatistics
 {
     bool converged = false;
     int iterations = 0;
     real_t achieved_tolerance = {};
+    real_t rhs_norm = {};
 };
 
 /** @brief Aggregate convergence statistics across several linear solves. */
@@ -263,9 +275,11 @@ public:
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs,
         multi_vector_type& solution,
-        const LinearSolverOptions& options = {})
+        const LinearSolverOptions& options = {},
+        LinearResidualScaling residual_scaling = {})
     {
         validate_options(options);
+        validate_residual_scaling(residual_scaling);
         prepare_initial_guess(matrix, rhs, solution);
         auto x = Teuchos::rcpFromRef(solution);
         auto b = Teuchos::rcpFromRef(rhs);
@@ -309,13 +323,15 @@ public:
         }
 
         static_cast<void>(d_solver->solve());
-        const auto achieved_tolerance =
-            true_relative_residual(matrix, rhs, solution);
+        real_t rhs_norm{};
+        const auto achieved_tolerance = true_relative_residual(
+            matrix, rhs, solution, residual_scaling, &rhs_norm);
         return {
             std::isfinite(achieved_tolerance)
                 && achieved_tolerance <= options.tolerance,
             d_solver->getNumIters(),
-            achieved_tolerance};
+            achieved_tolerance,
+            rhs_norm};
     }
 
     bool solve(
@@ -336,13 +352,15 @@ public:
         const Teuchos::RCP<const operator_type>& matrix,
         const vector_type& rhs,
         vector_type& solution,
-        const LinearSolverOptions& options = {})
+        const LinearSolverOptions& options = {},
+        LinearResidualScaling residual_scaling = {})
     {
         auto x = Teuchos::rcp_implicit_cast<multi_vector_type>(
             Teuchos::rcpFromRef(solution));
         auto b = Teuchos::rcp_implicit_cast<const multi_vector_type>(
             Teuchos::rcpFromRef(rhs));
-        return solve_with_statistics(matrix, *b, *x, options);
+        return solve_with_statistics(
+            matrix, *b, *x, options, residual_scaling);
     }
 
 private:
@@ -361,6 +379,18 @@ private:
         }
         static_cast<void>(to_string(options.backend));
         static_cast<void>(to_string(options.preconditioner));
+    }
+
+    static void validate_residual_scaling(
+        const LinearResidualScaling& residual_scaling)
+    {
+        if (!std::isfinite(residual_scaling.rhs_norm_floor)
+            || residual_scaling.rhs_norm_floor < real_t{})
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver requires a finite non-negative RHS "
+                "norm floor.");
+        }
     }
 
     Teuchos::RCP<solver_type> create_solver(
@@ -569,8 +599,11 @@ private:
     real_t true_relative_residual(
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs,
-        const multi_vector_type& solution) const
+        const multi_vector_type& solution,
+        LinearResidualScaling residual_scaling = {},
+        real_t* maximum_rhs_norm = nullptr) const
     {
+        validate_residual_scaling(residual_scaling);
         auto& residual = residual_workspace(rhs);
         residual.update(
             scalar_type{1}, rhs, scalar_type{0});
@@ -586,6 +619,7 @@ private:
         residual.norm2(residual_norms());
 
         magnitude_type maximum{};
+        magnitude_type largest_rhs_norm{};
         for (std::size_t column = 0;
              column < rhs.getNumVectors();
              ++column)
@@ -595,17 +629,33 @@ private:
             if (!std::isfinite(rhs_norm)
                 || !std::isfinite(residual_norm))
             {
+                if (maximum_rhs_norm != nullptr)
+                {
+                    *maximum_rhs_norm =
+                        std::numeric_limits<real_t>::infinity();
+                }
                 return std::numeric_limits<real_t>::infinity();
             }
+            largest_rhs_norm =
+                std::max(largest_rhs_norm, rhs_norm);
+            const auto denominator = std::max(
+                rhs_norm,
+                static_cast<magnitude_type>(
+                    residual_scaling.rhs_norm_floor));
             const auto scaled =
-                rhs_norm > magnitude_type{}
-                    ? residual_norm / rhs_norm
+                denominator > magnitude_type{}
+                    ? residual_norm / denominator
                     : residual_norm;
             if (!std::isfinite(scaled))
             {
                 return std::numeric_limits<real_t>::infinity();
             }
             maximum = std::max(maximum, scaled);
+        }
+        if (maximum_rhs_norm != nullptr)
+        {
+            *maximum_rhs_norm =
+                static_cast<real_t>(largest_rhs_norm);
         }
         return static_cast<real_t>(maximum);
     }

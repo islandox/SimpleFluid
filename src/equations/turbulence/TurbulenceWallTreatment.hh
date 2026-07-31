@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceFlux.hh"
 #include "dataclass/typedefs.hh"
@@ -37,10 +38,12 @@ enum class TurbulenceWallRoughnessModel
 };
 
 /** @brief Return the canonical database name of a wall roughness model. */
-std::string_view to_string(TurbulenceWallRoughnessModel model) noexcept;
+SIMPLEFLUID_EQUATIONS_EXPORT std::string_view
+to_string(TurbulenceWallRoughnessModel model) noexcept;
 
 /** @brief Parse `smooth` or `sandGrain`. */
-TurbulenceWallRoughnessModel parse_turbulence_wall_roughness_model(
+SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceWallRoughnessModel
+parse_turbulence_wall_roughness_model(
     const std::string& value);
 
 /** @brief Thermal wall-law closure applied by a high-Re wall treatment. */
@@ -51,10 +54,12 @@ enum class TurbulenceThermalWallLaw
 };
 
 /** @brief Return the canonical database name of a thermal wall law. */
-std::string_view to_string(TurbulenceThermalWallLaw law) noexcept;
+SIMPLEFLUID_EQUATIONS_EXPORT std::string_view
+to_string(TurbulenceThermalWallLaw law) noexcept;
 
 /** @brief Parse `turbulentPrandtl` or `Jayatilleke`. */
-TurbulenceThermalWallLaw parse_turbulence_thermal_wall_law(
+SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceThermalWallLaw
+parse_turbulence_thermal_wall_law(
     const std::string& value);
 
 /** @brief Constants and explicitly selected no-slip patches for wall treatment.
@@ -100,13 +105,16 @@ struct TurbulenceWallTreatmentOptions
 
 /** @brief Validate policy-independent wall-treatment constants and patch names.
  */
-void validate_turbulence_wall_treatment_options(const TurbulenceWallTreatmentOptions& options);
+SIMPLEFLUID_EQUATIONS_EXPORT void
+validate_turbulence_wall_treatment_options(
+    const TurbulenceWallTreatmentOptions& options);
 
 /** @brief OpenFOAM.com v2606 ten-iteration sublayer intersection. */
-real_t openfoam_y_plus_lam(real_t kappa, real_t log_layer_e);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+openfoam_y_plus_lam(real_t kappa, real_t log_layer_e);
 
 /** @brief Tag selecting integration-to-the-wall SST boundary data. */
-struct ResolvedLowReSSTWallPolicy
+struct SIMPLEFLUID_PUBLIC_TYPE ResolvedLowReSSTWallPolicy
 {
     static constexpr std::string_view name = "resolvedLowReSST";
 };
@@ -119,14 +127,14 @@ struct ResolvedLowReSSTWallPolicy
  * molecular-only wall transport. It is intended for near-wall meshes with
  * @f$y^+\approx 1@f$.
  */
-struct ResolvedLowReKEpsilonWallPolicy
+struct SIMPLEFLUID_PUBLIC_TYPE ResolvedLowReKEpsilonWallPolicy
 {
     static constexpr std::string_view name = "resolvedLowReKEpsilon";
 };
 
 /** @brief Tag selecting the OpenFOAM.com v2606 stepwise high-Re k-epsilon
  * wall-function set. */
-struct StandardHighReKEpsilonWallPolicy
+struct SIMPLEFLUID_PUBLIC_TYPE StandardHighReKEpsilonWallPolicy
 {
     static constexpr std::string_view name = "standardHighReKEpsilon";
 };
@@ -167,7 +175,8 @@ template <class Scalar> struct TurbulenceWallFaceEvaluation
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  * @tparam Policy Wall-treatment policy tag.
  */
-template <TpetraTypePack Pack, class Policy> class TurbulenceWallTreatment
+template <TpetraTypePack Pack, class Policy>
+class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceWallTreatment
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -186,7 +195,7 @@ public:
     public:
         Evaluation() = default;
         Evaluation(const Evaluation&) = default;
-        Evaluation(Evaluation&&) noexcept = default;
+        SIMPLEFLUID_EQUATIONS_LOCAL Evaluation(Evaluation&&) noexcept = default;
         Evaluation& operator=(const Evaluation&) = default;
         Evaluation& operator=(Evaluation&&) noexcept = default;
 
@@ -229,7 +238,9 @@ public:
     private:
         friend class TurbulenceWallTreatment<Pack, Policy>;
 
+        SIMPLEFLUID_EQUATIONS_LOCAL
         explicit Evaluation(SP<const mesh_type> mesh);
+        SIMPLEFLUID_EQUATIONS_LOCAL
         void check_owned_cell(local_ordinal_type cell_lid) const;
 
         SP<const mesh_type> d_mesh;
@@ -284,7 +295,11 @@ private:
         real_t roughness_constant{};
     };
 
-    void initialize(const std::unordered_map<std::string, BoundaryConditionType>& boundary_types);
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    void initialize(
+        const std::unordered_map<std::string, BoundaryConditionType>&
+            boundary_types);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_velocity_cache(const velocity_boundary_cache_type& velocity_boundary_cache) const;
 
     SP<const mesh_type> d_mesh;
@@ -303,5 +318,12 @@ using ResolvedLowReKEpsilonWallTreatment =
 template <TpetraTypePack Pack = DefaultTpetraTypes>
 using StandardHighReKEpsilonWallTreatment =
     TurbulenceWallTreatment<Pack, StandardHighReKEpsilonWallPolicy>;
+
+extern template class TurbulenceWallTreatment<
+    DefaultTpetraTypes, ResolvedLowReSSTWallPolicy>;
+extern template class TurbulenceWallTreatment<
+    DefaultTpetraTypes, ResolvedLowReKEpsilonWallPolicy>;
+extern template class TurbulenceWallTreatment<
+    DefaultTpetraTypes, StandardHighReKEpsilonWallPolicy>;
 
 } // namespace SimpleFluid

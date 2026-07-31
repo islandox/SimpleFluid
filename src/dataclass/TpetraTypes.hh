@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "typedefs.hh"
 
 #include <limits>
@@ -68,11 +69,8 @@ concept TpetraTypePack = requires {
  * @tparam GO Global ordinal type.
  * @tparam Node Kokkos node type.
  */
-template <class Scalar = real_t,
-          class LO = local_index_t,
-          class GO = global_index_t,
-          class Node = typename Tpetra::Map<LO, GO>::node_type>
-struct TpetraTypes
+template <class Scalar, class LO, class GO, class Node>
+struct TpetraTypesBase
 {
     using Map = Tpetra::Map<LO, GO, Node>;
     using Graph = Tpetra::CrsGraph<LO, GO, Node>;
@@ -104,6 +102,36 @@ struct TpetraTypes
 
     using vector_type = Tpetra::Vector<Scalar, LO, GO, Node>;
     using multi_vector_type = Tpetra::MultiVector<Scalar, LO, GO, Node>;
+};
+
+template <class Scalar = real_t,
+          class LO = local_index_t,
+          class GO = global_index_t,
+          class Node = typename Tpetra::Map<LO, GO>::node_type>
+struct SIMPLEFLUID_PUBLIC_TYPE TpetraTypes
+    : TpetraTypesBase<Scalar, LO, GO, Node>
+{
+};
+
+using DefaultTpetraNode =
+    typename Tpetra::Map<local_index_t, global_index_t>::node_type;
+
+/**
+ * @brief Public ABI specialization used by compiled equation and solver
+ *        templates.
+ *
+ * The explicit annotation overrides the more restrictive visibility inherited
+ * from vendor template arguments while preserving the historic
+ * `TpetraTypes<>` type identity.
+ */
+template<>
+struct SIMPLEFLUID_PUBLIC_TYPE
+    TpetraTypes<real_t, local_index_t, global_index_t, DefaultTpetraNode>
+    : TpetraTypesBase<real_t,
+                      local_index_t,
+                      global_index_t,
+                      DefaultTpetraNode>
+{
 };
 
 using DefaultTpetraTypes = TpetraTypes<>;
