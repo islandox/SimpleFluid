@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
+#include "equations/EquationForward.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
@@ -37,7 +39,7 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class IncompressibleMomentumEquation
+class SIMPLEFLUID_EQUATIONS_EXPORT IncompressibleMomentumEquation
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -113,6 +115,7 @@ public:
         const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
 private:
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_transport_inputs(
         const velocity_field_type& old_velocity,
         const FaceField<Pack>& face_fluxes,
@@ -132,5 +135,8 @@ private:
         d_cached_physical_graph_supports_non_orthogonal_correction = false;
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
+
+extern template class
+    IncompressibleMomentumEquation<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

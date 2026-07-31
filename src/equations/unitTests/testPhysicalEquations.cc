@@ -65,6 +65,12 @@ struct PressureProjectionEquationTestAccess
         return equation.d_cached_predictor_flux_reuse_count;
     }
 
+    static real_t rhs_norm_reference(
+        const PressureProjectionEquation<Pack>& equation) noexcept
+    {
+        return equation.d_rhs_norm_reference;
+    }
+
     static auto project_reusing_cached_predictor(
         PressureProjectionEquation<Pack>& equation,
         CellField<Pack>& pressure,
@@ -957,6 +963,10 @@ TEST(PhysicalEquationsTest,
         reference_density,
         velocity_cache,
         reused_velocity);
+    const auto first_rhs_norm =
+        SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::
+            rhs_norm_reference(reused_equation);
+    ASSERT_GT(first_rhs_norm, 0.0);
 
     const auto reconstructed_result =
         reconstructed_equation.project(
@@ -977,6 +987,12 @@ TEST(PhysicalEquationsTest,
                 velocity_cache,
                 reused_velocity);
 
+    EXPECT_TRUE(reconstructed_result.linear_solve.converged);
+    EXPECT_TRUE(reused_result.linear_solve.converged);
+    EXPECT_DOUBLE_EQ(
+        SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::
+            rhs_norm_reference(reused_equation),
+        first_rhs_norm);
     EXPECT_EQ(
         SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::
             predictor_flux_reuse_count(reused_equation),

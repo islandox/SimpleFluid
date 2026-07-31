@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/typedefs.hh"
 
@@ -171,39 +172,54 @@ namespace RadiolyticGasPhysics
 {
 
 /** @brief Require a finite strictly positive value. */
-real_t require_positive(real_t value, std::string_view label);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+require_positive(real_t value, std::string_view label);
 
 /** @brief Require a finite non-negative value. */
-real_t require_non_negative(real_t value, std::string_view label);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+require_non_negative(real_t value, std::string_view label);
 
 /** @brief Convert fission power density to an ideal-gas alpha source rate. */
-real_t ideal_gas_alpha_source(real_t liquid_fraction, real_t release_efficiency,
-                              real_t yield_mol_per_j, real_t power_density, real_t gas_constant,
-                              real_t temperature, real_t absolute_pressure, real_t max_source_rate);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+ideal_gas_alpha_source(real_t liquid_fraction, real_t release_efficiency,
+                       real_t yield_mol_per_j, real_t power_density,
+                       real_t gas_constant, real_t temperature,
+                       real_t absolute_pressure, real_t max_source_rate);
 
 /** @brief Henry-law equilibrium H2 concentration including Laplace pressure. */
-real_t henry_equilibrium_concentration(real_t henry_coefficient, real_t liquid_pressure,
-                                       real_t surface_tension, real_t bubble_radius);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+henry_equilibrium_concentration(real_t henry_coefficient,
+                                real_t liquid_pressure,
+                                real_t surface_tension,
+                                real_t bubble_radius);
 
 /** @brief Sheng pressure correction for the nucleation radius. */
-real_t pressure_nucleation_correction(real_t liquid_pressure, real_t atmospheric_pressure);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+pressure_nucleation_correction(real_t liquid_pressure,
+                               real_t atmospheric_pressure);
 
 /** @brief Mean fission-fragment LET from Sheng Eq. (13). */
-real_t mean_fission_fragment_let(real_t temperature_kelvin,
-                                 real_t uranium_concentration_mol_per_m3);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+mean_fission_fragment_let(real_t temperature_kelvin,
+                          real_t uranium_concentration_mol_per_m3);
 
 /** @brief Pure-water nucleation radius correlation from Winter. */
-real_t pure_water_nucleation_radius(real_t temperature_kelvin, real_t mean_let);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+pure_water_nucleation_radius(real_t temperature_kelvin, real_t mean_let);
 
 /** @brief Correct pure-water nucleation radius for H2 radiation yield. */
-real_t atmospheric_nucleation_radius(real_t pure_water_radius,
-                                     real_t hydrogen_yield_molecules_per_100_ev);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+atmospheric_nucleation_radius(
+    real_t pure_water_radius,
+    real_t hydrogen_yield_molecules_per_100_ev);
 
 /** @brief Sheng 2024 nucleation radius assembled from LET and pressure terms. */
-real_t sheng2024_nucleation_radius(real_t temperature_kelvin,
-                                   real_t uranium_concentration_mol_per_m3,
-                                   real_t hydrogen_yield_molecules_per_100_ev,
-                                   real_t liquid_pressure, real_t atmospheric_pressure);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+sheng2024_nucleation_radius(
+    real_t temperature_kelvin,
+    real_t uranium_concentration_mol_per_m3,
+    real_t hydrogen_yield_molecules_per_100_ev,
+    real_t liquid_pressure, real_t atmospheric_pressure);
 
 /**
  * @brief Sheng 2024 surface-tension correlation from Table 2.
@@ -211,21 +227,27 @@ real_t sheng2024_nucleation_radius(real_t temperature_kelvin,
  * Sheng et al. (2024) Table 2 prints a positive quadratic term. Its cited
  * Winter sources print a negative term; this selector follows the Sheng table.
  */
-real_t sheng2024_surface_tension(real_t temperature_celsius,
-                                 real_t uranium_concentration_mol_per_m3);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+sheng2024_surface_tension(real_t temperature_celsius,
+                          real_t uranium_concentration_mol_per_m3);
 
 /** @brief Sheng 2024 hydrogen diffusivity correlation. */
-real_t sheng2024_hydrogen_diffusivity(real_t temperature_kelvin);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+sheng2024_hydrogen_diffusivity(real_t temperature_kelvin);
 
 /** @brief Hughmark Sherwood-number correlation. */
-real_t hughmark_sherwood(real_t reynolds, real_t schmidt);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+hughmark_sherwood(real_t reynolds, real_t schmidt);
 
 /** @brief Liquid-side mass-transfer coefficient from Hughmark. */
-real_t hughmark_mass_transfer_coefficient(real_t diffusivity, real_t radius, real_t liquid_density,
-                                          real_t dynamic_viscosity, real_t relative_speed);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+hughmark_mass_transfer_coefficient(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed);
 
 /** @brief Celata 2007 drag coefficient from Reynolds and Eotvos numbers. */
-real_t celata2007_drag_coefficient(real_t reynolds, real_t eotvos);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+celata2007_drag_coefficient(real_t reynolds, real_t eotvos);
 
 /**
  * @brief Result and diagnostics from the bubble rise-velocity solve.
@@ -249,7 +271,7 @@ struct BubbleRiseVelocityResult
  * relation. The bracketed solve avoids the zero-velocity root introduced by
  * rearranging the terminal-velocity equation.
  */
-BubbleRiseVelocityResult
+SIMPLEFLUID_EQUATIONS_EXPORT BubbleRiseVelocityResult
 celata2007_bubble_rise_velocity(real_t radius, real_t liquid_density, real_t gas_density,
                                 real_t dynamic_viscosity, real_t surface_tension,
                                 real_t gravity = 9.80665, int max_iterations = 100,
@@ -267,32 +289,38 @@ struct BubbleRadiusResult
 };
 
 /** @brief Solve bubble radius from moles and capillary pressure. */
-BubbleRadiusResult solve_bubble_radius(real_t moles_per_bubble, real_t liquid_pressure,
-                                       real_t surface_tension, real_t gas_constant,
-                                       real_t temperature, real_t min_radius, real_t max_radius,
-                                       int max_iterations = 100,
-                                       real_t relative_tolerance = 1.0e-12);
+SIMPLEFLUID_EQUATIONS_EXPORT BubbleRadiusResult
+solve_bubble_radius(real_t moles_per_bubble, real_t liquid_pressure,
+                    real_t surface_tension, real_t gas_constant,
+                    real_t temperature, real_t min_radius,
+                    real_t max_radius, int max_iterations = 100,
+                    real_t relative_tolerance = 1.0e-12);
 
 /** @brief Compute void fraction from bubble number density and radius. */
-real_t bubble_void_fraction(real_t number_density, real_t radius);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+bubble_void_fraction(real_t number_density, real_t radius);
 
 /** @brief Compute the area-weighted characteristic radius of two populations. */
-real_t characteristic_radius(real_t micro_number, real_t micro_radius, real_t large_number,
-                             real_t large_radius);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+characteristic_radius(real_t micro_number, real_t micro_radius,
+                      real_t large_number, real_t large_radius);
 
 /** @brief Evaluate either exact or smoothed Heaviside activation. */
-real_t smoothed_heaviside(real_t value, RadiolyticHeavisideMode mode, real_t width);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+smoothed_heaviside(real_t value, RadiolyticHeavisideMode mode, real_t width);
 
 } // namespace RadiolyticGasPhysics
 
 /**
  * @brief Parse radiolytic gas options from a flat database.
  */
-RadiolyticGasOptions radiolytic_gas_options_from_database(const Database& database);
+SIMPLEFLUID_EQUATIONS_EXPORT RadiolyticGasOptions
+radiolytic_gas_options_from_database(const Database& database);
 
 /**
  * @brief Validate radiolytic gas options and throw on inconsistent settings.
  */
-void validate_radiolytic_gas_options(const RadiolyticGasOptions& options);
+SIMPLEFLUID_EQUATIONS_EXPORT void
+validate_radiolytic_gas_options(const RadiolyticGasOptions& options);
 
 } // namespace SimpleFluid

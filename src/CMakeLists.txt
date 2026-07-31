@@ -30,6 +30,20 @@ target_precompile_headers(SimpleFluidPch PRIVATE
 )
 set_target_properties(SimpleFluidPch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Shared-library consumers require a PCH compiled with the same hidden-default
+# visibility policy as the owning translation units.
+add_library(SimpleFluidSharedPch STATIC
+    ${PROJECT_SOURCE_DIR}/cmake/PrecompiledHeaders.cc
+)
+simplefluid_configure_library(SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidSharedPch PRIVATE
+    "$<$<COMPILE_LANGUAGE:CXX>:${SIMPLEFLUID_PCH_HEADER}>"
+)
+set_target_properties(SimpleFluidSharedPch PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
+
 # Executables are compiled without `-fPIC`, so GCC cannot reuse the
 # position-independent library PCH above.  Build one matching executable PCH
 # instead of regenerating the same header for every test and example target.
@@ -50,11 +64,12 @@ add_library(SimpleFluidCore STATIC
 )
 add_library(SimpleFluid::Core ALIAS SimpleFluidCore)
 simplefluid_configure_library(SimpleFluidCore)
-set_target_properties(SimpleFluidCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(SimpleFluidCore PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
 
-# Mesh owns geometry, partitioning, and mesh output. These implementations are
-# kept together because STKMesh and MeshHandle directly use both facilities.
-add_library(SimpleFluidMesh STATIC
+set(SIMPLEFLUID_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
     geometry/Mesh.cc
     geometry/MeshHandle.cc
@@ -74,9 +89,16 @@ add_library(SimpleFluidMesh STATIC
     io/VTUWriter.cc
     parallel/MeshPartitioner.cc
 )
+
+# Mesh owns geometry, partitioning, and mesh output. These implementations are
+# kept together because STKMesh and MeshHandle directly use both facilities.
+add_library(SimpleFluidMesh STATIC ${SIMPLEFLUID_MESH_SOURCES})
 add_library(SimpleFluid::Mesh ALIAS SimpleFluidMesh)
 simplefluid_configure_library(SimpleFluidMesh)
-set_target_properties(SimpleFluidMesh PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(SimpleFluidMesh PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 
 # Fields remain header-only. FVM compiles the deliberately supported template
@@ -94,14 +116,13 @@ add_library(SimpleFluidFVM STATIC
 )
 add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
 simplefluid_configure_library(SimpleFluidFVM)
-set_target_properties(SimpleFluidFVM PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(SimpleFluidFVM PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
 target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 
-# Trilinos installations used by SimpleFluid commonly provide static archives
-# that are not position-independent (notably MueLu).  Keep the compiled upper
-# layers static so a clean build never embeds those archives in a shared object.
-# The public SimpleFluid::* aliases below preserve the downstream link API.
-add_library(SimpleFluidEquations SHARED
+set(SIMPLEFLUID_EQUATION_SOURCES
     equations/BoussinesqMomentumEquation.cc
     equations/IncompressibleMomentumEquation.cc
     equations/PressureProjectionEquation.cc
@@ -113,33 +134,152 @@ add_library(SimpleFluidEquations SHARED
     equations/turbulence/TurbulenceWallTreatment.cc
     equations/turbulence/WallDistanceEquation.cc
 )
-add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
-simplefluid_configure_library(SimpleFluidEquations)
-set_target_properties(SimpleFluidEquations PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(SimpleFluidEquations PUBLIC SimpleFluidFVM)
-
-add_library(SimpleFluidSolvers SHARED
+set(SIMPLEFLUID_SOLVER_SOURCES
     solvers/BoussinesqSolver.cc
     solvers/CoupledPressureVelocitySolver.cc
     solvers/FluidSolver.cc
     solvers/SteadyStateSearch.cc
 )
+
+# Clang ThinLTO can select an incomplete consumer-emitted MueLu vtable COMDAT
+# before it sees the complete GCC-built archive definition.  Put a non-LTO
+# explicit instantiation ahead of every ThinLTO input on the DSO link line.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+   AND SIMPLEFLUID_ENABLE_LTO
+   AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+    add_library(SimpleFluidClangLtoCompatibility OBJECT
+        ClangLtoTrilinosCompatibility.cc)
+    simplefluid_configure_library(SimpleFluidClangLtoCompatibility)
+    set_target_properties(SimpleFluidClangLtoCompatibility PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION FALSE
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+        INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES)
+    simplefluid_exclude_from_pgo_sources(
+        ClangLtoTrilinosCompatibility.cc)
+endif()
+
+# Static Trilinos installations put vendor implementations, RTTI, and mutable
+# process state into every shared object that consumes them.  Keep equations
+# and solvers in one physical DSO so the ELF export boundary can localize those
+# archive symbols without duplicating them or splitting cross-layer type
+# identity.  The logical equation and solver link targets remain separate.
+add_library(SimpleFluidSolvers SHARED
+    ${SIMPLEFLUID_EQUATION_SOURCES}
+    ${SIMPLEFLUID_SOLVER_SOURCES}
+)
 add_library(SimpleFluid::Solvers ALIAS SimpleFluidSolvers)
 simplefluid_configure_library(SimpleFluidSolvers)
-set_target_properties(SimpleFluidSolvers PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidEquations)
+set_target_properties(SimpleFluidSolvers PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
+target_compile_definitions(SimpleFluidSolvers PRIVATE
+    SimpleFluidEquations_EXPORTS)
+target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)
+if(TARGET SimpleFluidClangLtoCompatibility)
+    add_dependencies(
+        SimpleFluidSolvers SimpleFluidClangLtoCompatibility)
+    target_link_options(SimpleFluidSolvers PRIVATE
+        "$<$<CONFIG:Release,RelWithDebInfo>:$<TARGET_OBJECTS:SimpleFluidClangLtoCompatibility>>")
+endif()
+
+add_library(SimpleFluidEquations INTERFACE)
+add_library(SimpleFluid::Equations ALIAS SimpleFluidEquations)
+target_link_libraries(SimpleFluidEquations INTERFACE SimpleFluidSolvers)
+
+# Source visibility attributes select the public SimpleFluid API.  The ELF
+# version script localizes embedded vendor archives except for a separately
+# versioned Kokkos runtime bridge: executables and the DSO must share Kokkos
+# initialization, allocation, and callback state.  Bind archive functions
+# locally while leaving runtime data canonical across the process.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(SIMPLEFLUID_ELF_VERSION_SCRIPT
+        "${PROJECT_SOURCE_DIR}/cmake/SimpleFluidLinux.map")
+    target_link_options(SimpleFluidSolvers PRIVATE
+        "LINKER:--version-script=${SIMPLEFLUID_ELF_VERSION_SCRIPT}"
+        "LINKER:-Bsymbolic-functions")
+    set_property(TARGET SimpleFluidSolvers APPEND PROPERTY
+        LINK_DEPENDS "${SIMPLEFLUID_ELF_VERSION_SCRIPT}")
+endif()
+
+# Preserve the former linker names for source-level consumers.  New binaries
+# record libSimpleFluidSolvers as the single implementation SONAME.
+if(UNIX)
+    set(SIMPLEFLUID_EQUATIONS_LINKER_ALIAS
+        "$<TARGET_FILE_DIR:SimpleFluidSolvers>/${CMAKE_SHARED_LIBRARY_PREFIX}SimpleFluidEquations${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    add_custom_command(TARGET SimpleFluidSolvers POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E rm -f
+                "${SIMPLEFLUID_EQUATIONS_LINKER_ALIAS}"
+        COMMAND "${CMAKE_COMMAND}" -E create_symlink
+                "$<TARGET_FILE_NAME:SimpleFluidSolvers>"
+                "${SIMPLEFLUID_EQUATIONS_LINKER_ALIAS}"
+        VERBATIM)
+endif()
+
+# Keep the export map enforceable as the static Trilinos dependency set evolves.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    find_program(SIMPLEFLUID_CXXFILT
+        NAMES c++filt llvm-cxxfilt
+        REQUIRED)
+    add_test(NAME simplefluid_elf_export_boundary
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSIMPLEFLUID_LIBRARY=$<TARGET_FILE:SimpleFluidSolvers>"
+            "-DSIMPLEFLUID_NM=${CMAKE_NM}"
+            "-DSIMPLEFLUID_READELF=${CMAKE_READELF}"
+            "-DSIMPLEFLUID_CXXFILT=${SIMPLEFLUID_CXXFILT}"
+            -P "${PROJECT_SOURCE_DIR}/cmake/CheckSimpleFluidElfExports.cmake")
+    set_tests_properties(simplefluid_elf_export_boundary PROPERTIES
+        LABELS abi)
+endif()
+
+# GCC's LTO plugin can select, then discard, weak libstdc++ COMDAT definitions
+# that are also referenced by the non-LTO STK/Ioss archives.  Supply those
+# definitions from one deliberately non-LTO object instead of forcing large
+# archive members into each shared library.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND SIMPLEFLUID_ENABLE_LTO
+   AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+    add_library(SimpleFluidGccLtoCompatibility OBJECT
+        GccLtoStdlibCompatibility.cc)
+    set_target_properties(SimpleFluidGccLtoCompatibility PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION FALSE
+        INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+        INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES)
+    # Propagate the object through the public static-library link interface as
+    # final LTO executables encounter the same mixed archive boundary.
+    target_sources(SimpleFluidSolvers PUBLIC
+        "$<$<CONFIG:Release,RelWithDebInfo>:$<TARGET_OBJECTS:SimpleFluidGccLtoCompatibility>>")
+    simplefluid_require_complete_pgo(SimpleFluidGccLtoCompatibility)
+endif()
+
+# SimpleFluid does not expose ELF symbol interposition as an extension API.
+# Let optimized shared-library builds bind their own definitions locally when
+# the compiler supports that model.
+if(SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
+    target_compile_options(SimpleFluidSolvers PRIVATE
+        "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-fno-semantic-interposition>")
+endif()
 
 # Preserve the original target as an umbrella for downstream users.
 add_library(SimpleFluid INTERFACE)
 add_library(SimpleFluid::SimpleFluid ALIAS SimpleFluid)
 target_link_libraries(SimpleFluid INTERFACE SimpleFluidSolvers)
 
-# Build one PCH and reuse it for all compiled modules and test executables.
-target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidPch)
-target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidPch)
-target_precompile_headers(SimpleFluidFVM REUSE_FROM SimpleFluidPch)
-target_precompile_headers(SimpleFluidEquations REUSE_FROM SimpleFluidPch)
-target_precompile_headers(SimpleFluidSolvers REUSE_FROM SimpleFluidPch)
+# Reuse a visibility-compatible PCH for every object embedded in the DSO.
+target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidFVM REUSE_FROM SimpleFluidSharedPch)
+target_precompile_headers(SimpleFluidSolvers REUSE_FROM SimpleFluidSharedPch)
 
 # Only define the optional application when main.cc contains an entry point.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cc")
@@ -149,6 +289,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cc")
         target_link_libraries(SimpleFluid_app PRIVATE SimpleFluid)
         target_precompile_headers(
             SimpleFluid_app REUSE_FROM SimpleFluidExecutablePch)
+        simplefluid_require_complete_pgo(SimpleFluid_app)
     endif()
 endif()
 
@@ -195,6 +336,27 @@ add_executable(natural_convection_shiri examples/natural_convection_shiri.cc)
 target_link_libraries(natural_convection_shiri PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(natural_convection_shiri)
 
+# The Shiri training workload covers these complete production targets.
+simplefluid_require_complete_pgo(SimpleFluidCore)
+simplefluid_require_complete_pgo(SimpleFluidFVM)
+simplefluid_require_complete_pgo(SimpleFluidSolvers)
+
+# Require profiles for every Mesh archive member linked into Shiri. The four
+# alternate-path objects are compiled with ordinary LTO optimization in USE
+# builds instead of silently applying profile-use without matching data.
+set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
+    geometry/BoundaryLayerMeshFactory.cc
+    geometry/mesh/OrthogonalLocalGlobalIndexer.cc
+    geometry/mesh/PartitionedMeshBase.cc
+    geometry/mesh/SemiStructuredXY_Z.cc)
+set(SIMPLEFLUID_SHIRI_PROFILED_MESH_SOURCES ${SIMPLEFLUID_MESH_SOURCES})
+list(REMOVE_ITEM SIMPLEFLUID_SHIRI_PROFILED_MESH_SOURCES
+    ${SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES})
+simplefluid_require_complete_pgo_sources(
+    ${SIMPLEFLUID_SHIRI_PROFILED_MESH_SOURCES})
+simplefluid_exclude_from_pgo_sources(
+    ${SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES})
+
 add_executable(pitz_daily examples/pitz_daily.cc)
 target_link_libraries(pitz_daily PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(pitz_daily)
@@ -215,6 +377,9 @@ add_executable(
 target_link_libraries(constant_power_cylinder_vessel PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(constant_power_cylinder_vessel)
 
+# Any production executable requested from a USE tree must have been present in
+# the training run. The presets build Shiri only; building another application
+# later therefore fails loudly until its workload is added to training.
 foreach(EXAMPLE_TARGET IN ITEMS
     natural_convection_box
     natural_convection_cylinder
@@ -225,6 +390,7 @@ foreach(EXAMPLE_TARGET IN ITEMS
     fissile_solution_tank_demo
     fissile_solution_tank_sst
     constant_power_cylinder_vessel)
+  simplefluid_require_complete_pgo(${EXAMPLE_TARGET})
   add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
   set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
       LABELS integration

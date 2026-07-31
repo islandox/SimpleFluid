@@ -26,6 +26,78 @@
                 "CMAKE_CXX_COMPILER": "g++",
                 "CMAKE_C_COMPILER": "gcc"
             }
+        },
+        {
+            "name": "GCC-PGO-Release-Generate",
+            "inherits": "GCC-ninja-multi",
+            "binaryDir": "${sourceDir}/build-gcc-pgo-release-generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "Release",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/gcc-release"
+            }
+        },
+        {
+            "name": "GCC-PGO-Release-Use",
+            "inherits": "GCC-PGO-Release-Generate",
+            "binaryDir": "${sourceDir}/build-gcc-pgo-release-use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Generate",
+            "inherits": "GCC-ninja-multi",
+            "binaryDir": "${sourceDir}/build-gcc-pgo-relwithdebinfo-generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "RelWithDebInfo",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/gcc-relwithdebinfo"
+            }
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Use",
+            "inherits": "GCC-PGO-RelWithDebInfo-Generate",
+            "binaryDir": "${sourceDir}/build-gcc-pgo-relwithdebinfo-use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        },
+        {
+            "name": "LLVM-PGO-Release-Generate",
+            "inherits": "LLVM-ninja-multi",
+            "binaryDir": "${sourceDir}/build-llvm-pgo-release-generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "Release",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/llvm-release"
+            }
+        },
+        {
+            "name": "LLVM-PGO-Release-Use",
+            "inherits": "LLVM-PGO-Release-Generate",
+            "binaryDir": "${sourceDir}/build-llvm-pgo-release-use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Generate",
+            "inherits": "LLVM-ninja-multi",
+            "binaryDir": "${sourceDir}/build-llvm-pgo-relwithdebinfo-generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "RelWithDebInfo",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/llvm-relwithdebinfo"
+            }
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Use",
+            "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
+            "binaryDir": "${sourceDir}/build-llvm-pgo-relwithdebinfo-use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
         }
     ],
     "buildPresets": [
@@ -70,6 +142,76 @@
             "configurePreset": "LLVM-ninja-multi",
             "configuration": "RelWithDebInfo",
             "jobs": 8
+        },
+        {
+            "name": "GCC-PGO-Release-Generate",
+            "configurePreset": "GCC-PGO-Release-Generate",
+            "configuration": "Release",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "GCC-PGO-Release-Use",
+            "inherits": "GCC-PGO-Release-Generate",
+            "configurePreset": "GCC-PGO-Release-Use"
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "GCC-PGO-RelWithDebInfo-Generate",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Use",
+            "inherits": "GCC-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "GCC-PGO-RelWithDebInfo-Use"
+        },
+        {
+            "name": "LLVM-PGO-Release-Generate",
+            "configurePreset": "LLVM-PGO-Release-Generate",
+            "configuration": "Release",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-Release-Merge",
+            "inherits": "LLVM-PGO-Release-Generate",
+            "targets": [
+                "simplefluid-pgo-merge"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-Release-Use",
+            "inherits": "LLVM-PGO-Release-Generate",
+            "configurePreset": "LLVM-PGO-Release-Use"
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "LLVM-PGO-RelWithDebInfo-Generate",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Merge",
+            "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
+            "targets": [
+                "simplefluid-pgo-merge"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Use",
+            "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "LLVM-PGO-RelWithDebInfo-Use"
         }
     ],
     "testPresets": [

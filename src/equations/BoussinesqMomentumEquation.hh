@@ -25,7 +25,7 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class BoussinesqMomentumEquation
+class SIMPLEFLUID_EQUATIONS_EXPORT BoussinesqMomentumEquation
     : public IncompressibleMomentumEquation<Pack>
 {
 public:
@@ -119,9 +119,12 @@ public:
         const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
 
 private:
+    SIMPLEFLUID_EQUATIONS_LOCAL
     const field_type& select_dynamic_viscosity(
         const MaterialPropertyFields<Pack>& material,
         const field_type* dynamic_viscosity_override) const;
 };
+
+extern template class BoussinesqMomentumEquation<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

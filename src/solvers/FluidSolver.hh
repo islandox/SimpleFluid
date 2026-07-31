@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
 #include "equations/PressureProjectionEquation.hh"
@@ -38,7 +39,7 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for distributed solver storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class FluidSolver
+class SIMPLEFLUID_SOLVERS_EXPORT FluidSolver
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -222,23 +223,31 @@ protected:
     mutable VTUWriter::TopologyHandle d_vtu_topology;
 
 private:
+    SIMPLEFLUID_SOLVERS_LOCAL
     FluidSolver(SP<const MeshHandle<Pack>> mesh,
                 BoundaryConditionSet boundary_conditions,
                 TimeStepperOptions time_options,
                 LinearSolverOptions linear_options,
                 bool register_momentum_equation);
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     LinearSolveSummary run_momentum_predictor();
     /**
      * @return Communicator-wide sum.
      */
+    SIMPLEFLUID_SOLVERS_LOCAL
     scalar_type global_sum(scalar_type local_value) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
     void write_step_progress(
         ProgressStream& progress_output,
         int total_steps) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
     typename PressureProjectionEquation<Pack>::ProjectionResult
     run_pressure_correction(bool reuse_cached_predictor_flux);
+    SIMPLEFLUID_SOLVERS_LOCAL
     void solve_coupled_krylov();
 };
+
+extern template class FluidSolver<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

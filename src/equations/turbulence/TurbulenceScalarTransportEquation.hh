@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "FVM/TransportSystem.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
@@ -66,7 +67,8 @@ struct TurbulenceScalarBoundaryOverrides
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes> class TurbulenceScalarTransportEquation
+template <TpetraTypePack Pack = DefaultTpetraTypes>
+class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceScalarTransportEquation
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -124,5 +126,8 @@ private:
     mutable bool d_cached_graph_supports_non_orthogonal_correction = false;
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
+
+extern template class
+    TurbulenceScalarTransportEquation<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

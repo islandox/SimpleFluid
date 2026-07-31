@@ -6,6 +6,7 @@ simplefluid_configure_library(SimpleFluidBenchmarkSupport)
 target_link_libraries(SimpleFluidBenchmarkSupport PUBLIC SimpleFluid::Solvers)
 set_target_properties(SimpleFluidBenchmarkSupport PROPERTIES POSITION_INDEPENDENT_CODE ON)
 simplefluid_lib_reuse_precompiled_header(SimpleFluidBenchmarkSupport)
+simplefluid_require_complete_pgo(SimpleFluidBenchmarkSupport)
 
 execute_process(
     COMMAND git rev-parse --short=12 HEAD
@@ -40,6 +41,7 @@ target_compile_definitions(simplefluid_benchmark PRIVATE
     SIMPLEFLUID_BUILD_TYPE="$<CONFIG>"
     SIMPLEFLUID_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}"
 )
+simplefluid_require_complete_pgo(simplefluid_benchmark)
 
 add_subdirectory(unitTests)
 

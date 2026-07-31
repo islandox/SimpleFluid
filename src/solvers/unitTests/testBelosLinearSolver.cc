@@ -42,9 +42,11 @@ struct BelosLinearSolverTestAccess
         const BelosLinearSolver<Pack>& solver,
         const Teuchos::RCP<const typename Pack::operator_type>& matrix,
         const typename Pack::multi_vector_type& rhs,
-        const typename Pack::multi_vector_type& solution)
+        const typename Pack::multi_vector_type& solution,
+        LinearResidualScaling residual_scaling = {})
     {
-        return solver.true_relative_residual(matrix, rhs, solution);
+        return solver.true_relative_residual(
+            matrix, rhs, solution, residual_scaling);
     }
 };
 
@@ -78,12 +80,13 @@ double true_relative_residual(
     const SimpleFluid::BelosLinearSolver<Pack>& solver,
     const Teuchos::RCP<const Pack::operator_type>& matrix,
     const Pack::multi_vector_type& rhs,
-    const Pack::multi_vector_type& solution)
+    const Pack::multi_vector_type& solution,
+    SimpleFluid::LinearResidualScaling residual_scaling = {})
 {
     using Access =
         SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
     return Access::true_relative_residual(
-        solver, matrix, rhs, solution);
+        solver, matrix, rhs, solution, residual_scaling);
 }
 
 /** @brief Minimal identity operator used to test non-CRS Belos inputs. */
@@ -356,6 +359,65 @@ TEST(BelosLinearSolverTest, UsesRhsScaledResidualForWarmStart)
     EXPECT_LT(statistics.achieved_tolerance, options.tolerance);
 }
 
+/** @brief A retained reference norm bounds scaling for a tiny nonzero RHS. */
+TEST(BelosLinearSolverTest, UsesReferenceNormFloorForTinyRhs)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    constexpr double rhs_value = 1.0e-15;
+    constexpr double residual_value = 1.25e-24;
+    rhs.putScalar(rhs_value);
+    solution.putScalar(rhs_value - residual_value);
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto relative =
+        true_relative_residual(solver, op, rhs, solution);
+    SimpleFluid::LinearResidualScaling scaling;
+    scaling.rhs_norm_floor = 2.0 * rhs.norm2();
+    const auto scaled =
+        true_relative_residual(solver, op, rhs, solution, scaling);
+
+    EXPECT_GT(relative, 1.0e-9);
+    EXPECT_LT(scaled, 1.0e-9);
+    EXPECT_NEAR(scaled, 0.5 * relative, 1.0e-15);
+}
+
+/** @brief Invalid explicit-residual norm floors are rejected before solving. */
+TEST(BelosLinearSolverTest, RejectsInvalidResidualNormFloor)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 3, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op =
+        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(1.0);
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+
+    for (const auto invalid : {
+             -1.0,
+             std::numeric_limits<double>::infinity(),
+             std::numeric_limits<double>::quiet_NaN()})
+    {
+        SimpleFluid::LinearResidualScaling scaling;
+        scaling.rhs_norm_floor = invalid;
+        EXPECT_THROW(
+            solver.solve_with_statistics(
+                op, rhs, solution, {}, scaling),
+            std::invalid_argument);
+    }
+}
+
 /**
  * @brief Zero-RHS columns use absolute scaling and discard a harmful nonzero
  *        guess without disturbing helpful columns.
@@ -472,6 +534,7 @@ TEST(BelosLinearSolverTest, ReportsIterationsAndAchievedTolerance)
     EXPECT_GE(statistics.iterations, 0);
     EXPECT_TRUE(std::isfinite(statistics.achieved_tolerance));
     EXPECT_GE(statistics.achieved_tolerance, 0.0);
+    EXPECT_NEAR(statistics.rhs_norm, rhs.norm2(), 1.0e-14);
 }
 
 /** @brief Verify CRS matrices can be solved with a MueLu preconditioner. */
