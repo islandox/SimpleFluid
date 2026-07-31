@@ -22,6 +22,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
 endforeach()
 
+target_sources(testBoussinesqSolver PRIVATE
+  PressureGradientStencilTestSupport.cc)
+
 add_executable(
   testRadiolyticGasModelMultiRank
   testRadiolyticGasModelMultiRank.cc)

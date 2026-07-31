@@ -109,7 +109,8 @@ void reconstruct_gradient(
  * @brief Owns all fields, closures, equations, and staged wall data.
  * @tparam Pack Tpetra type pack used by the enclosing model.
  */
-template <TpetraTypePack Pack> struct TurbulenceModel<Pack>::State
+template <TpetraTypePack Pack>
+struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack>::State
 {
     using closure_type =
         std::variant<StandardKEpsilonEquation, RNGKEpsilonEquation, RealizableKEpsilonEquation,

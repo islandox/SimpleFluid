@@ -10,9 +10,11 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
+#include "equations/EquationForward.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
@@ -34,10 +36,6 @@
 
 namespace SimpleFluid
 {
-
-template<TpetraTypePack Pack> class BoussinesqMomentumEquation;
-
-template<TpetraTypePack Pack> class IncompressibleMomentumEquation;
 
 template<TpetraTypePack Pack> struct MaterialPropertyFields;
 
@@ -137,6 +135,7 @@ namespace detail
  * @param value Contribution to add.
  */
 template<class Column, class Scalar>
+SIMPLEFLUID_SOLVERS_LOCAL
 void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar value);
 
 /**
@@ -147,6 +146,7 @@ void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar va
  * @return Coupled velocity-pressure map.
  */
 template<TpetraTypePack Pack>
+SIMPLEFLUID_SOLVERS_LOCAL
 auto make_coupled_map(const Mesh<Pack>& mesh) -> Teuchos::RCP<const typename Pack::map_type>;
 
 /** @brief Matrix reset for cached-graph assembly. */
@@ -160,18 +160,21 @@ template<TpetraTypePack Pack> struct PreparedCoupledMatrix
  * @brief Allocate a matrix or reset a compatible cached graph.
  */
 template<TpetraTypePack Pack>
+SIMPLEFLUID_SOLVERS_LOCAL
 PreparedCoupledMatrix<Pack> prepare_coupled_matrix(const Teuchos::RCP<const typename Pack::map_type>& row_map,
     const Teuchos::RCP<const typename Pack::map_type>& column_map,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row);
 
 /** @brief Insert into a fresh local graph or sum into a reused one. */
 template<TpetraTypePack Pack>
+SIMPLEFLUID_SOLVERS_LOCAL
 void add_coupled_local_values(const PreparedCoupledMatrix<Pack>& prepared, typename Pack::local_ordinal_type row,
     const Teuchos::ArrayView<const typename Pack::local_ordinal_type>& columns,
     const Teuchos::ArrayView<const typename Pack::scalar_type>& values);
 
 /** @brief Insert into a fresh global graph or sum into a reused one. */
 template<TpetraTypePack Pack>
+SIMPLEFLUID_SOLVERS_LOCAL
 void add_coupled_global_values(const PreparedCoupledMatrix<Pack>& prepared, typename Pack::global_ordinal_type row,
     const Teuchos::ArrayView<const typename Pack::global_ordinal_type>& columns,
     const Teuchos::ArrayView<const typename Pack::scalar_type>& values);
@@ -202,8 +205,11 @@ template<TpetraTypePack Pack> struct AffinePressureGradientStencil
  * @throws std::invalid_argument for unsupported pressure boundary types.
  */
 template<TpetraTypePack Pack>
-auto pressure_gradient_stencils(const Mesh<Pack>& mesh, const BoundaryConditionMap& boundary_conditions,
-    typename Pack::scalar_type reference_density) -> std::vector<AffinePressureGradientStencil<Pack>>;
+SIMPLEFLUID_SOLVERS_LOCAL auto pressure_gradient_stencils(
+    const Mesh<Pack>& mesh,
+    const BoundaryConditionMap& boundary_conditions,
+    typename Pack::scalar_type reference_density)
+    -> std::vector<AffinePressureGradientStencil<Pack>>;
 
 /**
  * @brief Left-scale a gradient matrix by an inverse momentum diagonal.
@@ -215,6 +221,7 @@ auto pressure_gradient_stencils(const Mesh<Pack>& mesh, const BoundaryConditionM
  * @return Scaled gradient matrix with refreshed numeric values.
  */
 template<TpetraTypePack Pack>
+SIMPLEFLUID_SOLVERS_LOCAL
 Teuchos::RCP<typename Pack::matrix_type> scaled_gradient_matrix(const typename Pack::matrix_type& gradient,
     const typename Pack::vector_type& inverse_diagonal,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null);
@@ -226,6 +233,7 @@ template<TpetraTypePack Pack> struct CoupledSchurWorkspace
     std::array<Teuchos::RCP<typename Pack::matrix_type>, 3> scaled_gradient;
     std::array<Teuchos::RCP<typename Pack::matrix_type>, 3> product;
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     void clear();
 };
 
@@ -245,6 +253,7 @@ template<TpetraTypePack Pack> struct CoupledSchurWorkspace
  * @throws std::runtime_error if the momentum diagonal is singular.
  */
 template<TpetraTypePack Pack>
+SIMPLEFLUID_SOLVERS_LOCAL
 Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(const typename Pack::matrix_type& momentum,
     const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& gradient,
     const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& divergence,
@@ -275,7 +284,8 @@ template<TpetraTypePack Pack> class CoupledSchurPreconditioner;
  *
  * @tparam Pack Tpetra type pack defining distributed algebra types.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes> class CoupledPressureVelocitySolver
+template<TpetraTypePack Pack = DefaultTpetraTypes>
+class SIMPLEFLUID_SOLVERS_EXPORT CoupledPressureVelocitySolver
 {
 public:
     using field_type = CellField<Pack>;
@@ -356,16 +366,21 @@ private:
         std::array<Teuchos::RCP<matrix_type>, 3> gradient_operators;
         std::array<Teuchos::RCP<vector_type>, 3> gradient_constants;
 
+        SIMPLEFLUID_SOLVERS_LOCAL
         bool empty() const noexcept;
     };
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     static bool same_pressure_boundaries(const BoundaryConditionMap& lhs, const BoundaryConditionMap& rhs);
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     static pressure_graph_signature_type pressure_graph_signature(const BoundaryConditionMap& boundaries);
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     bool can_reuse_assembly_graph(
         const momentum_system_type& momentum, const pressure_graph_signature_type& pressure_signature) const;
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     system_type assemble_coupled_system(const momentum_system_type& momentum, const velocity_field_type& velocity,
         const field_type& pressure, const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,

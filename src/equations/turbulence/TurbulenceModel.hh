@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/FaceFlux.hh"
 #include "dataclass/Database.hh"
@@ -49,7 +50,8 @@ enum class TurbulenceModelType
 };
 
 /** @brief Return the canonical database name of a turbulence closure. */
-std::string_view to_string(TurbulenceModelType model) noexcept;
+SIMPLEFLUID_EQUATIONS_EXPORT std::string_view
+to_string(TurbulenceModelType model) noexcept;
 
 /**
  * @brief Parse a turbulence model name.
@@ -57,7 +59,8 @@ std::string_view to_string(TurbulenceModelType model) noexcept;
  * Accepted spellings are `laminar`, `standardKEpsilon`, `RNGKEpsilon`,
  * `realizableKEpsilon`, `standardKOmega`, `BSLKOmega`, and `SSTKOmega`.
  */
-TurbulenceModelType parse_turbulence_model_type(const std::string& value);
+SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModelType
+parse_turbulence_model_type(const std::string& value);
 
 /** @brief Runtime selection of the wall treatment paired with a closure. */
 enum class TurbulenceWallTreatmentType
@@ -69,13 +72,15 @@ enum class TurbulenceWallTreatmentType
 };
 
 /** @brief Return the canonical database name of a wall treatment. */
-std::string_view to_string(TurbulenceWallTreatmentType treatment) noexcept;
+SIMPLEFLUID_EQUATIONS_EXPORT std::string_view
+to_string(TurbulenceWallTreatmentType treatment) noexcept;
 
 /**
  * @brief Parse `none`, `resolvedLowReSST`, `resolvedLowReKEpsilon`, or
  * `standardHighReKEpsilon`.
  */
-TurbulenceWallTreatmentType parse_turbulence_wall_treatment_type(
+SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceWallTreatmentType
+parse_turbulence_wall_treatment_type(
     const std::string& value);
 
 /** @brief Optional direct buoyancy production in the turbulence equations. */
@@ -86,10 +91,12 @@ enum class TurbulenceBuoyancyModel
 };
 
 /** @brief Return the canonical database name of a buoyancy-production model. */
-std::string_view to_string(TurbulenceBuoyancyModel model) noexcept;
+SIMPLEFLUID_EQUATIONS_EXPORT std::string_view
+to_string(TurbulenceBuoyancyModel model) noexcept;
 
 /** @brief Parse `none` or `OpenFOAMBoussinesq`. */
-TurbulenceBuoyancyModel parse_turbulence_buoyancy_model(
+SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceBuoyancyModel
+parse_turbulence_buoyancy_model(
     const std::string& value);
 
 /** @brief Initial conditions, floors, and turbulent heat-flux controls. */
@@ -127,10 +134,12 @@ struct TurbulenceModelOptions
 };
 
 /** @brief Validate a turbulence configuration before allocating model state. */
-void validate_turbulence_model_options(const TurbulenceModelOptions& options);
+SIMPLEFLUID_EQUATIONS_EXPORT void
+validate_turbulence_model_options(const TurbulenceModelOptions& options);
 
 /** @brief Parse and validate flat turbulence database keys. */
-TurbulenceModelOptions turbulence_model_options_from_database(const Database& database);
+SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModelOptions
+turbulence_model_options_from_database(const Database& database);
 
 /**
  * @brief Boussinesq fields and forcing used by direct turbulence buoyancy.
@@ -181,7 +190,8 @@ struct TurbulenceBuoyancyContext
  * @f$-2/3\,\nabla k@f$, so the solver pressure remains mechanical pressure.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes> class TurbulenceModel
+template <TpetraTypePack Pack = DefaultTpetraTypes>
+class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModel
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -311,17 +321,20 @@ public:
 
 private:
     /** @brief Lazily allocated closure, transport, and derived-field state. */
-    struct State;
+    struct SIMPLEFLUID_EQUATIONS_LOCAL State;
 
-    State& require_state();
-    const State& require_state() const;
+    SIMPLEFLUID_EQUATIONS_LOCAL State& require_state();
+    SIMPLEFLUID_EQUATIONS_LOCAL const State& require_state() const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void stage_effective_properties(State& state, const field_type& turbulent_kinematic_viscosity,
                                     const material_type& material, scalar_type reference_density,
                                     scalar_type turbulent_prandtl_number) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void stage_menter_eddy_viscosity(
         State& state, const field_type& wall_distance,
         const material_type& material, scalar_type reference_density,
         std::string_view context) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void commit_effective_properties(State& state) const;
 
     SP<const mesh_type> d_mesh;
@@ -333,5 +346,7 @@ private:
     std::map<std::string, const field_type*> d_empty_output_fields;
     Arr<WallYPlusStatistics> d_empty_wall_y_plus_statistics;
 };
+
+extern template class TurbulenceModel<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

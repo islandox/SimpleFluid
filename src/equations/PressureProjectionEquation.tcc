@@ -453,13 +453,21 @@ auto PressureProjectionEquation<Pack>::project_impl(
 
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix =
         d_cached_pressure_matrix;
+    const LinearResidualScaling residual_scaling{
+        reuse_cached_predictor_flux
+            ? d_rhs_norm_reference
+            : real_t{}};
     const auto linear_statistics =
         d_linear_solver.solve_with_statistics(
             const_matrix, *d_cached_rhs, pressure_correction.owned_data(),
-            d_linear_options);
+            d_linear_options, residual_scaling);
     if (!linear_statistics.converged)
     {
         throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
+    }
+    if (!reuse_cached_predictor_flux)
+    {
+        d_rhs_norm_reference = linear_statistics.rhs_norm;
     }
     d_mesh->sync_periodic_boundaries(pressure_correction);
 

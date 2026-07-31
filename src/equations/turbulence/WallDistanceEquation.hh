@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "dataclass/typedefs.hh"
 #include "fields/CellField.hh"
@@ -38,7 +39,7 @@ struct WallDistanceEquationOptions
  * @throws std::invalid_argument for invalid treatment, corrector, or solver
  *         controls.
  */
-void validate_wall_distance_equation_options(
+SIMPLEFLUID_EQUATIONS_EXPORT void validate_wall_distance_equation_options(
     const WallDistanceEquationOptions& options);
 
 /**
@@ -64,7 +65,7 @@ void validate_wall_distance_equation_options(
  * @tparam Pack Tpetra type pack used by the mesh and fields.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes>
-class PoissonWallDistanceEquation
+class SIMPLEFLUID_EQUATIONS_EXPORT PoissonWallDistanceEquation
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -96,5 +97,7 @@ public:
 private:
     SP<const mesh_type> d_mesh;
 };
+
+extern template class PoissonWallDistanceEquation<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

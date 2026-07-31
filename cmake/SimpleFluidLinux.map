@@ -1,0 +1,33 @@
+SIMPLEFLUID_KOKKOS_RUNTIME_1.0 {
+    global:
+        /*
+         * Static Trilinos consumers must resolve Kokkos initialization,
+         * allocation, callback, RTTI, and singleton state to this DSO instead
+         * of extracting a second runtime from the same archives.
+         * -Bsymbolic-functions keeps calls inside the DSO direct.
+         */
+        _ZN6Kokkos*;
+        _ZNK6Kokkos*;
+        _ZNV6Kokkos*;
+        _ZNKV6Kokkos*;
+        _ZTIN6Kokkos*;
+        _ZTSN6Kokkos*;
+        _ZTVN6Kokkos*;
+        _ZTTN6Kokkos*;
+        Kokkos_*;
+        kokkosp_*;
+};
+
+SIMPLEFLUID_1.0 {
+    global:
+        _ZN11SimpleFluid*;
+        _ZNK11SimpleFluid*;
+        _ZNV11SimpleFluid*;
+        _ZNKV11SimpleFluid*;
+        _ZTIN11SimpleFluid*;
+        _ZTSN11SimpleFluid*;
+        _ZTVN11SimpleFluid*;
+        _ZTTN11SimpleFluid*;
+    local:
+        *;
+} SIMPLEFLUID_KOKKOS_RUNTIME_1.0;

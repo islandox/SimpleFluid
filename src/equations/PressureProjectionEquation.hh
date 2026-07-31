@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -30,7 +31,7 @@ namespace SimpleFluid
 {
 
 template<TpetraTypePack Pack>
-class FluidSolver;
+class SIMPLEFLUID_SOLVERS_EXPORT FluidSolver;
 
 namespace detail
 {
@@ -66,7 +67,7 @@ inline LinearSolverOptions pressure_projection_linear_solver_options()
  * @tparam Pack Tpetra type pack used for matrix/vector storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class PressureProjectionEquation
+class SIMPLEFLUID_EQUATIONS_EXPORT PressureProjectionEquation
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -164,6 +165,7 @@ private:
     friend struct detail::PressureProjectionEquationTestAccess<Pack>;
     friend class FluidSolver<Pack>;
 
+    SIMPLEFLUID_EQUATIONS_LOCAL
     static Teuchos::RCP<const map_type> require_owned_cell_map(
         const SP<const mesh_type>& mesh);
 
@@ -182,6 +184,7 @@ private:
         const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
         velocity_field_type& velocity);
 
+    SIMPLEFLUID_EQUATIONS_LOCAL
     ProjectionResult project_impl(
         field_type& pressure_correction,
         scalar_type time_step,
@@ -204,9 +207,12 @@ private:
     mutable face_flux_workspace_type d_face_flux_workspace;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
+    real_t d_rhs_norm_reference = {};
     bool d_cached_predictor_flux_valid = false;
     std::size_t d_cached_predictor_flux_reuse_count = 0;
     BelosLinearSolver<Pack> d_linear_solver;
 };
+
+extern template class PressureProjectionEquation<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

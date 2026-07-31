@@ -36,7 +36,8 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for vector storage and communication.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class BoussinesqSolver : public FluidSolver<Pack>
+class SIMPLEFLUID_SOLVERS_EXPORT BoussinesqSolver
+    : public FluidSolver<Pack>
 {
 public:
     using base_type = FluidSolver<Pack>;
@@ -313,6 +314,7 @@ private:
     /** @brief Tag selecting the physical-model constructor implementation. */
     struct PhysicalModelTag {};
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
                      BoundaryConditionSet boundary_conditions,
                      TimeStepperOptions time_options,
@@ -321,26 +323,42 @@ private:
                      bool physical_model_enabled,
                      PhysicalModelTag);
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     TemperatureDiffusionEquation<Pack>& temperature_equation();
     BoussinesqMomentumEquation<Pack>& momentum_equation() override;
     LinearSolveSummary advance_momentum() override;
     coupled_system_type assemble_coupled_system() override;
     scalar_type pressure_reference_density() const noexcept override;
+    SIMPLEFLUID_SOLVERS_LOCAL
     MaterialPropertyFields<Pack>& stored_material_properties();
+    SIMPLEFLUID_SOLVERS_LOCAL
     const MaterialPropertyFields<Pack>& stored_material_properties() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
     TurbulenceModel<Pack>& stored_turbulence_model();
+    SIMPLEFLUID_SOLVERS_LOCAL
     const TurbulenceModel<Pack>& stored_turbulence_model() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
     bool physical_transport_enabled() const noexcept;
+    SIMPLEFLUID_SOLVERS_LOCAL
     VTUWriter solution_writer(
         const SolutionOutputOptions& output_options) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
     TemperatureSourceRegistry<Pack>& stored_temperature_sources();
+    SIMPLEFLUID_SOLVERS_LOCAL
     const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
     void refresh_physical_models();
+    SIMPLEFLUID_SOLVERS_LOCAL
     void refresh_material_feedback(scalar_type time);
+    SIMPLEFLUID_SOLVERS_LOCAL
     void initialize_radiolytic_gas_state(bool force = false);
+    SIMPLEFLUID_SOLVERS_LOCAL
     void update_void_fraction_models(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
     const field_type* active_alpha_g_field() const noexcept;
+    SIMPLEFLUID_SOLVERS_LOCAL
     const field_type* active_alpha_l_field() const noexcept;
+    SIMPLEFLUID_SOLVERS_LOCAL
     void ensure_scalar_void_fraction_model();
 
     BoussinesqModelOptions d_model_options;
@@ -357,5 +375,7 @@ private:
     std::unique_ptr<DelayedNeutronPrecursorModel<Pack>>
         d_precursor_model;
 };
+
+extern template class BoussinesqSolver<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid

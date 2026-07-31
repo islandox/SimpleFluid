@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "dataclass/typedefs.hh"
 #include "equations/PressureVelocityCoupling.hh"
 #include "fields/CellField.hh"
@@ -76,8 +77,10 @@ struct SteadyStateSearchOptions
 /**
  * @brief Validate steady-state controls against the initial pseudo-time step.
  */
-void validate_steady_state_search_options(const SteadyStateSearchOptions& options,
-                                          real_t initial_time_step);
+SIMPLEFLUID_SOLVERS_EXPORT void
+validate_steady_state_search_options(
+    const SteadyStateSearchOptions& options,
+    real_t initial_time_step);
 
 /** @brief Normalized physical-field change rates from one accepted step. */
 template <class Scalar>
@@ -112,7 +115,7 @@ struct SteadyStateStepStatistics
 /**
  * @brief Adapt pseudo-time steps and enforce sustained steady convergence.
  */
-class AdaptiveSteadyStateController
+class SIMPLEFLUID_SOLVERS_EXPORT AdaptiveSteadyStateController
 {
 public:
     explicit AdaptiveSteadyStateController(SteadyStateSearchOptions options,
@@ -140,6 +143,7 @@ public:
     real_t rejected_time_step(real_t time_step);
 
 private:
+    SIMPLEFLUID_SOLVERS_LOCAL
     real_t adapted_time_step(real_t current_time_step, real_t maximum_courant_number,
                              bool solver_converged) const;
 
@@ -161,7 +165,7 @@ private:
  * @tparam Pack Tpetra type pack used by the monitored fields.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes>
-class SteadyStateFieldMonitor
+class SIMPLEFLUID_SOLVERS_EXPORT SteadyStateFieldMonitor
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -189,11 +193,14 @@ public:
     SteadyStateUpdateRates<scalar_type> observe(scalar_type time_step);
 
 private:
+    SIMPLEFLUID_SOLVERS_LOCAL
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
 
     template <class Field>
+    SIMPLEFLUID_SOLVERS_LOCAL
     void require_field_mesh(const Field& field, const char* name) const;
 
+    SIMPLEFLUID_SOLVERS_LOCAL
     void capture_current_state();
 
     SP<const mesh_type> d_mesh;
@@ -210,7 +217,7 @@ private:
 
 /** @brief Format one adaptive steady-state search iteration. */
 template <class Scalar>
-class SteadyStateProgressLineFormatter
+class SIMPLEFLUID_SOLVERS_EXPORT SteadyStateProgressLineFormatter
 {
 public:
     static std::string format(const SteadyStateStepStatistics<Scalar>& statistics,
@@ -222,7 +229,7 @@ public:
 };
 
 /** @brief Flush one steady-state progress line at a time. */
-class SteadyStateProgressStream
+class SIMPLEFLUID_SOLVERS_EXPORT SteadyStateProgressStream
 {
 public:
     explicit SteadyStateProgressStream(std::ostream& output);
@@ -239,5 +246,14 @@ private:
     std::ostream& d_output;
 };
 
-} // namespace SimpleFluid
+extern template class SteadyStateFieldMonitor<DefaultTpetraTypes>;
+extern template class SteadyStateProgressLineFormatter<real_t>;
+extern template void SteadyStateProgressStream::write<real_t>(
+    const SteadyStateStepStatistics<real_t>& statistics,
+    const FluidStepStatistics<real_t>& solver_statistics);
+extern template void SteadyStateProgressStream::write_retry<real_t>(
+    int iteration, int retry, int maximum_retries,
+    real_t time, real_t time_step, real_t next_time_step,
+    std::string_view reason);
 
+} // namespace SimpleFluid

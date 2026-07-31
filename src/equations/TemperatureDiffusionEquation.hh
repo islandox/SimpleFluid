@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/EquationValidation.hh"
@@ -38,7 +39,7 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class TemperatureDiffusionEquation
+class SIMPLEFLUID_EQUATIONS_EXPORT TemperatureDiffusionEquation
 {
 public:
     using mesh_type = Mesh<Pack>;
@@ -111,5 +112,7 @@ private:
         d_cached_physical_graph_supports_non_orthogonal_correction = false;
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
+
+extern template class TemperatureDiffusionEquation<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid
