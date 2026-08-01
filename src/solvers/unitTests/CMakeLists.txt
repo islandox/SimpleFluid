@@ -11,7 +11,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
-  simplefluid_exe_reuse_precompiled_header(${TEST_NAME})
+  simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
       ${TEST_NAME}
@@ -32,7 +32,7 @@ target_link_libraries(
   testRadiolyticGasModelMultiRank
   SimpleFluid::Solvers
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testRadiolyticGasModelMultiRank)
+simplefluid_configure_test_executable(testRadiolyticGasModelMultiRank)
 
 add_executable(
   testFluidSolverMultiRank
@@ -41,7 +41,7 @@ target_link_libraries(
   testFluidSolverMultiRank
   SimpleFluid::Solvers
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testFluidSolverMultiRank)
+simplefluid_configure_test_executable(testFluidSolverMultiRank)
 
 add_executable(
   testFeedbackMapMultiRank
@@ -50,7 +50,7 @@ target_link_libraries(
   testFeedbackMapMultiRank
   SimpleFluid::Solvers
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testFeedbackMapMultiRank)
+simplefluid_configure_test_executable(testFeedbackMapMultiRank)
 
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0

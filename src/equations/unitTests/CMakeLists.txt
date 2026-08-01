@@ -13,7 +13,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
-  simplefluid_exe_reuse_precompiled_header(${TEST_NAME})
+  simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testAnalyticalConvergence")
     simplefluid_discover_tests(
       ${TEST_NAME}
@@ -30,7 +30,7 @@ target_link_libraries(
   testBoussinesqModelMultiRank
   SimpleFluid::Equations
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testBoussinesqModelMultiRank)
+simplefluid_configure_test_executable(testBoussinesqModelMultiRank)
 
 add_executable(
   testFissionPowerSourceMultiRank
@@ -39,7 +39,7 @@ target_link_libraries(
   testFissionPowerSourceMultiRank
   SimpleFluid::Equations
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testFissionPowerSourceMultiRank)
+simplefluid_configure_test_executable(testFissionPowerSourceMultiRank)
 
 add_executable(
   testPressureProjectionMultiRank
@@ -48,7 +48,7 @@ target_link_libraries(
   testPressureProjectionMultiRank
   SimpleFluid::Equations
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testPressureProjectionMultiRank)
+simplefluid_configure_test_executable(testPressureProjectionMultiRank)
 
 add_executable(
   testTurbulenceModelMultiRank
@@ -57,7 +57,7 @@ target_link_libraries(
   testTurbulenceModelMultiRank
   SimpleFluid::Equations
   GTest::gtest_main)
-simplefluid_exe_reuse_precompiled_header(testTurbulenceModelMultiRank)
+simplefluid_configure_test_executable(testTurbulenceModelMultiRank)
 
 if(MPIEXEC_EXECUTABLE
    AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
