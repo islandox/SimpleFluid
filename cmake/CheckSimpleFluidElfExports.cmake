@@ -19,6 +19,11 @@ if(NOT DEFINED SIMPLEFLUID_READELF
     message(FATAL_ERROR
         "SIMPLEFLUID_READELF must name the configured ELF inspection tool")
 endif()
+if(NOT DEFINED SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING
+   OR NOT SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING must be a non-negative integer")
+endif()
 
 execute_process(
     COMMAND "${SIMPLEFLUID_NM}" -D --defined-only -j
@@ -116,7 +121,7 @@ foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
             list(APPEND simplefluid_unexpected_symbols
                  "${simplefluid_symbol} (wrong Kokkos runtime version)")
         endif()
-    elseif(NOT simplefluid_symbol MATCHES
+    elseif(NOT simplefluid_unversioned_symbol MATCHES
            "^SIMPLEFLUID_(1[.]0|KOKKOS_RUNTIME_1[.]0)$")
         list(APPEND simplefluid_unexpected_symbols "${simplefluid_symbol}")
     endif()
@@ -268,11 +273,13 @@ if(simplefluid_api_symbol_count LESS 300
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
         "SimpleFluid symbols; the reviewed public-API range is 300 to 400")
 endif()
-if(simplefluid_kokkos_bridge_symbol_count GREATER 7000)
+if(simplefluid_kokkos_bridge_symbol_count GREATER
+   SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports "
         "${simplefluid_kokkos_bridge_symbol_count} Kokkos runtime symbols; "
-        "the validated static-Trilinos compatibility ceiling is 7000")
+        "the validated static-Trilinos compatibility ceiling is "
+        "${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}")
 endif()
 if(simplefluid_unexpected_symbols)
     list(LENGTH simplefluid_unexpected_symbols
