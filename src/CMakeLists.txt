@@ -20,6 +20,32 @@ function(simplefluid_configure_library target_name)
     )
 endfunction()
 
+# GCC's linker plugin can discard weak definitions from the non-LTO static
+# Trilinos archives when a unit test also contributes LTO objects.  Preserve a
+# native copy in SimpleFluid's static archives so GNU test executables can use a
+# normal non-plugin link while production libraries and applications retain LTO.
+function(simplefluid_enable_native_archive_fallback target_name)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+       AND SIMPLEFLUID_ENABLE_LTO
+       AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+        target_compile_options(${target_name} PRIVATE
+            "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-ffat-lto-objects>")
+    endif()
+endfunction()
+
+# Apple Arm64 libc++ treats hidden RTTI as unique to one Mach-O image.  Both
+# the SimpleFluid DSO and its consumers instantiate Trilinos template types,
+# so hidden visibility would make equivalent Teuchos types compare unequal
+# across that boundary.  The version-script ABI boundary is ELF-specific;
+# retain Darwin's default visibility so its non-unique RTTI can be coalesced.
+set(SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET hidden)
+set(SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN YES)
+if(APPLE)
+    set(SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET default)
+    set(SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN NO)
+endif()
+
 # Keep PCH ownership independent from the module dependency graph.
 add_library(SimpleFluidPch STATIC
     ${PROJECT_SOURCE_DIR}/cmake/PrecompiledHeaders.cc
@@ -30,8 +56,8 @@ target_precompile_headers(SimpleFluidPch PRIVATE
 )
 set_target_properties(SimpleFluidPch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Shared-library consumers require a PCH compiled with the same hidden-default
-# visibility policy as the owning translation units.
+# Shared-library consumers require a PCH compiled with the same visibility
+# policy as the owning translation units.
 add_library(SimpleFluidSharedPch STATIC
     ${PROJECT_SOURCE_DIR}/cmake/PrecompiledHeaders.cc
 )
@@ -41,8 +67,8 @@ target_precompile_headers(SimpleFluidSharedPch PRIVATE
 )
 set_target_properties(SimpleFluidSharedPch PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES)
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 
 # Executables are compiled without `-fPIC`, so GCC cannot reuse the
 # position-independent library PCH above.  Build one matching executable PCH
@@ -64,10 +90,11 @@ add_library(SimpleFluidCore STATIC
 )
 add_library(SimpleFluid::Core ALIAS SimpleFluidCore)
 simplefluid_configure_library(SimpleFluidCore)
+simplefluid_enable_native_archive_fallback(SimpleFluidCore)
 set_target_properties(SimpleFluidCore PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES)
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 
 set(SIMPLEFLUID_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
@@ -95,10 +122,11 @@ set(SIMPLEFLUID_MESH_SOURCES
 add_library(SimpleFluidMesh STATIC ${SIMPLEFLUID_MESH_SOURCES})
 add_library(SimpleFluid::Mesh ALIAS SimpleFluidMesh)
 simplefluid_configure_library(SimpleFluidMesh)
+simplefluid_enable_native_archive_fallback(SimpleFluidMesh)
 set_target_properties(SimpleFluidMesh PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES)
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 
 # Fields remain header-only. FVM compiles the deliberately supported template
@@ -116,10 +144,11 @@ add_library(SimpleFluidFVM STATIC
 )
 add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
 simplefluid_configure_library(SimpleFluidFVM)
+simplefluid_enable_native_archive_fallback(SimpleFluidFVM)
 set_target_properties(SimpleFluidFVM PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES)
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 
 set(SIMPLEFLUID_EQUATION_SOURCES
@@ -175,8 +204,8 @@ add_library(SimpleFluid::Solvers ALIAS SimpleFluidSolvers)
 simplefluid_configure_library(SimpleFluidSolvers)
 set_target_properties(SimpleFluidSolvers PROPERTIES
     POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-    VISIBILITY_INLINES_HIDDEN YES)
+    CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
+    VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_compile_definitions(SimpleFluidSolvers PRIVATE
     SimpleFluidEquations_EXPORTS)
 target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)
@@ -224,6 +253,14 @@ endif()
 # Keep the export map enforceable as the static Trilinos dependency set evolves.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # Clang-built Trilinos emits substantially more weak Kokkos template
+    # definitions in Debug than GCC-built archives.  Both sets are part of
+    # the intentional, versioned runtime bridge; retain a tighter bound for
+    # GCC while allowing the validated Clang archive shape.
+    set(SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING 7000)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING 15000)
+    endif()
     find_program(SIMPLEFLUID_CXXFILT
         NAMES c++filt llvm-cxxfilt
         REQUIRED)
@@ -233,6 +270,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
             "-DSIMPLEFLUID_NM=${CMAKE_NM}"
             "-DSIMPLEFLUID_READELF=${CMAKE_READELF}"
             "-DSIMPLEFLUID_CXXFILT=${SIMPLEFLUID_CXXFILT}"
+            "-DSIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING=${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}"
             -P "${PROJECT_SOURCE_DIR}/cmake/CheckSimpleFluidElfExports.cmake")
     set_tests_properties(simplefluid_elf_export_boundary PROPERTIES
         LABELS abi)
@@ -255,9 +293,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
         POSITION_INDEPENDENT_CODE ON
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN YES)
-    # Propagate the object through the public static-library link interface as
-    # final LTO executables encounter the same mixed archive boundary.
-    target_sources(SimpleFluidSolvers PUBLIC
+    # Propagate the object from the root static-library interface so Core-only
+    # tests as well as DSO consumers receive it before their LTO inputs.
+    target_sources(SimpleFluidCore PUBLIC
         "$<$<CONFIG:Release,RelWithDebInfo>:$<TARGET_OBJECTS:SimpleFluidGccLtoCompatibility>>")
     simplefluid_require_complete_pgo(SimpleFluidGccLtoCompatibility)
 endif()
@@ -301,6 +339,25 @@ endfunction()
 function(simplefluid_exe_reuse_precompiled_header target_name)
     target_precompile_headers(
         ${target_name} REUSE_FROM SimpleFluidExecutablePch)
+endfunction()
+
+function(simplefluid_configure_test_executable target_name)
+    simplefluid_exe_reuse_precompiled_header(${target_name})
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+       AND SIMPLEFLUID_ENABLE_LTO
+       AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+        set_target_properties(${target_name} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION FALSE
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+        target_compile_options(${target_name} PRIVATE
+            "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-fno-lto>")
+        target_link_options(${target_name} PRIVATE
+            "$<$<CONFIG:Release,RelWithDebInfo>:-fno-lto>"
+            "$<$<CONFIG:Release,RelWithDebInfo>:-fno-use-linker-plugin>")
+    endif()
 endfunction()
 
 add_subdirectory(dataclass/unitTests)

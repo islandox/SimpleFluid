@@ -3,6 +3,7 @@ add_library(SimpleFluidBenchmarkSupport STATIC
 )
 add_library(SimpleFluid::BenchmarkSupport ALIAS SimpleFluidBenchmarkSupport)
 simplefluid_configure_library(SimpleFluidBenchmarkSupport)
+simplefluid_enable_native_archive_fallback(SimpleFluidBenchmarkSupport)
 target_link_libraries(SimpleFluidBenchmarkSupport PUBLIC SimpleFluid::Solvers)
 set_target_properties(SimpleFluidBenchmarkSupport PROPERTIES POSITION_INDEPENDENT_CODE ON)
 simplefluid_lib_reuse_precompiled_header(SimpleFluidBenchmarkSupport)
