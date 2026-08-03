@@ -307,7 +307,7 @@ int main(int argc, char** argv)
     constexpr double dynamic_viscosity = 1.0e-3;
     constexpr double thermal_conductivity = 0.6;
     constexpr double thermal_expansion = 2.1e-4;
-    constexpr double total_power = 100.0;
+    constexpr double total_power = 1000.0;
     constexpr double gaussian_radial_width = 0.03;
     constexpr double gaussian_axial_width = 0.075;
     constexpr double initial_k = 1.0e-6;
@@ -367,7 +367,7 @@ int main(int argc, char** argv)
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 1000;
     linear_options.tolerance = 1.0e-9;
-    linear_options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    linear_options.backend = SimpleFluid::LinearSolverBackend::Gmres;
     linear_options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
     linear_options.reuse_preconditioner = false;
 
@@ -501,6 +501,15 @@ int main(int argc, char** argv)
     {
         solver.step(progress);
         project_axisymmetric_tank_state(solver, turbulence, radial_projection_edges, axial_projection_edges, density);
+        if ((step + 1) % 10 == 0 || step + 1 == steps)
+        {
+            const auto courant_number = solver.maximum_courant_number();
+            if (rank == 0)
+            {
+                std::cout << "tank_diagnostics: step=" << step + 1 << ", time=" << solver.time()
+                          << " s, maximum_Courant=" << courant_number << '\n';
+            }
+        }
     }
     const auto maximum_courant_number = solver.maximum_courant_number();
 
