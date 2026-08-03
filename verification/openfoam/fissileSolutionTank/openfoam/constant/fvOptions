@@ -27,7 +27,7 @@ fissionHeating
 
         codeAddSup
         #{
-            constexpr scalar fullTankPower = 100.0;
+            constexpr scalar fullTankPower = 1000.0;
             constexpr scalar sectorFraction = 5.0/360.0;
             constexpr scalar rhoCp = 1000.0*4200.0;
             constexpr scalar radialWidth = 0.03;
