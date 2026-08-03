@@ -24,7 +24,7 @@ BOUNDARY_LAYER_COUNT = 5
 BOUNDARY_LAYER_FIRST_HEIGHT = 1.0e-3
 BOUNDARY_LAYER_GROWTH = 1.18
 REFERENCE_TEMPERATURE = 300.0
-TOTAL_POWER = 100.0
+TOTAL_POWER = 1000.0
 SECTOR_FRACTION = 5.0 / 360.0
 GAUSSIAN_RADIAL_WIDTH = 0.03
 GAUSSIAN_AXIAL_WIDTH = 0.075
@@ -320,6 +320,34 @@ def read_openfoam(
     return rows, maximum_boundary_y_plus
 
 
+def validate_openfoam_power(case: Path) -> None:
+    """Reject fields produced by a differently powered OpenFOAM run."""
+    log_path = case / "log.solver"
+    if not log_path.is_file():
+        raise ValueError(
+            f"{log_path} is required to validate the OpenFOAM source power"
+        )
+    matches = re.findall(
+        r"Gaussian fission source:\s*fullTankPower=([+\-0-9.eE]+)",
+        log_path.read_text(encoding="utf-8", errors="replace"),
+    )
+    if not matches:
+        raise ValueError(
+            f"{log_path} does not report the Gaussian full-tank power"
+        )
+    reported_power = float(matches[-1])
+    if not math.isclose(
+        reported_power,
+        TOTAL_POWER,
+        rel_tol=1.0e-10,
+        abs_tol=1.0e-10 * max(1.0, TOTAL_POWER),
+    ):
+        raise ValueError(
+            f"{log_path} reports {reported_power:g} W; "
+            f"expected {TOTAL_POWER:g} W"
+        )
+
+
 def read_simplefluid(
     patterns: list[str],
     expected_ranks: int | None,
@@ -356,6 +384,7 @@ def read_simplefluid(
         *FIELDS,
     }
     rows: list[dict[str, float]] = []
+    time_tolerance = 1.0e-10 * max(1.0, abs(expected_time))
     for path in paths:
         with path.open(newline="", encoding="utf-8") as stream:
             reader = csv.DictReader(stream)
@@ -383,7 +412,7 @@ def read_simplefluid(
                     row["time"],
                     expected_time,
                     rel_tol=0.0,
-                    abs_tol=1.0e-12,
+                    abs_tol=time_tolerance,
                 ):
                     raise ValueError(
                         f"{path}:{line_number} is at t={row['time']}; "
@@ -878,7 +907,8 @@ def render_distribution(
     svg.text(
         610,
         82,
-        f"t = {expected_time:g} s; 100 W full-tank Gaussian; SST k-omega",
+        f"t = {expected_time:g} s; {TOTAL_POWER:g} W full-tank Gaussian; "
+        "SST k-omega",
         size=16,
         anchor="middle",
         fill="#52606d",
@@ -1131,6 +1161,7 @@ def main() -> int:
 
     r_edges = radial_edges()
     z_edges = axial_edges()
+    validate_openfoam_power(arguments.openfoam_case)
     openfoam_cells, openfoam_maximum_wall_y_plus = read_openfoam(
         arguments.openfoam_case, arguments.expected_time
     )
@@ -1139,6 +1170,20 @@ def main() -> int:
         arguments.expected_ranks,
         arguments.expected_time,
     )
+    simplefluid_power = math.fsum(
+        row["qdot_fission"] * row["cell_volume"]
+        for row in simplefluid_cells
+    )
+    if not math.isclose(
+        simplefluid_power,
+        TOTAL_POWER,
+        rel_tol=1.0e-10,
+        abs_tol=1.0e-10 * max(1.0, TOTAL_POWER),
+    ):
+        raise ValueError(
+            f"SimpleFluid CSV files integrate to {simplefluid_power:g} W; "
+            f"expected {TOTAL_POWER:g} W"
+        )
     if len(openfoam_cells) != RADIAL_CELLS * AXIAL_CELLS:
         raise ValueError(
             f"expected {RADIAL_CELLS * AXIAL_CELLS} OpenFOAM cells, "

@@ -254,7 +254,7 @@ short-running physical smoke cases:
 | Natural convection cavity | Differentially heated square cavity |
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
-| OpenFOAM Gaussian tank | 100 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
+| OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
 and MPI coverage. A permanent combined RANS-plus-bubble regression and a
@@ -279,7 +279,7 @@ Pre-built example executables:
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
 | `pitz_daily` | OpenFOAM pitzDaily geometry with transient standard k-epsilon transport |
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
-| `fissile_solution_tank_sst` | 100 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
+| `fissile_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 
 Each example is configured via a `Database` object and runs a short transient
