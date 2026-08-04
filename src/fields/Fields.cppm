@@ -1,6 +1,8 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "fields/BoundaryFaceField.hh"
 #include "fields/CellField.hh"
@@ -12,6 +14,10 @@ module;
 #include "fields/VectorFaceField.hh"
 
 export module SimpleFluid.Fields;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export import SimpleFluid.Mesh;
 

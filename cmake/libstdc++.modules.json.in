@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "revision": 1,
+  "modules": [
+    {
+      "logical-name": "std",
+      "source-path": "@SIMPLEFLUID_LIBSTDCXX_STD_MODULE_SOURCE@",
+      "is-std-library": true
+    },
+    {
+      "logical-name": "std.compat",
+      "source-path": "@SIMPLEFLUID_LIBSTDCXX_STD_COMPAT_MODULE_SOURCE@",
+      "is-std-library": true
+    }
+  ]
+}

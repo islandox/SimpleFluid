@@ -11,6 +11,9 @@
 #include <unistd.h>
 #include <mpi.h>
 
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#else
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -25,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#endif
 
 #if defined(SIMPLEFLUID_USE_CXX_MODULES)
 import SimpleFluid;

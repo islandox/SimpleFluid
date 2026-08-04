@@ -11,12 +11,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})
   if(SIMPLEFLUID_ENABLE_CXX_MODULES AND TEST_NAME STREQUAL "testFvmModule")
-    set_target_properties(${TEST_NAME} PROPERTIES CXX_SCAN_FOR_MODULES ON)
-    set_source_files_properties(${TEST_SRC}
-        PROPERTIES
-        SKIP_PRECOMPILE_HEADERS ON
-        COMPILE_OPTIONS
-        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+    simplefluid_configure_module_test(${TEST_NAME} ${TEST_SRC})
   endif()
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()

@@ -1,10 +1,16 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "solvers/BelosLinearSolver.hh"
 
 export module SimpleFluid.LinearSolvers;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export import SimpleFluid.Fields;
 

@@ -1,6 +1,8 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "geometry/MeshUtils.hh"
 #include "geometry/mesh/MeshIndexTypes.hh"
@@ -29,6 +31,10 @@ module;
 #include "parallel/MeshPartitioner.hh"
 
 export module SimpleFluid.Mesh;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export import SimpleFluid.Core;
 

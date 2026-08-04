@@ -1,6 +1,8 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "FVM/BoundaryCache.hh"
 #include "FVM/EquationOperators.hh"
@@ -8,6 +10,10 @@ module;
 #include "FVM/Operators.hh"
 
 export module SimpleFluid.FVM;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export import SimpleFluid.Fields;
 export import SimpleFluid.LinearSolvers;
@@ -33,6 +39,7 @@ using ::SimpleFluid::cache_boundary_conditions;
 
 export namespace SimpleFluid::FVM
 {
+using ::SimpleFluid::FVM::BoundaryCache;
 using ::SimpleFluid::FVM::ConvectionOperator;
 using ::SimpleFluid::FVM::DiffusionOperator;
 using ::SimpleFluid::FVM::DiffusionSystem;
