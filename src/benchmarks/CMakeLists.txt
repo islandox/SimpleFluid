@@ -14,8 +14,13 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES
         FILE_SET CXX_MODULES
         BASE_DIRS ${PROJECT_SOURCE_DIR}/src
         FILES BenchmarkSupport.cppm)
+    simplefluid_enable_std_module(SimpleFluidBenchmarkSupport)
     set_source_files_properties(BenchmarkSupport.cppm PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON)
+    if(SIMPLEFLUID_USE_STD_MODULE)
+        set_property(SOURCE BenchmarkSupport.cppm APPEND PROPERTY
+            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
+    endif()
 endif()
 
 execute_process(

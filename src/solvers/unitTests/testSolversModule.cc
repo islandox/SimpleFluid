@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#else
 #include <type_traits>
+#endif
 
 import SimpleFluid.Solvers;
 

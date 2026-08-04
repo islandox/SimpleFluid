@@ -1,6 +1,8 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "solvers/BelosLinearSolver.hh"
 #include "equations/BoundaryConditions.hh"
@@ -25,6 +27,10 @@ module;
 #include "equations/TemperatureDiffusionEquation.hh"
 
 export module SimpleFluid.Equations;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export import SimpleFluid.FVM;
 

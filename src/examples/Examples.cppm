@@ -1,10 +1,16 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "examples/ExampleRunner.hh"
 
 export module SimpleFluid.Examples;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export namespace SimpleFluid
 {

@@ -4,6 +4,10 @@ module;
 
 export module SimpleFluid.BenchmarkSupport;
 
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
+
 export namespace SimpleFluid::Benchmark
 {
 using ::SimpleFluid::Benchmark::ProcessMemory;
