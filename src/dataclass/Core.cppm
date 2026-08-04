@@ -1,6 +1,8 @@
 module;
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include "cmake/StandardHeaders.hh"
+#endif
 
 #include "dataclass/typedefs.hh"
 #include "dataclass/vec3.hh"
@@ -10,6 +12,10 @@ module;
 #include "dataclass/TpetraTypes.hh"
 
 export module SimpleFluid.Core;
+
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 
 export namespace SimpleFluid
 {

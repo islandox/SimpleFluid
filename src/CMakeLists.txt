@@ -53,6 +53,12 @@ if(APPLE)
     set(SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN NO)
 endif()
 
+function(simplefluid_enable_std_module target_name)
+    if(SIMPLEFLUID_USE_STD_MODULE)
+        set_target_properties(${target_name} PROPERTIES CXX_MODULE_STD ON)
+    endif()
+endfunction()
+
 # Configure ordinary translation units that consume named modules.  These
 # sources must not inherit the Trilinos-heavy PCH: mixing textual Trilinos
 # declarations with declarations reachable through a BMI is ill-formed on
@@ -64,12 +70,17 @@ function(simplefluid_configure_module_consumers target_name)
 
     set_target_properties(${target_name} PROPERTIES
         CXX_SCAN_FOR_MODULES ON)
+    simplefluid_enable_std_module(${target_name})
     set_source_files_properties(${ARGN}
         PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
         COMPILE_DEFINITIONS SIMPLEFLUID_USE_CXX_MODULES=1
         COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+    if(SIMPLEFLUID_USE_STD_MODULE)
+        set_property(SOURCE ${ARGN} APPEND PROPERTY
+            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
+    endif()
 endfunction()
 
 if(SIMPLEFLUID_ENABLE_CXX_MODULES)
@@ -138,7 +149,7 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
                     -DKOKKOS_DEPENDENCE
                     ${_simplefluid_header_unit_include_options}
                     -std=c++23
-                    -fmodules-ts
+                    -fmodules
                     -x c++-header
                     # Keep GCC module pseudo-targets out of Ninja depfiles.
                     -MD -Mno-modules -MF "${_depfile}"
@@ -604,7 +615,14 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
 
     foreach(_module_target IN LISTS _simplefluid_project_module_targets)
         add_dependencies(${_module_target} SimpleFluidHeaderUnits)
+        simplefluid_enable_std_module(${_module_target})
     endforeach()
+
+    if(SIMPLEFLUID_USE_STD_MODULE)
+        set_property(SOURCE ${_simplefluid_project_module_sources}
+            APPEND PROPERTY
+            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
+    endif()
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         foreach(_module_target IN LISTS _simplefluid_project_module_targets)
@@ -670,6 +688,7 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
         FILE_SET CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES examples/Examples.cppm)
+    simplefluid_enable_std_module(SimpleFluidExamples)
     add_dependencies(SimpleFluidExamples SimpleFluidHeaderUnits)
     set_source_files_properties(examples/Examples.cppm PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
@@ -677,6 +696,10 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
         "$<$<CXX_COMPILER_ID:GNU>:SIMPLEFLUID_USE_TRILINOS_MODULES=1>"
         COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+    if(SIMPLEFLUID_USE_STD_MODULE)
+        set_property(SOURCE examples/Examples.cppm APPEND PROPERTY
+            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
+    endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         set_property(TARGET SimpleFluidExamples
             PROPERTY CXX_COMPILER_LAUNCHER
@@ -738,11 +761,16 @@ endfunction()
 
 function(simplefluid_configure_module_test target_name source_file)
     set_target_properties(${target_name} PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    simplefluid_enable_std_module(${target_name})
     set_source_files_properties(${source_file}
         PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
         COMPILE_OPTIONS
         "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
+    if(SIMPLEFLUID_USE_STD_MODULE)
+        set_property(SOURCE ${source_file} APPEND PROPERTY
+            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
+    endif()
 endfunction()
 
 add_subdirectory(dataclass/unitTests)

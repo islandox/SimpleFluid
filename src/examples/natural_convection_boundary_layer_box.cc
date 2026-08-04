@@ -9,9 +9,14 @@
  *
  */
 
+#if !defined(SIMPLEFLUID_USE_STD_MODULE)
 #include <initializer_list>
+#endif
 
 #if defined(SIMPLEFLUID_USE_CXX_MODULES)
+#if defined(SIMPLEFLUID_USE_STD_MODULE)
+import std;
+#endif
 import SimpleFluid.Examples;
 #else
 #include "examples/ExampleRunner.hh"

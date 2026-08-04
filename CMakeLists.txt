@@ -4,6 +4,25 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+set(SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT ON)
+option(SIMPLEFLUID_ENABLE_CXX_MODULES
+       "Build C++ module interfaces for module-capable toolchains"
+       ${SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT})
+option(SIMPLEFLUID_ENABLE_STD_MODULE
+       "Use the C++23 standard-library module in module consumers"
+       ON)
+
+# CMake's import-std support is still experimental and its activation token
+# changes between CMake releases. Keep older/newer CMake versions on the
+# existing standard-header path until their token is deliberately validated.
+if(SIMPLEFLUID_ENABLE_CXX_MODULES
+   AND SIMPLEFLUID_ENABLE_STD_MODULE
+   AND CMAKE_VERSION VERSION_GREATER_EQUAL 4.4
+   AND CMAKE_VERSION VERSION_LESS 4.5)
+    set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD
+        "f35a9ac6-8463-4d38-8eec-5d6008153e7d")
+endif()
+
 project(SimpleFluid C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -61,11 +80,60 @@ endif()
 
 simplefluid_configure_profile_guided_optimization()
 
-set(SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT ON)
-option(SIMPLEFLUID_ENABLE_CXX_MODULES
-       "Build C++ module interfaces for module-capable toolchains"
-       ${SIMPLEFLUID_ENABLE_CXX_MODULES_DEFAULT})
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+set(SIMPLEFLUID_USE_STD_MODULE OFF)
+if(SIMPLEFLUID_ENABLE_CXX_MODULES
+   AND SIMPLEFLUID_ENABLE_STD_MODULE
+   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+   AND 23 IN_LIST CMAKE_CXX_COMPILER_IMPORT_STD)
+    set(SIMPLEFLUID_USE_STD_MODULE ON)
+
+    # GCC 16 installations may ship libstdc++.modules.json beside libgcc even
+    # though its relative source paths assume the C++ include root. Both GCC
+    # and Clang can discover that metadata, so generate a corrected build-local
+    # copy based on the selected standard library rather than the compiler ID.
+    if(CMAKE_CXX_STDLIB_MODULES_JSON
+       MATCHES "libstdc\\+\\+\\.modules\\.json$")
+        find_file(SIMPLEFLUID_LIBSTDCXX_STD_MODULE_SOURCE
+            NAMES bits/std.cc
+            PATHS ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}
+            NO_DEFAULT_PATH)
+        find_file(SIMPLEFLUID_LIBSTDCXX_STD_COMPAT_MODULE_SOURCE
+            NAMES bits/std.compat.cc
+            PATHS ${CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES}
+            NO_DEFAULT_PATH)
+        if(SIMPLEFLUID_LIBSTDCXX_STD_MODULE_SOURCE
+           AND SIMPLEFLUID_LIBSTDCXX_STD_COMPAT_MODULE_SOURCE)
+            configure_file(
+                cmake/libstdc++.modules.json.in
+                "${CMAKE_BINARY_DIR}/libstdc++.modules.json"
+                @ONLY)
+            set(CMAKE_CXX_STDLIB_MODULES_JSON
+                "${CMAKE_BINARY_DIR}/libstdc++.modules.json")
+        else()
+            message(WARNING
+                "The toolchain advertises import std support, but the libstdc++ "
+                "module sources were not found; retaining standard headers")
+            set(SIMPLEFLUID_USE_STD_MODULE OFF)
+        endif()
+    endif()
+endif()
+
+if(SIMPLEFLUID_USE_STD_MODULE)
+    message(STATUS "SimpleFluid module consumers use import std")
+elseif(SIMPLEFLUID_ENABLE_CXX_MODULES
+       AND SIMPLEFLUID_ENABLE_STD_MODULE
+       AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(STATUS
+        "Clang retains standard headers because import std triggers a "
+        "Trilinos late-template compiler crash")
+elseif(SIMPLEFLUID_ENABLE_CXX_MODULES AND SIMPLEFLUID_ENABLE_STD_MODULE)
+    message(STATUS
+        "import std is unavailable; SimpleFluid modules retain standard headers")
+elseif(SIMPLEFLUID_ENABLE_CXX_MODULES)
+    message(STATUS "SimpleFluid import std support is disabled")
+endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # Trilinos 17 has fallback template bodies that Clang diagnoses eagerly
