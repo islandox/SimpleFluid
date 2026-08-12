@@ -16,8 +16,8 @@
 #include "utils/debug_check.hh"
 
 #include "MeshUtils.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Kokkos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Kokkos.hh"
 
 #include <string>
 #include <memory>

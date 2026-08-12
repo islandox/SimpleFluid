@@ -344,9 +344,9 @@ equation and solver implementation units against their BMIs. GCC keeps those
 shared-library implementation units on the safe PCH path while leaf executables
 consume the named modules.
 
-`SimpleFluid.Kokkos`, `SimpleFluid.STK`, `SimpleFluid.Teuchos`,
-`SimpleFluid.Tpetra`, and `SimpleFluid.Zoltan2` provide the corresponding
-Trilinos compatibility views.
+`Trilinos` provides the aggregate third-party boundary. `Trilinos.Kokkos`,
+`Trilinos.STK`, `Trilinos.Teuchos`, `Trilinos.Tpetra`, and
+`Trilinos.Zoltan2` provide the corresponding package compatibility views.
 Header-based consumers remain supported; configure with
 `-DSIMPLEFLUID_ENABLE_CXX_MODULES=OFF` to omit module interfaces entirely.
 

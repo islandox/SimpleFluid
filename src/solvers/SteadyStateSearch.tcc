@@ -263,7 +263,7 @@ void SteadyStateProgressStream::write_retry(int iteration, int retry, int maximu
                                             std::string_view reason)
 {
     d_output << SteadyStateProgressLineFormatter<Scalar>::format_retry
-                            (iteration, retry, maximum_retries, 
+                            (iteration, retry, maximum_retries,
                              time, time_step,
                              next_time_step, reason)
              << std::endl;

@@ -15,9 +15,9 @@
 #include "typedefs.hh"
 
 #include <limits>
-#include "modules/Tpetra.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Kokkos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Kokkos.hh"
 
 namespace SimpleFluid
 {

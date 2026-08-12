@@ -72,10 +72,12 @@ macro(simplefluid_configure_profile_guided_optimization)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hh"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/*.tcc"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cppm"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.cc"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.hh"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.cmake"
-            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.map")
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.map"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.json.in")
         list(FILTER SIMPLEFLUID_PGO_SOURCE_INPUTS
              EXCLUDE REGEX "/unitTests/")
         list(FILTER SIMPLEFLUID_PGO_SOURCE_INPUTS

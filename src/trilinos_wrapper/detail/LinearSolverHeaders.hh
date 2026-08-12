@@ -1,17 +1,17 @@
 /**
- * @file LinearSolvers.hh
- * @brief Header boundary for Trilinos linear-solver packages.
+ * @file LinearSolverHeaders.hh
+ * @brief Unconditional textual solver declarations for the Trilinos boundary.
  */
 #pragma once
 
-#if defined(SIMPLEFLUID_USE_TRILINOS_MODULES)
-import "modules/Trilinos.hh";
-#else
+#include <BelosBiCGStabSolMgr.hpp>
 #include <BelosBlockGmresSolMgr.hpp>
 #include <BelosLinearProblem.hpp>
+#include <BelosPseudoBlockCGSolMgr.hpp>
 #include <BelosPseudoBlockGmresSolMgr.hpp>
+#include <BelosSolverManager.hpp>
 #include <BelosTpetraAdapter.hpp>
 #include <BelosTypes.hpp>
 #include <Ifpack2_Factory.hpp>
+#include <Ifpack2_Preconditioner.hpp>
 #include <MueLu_CreateTpetraPreconditioner.hpp>
-#endif

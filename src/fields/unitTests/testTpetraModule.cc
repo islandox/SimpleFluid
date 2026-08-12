@@ -1,4 +1,4 @@
-import SimpleFluid.Tpetra;
+import Trilinos.Tpetra;
 
 using map_type = Tpetra::Map<int, long long>;
 

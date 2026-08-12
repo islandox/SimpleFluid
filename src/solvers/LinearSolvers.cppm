@@ -16,8 +16,12 @@ export import SimpleFluid.Fields;
 
 export namespace SimpleFluid
 {
+using ::SimpleFluid::LinearSolverBackend;
+using ::SimpleFluid::parse_linear_solver_backend;
 using ::SimpleFluid::LinearPreconditioner;
+using ::SimpleFluid::parse_linear_preconditioner;
 using ::SimpleFluid::to_string;
+using ::SimpleFluid::LinearResidualScaling;
 using ::SimpleFluid::LinearSolveStatistics;
 using ::SimpleFluid::LinearSolveSummary;
 using ::SimpleFluid::LinearSolverOptions;

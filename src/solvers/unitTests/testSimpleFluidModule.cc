@@ -20,6 +20,11 @@ TEST(SimpleFluidModuleTest, ReexportsTheCompleteProjectApi)
                   SimpleFluid::FVM::TransportSystem<
                       SimpleFluid::DefaultTpetraTypes>>);
     static_assert(std::is_class_v<SimpleFluid::TimeStepperOptions>);
+    static_assert(std::is_class_v<SimpleFluid::MeshQualityGate>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::PoissonWallDistanceEquation<>>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::AdaptiveSteadyStateController>);
     static_assert(std::is_class_v<SimpleFluid::BoussinesqSolver<>>);
 }
 

@@ -13,8 +13,8 @@
 
 #include "fields/Field.hh"
 #include "geometry/MeshHandle.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #include <concepts>
 #include <cstddef>

@@ -10,8 +10,8 @@
  */
 
 #pragma once
-#include "modules/Kokkos.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/Kokkos.hh"
+#include "trilinos_wrapper/STK.hh"
 
 #include <cstddef>
 #include <limits>

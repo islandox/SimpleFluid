@@ -992,7 +992,7 @@ typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocit
             {
                 const auto velocity_type = velocity_boundary_cache.type.at(location.batch_id);
                 const auto prescribed = velocity_type == BoundaryConditionType::Slip
-                                            ? FVM::detail::slip_face_velocity(velocity, face_lid)
+                                            ? FVM::slip_face_velocity(velocity, face_lid)
                                             : velocity_boundary_cache.value.at(location.batch_id)[location.in_batch_id];
                 continuity_rhs -= prescribed.dot(area);
             }

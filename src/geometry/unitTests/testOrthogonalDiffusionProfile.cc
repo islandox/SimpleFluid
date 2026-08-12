@@ -19,8 +19,8 @@
 #include "solvers/BelosLinearSolver.hh"
 #include "FVM/OperatorDetails.hh"
 #include "utils/testing_environment.hh"
-#include "modules/Tpetra.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <cmath>
 #include <chrono>

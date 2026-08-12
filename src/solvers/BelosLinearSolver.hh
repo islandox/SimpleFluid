@@ -11,16 +11,16 @@
 #pragma once
 
 #include "dataclass/TpetraTypes.hh"
-#include "modules/LinearSolvers.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/LinearSolvers.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
 #include <optional>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 

@@ -1,4 +1,4 @@
-import SimpleFluid.Teuchos;
+import Trilinos.Teuchos;
 
 using rcp_type = Teuchos::RCP<int>;
 

@@ -13,6 +13,7 @@
                 "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-pic/lib/cmake/Trilinos",
                 "CMAKE_CXX_COMPILER": "g++",
                 "CMAKE_C_COMPILER": "gcc",
+                "SIMPLEFLUID_ENABLE_CXX_MODULES": "ON",
                 "SIMPLEFLUID_ENABLE_STD_MODULE": "ON"
             }
         },
@@ -29,6 +30,7 @@
                 "CMAKE_CXX_COMPILER": "clang++",
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_FLAGS": "-stdlib=libc++",
+                "SIMPLEFLUID_ENABLE_CXX_MODULES": "ON",
                 "SIMPLEFLUID_ENABLE_STD_MODULE": "OFF"
             }
         },

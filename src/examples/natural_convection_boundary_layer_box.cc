@@ -20,7 +20,7 @@ import std;
 import SimpleFluid.Examples;
 #else
 #include "examples/ExampleRunner.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 #endif
 
 /**

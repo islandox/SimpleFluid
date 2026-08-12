@@ -13,7 +13,7 @@
 #include "geometry/STKMesh.hh"
 
 #include "utils/testing_environment.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/STK.hh"
 
 #include <algorithm>
 #include <array>

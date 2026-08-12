@@ -11,7 +11,7 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <algorithm>
 #include <cctype>

@@ -18,7 +18,7 @@
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <cstddef>
 #include <functional>

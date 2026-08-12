@@ -14,7 +14,7 @@
 #include "FVM/OperatorDetails.hh"
 #include "fields/CellField.hh"
 #include "geometry/Mesh.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <cstddef>
 #include <stdexcept>

@@ -53,179 +53,19 @@ if(APPLE)
     set(SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN NO)
 endif()
 
-function(simplefluid_enable_std_module target_name)
-    if(SIMPLEFLUID_USE_STD_MODULE)
-        set_target_properties(${target_name} PROPERTIES CXX_MODULE_STD ON)
-    endif()
-endfunction()
-
-# Configure ordinary translation units that consume named modules.  These
-# sources must not inherit the Trilinos-heavy PCH: mixing textual Trilinos
-# declarations with declarations reachable through a BMI is ill-formed on
-# GCC and Clang, and would also defeat the compile-time benefit of importing.
-function(simplefluid_configure_module_consumers target_name)
-    if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
-        return()
-    endif()
-
-    set_target_properties(${target_name} PROPERTIES
-        CXX_SCAN_FOR_MODULES ON)
-    simplefluid_enable_std_module(${target_name})
-    set_source_files_properties(${ARGN}
-        PROPERTIES
-        SKIP_PRECOMPILE_HEADERS ON
-        COMPILE_DEFINITIONS SIMPLEFLUID_USE_CXX_MODULES=1
-        COMPILE_OPTIONS
-        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
-    if(SIMPLEFLUID_USE_STD_MODULE)
-        set_property(SOURCE ${ARGN} APPEND PROPERTY
-            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
-    endif()
-endfunction()
-
 if(SIMPLEFLUID_ENABLE_CXX_MODULES)
-    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        message(FATAL_ERROR
-            "SimpleFluid Trilinos wrapper modules require GCC or Clang")
-    endif()
-
-    set(SIMPLEFLUID_TRILINOS_WRAPPER_HEADERS
-        "${CMAKE_CURRENT_SOURCE_DIR}/modules/Trilinos.hh"
-    )
-    set(SIMPLEFLUID_TRILINOS_WRAPPER_MODULES
-        modules/Trilinos.cppm
-        modules/Kokkos.cppm
-        modules/STK.cppm
-        modules/Teuchos.cppm
-        modules/Tpetra.cppm
-        modules/Zoltan2.cppm
-    )
-
-    set(_simplefluid_header_unit_include_options)
-    set(_simplefluid_header_unit_include_dirs
-        ${SIMPLEFLUID_PUBLIC_INCLUDE_DIRS}
-        ${Trilinos_INCLUDE_DIRS}
-        ${MPI_CXX_INCLUDE_DIRS})
-    foreach(_dependency_target IN ITEMS
-            Kokkos::kokkos
-            METIS::all_libs
-            ParMETIS::all_libs)
-        if(TARGET ${_dependency_target})
-            get_target_property(_dependency_include_dirs
-                ${_dependency_target} INTERFACE_INCLUDE_DIRECTORIES)
-            if(_dependency_include_dirs)
-                list(APPEND _simplefluid_header_unit_include_dirs
-                    ${_dependency_include_dirs})
-            endif()
-        endif()
-    endforeach()
-    foreach(_include_dir IN LISTS
-            _simplefluid_header_unit_include_dirs)
-        list(APPEND _simplefluid_header_unit_include_options
-            "-I${_include_dir}")
-    endforeach()
-    list(REMOVE_DUPLICATES _simplefluid_header_unit_include_options)
-
-    set(_simplefluid_header_unit_outputs)
-    set(_simplefluid_clang_header_unit_options)
-    set(_simplefluid_gcc_header_unit_map_contents "")
-    set(_simplefluid_header_unit_work_dir
-        "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/SimpleFluidHeaderUnits")
-    file(MAKE_DIRECTORY "${_simplefluid_header_unit_work_dir}")
-
-    foreach(_header IN LISTS SIMPLEFLUID_TRILINOS_WRAPPER_HEADERS)
-        get_filename_component(_header_name "${_header}" NAME_WE)
-        set(_depfile
-            "${_simplefluid_header_unit_work_dir}/${_header_name}.d")
-
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            set(_stamp
-                "${_simplefluid_header_unit_work_dir}/${_header_name}.stamp")
-            set(_gcm "${CMAKE_BINARY_DIR}/gcm.cache${_header}.gcm")
-            add_custom_command(
-                OUTPUT "${_stamp}"
-                BYPRODUCTS "${_gcm}"
-                COMMAND ${CMAKE_CXX_COMPILER}
-                    -DKOKKOS_DEPENDENCE
-                    ${_simplefluid_header_unit_include_options}
-                    -std=c++23
-                    -fmodules
-                    -x c++-header
-                    # Keep GCC module pseudo-targets out of Ninja depfiles.
-                    -MD -Mno-modules -MF "${_depfile}"
-                    "${_header}"
-                COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
-                DEPENDS "${_header}"
-                DEPFILE "${_depfile}"
-                WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-                COMMAND_EXPAND_LISTS
-                VERBATIM
-            )
-            list(APPEND _simplefluid_header_unit_outputs "${_stamp}")
-            string(APPEND _simplefluid_gcc_header_unit_map_contents
-                "${_header} ${_gcm}\n")
-        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-            set(_pcm
-                "${_simplefluid_header_unit_work_dir}/${_header_name}.pcm")
-            add_custom_command(
-                OUTPUT "${_pcm}"
-                COMMAND ${CMAKE_CXX_COMPILER}
-                    -DKOKKOS_DEPENDENCE
-                    ${_simplefluid_header_unit_include_options}
-                    -std=c++23
-                    -fdelayed-template-parsing
-                    -Wno-delayed-template-parsing-in-cxx20
-                    -Wno-deprecated
-                    -fmodule-header=user
-                    -MD -MF "${_depfile}"
-                    "${_header}"
-                    -o "${_pcm}"
-                DEPENDS "${_header}"
-                DEPFILE "${_depfile}"
-                WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
-                COMMAND_EXPAND_LISTS
-                VERBATIM
-            )
-            list(APPEND _simplefluid_header_unit_outputs "${_pcm}")
-            list(APPEND _simplefluid_clang_header_unit_options
-                "-fmodule-file=${_pcm}")
-        endif()
-    endforeach()
-
-    add_custom_target(SimpleFluidHeaderUnits
-        DEPENDS ${_simplefluid_header_unit_outputs})
-
-    add_library(SimpleFluidTrilinosModules STATIC)
-    add_library(SimpleFluid::TrilinosModules ALIAS SimpleFluidTrilinosModules)
-    simplefluid_configure_library(SimpleFluidTrilinosModules)
-    set_target_properties(SimpleFluidTrilinosModules PROPERTIES
-        POSITION_INDEPENDENT_CODE ON)
-    target_sources(SimpleFluidTrilinosModules PUBLIC
-        FILE_SET CXX_MODULES
-        BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
-        FILES ${SIMPLEFLUID_TRILINOS_WRAPPER_MODULES}
-    )
-    set_source_files_properties(
-        ${SIMPLEFLUID_TRILINOS_WRAPPER_MODULES}
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-    add_dependencies(SimpleFluidTrilinosModules SimpleFluidHeaderUnits)
-
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set(_simplefluid_gcc_header_unit_map
-            "${_simplefluid_header_unit_work_dir}/gcc-header-units.map")
-        file(GENERATE
-            OUTPUT "${_simplefluid_gcc_header_unit_map}"
-            CONTENT "${_simplefluid_gcc_header_unit_map_contents}")
-        set_property(TARGET SimpleFluidTrilinosModules
-            PROPERTY CXX_COMPILER_LAUNCHER
-            ${CMAKE_COMMAND}
-            -DSIMPLEFLUID_HEADER_UNIT_MAP=${_simplefluid_gcc_header_unit_map}
-            -P ${PROJECT_SOURCE_DIR}/cmake/LaunchGccWithHeaderUnits.cmake
-            --)
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        target_compile_options(SimpleFluidTrilinosModules PUBLIC
-            ${_simplefluid_clang_header_unit_options})
-    endif()
+    # Build the unconditional payload, never a consumer wrapper, so the
+    # header-unit dependency graph remains one-way.
+    simplefluid_add_trilinos_modules(
+        HEADERS
+        "${CMAKE_CURRENT_SOURCE_DIR}/trilinos_wrapper/TrilinosHeaderUnit.hh"
+        MODULES
+        trilinos_wrapper/Trilinos.cppm
+        trilinos_wrapper/Kokkos.cppm
+        trilinos_wrapper/STK.cppm
+        trilinos_wrapper/Teuchos.cppm
+        trilinos_wrapper/Tpetra.cppm
+        trilinos_wrapper/Zoltan2.cppm)
 endif()
 
 # Keep PCH ownership independent from the module dependency graph.
@@ -613,59 +453,19 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
             solvers/Solvers.cppm
             SimpleFluid.cppm)
 
-    foreach(_module_target IN LISTS _simplefluid_project_module_targets)
-        add_dependencies(${_module_target} SimpleFluidHeaderUnits)
-        simplefluid_enable_std_module(${_module_target})
-    endforeach()
+    simplefluid_configure_project_modules(
+        TARGETS ${_simplefluid_project_module_targets}
+        SOURCES ${_simplefluid_project_module_sources})
 
-    if(SIMPLEFLUID_USE_STD_MODULE)
-        set_property(SOURCE ${_simplefluid_project_module_sources}
-            APPEND PROPERTY
-            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
-    endif()
-
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        foreach(_module_target IN LISTS _simplefluid_project_module_targets)
-            set_property(TARGET ${_module_target}
-                PROPERTY CXX_COMPILER_LAUNCHER
-                ${CMAKE_COMMAND}
-                -DSIMPLEFLUID_HEADER_UNIT_MAP=${_simplefluid_gcc_header_unit_map}
-                -P ${PROJECT_SOURCE_DIR}/cmake/LaunchGccWithHeaderUnits.cmake
-                --)
-        endforeach()
-    endif()
-
-    set_source_files_properties(
-        ${_simplefluid_project_module_sources}
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-    # GCC imports the aggregate header unit to keep Trilinos TU-local entities
-    # out of named modules. Clang keeps the established textual GMF path; its
-    # public wrapper modules still use the aggregate header unit above.
-    set_source_files_properties(
-        ${_simplefluid_project_module_sources}
-        PROPERTIES COMPILE_DEFINITIONS
-        "$<$<CXX_COMPILER_ID:GNU>:SIMPLEFLUID_USE_TRILINOS_MODULES=1>")
-    set_source_files_properties(
-        ${_simplefluid_project_module_sources}
-        PROPERTIES COMPILE_OPTIONS
-        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
-
-    # Clang safely consumes the project BMIs from implementation TUs.  GCC's
-    # current header-unit implementation emits interposable Trilinos template
-    # bodies into each shared library; keep those library TUs on the textual
-    # PCH path until that runtime ODR issue is fixed upstream.  GCC leaf
-    # executables still consume the named modules below.
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        simplefluid_configure_module_consumers(
-            SimpleFluidSolvers
-            equations/BoussinesqMomentumEquation.cc
-            equations/IncompressibleMomentumEquation.cc
-            equations/PressureProjectionEquation.cc
-            equations/RadiolyticGasProperties.cc
-            equations/TemperatureDiffusionEquation.cc
-            solvers/BoussinesqSolver.cc
-            solvers/FluidSolver.cc)
-    endif()
+    simplefluid_configure_clang_module_consumers(
+        SimpleFluidSolvers
+        equations/BoussinesqMomentumEquation.cc
+        equations/IncompressibleMomentumEquation.cc
+        equations/PressureProjectionEquation.cc
+        equations/RadiolyticGasProperties.cc
+        equations/TemperatureDiffusionEquation.cc
+        solvers/BoussinesqSolver.cc
+        solvers/FluidSolver.cc)
 endif()
 
 # Preserve the original target as an umbrella for downstream users.
@@ -688,26 +488,8 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
         FILE_SET CXX_MODULES
         BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
         FILES examples/Examples.cppm)
-    simplefluid_enable_std_module(SimpleFluidExamples)
-    add_dependencies(SimpleFluidExamples SimpleFluidHeaderUnits)
-    set_source_files_properties(examples/Examples.cppm PROPERTIES
-        SKIP_PRECOMPILE_HEADERS ON
-        COMPILE_DEFINITIONS
-        "$<$<CXX_COMPILER_ID:GNU>:SIMPLEFLUID_USE_TRILINOS_MODULES=1>"
-        COMPILE_OPTIONS
-        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
-    if(SIMPLEFLUID_USE_STD_MODULE)
-        set_property(SOURCE examples/Examples.cppm APPEND PROPERTY
-            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
-    endif()
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set_property(TARGET SimpleFluidExamples
-            PROPERTY CXX_COMPILER_LAUNCHER
-            ${CMAKE_COMMAND}
-            -DSIMPLEFLUID_HEADER_UNIT_MAP=${_simplefluid_gcc_header_unit_map}
-            -P ${PROJECT_SOURCE_DIR}/cmake/LaunchGccWithHeaderUnits.cmake
-            --)
-    endif()
+    simplefluid_configure_example_module(
+        SimpleFluidExamples examples/Examples.cppm)
 endif()
 
 # Reuse a visibility-compatible PCH for every object embedded in the DSO.
@@ -759,19 +541,6 @@ function(simplefluid_configure_test_executable target_name)
     endif()
 endfunction()
 
-function(simplefluid_configure_module_test target_name source_file)
-    set_target_properties(${target_name} PROPERTIES CXX_SCAN_FOR_MODULES ON)
-    simplefluid_enable_std_module(${target_name})
-    set_source_files_properties(${source_file}
-        PROPERTIES
-        SKIP_PRECOMPILE_HEADERS ON
-        COMPILE_OPTIONS
-        "$<$<CXX_COMPILER_ID:Clang>:-fno-delayed-template-parsing>")
-    if(SIMPLEFLUID_USE_STD_MODULE)
-        set_property(SOURCE ${source_file} APPEND PROPERTY
-            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
-    endif()
-endfunction()
 
 add_subdirectory(dataclass/unitTests)
 add_subdirectory(geometry/unitTests)

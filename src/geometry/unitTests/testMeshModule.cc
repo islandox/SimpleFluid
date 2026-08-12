@@ -23,6 +23,10 @@ TEST(MeshModuleTest, ExportsMeshApisAndReexportsCore)
     static_assert(std::is_class_v<SimpleFluid::MeshHandle<>>);
     static_assert(std::is_class_v<SimpleFluid::MeshPartitioner<
                   SimpleFluid::DefaultTpetraTypes>>);
+    static_assert(std::is_class_v<SimpleFluid::MeshQualityGate>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::YPlusBoundaryLayerController>);
+    static_assert(std::is_class_v<SimpleFluid::WallYPlusStatistics>);
     static_assert(SimpleFluid::TpetraTypePack<
                   SimpleFluid::DefaultTpetraTypes>);
 }

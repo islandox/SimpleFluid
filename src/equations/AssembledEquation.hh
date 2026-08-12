@@ -12,7 +12,7 @@
 #pragma once
 
 #include "solvers/BelosLinearSolver.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <stdexcept>
 #include <utility>

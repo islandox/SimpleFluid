@@ -135,7 +135,12 @@ set(simplefluid_unexpected_symbols)
 foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
     string(REGEX REPLACE "@.*$" ""
            simplefluid_unversioned_symbol "${simplefluid_symbol}")
-    if(simplefluid_symbol MATCHES
+    if(simplefluid_symbol MATCHES "^_ZGIW11SimpleFluid")
+        if(NOT simplefluid_symbol MATCHES "@@SIMPLEFLUID_1[.]0$")
+            list(APPEND simplefluid_unexpected_symbols
+                 "${simplefluid_symbol} (wrong module initializer version)")
+        endif()
+    elseif(simplefluid_symbol MATCHES
        "^(_ZN11SimpleFluid|_ZNK11SimpleFluid|_ZNV11SimpleFluid|_ZNKV11SimpleFluid|_ZTIN11SimpleFluid|_ZTSN11SimpleFluid|_ZTVN11SimpleFluid|_ZTTN11SimpleFluid)")
         list(APPEND simplefluid_symbols_to_demangle
              "${simplefluid_unversioned_symbol}")

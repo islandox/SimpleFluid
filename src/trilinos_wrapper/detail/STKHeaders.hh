@@ -1,12 +1,9 @@
 /**
- * @file STK.hh
- * @brief Header boundary for STK declarations sharing the Trilinos module.
+ * @file STKHeaders.hh
+ * @brief Unconditional textual STK declarations for the Trilinos boundary.
  */
 #pragma once
 
-#if defined(SIMPLEFLUID_USE_TRILINOS_MODULES)
-import "modules/Trilinos.hh";
-#else
 #include <stk_io/IossBridge.hpp>
 #include <stk_io/StkMeshIoBroker.hpp>
 #include <stk_mesh/base/BulkData.hpp>
@@ -19,4 +16,3 @@ import "modules/Trilinos.hh";
 #include <stk_mesh/base/Types.hpp>
 #include <stk_topology/topology.hpp>
 #include <stk_util/parallel/Parallel.hpp>
-#endif

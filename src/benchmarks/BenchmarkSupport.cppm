@@ -17,4 +17,5 @@ using ::SimpleFluid::Benchmark::host_name;
 using ::SimpleFluid::Benchmark::csv_escape;
 using ::SimpleFluid::Benchmark::Record;
 using ::SimpleFluid::Benchmark::CsvWriter;
+using ::SimpleFluid::Benchmark::RegressionGate;
 }

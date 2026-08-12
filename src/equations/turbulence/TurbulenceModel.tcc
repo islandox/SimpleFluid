@@ -961,7 +961,7 @@ void TurbulenceModel<Pack>::configure(const TurbulenceModelOptions& options,
                 configured_velocity_boundary_cache.type.at(batch_id);
             if (type == BoundaryConditionType::Slip)
             {
-                return FVM::detail::slip_face_velocity(
+                return FVM::slip_face_velocity(
                     candidate->wall_velocity, face_lid);
             }
             if (type == BoundaryConditionType::Periodic)
@@ -1848,7 +1848,7 @@ auto TurbulenceModel<Pack>::advance(const velocity_field_type& velocity,
         const auto type = velocity_boundary_cache.type.at(batch_id);
         if (type == BoundaryConditionType::Slip)
         {
-            return FVM::detail::slip_face_velocity(velocity, face_lid);
+            return FVM::slip_face_velocity(velocity, face_lid);
         }
         if (type == BoundaryConditionType::Periodic)
         {

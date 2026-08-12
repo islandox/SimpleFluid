@@ -13,8 +13,8 @@
 
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/mesh/MeshBase.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #include <concepts>
 #include <limits>

@@ -12,7 +12,7 @@
 #pragma once
 
 #include "dataclass/TpetraTypes.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <functional>
 #include <memory>
