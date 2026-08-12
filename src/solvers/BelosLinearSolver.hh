@@ -12,8 +12,8 @@
 
 #include "dataclass/TpetraTypes.hh"
 #include "solvers/DICPreconditioner.hh"
-#include "modules/LinearSolvers.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/LinearSolvers.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -22,8 +22,8 @@
 #include <limits>
 #include <optional>
 #include <sstream>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 

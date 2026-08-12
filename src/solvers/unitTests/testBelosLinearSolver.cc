@@ -14,8 +14,8 @@
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #include <array>
 #include <limits>

@@ -24,7 +24,7 @@
 #include "fields/VectorCellField.hh"
 #include "geometry/GeometryEpoch.hh"
 #include "geometry/Mesh.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <cstddef>
 #include <functional>

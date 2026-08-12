@@ -23,6 +23,12 @@ TEST(EquationsModuleTest, ExportsEquationApisAndLowerLayers)
 
     static_assert(std::is_class_v<SimpleFluid::Equation<
                   SimpleFluid::ScalarCellFieldStored<>>>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::PoissonWallDistanceEquation<>>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::TurbulenceBuoyancyContext<>>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::ResolvedLowReKEpsilonWallTreatment<>>);
     static_assert(std::is_same_v<
                   SimpleFluid::VectorBoundaryConditionMap::mapped_type,
                   SimpleFluid::VectorBoundaryCondition>);

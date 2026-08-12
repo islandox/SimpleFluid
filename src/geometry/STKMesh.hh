@@ -12,7 +12,7 @@
 #pragma once
 
 #include "Mesh.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/STK.hh"
 
 namespace SimpleFluid
 {

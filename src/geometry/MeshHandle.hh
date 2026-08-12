@@ -25,8 +25,8 @@
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "io/VTUWriter.hh"
 #include "utils/debug_check.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #include <algorithm>
 #include <concepts>

@@ -1,12 +1,9 @@
 /**
- * @file Teuchos.hh
- * @brief Header and module boundary for the Teuchos API used by SimpleFluid.
+ * @file TeuchosHeaders.hh
+ * @brief Unconditional textual Teuchos declarations for the Trilinos boundary.
  */
 #pragma once
 
-#if defined(SIMPLEFLUID_USE_TRILINOS_MODULES)
-import "modules/Trilinos.hh";
-#else
 #include <Teuchos_Array.hpp>
 #include <Teuchos_Comm.hpp>
 #include <Teuchos_CommHelpers.hpp>
@@ -14,4 +11,4 @@ import "modules/Trilinos.hh";
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Teuchos_ParameterList.hpp>
 #include <Teuchos_RCP.hpp>
-#endif
+#include <Teuchos_ScalarTraits.hpp>

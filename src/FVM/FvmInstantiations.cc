@@ -8,7 +8,7 @@
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/FaceFlux.hh"
 #include "FVM/MatrixOperators.hh"
-#include "FVM/TransportSystem.hh"
+#include "FVM/TransportSystem.tcc"
 
 namespace SimpleFluid
 {

@@ -25,6 +25,8 @@ module;
 #include "equations/BoussinesqMomentumEquation.hh"
 #include "equations/PressureProjectionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
+#include "equations/turbulence/TurbulenceModel.hh"
+#include "equations/turbulence/WallDistanceEquation.hh"
 
 export module SimpleFluid.Equations;
 
@@ -74,6 +76,7 @@ using ::SimpleFluid::SolutionOutputOptions;
 using ::SimpleFluid::FissionPowerProfile;
 using ::SimpleFluid::fission_power_profile_from_string;
 using ::SimpleFluid::FissionPowerSourceOptions;
+using ::SimpleFluid::validate_fission_power_options;
 using ::SimpleFluid::fission_power_source_options_from_database;
 using ::SimpleFluid::FissionPowerSource;
 
@@ -120,6 +123,44 @@ using ::SimpleFluid::BoussinesqMomentumEquation;
 using ::SimpleFluid::pressure_projection_linear_solver_options;
 using ::SimpleFluid::PressureProjectionEquation;
 using ::SimpleFluid::TemperatureDiffusionEquation;
+
+using ::SimpleFluid::BSLKOmegaEquation;
+using ::SimpleFluid::RNGKEpsilonEquation;
+using ::SimpleFluid::RealizableKEpsilonEquation;
+using ::SimpleFluid::SSTKOmegaEquation;
+using ::SimpleFluid::StandardKEpsilonEquation;
+using ::SimpleFluid::StandardKOmegaEquation;
+using ::SimpleFluid::TurbulenceModelType;
+using ::SimpleFluid::parse_turbulence_model_type;
+using ::SimpleFluid::TurbulenceWallTreatmentType;
+using ::SimpleFluid::parse_turbulence_wall_treatment_type;
+using ::SimpleFluid::TurbulenceBuoyancyModel;
+using ::SimpleFluid::parse_turbulence_buoyancy_model;
+using ::SimpleFluid::TurbulenceModelOptions;
+using ::SimpleFluid::validate_turbulence_model_options;
+using ::SimpleFluid::turbulence_model_options_from_database;
+using ::SimpleFluid::TurbulenceScalarBoundaryOverrides;
+using ::SimpleFluid::TurbulenceScalarTransportEquation;
+using ::SimpleFluid::TurbulenceBuoyancyContext;
+using ::SimpleFluid::TurbulenceWallRoughnessModel;
+using ::SimpleFluid::parse_turbulence_wall_roughness_model;
+using ::SimpleFluid::TurbulenceThermalWallLaw;
+using ::SimpleFluid::parse_turbulence_thermal_wall_law;
+using ::SimpleFluid::TurbulenceWallTreatmentOptions;
+using ::SimpleFluid::validate_turbulence_wall_treatment_options;
+using ::SimpleFluid::openfoam_y_plus_lam;
+using ::SimpleFluid::ResolvedLowReSSTWallPolicy;
+using ::SimpleFluid::ResolvedLowReKEpsilonWallPolicy;
+using ::SimpleFluid::StandardHighReKEpsilonWallPolicy;
+using ::SimpleFluid::TurbulenceWallFaceEvaluation;
+using ::SimpleFluid::TurbulenceWallTreatment;
+using ::SimpleFluid::ResolvedLowReSSTWallTreatment;
+using ::SimpleFluid::ResolvedLowReKEpsilonWallTreatment;
+using ::SimpleFluid::StandardHighReKEpsilonWallTreatment;
+using ::SimpleFluid::TurbulenceModel;
+using ::SimpleFluid::WallDistanceEquationOptions;
+using ::SimpleFluid::validate_wall_distance_equation_options;
+using ::SimpleFluid::PoissonWallDistanceEquation;
 }
 
 export namespace SimpleFluid::EquationValidation

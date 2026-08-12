@@ -10,10 +10,10 @@
  */
 
 #include "MeshPartitioner.hh"
+#include "trilinos_wrapper/Zoltan2.hh"
 
 #include <map>
 #include <type_traits>
-#include "modules/Zoltan2.hh"
 
 using namespace SimpleFluid;
 

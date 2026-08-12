@@ -14,7 +14,7 @@
 #endif
 
 #include "equations/CollectiveValidation.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 namespace SimpleFluid
 {

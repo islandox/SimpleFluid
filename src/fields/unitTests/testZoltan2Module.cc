@@ -1,4 +1,4 @@
-import SimpleFluid.Zoltan2;
+import Trilinos.Zoltan2;
 
 using graph_type = Tpetra::CrsGraph<int, long long>;
 using adapter_type = Zoltan2::TpetraRowGraphAdapter<graph_type>;

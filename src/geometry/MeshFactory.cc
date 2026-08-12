@@ -12,7 +12,8 @@
 #include "MeshFactory.hh"
 #include "STKMesh.hh"
 #include "geometry/mesh/FrontalDelaunay2D.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/STK.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <algorithm>
 #include <array>

@@ -62,6 +62,8 @@ SIMPLEFLUID_TPETRA_RTTI_1.0 {
 
 SIMPLEFLUID_1.0 {
     global:
+        /* GCC module initializers required by named-module consumers. */
+        _ZGIW11SimpleFluid*;
         _ZN11SimpleFluid*;
         _ZNK11SimpleFluid*;
         _ZNV11SimpleFluid*;

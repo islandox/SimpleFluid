@@ -17,6 +17,11 @@ TEST(SolversModuleTest, ExportsSolverApisAndProblem)
     static_assert(std::is_class_v<SimpleFluid::CoupledPressureVelocitySolver<>>);
     static_assert(std::is_class_v<SimpleFluid::FluidSolver<>>);
     static_assert(std::is_class_v<SimpleFluid::BoussinesqSolver<>>);
+    static_assert(std::is_class_v<
+                  SimpleFluid::AdaptiveSteadyStateController>);
+    static_assert(std::is_class_v<SimpleFluid::SteadyStateFieldMonitor<>>);
+    static_assert(SimpleFluid::CoupledRebuildPolicy::Always
+                  != SimpleFluid::CoupledRebuildPolicy::OnOperatorGraphChange);
     static_assert(std::is_class_v<SimpleFluid::TemperatureDiffusionEquation<>>);
 }
 

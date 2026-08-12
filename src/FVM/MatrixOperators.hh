@@ -16,7 +16,7 @@
 #include "fields/FaceField.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/Mesh.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <concepts>
 #include <cstddef>
@@ -236,22 +236,5 @@ pressure_poisson_matrix(
         std::optional<typename Pack::global_ordinal_type>{gauge_cell_gid},
         homogeneous_neumann);
 }
-
-extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
-identity_matrix<DefaultTpetraTypes>(
-    const Teuchos::RCP<const DefaultTpetraTypes::map_type>&,
-    DefaultTpetraTypes::scalar_type);
-extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
-diffusion_matrix<DefaultTpetraTypes>(
-    const Mesh<DefaultTpetraTypes>&,
-    DefaultTpetraTypes::scalar_type);
-extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
-upwind_convection_matrix<DefaultTpetraTypes>(
-    const Mesh<DefaultTpetraTypes>&,
-    const FaceField<DefaultTpetraTypes>&);
-extern template Teuchos::RCP<DefaultTpetraTypes::matrix_type>
-pressure_poisson_matrix<DefaultTpetraTypes>(
-    const Mesh<DefaultTpetraTypes>&,
-    DefaultTpetraTypes::global_ordinal_type);
 
 } // namespace SimpleFluid::FVM
