@@ -11,8 +11,8 @@
 #pragma once
 
 #include "geometry/Mesh.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #include <cstddef>
 #include <stdexcept>

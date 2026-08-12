@@ -24,9 +24,8 @@
 #include "fields/VectorCellField.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/CoupledBlockOperator.hh"
-#include "modules/LinearSolvers.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/LinearSolvers.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <array>
 #include <concepts>

@@ -5,7 +5,10 @@ module;
 #endif
 
 #include "FVM/BoundaryCache.hh"
+#include "FVM/AssemblyCallbacks.hh"
+#include "FVM/CellGradientScheme.hh"
 #include "FVM/EquationOperators.hh"
+#include "FVM/FaceCoefficientInterpolation.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/Operators.hh"
 
@@ -40,6 +43,17 @@ using ::SimpleFluid::cache_boundary_conditions;
 export namespace SimpleFluid::FVM
 {
 using ::SimpleFluid::FVM::BoundaryCache;
+using ::SimpleFluid::FVM::ScalarBoundaryConditionProvider;
+using ::SimpleFluid::FVM::VectorBoundaryConditionProvider;
+using ::SimpleFluid::FVM::ScalarBoundaryValueProvider;
+using ::SimpleFluid::FVM::VectorBoundaryValueProvider;
+using ::SimpleFluid::FVM::ScalarCellValueProvider;
+using ::SimpleFluid::FVM::VectorCellValueProvider;
+using ::SimpleFluid::FVM::BoundaryFaceSelector;
+using ::SimpleFluid::FVM::BoundaryCoefficientProvider;
+using ::SimpleFluid::FVM::CellGradientScheme;
+using ::SimpleFluid::FVM::FaceCoefficientInterpolation;
+using ::SimpleFluid::FVM::CellGradientCache;
 using ::SimpleFluid::FVM::ConvectionOperator;
 using ::SimpleFluid::FVM::DiffusionOperator;
 using ::SimpleFluid::FVM::DiffusionSystem;
@@ -50,9 +64,11 @@ using ::SimpleFluid::FVM::OperatorVariant;
 using ::SimpleFluid::FVM::SourceOperator;
 using ::SimpleFluid::FVM::TransientOperator;
 using ::SimpleFluid::FVM::TransportSystem;
+using ::SimpleFluid::FVM::TransportGeometryCache;
 using ::SimpleFluid::FVM::VectorDiffusionSystem;
 using ::SimpleFluid::FVM::VectorTransportSystem;
 using ::SimpleFluid::FVM::VelocityBoundaryCache;
+using ::SimpleFluid::FVM::PressureWeightedFaceFluxWorkspace;
 using ::SimpleFluid::FVM::add_explicit_non_orthogonal_correction;
 using ::SimpleFluid::FVM::cache_velocity_boundary_conditions;
 using ::SimpleFluid::FVM::cell_divergence_from_fluxes;

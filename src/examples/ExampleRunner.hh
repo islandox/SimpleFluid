@@ -13,7 +13,7 @@
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
 
-#include <cstdio>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <string_view>

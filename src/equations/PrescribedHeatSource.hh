@@ -14,7 +14,7 @@
 #include "dataclass/DatabaseOptionReader.hh"
 #include "equations/BoussinesqModel.hh"
 #include "fields/MeshFieldTraits.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -167,6 +167,13 @@ inline void validate_prescribed_heat_power_options(
 }
 
 } // namespace detail
+
+/** @brief Validate prescribed prescribed_heat-power options for the selected profile. */
+inline void validate_prescribed_heat_power_options(
+    const PrescribedHeatSourceOptions& options)
+{
+    detail::validate_prescribed_heat_power_options(options);
+}
 
 /**
  * @brief Parse prescribed_heat power-source options from a flat database.

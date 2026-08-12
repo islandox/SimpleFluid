@@ -794,6 +794,7 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::add_prescribed_heat_s
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::configure_prescribed_heat_source(const PrescribedHeatSourceOptions& options)
 {
+    validate_prescribed_heat_power_options(options);
     if (options.profile == PrescribedHeatProfile::Disabled)
     {
         remove_prescribed_heat_source();

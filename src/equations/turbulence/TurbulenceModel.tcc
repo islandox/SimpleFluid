@@ -48,7 +48,7 @@ auto slip_face_velocity(
     }
     else
     {
-        return FVM::detail::slip_face_velocity(velocity, face_lid);
+        return FVM::slip_face_velocity(velocity, face_lid);
     }
 }
 
