@@ -29,6 +29,7 @@ if(SIMPLEFLUID_ENABLE_CXX_MODULES)
     add_executable(${MODULE_TEST_NAME} "${MODULE_TEST_SRC}")
     target_link_libraries(${MODULE_TEST_NAME}
         SimpleFluid::TrilinosModules)
+    simplefluid_configure_test_executable(${MODULE_TEST_NAME})
     set_target_properties(${MODULE_TEST_NAME} PROPERTIES
         CXX_SCAN_FOR_MODULES ON)
     set_source_files_properties(${MODULE_TEST_SRC} PROPERTIES

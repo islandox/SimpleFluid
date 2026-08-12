@@ -794,6 +794,7 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::add_fission_power_sou
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::configure_fission_power_source(const FissionPowerSourceOptions& options)
 {
+    validate_fission_power_options(options);
     if (options.profile == FissionPowerProfile::Disabled)
     {
         remove_fission_power_source();

@@ -1,4 +1,4 @@
-import SimpleFluid.STK;
+import Trilinos.STK;
 
 using entity_type = stk::mesh::Entity;
 

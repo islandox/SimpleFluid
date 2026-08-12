@@ -12,7 +12,9 @@
 #include "STKMesh.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "io/VTUWriter.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/STK.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #include <algorithm>
 #include <cmath>

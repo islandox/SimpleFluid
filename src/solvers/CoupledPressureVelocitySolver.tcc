@@ -1889,7 +1889,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 {
                     if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
                     {
-                        prescribed = FVM::detail::slip_face_velocity(velocity, face_lid);
+                        prescribed = FVM::slip_face_velocity(velocity, face_lid);
                     }
                     else
                     {

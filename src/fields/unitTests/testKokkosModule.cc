@@ -1,4 +1,4 @@
-import SimpleFluid.Kokkos;
+import Trilinos.Kokkos;
 
 using view_type = Kokkos::View<double*>;
 

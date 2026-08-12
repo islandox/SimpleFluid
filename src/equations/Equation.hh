@@ -16,7 +16,7 @@
 #include "equations/AssembledEquation.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/FieldStored.hh"
-#include "modules/Teuchos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
 
 #include <array>
 #include <cstddef>

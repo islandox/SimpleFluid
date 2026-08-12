@@ -11,7 +11,7 @@
 #pragma once
 
 #include "geometry/STKMesh.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/STK.hh"
 
 #include <array>
 #include <cstddef>

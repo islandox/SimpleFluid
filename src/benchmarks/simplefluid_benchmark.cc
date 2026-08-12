@@ -33,9 +33,9 @@ import std;
 #if defined(SIMPLEFLUID_USE_CXX_MODULES)
 import SimpleFluid;
 import SimpleFluid.BenchmarkSupport;
-import SimpleFluid.STK;
-import SimpleFluid.Teuchos;
-import SimpleFluid.Tpetra;
+import Trilinos.STK;
+import Trilinos.Teuchos;
+import Trilinos.Tpetra;
 #else
 #include "benchmarks/BenchmarkSupport.hh"
 #include "equations/BoundaryConditions.hh"
@@ -44,9 +44,9 @@ import SimpleFluid.Tpetra;
 #include "geometry/STKMesh.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/BoussinesqSolver.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
-#include "modules/STK.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
+#include "trilinos_wrapper/STK.hh"
 #endif
 
 #ifndef SIMPLEFLUID_GIT_COMMIT

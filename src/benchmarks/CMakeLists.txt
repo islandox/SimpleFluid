@@ -8,19 +8,13 @@ target_link_libraries(SimpleFluidBenchmarkSupport PUBLIC SimpleFluid::Solvers)
 set_target_properties(SimpleFluidBenchmarkSupport PROPERTIES POSITION_INDEPENDENT_CODE ON)
 simplefluid_lib_reuse_precompiled_header(SimpleFluidBenchmarkSupport)
 simplefluid_require_complete_pgo(SimpleFluidBenchmarkSupport)
-if(SIMPLEFLUID_ENABLE_CXX_MODULES
-   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(SIMPLEFLUID_USE_BENCHMARK_MODULES)
     target_sources(SimpleFluidBenchmarkSupport PUBLIC
         FILE_SET CXX_MODULES
         BASE_DIRS ${PROJECT_SOURCE_DIR}/src
         FILES BenchmarkSupport.cppm)
-    simplefluid_enable_std_module(SimpleFluidBenchmarkSupport)
-    set_source_files_properties(BenchmarkSupport.cppm PROPERTIES
-        SKIP_PRECOMPILE_HEADERS ON)
-    if(SIMPLEFLUID_USE_STD_MODULE)
-        set_property(SOURCE BenchmarkSupport.cppm APPEND PROPERTY
-            COMPILE_DEFINITIONS SIMPLEFLUID_USE_STD_MODULE=1)
-    endif()
+    simplefluid_configure_benchmark_module(
+        SimpleFluidBenchmarkSupport BenchmarkSupport.cppm)
 endif()
 
 execute_process(
@@ -51,8 +45,7 @@ target_link_libraries(
     simplefluid_benchmark PRIVATE
     SimpleFluid::BenchmarkSupport
     SimpleFluid)
-if(SIMPLEFLUID_ENABLE_CXX_MODULES
-   AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(SIMPLEFLUID_USE_BENCHMARK_MODULES)
     target_link_libraries(simplefluid_benchmark PRIVATE
         SimpleFluid::TrilinosModules)
     simplefluid_configure_module_consumers(

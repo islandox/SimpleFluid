@@ -20,13 +20,13 @@
 #  pragma GCC visibility push(default)
 #endif
 
-#include "modules/LinearSolvers.hh"
-#include "modules/Kokkos.hh"
-#include "modules/Teuchos.hh"
-#include "modules/Tpetra.hh"
+#include "trilinos_wrapper/LinearSolvers.hh"
+#include "trilinos_wrapper/Kokkos.hh"
+#include "trilinos_wrapper/Teuchos.hh"
+#include "trilinos_wrapper/Tpetra.hh"
 
 #if defined(__ELF__) && defined(_LIBCPP_VERSION)
 #  pragma GCC visibility pop
 #endif
 
-#include "modules/STK.hh"
+#include "trilinos_wrapper/STK.hh"

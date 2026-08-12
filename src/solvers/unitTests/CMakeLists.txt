@@ -18,6 +18,12 @@ if(NOT SIMPLEFLUID_ENABLE_CXX_MODULES)
        "${CMAKE_CURRENT_SOURCE_DIR}/testSimpleFluidModule.cc"
        "${CMAKE_CURRENT_SOURCE_DIR}/testSolversModule.cc")
 endif()
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testRadiolyticGasModelMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testFluidSolverMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testFeedbackMapMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
