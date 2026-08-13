@@ -2,45 +2,48 @@
     "version": 3,
     "configurePresets": [
         {
-            "name": "LLVM-ninja-multi",
-            "displayName": "LLVM with pre-built Trilinos and OpenMPI",
-            "description": "Multi config build with Trilinos (Tpetra, STK, Kokkos, Teuchos) and OpenMPI",
-            "generator": "Ninja Multi-Config",
-            "binaryDir": "${sourceDir}/build-llvm",
+            "name": "GCC-ninja-multi",
+            "displayName": "GCC with pre-built Trilinos and OpenMPI",
+            "description": "Local multi-config build using the shared Trilinos and OpenMPI settings",
+            "binaryDir": "${sourceDir}/build/gcc",
             "cacheVariables": {
                 "CMAKE_CXX_STANDARD": "23",
                 "CMAKE_CXX_STANDARD_REQUIRED": "ON",
                 "CMAKE_CXX_EXTENSIONS": "OFF",
                 "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-pic/lib/cmake/Trilinos",
-                "CMAKE_CXX_COMPILER": "clang++",
-                "CMAKE_C_COMPILER": "clang"
-            }
-        },
-        {
-            "name": "GCC-ninja-multi",
-            "displayName": "GCC with pre-built Trilinos and OpenMPI",
-            "description": "Local multi-config build using the shared Trilinos and OpenMPI settings",
-            "inherits": "LLVM-ninja-multi",
-            "binaryDir": "${sourceDir}/build-gcc",
-            "cacheVariables": {
                 "CMAKE_CXX_COMPILER": "g++",
                 "CMAKE_C_COMPILER": "gcc"
             }
         },
         {
+            "name": "LLVM-ninja-multi",
+            "displayName": "LLVM with pre-built Trilinos and OpenMPI",
+            "description": "Multi config build with Trilinos (Tpetra, STK, Kokkos, Teuchos) and OpenMPI",
+            "generator": "Ninja Multi-Config",
+            "binaryDir": "${sourceDir}/build/llvm",
+            "inherits": "GCC-ninja-multi",
+            "cacheVariables": {
+                "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-libcxx/lib/cmake/Trilinos",
+                "GTest_ROOT": "$env{HOME}/local/toolchains/gtest-clang-libc++",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_FLAGS": "-stdlib=libc++"
+            }
+        },
+        {
             "name": "GCC-PGO-Release-Generate",
             "inherits": "GCC-ninja-multi",
-            "binaryDir": "${sourceDir}/build-gcc-pgo-release-generate",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/generate",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "GENERATE",
                 "SIMPLEFLUID_PGO_CONFIG": "Release",
-                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/gcc-release"
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/gcc/pgo/profile/release"
             }
         },
         {
             "name": "GCC-PGO-Release-Use",
             "inherits": "GCC-PGO-Release-Generate",
-            "binaryDir": "${sourceDir}/build-gcc-pgo-release-use",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/use",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "USE"
             }
@@ -48,17 +51,17 @@
         {
             "name": "GCC-PGO-RelWithDebInfo-Generate",
             "inherits": "GCC-ninja-multi",
-            "binaryDir": "${sourceDir}/build-gcc-pgo-relwithdebinfo-generate",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/generate",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "GENERATE",
                 "SIMPLEFLUID_PGO_CONFIG": "RelWithDebInfo",
-                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/gcc-relwithdebinfo"
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/gcc/pgo/profile/relwithdebinfo"
             }
         },
         {
             "name": "GCC-PGO-RelWithDebInfo-Use",
             "inherits": "GCC-PGO-RelWithDebInfo-Generate",
-            "binaryDir": "${sourceDir}/build-gcc-pgo-relwithdebinfo-use",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/use",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "USE"
             }
@@ -66,17 +69,17 @@
         {
             "name": "LLVM-PGO-Release-Generate",
             "inherits": "LLVM-ninja-multi",
-            "binaryDir": "${sourceDir}/build-llvm-pgo-release-generate",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/generate",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "GENERATE",
                 "SIMPLEFLUID_PGO_CONFIG": "Release",
-                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/llvm-release"
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/llvm/pgo/profile/release"
             }
         },
         {
             "name": "LLVM-PGO-Release-Use",
             "inherits": "LLVM-PGO-Release-Generate",
-            "binaryDir": "${sourceDir}/build-llvm-pgo-release-use",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/use",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "USE"
             }
@@ -84,17 +87,17 @@
         {
             "name": "LLVM-PGO-RelWithDebInfo-Generate",
             "inherits": "LLVM-ninja-multi",
-            "binaryDir": "${sourceDir}/build-llvm-pgo-relwithdebinfo-generate",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/generate",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "GENERATE",
                 "SIMPLEFLUID_PGO_CONFIG": "RelWithDebInfo",
-                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build-pgo/llvm-relwithdebinfo"
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/llvm/pgo/profile/relwithdebinfo"
             }
         },
         {
             "name": "LLVM-PGO-RelWithDebInfo-Use",
             "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
-            "binaryDir": "${sourceDir}/build-llvm-pgo-relwithdebinfo-use",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/use",
             "cacheVariables": {
                 "SIMPLEFLUID_PGO_PHASE": "USE"
             }
