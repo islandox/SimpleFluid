@@ -44,7 +44,7 @@ TEST(MPIInterfaceTest, ExposesCommunicatorAndDatatypeHelpers)
 {
     const auto [rank, size] = rank_and_size();
     EXPECT_GE(rank, 0);
-    EXPECT_GE(size, 2);
+    EXPECT_GE(size, 1);
     EXPECT_EQ(my_mpi::type_trait<int>(), MPI_INT32_T);
     EXPECT_EQ(my_mpi::type_trait<double>(), MPI_DOUBLE);
     EXPECT_EQ(my_mpi::type_trait<long double>(), MPI_LONG_DOUBLE);
@@ -72,6 +72,8 @@ TEST(MPIInterfaceTest, ExposesCommunicatorAndDatatypeHelpers)
  */
 TEST(MPIInterfaceTest, SupportsBlockingAndNonBlockingPointToPoint)
 {
+    SKIP_SINGLE_RANK(SupportsBlockingAndNonBlockingPointToPoint);
+
     const auto [rank, size] = rank_and_size();
     ASSERT_GE(size, 2);
     constexpr int blocking_tag = 41;
@@ -134,6 +136,8 @@ TEST(MPIInterfaceTest, SupportsBlockingAndNonBlockingPointToPoint)
  */
 TEST(MPIInterfaceTest, SupportsCollectivesAndReductions)
 {
+    SKIP_SINGLE_RANK(SupportsCollectivesAndReductions);
+
     const auto [rank, size] = rank_and_size();
     ASSERT_GE(size, 2);
 

@@ -36,6 +36,14 @@
 #include <variant>
 #include <vector>
 
+#if defined(__ELF__) && defined(_LIBCPP_VERSION)
+// Static Trilinos is linked into both SimpleFluidSolvers and its consumers.
+// libc++ requires its polymorphic template types to keep non-unique RTTI for
+// cross-image dynamic_cast, while SimpleFluid implementation symbols remain
+// hidden by the surrounding target visibility policy.
+#  pragma GCC visibility push(default)
+#endif
+
 #include <BelosBiCGStabSolMgr.hpp>
 #include <BelosLinearProblem.hpp>
 #include <BelosPseudoBlockCGSolMgr.hpp>
@@ -60,6 +68,11 @@
 #include <Tpetra_MultiVector.hpp>
 #include <Tpetra_Operator.hpp>
 #include <Tpetra_Vector.hpp>
+
+#if defined(__ELF__) && defined(_LIBCPP_VERSION)
+#  pragma GCC visibility pop
+#endif
+
 #include <stk_io/IossBridge.hpp>
 #include <stk_io/StkMeshIoBroker.hpp>
 #include <stk_mesh/base/BulkData.hpp>
