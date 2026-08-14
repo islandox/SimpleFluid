@@ -24,6 +24,15 @@ if(NOT DEFINED SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING
     message(FATAL_ERROR
         "SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING must be a non-negative integer")
 endif()
+if(NOT DEFINED SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING
+   OR NOT SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING must be a non-negative integer")
+endif()
+if(NOT DEFINED SIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES)
+    message(FATAL_ERROR
+        "SIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES must be defined")
+endif()
 
 execute_process(
     COMMAND "${SIMPLEFLUID_NM}" -D --defined-only -j
@@ -90,6 +99,37 @@ string(REPLACE "\n" ";"
 set(simplefluid_found_api FALSE)
 set(simplefluid_api_symbol_count 0)
 set(simplefluid_kokkos_bridge_symbol_count 0)
+set(simplefluid_required_teuchos_comm_bridge_symbols
+    "_ZTIN7Teuchos4CommIiEE"
+    "_ZTSN7Teuchos4CommIiEE"
+    "_ZTIN7Teuchos7MpiCommIiEE"
+    "_ZTSN7Teuchos7MpiCommIiEE"
+    "_ZTIN7Teuchos10SerialCommIiEE"
+    "_ZTSN7Teuchos10SerialCommIiEE"
+    "_ZTIN7Teuchos10CommStatusIiEE"
+    "_ZTSN7Teuchos10CommStatusIiEE"
+    "_ZTIN7Teuchos11CommRequestIiEE"
+    "_ZTSN7Teuchos11CommRequestIiEE"
+    "_ZTIN7Teuchos13MpiCommStatusIiEE"
+    "_ZTSN7Teuchos13MpiCommStatusIiEE"
+    "_ZTIN7Teuchos14MpiCommRequestIiEE"
+    "_ZTSN7Teuchos14MpiCommRequestIiEE"
+    "_ZTIN7Teuchos18MpiCommRequestBaseIiEE"
+    "_ZTSN7Teuchos18MpiCommRequestBaseIiEE")
+set(simplefluid_missing_teuchos_comm_bridge_symbols
+    ${simplefluid_required_teuchos_comm_bridge_symbols})
+set(simplefluid_tpetra_rtti_symbol_count 0)
+set(simplefluid_required_tpetra_rtti_patterns
+    "^_ZTIN6Tpetra13SrcDistObjectE$"
+    "^_ZTSN6Tpetra13SrcDistObjectE$"
+    "^_ZTIN6Tpetra10DistObjectIdix"
+    "^_ZTSN6Tpetra10DistObjectIdix"
+    "^_ZTIN6Tpetra11MultiVectorIdix"
+    "^_ZTSN6Tpetra11MultiVectorIdix"
+    "^_ZTIN6Tpetra6VectorIdix"
+    "^_ZTSN6Tpetra6VectorIdix")
+set(simplefluid_missing_tpetra_rtti_patterns
+    ${simplefluid_required_tpetra_rtti_patterns})
 set(simplefluid_symbols_to_demangle)
 set(simplefluid_unexpected_symbols)
 foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
@@ -121,8 +161,34 @@ foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
             list(APPEND simplefluid_unexpected_symbols
                  "${simplefluid_symbol} (wrong Kokkos runtime version)")
         endif()
+    elseif(simplefluid_unversioned_symbol IN_LIST
+           simplefluid_required_teuchos_comm_bridge_symbols)
+        list(REMOVE_ITEM simplefluid_missing_teuchos_comm_bridge_symbols
+             "${simplefluid_unversioned_symbol}")
+        if(NOT simplefluid_symbol MATCHES
+           "@@SIMPLEFLUID_TEUCHOS_COMM_RUNTIME_1[.]0$")
+            list(APPEND simplefluid_unexpected_symbols
+                 "${simplefluid_symbol} (wrong Teuchos Comm runtime version)")
+        endif()
+    elseif(simplefluid_unversioned_symbol MATCHES
+           "^_ZT[IS]N6Tpetra(13SrcDistObjectE$|10DistObject|11MultiVector|6Vector)")
+        math(EXPR simplefluid_tpetra_rtti_symbol_count
+             "${simplefluid_tpetra_rtti_symbol_count} + 1")
+        foreach(simplefluid_required_tpetra_rtti_pattern
+                IN LISTS simplefluid_missing_tpetra_rtti_patterns)
+            if(simplefluid_unversioned_symbol MATCHES
+               "${simplefluid_required_tpetra_rtti_pattern}")
+                list(REMOVE_ITEM simplefluid_missing_tpetra_rtti_patterns
+                     "${simplefluid_required_tpetra_rtti_pattern}")
+            endif()
+        endforeach()
+        if(NOT simplefluid_symbol MATCHES
+           "@@SIMPLEFLUID_TPETRA_RTTI_1[.]0$")
+            list(APPEND simplefluid_unexpected_symbols
+                 "${simplefluid_symbol} (wrong Tpetra RTTI version)")
+        endif()
     elseif(NOT simplefluid_unversioned_symbol MATCHES
-           "^SIMPLEFLUID_(1[.]0|KOKKOS_RUNTIME_1[.]0)$")
+           "^SIMPLEFLUID_(1[.]0|KOKKOS_RUNTIME_1[.]0|TEUCHOS_COMM_RUNTIME_1[.]0|TPETRA_RTTI_1[.]0)$")
         list(APPEND simplefluid_unexpected_symbols "${simplefluid_symbol}")
     endif()
 endforeach()
@@ -254,6 +320,22 @@ if(simplefluid_missing_kokkos_patterns)
         "${SIMPLEFLUID_LIBRARY} has an incomplete Kokkos runtime bridge:\n  "
         "${simplefluid_missing_kokkos_patterns}")
 endif()
+if(SIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES
+   AND simplefluid_missing_teuchos_comm_bridge_symbols)
+    list(JOIN simplefluid_missing_teuchos_comm_bridge_symbols "\n  "
+         simplefluid_missing_teuchos_comm_bridge_symbols)
+    message(FATAL_ERROR
+        "${SIMPLEFLUID_LIBRARY} has an incomplete Teuchos Comm RTTI bridge:\n  "
+        "${simplefluid_missing_teuchos_comm_bridge_symbols}")
+endif()
+if(SIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES
+   AND simplefluid_missing_tpetra_rtti_patterns)
+    list(JOIN simplefluid_missing_tpetra_rtti_patterns "\n  "
+         simplefluid_missing_tpetra_rtti_patterns)
+    message(FATAL_ERROR
+        "${SIMPLEFLUID_LIBRARY} has an incomplete Tpetra RTTI bridge:\n  "
+        "${simplefluid_missing_tpetra_rtti_patterns}")
+endif()
 if(simplefluid_forbidden_api_symbols)
     list(LENGTH simplefluid_forbidden_api_symbols
          simplefluid_forbidden_api_symbol_count)
@@ -280,6 +362,14 @@ if(simplefluid_kokkos_bridge_symbol_count GREATER
         "${simplefluid_kokkos_bridge_symbol_count} Kokkos runtime symbols; "
         "the validated static-Trilinos compatibility ceiling is "
         "${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}")
+endif()
+if(simplefluid_tpetra_rtti_symbol_count GREATER
+   SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING)
+    message(FATAL_ERROR
+        "${SIMPLEFLUID_LIBRARY} exports "
+        "${simplefluid_tpetra_rtti_symbol_count} Tpetra RTTI symbols; "
+        "the reviewed transfer-RTTI ceiling is "
+        "${SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING}")
 endif()
 if(simplefluid_unexpected_symbols)
     list(LENGTH simplefluid_unexpected_symbols

@@ -37,14 +37,6 @@ SimpleFluid::SP<MeshType> make_distributed_mesh()
         SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
 }
 
-void require_multiple_ranks(const MeshType& mesh)
-{
-    if (mesh.owned_cell_map()->getComm()->getSize() < 2)
-    {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-    }
-}
-
 SimpleFluid::MaterialPropertyFields<Pack> make_material(
     SimpleFluid::SP<const MeshType> mesh)
 {
@@ -58,8 +50,8 @@ SimpleFluid::MaterialPropertyFields<Pack> make_material(
 /** @brief Verifies a rank-local initializer failure is reduced before import. */
 TEST(BoussinesqModelMultiRankTest, RankLocalInitializerFailureThrowsCoherently)
 {
+    SKIP_SINGLE_RANK(RankLocalInitializerFailureThrowsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     ASSERT_GT(mesh->num_owned_cells(), 0U);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
@@ -81,8 +73,8 @@ TEST(BoussinesqModelMultiRankTest, RankLocalInitializerFailureThrowsCoherently)
 /** @brief Verifies a rank-local source callback failure is reduced before import. */
 TEST(BoussinesqModelMultiRankTest, RankLocalSourceCallbackFailureThrowsCoherently)
 {
+    SKIP_SINGLE_RANK(RankLocalSourceCallbackFailureThrowsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     ASSERT_GT(mesh->num_owned_cells(), 0U);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
@@ -110,8 +102,8 @@ TEST(BoussinesqModelMultiRankTest, RankLocalSourceCallbackFailureThrowsCoherentl
 /** @brief Verifies rank-local invalid source output is reduced before import. */
 TEST(BoussinesqModelMultiRankTest, RankLocalInvalidSourceOutputThrowsCoherently)
 {
+    SKIP_SINGLE_RANK(RankLocalInvalidSourceOutputThrowsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     ASSERT_GT(mesh->num_owned_cells(), 0U);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
@@ -138,8 +130,8 @@ TEST(BoussinesqModelMultiRankTest, RankLocalInvalidSourceOutputThrowsCoherently)
 /** @brief Verifies multiple dynamic source failures share one coherent batch. */
 TEST(BoussinesqModelMultiRankTest, RegistryBatchPropagatesRankLocalFailure)
 {
+    SKIP_SINGLE_RANK(RegistryBatchPropagatesRankLocalFailure);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     ASSERT_GT(mesh->num_owned_cells(), 0U);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
@@ -173,8 +165,8 @@ TEST(BoussinesqModelMultiRankTest, RegistryBatchPropagatesRankLocalFailure)
 /** @brief Verifies rank-varying activation fails before any source import. */
 TEST(BoussinesqModelMultiRankTest, RegistryRejectsRankVaryingActivation)
 {
+    SKIP_SINGLE_RANK(RegistryRejectsRankVaryingActivation);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
     auto& source = registry.add("heat");
@@ -195,8 +187,8 @@ TEST(BoussinesqModelMultiRankTest, RegistryRejectsRankVaryingActivation)
 TEST(BoussinesqModelMultiRankTest,
      RegistryRejectsRankVaryingEmptyStateCoherently)
 {
+    SKIP_SINGLE_RANK(RegistryRejectsRankVaryingEmptyStateCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
     registry.add("heat");
@@ -218,8 +210,8 @@ TEST(BoussinesqModelMultiRankTest,
 TEST(BoussinesqModelMultiRankTest,
      RegistryRejectsDifferentSourceCountsCoherently)
 {
+    SKIP_SINGLE_RANK(RegistryRejectsDifferentSourceCountsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
     registry.add("first");
@@ -243,8 +235,8 @@ TEST(BoussinesqModelMultiRankTest,
 TEST(BoussinesqModelMultiRankTest,
      RegistryRejectsDifferentSourceNamesCoherently)
 {
+    SKIP_SINGLE_RANK(RegistryRejectsDifferentSourceNamesCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
     registry.add("first");
@@ -263,8 +255,8 @@ TEST(BoussinesqModelMultiRankTest,
 /** @brief Verifies a rank-local material callback failure is reduced before imports. */
 TEST(BoussinesqModelMultiRankTest, RankLocalMaterialCallbackFailureThrowsCoherently)
 {
+    SKIP_SINGLE_RANK(RankLocalMaterialCallbackFailureThrowsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     ASSERT_GT(mesh->num_owned_cells(), 0U);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     auto material = make_material(mesh);
@@ -291,8 +283,8 @@ TEST(BoussinesqModelMultiRankTest, RankLocalMaterialCallbackFailureThrowsCoheren
 /** @brief Verifies rank-local invalid material output is reduced before imports. */
 TEST(BoussinesqModelMultiRankTest, RankLocalInvalidMaterialOutputThrowsCoherently)
 {
+    SKIP_SINGLE_RANK(RankLocalInvalidMaterialOutputThrowsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     ASSERT_GT(mesh->num_owned_cells(), 0U);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     auto material = make_material(mesh);

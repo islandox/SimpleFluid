@@ -18,6 +18,48 @@ SIMPLEFLUID_KOKKOS_RUNTIME_1.0 {
         kokkosp_*;
 };
 
+SIMPLEFLUID_TEUCHOS_COMM_RUNTIME_1.0 {
+    global:
+        /*
+         * Teuchos dispatches typed collectives with dynamic_cast.  Static
+         * libc++ Trilinos consumers therefore need the communicator RTTI in
+         * this DSO to resolve to the same non-unique definitions.
+         */
+        _ZTIN7Teuchos4CommIiEE;
+        _ZTSN7Teuchos4CommIiEE;
+        _ZTIN7Teuchos7MpiCommIiEE;
+        _ZTSN7Teuchos7MpiCommIiEE;
+        _ZTIN7Teuchos10SerialCommIiEE;
+        _ZTSN7Teuchos10SerialCommIiEE;
+        _ZTIN7Teuchos10CommStatusIiEE;
+        _ZTSN7Teuchos10CommStatusIiEE;
+        _ZTIN7Teuchos11CommRequestIiEE;
+        _ZTSN7Teuchos11CommRequestIiEE;
+        _ZTIN7Teuchos13MpiCommStatusIiEE;
+        _ZTSN7Teuchos13MpiCommStatusIiEE;
+        _ZTIN7Teuchos14MpiCommRequestIiEE;
+        _ZTSN7Teuchos14MpiCommRequestIiEE;
+        _ZTIN7Teuchos18MpiCommRequestBaseIiEE;
+        _ZTSN7Teuchos18MpiCommRequestBaseIiEE;
+} SIMPLEFLUID_KOKKOS_RUNTIME_1.0;
+
+SIMPLEFLUID_TPETRA_RTTI_1.0 {
+    global:
+        /*
+         * DistObject transfers downcast their source to the concrete
+         * MultiVector family.  Keep only that RTTI hierarchy shared across
+         * the static-Trilinos DSO boundary.
+         */
+        _ZTIN6Tpetra13SrcDistObjectE;
+        _ZTSN6Tpetra13SrcDistObjectE;
+        _ZTIN6Tpetra10DistObject*;
+        _ZTSN6Tpetra10DistObject*;
+        _ZTIN6Tpetra11MultiVector*;
+        _ZTSN6Tpetra11MultiVector*;
+        _ZTIN6Tpetra6Vector*;
+        _ZTSN6Tpetra6Vector*;
+} SIMPLEFLUID_TEUCHOS_COMM_RUNTIME_1.0;
+
 SIMPLEFLUID_1.0 {
     global:
         _ZN11SimpleFluid*;
@@ -30,4 +72,4 @@ SIMPLEFLUID_1.0 {
         _ZTTN11SimpleFluid*;
     local:
         *;
-} SIMPLEFLUID_KOKKOS_RUNTIME_1.0;
+} SIMPLEFLUID_TPETRA_RTTI_1.0;
