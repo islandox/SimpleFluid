@@ -52,14 +52,6 @@ SimpleFluid::MaterialPropertyFields<Pack> make_material(SimpleFluid::SP<const Me
     return {std::move(mesh), options, time_options};
 }
 
-void require_multiple_ranks(const MeshType& mesh)
-{
-    if (mesh.owned_cell_map()->getComm()->getSize() < 2)
-    {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-    }
-}
-
 template <class Field> void expect_positive_finite_and_uniform(const Field& field)
 {
     using scalar_type = typename Pack::scalar_type;
@@ -88,8 +80,8 @@ template <class Field> void expect_positive_finite_and_uniform(const Field& fiel
 /** @brief Verifies coherent model rollback after a rank-local material failure. */
 TEST(TurbulenceModelMultiRankTest, RankLocalMaterialFailureThrowsCoherentlyWithoutEnablingModel)
 {
+    SKIP_SINGLE_RANK(RankLocalMaterialFailureThrowsCoherentlyWithoutEnablingModel);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     auto material = make_material(mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     ASSERT_GT(mesh->num_owned_cells(), 0U);
@@ -109,8 +101,8 @@ TEST(TurbulenceModelMultiRankTest, RankLocalMaterialFailureThrowsCoherentlyWitho
 /** @brief Verifies global accepted-state preservation after a rank-local source failure. */
 TEST(TurbulenceModelMultiRankTest, RankLocalScalarSourceFailurePreservesAcceptedStateOnEveryRank)
 {
+    SKIP_SINGLE_RANK(RankLocalScalarSourceFailurePreservesAcceptedStateOnEveryRank);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     FieldType state(mesh, 1.0, "accepted_state");
     FieldType diffusivity(mesh, 0.1, "diffusivity");
@@ -131,8 +123,8 @@ TEST(TurbulenceModelMultiRankTest, RankLocalScalarSourceFailurePreservesAccepted
 /** @brief Verifies rejection of rank-inconsistent model selection before allocation. */
 TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentModelSelectionBeforeStateAllocation)
 {
+    SKIP_SINGLE_RANK(RejectsRankInconsistentModelSelectionBeforeStateAllocation);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     auto material = make_material(mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::BoundaryConditionSet boundaries;
@@ -148,8 +140,8 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentModelSelectionBeforeSt
 /** @brief Verifies rejection of rank-inconsistent wall treatment before allocation. */
 TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallTreatmentBeforeStateAllocation)
 {
+    SKIP_SINGLE_RANK(RejectsRankInconsistentWallTreatmentBeforeStateAllocation);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     auto material = make_material(mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::BoundaryConditionSet boundaries;
@@ -172,8 +164,8 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallTreatmentBeforeSta
 /** @brief Verifies rejection of rank-inconsistent wall constants before allocation. */
 TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallConstantsBeforeStateAllocation)
 {
+    SKIP_SINGLE_RANK(RejectsRankInconsistentWallConstantsBeforeStateAllocation);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     auto material = make_material(mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::BoundaryConditionSet boundaries;
@@ -195,8 +187,8 @@ TEST(TurbulenceModelMultiRankTest, RejectsRankInconsistentWallConstantsBeforeSta
 /** @brief Verifies coherent failure propagation after a rank-local database parse error. */
 TEST(TurbulenceModelMultiRankTest, RankLocalDatabaseParseFailureThrowsCoherently)
 {
+    SKIP_SINGLE_RANK(RankLocalDatabaseParseFailureThrowsCoherently);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     auto material = make_material(mesh);
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
     SimpleFluid::BoundaryConditionSet boundaries;
@@ -214,11 +206,11 @@ TEST(TurbulenceModelMultiRankTest, RankLocalDatabaseParseFailureThrowsCoherently
 /** @brief Verifies uniform distributed advances for standard k-epsilon and SST. */
 TEST(TurbulenceModelMultiRankTest, StandardKEpsilonAndSSTAdvanceUniformDistributedState)
 {
+    SKIP_SINGLE_RANK(StandardKEpsilonAndSSTAdvanceUniformDistributedState);
     for (const auto type : {SimpleFluid::TurbulenceModelType::StandardKEpsilon,
                             SimpleFluid::TurbulenceModelType::SSTKOmega})
     {
         auto mesh = make_distributed_mesh();
-        require_multiple_ranks(*mesh);
         auto material = make_material(mesh);
         SimpleFluid::BoundaryConditionSet boundaries;
         Model model(mesh, boundaries);
@@ -257,8 +249,8 @@ TEST(TurbulenceModelMultiRankTest, StandardKEpsilonAndSSTAdvanceUniformDistribut
  */
 TEST(TurbulenceModelMultiRankTest, WallDistanceReplacementSynchronizesOwnedInputBeforeValidation)
 {
+    SKIP_SINGLE_RANK(WallDistanceReplacementSynchronizesOwnedInputBeforeValidation);
     auto mesh = make_distributed_mesh();
-    require_multiple_ranks(*mesh);
     auto material = make_material(mesh);
     SimpleFluid::BoundaryConditionSet boundaries;
     Model model(mesh, boundaries);
@@ -305,6 +297,7 @@ TEST(TurbulenceModelMultiRankTest, WallDistanceReplacementSynchronizesOwnedInput
 TEST(TurbulenceModelMultiRankTest,
      WallTreatmentClosurePairingsAdvanceAcrossPartitionedWallBatches)
 {
+    SKIP_SINGLE_RANK(WallTreatmentClosurePairingsAdvanceAcrossPartitionedWallBatches);
     /** @brief Wall-treatment case and the closure used to exercise it. */
     struct WallCase
     {
@@ -324,7 +317,6 @@ TEST(TurbulenceModelMultiRankTest,
     for (const auto wall_case : cases)
     {
         auto mesh = make_distributed_mesh();
-        require_multiple_ranks(*mesh);
         auto material = make_material(mesh);
         SimpleFluid::BoundaryConditionSet boundaries;
         boundaries.velocity["xmin"] = {

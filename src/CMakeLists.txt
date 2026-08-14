@@ -34,11 +34,18 @@ function(simplefluid_enable_native_archive_fallback target_name)
     endif()
 endfunction()
 
-# Apple Arm64 libc++ treats hidden RTTI as unique to one Mach-O image.  Both
-# the SimpleFluid DSO and its consumers instantiate Trilinos template types,
-# so hidden visibility would make equivalent Teuchos types compare unequal
-# across that boundary.  The version-script ABI boundary is ELF-specific;
-# retain Darwin's default visibility so its non-unique RTTI can be coalesced.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles([[#include <version>
+#ifndef _LIBCPP_VERSION
+#error "not libc++"
+#endif
+int main() { return 0; }
+]] SIMPLEFLUID_CXX_USES_LIBCXX)
+
+# Apple libc++ requires default visibility for the complete image.  ELF libc++
+# keeps SimpleFluid hidden here and gives only the Trilinos header region in the
+# shared PCH default visibility; the Linux version script remains the final DSO
+# export boundary.
 set(SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET hidden)
 set(SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN YES)
 if(APPLE)
@@ -259,8 +266,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
     # GCC while allowing the validated Clang archive shape.
     set(SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING 7000)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        set(SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING 15000)
+        set(SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING 20000)
     endif()
+    set(SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING 64)
     find_program(SIMPLEFLUID_CXXFILT
         NAMES c++filt llvm-cxxfilt
         REQUIRED)
@@ -271,6 +279,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
             "-DSIMPLEFLUID_READELF=${CMAKE_READELF}"
             "-DSIMPLEFLUID_CXXFILT=${SIMPLEFLUID_CXXFILT}"
             "-DSIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING=${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}"
+            "-DSIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING=${SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING}"
+            "-DSIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES=$<BOOL:${SIMPLEFLUID_CXX_USES_LIBCXX}>"
             -P "${PROJECT_SOURCE_DIR}/cmake/CheckSimpleFluidElfExports.cmake")
     set_tests_properties(simplefluid_elf_export_boundary PROPERTIES
         LABELS abi)

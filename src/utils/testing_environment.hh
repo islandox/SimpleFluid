@@ -27,6 +27,18 @@
     #define EXPECT_THROW_WHEN_DEBUG(statement, expected_exception) 
 #endif
 
+#define SKIP_SINGLE_RANK(testname)                                      \
+    {                                                                   \
+        int simplefluid_mpi_size = 0;                                   \
+        ASSERT_EQ(                                                      \
+            my_mpi::comm_size(simplefluid_mpi_size), MPI_SUCCESS);      \
+        if (simplefluid_mpi_size == 1)                                  \
+        {                                                               \
+            GTEST_SKIP() << "Test " << #testname                        \
+                         << " requires multiple MPI ranks.";            \
+        }                                                               \
+    }
+
 namespace utils_test
 {
 
