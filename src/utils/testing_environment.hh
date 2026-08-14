@@ -28,17 +28,16 @@
 #endif
 
 #define SKIP_SINGLE_RANK(testname)                                      \
-    do                                                                  \
     {                                                                   \
         int simplefluid_mpi_size = 0;                                   \
         ASSERT_EQ(                                                      \
             my_mpi::comm_size(simplefluid_mpi_size), MPI_SUCCESS);      \
         if (simplefluid_mpi_size == 1)                                  \
         {                                                               \
-            GTEST_SKIP() << "Test " << #testname                       \
+            GTEST_SKIP() << "Test " << #testname                        \
                          << " requires multiple MPI ranks.";            \
         }                                                               \
-    } while (false)
+    }
 
 namespace utils_test
 {
