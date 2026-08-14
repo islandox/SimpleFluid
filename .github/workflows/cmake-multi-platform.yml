@@ -25,9 +25,6 @@ jobs:
         build_type: [Release, Debug]
         compiler_id: [GCC, LLVM]
         include:
-#          - os: windows-latest
-#            c_compiler: cl
-#            cpp_compiler: cl
           - os: ubuntu-26.04
             compiler_id: GCC
             c_compiler: gcc
@@ -40,22 +37,7 @@ jobs:
             cpp_compiler: clang++
             fortran_compiler: flang
             cache_suffix: v5
-          - os: ubuntu-26.04
-            build_type: Debug
-            compiler_id: GCC
-            c_compiler: gcc
-            cpp_compiler: g++
-            fortran_compiler: gfortran
           - os: macos-26
-            build_type: Release
-            compiler_id: LLVM
-            c_compiler: clang
-            cpp_compiler: clang++
-            fortran_compiler: mpifort
-            cmake_platform_options: -DCMAKE_OSX_ARCHITECTURES=arm64
-            cache_suffix: v7
-          - os: macos-26
-            build_type: Debug
             compiler_id: LLVM
             c_compiler: clang
             cpp_compiler: clang++
