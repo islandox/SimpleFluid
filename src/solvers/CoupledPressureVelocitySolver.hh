@@ -12,7 +12,7 @@
 
 #include "SimpleFluidExport.hh"
 #include "FVM/BoundaryCache.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationForward.hh"
 #include "fields/CellField.hh"

@@ -16,7 +16,8 @@
 #include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/CellGradientScheme.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/FieldStoredCellOperators.hh"
+#include "FVM/details/OperatorDetails.hh"
 
 #include <algorithm>
 #include <array>
@@ -44,12 +45,13 @@ namespace SimpleFluid::FVM
  * concurrent evaluations provided their fields and callbacks are independent.
  *
  * @tparam Pack Tpetra type pack used by the mesh and fields.
+ * @tparam MeshType Runtime or statically dispatched mesh interface.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack, class MeshType = Mesh<Pack>>
 class CellGradientCache
 {
 public:
-    using mesh_type = Mesh<Pack>;
+    using mesh_type = MeshType;
     using local_ordinal_type = typename mesh_type::local_ordinal_type;
     using vec_type = typename mesh_type::Vec3;
     using boundary_location_type =
@@ -1532,6 +1534,329 @@ cell_divergence_from_fluxes(
             / mesh.cell_volume(cell_lid);
     }
 
+    return divergence;
+}
+
+/**
+ * @brief Reconstruct an interior least-squares gradient in mesh-aware stored
+ *        fields.
+ *
+ * This overload covers `MeshHandle` fields backed by orthogonal or
+ * semi-structured meshes as well as statically typed partitioned meshes.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    VectorCellFieldStored<Pack, MeshType>& gradients)
+{
+    detail::stored_scalar_cell_gradient(field, gradients);
+}
+
+/** @brief Reconstruct a stored scalar gradient from cached mesh geometry. */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    VectorCellFieldStored<Pack, MeshType>& gradients,
+    const CellGradientCache<Pack, MeshType>& cache)
+{
+    detail::stored_cached_scalar_cell_gradient(
+        field, gradients, cache);
+}
+
+/** @brief Reconstruct a boundary-aware stored scalar gradient. */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellFieldStored<Pack, MeshType>& gradients)
+{
+    auto boundary_condition = [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        return static_cast<typename Pack::scalar_type>(
+            boundary_condition(batch_id, in_batch_id).value);
+    };
+    detail::stored_scalar_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/** @brief Reconstruct a cached boundary-aware stored scalar gradient. */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellFieldStored<Pack, MeshType>& gradients,
+    const CellGradientCache<Pack, MeshType>& cache)
+{
+    auto boundary_condition = [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        return static_cast<typename Pack::scalar_type>(
+            boundary_condition(batch_id, in_batch_id).value);
+    };
+    detail::stored_cached_scalar_cell_gradient(
+        field, boundary_condition, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct a stored scalar gradient from dynamic boundary data. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+    requires requires(BoundaryConditionProvider condition,
+                      BoundaryValueProvider value,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { condition(batch_id, in_batch_id) }
+            -> std::convertible_to<BoundaryCondition>;
+        { value(batch_id, in_batch_id) }
+            -> std::convertible_to<typename Pack::scalar_type>;
+    }
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value,
+    VectorCellFieldStored<Pack, MeshType>& gradients)
+{
+    detail::stored_scalar_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/** @brief Reconstruct a cached stored scalar gradient from boundary data. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+    requires requires(BoundaryConditionProvider condition,
+                      BoundaryValueProvider value,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { condition(batch_id, in_batch_id) }
+            -> std::convertible_to<BoundaryCondition>;
+        { value(batch_id, in_batch_id) }
+            -> std::convertible_to<typename Pack::scalar_type>;
+    }
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value,
+    VectorCellFieldStored<Pack, MeshType>& gradients,
+    const CellGradientCache<Pack, MeshType>& cache)
+{
+    detail::stored_cached_scalar_cell_gradient(
+        field, boundary_condition, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct component gradients into a stored tensor field. */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const VectorCellFieldStored<Pack, MeshType>& field,
+    TensorCellFieldStored<Pack, MeshType>& gradients)
+{
+    detail::stored_vector_cell_gradient(field, gradients);
+}
+
+/** @brief Reconstruct cached component gradients into tensor storage. */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const VectorCellFieldStored<Pack, MeshType>& field,
+    TensorCellFieldStored<Pack, MeshType>& gradients,
+    const CellGradientCache<Pack, MeshType>& cache)
+{
+    detail::stored_cached_vector_cell_gradient(
+        field, gradients, cache);
+}
+
+/** @brief Reconstruct boundary-aware vector gradients into tensor storage. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryValueProvider>
+    requires requires(BoundaryValueProvider provider,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { provider(batch_id, in_batch_id) }
+            -> std::convertible_to<
+                typename VectorCellFieldStored<Pack, MeshType>::value_type>;
+    }
+void cell_gradient(
+    const VectorCellFieldStored<Pack, MeshType>& field,
+    BoundaryValueProvider boundary_value,
+    TensorCellFieldStored<Pack, MeshType>& gradients)
+{
+    detail::stored_vector_cell_gradient(
+        field, boundary_value, gradients);
+}
+
+/** @brief Reconstruct cached boundary-aware vector gradients. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryValueProvider>
+    requires requires(BoundaryValueProvider provider,
+                      int batch_id,
+                      size_t in_batch_id)
+    {
+        { provider(batch_id, in_batch_id) }
+            -> std::convertible_to<
+                typename VectorCellFieldStored<Pack, MeshType>::value_type>;
+    }
+void cell_gradient(
+    const VectorCellFieldStored<Pack, MeshType>& field,
+    BoundaryValueProvider boundary_value,
+    TensorCellFieldStored<Pack, MeshType>& gradients,
+    const CellGradientCache<Pack, MeshType>& cache)
+{
+    detail::stored_cached_vector_cell_gradient(
+        field, boundary_value, gradients, cache);
+}
+
+/** @brief Compute a Gauss-linear stored scalar gradient. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider,
+         class BoundaryValueProvider>
+void gauss_linear_cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    BoundaryConditionProvider boundary_condition,
+    BoundaryValueProvider boundary_value,
+    VectorCellFieldStored<Pack, MeshType>& gradients)
+{
+    detail::stored_gauss_linear_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/** @brief Compute a Gauss-linear stored scalar gradient from a boundary map. */
+template<TpetraTypePack Pack, class MeshType>
+void gauss_linear_cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellFieldStored<Pack, MeshType>& gradients)
+{
+    auto boundary_condition = [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end()
+             ? BoundaryCondition{}
+             : iter->second;
+    };
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        return static_cast<typename Pack::scalar_type>(
+            boundary_condition(batch_id, in_batch_id).value);
+    };
+    detail::stored_gauss_linear_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/** @brief Compute a zero-normal-boundary Gauss-linear scalar gradient. */
+template<TpetraTypePack Pack, class MeshType>
+void gauss_linear_cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    VectorCellFieldStored<Pack, MeshType>& gradients)
+{
+    auto boundary_condition = [](int, size_t)
+    {
+        return BoundaryCondition{};
+    };
+    auto boundary_value = [](int, size_t)
+    {
+        return typename Pack::scalar_type{};
+    };
+    detail::stored_gauss_linear_cell_gradient(
+        field, boundary_condition, boundary_value, gradients);
+}
+
+/** @brief Compute a Gauss-linear stored vector gradient. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryValueProvider>
+void gauss_linear_cell_gradient(
+    const VectorCellFieldStored<Pack, MeshType>& field,
+    BoundaryValueProvider boundary_value,
+    TensorCellFieldStored<Pack, MeshType>& gradients)
+{
+    detail::stored_gauss_linear_cell_gradient(
+        field, boundary_value, gradients);
+}
+
+/** @brief Select the stored scalar gradient reconstruction scheme. */
+template<TpetraTypePack Pack, class MeshType>
+void cell_gradient(
+    const ScalarCellFieldStored<Pack, MeshType>& field,
+    const BoundaryConditionMap& boundary_conditions,
+    VectorCellFieldStored<Pack, MeshType>& gradients,
+    const CellGradientCache<Pack, MeshType>& cache,
+    CellGradientScheme scheme)
+{
+    if (scheme == CellGradientScheme::GaussLinear)
+    {
+        gauss_linear_cell_gradient(
+            field, boundary_conditions, gradients);
+        return;
+    }
+    cell_gradient(
+        field, boundary_conditions, gradients, cache);
+}
+
+/** @brief Compute one stored face field's net flux around a cell. */
+template<TpetraTypePack Pack, class MeshType>
+auto cell_flux_balance(
+    const MeshType& mesh,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
+    typename Pack::local_ordinal_type cell_lid)
+    -> typename Pack::scalar_type
+{
+    if (&mesh != &face_fluxes.mesh())
+    {
+        throw std::invalid_argument(
+            "cell_flux_balance requires the face field mesh.");
+    }
+    return detail::stored_cell_flux_balance(
+        mesh, face_fluxes, cell_lid);
+}
+
+/** @brief Compute volume-normalized divergence from stored face fluxes. */
+template<TpetraTypePack Pack, class MeshType>
+std::vector<typename Pack::scalar_type>
+cell_divergence_from_fluxes(
+    const MeshType& mesh,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    if (&mesh != &face_fluxes.mesh())
+    {
+        throw std::invalid_argument(
+            "cell_divergence_from_fluxes requires the face field mesh.");
+    }
+    std::vector<scalar_type> divergence(mesh.num_owned_cells());
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto cell_id = detail::query_cell_id(mesh, cell_lid);
+        divergence[owned] = detail::stored_cell_flux_balance(
+                                mesh, face_fluxes, cell_lid)
+                          / static_cast<scalar_type>(
+                                mesh.cell_volume(cell_id));
+    }
     return divergence;
 }
 

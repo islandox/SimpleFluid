@@ -11,7 +11,7 @@
 
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
 
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/turbulence/TurbulenceCollectiveValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>

@@ -12,15 +12,19 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/MatrixOperatorsImpl.hh"
 #include "fields/FaceField.hh"
+#include "fields/FieldStored.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <concepts>
 #include <cstddef>
 #include <optional>
+#include <type_traits>
+#include <utility>
 
 namespace SimpleFluid::FVM
 {
@@ -68,48 +72,7 @@ template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type>
 diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
 {
-    using matrix_type = typename Pack::matrix_type;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-
-    auto matrix = Teuchos::rcp(
-        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(32);
-    vals.reserve(32);
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-
-        cols.clear();
-        vals.clear();
-        scalar_type diagonal = 0.0;
-
-        for (const auto face_lid : mesh.faces(cell_lid))
-        {
-            if (!mesh.is_interior_face(face_lid))
-            {
-                continue;
-            }
-
-            const auto other =
-                mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-            const auto coeff =
-                detail::interior_diffusion_coefficient(
-                    mesh, face_lid, cell_lid, other, diffusivity);
-            diagonal += coeff;
-            cols.push_back(other);
-            vals.push_back(-coeff);
-        }
-
-        cols.push_back(cell_lid);
-        vals.push_back(diagonal);
-        matrix->insertLocalValues(cell_lid, cols(), vals());
-    }
-
-    matrix->fillComplete();
-    return matrix;
+    return detail::diffusion_matrix_impl<Pack>(mesh, diffusivity);
 }
 
 /**
@@ -128,52 +91,16 @@ upwind_convection_matrix(
     const Mesh<Pack>& mesh,
     const FaceField<Pack>& face_fluxes)
 {
-    using matrix_type = typename Pack::matrix_type;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-
-    auto matrix = Teuchos::rcp(
-        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(32);
-    vals.reserve(32);
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-
-        cols.clear();
-        vals.clear();
-        scalar_type diagonal = 0.0;
-
-        for (const auto face_lid : mesh.faces(cell_lid))
+    return detail::upwind_convection_matrix_impl<Pack>(
+        mesh,
+        [&](typename Pack::local_ordinal_type face_lid)
         {
-            const auto owner_oriented_flux =
-                face_fluxes.is_owned_face(face_lid) ? face_fluxes.value(face_lid) : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid
-                                ? owner_oriented_flux
-                                : -owner_oriented_flux;
-
-            if (out_flux >= 0.0)
-            {
-                diagonal += out_flux;
-            }
-            else if (mesh.is_interior_face(face_lid))
-            {
-                const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                cols.push_back(other);
-                vals.push_back(out_flux);
-            }
-        }
-
-        cols.push_back(cell_lid);
-        vals.push_back(diagonal);
-        matrix->insertLocalValues(cell_lid, cols(), vals());
-    }
-
-    matrix->fillComplete();
-    return matrix;
+            return face_fluxes.is_owned_face(face_lid);
+        },
+        [&](typename Pack::local_ordinal_type face_lid)
+        {
+            return face_fluxes.value(face_lid);
+        });
 }
 
 /**
@@ -202,88 +129,8 @@ pressure_poisson_matrix(
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
     BoundaryConditionProvider boundary_condition)
 {
-    using matrix_type = typename Pack::matrix_type;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-
-    auto matrix = Teuchos::rcp(
-        new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(32);
-    vals.reserve(32);
-    const auto boundary_locations =
-        detail::boundary_face_locations(mesh);
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto row_gid =
-            mesh.owned_cell_map()->getGlobalElement(cell_lid);
-
-        cols.clear();
-        vals.clear();
-
-        if (gauge_cell_gid && row_gid == *gauge_cell_gid)
-        {
-            cols.push_back(cell_lid);
-            vals.push_back(1.0);
-            matrix->insertLocalValues(cell_lid, cols(), vals());
-            continue;
-        }
-
-        scalar_type diagonal = 0.0;
-        for (const auto face_lid : mesh.faces(cell_lid))
-        {
-            if (mesh.is_interior_face(face_lid))
-            {
-                const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(
-                        face_lid, cell_lid);
-                const auto coeff =
-                    detail::interior_diffusion_coefficient(
-                        mesh, face_lid, cell_lid, other, scalar_type{1});
-                diagonal += coeff;
-                cols.push_back(other);
-                vals.push_back(-coeff);
-                continue;
-            }
-
-            if (!mesh.is_boundary_face(face_lid)
-                || static_cast<size_t>(face_lid)
-                   >= boundary_locations.size())
-            {
-                continue;
-            }
-            const auto location =
-                boundary_locations[static_cast<size_t>(face_lid)];
-            if (!location.active)
-            {
-                continue;
-            }
-            const auto condition =
-                boundary_condition(
-                    location.batch_id, location.in_batch_id);
-            if (condition.type == BoundaryConditionType::Dirichlet)
-            {
-                diagonal +=
-                    detail::boundary_diffusion_coefficient(
-                        mesh, face_lid, cell_lid, scalar_type{1});
-            }
-            else if (condition.type != BoundaryConditionType::Neumann)
-            {
-                throw std::invalid_argument(
-                    "pressure_poisson_matrix supports only Dirichlet and "
-                    "Neumann pressure boundary conditions.");
-            }
-        }
-
-        cols.push_back(cell_lid);
-        vals.push_back(diagonal > 0.0 ? diagonal : 1.0);
-        matrix->insertLocalValues(cell_lid, cols(), vals());
-    }
-
-    matrix->fillComplete();
-    return matrix;
+    return detail::pressure_poisson_matrix_impl<Pack>(
+        mesh, gauge_cell_gid, std::move(boundary_condition));
 }
 
 /**
@@ -307,6 +154,83 @@ pressure_poisson_matrix(
     };
     return pressure_poisson_matrix<Pack>(
         mesh, gauge_cell_gid, homogeneous_neumann);
+}
+
+/**
+ * @brief Assemble diffusion on a mapped orthogonal/semi-structured mesh
+ *        interface.
+ *
+ * The explicit @p Pack parameter preserves the established call surface:
+ * `diffusion_matrix<Pack>(mesh, diffusivity)`.
+ */
+template<TpetraTypePack Pack, class MeshType>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+Teuchos::RCP<typename Pack::matrix_type>
+diffusion_matrix(
+    const MeshType& mesh,
+    typename Pack::scalar_type diffusivity)
+{
+    return detail::diffusion_matrix_impl<Pack>(mesh, diffusivity);
+}
+
+/** @brief Assemble upwind convection from a mesh-aware stored face field. */
+template<TpetraTypePack Pack, class MeshType>
+Teuchos::RCP<typename Pack::matrix_type>
+upwind_convection_matrix(
+    const MeshType& mesh,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes)
+{
+    if (&mesh != &face_fluxes.mesh())
+    {
+        throw std::invalid_argument(
+            "upwind_convection_matrix requires the face field mesh.");
+    }
+    return detail::upwind_convection_matrix_impl<Pack>(
+        mesh,
+        [&](typename Pack::local_ordinal_type face_lid)
+        {
+            return face_fluxes.is_owned(face_lid);
+        },
+        [&](typename Pack::local_ordinal_type face_lid)
+        {
+            return face_fluxes.value(face_lid);
+        });
+}
+
+/** @brief Assemble pressure Poisson on a mapped static/runtime mesh. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+Teuchos::RCP<typename Pack::matrix_type>
+pressure_poisson_matrix(
+    const MeshType& mesh,
+    std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
+    BoundaryConditionProvider boundary_condition)
+{
+    return detail::pressure_poisson_matrix_impl<Pack>(
+        mesh, gauge_cell_gid, std::move(boundary_condition));
+}
+
+/** @brief Assemble all-Neumann pressure Poisson on a mapped mesh. */
+template<TpetraTypePack Pack, class MeshType>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+Teuchos::RCP<typename Pack::matrix_type>
+pressure_poisson_matrix(
+    const MeshType& mesh,
+    typename Pack::global_ordinal_type gauge_cell_gid)
+{
+    auto homogeneous_neumann = [](int, size_t)
+    {
+        return BoundaryCondition{};
+    };
+    return detail::pressure_poisson_matrix_impl<Pack>(
+        mesh,
+        std::optional<typename Pack::global_ordinal_type>{gauge_cell_gid},
+        homogeneous_neumann);
 }
 
 } // namespace SimpleFluid::FVM

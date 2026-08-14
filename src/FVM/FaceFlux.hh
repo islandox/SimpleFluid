@@ -16,10 +16,14 @@
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 #include "FVM/CellOperators.hh"
+#include "FVM/details/FieldStoredFaceFlux.hh"
 
+#include <algorithm>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -52,6 +56,27 @@ struct VelocityBoundaryCache
     /// Configured velocity types replicated by name on every rank.
     std::unordered_map<std::string, BoundaryConditionType> type_by_name;
     SP<const Mesh<Pack>> mesh;
+};
+
+/**
+ * @brief Boundary cache for mesh-aware stored velocity fields.
+ * @tparam Pack Tpetra type pack used by the fields.
+ * @tparam MeshType Runtime or statically dispatched mapped mesh.
+ */
+template<TpetraTypePack Pack, class MeshType>
+struct FieldStoredVelocityBoundaryCache
+{
+    using vec_type = vec3<typename Pack::scalar_type>;
+
+    explicit FieldStoredVelocityBoundaryCache(SP<const MeshType> mesh)
+        : mesh(std::move(mesh))
+    {
+    }
+
+    std::unordered_map<int, Arr<vec_type>> value;
+    std::unordered_map<int, BoundaryConditionType> type;
+    std::unordered_map<std::string, BoundaryConditionType> type_by_name;
+    SP<const MeshType> mesh;
 };
 
 /**
@@ -208,6 +233,73 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
         cache.type[batch_id] = boundary_type;
     }
 
+    return cache;
+}
+
+/** @brief Build a boundary cache for a mesh-aware stored velocity field. */
+template<TpetraTypePack Pack, class MeshType>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+FieldStoredVelocityBoundaryCache<Pack, MeshType>
+cache_velocity_boundary_conditions(
+    SP<const MeshType> mesh,
+    const BoundaryConditionSet& boundary_conditions)
+{
+    if (!mesh)
+    {
+        throw std::invalid_argument(
+            "cache_velocity_boundary_conditions requires a non-null mesh.");
+    }
+
+    FieldStoredVelocityBoundaryCache<Pack, MeshType> cache(mesh);
+    for (const auto& [name, condition] : boundary_conditions.velocity)
+    {
+        cache.type_by_name[name] = condition.type;
+    }
+
+    std::unordered_map<int, size_t> local_batch_sizes;
+    for (const auto& location : detail::boundary_face_locations(*mesh))
+    {
+        if (location.active)
+        {
+            auto& size = local_batch_sizes[location.batch_id];
+            size = std::max(size, location.in_batch_id + 1);
+        }
+    }
+
+    for (const auto& [batch_id, batch_size] : local_batch_sizes)
+    {
+        typename FieldStoredVelocityBoundaryCache<
+            Pack, MeshType>::vec_type prescribed_value{};
+        auto boundary_type = BoundaryConditionType::Neumann;
+        const auto iter = boundary_conditions.velocity.find(
+            mesh->boundary_batch_name(batch_id));
+        if (iter != boundary_conditions.velocity.end())
+        {
+            boundary_type = iter->second.type;
+            if (boundary_type == BoundaryConditionType::NoSlip)
+            {
+                prescribed_value = {};
+            }
+            else if (boundary_type == BoundaryConditionType::Dirichlet)
+            {
+                prescribed_value = iter->second.value;
+            }
+            else if (boundary_type == BoundaryConditionType::Neumann
+                     && (iter->second.value.x != 0.0
+                         || iter->second.value.y != 0.0
+                         || iter->second.value.z != 0.0))
+            {
+                throw std::invalid_argument(
+                    "Cache-based incompressible velocity transport supports "
+                    "homogeneous Neumann outlet conditions only.");
+            }
+        }
+        cache.value[batch_id] = Arr<typename
+            FieldStoredVelocityBoundaryCache<Pack, MeshType>::vec_type>(
+                batch_size, prescribed_value);
+        cache.type[batch_id] = boundary_type;
+    }
     return cache;
 }
 
@@ -655,6 +747,65 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
                         FaceField<Pack>& fluxes)
 {
     detail::assemble_normal_face_fluxes(
+        velocity, &boundary_cache, fluxes);
+}
+
+/**
+ * @brief Interpolate a mesh-aware stored cell velocity onto stored faces.
+ *
+ * The mesh may be a runtime `MeshHandle` over an orthogonal or
+ * semi-structured geometry, or a statically typed partitioned mesh.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void face_velocities(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    VectorFaceFieldStored<Pack, MeshType>& face_velocity)
+{
+    using cache_type = FieldStoredVelocityBoundaryCache<Pack, MeshType>;
+    detail::assemble_stored_face_velocities<
+        Pack, MeshType, cache_type>(
+            velocity, nullptr, face_velocity);
+}
+
+/** @brief Interpolate stored velocities using cached boundary values. */
+template<TpetraTypePack Pack, class MeshType>
+void face_velocities(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    VectorFaceFieldStored<Pack, MeshType>& face_velocity)
+{
+    detail::assemble_stored_face_velocities(
+        velocity, &boundary_cache, face_velocity);
+}
+
+/** @brief Project a stored face velocity onto owner-oriented face areas. */
+template<TpetraTypePack Pack, class MeshType>
+void normal_face_fluxes(
+    const VectorFaceFieldStored<Pack, MeshType>& face_velocity,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    detail::stored_normal_face_fluxes(face_velocity, fluxes);
+}
+
+/** @brief Assemble stored normal face fluxes without boundary treatment. */
+template<TpetraTypePack Pack, class MeshType>
+void face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    using cache_type = FieldStoredVelocityBoundaryCache<Pack, MeshType>;
+    detail::assemble_stored_normal_face_fluxes<
+        Pack, MeshType, cache_type>(velocity, nullptr, fluxes);
+}
+
+/** @brief Assemble stored normal face fluxes with cached boundary values. */
+template<TpetraTypePack Pack, class MeshType>
+void face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    detail::assemble_stored_normal_face_fluxes(
         velocity, &boundary_cache, fluxes);
 }
 

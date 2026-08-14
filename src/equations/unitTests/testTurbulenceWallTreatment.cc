@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"

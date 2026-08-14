@@ -14,7 +14,7 @@
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
 #include "solvers/BelosLinearSolver.hh"
 

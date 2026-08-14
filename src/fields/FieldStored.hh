@@ -17,6 +17,7 @@
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Tpetra_CombineMode.hpp>
 
+#include <array>
 #include <concepts>
 #include <cstddef>
 #include <stdexcept>
@@ -40,6 +41,11 @@ struct StoredFieldValueTraits
     static constexpr bool is_vector = false;
     static constexpr size_t components = 1;
     using scalar_type = Value;
+
+    static scalar_type component(const Value& value, size_t)
+    {
+        return value;
+    }
 };
 
 /**
@@ -53,6 +59,27 @@ struct StoredFieldValueTraits<vec3<Scalar>>
     static constexpr bool is_vector = true;
     static constexpr size_t components = 3;
     using scalar_type = Scalar;
+
+    static scalar_type component(const vec3<Scalar>& value, size_t index)
+    {
+        return value.component(index);
+    }
+};
+
+/** @brief Maps a row-major 3x3 tensor to nine MultiVector columns. */
+template<class Scalar>
+struct StoredFieldValueTraits<std::array<vec3<Scalar>, 3>>
+{
+    static constexpr bool is_vector = true;
+    static constexpr size_t components = 9;
+    using scalar_type = Scalar;
+
+    static scalar_type component(
+        const std::array<vec3<Scalar>, 3>& value,
+        size_t index)
+    {
+        return value[index / 3].component(index % 3);
+    }
 };
 
 template<class Location>
@@ -191,9 +218,9 @@ public:
                  ++component)
             {
                 d_owned.getVectorNonConst(component)->putScalar(
-                    value.component(component));
+                    value_traits::component(value, component));
                 d_overlap.getVectorNonConst(component)->putScalar(
-                    value.component(component));
+                    value_traits::component(value, component));
             }
         }
         else
@@ -655,7 +682,19 @@ private:
         const storage_type& storage,
         local_ordinal_type row)
     {
-        if constexpr (value_traits::is_vector)
+        if constexpr (value_traits::components == 9)
+        {
+            value_type value{};
+            for (size_t component = 0;
+                 component < value_traits::components;
+                 ++component)
+            {
+                value[component / 3].component(component % 3) =
+                    storage.getData(component)[row];
+            }
+            return value;
+        }
+        else if constexpr (value_traits::is_vector)
         {
             return {
                 storage.getData(0)[row],
@@ -679,7 +718,8 @@ private:
                  ++component)
             {
                 storage.replaceLocalValue(
-                    row, component, value.component(component));
+                    row, component,
+                    value_traits::component(value, component));
             }
         }
         else
@@ -707,6 +747,11 @@ using VectorCellFieldStored =
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
          class MeshType = MeshHandle<Pack>>
+using TensorCellFieldStored =
+    FieldStored<TensorCellFieldDescriptor<Pack>, Pack, MeshType>;
+
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = MeshHandle<Pack>>
 using ScalarFaceFieldStored =
     FieldStored<ScalarFaceFieldDescriptor<Pack>, Pack, MeshType>;
 
@@ -730,6 +775,7 @@ template<TpetraTypePack Pack = DefaultTpetraTypes,
 using AnyFieldStored = std::variant<
     SP<ScalarCellFieldStored<Pack, MeshType>>,
     SP<VectorCellFieldStored<Pack, MeshType>>,
+    SP<TensorCellFieldStored<Pack, MeshType>>,
     SP<ScalarFaceFieldStored<Pack, MeshType>>,
     SP<VectorFaceFieldStored<Pack, MeshType>>,
     SP<ScalarBoundaryFaceFieldStored<Pack, MeshType>>,

@@ -56,6 +56,7 @@ public:
     using partitioned_mesh_base_tag = void;
     using mesh_type = GeometryMesh;
     using tpetra_type_pack = Pack;
+    using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using map_type = typename Pack::map_type;
@@ -73,6 +74,8 @@ public:
         int id = -1;
         std::vector<local_ordinal_type> face_lids;
     };
+
+    static constexpr int invalid_boundary_id = -1;
 
     /**
      * @brief Couple rank-local geometry with global indexing and maps.
