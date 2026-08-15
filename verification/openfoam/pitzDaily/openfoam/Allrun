@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+case "${1:-6}" in
+    ''|*[!0-9]*) echo "MPI rank count must be an integer from 1 to 6" >&2; exit 2 ;;
+esac
+np="${1:-6}"
+if [ "$np" -lt 1 ] || [ "$np" -gt 6 ]; then
+    echo "MPI rank count must be from 1 to 6" >&2
+    exit 2
+fi
+
+for command_name in blockMesh checkMesh simpleFoam postProcess; do
+    command -v "$command_name" >/dev/null 2>&1 || {
+        echo "OpenFOAM is not loaded; source its etc/bashrc first." >&2
+        exit 1
+    }
+done
+
+cd "$(dirname "$0")"
+./Allclean
+foamDictionary system/decomposeParDict \
+    -entry numberOfSubdomains -set "$np"
+blockMesh > log.blockMesh 2>&1
+checkMesh > log.checkMesh 2>&1
+
+if [ "$np" -eq 1 ]; then
+    simpleFoam > log.solver 2>&1
+else
+    decomposePar -force > log.decomposePar 2>&1
+    mpirun -np "$np" simpleFoam -parallel > log.solver 2>&1
+    reconstructPar -latestTime > log.reconstructPar 2>&1
+fi
+postProcess -latestTime -fields '(U p k)' > log.postProcess 2>&1

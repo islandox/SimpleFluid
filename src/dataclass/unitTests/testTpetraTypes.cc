@@ -1,0 +1,54 @@
+/**
+ * @file testTpetraTypes.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Compile-time and smoke tests for Tpetra type packs.
+ * @version 0.1
+ * @date 2026-06-03
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
+#include <gtest/gtest.h>
+
+#include "dataclass/TpetraTypes.hh"
+
+#include <type_traits>
+
+namespace
+{
+
+static_assert(SimpleFluid::TpetraTypePack<SimpleFluid::DefaultTpetraTypes>);
+static_assert(SimpleFluid::TpetraTypePack<SimpleFluid::TpetraTypes<float, int, long>>);
+
+/** @brief Confirms the default Trilinos aliases satisfy `TpetraTypePack`. */
+TEST(TpetraTypesTest, DefaultTypePackSatisfiesConcept)
+{
+    EXPECT_TRUE(SimpleFluid::TpetraTypePack<SimpleFluid::DefaultTpetraTypes>);
+}
+
+/** @brief Checks snake-case public aliases match their canonical Tpetra types. */
+TEST(TpetraTypesTest, PublicAliasesMatchCamelCaseTypes)
+{
+    using Pack = SimpleFluid::DefaultTpetraTypes;
+
+    EXPECT_TRUE((std::is_same_v<typename Pack::map_type, typename Pack::Map>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::graph_type, typename Pack::Graph>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::matrix_type, typename Pack::Matrix>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::vector_type, typename Pack::Vector>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::multi_vector_type,
+                                typename Pack::MultiVector>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::import_type, typename Pack::Import>));
+}
+
+/** @brief Verifies custom scalar and ordinal types propagate through the pack. */
+TEST(TpetraTypesTest, CustomScalarAndOrdinalsPropagate)
+{
+    using Pack = SimpleFluid::TpetraTypes<float, int, long>;
+
+    EXPECT_TRUE((std::is_same_v<typename Pack::scalar_type, float>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::local_ordinal_type, int>));
+    EXPECT_TRUE((std::is_same_v<typename Pack::global_ordinal_type, long>));
+}
+
+} // namespace

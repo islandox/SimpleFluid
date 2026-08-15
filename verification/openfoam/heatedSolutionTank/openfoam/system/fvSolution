@@ -1,0 +1,43 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvSolution;
+}
+solvers
+{
+    "p_rgh.*"
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-9;
+        relTol          0;
+        maxIter         2000;
+    }
+    "(U|T).*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-9;
+        relTol          0;
+        maxIter         2000;
+    }
+    "(k|omega).*"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-9;
+        relTol          0;
+        maxIter         2000;
+    }
+}
+
+PIMPLE
+{
+    momentumPredictor          yes;
+    nOuterCorrectors           1;
+    nCorrectors                2;
+    nNonOrthogonalCorrectors   0;
+    pRefCell                   0;
+    pRefValue                  0;
+}

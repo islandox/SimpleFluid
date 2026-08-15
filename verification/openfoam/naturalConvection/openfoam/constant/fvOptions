@@ -1,0 +1,15 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvOptions;
+}
+
+buoyancyTurbulence
+{
+    type            buoyancyTurbSource;
+    selectionMode   all;
+    beta            0.00344827586207;
+    alphat          alphat;
+    T               T;
+}

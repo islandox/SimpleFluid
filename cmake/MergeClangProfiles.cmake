@@ -1,0 +1,18 @@
+if(NOT DEFINED SIMPLEFLUID_LLVM_PROFDATA
+   OR NOT DEFINED SIMPLEFLUID_PGO_DIR
+   OR NOT DEFINED SIMPLEFLUID_PGO_OUTPUT)
+    message(FATAL_ERROR "Clang PGO merge arguments are incomplete")
+endif()
+
+file(GLOB SIMPLEFLUID_RAW_PROFILES
+    "${SIMPLEFLUID_PGO_DIR}/*.profraw")
+if(NOT SIMPLEFLUID_RAW_PROFILES)
+    message(FATAL_ERROR
+        "No Clang .profraw files found in ${SIMPLEFLUID_PGO_DIR}")
+endif()
+
+execute_process(
+    COMMAND "${SIMPLEFLUID_LLVM_PROFDATA}" merge
+            -o "${SIMPLEFLUID_PGO_OUTPUT}"
+            ${SIMPLEFLUID_RAW_PROFILES}
+    COMMAND_ERROR_IS_FATAL ANY)

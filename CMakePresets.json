@@ -1,0 +1,238 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "GCC-ninja-multi",
+            "displayName": "GCC with pre-built Trilinos and OpenMPI",
+            "description": "Local multi-config build using the shared Trilinos and OpenMPI settings",
+            "binaryDir": "${sourceDir}/build/gcc",
+            "cacheVariables": {
+                "CMAKE_CXX_STANDARD": "23",
+                "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+                "CMAKE_CXX_EXTENSIONS": "OFF",
+                "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-pic/lib/cmake/Trilinos",
+                "CMAKE_CXX_COMPILER": "g++",
+                "CMAKE_C_COMPILER": "gcc"
+            }
+        },
+        {
+            "name": "LLVM-ninja-multi",
+            "displayName": "LLVM with pre-built Trilinos and OpenMPI",
+            "description": "Multi config build with Trilinos (Tpetra, STK, Kokkos, Teuchos) and OpenMPI",
+            "generator": "Ninja Multi-Config",
+            "binaryDir": "${sourceDir}/build/llvm",
+            "inherits": "GCC-ninja-multi",
+            "cacheVariables": {
+                "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-libcxx/lib/cmake/Trilinos",
+                "GTest_ROOT": "$env{HOME}/local/toolchains/gtest-clang-libc++",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_FLAGS": "-stdlib=libc++"
+            }
+        },
+        {
+            "name": "GCC-PGO-Release-Generate",
+            "inherits": "GCC-ninja-multi",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "Release",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/gcc/pgo/profile/release"
+            }
+        },
+        {
+            "name": "GCC-PGO-Release-Use",
+            "inherits": "GCC-PGO-Release-Generate",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Generate",
+            "inherits": "GCC-ninja-multi",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "RelWithDebInfo",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/gcc/pgo/profile/relwithdebinfo"
+            }
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Use",
+            "inherits": "GCC-PGO-RelWithDebInfo-Generate",
+            "binaryDir": "${sourceDir}/build/gcc/pgo/use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        },
+        {
+            "name": "LLVM-PGO-Release-Generate",
+            "inherits": "LLVM-ninja-multi",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "Release",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/llvm/pgo/profile/release"
+            }
+        },
+        {
+            "name": "LLVM-PGO-Release-Use",
+            "inherits": "LLVM-PGO-Release-Generate",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Generate",
+            "inherits": "LLVM-ninja-multi",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/generate",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "GENERATE",
+                "SIMPLEFLUID_PGO_CONFIG": "RelWithDebInfo",
+                "SIMPLEFLUID_PGO_DIR": "${sourceDir}/build/llvm/pgo/profile/relwithdebinfo"
+            }
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Use",
+            "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
+            "binaryDir": "${sourceDir}/build/llvm/pgo/use",
+            "cacheVariables": {
+                "SIMPLEFLUID_PGO_PHASE": "USE"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "GCC-Debug",
+            "configurePreset": "GCC-ninja-multi",
+            "configuration": "Debug",
+            "jobs": 8
+        },
+        {
+            "name": "GCC-Release",
+            "configurePreset": "GCC-ninja-multi",
+            "configuration": "Release",
+            "jobs": 8
+        },
+        {
+            "name": "GCC-RelWithDebInfo",
+            "configurePreset": "GCC-ninja-multi",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8
+        },
+        {
+            "name": "LLVM-Debug",
+            "configurePreset": "LLVM-ninja-multi",
+            "configuration": "Debug",
+            "jobs": 8
+        },
+        {
+            "name": "LLVM-Release",
+            "configurePreset": "LLVM-ninja-multi",
+            "configuration": "Release",
+            "jobs": 8
+        },
+        {
+            "name": "LLVM-RelWithDebInfo",
+            "configurePreset": "LLVM-ninja-multi",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8
+        },
+        {
+            "name": "LLVM-RelWithDebInfo-Static",
+            "configurePreset": "LLVM-ninja-multi",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8
+        },
+        {
+            "name": "GCC-PGO-Release-Generate",
+            "configurePreset": "GCC-PGO-Release-Generate",
+            "configuration": "Release",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "GCC-PGO-Release-Use",
+            "inherits": "GCC-PGO-Release-Generate",
+            "configurePreset": "GCC-PGO-Release-Use"
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "GCC-PGO-RelWithDebInfo-Generate",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "GCC-PGO-RelWithDebInfo-Use",
+            "inherits": "GCC-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "GCC-PGO-RelWithDebInfo-Use"
+        },
+        {
+            "name": "LLVM-PGO-Release-Generate",
+            "configurePreset": "LLVM-PGO-Release-Generate",
+            "configuration": "Release",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-Release-Merge",
+            "inherits": "LLVM-PGO-Release-Generate",
+            "targets": [
+                "simplefluid-pgo-merge"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-Release-Use",
+            "inherits": "LLVM-PGO-Release-Generate",
+            "configurePreset": "LLVM-PGO-Release-Use"
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "LLVM-PGO-RelWithDebInfo-Generate",
+            "configuration": "RelWithDebInfo",
+            "jobs": 8,
+            "targets": [
+                "natural_convection_shiri"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Merge",
+            "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
+            "targets": [
+                "simplefluid-pgo-merge"
+            ]
+        },
+        {
+            "name": "LLVM-PGO-RelWithDebInfo-Use",
+            "inherits": "LLVM-PGO-RelWithDebInfo-Generate",
+            "configurePreset": "LLVM-PGO-RelWithDebInfo-Use"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "GCC-Debug",
+            "configurePreset": "GCC-ninja-multi",
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "GCC-RelWithDebInfo",
+            "configurePreset": "GCC-ninja-multi",
+            "configuration": "RelWithDebInfo",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

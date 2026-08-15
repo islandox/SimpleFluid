@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+rm -rf processor* postProcessing [1-9]* 0.[0-9]* log.*

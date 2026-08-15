@@ -1,0 +1,38 @@
+FoamFile
+{
+    format      ascii;
+    class       volScalarField;
+    object      nut;
+}
+dimensions      [0 2 -1 0 0 0 0];
+internalField   uniform 0.0016875;
+boundaryField
+{
+    pipeWall
+    {
+        type    nutkWallFunction;
+        value   uniform 0;
+    }
+    tunnelWall
+    {
+        type    nutkWallFunction;
+        value   uniform 0;
+    }
+    downWall
+    {
+        type    nutkWallFunction;
+        value   uniform 0;
+    }
+    inlet
+    {
+        type    nutkWallFunction;
+        value   uniform 0;
+    }
+    outlet
+    {
+        type    nutkWallFunction;
+        value   uniform 0;
+    }
+    cyclicLeft  { type cyclic; }
+    cyclicRight { type cyclic; }
+}

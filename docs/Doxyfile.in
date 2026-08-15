@@ -1,0 +1,55 @@
+# Doxygen configuration for the SimpleFluid maintainer reference.
+# Configure this file through CMake; see MAINTENANCE.md.
+
+PROJECT_NAME           = "SimpleFluid"
+PROJECT_BRIEF          = "Finite-volume incompressible CFD and multiphysics solver"
+OUTPUT_DIRECTORY       = "@CMAKE_BINARY_DIR@/docs/doxygen"
+
+INPUT                  = "@PROJECT_SOURCE_DIR@/README.md" \
+                         "@PROJECT_SOURCE_DIR@/MAINTENANCE.md" \
+                         "@PROJECT_SOURCE_DIR@/docs" \
+                         "@PROJECT_SOURCE_DIR@/src" \
+                         "@PROJECT_SOURCE_DIR@/cmake"
+RECURSIVE              = YES
+FILE_PATTERNS          = *.md *.dox *.h *.hh *.hpp *.cc *.ipp *.tcc
+EXCLUDE_PATTERNS       = */build/* */.git/*
+STRIP_FROM_PATH        = "@PROJECT_SOURCE_DIR@"
+
+USE_MDFILE_AS_MAINPAGE = "@PROJECT_SOURCE_DIR@/README.md"
+MARKDOWN_SUPPORT       = YES
+AUTOLINK_SUPPORT       = YES
+FILTER_PATTERNS        = *.md="\"@Python3_EXECUTABLE@\" \"@PROJECT_SOURCE_DIR@/docs/doxygen_markdown_filter.py\""
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = YES
+
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = YES
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+EXTRACT_LOCAL_METHODS  = YES
+INTERNAL_DOCS          = YES
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+BUILTIN_STL_SUPPORT    = YES
+INLINE_SOURCES         = NO
+SOURCE_BROWSER         = YES
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+GENERATE_HTML          = YES
+GENERATE_TREEVIEW      = YES
+USE_MATHJAX            = YES
+GENERATE_LATEX         = NO
+HTML_DYNAMIC_MENUS     = YES
+DISABLE_INDEX          = NO
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_AS_ERROR          = NO
+WARN_LOGFILE           = "@CMAKE_BINARY_DIR@/docs/doxygen/warnings.log"
+
+HAVE_DOT               = NO

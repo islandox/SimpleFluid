@@ -1,0 +1,168 @@
+/**
+ * @file testCellField.cc
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief unit tests for CellField class
+ * @version 0.1
+ * @date 2026-05-27
+ *
+ * @copyright Copyright (c) 2026
+ *
+ */
+
+#include <gtest/gtest.h>
+#include "utils/testing_environment.hh"
+#include "fields/CellField.hh"
+
+#include "geometry/unitTests/test_mesh_helpers.hh"
+
+#include <stdexcept>
+#include <string>
+
+namespace
+{
+
+using Pack = SimpleFluid::TpetraTypes<>;
+using MeshType = SimpleFluid::Mesh<Pack>;
+using FieldType = SimpleFluid::CellField<Pack>;
+
+using utils_test::KokkosEnvironment;
+
+testing::Environment* const kokkos_environment =
+    testing::AddGlobalTestEnvironment(new KokkosEnvironment);
+
+/** @brief Build the assembled two-cell mesh shared by cell-field tests. */
+SimpleFluid::SP<MeshType> make_two_hex_mesh()
+{
+    return SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+}
+
+} // namespace
+
+/**
+ * @brief Validates storage, retrieval, and ownership queries for a cell field on a two-hex mesh.
+ */
+TEST(CellFieldTest, StoresValuesOnOwnedCellMap)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType temperature(mesh, "temperature");
+
+    EXPECT_EQ(temperature.name(), "temperature");
+    EXPECT_EQ(temperature.mesh_ptr(), mesh);
+    EXPECT_EQ(temperature.num_owned_cells(), 2u);
+    EXPECT_EQ(temperature.map()->getLocalNumElements(), mesh->num_owned_cells());
+    EXPECT_DOUBLE_EQ(temperature.value(0), 0.0);
+    EXPECT_DOUBLE_EQ(temperature.value(1), 0.0);
+
+    temperature.set_value(0, 2.5);
+    temperature.set_global_value(2, 4.0);
+    temperature.sum_into_value(0, 0.5);
+    temperature.sum_into_global_value(2, 1.0);
+
+    EXPECT_DOUBLE_EQ(temperature.value(0), 3.0);
+    EXPECT_DOUBLE_EQ(temperature.global_value(1), 3.0);
+    EXPECT_DOUBLE_EQ(temperature.value(1), 5.0);
+    EXPECT_DOUBLE_EQ(temperature.global_value(2), 5.0);
+    EXPECT_TRUE(temperature.is_owned_cell(0));
+    EXPECT_TRUE(temperature.is_owned_global_cell(2));
+    EXPECT_FALSE(temperature.is_owned_global_cell(77));
+}
+
+/**
+ * @brief Confirms the initial-value constructor fills both owned and overlap data.
+ */
+TEST(CellFieldTest, InitialValueConstructorFillsVector)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType pressure(mesh, 101325.0, "pressure");
+
+    EXPECT_EQ(pressure.name(), "pressure");
+    EXPECT_DOUBLE_EQ(pressure.value(0), 101325.0);
+    EXPECT_DOUBLE_EQ(pressure.value(1), 101325.0);
+    EXPECT_DOUBLE_EQ(pressure.local_value(0), 101325.0);
+    EXPECT_DOUBLE_EQ(pressure.local_value(1), 101325.0);
+    EXPECT_EQ(pressure.overlap_map()->getLocalNumElements(), mesh->num_local_cells());
+}
+
+/**
+ * @brief Ensures sync_ghosts() propagates owned values into the overlap storage.
+ */
+TEST(CellFieldTest, SynchronizesOwnedValuesIntoOverlapStorage)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType temperature(mesh, "temperature");
+    temperature.set_value(0, 10.0);
+    temperature.set_value(1, 20.0);
+    temperature.sync_ghosts();
+
+    EXPECT_TRUE(temperature.is_local_cell(0));
+    EXPECT_TRUE(temperature.is_local_global_cell(1));
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), 10.0);
+    EXPECT_DOUBLE_EQ(temperature.local_value(1), 20.0);
+}
+
+/** @brief Verifies bulk host views preserve owned/overlap synchronization. */
+TEST(CellFieldTest, ExposesBulkOwnedAndLocalHostViews)
+{
+    auto mesh = make_two_hex_mesh();
+    FieldType temperature(mesh, "temperature");
+
+    {
+        auto owned = temperature.owned_write_view();
+        ASSERT_EQ(owned.extent(0), 2u);
+        ASSERT_EQ(owned.extent(1), 1u);
+        owned(0, 0) = 12.0;
+        owned(1, 0) = 24.0;
+    }
+
+    {
+        const auto owned = temperature.owned_read_view();
+        EXPECT_DOUBLE_EQ(owned(0, 0), 12.0);
+        EXPECT_DOUBLE_EQ(owned(1, 0), 24.0);
+    }
+
+    temperature.sync_ghosts();
+    {
+        const auto local = temperature.local_read_view();
+        EXPECT_DOUBLE_EQ(local(0, 0), 12.0);
+        EXPECT_DOUBLE_EQ(local(1, 0), 24.0);
+    }
+
+    {
+        auto local = temperature.local_write_view();
+        local(0, 0) = -1.0;
+    }
+    EXPECT_DOUBLE_EQ(temperature.value(0), 12.0);
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), -1.0);
+
+    temperature.sync_ghosts();
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), 12.0);
+}
+
+/** @brief Verifies periodic synchronization refreshes the overlap vector. */
+TEST(CellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
+{
+    auto mesh = make_two_hex_mesh();
+
+    FieldType temperature(mesh, 0.0, "temperature");
+    temperature.set_owned_value(0, 11.0);
+    temperature.set_owned_value(1, 22.0);
+
+    mesh->sync_periodic_boundaries(temperature);
+
+    EXPECT_DOUBLE_EQ(temperature.local_value(0), 11.0);
+    EXPECT_DOUBLE_EQ(temperature.local_value(1), 22.0);
+}
+
+#include "geometry/STKMesh.hh"
+
+/** @brief Ensures construction rejects a mesh without assembled maps. */
+TEST(CellFieldTest, RequiresAssembledMesh)
+{
+    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::STKMesh<Pack>>();
+
+    EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
+}
