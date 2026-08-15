@@ -1,0 +1,55 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+
+application         icoFoam;
+startFrom           startTime;
+startTime           0;
+stopAt              endTime;
+endTime             50;
+deltaT              0.01;
+writeControl        timeStep;
+writeInterval       1000;
+purgeWrite          0;
+writeFormat         ascii;
+writePrecision      12;
+writeCompression    off;
+timeFormat          general;
+timePrecision       6;
+runTimeModifiable   false;
+
+functions
+{
+    line_plot
+    {
+        type                sets;
+        libs                ("libsampling.so");
+        writeControl        writeTime;
+        setFormat           raw;
+        interpolationScheme cellPoint;
+        fields              (U);
+        sets
+        (
+            lineX
+            {
+                type        uniform;
+                axis        x;
+                start       (0 0.5 0.005);
+                end         (1 0.5 0.005);
+                nPoints     513;
+            }
+            lineY
+            {
+                type        uniform;
+                axis        y;
+                start       (0.5 0 0.005);
+                end         (0.5 1 0.005);
+                nPoints     513;
+            }
+        );
+    }
+}

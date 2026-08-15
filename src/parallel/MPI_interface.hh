@@ -1,0 +1,416 @@
+/**
+ * @file MPI_interface.hh
+ * @author islandox (59904740+islandox@users.noreply.github.com)
+ * @brief Lightweight C++ wrapper around raw MPI calls with type-deduced datatypes.
+ *
+ * Provides a thin, zero-overhead wrapper for the MPI C API.  All functions
+ * use a static global communicator (`my_mpi::comm`) that defaults to
+ * `MPI_COMM_WORLD` and can be overridden with `set_comm()`.
+ *
+ * The wrapper covers:
+ * - Lifecycle (init / finalize / initialized / finalized)
+ * - Point-to-point (send / recv / isend / irecv / wait / waitall / test)
+ * - Collectives (broadcast / gather / gatherv / scatter / scatterv /
+ *   allgather / allgatherv / alltoall / alltoallv / reduce / allreduce)
+ * - Synchronization (barrier)
+ * - Communicator management (dup / split / free / set_comm)
+ * - Timing (wtime / wtick)
+ *
+ * @version 0.2
+ * @date 2026-05-29
+ *
+ * @copyright Copyright (c) 2026
+ */
+
+#pragma once
+
+#include <mpi.h>
+
+#include <cstdint>
+#include <complex>
+
+#include "utils/TMP_helpers.hh"
+
+namespace my_mpi
+{
+
+// -- type aliases ---------------------------------------------------------
+
+using Comm = MPI_Comm;
+using Status = MPI_Status;
+using Request = MPI_Request;
+using ErrorCode = int;
+
+// -- global communicator (defaults to MPI_COMM_WORLD) ---------------------
+
+static inline Comm comm = MPI_COMM_WORLD;
+
+// -- MPI datatype traits --------------------------------------------------
+
+/**
+ * @brief Map a supported C++ value type to its MPI datatype.
+ * @tparam T C++ value type.
+ * @return Corresponding predefined MPI datatype.
+ */
+template<typename T>
+MPI_Datatype type_trait();
+
+// char / byte types
+// Note: on most platforms std::int8_t ≡ signed char and std::uint8_t ≡ unsigned char,
+// so we do NOT provide separate specializations for signed char / unsigned char.
+/** @brief Map char to MPI_CHAR. @return MPI_CHAR. */
+template<> inline MPI_Datatype type_trait<char>()               { return MPI_CHAR; }
+/** @brief Map an 8-bit signed integer to MPI_INT8_T. @return MPI_INT8_T. */
+template<> inline MPI_Datatype type_trait<std::int8_t>()        { return MPI_INT8_T; }
+/** @brief Map a 16-bit signed integer to MPI_INT16_T. @return MPI_INT16_T. */
+template<> inline MPI_Datatype type_trait<std::int16_t>()       { return MPI_INT16_T; }
+/** @brief Map a 32-bit signed integer to MPI_INT32_T. @return MPI_INT32_T. */
+template<> inline MPI_Datatype type_trait<std::int32_t>()       { return MPI_INT32_T; }
+/** @brief Map a 64-bit signed integer to MPI_INT64_T. @return MPI_INT64_T. */
+template<> inline MPI_Datatype type_trait<std::int64_t>()       { return MPI_INT64_T; }
+/** @brief Map an 8-bit unsigned integer to MPI_UINT8_T. @return MPI_UINT8_T. */
+template<> inline MPI_Datatype type_trait<std::uint8_t>()       { return MPI_UINT8_T; }
+/** @brief Map a 16-bit unsigned integer to MPI_UINT16_T. @return MPI_UINT16_T. */
+template<> inline MPI_Datatype type_trait<std::uint16_t>()      { return MPI_UINT16_T; }
+/** @brief Map a 32-bit unsigned integer to MPI_UINT32_T. @return MPI_UINT32_T. */
+template<> inline MPI_Datatype type_trait<std::uint32_t>()      { return MPI_UINT32_T; }
+/** @brief Map a 64-bit unsigned integer to MPI_UINT64_T. @return MPI_UINT64_T. */
+template<> inline MPI_Datatype type_trait<std::uint64_t>()      { return MPI_UINT64_T; }
+
+// explicit 64‑bit signed (long long is distinct from int64_t ≡ long on Linux)
+#ifdef __linux__
+/** @brief Map Linux long long to MPI_INT64_T. @return MPI_INT64_T. */
+template<> inline MPI_Datatype type_trait<long long>()          { return MPI_INT64_T; }
+/** @brief Map Linux unsigned long long to MPI_UINT64_T. @return MPI_UINT64_T. */
+template<> inline MPI_Datatype type_trait<unsigned long long>() { return MPI_UINT64_T; }
+static_assert(sizeof(long long) == 8 && sizeof(unsigned long long) == 8, "global_index_t must be 64-bit");
+#endif
+
+// floating point
+/** @brief Map float to MPI_FLOAT. @return MPI_FLOAT. */
+template<> inline MPI_Datatype type_trait<float>()              { return MPI_FLOAT; }
+/** @brief Map double to MPI_DOUBLE. @return MPI_DOUBLE. */
+template<> inline MPI_Datatype type_trait<double>()             { return MPI_DOUBLE; }
+/** @brief Map long double to MPI_LONG_DOUBLE. @return MPI_LONG_DOUBLE. */
+template<> inline MPI_Datatype type_trait<long double>()        { return MPI_LONG_DOUBLE; }
+
+// complex
+/** @brief Map complex float to MPI_CXX_FLOAT_COMPLEX. @return MPI_CXX_FLOAT_COMPLEX. */
+template<> inline MPI_Datatype type_trait<std::complex<float>>()  { return MPI_CXX_FLOAT_COMPLEX; }
+/** @brief Map complex double to MPI_CXX_DOUBLE_COMPLEX. @return MPI_CXX_DOUBLE_COMPLEX. */
+template<> inline MPI_Datatype type_trait<std::complex<double>>() { return MPI_CXX_DOUBLE_COMPLEX; }
+
+// boolean
+/** @brief Map bool to MPI_CXX_BOOL. @return MPI_CXX_BOOL. */
+template<> inline MPI_Datatype type_trait<bool>() { return MPI_CXX_BOOL; }
+
+// unsupported types will cause a compile-time error due to missing specialization
+/**
+ * @brief Reject a C++ type without an MPI datatype specialization.
+ * @tparam T Unsupported C++ value type.
+ * @return MPI_DATATYPE_NULL; this path is unreachable after the assertion.
+ */
+template<typename T>
+MPI_Datatype type_trait() {
+    static_assert(utils::TMP::always_false_v<T>, "MPI datatype not defined for this type:");
+    return MPI_DATATYPE_NULL;
+}
+
+// -- lifecycle ------------------------------------------------------------
+
+/// Wraps MPI_Init.  Pass nullptr for both args to let MPI handle them.
+inline ErrorCode init(int* argc, char*** argv) { return MPI_Init(argc, argv); }
+
+/// Wraps MPI_Finalize.
+inline ErrorCode finalize() { return MPI_Finalize(); }
+
+/// Wraps MPI_Initialized.
+inline bool initialized(ErrorCode& errorcode)
+{
+    int flag;
+    errorcode = MPI_Initialized(&flag);
+    return flag;
+}
+
+/// Wraps MPI_Finalized.
+inline bool finalized(ErrorCode& errorcode)
+{
+    int flag;
+    errorcode = MPI_Finalized(&flag);
+    return flag;
+}
+
+/// Wraps MPI_Abort on the active communicator.
+inline ErrorCode abort(int errorcode) { return MPI_Abort(comm, errorcode); }
+
+// -- communicator queries -------------------------------------------------
+
+/// Wraps MPI_Comm_size on the active communicator.
+inline ErrorCode comm_size(int& size) { return MPI_Comm_size(comm, &size); }
+
+/// Wraps MPI_Comm_rank on the active communicator.
+inline ErrorCode comm_rank(int& rank) { return MPI_Comm_rank(comm, &rank); }
+
+// -- communicator management ----------------------------------------------
+
+/// Override the globally active communicator.
+inline void set_comm(Comm c) { comm = c; }
+
+/// Wraps MPI_Comm_dup.
+inline ErrorCode comm_dup(Comm& newcomm) { return MPI_Comm_dup(comm, &newcomm); }
+
+/// Wraps MPI_Comm_split.
+inline ErrorCode comm_split(int color, int key, Comm& newcomm) {
+    return MPI_Comm_split(comm, color, key, &newcomm);
+}
+
+/// Wraps MPI_Comm_free.
+inline ErrorCode comm_free(Comm& comm_to_free) { return MPI_Comm_free(&comm_to_free); }
+
+// -- point-to-point (blocking) --------------------------------------------
+
+/**
+ * @brief Send a typed buffer on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Buffer to send.
+ * @param count Number of elements.
+ * @param dest Destination rank.
+ * @param tag Message tag.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode send(const T* data, int count, int dest, int tag) {
+    return MPI_Send(data, count, type_trait<T>(), dest, tag, comm);
+}
+
+/**
+ * @brief Receive a typed buffer on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Destination buffer.
+ * @param count Maximum number of elements.
+ * @param source Source rank.
+ * @param tag Message tag.
+ * @param status Receives MPI status information.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode recv(T* data, int count, int source, int tag, Status& status) {
+    return MPI_Recv(data, count, type_trait<T>(), source, tag, comm, &status);
+}
+
+// -- point-to-point (non-blocking) ----------------------------------------
+
+/**
+ * @brief Start a nonblocking typed send on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Buffer to send.
+ * @param count Number of elements.
+ * @param dest Destination rank.
+ * @param tag Message tag.
+ * @param request Receives the pending MPI request.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode isend(const T* data, int count, int dest, int tag, Request& request) {
+    return MPI_Isend(data, count, type_trait<T>(), dest, tag, comm, &request);
+}
+
+/**
+ * @brief Start a nonblocking typed receive on the active communicator.
+ * @tparam T Supported element type.
+ * @param data Destination buffer.
+ * @param count Maximum number of elements.
+ * @param source Source rank.
+ * @param tag Message tag.
+ * @param request Receives the pending MPI request.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode irecv(T* data, int count, int source, int tag, Request& request) {
+    return MPI_Irecv(data, count, type_trait<T>(), source, tag, comm, &request);
+}
+
+/// Wraps MPI_Wait for a single request.
+inline ErrorCode wait(Request& request, Status& status) {
+    return MPI_Wait(&request, &status);
+}
+
+/// Wraps MPI_Waitall.
+inline ErrorCode waitall(int count, Request* requests, Status* statuses) {
+    return MPI_Waitall(count, requests, statuses);
+}
+
+/// Wraps MPI_Test for a single request.
+inline ErrorCode test(Request& request, int& flag, Status& status) {
+    return MPI_Test(&request, &flag, &status);
+}
+
+// -- collectives ----------------------------------------------------------
+
+/// Wraps MPI_Bcast.
+template<typename T>
+inline ErrorCode broadcast(T* data, int count, int root) {
+    return MPI_Bcast(data, count, type_trait<T>(), root, comm);
+}
+
+/// Wraps MPI_Gather.
+template<typename Ts, typename Tr>
+inline ErrorCode gather(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount, int root) {
+    return MPI_Gather(sendbuf, sendcount, type_trait<Ts>(),
+                      recvbuf, recvcount, type_trait<Tr>(), root, comm);
+}
+
+/// Wraps MPI_Gatherv.
+template<typename Ts, typename Tr>
+inline ErrorCode gatherv(const Ts* sendbuf, int sendcount, Tr* recvbuf,
+                         const int* recvcounts, const int* displs, int root) {
+    return MPI_Gatherv(sendbuf, sendcount, type_trait<Ts>(),
+                       recvbuf, recvcounts, displs, type_trait<Tr>(), root, comm);
+}
+
+/// Wraps MPI_Scatter.
+template<typename Ts, typename Tr>
+inline ErrorCode scatter(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount, int root) {
+    return MPI_Scatter(sendbuf, sendcount, type_trait<Ts>(),
+                       recvbuf, recvcount, type_trait<Tr>(), root, comm);
+}
+
+/// Wraps MPI_Scatterv.
+template<typename Ts, typename Tr>
+inline ErrorCode scatterv(const Ts* sendbuf, const int* sendcounts, const int* displs,
+                   Tr* recvbuf, int recvcount, int root) {
+    return MPI_Scatterv(sendbuf, sendcounts, displs, type_trait<Ts>(),
+                        recvbuf, recvcount, type_trait<Tr>(), root, comm);
+}
+
+/// Wraps MPI_Allgather.
+template<typename Ts, typename Tr>
+inline ErrorCode allgather(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount) {
+    return MPI_Allgather(sendbuf, sendcount, type_trait<Ts>(),
+                         recvbuf, recvcount, type_trait<Tr>(), comm);
+}
+
+/// Wraps MPI_Allgatherv.
+template<typename Ts, typename Tr>
+inline ErrorCode allgatherv(const Ts* sendbuf, int sendcount, Tr* recvbuf,
+                            const int* recvcounts, const int* displs) {
+    return MPI_Allgatherv(sendbuf, sendcount, type_trait<Ts>(),
+                          recvbuf, recvcounts, displs, type_trait<Tr>(), comm);
+}
+
+/// Wraps MPI_Alltoall.
+template<typename Ts, typename Tr>
+inline ErrorCode alltoall(const Ts* sendbuf, int sendcount, Tr* recvbuf, int recvcount) {
+    return MPI_Alltoall(sendbuf, sendcount, type_trait<Ts>(),
+                        recvbuf, recvcount, type_trait<Tr>(), comm);
+}
+
+/// Wraps MPI_Alltoallv.
+template<typename Ts, typename Tr>
+inline ErrorCode alltoallv(const Ts* sendbuf, const int* sendcounts, const int* sdispls,
+                    Tr* recvbuf, const int* recvcounts, const int* rdispls) {
+    return MPI_Alltoallv(sendbuf, sendcounts, sdispls, type_trait<Ts>(),
+                         recvbuf, recvcounts, rdispls, type_trait<Tr>(), comm);
+}
+
+/// Wraps MPI_Reduce.
+template<typename T>
+inline ErrorCode reduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op, int root) {
+    return MPI_Reduce(sendbuf, recvbuf, count, type_trait<T>(), op, root, comm);
+}
+
+/// Wraps MPI_Allreduce.
+template<typename T>
+inline ErrorCode allreduce(const T* sendbuf, T* recvbuf, int count, MPI_Op op) {
+    return MPI_Allreduce(sendbuf, recvbuf, count, type_trait<T>(), op, comm);
+}
+
+/**
+ * @brief Sum a typed buffer across the active communicator.
+ * @tparam T Supported element type.
+ * @param sendbuf Local values.
+ * @param recvbuf Receives element-wise global sums.
+ * @param count Number of elements.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode global_sum(const T* sendbuf, T* recvbuf, int count) {
+    return allreduce(sendbuf, recvbuf, count, MPI_SUM);
+}
+
+/**
+ * @brief Sum one value across the active communicator.
+ * @tparam T Supported value type.
+ * @param value Local value.
+ * @param result Receives the global sum.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode global_sum(const T& value, T& result) {
+    return global_sum(&value, &result, 1);
+}
+
+/**
+ * @brief Compute element-wise maxima across the active communicator.
+ * @tparam T Supported element type.
+ * @param sendbuf Local values.
+ * @param recvbuf Receives element-wise global maxima.
+ * @param count Number of elements.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode global_max(const T* sendbuf, T* recvbuf, int count) {
+    return allreduce(sendbuf, recvbuf, count, MPI_MAX);
+}
+
+/**
+ * @brief Compute the maximum of one value across the active communicator.
+ * @tparam T Supported value type.
+ * @param value Local value.
+ * @param result Receives the global maximum.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode global_max(const T& value, T& result) {
+    return global_max(&value, &result, 1);
+}
+
+/**
+ * @brief Compute element-wise minima across the active communicator.
+ * @tparam T Supported element type.
+ * @param sendbuf Local values.
+ * @param recvbuf Receives element-wise global minima.
+ * @param count Number of elements.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode global_min(const T* sendbuf, T* recvbuf, int count) {
+    return allreduce(sendbuf, recvbuf, count, MPI_MIN);
+}
+
+/**
+ * @brief Compute the minimum of one value across the active communicator.
+ * @tparam T Supported value type.
+ * @param value Local value.
+ * @param result Receives the global minimum.
+ * @return MPI error code.
+ */
+template<typename T>
+inline ErrorCode global_min(const T& value, T& result) {
+    return global_min(&value, &result, 1);
+}
+
+// -- synchronization ------------------------------------------------------
+
+/// Wraps MPI_Barrier on the active communicator.
+inline ErrorCode barrier() { return MPI_Barrier(comm); }
+
+// -- timing ---------------------------------------------------------------
+
+/// Wraps MPI_Wtime.
+inline double wtime() { return MPI_Wtime(); }
+
+/// Wraps MPI_Wtick.
+inline double wtick() { return MPI_Wtick(); }
+
+} // namespace my_mpi

@@ -1,0 +1,541 @@
+/**
+ * @file Mesh.hh
+ * @author islandox(59904740+islandox@users.noreply.github.com)
+ * @brief Abstract finite-volume mesh base class with CRS connectivity and Kokkos device views.
+ * @version 0.1
+ * @date 2026-05-22
+ * 
+ * @copyright Copyright (c) 2026
+ * 
+ */
+#pragma once
+
+#include "dataclass/TpetraTypes.hh"
+#include "dataclass/vec3.hh"
+#include "dataclass/RandomAccessView.hh"
+#include "utils/debug_check.hh"
+
+#include "MeshUtils.hh"
+
+#include <Teuchos_RCP.hpp>
+#include <Kokkos_Core.hpp>
+
+#include <string>
+#include <memory>
+#include <optional>
+#include <limits>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>
+
+namespace SimpleFluid
+{
+
+/**
+ * @brief Forward declaration of a scalar field stored on mesh cells.
+ * @tparam Pack Tpetra type pack shared with the mesh.
+ */
+template<TpetraTypePack Pack>
+class CellField;
+
+/**
+ * @brief Forward declaration of a vector field stored on mesh cells.
+ * @tparam Pack Tpetra type pack shared with the mesh.
+ */
+template<TpetraTypePack Pack>
+class VectorCellField;
+
+/**
+ * @brief Forward declaration of a tensor field stored on mesh cells.
+ * @tparam Pack Tpetra type pack shared with the mesh.
+ */
+template<TpetraTypePack Pack>
+class TensorCellField;
+
+/**
+ * @brief Return the invalid sentinel for an integral identifier type.
+ * @tparam ID Signed or unsigned integral identifier type.
+ * @return Minus one for signed IDs, otherwise the maximum value.
+ */
+template <typename ID>
+constexpr ID invalid_id() noexcept
+{
+    if constexpr (std::is_signed_v<ID>)
+    {
+        return static_cast<ID>(-1);
+    }
+    else
+    {
+        return std::numeric_limits<ID>::max();
+    }
+}
+
+/**
+ * @brief finite-volume mesh for a hybrid triangular-prism / hexahedral mesh.
+ *
+ * @details
+ * Designed for Trilinos/Tpetra assembly:
+ *
+ *   - owned cells correspond to Tpetra rows;
+ *   - ghost cells provide off-rank stencil columns;
+ *   - connectivity is stored in CRS-like arrays;
+ *   - geometry is stored in Kokkos::View for CPU/GPU kernels.
+ *
+ * Typical FVM stencil:
+ *
+ *   A(P,P) and A(P,N) are assembled by looping over faces of owned cell P.
+ * 
+ * @tparam Pack Tpetra type pack used for map and vector types.
+ */
+template<TpetraTypePack Pack = DefaultTpetraTypes>
+class Mesh
+{
+    /** @brief Grants MeshPartitioner access to internal mesh arrays for parallel redistribution. */
+    template<TpetraTypePack>
+    friend class MeshPartitioner;
+
+    /** @brief Grants MeshFactory access to internal mesh arrays for contiguous GID assignment. */
+    friend class MeshFactory;
+
+public:
+    using map_type = typename Pack::map_type;
+    using global_ordinal_type = typename Pack::global_ordinal_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+    using comm_type = typename Pack::comm_type;
+
+    using ViewLO = RandomAccessView<local_ordinal_type>;
+    using ViewGO = RandomAccessView<global_ordinal_type>;
+    using ViewReal = RandomAccessView<real_t>;
+
+    static constexpr int invalid_boundary_id = invalid_id<int>();
+
+    using Vec3 = MeshUtils::Vec3;
+    using CellType = MeshUtils::CellType;
+    using FaceType = MeshUtils::FaceType;
+    using ArrVec3 = std::vector<Vec3>;
+    using ArrLO = std::vector<local_ordinal_type>;
+    using ArrGO = std::vector<global_ordinal_type>;
+
+    using GO2LOMap = std::unordered_map<global_ordinal_type, local_ordinal_type>;
+    using GO2GOMap = std::unordered_map<global_ordinal_type, global_ordinal_type>;
+
+    template <class T>
+    using kokkos_1dview = Kokkos::View<T*, typename Pack::device_type>;
+
+    template <class T>
+    using kokkos_vec3view = Kokkos::View<T*[3], typename Pack::device_type>;
+
+    template <class T>
+    using RCP = Teuchos::RCP<T>;
+
+    /**
+     * @brief Information about a cell, accessible by local cell ID.
+     * 
+     */
+    struct CellInfo {
+        bool owned = false;                  // Whether this cell is owned by the local process (true) or is a ghost cell (false).
+        CellType type = CellType::INVALID;   // Cell type (e.g., TETRAHEDRON, HEXAHEDRON, TRIPRISM).
+        Vec3 center;                         // Cell centroid coordinates.
+        double volume = 0.0;                 // Cell volume.
+        ViewLO faces;                        // Local face IDs of the faces that bound this cell, in the local face order from the first element that introduced this cell.
+        ViewReal face_distances;             // Distances from this cell centroid to each face centroid, parallel to faces.
+        ViewGO node_gids;                     // Global node IDs of the nodes that define this cell, in the local node order from the first element that introduced this cell.
+    };
+
+    /**
+     * @brief Information about a face, accessible by local face ID.
+     * 
+     */
+    struct FaceInfo {
+        FaceType type = FaceType::INVALID;
+        /*
+         * Physical boundary ID from Exodus sideset/STK side part.
+         * invalid_boundary_id means no physical boundary part was detected.
+         */
+        int boundary_id = invalid_boundary_id;
+
+        /*
+         * owner and neighbor are local cell indices in this StkFvmMesh object.
+         *
+         * owner is preferred to be a locally owned cell when exactly one side
+         * is owned and the other side is ghost/aura.
+         */
+        local_ordinal_type owner = invalid_id<local_ordinal_type>();
+        local_ordinal_type neighbor = invalid_id<local_ordinal_type>();
+
+        /*
+         * Node IDs in the local side order from the first element that
+         * introduced this face. Sorted copies are used internally for matching.
+         */
+        ViewGO node_gids;
+
+        MeshUtils::Vec3 center;
+
+        /*
+         * Unit normal pointing outward from owner.
+         * For a specific cell c, use face_normal_outward(c, f).
+         */
+        MeshUtils::Vec3 unit_normal_from_owner;
+        MeshUtils::Vec3 unit_normal_from_neighbor;
+
+        double area = 0.0;
+        double owner_to_face_distance = 0.0;
+        double neighbor_to_face_distance = 0.0;
+        double cell_center_distance = 0.0;
+    };
+
+    /**
+     * @brief Logical grouping of faces belonging to one boundary batch.
+     *
+     * Each batch has a unique integer identifier and a list of face local
+     * ordinals that form the batch.
+     */
+    struct BoundaryFaceBatch
+    {
+        int id = invalid_boundary_id;
+        ArrLO face_lids;
+    };
+
+    /** @brief Compact host-resident operator views of mesh geometry. */
+    struct HostViews;
+
+    /** @brief Device-resident mirrors of mesh connectivity and geometry. */
+    struct DeviceViews;
+
+    Mesh();
+
+//-------------------------------- assemble ----------------------------------//
+public:
+    /**
+     * @brief Finalize connectivity, distributed maps, and compact host views
+     *        after the concrete mesh has been populated.
+     *
+     * Device mirrors are created by device_views() only when requested.
+     */
+    virtual void assemble() = 0;
+
+    virtual void export_vtu(const std::string& filename) const = 0;
+
+protected:
+    void create_maps();
+    void assign_contiguous_tpetra_gids();
+    void reset_contiguous_tpetra_gids() noexcept;
+    void rebuild_boundary_face_batches();
+    void create_cell_face_distances();
+    void create_host_views();
+    void create_device_views() const;
+    void reset_device_views() const noexcept;
+
+    void prefer_owned_face_owners();
+
+    inline static std::string make_face_key(ViewGO node_ids);
+    inline static std::string make_face_key(ArrGO node_ids);
+
+//------------------------- one-by-one setting -------------------------------//
+public:
+
+
+//------------------------------- checks -------------------------------------//
+protected:
+    void check_cell(local_ordinal_type lid) const;
+    void check_face(local_ordinal_type lid) const;
+
+    void check_connectivity() const;
+
+//----------------------------- accessors ------------------------------------//
+public:
+    /**
+     * @brief Return compact host-side topology and geometry arrays.
+     *
+     * The returned reference remains valid until the mesh is assembled again.
+     * Keeping topology and geometry in separate structure-of-arrays groups
+     * lets host operators read only the data required by a particular sweep.
+     */
+    const HostViews& host_views() const noexcept { return d_host_views; }
+
+    /**
+     * @brief Return device-accessible mesh arrays, materializing them on demand.
+     *
+     * Host-only solver paths avoid allocating a second copy of all mesh
+     * geometry and connectivity. The first caller that needs device data pays
+     * the construction cost and subsequent calls reuse the cached views.
+     */
+    DeviceViews device_views() const;
+
+    const ArrLO& owned_cell_ids() const noexcept { return d_owned_cell_ids; }
+    const ArrGO& owned_cell_global_ids() const noexcept { return d_owned_cell_global_ids; }
+
+    RCP<const map_type> owned_cell_map() const { return d_owned_cell_map; }
+    RCP<const map_type> overlap_cell_map() const { return d_overlap_cell_map; }
+    RCP<const map_type> owned_face_map() const { return d_owned_face_map; }
+    RCP<const map_type> boundary_face_map() const { return d_boundary_face_map; }
+
+    /**
+     * @brief Convert a mesh (Exodus/STK) global ID to the corresponding contiguous Tpetra global ID.
+     * @param mesh_gid Mesh global ID.
+     * @return Contiguous Tpetra global ID, or invalid_id<global_ordinal_type>() if not found.
+     */
+    inline global_ordinal_type mesh_gid_to_tpetra_gid(global_ordinal_type mesh_gid) const;
+
+    /**
+     * @brief Convert a contiguous Tpetra global ID back to the corresponding mesh (Exodus/STK) global ID.
+     * @param tpetra_gid Tpetra global ID (must be in the owned range).
+     * @return Mesh global ID.
+     * @throws std::out_of_range if @p tpetra_gid is out of the owned Tpetra GID range.
+     */
+    inline global_ordinal_type tpetra_gid_to_mesh_gid(global_ordinal_type tpetra_gid) const;
+
+    /**
+     * @brief Return the global offset of this process's owned-cell Tpetra GID block.
+     */
+    global_ordinal_type tpetra_gid_offset() const noexcept { return d_tpetra_gid_offset; }
+    const std::unordered_map<int, BoundaryFaceBatch>& boundary_batches() const noexcept
+    {
+        return d_boundary_id_to_face_batch;
+    }
+
+//------------------------------ random access -------------------------------//
+    inline const CellInfo& cell(local_ordinal_type lid) const;
+    inline const FaceInfo& face(local_ordinal_type lid) const;
+    inline const global_ordinal_type& cell_global_id(local_ordinal_type lid) const;
+    inline const global_ordinal_type& face_global_id(local_ordinal_type lid) const;
+    inline const Vec3& node_coord(global_ordinal_type node_gid) const;
+
+//-------------------------------- queries -----------------------------------//
+
+    size_t spatial_dimension() const noexcept { return d_spatial_dim; }
+
+    size_t num_local_cells() const noexcept { return d_cells.size(); }
+    size_t num_owned_cells() const noexcept { return d_owned_cell_ids.size(); }
+    size_t num_faces() const noexcept { return d_faces.size(); }
+
+    inline bool is_owned_cell(local_ordinal_type lid) const;
+    inline bool is_owned_face(local_ordinal_type fid) const;
+
+    inline const ViewLO& faces(local_ordinal_type cell_lid) const;
+    inline const ViewReal& face_distances(local_ordinal_type cell_lid) const;
+
+    inline real_t cell_volume(local_ordinal_type lid) const;
+    inline const Vec3& cell_centroid(local_ordinal_type lid) const;
+
+    inline local_ordinal_type owner_cell(local_ordinal_type fid) const;
+    inline local_ordinal_type neighbor_cell(local_ordinal_type fid) const;
+    inline local_ordinal_type opposite_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+
+    inline real_t             face_area(local_ordinal_type fid) const;
+    inline Vec3               face_area_vector(local_ordinal_type fid) const;
+    inline Vec3               face_area_vector_outward(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+    inline real_t             face_cell_center_distance(local_ordinal_type fid) const;
+    inline Vec3               cell_center_vector(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+    inline real_t             cell_to_face_distance(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+    inline const Vec3&        face_normal(local_ordinal_type fid) const;
+    inline const Vec3&        face_centroid(local_ordinal_type fid) const;
+    inline const Vec3&        face_normal_outward(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+
+    inline bool is_exterior_face(local_ordinal_type fid) const;
+    inline bool is_interior_face(local_ordinal_type fid) const;
+    inline bool is_boundary_face(local_ordinal_type fid) const;
+
+    /** @brief Return the local cell LID of the opposite cell or periodic neighbor. */
+    inline local_ordinal_type opposite_or_periodic_neighbor_cell(local_ordinal_type fid, local_ordinal_type cell_lid) const;
+
+    /**
+     * @brief Synchronize overlap values used by periodic paired-cell stencils.
+     *
+     * Periodic neighbors are represented as local overlap cells, so the
+     * existing Tpetra ghost import is the synchronization path.
+     */
+    inline void sync_periodic_boundaries(CellField<Pack>& field) const;
+
+    /**
+     * @brief Synchronize vector overlap values used by periodic paired-cell stencils.
+     *
+     * Periodic neighbors are represented as local overlap cells, so the
+     * existing Tpetra ghost import is the synchronization path.
+     */
+    inline void sync_periodic_boundaries(VectorCellField<Pack>& field) const;
+
+    /**
+     * @brief Synchronize tensor overlap values used by periodic paired-cell
+     *        stencils.
+     *
+     * Periodic neighbors are represented as local overlap cells, so the
+     * existing Tpetra ghost import is the synchronization path.
+     */
+    inline void sync_periodic_boundaries(TensorCellField<Pack>& field) const;
+
+    /**
+     * @brief Manually set a periodic face pair (used for testing or when the
+     *        mesh format does not encode periodic pairings).
+     *
+     * After calling this, @p face_lid is treated as a periodic boundary face
+     * whose counterpart cell is @p paired_cell_lid.
+     * 
+     * @param face_lid   Local ID of the periodic boundary face.
+     * @param paired_cell_lid Local ID of the cell on the opposite side.
+     */
+    inline void set_periodic_face(local_ordinal_type face_lid,
+                                   local_ordinal_type paired_cell_lid);
+
+    inline int boundary_id(local_ordinal_type fid) const;
+    inline const std::string& boundary_name(local_ordinal_type fid) const;
+    inline const std::string& boundary_batch_name(int batch_id) const;
+    inline const BoundaryFaceBatch& boundary_face_batch(int batch_id) const;
+
+    inline local_ordinal_type global_to_local_cell(global_ordinal_type gid) const;
+
+//----------------------------- device views ---------------------------------//
+protected:
+    template <class T>
+    static inline kokkos_1dview<T>
+    make_mutable_vector_view(
+        const std::string& name, const std::vector<T>& data);
+
+    template <class T>
+    static inline kokkos_1dview<const T> 
+    make_vector_view(const std::string& name, const std::vector<T>& data);
+
+    static inline kokkos_vec3view<const real_t> 
+    make_vectorV3D_view(const std::string& name, 
+                        const std::vector<Vec3>& data);
+
+//---------------------------------- Data ------------------------------------//
+protected:
+    int d_spatial_dim = 0;
+
+    //!<@brief Cell information stored on host for easy random access.
+    //!<@note ghost cells are always stored after owned cells, so owned cells are contiguous at the beginning of d_cells.
+    Arr<CellInfo> d_cells;
+    Arr<FaceInfo> d_faces;   //!< Face information stored on host for easy random access.
+
+    ArrLO d_owned_cell_ids; // Local IDs of owned cells (0 to num_owned_cells-1). To be deleted.
+    ArrGO d_owned_cell_global_ids;
+    ArrGO d_ghost_cell_global_ids;
+
+    // --- Contiguous Tpetra GID mapping ---
+    // Owned cells: Tpetra GIDs form a contiguous block [d_tpetra_gid_offset, d_tpetra_gid_offset + num_owned).
+    // Ghost cells: Tpetra GIDs are resolved from the owning process's assignment.
+    global_ordinal_type d_tpetra_gid_offset = 0;  // Global offset of this process's owned Tpetra GID block.
+    ArrGO d_ghost_cell_tpetra_gids;                // Tpetra GIDs for ghost cells (size = num_ghost).
+    GO2GOMap d_mesh_gid_to_tpetra_gid;             // Mesh GID -> Tpetra GID (all local cells).
+    ArrGO d_tpetra_gid_to_mesh_gid;                // Tpetra GID -> Mesh GID (owned cells, indexed by local owned index).
+    // An explicit flag is required because a valid zero-owned rank leaves the
+    // reverse mapping empty after assignment.
+    bool d_contiguous_tpetra_gids_assigned = false;
+
+    ArrGO d_owned_face_global_ids;
+
+    ArrLO d_cell_owned_face_ids;
+    ArrReal d_cell_face_distances;
+    ArrGO d_cell_owned_node_global_ids;
+    ArrGO d_face_owned_node_global_ids;
+    ArrVec3 d_node_coords;
+
+    GO2LOMap d_cell_gid_to_lid;
+    GO2LOMap d_node_gid_to_lid;
+
+    /*
+     * @brief Internal face lookup: sorted node IDs encoded as a string key.
+     * This is only used at setup time, so simplicity is preferred over speed.
+     */
+    std::unordered_map<std::string, local_ordinal_type> d_face_key_to_face;
+
+    std::unordered_map<int, std::string> d_boundary_id_to_name;
+    std::unordered_map<std::string, int> d_boundary_name_to_id;
+    std::unordered_map<int, BoundaryFaceBatch> d_boundary_id_to_face_batch;
+    int d_next_boundary_id = 0;
+
+    RCP<const map_type> d_owned_cell_map;
+    RCP<const map_type> d_overlap_cell_map;
+    RCP<const map_type> d_owned_face_map;
+    RCP<const map_type> d_boundary_face_map;
+
+    HostViews d_host_views;
+    mutable kokkos_1dview<local_ordinal_type> d_face_neighbor_device;
+    mutable DeviceViews d_device_views;
+    mutable bool d_device_views_created = false;
+};
+
+/**
+ * @brief Compact host-side storage used by finite-volume operator loops.
+ *
+ * The owning vectors mirror the device-side SoA layout while separating
+ * topology from geometry. Full metadata records remain available for setup,
+ * node connectivity, and source compatibility.
+ */
+template<TpetraTypePack Pack>
+struct Mesh<Pack>::HostViews
+{
+    /** @brief Cell geometry read by hot operator loops. */
+    struct CellGeometry
+    {
+        ArrReal volume;
+        ArrVec3 centroid;
+    } cell_geometry;
+
+    /** @brief Compact face connectivity and boundary classification. */
+    struct FaceTopology
+    {
+        ArrLO owner;
+        ArrLO neighbor;
+        ArrInt type;
+        ArrInt boundary_id;
+    } face_topology;
+
+    /** @brief Face geometry grouped separately from connectivity. */
+    struct FaceGeometry
+    {
+        ArrReal area;
+        ArrVec3 unit_normal_from_owner;
+        ArrVec3 area_vector;
+        ArrVec3 centroid;
+        ArrVec3 owner_to_neighbor;
+        ArrReal owner_to_face_distance;
+        ArrReal neighbor_to_face_distance;
+        ArrReal cell_center_distance;
+    } face_geometry;
+};
+
+/**
+ * @brief Kokkos device-side views for mesh geometry and connectivity data.
+ */
+/**
+ * @brief Device-accessible storage backing a host-side Mesh.
+ * @tparam Pack Tpetra type pack that selects the Kokkos device type.
+ */
+template<TpetraTypePack Pack>
+struct Mesh<Pack>::DeviceViews
+{
+    kokkos_1dview<const global_ordinal_type>  cell_gid;
+    kokkos_1dview<const int>                  cell_type;
+
+    kokkos_1dview<const real_t>          cell_volume;
+    kokkos_vec3view<const real_t>        cell_centroid;
+
+    kokkos_1dview<const local_ordinal_type>   cell_face_offset;
+    kokkos_1dview<const local_ordinal_type>   cell_face_ids;
+    kokkos_1dview<const real_t>               cell_face_distance;
+
+    kokkos_1dview<const local_ordinal_type>   face_owner;
+    kokkos_1dview<const local_ordinal_type>   face_neighbor;
+    kokkos_1dview<const int>                  face_type;
+    kokkos_1dview<const int>                  face_batch;
+
+    kokkos_1dview<const real_t>          face_area;
+    kokkos_vec3view<const real_t>        face_area_vector;
+    kokkos_vec3view<const real_t>        face_centroid;
+
+    kokkos_vec3view<const real_t>        node_coord;
+
+    kokkos_1dview<const local_ordinal_type>   cell_node_offset;
+    kokkos_1dview<const local_ordinal_type>   cell_node_ids;
+
+    kokkos_1dview<const local_ordinal_type>   face_node_offset;
+    kokkos_1dview<const local_ordinal_type>   face_node_ids;
+};
+
+}
+
+// Include inline function definitions
+#include "geometry/Mesh.ipp"
