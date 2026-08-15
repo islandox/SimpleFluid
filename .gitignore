@@ -73,7 +73,7 @@ Testing/
 
 # Machine-specific files
 .vscode
-CMakePresets.json
+CMakeUserPresets.json
 
 # Copilot / Codex settings
 .github/prompts
@@ -84,3 +84,10 @@ CMakePresets.json
 .github/skills
 .codex
 .agents
+AGENTS.md
+
+# python cache
+__pycache__
+
+# Referenced documents PDFs to avoid unauthorized redistribution.
+docs/references/*.pdf

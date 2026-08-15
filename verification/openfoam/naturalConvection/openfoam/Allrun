@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+case "${1:-6}" in
+    ''|*[!0-9]*) echo "MPI rank count must be an integer from 1 to 6" >&2; exit 2 ;;
+esac
+np="${1:-6}"
+if [ "$np" -lt 1 ] || [ "$np" -gt 6 ]; then
+    echo "MPI rank count must be from 1 to 6" >&2
+    exit 2
+fi
+
+command -v blockMesh >/dev/null 2>&1 || {
+    echo "OpenFOAM is not loaded; source its etc/bashrc first." >&2
+    exit 1
+}
+command -v buoyantBoussinesqPimpleFoam >/dev/null 2>&1 || {
+    echo "This case requires buoyantBoussinesqPimpleFoam." >&2
+    exit 1
+}
+
+cd "$(dirname "$0")"
+rm -rf processor* postProcessing [1-9]* 0.[0-9]* log.*
+default_np=6
+if [ "$np" -ne "$default_np" ]; then
+    restore_decomposition()
+    {
+        foamDictionary system/decomposeParDict \
+            -entry numberOfSubdomains -set "$default_np" >/dev/null
+    }
+    trap restore_decomposition EXIT HUP INT TERM
+    foamDictionary system/decomposeParDict \
+        -entry numberOfSubdomains -set "$np"
+fi
+blockMesh > log.blockMesh 2>&1
+checkMesh > log.checkMesh 2>&1
+
+if [ "$np" -eq 1 ]; then
+    buoyantBoussinesqPimpleFoam > log.solver 2>&1
+else
+    decomposePar -force > log.decomposePar 2>&1
+    mpirun -np "$np" buoyantBoussinesqPimpleFoam -parallel > log.solver 2>&1
+    reconstructPar -latestTime > log.reconstructPar 2>&1
+fi
+postProcess -func writeCellCentres -latestTime > log.cellCentres 2>&1

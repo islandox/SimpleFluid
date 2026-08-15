@@ -1,0 +1,9 @@
+/profiles/
+/__pycache__/
+/openfoam/[1-9]*/
+/openfoam/0.[0-9]*/
+/openfoam/processor*/
+/openfoam/postProcessing/
+/openfoam/constant/polyMesh/
+/openfoam/dynamicCode/
+/openfoam/log.*
