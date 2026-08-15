@@ -15,6 +15,7 @@
 #include "geometry/MeshHandle.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
+#include <Tpetra_Access.hpp>
 #include <Tpetra_CombineMode.hpp>
 
 #include <array>
@@ -24,6 +25,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -116,10 +118,15 @@ public:
     using map_type = typename Pack::map_type;
     using import_type = typename Pack::import_type;
     using mesh_type = MeshType;
+    using vec_type = vec3<scalar_type>;
+    using tensor_type = std::array<vec_type, 3>;
     using storage_type = std::conditional_t<
         value_traits::is_vector,
         typename Pack::multi_vector_type,
         typename Pack::vector_type>;
+    using vector_type = storage_type;
+
+    static constexpr size_t num_components = value_traits::components;
 
     static_assert(detail::supported_field_location<location_type>,
                   "FieldStored does not support this field location.");
@@ -143,12 +150,27 @@ public:
           d_owned(make_storage(map_for<false>(*d_mesh), zero_out)),
           d_overlap(make_storage(map_for<true>(*d_mesh), false)),
           d_import(Teuchos::rcp(new import_type(
-              d_owned.getMap(), d_overlap.getMap())))
+              d_owned.getMap(), d_overlap.getMap()))),
+          d_owned_face_ids(make_owned_face_ids(*d_mesh))
     {
         if (zero_out)
         {
             sync_ghosts();
         }
+    }
+
+    /**
+     * @brief Construct from a mesh first for compatibility with solver fields.
+     */
+    explicit FieldStored(
+        SP<const mesh_type> mesh,
+        std::string name = {},
+        bool zero_out = true)
+        : FieldStored(
+              descriptor_type(std::move(name)),
+              std::move(mesh),
+              zero_out)
+    {
     }
 
     /** @brief Allocate storage and initialize every local entry. */
@@ -159,6 +181,17 @@ public:
               std::move(descriptor), std::move(mesh), false)
     {
         put_value(initial_value);
+    }
+
+    /** @brief Mesh-first uniformly initialized compatibility constructor. */
+    FieldStored(SP<const mesh_type> mesh,
+                const value_type& initial_value,
+                std::string name = {})
+        : FieldStored(
+              descriptor_type(std::move(name)),
+              std::move(mesh),
+              initial_value)
+    {
     }
 
     const descriptor_type& descriptor() const noexcept
@@ -187,9 +220,45 @@ public:
         return d_owned.getMap();
     }
 
+    /** @brief Compatibility alias for the authoritative owned map. */
+    Teuchos::RCP<const map_type> owned_map() const
+    {
+        return map();
+    }
+
     Teuchos::RCP<const map_type> overlap_map() const
     {
         return d_overlap.getMap();
+    }
+
+    /** @brief Acquire a read-only host view of authoritative owned storage. */
+    auto owned_read_view() const
+    {
+        return d_owned.getLocalViewHost(Tpetra::Access::ReadOnly);
+    }
+
+    /** @brief Acquire a read-only host view of overlap/ghost storage. */
+    auto local_read_view() const
+    {
+        return d_overlap.getLocalViewHost(Tpetra::Access::ReadOnly);
+    }
+
+    /**
+     * @brief Acquire a read-write host view of authoritative owned storage.
+     * @note Call sync_ghosts() before overlap readers must observe writes.
+     */
+    auto owned_write_view()
+    {
+        return d_owned.getLocalViewHost(Tpetra::Access::ReadWrite);
+    }
+
+    /**
+     * @brief Acquire a read-write host view of overlap/ghost storage.
+     * @note A later sync_ghosts() replaces these values from owned storage.
+     */
+    auto local_write_view()
+    {
+        return d_overlap.getLocalViewHost(Tpetra::Access::ReadWrite);
     }
 
     size_t num_owned_entries() const noexcept
@@ -200,6 +269,61 @@ public:
     size_t num_local_entries() const noexcept
     {
         return d_overlap.getMap()->getLocalNumElements();
+    }
+
+    size_t num_owned_cells() const noexcept
+        requires std::same_as<location_type, CellLocation>
+    {
+        return num_owned_entries();
+    }
+
+    size_t num_local_cells() const noexcept
+        requires std::same_as<location_type, CellLocation>
+    {
+        return num_local_entries();
+    }
+
+    size_t num_owned_faces() const noexcept
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return num_owned_entries();
+    }
+
+    size_t num_local_faces() const noexcept
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return num_local_entries();
+    }
+
+    size_t num_owned_boundary_faces() const noexcept
+        requires std::same_as<location_type, BoundaryFaceLocation>
+    {
+        return num_owned_entries();
+    }
+
+    /**
+     * @brief Ordered mesh-local IDs corresponding to owned face rows.
+     *
+     * Mapped mesh interfaces place owned faces before overlap-only faces, so
+     * the returned IDs also index owned host views directly.
+     */
+    const std::vector<local_ordinal_type>& owned_face_ids() const noexcept
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return d_owned_face_ids;
+    }
+
+    /** @brief Return the owned storage row for an owned mesh-local face ID. */
+    local_ordinal_type owned_row(local_ordinal_type face_lid) const
+        requires std::same_as<location_type, FaceLocation>
+    {
+        const auto row = owned_row_or_invalid(face_lid);
+        if (row == invalid_local_ordinal())
+        {
+            throw std::out_of_range(
+                "Field entry is not locally owned.");
+        }
+        return row;
     }
 
     /** @brief Import current owned values into overlap ghost storage. */
@@ -228,6 +352,12 @@ public:
             d_owned.putScalar(value);
             d_overlap.putScalar(value);
         }
+    }
+
+    /** @brief Compatibility alias for assigning one value everywhere. */
+    void put_scalar(const value_type& value)
+    {
+        put_value(value);
     }
 
     value_type value(local_ordinal_type local_id) const
@@ -261,6 +391,25 @@ public:
                     "Scalar field has only component zero.");
             }
             return value(local_id);
+        }
+    }
+
+    scalar_type local_component_value(local_ordinal_type local_id,
+                                      size_t component) const
+    {
+        check_component(component);
+        if constexpr (value_traits::is_vector)
+        {
+            return d_overlap.getData(component)[overlap_row(local_id)];
+        }
+        else
+        {
+            if (component != 0)
+            {
+                throw std::out_of_range(
+                    "Scalar field has only component zero.");
+            }
+            return local_value(local_id);
         }
     }
 
@@ -309,6 +458,36 @@ public:
         }
     }
 
+    /** @brief Update one authoritative component without touching overlap data. */
+    void set_owned_component_value(local_ordinal_type local_id,
+                                   size_t component,
+                                   scalar_type value)
+    {
+        check_component(component);
+        if constexpr (value_traits::is_vector)
+        {
+            d_owned.replaceLocalValue(
+                owned_row(local_id), component, value);
+        }
+        else
+        {
+            if (component != 0)
+            {
+                throw std::out_of_range(
+                    "Scalar field has only component zero.");
+            }
+            set_owned_value(local_id, value);
+        }
+    }
+
+    /** @brief Accumulate a scalar value into owned and local copies. */
+    void sum_into_value(local_ordinal_type local_id, scalar_type value)
+        requires (!value_traits::is_vector)
+    {
+        d_owned.sumIntoLocalValue(owned_row(local_id), value);
+        d_overlap.sumIntoLocalValue(overlap_row(local_id), value);
+    }
+
     bool is_owned(local_ordinal_type local_id) const
     {
         return owned_row_or_invalid(local_id)
@@ -319,6 +498,36 @@ public:
     {
         return overlap_row_or_invalid(local_id)
             != invalid_local_ordinal();
+    }
+
+    bool is_owned_cell(local_ordinal_type local_id) const
+        requires std::same_as<location_type, CellLocation>
+    {
+        return is_owned(local_id);
+    }
+
+    bool is_local_cell(local_ordinal_type local_id) const
+        requires std::same_as<location_type, CellLocation>
+    {
+        return is_local(local_id);
+    }
+
+    bool is_owned_face(local_ordinal_type local_id) const
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return is_owned(local_id);
+    }
+
+    bool is_local_face(local_ordinal_type local_id) const
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return is_local(local_id);
+    }
+
+    bool is_owned_boundary_face(local_ordinal_type local_id) const
+        requires std::same_as<location_type, BoundaryFaceLocation>
+    {
+        return is_owned(local_id);
     }
 
     // === Structured-ID accessors ===
@@ -582,6 +791,39 @@ private:
         }
     }
 
+    static std::vector<local_ordinal_type> make_owned_face_ids(
+        const mesh_type& mesh)
+    {
+        std::vector<local_ordinal_type> result;
+        if constexpr (std::is_same_v<location_type, FaceLocation>)
+        {
+            result.reserve(mesh.num_owned_faces());
+            for (size_t face = 0; face < mesh.num_faces(); ++face)
+            {
+                const auto face_lid = static_cast<local_ordinal_type>(face);
+                if (mesh.is_owned_face(face_lid))
+                {
+                    result.push_back(face_lid);
+                }
+            }
+            if (result.size() != mesh.num_owned_faces())
+            {
+                throw std::runtime_error(
+                    "FieldStored owned-face IDs do not match the owned map.");
+            }
+            for (size_t row = 0; row < result.size(); ++row)
+            {
+                if (result[row] != static_cast<local_ordinal_type>(row))
+                {
+                    throw std::runtime_error(
+                        "FieldStored requires owned faces to form a "
+                        "local-ID prefix.");
+                }
+            }
+        }
+        return result;
+    }
+
     static constexpr local_ordinal_type invalid_local_ordinal()
     {
         return Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
@@ -733,6 +975,7 @@ private:
     storage_type d_owned;
     storage_type d_overlap;
     Teuchos::RCP<const import_type> d_import;
+    std::vector<local_ordinal_type> d_owned_face_ids;
 };
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,

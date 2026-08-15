@@ -188,10 +188,11 @@ private:
                 static_cast<local_ordinal_type>(owned);
             if (include_boundary_samples)
             {
+                const auto cell_faces = mesh.faces(cell_lid);
                 const auto has_boundary_sample =
                     std::any_of(
-                        mesh.faces(cell_lid).begin(),
-                        mesh.faces(cell_lid).end(),
+                        cell_faces.begin(),
+                        cell_faces.end(),
                         [&](const auto face_lid)
                         {
                             return mesh.is_boundary_face(face_lid)
@@ -1830,6 +1831,23 @@ auto cell_flux_balance(
     }
     return detail::stored_cell_flux_balance(
         mesh, face_fluxes, cell_lid);
+}
+
+/**
+ * @brief Cached-view compatibility overload for a stored face field.
+ *
+ * FieldStored resolves owned/overlap rows itself; the supplied view is kept
+ * only so solver kernels can share their legacy cached-view call shape.
+ */
+template<TpetraTypePack Pack, class MeshType, class View>
+auto cell_flux_balance(
+    const MeshType& mesh,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
+    const View&,
+    typename Pack::local_ordinal_type cell_lid)
+    -> typename Pack::scalar_type
+{
+    return cell_flux_balance<Pack>(mesh, face_fluxes, cell_lid);
 }
 
 /** @brief Compute volume-normalized divergence from stored face fluxes. */

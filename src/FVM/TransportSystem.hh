@@ -13,6 +13,7 @@
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
+#include "FVM/details/FieldStoredTransportSystem.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -26,6 +27,8 @@
 #include <functional>
 #include <optional>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace SimpleFluid::FVM
@@ -186,12 +189,171 @@ private:
 };
 
 /**
- * @brief Library-provided transport geometry cache specialization.
+ * @brief Explicit instantiations for common transport geometry caches.
  *
- * Additional mesh/type-pack combinations require a deliberate explicit
- * instantiation in the owning implementation target.
+ * Generic definitions are header-visible so static mapped meshes can use the
+ * cache directly. These declarations retain compiled instantiations for the
+ * default legacy and runtime mesh types.
  */
 extern template class TransportGeometryCache<Mesh<DefaultTpetraTypes>>;
+extern template class TransportGeometryCache<MeshHandle<DefaultTpetraTypes>>;
+
+/**
+ * @brief Assemble scalar transport directly on a mapped FieldStored mesh.
+ *
+ * This compatibility overload uses the orthogonal two-point diffusion
+ * contribution. Use non_orthogonal_transport_system() to select explicit,
+ * implicit, or hybrid correction on a semi-structured mesh.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> right_hand_source,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    return detail::stored_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
+        std::move(boundary_condition), std::move(boundary_value), std::move(right_hand_source),
+        std::move(cached_matrix));
+}
+
+/** @brief Assemble mapped scalar transport with a zero source. */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarBoundaryValueProvider<Pack> boundary_value,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
+{
+    auto zero_source = [](typename Pack::local_ordinal_type) { return typename Pack::scalar_type{}; };
+    return transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity, std::move(boundary_condition),
+        std::move(boundary_value), ScalarCellValueProvider<Pack>{zero_source}, cached_matrix);
+}
+
+/**
+ * @brief Assemble mapped scalar transport with selectable non-orthogonal diffusion.
+ *
+ * The transported and optional lagged correction fields remain on their
+ * original mapped mesh. Geometry and matrix caches may be reused across
+ * steps when they were constructed for the same mesh and operator graph.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> right_hand_source,
+    NonOrthogonalTreatment treatment,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr)
+{
+    return detail::stored_scalar_non_orthogonal_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
+        std::move(boundary_condition), std::move(boundary_value), std::move(right_hand_source), treatment,
+        correction_field, std::move(cached_matrix), geometry_cache);
+}
+
+/**
+ * @brief Assemble weighted scalar transport directly on mapped fields.
+ *
+ * Storage, advection, and diffusion coefficients are cell fields. The
+ * overload mirrors the legacy weighted system while retaining the original
+ * mapped mesh and FieldStored ownership.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    const ScalarCellFieldStored<Pack, MeshType>& storage_weight,
+    const ScalarCellFieldStored<Pack, MeshType>& advection_weight,
+    const ScalarCellFieldStored<Pack, MeshType>& diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> source,
+    NonOrthogonalTreatment treatment,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink = {},
+    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value = {},
+    const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_diffusivity = nullptr,
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
+{
+    return detail::stored_weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
+        advection_weight, diffusivity, std::move(boundary_condition), std::move(boundary_value), std::move(source),
+        treatment, correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
+        boundary_diffusivity, geometry_cache, coefficient_interpolation);
+}
+
+/**
+ * @brief Assemble conservative physical temperature transport on mapped fields.
+ *
+ * The transient and advective coefficient is rho*cp, diffusion uses thermal
+ * conductivity, and the source is volumetric power density.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> physical_temperature_transport_system(
+    const ScalarCellFieldStored<Pack, MeshType>& old_temperature,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    const ScalarCellFieldStored<Pack, MeshType>& density,
+    const ScalarCellFieldStored<Pack, MeshType>& specific_heat_capacity,
+    const ScalarCellFieldStored<Pack, MeshType>& thermal_conductivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> power_density, NonOrthogonalTreatment treatment,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_thermal_conductivity = nullptr,
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
+{
+    return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
+        specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
+        std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
+        geometry_cache, coefficient_interpolation);
+}
+
+/**
+ * @brief Assemble mapped vector transport with selectable treatment.
+ *
+ * Explicit, implicit, and hybrid non-orthogonal treatments use the same
+ * mapped reconstruction stencils as the legacy mesh path.
+ */
+template<TpetraTypePack Pack, class MeshType>
+VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFieldStored<Pack, MeshType>& old_values,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    typename Pack::scalar_type diffusivity, VectorBoundaryValueProvider<Pack> boundary_value,
+    VectorCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
+    const std::type_identity_t<VectorCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr)
+{
+    return detail::stored_vector_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
+        std::move(boundary_value), std::move(right_hand_source), treatment, correction_field, std::move(cached_matrix),
+        std::move(boundary_diffusion), geometry_cache);
+}
+
+/**
+ * @brief Assemble mapped momentum transport with variable viscosity.
+ *
+ * The mapped path includes variable-coefficient orthogonal diffusion,
+ * explicit/implicit non-orthogonal corrections, and the deviatoric
+ * transpose-gradient stress used by physical momentum transport.
+ */
+template<TpetraTypePack Pack, class MeshType>
+VectorTransportSystem<Pack> physical_momentum_transport_system(
+    const VectorCellFieldStored<Pack, MeshType>& old_velocity, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
+    typename Pack::scalar_type time_step, const ScalarCellFieldStored<Pack, MeshType>& dynamic_viscosity,
+    typename Pack::scalar_type reference_density, VectorBoundaryValueProvider<Pack> boundary_value,
+    VectorCellValueProvider<Pack> acceleration_source, NonOrthogonalTreatment treatment,
+    const std::type_identity_t<VectorCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
+    const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_dynamic_viscosity = nullptr,
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
+{
+    return detail::stored_physical_momentum_transport_system<Pack>(old_velocity, face_fluxes, time_step,
+        dynamic_viscosity, reference_density, std::move(boundary_value), std::move(acceleration_source), treatment,
+        correction_field, std::move(cached_matrix), std::move(boundary_diffusion), boundary_dynamic_viscosity,
+        geometry_cache, coefficient_interpolation);
+}
 
 /**
  * @brief Assemble the semi-implicit transport system (unsteady
@@ -273,6 +435,23 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
     typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
     ScalarBoundaryValueProvider<Pack> boundary_value,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null);
+
+/**
+ * @brief Assemble legacy scalar transport with selectable non-orthogonal diffusion.
+ *
+ * This constant-coefficient overload preserves the scalar transport contract
+ * exposed by the mapped-field specialization while retaining legacy field
+ * storage.  It delegates to the weighted scalar kernel with unit storage and
+ * advection weights.
+ */
+template<TpetraTypePack Pack>
+TransportSystem<Pack> non_orthogonal_transport_system(const CellField<Pack>& old_values,
+    const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
+    const CellField<Pack>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr);
 
 /**
  * @brief Assemble the semi-implicit transport system for a 3-component
@@ -479,3 +658,5 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null);
 
 } // namespace SimpleFluid::FVM
+
+#include "FVM/details/TransportGeometryCache.hh"

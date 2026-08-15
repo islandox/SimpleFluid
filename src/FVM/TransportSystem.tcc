@@ -140,62 +140,6 @@ void add_transport_values(const PreparedTransportMatrix<Pack>& prepared, typenam
 
 } // namespace detail
 
-template<class MeshType>
-TransportGeometryCache<MeshType>::TransportGeometryCache(const MeshType& mesh)
-    : d_mesh(&mesh), d_interior_stencils(detail::least_squares_gradient_stencils(mesh)),
-      d_boundary_locations(detail::boundary_face_locations(mesh)),
-      d_boundary_geometry(detail::boundary_aware_gradient_geometry(mesh, d_boundary_locations))
-{
-}
-
-template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(const MeshType& mesh) const
-{
-    if (&mesh != d_mesh)
-    {
-        throw std::invalid_argument("transport geometry cache belongs to another mesh.");
-    }
-}
-
-template<class MeshType>
-const typename TransportGeometryCache<MeshType>::interior_stencils_type&
-TransportGeometryCache<MeshType>::interior_stencils() const noexcept
-{
-    return d_interior_stencils;
-}
-
-template<class MeshType>
-const typename TransportGeometryCache<MeshType>::boundary_locations_type&
-TransportGeometryCache<MeshType>::boundary_locations() const noexcept
-{
-    return d_boundary_locations;
-}
-
-template<class MeshType>
-const typename TransportGeometryCache<MeshType>::boundary_geometry_type&
-TransportGeometryCache<MeshType>::boundary_geometry() const noexcept
-{
-    return d_boundary_geometry;
-}
-
-template<class MeshType>
-std::vector<detail::AffineLeastSquaresGradientStencil<MeshType>>
-TransportGeometryCache<MeshType>::scalar_affine_stencils(
-    std::function<BoundaryCondition(int, size_t)> boundary_condition,
-    std::function<typename MeshType::scalar_type(int, size_t)> boundary_value) const
-{
-    return detail::materialize_scalar_affine_gradient_stencils<MeshType>(
-        d_boundary_geometry, std::move(boundary_condition), std::move(boundary_value));
-}
-
-template<class MeshType>
-std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshType>>
-TransportGeometryCache<MeshType>::vector_affine_stencils(
-    std::function<typename MeshType::Vec3(int, size_t)> boundary_value) const
-{
-    return detail::materialize_vector_affine_gradient_stencils<MeshType>(
-        d_boundary_geometry, std::move(boundary_value));
-}
-
 template<TpetraTypePack Pack>
 TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const FaceField<Pack>& face_fluxes,
     typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
@@ -392,6 +336,62 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
 
     return transport_system<Pack>(
         old_values, face_fluxes, time_step, diffusivity, boundary_value, zero_source, cached_matrix);
+}
+
+template<TpetraTypePack Pack>
+TransportSystem<Pack> non_orthogonal_transport_system(const CellField<Pack>& old_values,
+    const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
+    const CellField<Pack>* correction_field, Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache)
+{
+    using scalar_type = typename Pack::scalar_type;
+
+    const auto& mesh = old_values.mesh();
+    int invalid_geometry_cache = 0;
+    if (geometry_cache != nullptr)
+    {
+        try
+        {
+            geometry_cache->require_mesh(mesh);
+        }
+        catch (const std::invalid_argument&)
+        {
+            invalid_geometry_cache = 1;
+        }
+    }
+    const int local_validation_state[4]{&face_fluxes.mesh() != &mesh ? 1 : 0,
+        !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
+        !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0, invalid_geometry_cache};
+    int validation_state[4]{};
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 4, local_validation_state,
+        validation_state);
+    if (validation_state[0] != 0)
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires face fluxes on the old-value mesh.");
+    }
+    if (validation_state[1] != 0)
+    {
+        throw std::invalid_argument("non_orthogonal_transport_system requires a finite positive time step.");
+    }
+    if (validation_state[2] != 0)
+    {
+        throw std::invalid_argument("non_orthogonal_transport_system requires finite non-negative diffusivity.");
+    }
+    if (validation_state[3] != 0)
+    {
+        throw std::invalid_argument("non_orthogonal_transport_system received a geometry cache on the wrong mesh.");
+    }
+
+    CellField<Pack> storage_weight(old_values.mesh_ptr(), scalar_type{1}, "constant_storage_weight");
+    CellField<Pack> advection_weight(old_values.mesh_ptr(), scalar_type{1}, "constant_advection_weight");
+    CellField<Pack> diffusivity_field(old_values.mesh_ptr(), diffusivity, "constant_diffusivity");
+    return weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
+        advection_weight, diffusivity_field, std::move(boundary_condition), std::move(boundary_value),
+        std::move(right_hand_source), treatment, correction_field, std::move(cached_matrix), {}, {}, nullptr,
+        geometry_cache, FaceCoefficientInterpolation::Harmonic);
 }
 
 template<TpetraTypePack Pack>

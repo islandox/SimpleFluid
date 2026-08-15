@@ -27,8 +27,8 @@ namespace SimpleFluid
  * @param boundary_conditions Configured scalar boundary conditions.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template <TpetraTypePack Pack>
-TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
+template <TpetraTypePack Pack, class MeshType>
+TurbulenceScalarTransportEquation<Pack, MeshType>::TurbulenceScalarTransportEquation(
     SP<const mesh_type> mesh, BoundaryConditionMap boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh),
                                                        "TurbulenceScalarTransportEquation")),
@@ -57,8 +57,8 @@ TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
  * @throws std::invalid_argument if any transport input is invalid.
  * @throws std::runtime_error if the solve fails or produces non-finite data.
  */
-template <TpetraTypePack Pack>
-auto TurbulenceScalarTransportEquation<Pack>::advance(
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
     const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
     const field_type& effective_diffusivity, field_type& state,
     const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,

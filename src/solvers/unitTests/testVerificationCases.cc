@@ -44,6 +44,9 @@ using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
+using StoredMeshType = SimpleFluid::MeshHandle<Pack>;
+using StoredFieldType = SimpleFluid::ScalarCellFieldStored<Pack>;
+using StoredVectorFieldType = SimpleFluid::VectorCellFieldStored<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -187,12 +190,13 @@ SimpleFluid::BoundaryConditionSet cavity_boundary_conditions()
  * @return Square-root sum of squared cell flux balances.
  */
 double stabilized_continuity_norm(
-    const VectorFieldType& velocity,
-    const FieldType& pressure,
+    const StoredVectorFieldType& velocity,
+    const StoredFieldType& pressure,
     double time_step,
-    const SimpleFluid::FVM::VelocityBoundaryCache<Pack>& cache)
+    const SimpleFluid::FVM::FieldStoredVelocityBoundaryCache<
+        Pack, StoredMeshType>& cache)
 {
-    SimpleFluid::FaceField<Pack> fluxes(
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(
         velocity.mesh_ptr(), "verification_fluxes");
     SimpleFluid::FVM::pressure_weighted_face_fluxes(
         velocity, pressure, time_step, cache, fluxes);
@@ -203,7 +207,7 @@ double stabilized_continuity_norm(
          ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Pack::local_ordinal_type>(owned);
         const auto balance =
             SimpleFluid::FVM::cell_flux_balance<Pack>(
                 velocity.mesh(), fluxes, cell_lid);
@@ -252,7 +256,7 @@ void verify_lid_driven_cavity(
         const auto cache =
             SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
                 mesh, bcs);
-        SimpleFluid::VectorFaceField<Pack> face_velocity(
+        SimpleFluid::VectorFaceFieldStored<Pack> face_velocity(
             mesh, "cavity_face_velocity");
         SimpleFluid::FVM::face_velocities(
             solver.velocity(), cache, face_velocity);
@@ -263,7 +267,7 @@ void verify_lid_driven_cavity(
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
-                static_cast<MeshType::local_ordinal_type>(owned);
+                static_cast<Pack::local_ordinal_type>(owned);
             const auto velocity = solver.velocity().value(cell_lid);
             EXPECT_TRUE(std::isfinite(velocity.x));
             EXPECT_TRUE(std::isfinite(velocity.y));

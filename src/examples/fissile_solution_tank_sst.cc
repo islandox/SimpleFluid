@@ -129,12 +129,16 @@ size_t tank_bin_index(double coordinate, const std::vector<double>& edges)
  */
 template<class Pack>
 void project_axisymmetric_tank_state(SimpleFluid::BoussinesqSolver<Pack>& solver,
-    SimpleFluid::TurbulenceModel<Pack>& turbulence, const std::vector<double>& radial_edges,
+    typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence,
+    const std::vector<double>& radial_edges,
     const std::vector<double>& axial_edges, double reference_density)
 {
+    using solver_type = SimpleFluid::BoussinesqSolver<Pack>;
+    using turbulence_type = typename solver_type::turbulence_model_type;
+    using turbulence_field_type = typename turbulence_type::field_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using vector_type = typename SimpleFluid::VectorCellField<Pack>::vec_type;
+    using vector_type = typename solver_type::vec_type;
 
     constexpr size_t volume_component = 0;
     constexpr size_t temperature_component = 1;
@@ -196,9 +200,9 @@ void project_axisymmetric_tank_state(SimpleFluid::BoussinesqSolver<Pack>& solver
         }
     }
 
-    SimpleFluid::CellField<Pack> projected_k(mesh, "tank_axisymmetric_k");
-    SimpleFluid::CellField<Pack> projected_omega(mesh, "tank_axisymmetric_omega");
-    SimpleFluid::CellField<Pack> projected_nut(mesh, "tank_axisymmetric_nut");
+    turbulence_field_type projected_k(mesh, "tank_axisymmetric_k");
+    turbulence_field_type projected_omega(mesh, "tank_axisymmetric_omega");
+    turbulence_field_type projected_nut(mesh, "tank_axisymmetric_nut");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -225,8 +229,12 @@ void project_axisymmetric_tank_state(SimpleFluid::BoussinesqSolver<Pack>& solver
 
         solver.temperature().set_owned_value(cell_lid, global[offset + temperature_component] * inverse_volume);
         solver.velocity().set_owned_value(
-            cell_lid, vector_type{radial_velocity * std::cos(theta), radial_velocity * std::sin(theta),
-                          global[offset + axial_velocity_component] * inverse_volume});
+            cell_lid,
+            vector_type{
+                radial_velocity * std::cos(theta),
+                radial_velocity * std::sin(theta),
+                global[offset + axial_velocity_component]
+                    * inverse_volume});
         solver.pressure().set_owned_value(cell_lid, global[offset + pressure_component] * inverse_volume);
         projected_k.set_owned_value(cell_lid, projected_k_value);
         projected_omega.set_owned_value(cell_lid, projected_omega_value);
@@ -238,7 +246,8 @@ void project_axisymmetric_tank_state(SimpleFluid::BoussinesqSolver<Pack>& solver
     projected_k.sync_ghosts();
     projected_omega.sync_ghosts();
     projected_nut.sync_ghosts();
-    turbulence.restore_transported_state(projected_k, projected_omega, projected_nut, solver.velocity(),
+    turbulence.restore_transported_state(projected_k, projected_omega,
+        projected_nut, solver.velocity(),
         solver.material_properties(), static_cast<scalar_type>(reference_density));
 }
 
@@ -247,7 +256,8 @@ void project_axisymmetric_tank_state(SimpleFluid::BoussinesqSolver<Pack>& solver
  */
 template<class Pack>
 void write_profile_cells(const SimpleFluid::MeshHandle<Pack>& mesh, const SimpleFluid::BoussinesqSolver<Pack>& solver,
-    const SimpleFluid::TurbulenceModel<Pack>& turbulence, const SimpleFluid::FissionPowerSource<Pack>& fission,
+    const typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence,
+    const typename SimpleFluid::BoussinesqSolver<Pack>::fission_power_source_type& fission,
     int rank)
 {
     const char* configured_prefix = std::getenv("SIMPLEFLUID_TANK_OUTPUT_PREFIX");
@@ -414,7 +424,10 @@ int main(int argc, char** argv)
     turbulence_options.wall_treatment = SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST;
     turbulence_options.wall_options.boundary_names = {"radial", "zmin", "zmax"};
     auto& turbulence = solver.configure_turbulence(turbulence_options);
-    const auto field_mesh = turbulence.turbulent_kinetic_energy().mesh_ptr();
+    using turbulence_type =
+        typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type;
+    using turbulence_field_type = typename turbulence_type::field_type;
+    const auto field_mesh = solver.temperature().mesh_ptr();
     double local_minimum_wall_face_distance = std::numeric_limits<double>::infinity();
     double local_maximum_wall_face_distance = 0.0;
     for (const auto& [batch_id, batch] : field_mesh->boundary_batches())
@@ -432,7 +445,8 @@ int main(int argc, char** argv)
             local_maximum_wall_face_distance = std::max(local_maximum_wall_face_distance, distance);
         }
     }
-    SimpleFluid::CellField<Pack> exact_wall_distance(field_mesh, "tank_exact_wall_distance");
+    turbulence_field_type exact_wall_distance(
+        field_mesh, "tank_exact_wall_distance");
     for (size_t owned = 0; owned < field_mesh->num_owned_cells(); ++owned)
     {
         const auto lid = static_cast<typename Pack::local_ordinal_type>(owned);
@@ -446,9 +460,11 @@ int main(int argc, char** argv)
     }
     exact_wall_distance.sync_ghosts();
     turbulence.set_wall_distance(exact_wall_distance, solver.material_properties(), density);
-    SimpleFluid::CellField<Pack> initial_k_field(field_mesh, "tank_initial_k");
-    SimpleFluid::CellField<Pack> initial_omega_field(field_mesh, "tank_initial_omega");
-    SimpleFluid::CellField<Pack> initial_nut_field(field_mesh, "tank_initial_nut");
+    turbulence_field_type initial_k_field(field_mesh, "tank_initial_k");
+    turbulence_field_type initial_omega_field(
+        field_mesh, "tank_initial_omega");
+    turbulence_field_type initial_nut_field(
+        field_mesh, "tank_initial_nut");
     constexpr double sst_beta_1 = 0.075;
     constexpr double sst_cell_omega_coefficient = 6.0;
     const double molecular_kinematic_viscosity = dynamic_viscosity / density;
@@ -465,7 +481,8 @@ int main(int argc, char** argv)
     initial_k_field.sync_ghosts();
     initial_omega_field.sync_ghosts();
     initial_nut_field.sync_ghosts();
-    turbulence.restore_transported_state(initial_k_field, initial_omega_field, initial_nut_field, solver.velocity(),
+    turbulence.restore_transported_state(initial_k_field, initial_omega_field,
+        initial_nut_field, solver.velocity(),
         solver.material_properties(), density);
 
     const auto communicator = Tpetra::getDefaultComm();

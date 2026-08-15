@@ -15,12 +15,14 @@
 #include "dataclass/typedefs.hh"
 #include "equations/PressureVelocityCoupling.hh"
 #include "fields/CellField.hh"
+#include "fields/FieldStored.hh"
 #include "fields/VectorCellField.hh"
 #include "geometry/Mesh.hh"
 
 #include <iosfwd>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace SimpleFluid
@@ -171,10 +173,20 @@ public:
     using mesh_type = Mesh<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
+    using stored_mesh_type = MeshHandle<Pack>;
+    using stored_field_type = ScalarCellFieldStored<Pack>;
+    using stored_velocity_field_type = VectorCellFieldStored<Pack>;
+    using stored_additional_field_type =
+        std::variant<const field_type*, const stored_field_type*>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     SteadyStateFieldMonitor(SP<const mesh_type> mesh, scalar_type reference_temperature,
+                            SteadyStateUpdateScales scales = {});
+
+    /** @brief Monitor fields stored directly on a runtime mesh handle. */
+    SteadyStateFieldMonitor(SP<const stored_mesh_type> mesh,
+                            scalar_type reference_temperature,
                             SteadyStateUpdateScales scales = {});
 
     /**
@@ -182,6 +194,17 @@ public:
      */
     void initialize(const velocity_field_type& velocity, const field_type& temperature,
                     std::vector<const field_type*> additional_scalar_fields = {});
+
+    /**
+     * @brief Capture MeshHandle-backed solver fields before the first step.
+     *
+     * Additional transported scalars may use FieldStored or, for a handle
+     * adapting an existing STK mesh, the corresponding legacy CellField.
+     */
+    void initialize(
+        const stored_velocity_field_type& velocity,
+        const stored_field_type& temperature,
+        std::vector<stored_additional_field_type> additional_scalar_fields = {});
 
     /**
      * @brief Compare the current fields with the preceding accepted state.
@@ -196,19 +219,51 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
 
+    SIMPLEFLUID_SOLVERS_LOCAL
+    static SP<const stored_mesh_type> require_mesh(
+        SP<const stored_mesh_type> mesh);
+
     template <class Field>
     SIMPLEFLUID_SOLVERS_LOCAL
     void require_field_mesh(const Field& field, const char* name) const;
 
     SIMPLEFLUID_SOLVERS_LOCAL
+    void require_field_mesh(const stored_additional_field_type& field,
+                            const char* name) const;
+
+    SIMPLEFLUID_SOLVERS_LOCAL
     void capture_current_state();
 
+    template<class MeshType, class VelocityField, class TemperatureField,
+             class AdditionalFields>
+    SIMPLEFLUID_SOLVERS_LOCAL
+    SteadyStateUpdateRates<scalar_type> observe_fields(
+        scalar_type time_step,
+        const MeshType& mesh,
+        const VelocityField& velocity,
+        const TemperatureField& temperature,
+        const AdditionalFields& additional_scalar_fields);
+
+    template<class MeshType, class VelocityField, class TemperatureField,
+             class AdditionalFields>
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void capture_current_state(
+        const MeshType& mesh,
+        const VelocityField& velocity,
+        const TemperatureField& temperature,
+        const AdditionalFields& additional_scalar_fields);
+
     SP<const mesh_type> d_mesh;
+    SP<const stored_mesh_type> d_stored_mesh;
     scalar_type d_reference_temperature;
     SteadyStateUpdateScales d_scales;
     const velocity_field_type* d_velocity = nullptr;
     const field_type* d_temperature = nullptr;
     std::vector<const field_type*> d_additional_scalar_fields;
+    const stored_velocity_field_type* d_stored_velocity = nullptr;
+    const stored_field_type* d_stored_temperature = nullptr;
+    std::vector<stored_additional_field_type>
+        d_stored_additional_scalar_fields;
     std::vector<scalar_type> d_previous_velocity;
     std::vector<scalar_type> d_previous_temperature;
     std::vector<std::vector<scalar_type>> d_previous_additional_fields;

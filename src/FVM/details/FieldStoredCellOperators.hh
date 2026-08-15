@@ -393,13 +393,9 @@ auto stored_cell_flux_balance(const MeshType& mesh, const ScalarFaceFieldStored<
     for (const auto face_id : mesh.faces(cell_id))
     {
         const auto face_lid = static_cast<typename Pack::local_ordinal_type>(packed_face_local_id(mesh, face_id));
-        if (!face_fluxes.is_owned(face_lid))
-        {
-            continue;
-        }
         const auto owner_lid = packed_cell_local_id(mesh, mesh.owner_cell(face_id));
         const auto sign = owner_lid == cell_lid ? scalar_type{1} : scalar_type{-1};
-        balance += sign * face_fluxes.value(face_lid);
+        balance += sign * face_fluxes.local_value(face_lid);
     }
     return balance;
 }

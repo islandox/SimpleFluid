@@ -37,18 +37,28 @@ void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar va
     row[column] += value;
 }
 
-template<TpetraTypePack Pack>
-auto make_coupled_map(const Mesh<Pack>& mesh) -> Teuchos::RCP<const typename Pack::map_type>
+template<TpetraTypePack Pack, class MeshType>
+auto make_coupled_map(const MeshType& mesh) -> Teuchos::RCP<const typename Pack::map_type>
 {
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using map_type = typename Pack::map_type;
 
     constexpr global_ordinal_type block_size = 4;
     const auto invalid_global_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
-    const auto comm = mesh.owned_cell_map()->getComm();
+    const auto cell_map = mesh.owned_cell_map();
+    const auto comm = cell_map->getComm();
+    Teuchos::Array<global_ordinal_type> coupled_global_ids;
+    coupled_global_ids.reserve(block_size * mesh.num_owned_cells());
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_gid = cell_map->getGlobalElement(static_cast<typename Pack::local_ordinal_type>(owned));
+        for (global_ordinal_type component = 0; component < block_size; ++component)
+        {
+            coupled_global_ids.push_back(block_size * cell_gid + component);
+        }
+    }
 
-    return Teuchos::rcp(
-        new map_type(invalid_global_size, block_size * mesh.num_owned_cells(), global_ordinal_type{0}, comm));
+    return Teuchos::rcp(new map_type(invalid_global_size, coupled_global_ids(), global_ordinal_type{0}, comm));
 }
 
 template<TpetraTypePack Pack>
@@ -111,14 +121,14 @@ void add_coupled_global_values(const PreparedCoupledMatrix<Pack>& prepared, type
     }
 }
 
-template<TpetraTypePack Pack>
-auto pressure_gradient_stencils(const Mesh<Pack>& mesh, const BoundaryConditionMap& boundary_conditions,
-    typename Pack::scalar_type reference_density) -> std::vector<AffinePressureGradientStencil<Pack>>
+template<TpetraTypePack Pack, class MeshType>
+auto pressure_gradient_stencils(const MeshType& mesh, const BoundaryConditionMap& boundary_conditions,
+    typename Pack::scalar_type reference_density) -> std::vector<AffinePressureGradientStencil<Pack, MeshType>>
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
+    using mesh_type = MeshType;
 
-    std::vector<AffinePressureGradientStencil<Pack>> stencils(mesh.num_owned_cells());
+    std::vector<AffinePressureGradientStencil<Pack, mesh_type>> stencils(mesh.num_owned_cells());
     const auto boundary_locations = FVM::detail::boundary_face_locations(mesh);
     auto boundary_condition = [&](local_ordinal_type face_lid) -> std::optional<BoundaryCondition>
     {
@@ -593,23 +603,26 @@ private:
 
 } // namespace detail
 
-template<TpetraTypePack Pack> bool CoupledPressureVelocitySolver<Pack>::StaticGeometryCache::empty() const noexcept
+template<TpetraTypePack Pack, class MeshType>
+bool CoupledPressureVelocitySolver<Pack, MeshType>::StaticGeometryCache::empty() const noexcept
 {
     return stencils.empty();
 }
 
-template<TpetraTypePack Pack>
-CoupledPressureVelocitySolver<Pack>::CoupledPressureVelocitySolver(SP<const mesh_type> mesh)
+template<TpetraTypePack Pack, class MeshType>
+CoupledPressureVelocitySolver<Pack, MeshType>::CoupledPressureVelocitySolver(SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "CoupledPressureVelocitySolver")),
-      d_coupled_map(detail::make_coupled_map(*d_mesh)),
+      d_coupled_map(detail::make_coupled_map<Pack>(*d_mesh)),
       d_boundary_locations(FVM::detail::boundary_face_locations(*d_mesh))
 {
     d_cache_statistics.coupled_map_builds = 1;
 }
 
-template<TpetraTypePack Pack> CoupledPressureVelocitySolver<Pack>::~CoupledPressureVelocitySolver() = default;
+template<TpetraTypePack Pack, class MeshType>
+CoupledPressureVelocitySolver<Pack, MeshType>::~CoupledPressureVelocitySolver() = default;
 
-template<TpetraTypePack Pack> void CoupledPressureVelocitySolver<Pack>::set_rebuild_policy(CoupledRebuildPolicy policy)
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::set_rebuild_policy(CoupledRebuildPolicy policy)
 {
     if (d_rebuild_policy == policy)
     {
@@ -619,18 +632,20 @@ template<TpetraTypePack Pack> void CoupledPressureVelocitySolver<Pack>::set_rebu
     clear_cache();
 }
 
-template<TpetraTypePack Pack> CoupledRebuildPolicy CoupledPressureVelocitySolver<Pack>::rebuild_policy() const noexcept
+template<TpetraTypePack Pack, class MeshType>
+CoupledRebuildPolicy CoupledPressureVelocitySolver<Pack, MeshType>::rebuild_policy() const noexcept
 {
     return d_rebuild_policy;
 }
 
-template<TpetraTypePack Pack>
-const CoupledPressureVelocityCacheStatistics& CoupledPressureVelocitySolver<Pack>::cache_statistics() const noexcept
+template<TpetraTypePack Pack, class MeshType>
+const CoupledPressureVelocityCacheStatistics&
+CoupledPressureVelocitySolver<Pack, MeshType>::cache_statistics() const noexcept
 {
     return d_cache_statistics;
 }
 
-template<TpetraTypePack Pack> void CoupledPressureVelocitySolver<Pack>::clear_cache()
+template<TpetraTypePack Pack, class MeshType> void CoupledPressureVelocitySolver<Pack, MeshType>::clear_cache()
 {
     d_cached_system = {};
     d_static_geometry = {};
@@ -644,11 +659,11 @@ template<TpetraTypePack Pack> void CoupledPressureVelocitySolver<Pack>::clear_ca
     d_solution = Teuchos::null;
 }
 
-template<TpetraTypePack Pack>
-typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocitySolver<Pack>::assemble(
-    const IncompressibleMomentumEquation<Pack>& momentum_equation, const velocity_field_type& velocity,
-    const field_type& pressure, const face_flux_field_type& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& time_options, scalar_type reference_density) const
 {
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
@@ -662,15 +677,15 @@ typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocit
         momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions, time_options, reference_density);
 }
 
-template<TpetraTypePack Pack>
-typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocitySolver<Pack>::assemble(
-    const BoussinesqMomentumEquation<Pack>& momentum_equation, const velocity_field_type& velocity,
-    const field_type& pressure, const field_type& temperature, const face_flux_field_type& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
-    const TimeStepperOptions& time_options, const MaterialPropertyFields<Pack>* material, scalar_type reference_density,
-    bool density_feedback_enabled, const field_type* dynamic_viscosity_override,
-    const velocity_field_type* turbulent_kinetic_energy_gradient,
-    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+    const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+    const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+    const material_property_fields_type* material, scalar_type reference_density, bool density_feedback_enabled,
+    const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+    const boundary_cache_type* boundary_dynamic_viscosity) const
 {
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
@@ -716,8 +731,8 @@ typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocit
         momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions, time_options, reference_density);
 }
 
-template<TpetraTypePack Pack>
-bool CoupledPressureVelocitySolver<Pack>::same_pressure_boundaries(
+template<TpetraTypePack Pack, class MeshType>
+bool CoupledPressureVelocitySolver<Pack, MeshType>::same_pressure_boundaries(
     const BoundaryConditionMap& lhs, const BoundaryConditionMap& rhs)
 {
     if (lhs.size() != rhs.size())
@@ -736,9 +751,9 @@ bool CoupledPressureVelocitySolver<Pack>::same_pressure_boundaries(
     return true;
 }
 
-template<TpetraTypePack Pack>
-typename CoupledPressureVelocitySolver<Pack>::pressure_graph_signature_type
-CoupledPressureVelocitySolver<Pack>::pressure_graph_signature(const BoundaryConditionMap& boundaries)
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::pressure_graph_signature_type
+CoupledPressureVelocitySolver<Pack, MeshType>::pressure_graph_signature(const BoundaryConditionMap& boundaries)
 {
     pressure_graph_signature_type signature;
     signature.reserve(boundaries.size());
@@ -751,8 +766,8 @@ CoupledPressureVelocitySolver<Pack>::pressure_graph_signature(const BoundaryCond
     return signature;
 }
 
-template<TpetraTypePack Pack>
-bool CoupledPressureVelocitySolver<Pack>::can_reuse_assembly_graph(
+template<TpetraTypePack Pack, class MeshType>
+bool CoupledPressureVelocitySolver<Pack, MeshType>::can_reuse_assembly_graph(
     const momentum_system_type& momentum, const pressure_graph_signature_type& pressure_signature) const
 {
     // BlockGmresSolMgr retains its last iteration object after
@@ -769,10 +784,11 @@ bool CoupledPressureVelocitySolver<Pack>::can_reuse_assembly_graph(
            pressure_signature == d_cached_pressure_graph_signature;
 }
 
-template<TpetraTypePack Pack>
-typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocitySolver<Pack>::assemble_coupled_system(
-    const momentum_system_type& momentum, const velocity_field_type& velocity, const field_type& pressure,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const momentum_system_type& momentum,
+    const velocity_field_type& velocity, const field_type& pressure,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& time_options, scalar_type reference_density) const
 {
     if (!std::isfinite(reference_density) || reference_density <= scalar_type{})
@@ -991,9 +1007,22 @@ typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocit
             if (pressure_condition.type != BoundaryConditionType::Dirichlet)
             {
                 const auto velocity_type = velocity_boundary_cache.type.at(location.batch_id);
-                const auto prescribed = velocity_type == BoundaryConditionType::Slip
-                                            ? FVM::detail::slip_face_velocity(velocity, face_lid)
-                                            : velocity_boundary_cache.value.at(location.batch_id)[location.in_batch_id];
+                typename velocity_field_type::vec_type prescribed;
+                if (velocity_type == BoundaryConditionType::Slip)
+                {
+                    if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+                    {
+                        prescribed = FVM::detail::slip_face_velocity(velocity, face_lid);
+                    }
+                    else
+                    {
+                        prescribed = FVM::detail::stored_slip_face_velocity(velocity, face_lid);
+                    }
+                }
+                else
+                {
+                    prescribed = velocity_boundary_cache.value.at(location.batch_id)[location.in_batch_id];
+                }
                 continuity_rhs -= prescribed.dot(area);
             }
         }
@@ -1182,10 +1211,10 @@ typename CoupledPressureVelocitySolver<Pack>::system_type CoupledPressureVelocit
     return assembled;
 }
 
-template<TpetraTypePack Pack>
-typename CoupledPressureVelocitySolver<Pack>::result_type CoupledPressureVelocitySolver<Pack>::solve(
-    const system_type& system, velocity_field_type& velocity, field_type& pressure,
-    const LinearSolverOptions& options) const
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::result_type
+CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, velocity_field_type& velocity,
+    field_type& pressure, const LinearSolverOptions& options) const
 {
     if (!std::isfinite(system.reference_density) || system.reference_density <= scalar_type{})
     {

@@ -174,7 +174,11 @@ diffusion_matrix(
     return detail::diffusion_matrix_impl<Pack>(mesh, diffusivity);
 }
 
-/** @brief Assemble upwind convection from a mesh-aware stored face field. */
+/**
+ * @brief Assemble upwind convection from a mesh-aware stored face field.
+ * @note Synchronize @p face_fluxes before distributed assembly so overlap
+ *       partition faces contain their owning rank's accepted flux.
+ */
 template<TpetraTypePack Pack, class MeshType>
 Teuchos::RCP<typename Pack::matrix_type>
 upwind_convection_matrix(
@@ -188,13 +192,15 @@ upwind_convection_matrix(
     }
     return detail::upwind_convection_matrix_impl<Pack>(
         mesh,
-        [&](typename Pack::local_ordinal_type face_lid)
+        [](typename Pack::local_ordinal_type)
         {
-            return face_fluxes.is_owned(face_lid);
+            return true;
         },
         [&](typename Pack::local_ordinal_type face_lid)
         {
-            return face_fluxes.value(face_lid);
+            return face_fluxes.is_owned(face_lid)
+                 ? face_fluxes.value(face_lid)
+                 : face_fluxes.local_value(face_lid);
         });
 }
 

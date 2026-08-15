@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "equations/RadiolyticGasModel.hh"
+#include "geometry/MeshHandle.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
@@ -521,6 +523,60 @@ TEST(RadiolyticGasModelTest, TwoPopulationStepConservesHydrogen)
     EXPECT_GT(model.alpha_g().value(0), 0.0);
     EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
     EXPECT_GE(model.micro_moles().value(0), 0.0);
+}
+
+/** @brief Sheng transport runs directly on MeshHandle/FieldStored storage. */
+TEST(RadiolyticGasModelTest, NativeTwoPopulationStepConservesHydrogen)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    auto mesh = std::make_shared<Handle>(std::move(cartesian));
+    auto options = sheng_options();
+    SimpleFluid::RadiolyticGasModel<Pack, Handle> model(mesh, options);
+    SimpleFluid::ScalarCellFieldStored<Pack> temperature(
+        mesh, 300.0, "temperature");
+    SimpleFluid::ScalarCellFieldStored<Pack> pressure(
+        mesh, 0.0, "pressure");
+    SimpleFluid::ScalarCellFieldStored<Pack> power(
+        mesh, 1.0e5, "qdot_fission");
+    SimpleFluid::VectorCellFieldStored<Pack> velocity(
+        mesh, Handle::Vec3{}, "velocity");
+    SimpleFluid::ScalarFaceFieldStored<Pack> flux(
+        mesh, 0.0, "flux");
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions material_options;
+    material_options.reference_density = 1000.0;
+    material_options.density = 1000.0;
+    material_options.specific_heat_capacity = 4200.0;
+    material_options.dynamic_viscosity = 1.0e-3;
+    material_options.thermal_conductivity = 0.6;
+    SimpleFluid::MaterialPropertyFields<Pack, Handle> material(
+        mesh, material_options, time_options);
+
+    constexpr double time_step = 1.0e-6;
+    model.advance(
+        time_step,
+        time_step,
+        temperature,
+        pressure,
+        velocity,
+        flux,
+        material,
+        &power);
+
+    const auto& statistics = model.last_statistics();
+    EXPECT_FALSE(mesh->legacy_mesh());
+    EXPECT_EQ(model.alpha_g().mesh_ptr(), mesh);
+    EXPECT_NEAR(
+        statistics.hydrogen_produced,
+        options.hydrogen_yield_mol_per_j * 1.0e5 * time_step,
+        1.0e-15);
+    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-14);
+    EXPECT_GT(statistics.hydrogen_after, 0.0);
+    EXPECT_GT(model.alpha_g().value(0), 0.0);
 }
 
 /**

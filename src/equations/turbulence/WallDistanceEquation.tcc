@@ -15,7 +15,7 @@
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/turbulence/TurbulenceCollectiveValidation.hh"
-#include "fields/VectorCellField.hh"
+#include "fields/MeshFieldTraits.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -38,8 +38,8 @@ namespace wall_distance_detail
  * Length and character reductions avoid relying on implementation-specific
  * string hashes and ensure every rank executes the same boundary branches.
  */
-template <TpetraTypePack Pack>
-void require_uniform_wall_names(const Mesh<Pack>& mesh,
+template <class MeshType>
+void require_uniform_wall_names(const MeshType& mesh,
                                 const ArrString& names)
 {
     turbulence_detail::require_uniform_integral(
@@ -84,11 +84,10 @@ void require_uniform_wall_names(const Mesh<Pack>& mesh,
  * Treating an unexpected backend failure as fatal preserves the solve()
  * contract: no exception can expose a partially replaced output field.
  */
-template <TpetraTypePack Pack>
-void publish_synced_candidate(
-    CellField<Pack>& output, const CellField<Pack>& candidate) noexcept
+template <class FieldType>
+void publish_synced_candidate(FieldType& output, const FieldType& candidate) noexcept
 {
-    using scalar_type = typename Pack::scalar_type;
+    using scalar_type = typename FieldType::scalar_type;
     output.owned_data().update(
         scalar_type{1}, candidate.owned_data(), scalar_type{0});
     output.overlap_data().update(
@@ -102,8 +101,8 @@ void publish_synced_candidate(
  * @tparam Pack Tpetra type pack used by the equation.
  * @param mesh Computational mesh.
  */
-template <TpetraTypePack Pack>
-PoissonWallDistanceEquation<Pack>::PoissonWallDistanceEquation(
+template <TpetraTypePack Pack, class MeshType>
+PoissonWallDistanceEquation<Pack, MeshType>::PoissonWallDistanceEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "PoissonWallDistanceEquation"))
@@ -114,8 +113,8 @@ PoissonWallDistanceEquation<Pack>::PoissonWallDistanceEquation(
  * @brief Validate, solve, reconstruct, and atomically publish wall distance.
  * @tparam Pack Tpetra type pack used by the equation.
  */
-template <TpetraTypePack Pack>
-void PoissonWallDistanceEquation<Pack>::solve(
+template <TpetraTypePack Pack, class MeshType>
+void PoissonWallDistanceEquation<Pack, MeshType>::solve(
     const ArrString& wall_boundary_names,
     field_type& wall_distance,
     const WallDistanceEquationOptions& options) const
@@ -288,8 +287,8 @@ void PoissonWallDistanceEquation<Pack>::solve(
             }
         });
 
-    VectorCellField<Pack> potential_gradient(
-        d_mesh, "wall_distance_potential_gradient");
+    typename MeshFieldTraits<Pack, mesh_type>::vector_cell_type
+        potential_gradient(d_mesh, "wall_distance_potential_gradient");
     const auto boundary_value =
         [&](int batch_id, size_t in_batch_id) -> scalar_type
     {

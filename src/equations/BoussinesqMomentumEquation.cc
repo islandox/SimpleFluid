@@ -14,5 +14,6 @@
 
 namespace SimpleFluid
 {
-template class BoussinesqMomentumEquation<DefaultTpetraTypes>;
-}
+template class BoussinesqMomentumEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
+template class BoussinesqMomentumEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
+} // namespace SimpleFluid

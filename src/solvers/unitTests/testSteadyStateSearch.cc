@@ -177,6 +177,44 @@ TEST(SteadyStateFieldMonitorTest, ComputesVolumeWeightedRelativeUpdateRates)
     EXPECT_DOUBLE_EQ(unchanged.maximum(), 0.0);
 }
 
+TEST(SteadyStateFieldMonitorTest,
+     SupportsMeshHandleFieldsWithLegacyAdditionalScalars)
+{
+    auto legacy_mesh = make_single_cell_mesh();
+    auto mesh = std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy_mesh);
+    SimpleFluid::VectorCellFieldStored<Pack> velocity(
+        mesh, SimpleFluid::vec3<double>{0.0, 0.0, 0.0}, "velocity");
+    SimpleFluid::ScalarCellFieldStored<Pack> temperature(
+        mesh, 10.0, "temperature");
+    SimpleFluid::ScalarCellFieldStored<Pack> stored_turbulence(
+        mesh, 2.0, "stored_turbulence");
+    SimpleFluid::CellField<Pack> turbulence(
+        legacy_mesh, 1.0, "turbulence");
+
+    SimpleFluid::SteadyStateUpdateScales scales;
+    scales.velocity = 1.0;
+    scales.temperature = 2.0;
+    scales.turbulence = 0.5;
+    SimpleFluid::SteadyStateFieldMonitor<Pack> monitor(
+        mesh, 10.0, scales);
+    monitor.initialize(
+        velocity, temperature, {&turbulence, &stored_turbulence});
+
+    velocity.set_owned_value(0, {2.0, 0.0, 0.0});
+    temperature.set_owned_value(0, 14.0);
+    turbulence.set_owned_value(0, 3.0);
+    stored_turbulence.set_owned_value(0, 6.0);
+    const auto rates = monitor.observe(2.0);
+
+    EXPECT_NEAR(rates.velocity, 0.5, 1.0e-14);
+    EXPECT_NEAR(rates.temperature, 0.5, 1.0e-14);
+    EXPECT_NEAR(rates.turbulence, 1.0 / 3.0, 1.0e-14);
+    EXPECT_NEAR(rates.maximum(), 0.5, 1.0e-14);
+
+    const auto unchanged = monitor.observe(2.0);
+    EXPECT_DOUBLE_EQ(unchanged.maximum(), 0.0);
+}
+
 TEST(FluidSolverAdaptiveTimeStepTest, UpdatesTimeStepAndComputesMaximumCourantNumber)
 {
     auto mesh = make_single_cell_mesh();

@@ -11,6 +11,7 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
+#include "fields/MeshFieldTraits.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -239,14 +240,18 @@ fission_power_source_options_from_database(const Database& database)
 /**
  * @brief Specialized non-negative heat source named qdot_fission.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack, class MeshType>
 class FissionPowerSource
 {
 public:
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using field_type = CellField<Pack>;
-    using context_type = BoussinesqUpdateContext<Pack>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using context_type = BoussinesqUpdateContext<Pack, mesh_type>;
+    using source_registry_type = TemperatureSourceRegistry<Pack, mesh_type>;
+    using source_type = VolumetricScalarSource<Pack, mesh_type>;
     using multiplier_type =
         std::function<scalar_type(const context_type&)>;
 
@@ -256,8 +261,8 @@ public:
      * @brief Construct and reserve the qdot_fission temperature source.
      */
     FissionPowerSource(
-        SP<const Mesh<Pack>> mesh,
-        TemperatureSourceRegistry<Pack>& registry)
+        SP<const mesh_type> mesh,
+        source_registry_type& registry)
         : d_mesh(require_mesh(std::move(mesh))),
           d_base_profile(d_mesh, scalar_type{}, "qdot_fission_base"),
           d_registry(&registry),
@@ -641,8 +646,8 @@ private:
         }
     }
 
-    static SP<const Mesh<Pack>> require_mesh(
-        SP<const Mesh<Pack>> mesh)
+    static SP<const mesh_type> require_mesh(
+        SP<const mesh_type> mesh)
     {
         if (!mesh)
         {
@@ -808,10 +813,10 @@ private:
         }
     }
 
-    SP<const Mesh<Pack>> d_mesh;
+    SP<const mesh_type> d_mesh;
     field_type d_base_profile;
-    TemperatureSourceRegistry<Pack>* d_registry; ///< Non-owning source registry.
-    VolumetricScalarSource<Pack>* d_source; ///< Non-owning registry entry.
+    source_registry_type* d_registry; ///< Non-owning source registry.
+    source_type* d_source; ///< Non-owning registry entry.
     multiplier_type d_time_multiplier;
 };
 

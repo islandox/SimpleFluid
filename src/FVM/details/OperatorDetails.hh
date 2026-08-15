@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -325,12 +326,22 @@ auto query_face_id(
  * @param mesh Mesh that owns the identifier mapping.
  * @param cell_id Native or already-packed cell identifier.
  * @return Packed local cell identifier.
+ * @note PartitionedMesh topology methods already return packed ordinals;
+ *       callers must not pass its underlying geometry IDs here.
  */
 template<class MeshType, class CellID>
 auto packed_cell_local_id(const MeshType& mesh, CellID cell_id)
     -> typename MeshType::local_ordinal_type
 {
-    if constexpr (requires { mesh.cell_local_id(cell_id); })
+    if constexpr (requires {
+                      typename std::remove_cvref_t<
+                          MeshType>::partitioned_mesh_base_tag;
+                  })
+    {
+        return static_cast<typename MeshType::local_ordinal_type>(
+            cell_id);
+    }
+    else if constexpr (requires { mesh.cell_local_id(cell_id); })
     {
         return mesh.cell_local_id(cell_id);
     }
@@ -779,11 +790,20 @@ struct AlwaysDiffuseBoundary
  * @param mesh Mesh that owns the identifier mapping.
  * @param face_id Native or already-packed face identifier.
  * @return Packed local face identifier.
+ * @note PartitionedMesh topology methods already return packed ordinals;
+ *       callers must not pass its underlying geometry IDs here.
  */
 template<class MeshType, class FaceID>
 size_t packed_face_local_id(const MeshType& mesh, FaceID face_id)
 {
-    if constexpr (requires { mesh.face_local_id(face_id); })
+    if constexpr (requires {
+                      typename std::remove_cvref_t<
+                          MeshType>::partitioned_mesh_base_tag;
+                  })
+    {
+        return static_cast<size_t>(face_id);
+    }
+    else if constexpr (requires { mesh.face_local_id(face_id); })
     {
         return mesh.face_local_id(face_id);
     }

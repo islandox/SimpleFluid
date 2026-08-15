@@ -20,6 +20,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace SimpleFluid
@@ -38,6 +39,23 @@ SteadyStateFieldMonitor<Pack>::SteadyStateFieldMonitor(SP<const mesh_type> mesh,
     }
     const SteadyStateSearchOptions validation_options{.update_scales = d_scales};
     validate_steady_state_search_options(validation_options, validation_options.minimum_time_step);
+}
+
+template <TpetraTypePack Pack>
+SteadyStateFieldMonitor<Pack>::SteadyStateFieldMonitor(
+    SP<const stored_mesh_type> mesh,
+    scalar_type reference_temperature,
+    SteadyStateUpdateScales scales)
+    : d_stored_mesh(require_mesh(std::move(mesh))),
+      d_reference_temperature(reference_temperature), d_scales(scales)
+{
+    if (!std::isfinite(reference_temperature))
+    {
+        throw std::invalid_argument("Steady-state reference temperature must be finite.");
+    }
+    const SteadyStateSearchOptions validation_options{.update_scales = d_scales};
+    validate_steady_state_search_options(validation_options,
+                                         validation_options.minimum_time_step);
 }
 
 template <TpetraTypePack Pack>
@@ -64,6 +82,32 @@ void SteadyStateFieldMonitor<Pack>::initialize(
 }
 
 template <TpetraTypePack Pack>
+void SteadyStateFieldMonitor<Pack>::initialize(
+    const stored_velocity_field_type& velocity,
+    const stored_field_type& temperature,
+    std::vector<stored_additional_field_type> additional_scalar_fields)
+{
+    if (!d_stored_mesh)
+    {
+        throw std::invalid_argument(
+            "Steady-state FieldStored fields require a MeshHandle monitor.");
+    }
+    require_field_mesh(velocity, "velocity");
+    require_field_mesh(temperature, "temperature");
+    for (const auto& field : additional_scalar_fields)
+    {
+        require_field_mesh(field, "additional scalar field");
+    }
+
+    d_stored_velocity = &velocity;
+    d_stored_temperature = &temperature;
+    d_stored_additional_scalar_fields =
+        std::move(additional_scalar_fields);
+    capture_current_state();
+    d_initialized = true;
+}
+
+template <TpetraTypePack Pack>
 SteadyStateUpdateRates<typename Pack::scalar_type>
 SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
 {
@@ -77,16 +121,36 @@ SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
                                     "step.");
     }
 
-    const size_t field_count = d_additional_scalar_fields.size();
-    std::vector<scalar_type> local_sums(5 + 2 * field_count, scalar_type{});
-    const auto velocity_values = d_velocity->owned_read_view();
-    const auto temperature_values = d_temperature->owned_read_view();
-    const auto& volumes = d_mesh->host_views().cell_geometry.volume;
+    if (d_stored_mesh)
+    {
+        return observe_fields(
+            time_step, *d_stored_mesh, *d_stored_velocity,
+            *d_stored_temperature, d_stored_additional_scalar_fields);
+    }
+    return observe_fields(time_step, *d_mesh, *d_velocity, *d_temperature,
+                          d_additional_scalar_fields);
+}
 
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+template <TpetraTypePack Pack>
+template<class MeshType, class VelocityField, class TemperatureField,
+         class AdditionalFields>
+SteadyStateUpdateRates<typename Pack::scalar_type>
+SteadyStateFieldMonitor<Pack>::observe_fields(
+    scalar_type time_step,
+    const MeshType& mesh,
+    const VelocityField& velocity,
+    const TemperatureField& temperature,
+    const AdditionalFields& additional_scalar_fields)
+{
+    const size_t field_count = additional_scalar_fields.size();
+    std::vector<scalar_type> local_sums(5 + 2 * field_count, scalar_type{});
+    const auto velocity_values = velocity.owned_read_view();
+    const auto temperature_values = temperature.owned_read_view();
+
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell = static_cast<local_ordinal_type>(owned);
-        const auto volume = static_cast<scalar_type>(volumes[owned]);
+        const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell));
         local_sums[0] += volume;
 
         scalar_type velocity_delta_squared{};
@@ -113,21 +177,37 @@ SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
 
     for (size_t field_id = 0; field_id < field_count; ++field_id)
     {
-        const auto values = d_additional_scalar_fields[field_id]->owned_read_view();
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        const auto accumulate_field = [&](const auto* field)
         {
-            const auto cell = static_cast<local_ordinal_type>(owned);
-            const auto current = values(cell, 0);
-            const auto delta = current - d_previous_additional_fields[field_id][owned];
-            const auto volume = static_cast<scalar_type>(volumes[owned]);
-            local_sums[5 + 2 * field_id] += delta * delta * volume;
-            local_sums[6 + 2 * field_id] += current * current * volume;
-            d_previous_additional_fields[field_id][owned] = current;
+            const auto values = field->owned_read_view();
+            for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto current = values(cell, 0);
+                const auto delta =
+                    current - d_previous_additional_fields[field_id][owned];
+                const auto volume =
+                    static_cast<scalar_type>(mesh.cell_volume(cell));
+                local_sums[5 + 2 * field_id] += delta * delta * volume;
+                local_sums[6 + 2 * field_id] += current * current * volume;
+                d_previous_additional_fields[field_id][owned] = current;
+            }
+        };
+        using additional_field_type =
+            typename AdditionalFields::value_type;
+        if constexpr (std::is_same_v<additional_field_type,
+                                     stored_additional_field_type>)
+        {
+            std::visit(accumulate_field, additional_scalar_fields[field_id]);
+        }
+        else
+        {
+            accumulate_field(additional_scalar_fields[field_id]);
         }
     }
 
     std::vector<scalar_type> global_sums(local_sums.size(), scalar_type{});
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
                        static_cast<int>(local_sums.size()), local_sums.data(), global_sums.data());
     if (!std::isfinite(global_sums[0]) || global_sums[0] <= scalar_type{})
     {
@@ -173,10 +253,24 @@ SteadyStateFieldMonitor<Pack>::require_mesh(SP<const mesh_type> mesh)
 }
 
 template <TpetraTypePack Pack>
+SP<const typename SteadyStateFieldMonitor<Pack>::stored_mesh_type>
+SteadyStateFieldMonitor<Pack>::require_mesh(SP<const stored_mesh_type> mesh)
+{
+    if (!mesh)
+    {
+        throw std::invalid_argument("Steady-state field monitor requires a non-null mesh.");
+    }
+    return mesh;
+}
+
+template <TpetraTypePack Pack>
 template <class Field>
 void SteadyStateFieldMonitor<Pack>::require_field_mesh(const Field& field, const char* name) const
 {
-    if (field.mesh_ptr().get() != d_mesh.get())
+    const auto expected_mesh = d_stored_mesh
+        ? static_cast<const void*>(d_stored_mesh.get())
+        : static_cast<const void*>(d_mesh.get());
+    if (static_cast<const void*>(field.mesh_ptr().get()) != expected_mesh)
     {
         throw std::invalid_argument(std::string("Steady-state ") + name +
                                     " belongs to a different mesh.");
@@ -184,16 +278,71 @@ void SteadyStateFieldMonitor<Pack>::require_field_mesh(const Field& field, const
 }
 
 template <TpetraTypePack Pack>
+void SteadyStateFieldMonitor<Pack>::require_field_mesh(
+    const stored_additional_field_type& field,
+    const char* name) const
+{
+    std::visit(
+        [&](const auto* field_pointer)
+        {
+            if (field_pointer == nullptr)
+            {
+                throw std::invalid_argument(
+                    "Steady-state additional field cannot be null.");
+            }
+            using pointed_field_type = std::remove_cv_t<
+                std::remove_pointer_t<decltype(field_pointer)>>;
+            if constexpr (std::is_same_v<pointed_field_type,
+                                         stored_field_type>)
+            {
+                require_field_mesh(*field_pointer, name);
+            }
+            else
+            {
+                const auto legacy_mesh = d_stored_mesh->legacy_mesh();
+                if (!legacy_mesh ||
+                    field_pointer->mesh_ptr().get() != legacy_mesh.get())
+                {
+                    throw std::invalid_argument(
+                        std::string("Steady-state ") + name +
+                        " belongs to a different mesh.");
+                }
+            }
+        },
+        field);
+}
+
+template <TpetraTypePack Pack>
 void SteadyStateFieldMonitor<Pack>::capture_current_state()
 {
-    const auto owned_cells = d_mesh->num_owned_cells();
+    if (d_stored_mesh)
+    {
+        capture_current_state(
+            *d_stored_mesh, *d_stored_velocity, *d_stored_temperature,
+            d_stored_additional_scalar_fields);
+        return;
+    }
+    capture_current_state(*d_mesh, *d_velocity, *d_temperature,
+                          d_additional_scalar_fields);
+}
+
+template <TpetraTypePack Pack>
+template<class MeshType, class VelocityField, class TemperatureField,
+         class AdditionalFields>
+void SteadyStateFieldMonitor<Pack>::capture_current_state(
+    const MeshType& mesh,
+    const VelocityField& velocity,
+    const TemperatureField& temperature,
+    const AdditionalFields& additional_scalar_fields)
+{
+    const auto owned_cells = mesh.num_owned_cells();
     d_previous_velocity.assign(3 * owned_cells, scalar_type{});
     d_previous_temperature.assign(owned_cells, scalar_type{});
-    d_previous_additional_fields.assign(d_additional_scalar_fields.size(),
+    d_previous_additional_fields.assign(additional_scalar_fields.size(),
                                         std::vector<scalar_type>(owned_cells, scalar_type{}));
 
-    const auto velocity_values = d_velocity->owned_read_view();
-    const auto temperature_values = d_temperature->owned_read_view();
+    const auto velocity_values = velocity.owned_read_view();
+    const auto temperature_values = temperature.owned_read_view();
     for (size_t owned = 0; owned < owned_cells; ++owned)
     {
         const auto cell = static_cast<local_ordinal_type>(owned);
@@ -203,13 +352,27 @@ void SteadyStateFieldMonitor<Pack>::capture_current_state()
         }
         d_previous_temperature[owned] = temperature_values(cell, 0);
     }
-    for (size_t field_id = 0; field_id < d_additional_scalar_fields.size(); ++field_id)
+    for (size_t field_id = 0; field_id < additional_scalar_fields.size(); ++field_id)
     {
-        const auto values = d_additional_scalar_fields[field_id]->owned_read_view();
-        for (size_t owned = 0; owned < owned_cells; ++owned)
+        const auto capture_field = [&](const auto* field)
         {
-            d_previous_additional_fields[field_id][owned] =
-                values(static_cast<local_ordinal_type>(owned), 0);
+            const auto values = field->owned_read_view();
+            for (size_t owned = 0; owned < owned_cells; ++owned)
+            {
+                d_previous_additional_fields[field_id][owned] =
+                    values(static_cast<local_ordinal_type>(owned), 0);
+            }
+        };
+        using additional_field_type =
+            typename AdditionalFields::value_type;
+        if constexpr (std::is_same_v<additional_field_type,
+                                     stored_additional_field_type>)
+        {
+            std::visit(capture_field, additional_scalar_fields[field_id]);
+        }
+        else
+        {
+            capture_field(additional_scalar_fields[field_id]);
         }
     }
 }
