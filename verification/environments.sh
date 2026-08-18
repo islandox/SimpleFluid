@@ -204,7 +204,7 @@ export_build_env()
         build_dir="${configured_build_dir%/}"
         SIMPLEFLUID_BUILD_MODE="directory"
     else
-        build_dir="$root_dir/build-$build_suffix"
+        build_dir="$root_dir/build/$build_suffix"
         SIMPLEFLUID_BUILD_MODE="preset"
     fi
 
