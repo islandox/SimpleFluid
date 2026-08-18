@@ -1,10 +1,70 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Status date:** July 22, 2026
+**Status date:** August 18, 2026
 
-**Near-term goal:** add conservative reacting-gas, boiling, void-fraction, and thermal-feedback infrastructure for heated-solution-tank criticality-accident simulations, without prematurely implementing a full Euler–Euler two-fluid solver.
+**Near-term goal:** finish validation and integration of the implemented RANS,
+reacting-gas, boiling, void-fraction, and thermal-feedback stack; close the
+remaining scalar source-decay, feedback-map, and configuration-documentation gaps;
+and avoid prematurely presenting the current model as a full Euler–Euler
+two-fluid solver.
 
-## Implemented foundation — squashed Phases -1 to 8
+## Roadmap dashboard
+
+The numbered phases record dependency and implementation history; they are not
+the current execution order. Work from the priorities below, and use each
+phase's unchecked tasks and acceptance criteria as its completion contract.
+
+### Current priorities
+
+1. Update `verification/environments.sh` for the current compiler-specific
+   preset directories and revalidate each OpenFOAM launcher.
+2. Add a tolerance-gated pitzDaily reference case.
+3. Add the Phase 20 feedback-field registry, mapped-feedback export path, and
+   placeholder outer-coupling driver.
+4. Add Phase 19 liquid-velocity scalar source-decay transport, scalar source-decay inventory
+   diagnostics, and the corresponding conservative transport test.
+5. Decide whether Phase 14's optional scalar-void transport/slip path is still
+   needed now that Phase 14.1 owns bubble transport; implement it or explicitly
+   defer it.
+6. Add Phase 16 demo validation checks for ParaView-readable output and
+   disabled-supplied reaction sources/boiling baseline behavior.
+7. Complete the Phase 18 user-facing configuration reference.
+8. Revisit foundational numerics gaps: second-order time integration,
+   higher-order convection, Ghia profile checks, and bundled OpenFOAM
+   centerline tolerances.
+
+### Status map
+
+| Workstream | State | Principal open gate |
+| --- | --- | --- |
+| Foundation, Phases -1 to 8 | Implemented with gaps | Launcher paths and higher-order numerical verification |
+| Two-equation RANS | Implemented and focused-tested | Quantitative external validation and phase-aware bubbly-flow scope |
+| Phase 9, performance | Substantially complete | Backend-portable device assembly API |
+| Phases 10–12, sources/materials/supplied reaction sources | Implemented | No open phase acceptance items |
+| Phase 13, boiling | Partial | Wall heat-flux partitioning interface |
+| Phase 14, scalar void | Partial | Advection and disposition of the low-order slip path |
+| Phase 14.1, bubble populations | Broad implementation | Physical reproduction, combined RANS coverage, and production hardening |
+| Phases 15–16, feedback/demo | Partial | Property extensions and demo acceptance checks |
+| Phase 17, focused tests | Complete for supported scope | Reopen when model scope expands |
+| Phase 18, documentation | Partial | Complete key/default/unit/validity reference |
+| Phase 19, scalar source-decay groups | Partial | Liquid advection and inventory diagnostics |
+| Phase 20, TH/external-source physics map | Partial | Registry, export, and outer-coupling driver |
+| Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
+
+### Checklist conventions
+
+- `[x]` means the stated implementation and its cited scope exist; it does not
+  imply that broader physical validation is complete.
+- `[ ]` means required work or acceptance evidence is still open.
+- A phase status statement defines the boundary between implemented behavior
+  and remaining acceptance work. Keep that statement synchronized with its
+  checkboxes.
+- Verify implementation, focused tests, and relevant serial/MPI runtime modes
+  before changing a checkbox.
+
+## Foundation and cross-cutting programs
+
+### Implemented foundation — squashed Phases -1 to 8
 
 The following infrastructure is implemented and should not be re-planned as
 active roadmap phases unless regressions are found. The open numerical and
@@ -20,14 +80,15 @@ verification items below mean the foundation as a whole is not yet complete.
   - [x] Owned/ghost cell decomposition
   - [x] Zoltan2/ParMETIS partitioning
 - [x] Field infrastructure
-  - [x] Cell-centered scalar and vector fields
+  - [x] Cell-centered scalar, vector, and tensor fields
   - [x] Face-centered scalar and vector fields
   - [x] Boundary-face fields
   - [x] Tpetra-backed distributed storage
   - [x] Ghost-value synchronization
   - [x] Mesh-aware `FieldStored` abstraction
 - [x] Finite-volume operators
-  - [x] Least-squares gradient reconstruction
+  - [x] Cached least-squares scalar/vector gradient reconstruction
+  - [x] Gauss-linear scalar/vector gradient reconstruction
   - [x] Orthogonal scalar/vector diffusion
   - [x] Explicit non-orthogonal correction
   - [x] Fully implicit non-orthogonal diffusion
@@ -51,6 +112,20 @@ verification items below mean the foundation as a whole is not yet complete.
   - [x] Boussinesq buoyancy
   - [x] Temperature transport
   - [x] Natural-convection driver
+- [x] Native runtime-mesh solver path
+  - [x] Run `FluidSolver` and `BoussinesqSolver` directly on supported
+        `MeshHandle` backends without reconstructing a legacy mesh
+  - [x] Select `FieldStored` scalar, vector, and tensor cell storage plus
+        scalar/vector face storage through `MeshFieldTraits`
+  - [x] Support mapped diffusion, convection, pressure projection,
+        Rhie–Chow fluxes, and coupled pressure–velocity assembly
+  - [x] Carry turbulence, wall distance/treatment, prescribed heat, supplied reaction sources,
+        boiling, void, material feedback, scalar source-decay groups, and steady-state search
+        through the native field path
+  - [x] Preserve exact legacy `Mesh` identity, public solver hooks, and
+        established behavior through a distinct compatibility path
+  - [x] Cover Cartesian, cylindrical, semi-structured, statically partitioned,
+        and distributed MPI execution with focused regressions
 - [x] I/O and utilities
   - [x] VTU output for ParaView
   - [x] STK Exodus II mesh input for `HEX_8` and `WEDGE_6` volume elements
@@ -70,8 +145,11 @@ verification items below mean the foundation as a whole is not yet complete.
   - [x] Rhie–Chow checkerboard-suppression tests
   - [x] Slip-boundary momentum-diffusion regression tests
 
-### Known foundational gaps
+#### Known foundational gaps
 
+- [ ] Align `verification/environments.sh` with the current preset output
+      directories (`build/gcc` and `build/llvm`); it still derives the removed
+      `build-gcc` and `build-llvm` paths.
 - [ ] Add and verify Crank–Nicolson or another second-order time integrator.
 - [ ] Add a higher-order convection scheme or deferred-correction path.
 - [ ] Add quantitative lid-driven-cavity profile checks against Ghia et al.
@@ -80,13 +158,13 @@ verification items below mean the foundation as a whole is not yet complete.
 
 ---
 
-## Active program — two-equation RANS turbulence
+### Two-equation RANS turbulence
 
 This program was added after the numbered multiphysics roadmap. It is tracked
 separately so its implemented scope and remaining validation work are not
 mistaken for foundation or Phase 9 completion.
 
-### Implemented scope
+#### Implemented scope
 
 - [x] Add runtime selection for six transported two-equation closures:
   - [x] standard k-epsilon
@@ -118,7 +196,7 @@ mistaken for foundation or Phase 9 completion.
 - [x] Document that the current RANS variables use single-continuum, full-cell
       transport rather than phase-volume-fraction-weighted equations.
 
-### Remaining work and acceptance
+#### Remaining work and acceptance
 
 - [ ] Establish a converged pitzDaily reference configuration and checked-in
       velocity-profile tolerances. The current workflow reports errors and
@@ -135,7 +213,9 @@ turbulent bubbly-flow formulation remain open.
 
 ---
 
-## Phase 9 — Performance and solver-regression benchmarks
+## Core infrastructure and source phases — Phases 9 to 12
+
+### Phase 9 — Performance and solver-regression benchmarks
 
 Keep this phase independent of the new physics so solver performance changes can be diagnosed cleanly.
 
@@ -177,7 +257,7 @@ The timing ceiling is a smoke-regression guard, not a claim of comparable
 performance across different machines. Release scaling and profiling remain
 manual measurement workflows.
 
-### Phase 9 acceptance criteria
+#### Phase 9 acceptance criteria
 
 - [x] Benchmarks can be run from CTest or a documented command.
 - [x] At least one small benchmark is safe for local Debug builds.
@@ -193,7 +273,7 @@ open.
 
 ---
 
-## Phase 10 — Source-term and material-property infrastructure
+### Phase 10 — Source-term and material-property infrastructure
 
 Before adding supplied reaction sources or boiling, make the solver accept explicit source fields and updateable material properties cleanly.
 
@@ -208,7 +288,7 @@ Before adding supplied reaction sources or boiling, make the solver accept expli
 - [x] Add robust field initialization from programmatic configuration.
 - [x] Preserve existing Boussinesq behavior when new models are disabled.
 
-### Phase 10 acceptance criteria
+#### Phase 10 acceptance criteria
 
 - [x] Existing natural-convection examples reproduce their old behavior when all new model switches are off.
 - [x] A constant heat source produces the expected one-cell analytic temperature change when diffusion/advection are disabled.
@@ -217,7 +297,7 @@ Before adding supplied reaction sources or boiling, make the solver accept expli
 
 ---
 
-## Phase 11 — prescribed heat power density and heat-source coupling
+### Phase 11 — prescribed heat power density and heat-source coupling
 
 Add the thermal source used by the criticality-accident model, initially without a external-source physics solver.
 
@@ -232,7 +312,7 @@ Add the thermal source used by the criticality-accident model, initially without
 - [x] Add optional time-dependent multiplier for transient tests.
 - [x] Write `qdot_external` to VTU.
 
-### Phase 11 acceptance criteria
+#### Phase 11 acceptance criteria
 
 - [x] Integrated power equals configured total power within tolerance.
 - [x] Zero power gives zero thermal source.
@@ -241,11 +321,11 @@ Add the thermal source used by the criticality-accident model, initially without
 
 ---
 
-## Phase 12 — Reacting gas generation model
+### Phase 12 — Reacting gas generation model
 
 Implement the first conservative unresolved gas-generation model. This phase produces an `alpha_g` source but does not solve a gas momentum equation.
 
-### Model variables
+#### Model variables
 
 - `qdot_external` — prescribed heat power density, W/m³
 - `T` — liquid temperature, K
@@ -253,7 +333,7 @@ Implement the first conservative unresolved gas-generation model. This phase pro
 - `alpha_g` — gas void fraction
 - `alpha_l = 1 - alpha_g` — liquid volume fraction
 
-### Baseline model
+#### Baseline model
 
 $$
 \dot n_g = \eta_g\,G_g\,\dot q_{\mathrm{ext}}
@@ -274,7 +354,7 @@ where:
 - $\mathrm R$ is the ideal-gas constant
 - $S_{\alpha,\mathrm{reaction}}$ has units 1/s
 
-### Tasks
+#### Tasks
 
 - [x] Add `GasGenerationProperties` or equivalent configuration struct.
 - [x] Add `ReactingGasModel` with small testable pure functions.
@@ -291,7 +371,7 @@ where:
 - [x] Clamp or limit source terms so `alpha_g` remains bounded.
 - [x] Write `S_alpha_reaction` to VTU.
 
-### Phase 12 acceptance criteria
+#### Phase 12 acceptance criteria
 
 - [x] `qdot_external = 0` gives `S_alpha_reaction = 0`.
 - [x] Doubling `qdot_external` doubles `S_alpha_reaction`.
@@ -303,7 +383,9 @@ where:
 
 ---
 
-## Phase 13 — Bulk and wall boiling source model
+## Active multiphysics phases — Phases 13 to 20
+
+### Phase 13 — Bulk and wall boiling source model
 
 Add a simple energy-consistent boiling model. This is a placeholder for a later RPI-like wall heat-flux partitioning model.
 
@@ -311,7 +393,7 @@ Add a simple energy-consistent boiling model. This is a placeholder for a later 
 focused conservation tests are implemented; the RPI heat-flux-partitioning
 interface remains open.
 
-### Bulk superheat model
+#### Bulk superheat model
 
 For cells with:
 
@@ -349,7 +431,7 @@ timestep-realizable collapse. Scale `S_alpha_boil` and `Q_latent` together so
 latent energy is removed only for vapor admitted into the authoritative scalar
 `alpha_g` field.
 
-### Wall boiling placeholder
+#### Wall boiling placeholder
 
 For heated boundary faces:
 
@@ -363,7 +445,7 @@ $$
 \dot m_{w,vol} = \dot m''_w \frac{A_f}{V_P}
 $$
 
-### Tasks
+#### Tasks
 
 - [x] Add `BoilingSourceModel` or equivalent.
 - [x] Add configurable parameters:
@@ -385,7 +467,7 @@ $$
   - [ ] quenching heat transfer
   - [ ] evaporative heat transfer
 
-### Phase 13 acceptance criteria
+#### Phase 13 acceptance criteria
 
 - [x] Below threshold, boiling source is zero.
 - [x] Above threshold, boiling source is positive.
@@ -396,7 +478,7 @@ $$
 
 ---
 
-## Phase 14 — Low-order void-fraction field update and optional transport
+### Phase 14 — Low-order void-fraction field update and optional transport
 
 Introduce `alpha_g` as the first unresolved gas-state field for source-driven
 supplied reaction sources and boiling workflows. This phase is the low-order scalar path:
@@ -413,7 +495,7 @@ optional diffusion.
 update are implemented. Low-order advection and slip transport remain open;
 the operational slip setting belongs only to Phase 14.1 today.
 
-### Minimum required update
+#### Minimum required update
 
 $$
 \alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,total},\alpha_{min},\alpha_{max}\right)
@@ -432,7 +514,7 @@ S_{\alpha,collapse} = \min\left(\frac{\alpha_g}{\tau_c},
 \frac{\alpha_g-\alpha_{min}}{\Delta t}\right).
 $$
 
-### Optional transport upgrade
+#### Optional transport upgrade
 
 If the existing scalar transport API allows it cleanly, add:
 
@@ -445,7 +527,7 @@ $$
 + S_{\alpha,total}
 $$
 
-### Tasks
+#### Tasks
 
 - [x] Allocate and initialize reacting `alpha_g` and `alpha_l`.
 - [x] Allocate and initialize `S_alpha_reaction`.
@@ -462,7 +544,7 @@ $$
 - [x] Write reacting `alpha_g`, `alpha_l`, and `S_alpha_reaction` to VTU behind output switches.
 - [x] Write `S_alpha_total` to VTU after aggregate source bookkeeping exists.
 
-### Phase 14 acceptance criteria
+#### Phase 14 acceptance criteria
 
 - [x] One-cell constant-source update matches the analytic result.
 - [x] `alpha_g` never leaves `[alphaMin, alphaMax]`.
@@ -475,7 +557,7 @@ $$
 
 ---
 
-## Phase 14.1 — Pressure-coupled two-population reacting bubble model
+### Phase 14.1 — Pressure-coupled two-population reacting bubble model
 
 Implement the pressure-sensitive hydrogen-bubble model from Sheng et al. (2024) as an advanced, runtime-selectable refinement of the Phase 12 ideal-gas source and the Phase 14 scalar void-fraction path.
 
@@ -486,7 +568,7 @@ tests. End-to-end reproduction of the paper results, extrapolation warnings,
 source-Jacobian hooks, an allocation-free Kokkos-compatible local update, and
 permanent combined RANS-plus-bubble coverage remain open.
 
-### Model selection and scope
+#### Model selection and scope
 
 - [x] Add a runtime selector:
 
@@ -505,7 +587,7 @@ permanent combined RANS-plus-bubble coverage remain open.
   - [x] reconstructed local absolute pressure
   - [x] experimental inertial-pressure coupling
 
-### State fields
+#### State fields
 
 Add cell fields with documented SI units:
 
@@ -520,7 +602,7 @@ Add cell fields with documented SI units:
 - [x] `alpha_g_micro`, `alpha_g_large`, and total `alpha_g`
 - [x] diagnostic production, conversion, growth, dissolution, escape, and inventory fields
 
-### Henry-law equilibrium and critical concentration
+#### Henry-law equilibrium and critical concentration
 
 Use:
 
@@ -537,7 +619,7 @@ $$
 - [x] Guard against very small radius and non-positive pressure.
 - [x] Verify pressure and Laplace-pressure monotonicity.
 
-### Pressure-corrected nucleation radius
+#### Pressure-corrected nucleation radius
 
 Implement Eqs. (11)–(15) of the article in a dedicated property class.
 
@@ -561,7 +643,7 @@ $$
 - [ ] Add validity-range checks and warnings for extrapolation.
 - [x] Add tabulated regression tests evaluated directly from the published equations.
 
-### Dissolved-hydrogen equation
+#### Dissolved-hydrogen equation
 
 Implement the paper-faithful short-pulse baseline:
 
@@ -583,7 +665,7 @@ $$
 - [x] Use existing scalar-transport infrastructure for advective mode.
 - [x] Conserve dissolved-plus-bubble H₂ up to prescribed heat production and boundary escape.
 
-### Bubble-population balances
+#### Bubble-population balances
 
 For `i=1` (microbubbles) and `i=2` (large bubbles), implement:
 
@@ -599,7 +681,7 @@ $$
 
 The article uses axial transport; use the general finite-volume divergence form while retaining an axial compatibility mode.
 
-#### Source-driven reference population production
+##### Source-driven reference population production
 - [x] Implement:
 
   \[
@@ -613,7 +695,7 @@ The article uses axial transport; use the general finite-volume divergence form 
 - [x] Convert H₂ yield to mol/J consistently.
 - [x] Compute nucleation-bubble molar content `zeta_0` from the bubble equation of state.
 
-#### Microbubble dissolution
+##### Microbubble dissolution
 
 - [x] Implement:
 
@@ -625,7 +707,7 @@ The article uses axial transport; use the general finite-volume divergence form 
 
 - [x] Make `tauMicro` configurable; document approximately 10 μs as the article default rather than a universal constant.
 
-#### Pressure-dependent micro-to-large conversion
+##### Pressure-dependent micro-to-large conversion
 
 For `C>C_critical`, implement:
 
@@ -645,7 +727,7 @@ $$
 - [x] Make `F` configurable and mark it as an empirical calibration parameter with units 1/(Pa·s).
 - [x] Support exact and optionally smoothed Heaviside functions.
 
-#### Large-bubble growth and dissolution
+##### Large-bubble growth and dissolution
 
 Implement the article's sign convention:
 
@@ -667,7 +749,7 @@ $$
 - [x] Verify that supersaturation grows `M_large` without creating bubble number.
 - [x] Verify that undersaturation reduces both bubble moles and, through dissolution, bubble number.
 
-### Interfacial mass transfer
+#### Interfacial mass transfer
 
 Implement the Hughmark correlation used in the article:
 
@@ -691,7 +773,7 @@ $$
 - [x] Evaluate liquid properties locally.
 - [x] Depend on a bubble-velocity interface rather than a hard-coded rise law.
 
-### Bubble equation of state and radius solve
+#### Bubble equation of state and radius solve
 
 For each category solve:
 
@@ -708,7 +790,7 @@ $$
 - [x] Add minimum and maximum radius guards.
 - [x] Verify residuals and monotonic trends with temperature, pressure, bubble moles, and bubble count.
 
-### Void fraction and characteristic radius
+#### Void fraction and characteristic radius
 
 Compute:
 
@@ -736,7 +818,7 @@ $$
   \Delta V_{void}=\int_V\alpha_g\,dV.
   \]
 
-### Bubble transport and free-surface escape
+#### Bubble transport and free-surface escape
 
 - [x] Add `BubbleRiseVelocityModel`.
 - [x] Provide:
@@ -750,7 +832,7 @@ $$
 - [x] Evaluate implicit-outflow escape from the accepted transported state and
   localize escape-rate fields to boundary-adjacent owner cells.
 
-### Optional inertial-pressure coupling
+#### Optional inertial-pressure coupling
 
 Implement this behind an experimental switch and do not destabilize the incompressible pressure solver.
 
@@ -788,7 +870,7 @@ $$
 - [x] Initially use a local or weakly coupled equation-of-state pressure update.
 - [x] Support constant-pressure and inertial-pressure modes for comparison.
 
-### Numerical integration and stiffness
+#### Numerical integration and stiffness
 
 The microsecond dissolution time scales can be far shorter than the CFD time step.
 
@@ -802,7 +884,7 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [ ] Keep the local update Kokkos-compatible and allocation-free per cell.
 - [x] Report substeps, clipping, radius-solver failure, and inventory error.
 
-### Configuration
+#### Configuration
 
 - [x] `hydrogenYieldMolPerJ`
 - [x] `henryCoefficient` and convention
@@ -819,7 +901,7 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] radius/population/concentration floors and ceilings
 - [x] local ODE tolerance and maximum subcycles
 
-### Verification tests
+#### Verification tests
 
 - [x] Henry-law pressure monotonicity.
 - [x] Laplace-pressure/radius monotonicity.
@@ -845,7 +927,7 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [ ] Add an MPI counterpart after the serial combined test defines conserved
       inventory and bounded-field acceptance checks.
 
-### Phase 14.1 acceptance criteria
+#### Phase 14.1 acceptance criteria
 
 - [x] The advanced model is runtime-selectable and does not change Phase 12 results when disabled.
 - [x] All state variables remain finite, non-negative, and bounded.
@@ -859,7 +941,7 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [ ] Validate full SILENE power/pressure behavior after point-kinetics or
       external-source physics coupling becomes available; this remains deferred.
 
-### Reference and known limitations
+#### Reference and known limitations
 
 Primary reference:
 
@@ -880,7 +962,7 @@ Known limitations:
 
 ---
 
-## Phase 15 — Temperature- and void-dependent feedback properties
+### Phase 15 — Temperature- and void-dependent feedback properties
 
 Add property feedback fields for external-source physics-oriented thermal-hydraulics.
 
@@ -888,7 +970,7 @@ Add property feedback fields for external-source physics-oriented thermal-hydrau
 safety floors are implemented. Temperature/void viscosity extensions and a
 natural-convection stability acceptance case remain open.
 
-### Density feedback
+#### Density feedback
 
 Support a conservative default:
 
@@ -905,7 +987,7 @@ $$
 + \rho_g\alpha_g
 $$
 
-### Viscosity feedback
+#### Viscosity feedback
 
 Start with:
 
@@ -915,7 +997,7 @@ $$
 
 where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
 
-### Tasks
+#### Tasks
 
 - [x] Add `MaterialFeedbackModel` or equivalent.
 - [x] Add configurable density model:
@@ -934,7 +1016,7 @@ where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
 - [x] Couple viscosity feedback into momentum diffusion only if existing equation design allows it cleanly.
 - [x] Write `rhoFeedback` and `muFeedback` to VTU.
 
-### Phase 15 acceptance criteria
+#### Phase 15 acceptance criteria
 
 - [x] Increasing `alpha_g` lowers density for liquid-like systems.
 - [x] Increasing `T` lowers density under Boussinesq settings.
@@ -944,7 +1026,7 @@ where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
 
 ---
 
-## Phase 16 — Fissile-solution tank demo case
+### Phase 16 — Fissile-solution tank demo case
 
 Add a small demonstration case that exercises the new source models without requiring a external-source physics solver.
 
@@ -976,7 +1058,7 @@ acceptance-tested.
   - [x] `rhoFeedback`
 - [x] Add a short README section or example note explaining how to run and inspect in ParaView.
 
-### Phase 16 acceptance criteria
+#### Phase 16 acceptance criteria
 
 - [x] Example builds in Debug and Release.
 - [x] Example runs for a few time steps in serial.
@@ -986,7 +1068,7 @@ acceptance-tested.
 
 ---
 
-## Phase 17 — Unit, regression, and conservation tests for supplied reaction sources/boiling
+### Phase 17 — Unit, regression, and conservation tests for supplied reaction sources/boiling
 
 Collect the new physics tests into a focused verification suite.
 
@@ -1008,7 +1090,7 @@ does not close the unchecked model and validation work in those phases.
 - [x] `Database` parsing/defaults test.
 - [x] Regression test that all models disabled leaves old solver behavior unchanged.
 
-### Phase 17 acceptance criteria
+#### Phase 17 acceptance criteria
 
 - [x] All new tests are deterministic.
 - [x] Tests are safe in serial and do not require MPI launch unless explicitly marked.
@@ -1018,7 +1100,7 @@ does not close the unchecked model and validation work in those phases.
 
 ---
 
-## Phase 18 — Documentation and configuration examples
+### Phase 18 — Documentation and configuration examples
 
 Document the low-order scalar model and the two-population reacting bubble model clearly so future work does not confuse either path with a full Euler–Euler method.
 
@@ -1047,7 +1129,7 @@ those details remain distributed across implementation headers and model docs.
 - [x] Document the weakly coupled RANS-plus-bubble scope and distinguish it
       from phase-aware turbulent Euler–Euler bubbly flow.
 
-### Phase 18 acceptance criteria
+#### Phase 18 acceptance criteria
 
 - [ ] A new developer can configure every supported model from documentation
       alone without consulting implementation headers.
@@ -1057,7 +1139,7 @@ those details remain distributed across implementation headers and model docs.
 
 ---
 
-## Phase 19 — scalar source-decay scalar transport
+### Phase 19 — scalar source-decay scalar transport
 
 After velocity, temperature, and void feedback fields are available, add scalar source-decay transport on the liquid phase.
 
@@ -1065,7 +1147,7 @@ After velocity, temperature, and void feedback fields are available, add scalar 
 implemented. Liquid-velocity advection and group inventory diagnostics remain
 open.
 
-### Target equation
+#### Target equation
 
 For scalar source-decay group `i`:
 
@@ -1078,7 +1160,7 @@ $$
 - \lambda_i \alpha_l C_i
 $$
 
-### Tasks
+#### Tasks
 
 - [x] Add configurable number of scalar source-decay groups.
 - [x] Add per-group fields `C_1 ... C_N`.
@@ -1090,7 +1172,7 @@ $$
 - [x] Write scalar source-decay fields to VTU.
 - [ ] Add group inventory diagnostics.
 
-### Phase 19 acceptance criteria
+#### Phase 19 acceptance criteria
 
 - [x] Zero source and zero initial concentration remains zero.
 - [x] Pure decay one-cell test matches analytic exponential decay.
@@ -1100,7 +1182,7 @@ $$
 
 ---
 
-## Phase 20 — TH/external-source physics feedback-map interface
+### Phase 20 — TH/external-source physics feedback-map interface
 
 Add data structures for mapping CFD feedback fields to a coarser external-source physics mesh or external external-source physics code.
 
@@ -1125,7 +1207,7 @@ outer-coupling driver remain open.
   - [ ] repeat
 - [x] Keep the interface file-based or in-memory depending on the existing code style; do not force an external dependency.
 
-### Phase 20 acceptance criteria
+#### Phase 20 acceptance criteria
 
 - [x] Constant CFD field maps to the same constant feedback field.
 - [x] Volume-weighted integral is preserved for mapped scalar fields.
@@ -1134,7 +1216,9 @@ outer-coupling driver remain open.
 
 ---
 
-## Phase 21 — Full Euler–Euler two-fluid extension, deferred
+## Deferred architecture — Phase 21
+
+### Phase 21 — Full Euler–Euler two-fluid extension
 
 This phase is explicitly deferred until the scalar void-fraction source model and the two-population reacting bubble model are verified.
 
@@ -1165,7 +1249,7 @@ not liquid-volume-fraction weighted.
       interfaces with documented validity ranges.
 - [ ] Validate against a bubbly-plume or bubble-column benchmark before applying to criticality accident analysis.
 
-### Phase 21 acceptance criteria
+#### Phase 21 acceptance criteria
 
 - [ ] Scalar `alpha_g` model remains available as a lower-order option.
 - [ ] Two-fluid equations conserve phase volume/mass under controlled tests.
@@ -1180,8 +1264,9 @@ not liquid-volume-fraction weighted.
 
 ## Global acceptance criteria
 
-**Overall status: not met.** The build/test/tooling criteria are satisfied, but
-open model, turbulence-validation, and documentation criteria remain.
+**Overall status: not met.** The core configure/build/test criteria are
+satisfied, but an auxiliary verification-launcher path, open model work,
+turbulence validation, and documentation criteria remain.
 
 - [x] `cmake --preset GCC-ninja-multi` succeeds.
 - [x] `cmake --build --preset GCC-Debug` succeeds.
@@ -1200,13 +1285,3 @@ open model, turbulence-validation, and documentation criteria remain.
 - [ ] Complete the Phase 18 key/default/unit reference.
 - [ ] Satisfy every acceptance criterion in the non-deferred roadmap phases.
 - [ ] Close the remaining quantitative RANS validation criteria.
-
-## Suggested immediate Codex task order
-
-1. Add a tolerance-gated pitzDaily reference case.
-2. Add the Phase 20 feedback-field registry, mapped-feedback export path, and placeholder outer-coupling driver.
-3. Add Phase 19 liquid-velocity scalar source-decay transport, scalar source-decay inventory diagnostics, and the corresponding conservative transport test.
-4. Decide whether Phase 14's optional scalar-void transport/slip path is still needed now that Phase 14.1 owns bubble transport; implement it or explicitly defer it.
-5. Add Phase 16 demo validation checks for ParaView-readable output and disabled-supplied reaction sources/boiling baseline behavior.
-6. Complete the Phase 18 user-facing configuration reference.
-7. Revisit foundational numerics gaps: second-order time integration, higher-order convection, Ghia profile checks, and bundled OpenFOAM centerline tolerances.
