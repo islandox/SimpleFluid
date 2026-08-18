@@ -147,9 +147,8 @@ verification items below mean the foundation as a whole is not yet complete.
 
 #### Known foundational gaps
 
-- [ ] Align `verification/environments.sh` with the current preset output
-      directories (`build/gcc` and `build/llvm`); it still derives the removed
-      `build-gcc` and `build-llvm` paths.
+- [x] Align `verification/environments.sh` with the current preset output
+      directories (`build/gcc` and `build/llvm`).
 - [ ] Add and verify Crank–Nicolson or another second-order time integrator.
 - [ ] Add a higher-order convection scheme or deferred-correction path.
 - [ ] Add quantitative lid-driven-cavity profile checks against Ghia et al.

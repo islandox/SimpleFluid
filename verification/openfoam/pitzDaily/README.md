@@ -30,10 +30,11 @@ verification/openfoam/pitzDaily/run_simplefluid.sh 6
 
 The SimpleFluid launcher sources `verification/environments.sh` and builds the
 `GCC-RelWithDebInfo` preset by default, using
-`build-gcc/bin/RelWithDebInfo`. Set `SIMPLEFLUID_COMPILER=LLVM` to use the
-corresponding LLVM preset, or set `SIMPLEFLUID_BUILD_CONFIG=Debug` for a debug
-run. A custom, already-configured build tree can be selected with
-`SIMPLEFLUID_BUILD_DIR`. Rank CSV and VTU files are written under `profiles/`.
+`build/gcc/bin/RelWithDebInfo`. Set `SIMPLEFLUID_COMPILER=LLVM` to use the
+corresponding LLVM preset and `build/llvm/bin/RelWithDebInfo`, or set
+`SIMPLEFLUID_BUILD_CONFIG=Debug` for a debug run. A custom, already-configured
+build tree can be selected with `SIMPLEFLUID_BUILD_DIR`. Rank CSV and VTU
+files are written under `profiles/`.
 Runtime and resolution are configurable:
 
 ```sh
