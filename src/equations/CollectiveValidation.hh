@@ -43,11 +43,8 @@ struct CollectiveValidationBatchScratch
  * The rank where the failure originated retains its original exception; peers
  * receive a runtime error containing @p context.
  */
-template<TpetraTypePack Pack, class Operation>
-void collective_local_validation(
-    const Mesh<Pack>& mesh,
-    std::string_view context,
-    Operation&& operation)
+template<class MeshType, class Operation>
+void collective_local_validation(const MeshType& mesh, std::string_view context, Operation&& operation)
 {
     std::exception_ptr local_error;
     try
@@ -61,12 +58,7 @@ void collective_local_validation(
 
     const int local_failed = local_error ? 1 : 0;
     int any_failed = 0;
-    Teuchos::reduceAll(
-        *mesh.owned_cell_map()->getComm(),
-        Teuchos::REDUCE_MAX,
-        1,
-        &local_failed,
-        &any_failed);
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_failed, &any_failed);
     if (any_failed == 0)
     {
         return;
@@ -75,8 +67,7 @@ void collective_local_validation(
     {
         std::rethrow_exception(local_error);
     }
-    throw std::runtime_error(
-        std::string(context) + " failed on another rank.");
+    throw std::runtime_error(std::string(context) + " failed on another rank.");
 }
 
 /**
@@ -95,20 +86,13 @@ void collective_local_validation(
  * @param scratch Reusable communication and result storage.
  * @return One byte per operation, nonzero only when active on every rank.
  */
-template<TpetraTypePack Pack, class Range, class ActivePredicate,
-         class Operation>
-const std::vector<unsigned char>& collective_local_validation_batch(
-    const Mesh<Pack>& mesh,
-    std::string_view context,
-    Range&& operations,
-    ActivePredicate&& is_active,
-    Operation&& operation,
-    CollectiveValidationBatchScratch& scratch)
+template<class MeshType, class Range, class ActivePredicate, class Operation>
+const std::vector<unsigned char>& collective_local_validation_batch(const MeshType& mesh, std::string_view context,
+    Range&& operations, ActivePredicate&& is_active, Operation&& operation, CollectiveValidationBatchScratch& scratch)
 {
     using std::begin;
     using std::end;
-    const auto operation_count = static_cast<size_t>(
-        std::distance(begin(operations), end(operations)));
+    const auto operation_count = static_cast<size_t>(std::distance(begin(operations), end(operations)));
     scratch.local_status.assign(operation_count + 1, 0);
     scratch.global_status.assign(operation_count + 1, 0);
     scratch.globally_active.assign(operation_count, 0);
@@ -141,11 +125,7 @@ const std::vector<unsigned char>& collective_local_validation_batch(
     local_status.back() = local_error ? 1 : 0;
 
     const auto communicator = mesh.owned_cell_map()->getComm();
-    Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_SUM,
-        static_cast<int>(local_status.size()),
-        local_status.data(),
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, static_cast<int>(local_status.size()), local_status.data(),
         global_status.data());
 
     const bool any_failed = global_status.back() != 0;
@@ -155,24 +135,18 @@ const std::vector<unsigned char>& collective_local_validation_batch(
         {
             std::rethrow_exception(local_error);
         }
-        throw std::runtime_error(
-            std::string(context) + " failed on another rank.");
+        throw std::runtime_error(std::string(context) + " failed on another rank.");
     }
 
     const auto rank_count = communicator->getSize();
-    for (size_t operation_index = 0;
-         operation_index < operation_count;
-         ++operation_index)
+    for (size_t operation_index = 0; operation_index < operation_count; ++operation_index)
     {
         const auto active_count = global_status[operation_index];
         if (active_count != 0 && active_count != rank_count)
         {
-            throw std::invalid_argument(
-                std::string(context)
-                + " activation must agree on every rank.");
+            throw std::invalid_argument(std::string(context) + " activation must agree on every rank.");
         }
-        scratch.globally_active[operation_index] =
-            active_count == rank_count ? 1 : 0;
+        scratch.globally_active[operation_index] = active_count == rank_count ? 1 : 0;
     }
     return scratch.globally_active;
 }

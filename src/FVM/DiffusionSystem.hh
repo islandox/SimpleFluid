@@ -11,15 +11,19 @@
 #pragma once
 
 #include "equations/BoundaryConditions.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/DiffusionSystemImpl.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "fields/CellField.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <concepts>
 #include <cstddef>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace SimpleFluid::FVM
 {
@@ -372,6 +376,101 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
 
     return vector_diffusion_system<Pack>(
         mesh, diffusivity, boundary_condition, zero_source);
+}
+
+/**
+ * @brief Assemble scalar diffusion on a mapped orthogonal,
+ *        semi-structured, or runtime mesh interface.
+ */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider,
+         class SourceProvider>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+DiffusionSystem<Pack>
+diffusion_system(
+    const MeshType& mesh,
+    typename Pack::scalar_type diffusivity,
+    BoundaryConditionProvider boundary_condition,
+    SourceProvider right_hand_source)
+{
+    return detail::diffusion_system_impl<Pack>(
+        mesh,
+        diffusivity,
+        std::move(boundary_condition),
+        std::move(right_hand_source));
+}
+
+/** @brief Assemble mapped scalar diffusion with a zero source. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+DiffusionSystem<Pack>
+diffusion_system(
+    const MeshType& mesh,
+    typename Pack::scalar_type diffusivity,
+    BoundaryConditionProvider boundary_condition)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+    auto zero_source = [](local_ordinal_type) -> scalar_type
+    {
+        return scalar_type{};
+    };
+    return detail::diffusion_system_impl<Pack>(
+        mesh,
+        diffusivity,
+        std::move(boundary_condition),
+        zero_source);
+}
+
+/** @brief Assemble vector diffusion on a mapped mesh interface. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider,
+         class SourceProvider>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+VectorDiffusionSystem<Pack>
+vector_diffusion_system(
+    const MeshType& mesh,
+    typename Pack::scalar_type diffusivity,
+    BoundaryConditionProvider boundary_condition,
+    SourceProvider right_hand_source)
+{
+    return detail::vector_diffusion_system_impl<Pack>(
+        mesh,
+        diffusivity,
+        std::move(boundary_condition),
+        std::move(right_hand_source));
+}
+
+/** @brief Assemble mapped vector diffusion with a zero source. */
+template<TpetraTypePack Pack,
+         class MeshType,
+         class BoundaryConditionProvider>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+VectorDiffusionSystem<Pack>
+vector_diffusion_system(
+    const MeshType& mesh,
+    typename Pack::scalar_type diffusivity,
+    BoundaryConditionProvider boundary_condition)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using vec_type = vec3<typename Pack::scalar_type>;
+    auto zero_source = [](local_ordinal_type) -> vec_type
+    {
+        return {};
+    };
+    return detail::vector_diffusion_system_impl<Pack>(
+        mesh,
+        diffusivity,
+        std::move(boundary_condition),
+        zero_source);
 }
 
 } // namespace SimpleFluid::FVM

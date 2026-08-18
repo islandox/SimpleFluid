@@ -12,6 +12,7 @@
 
 #include "equations/BoussinesqModel.hh"
 #include "FVM/TransportSystem.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <algorithm>
@@ -119,14 +120,17 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class ScalarVoidFractionModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
 
     /**
      * @brief Construct a scalar void-fraction model on a mesh.
@@ -332,7 +336,7 @@ private:
         }
 
         d_alpha_g.sync_ghosts();
-        FaceField<Pack> zero_flux(
+        face_flux_field_type zero_flux(
             d_mesh, scalar_type{}, "alpha_zero_face_flux");
         field_type unit_weight(
             d_mesh, scalar_type{1}, "alpha_unit_weight");

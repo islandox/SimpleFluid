@@ -459,4 +459,6 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
 }
 
 template class TurbulenceModel<DefaultTpetraTypes>;
+template class TurbulenceModel<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid

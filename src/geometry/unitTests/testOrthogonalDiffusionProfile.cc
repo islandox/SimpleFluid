@@ -17,7 +17,7 @@
 
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BelosLinearSolver.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "utils/testing_environment.hh"
 
 #include <Tpetra_CrsMatrix.hpp>

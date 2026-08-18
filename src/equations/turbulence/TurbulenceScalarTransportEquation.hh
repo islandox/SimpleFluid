@@ -15,8 +15,8 @@
 #include "FVM/TransportSystem.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
-#include "fields/CellField.hh"
-#include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
+#include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <functional>
@@ -33,8 +33,10 @@ namespace SimpleFluid
  * wall batches while inlet, outlet, and symmetry data continue to come from
  * the ordinary boundary-condition map.
  * @tparam Pack Tpetra type pack used for field and boundary-cache storage.
+ * @tparam MeshType Mesh and associated field-storage backend.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes>
+template <TpetraTypePack Pack = DefaultTpetraTypes,
+          class MeshType = Mesh<Pack>>
 struct TurbulenceScalarBoundaryOverrides
 {
     using scalar_type = typename Pack::scalar_type;
@@ -51,7 +53,7 @@ struct TurbulenceScalarBoundaryOverrides
     fixed_cell_value_provider_type fixed_cell_value;
 
     /** Sparse per-face diffusivity; omitted faces use the owner-cell value. */
-    const FVM::BoundaryCache<Pack>* boundary_diffusivity = nullptr;
+    const FVM::MeshBoundaryCache<Pack, MeshType>* boundary_diffusivity = nullptr;
 
     /** Permit an overridden Dirichlet face to be exactly zero (wall k). */
     bool allow_zero_dirichlet = false;
@@ -66,18 +68,21 @@ struct TurbulenceScalarBoundaryOverrides
  * converged candidate has been validated and floored.
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
+ * @tparam MeshType Mesh and associated field-storage backend.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes>
+template <TpetraTypePack Pack = DefaultTpetraTypes,
+          class MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceScalarTransportEquation
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using face_field_type = FaceField<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using face_field_type = typename field_traits::scalar_face_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using scalar_provider_type = std::function<scalar_type(local_ordinal_type)>;
-    using boundary_overrides_type = TurbulenceScalarBoundaryOverrides<Pack>;
+    using boundary_overrides_type = TurbulenceScalarBoundaryOverrides<Pack, mesh_type>;
 
     /**
      * @brief Construct an equation on @p mesh with scalar boundary data.
@@ -129,5 +134,8 @@ private:
 
 extern template class
     TurbulenceScalarTransportEquation<DefaultTpetraTypes>;
+
+extern template class TurbulenceScalarTransportEquation<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
