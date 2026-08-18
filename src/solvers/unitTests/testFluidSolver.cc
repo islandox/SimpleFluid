@@ -22,8 +22,10 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <numbers>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace
 {
@@ -95,6 +97,36 @@ public:
     {
         return d_problem.mesh_ptr();
     }
+
+    auto pressure_mesh_handle() const
+    {
+        return pressure().mesh_ptr();
+    }
+
+    auto velocity_mesh_handle() const
+    {
+        return velocity().mesh_ptr();
+    }
+
+    auto wrapped_legacy_mesh() const
+    {
+        return d_legacy_mesh;
+    }
+
+    bool has_legacy_backend() const
+    {
+        return uses_legacy_backend();
+    }
+
+    auto* historical_pressure_flux_workspace()
+    {
+        return &pressure_face_flux_workspace();
+    }
+
+    auto* explicit_legacy_pressure_flux_workspace()
+    {
+        return &legacy_pressure_face_flux_workspace();
+    }
 };
 
 /** @brief Override pressure normalization to represent water-density scaling. */
@@ -108,6 +140,51 @@ protected:
     {
         return 1000.0;
     }
+};
+
+/** @brief Exercise the public FieldStored contract of the virtual hook. */
+class PublicMomentumHookFluidSolver
+    : public SimpleFluid::FluidSolver<Pack>
+{
+public:
+    using SimpleFluid::FluidSolver<Pack>::FluidSolver;
+
+protected:
+    SimpleFluid::LinearSolveSummary advance_momentum() override
+    {
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            velocity().set_value(
+                static_cast<Pack::local_ordinal_type>(owned),
+                {2.0, 0.0, 0.0});
+        }
+        return {};
+    }
+};
+
+/** @brief Verify native mesh dispatch remains an overridable hook. */
+class NativeMomentumEquationHookFluidSolver
+    : public SimpleFluid::FluidSolver<Pack>
+{
+public:
+    using SimpleFluid::FluidSolver<Pack>::FluidSolver;
+
+    bool native_hook_called() const noexcept
+    {
+        return d_native_hook_called;
+    }
+
+protected:
+    momentum_equation_type& native_momentum_equation() override
+    {
+        d_native_hook_called = true;
+        return SimpleFluid::FluidSolver<Pack>::native_momentum_equation();
+    }
+
+private:
+    bool d_native_hook_called = false;
 };
 
 } // namespace
@@ -125,6 +202,159 @@ TEST(FluidSolverTest, ReusesProvidedRuntimeMeshHandle)
     TestFluidSolver solver(handle, {});
 
     EXPECT_EQ(solver.runtime_mesh_handle(), handle);
+    EXPECT_EQ(solver.pressure_mesh_handle(), handle);
+    EXPECT_EQ(solver.velocity_mesh_handle(), handle);
+    EXPECT_EQ(solver.wrapped_legacy_mesh(), legacy);
+    EXPECT_TRUE(solver.has_legacy_backend());
+}
+
+/** @brief The legacy constructor wraps, but never rebuilds, its input mesh. */
+TEST(FluidSolverTest, ReusesExactLegacyMeshWithoutConversion)
+{
+    auto legacy = make_single_cell_mesh();
+    TestFluidSolver solver(legacy, {});
+
+    ASSERT_TRUE(solver.runtime_mesh_handle());
+    EXPECT_EQ(solver.runtime_mesh_handle()->legacy_mesh(), legacy);
+    EXPECT_EQ(solver.wrapped_legacy_mesh(), legacy);
+    EXPECT_EQ(solver.pressure_mesh_handle(), solver.runtime_mesh_handle());
+    EXPECT_EQ(solver.velocity_mesh_handle(), solver.runtime_mesh_handle());
+    EXPECT_EQ(solver.historical_pressure_flux_workspace(),
+              solver.explicit_legacy_pressure_flux_workspace());
+}
+
+/** @brief Legacy mirrors do not overwrite a derived public momentum update. */
+TEST(FluidSolverTest, PreservesPublicMomentumHookUpdatesOnLegacyMesh)
+{
+    PublicMomentumHookFluidSolver solver(make_single_cell_mesh(), {});
+    solver.step();
+
+    const auto updated = solver.velocity().value(0);
+    EXPECT_NEAR(updated.x, 2.0, 1.0e-12);
+    EXPECT_NEAR(updated.y, 0.0, 1.0e-12);
+    EXPECT_NEAR(updated.z, 0.0, 1.0e-12);
+}
+
+/** @brief Native mesh handles run without constructing a legacy mesh. */
+TEST(FluidSolverTest, RunsNativeMeshHandlesWithoutLegacyConversion)
+{
+    using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
+    using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
+    using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
+
+    std::vector<SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>> meshes;
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::make_shared<Cartesian>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 0.5, 1.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}})));
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::make_shared<Cylindrical>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {1.0, 2.0},
+                {0.0, std::numbers::pi, 2.0 * std::numbers::pi},
+                {0.0, 1.0}}})));
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::make_shared<SemiStructured>(
+            SimpleFluid::Arr<SemiStructured::Vec3>{
+                {0.0, 0.0, 0.0},
+                {1.0, 0.0, 0.0},
+                {1.0, 1.0, 0.0},
+                {0.0, 1.0, 0.0}},
+            SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{
+                {0, 1, 3}, {1, 2, 3}},
+            SimpleFluid::ArrReal{0.0, 1.0})));
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 1;
+    time_options.kinematic_viscosity = 0.0;
+
+    for (size_t mesh_index = 0; mesh_index < meshes.size(); ++mesh_index)
+    {
+        SCOPED_TRACE(mesh_index);
+        const auto& mesh = meshes[mesh_index];
+        ASSERT_FALSE(mesh->legacy_mesh());
+        TestFluidSolver solver(mesh, {}, time_options);
+        EXPECT_EQ(solver.runtime_mesh_handle(), mesh);
+        EXPECT_EQ(solver.pressure_mesh_handle(), mesh);
+        EXPECT_EQ(solver.velocity_mesh_handle(), mesh);
+        EXPECT_FALSE(solver.wrapped_legacy_mesh());
+        EXPECT_FALSE(solver.has_legacy_backend());
+
+        solver.run();
+        EXPECT_EQ(solver.step_index(), 1);
+        EXPECT_TRUE(std::isfinite(solver.pressure().value(0)));
+        const auto velocity = solver.velocity().value(0);
+        EXPECT_TRUE(std::isfinite(velocity.x));
+        EXPECT_TRUE(std::isfinite(velocity.y));
+        EXPECT_TRUE(std::isfinite(velocity.z));
+
+        const auto output_file = std::filesystem::temp_directory_path() /
+                                 ("SimpleFluid_native_solver_" +
+                                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+                                     std::to_string(mesh_index) + ".vtu");
+        solver.write_solution_vtu(output_file.string());
+        EXPECT_TRUE(std::filesystem::exists(output_file));
+        std::filesystem::remove(output_file);
+    }
+}
+
+/** @brief Native handles execute the monolithic solver without conversion. */
+TEST(FluidSolverTest, RunsCoupledKrylovOnNativeMeshHandle)
+{
+    using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
+    using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
+    using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
+
+    std::vector<SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>> meshes;
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 0.5, 1.0}, {0.0, 1.0}, {0.0, 1.0}}})));
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::make_shared<Cylindrical>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{
+            {{1.0, 2.0}, {0.0, std::numbers::pi, 2.0 * std::numbers::pi}, {0.0, 1.0}}})));
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(std::make_shared<SemiStructured>(
+        SimpleFluid::Arr<SemiStructured::Vec3>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}},
+        SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 3}, {1, 2, 3}}, SimpleFluid::ArrReal{0.0, 1.0})));
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::CoupledKrylov;
+
+    for (size_t mesh_index = 0; mesh_index < meshes.size(); ++mesh_index)
+    {
+        SCOPED_TRACE(mesh_index);
+        const auto& mesh = meshes[mesh_index];
+        ASSERT_FALSE(mesh->legacy_mesh());
+        TestFluidSolver solver(mesh, {}, time_options);
+
+        EXPECT_NO_THROW(solver.step());
+        EXPECT_EQ(solver.step_index(), 1);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_TRUE(std::isfinite(solver.pressure().value(cell_lid)));
+            const auto velocity = solver.velocity().value(cell_lid);
+            EXPECT_TRUE(std::isfinite(velocity.x));
+            EXPECT_TRUE(std::isfinite(velocity.y));
+            EXPECT_TRUE(std::isfinite(velocity.z));
+        }
+    }
+}
+
+/** @brief Native handles dispatch through their dedicated equation hook. */
+TEST(FluidSolverTest, DispatchesNativeMomentumEquationHook)
+{
+    auto cartesian = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    auto mesh = std::make_shared<SimpleFluid::MeshHandle<Pack>>(cartesian);
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    NativeMomentumEquationHookFluidSolver solver(mesh, {}, time_options);
+
+    solver.step();
+    EXPECT_TRUE(solver.native_hook_called());
 }
 
 /**
@@ -135,10 +365,8 @@ TEST(FluidSolverTest, ExposesIndependentLinearSolverPolicies)
     auto mesh = make_single_cell_mesh();
 
     SimpleFluid::LinearSolverOptions transport_options;
-    transport_options.backend =
-        SimpleFluid::LinearSolverBackend::BiCGStab;
-    transport_options.preconditioner =
-        SimpleFluid::LinearPreconditioner::ILU0;
+    transport_options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    transport_options.preconditioner = SimpleFluid::LinearPreconditioner::ILU0;
     TestFluidSolver solver(mesh, {}, {}, transport_options);
 
     EXPECT_EQ(
@@ -252,7 +480,7 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
         solver.pressure().set_value(
             cell_lid, mesh->cell_centroid(cell_lid).x);
     }
-    mesh->sync_periodic_boundaries(solver.pressure());
+    solver.pressure().sync_ghosts();
 
     const auto summary = solver.advance_momentum_once();
 
@@ -314,9 +542,10 @@ TEST(FluidSolverTest,
         EXPECT_NEAR(velocity.z, 0.0, 1.0e-12);
         const auto cache =
             SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
-                mesh, bcs);
-        SimpleFluid::FaceField<Pack> final_fluxes(
-            mesh, "final_pressure_weighted_fluxes");
+                solver.velocity().mesh_ptr(), bcs);
+        SimpleFluid::ScalarFaceFieldStored<Pack> final_fluxes(
+            solver.velocity().mesh_ptr(),
+            "final_pressure_weighted_fluxes");
         SimpleFluid::FVM::pressure_weighted_face_fluxes(
             solver.velocity(),
             solver.pressure(),
@@ -326,7 +555,7 @@ TEST(FluidSolverTest,
             final_fluxes);
         const auto final_imbalance = std::abs(
             SimpleFluid::FVM::cell_flux_balance<Pack>(
-                *mesh, final_fluxes, 0));
+                solver.velocity().mesh(), final_fluxes, 0));
         EXPECT_NEAR(
             solver.last_pressure_velocity_residuals().continuity,
             final_imbalance,

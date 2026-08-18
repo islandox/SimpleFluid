@@ -12,7 +12,7 @@
 #pragma once
 
 #include "FVM/EquationOperators.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/AssembledEquation.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/FieldStored.hh"

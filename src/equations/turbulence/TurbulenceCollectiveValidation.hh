@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "geometry/Mesh.hh"
+#include "dataclass/typedefs.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -31,8 +31,8 @@ namespace SimpleFluid::turbulence_detail
  * it, allowing all ranks to fail before any caller enters its next import,
  * matrix assembly, or linear solve.
  */
-template <TpetraTypePack Pack, class Operation>
-void collective_local_validation(const Mesh<Pack>& mesh, std::string_view context,
+template <class MeshType, class Operation>
+void collective_local_validation(const MeshType& mesh, std::string_view context,
                                  Operation&& operation)
 {
     std::exception_ptr local_error;
@@ -61,8 +61,8 @@ void collective_local_validation(const Mesh<Pack>& mesh, std::string_view contex
 }
 
 /** @brief Require one integral configuration value on every rank. */
-template <TpetraTypePack Pack>
-void require_uniform_integral(const Mesh<Pack>& mesh, int local_value, std::string_view context)
+template <class MeshType>
+void require_uniform_integral(const MeshType& mesh, int local_value, std::string_view context)
 {
     int minimum = 0;
     int maximum = 0;
@@ -76,8 +76,8 @@ void require_uniform_integral(const Mesh<Pack>& mesh, int local_value, std::stri
 }
 
 /** @brief Require one finite floating-point configuration value on every rank. */
-template <TpetraTypePack Pack>
-void require_uniform_real(const Mesh<Pack>& mesh, real_t local_value, std::string_view context)
+template <class MeshType>
+void require_uniform_real(const MeshType& mesh, real_t local_value, std::string_view context)
 {
     real_t minimum = {};
     real_t maximum = {};

@@ -242,8 +242,17 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::temperature[(][)]$"
     "^SimpleFluid::TurbulenceModel<.*>[ ]*::advance[(]"
     "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project[(]"
+    "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::Mesh<.*>[ ]*::project[(]"
+    "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::project[(]"
     "^SimpleFluid::IncompressibleMomentumEquation<.*>[ ]*::advance_velocity[(]"
+    "^SimpleFluid::IncompressibleMomentumEquation<.*SimpleFluid::Mesh<.*>[ ]*::advance_velocity[(]"
+    "^SimpleFluid::IncompressibleMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity[(]"
     "^SimpleFluid::CoupledPressureVelocitySolver<.*>[ ]*::solve[(]"
+    "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::Mesh<.*>[ ]*::solve[(]"
+    "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::MeshHandle<.*>[ ]*::solve[(]"
+    "^SimpleFluid::TemperatureDiffusionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_physical[(]"
+    "^SimpleFluid::BoussinesqMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity_physical[(]"
+    "^SimpleFluid::TurbulenceModel<.*SimpleFluid::MeshHandle<.*>[ ]*::advance[(]"
     "^SimpleFluid::AdaptiveSteadyStateController::observe[(]")
 set(simplefluid_missing_api_patterns)
 foreach(simplefluid_required_api_pattern
@@ -350,10 +359,10 @@ if(simplefluid_forbidden_api_symbols)
         "${simplefluid_forbidden_api_symbol_sample}")
 endif()
 if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 400)
+   OR simplefluid_api_symbol_count GREATER 600)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 400")
+        "SimpleFluid symbols; the reviewed public-API range is 300 to 600")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)

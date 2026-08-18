@@ -10,13 +10,14 @@
  */
 #pragma once
 
-#include "SimpleFluidExport.hh"
 #include "FVM/BoundaryCache.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
+#include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationForward.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -26,10 +27,12 @@
 #include <Teuchos_RCP.hpp>
 
 #include <array>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -37,7 +40,7 @@
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack> struct MaterialPropertyFields;
+template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields;
 
 struct TimeStepperOptions;
 
@@ -46,6 +49,8 @@ namespace FVM
 template<TpetraTypePack Pack> struct VectorTransportSystem;
 
 template<TpetraTypePack Pack> struct VelocityBoundaryCache;
+
+template<TpetraTypePack Pack, class MeshType> struct FieldStoredVelocityBoundaryCache;
 } // namespace FVM
 
 /**
@@ -145,9 +150,8 @@ void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar va
  * @param mesh Mesh that owns the cell distribution.
  * @return Coupled velocity-pressure map.
  */
-template<TpetraTypePack Pack>
-SIMPLEFLUID_SOLVERS_LOCAL
-auto make_coupled_map(const Mesh<Pack>& mesh) -> Teuchos::RCP<const typename Pack::map_type>;
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_SOLVERS_LOCAL auto make_coupled_map(const MeshType& mesh) -> Teuchos::RCP<const typename Pack::map_type>;
 
 /** @brief Matrix reset for cached-graph assembly. */
 template<TpetraTypePack Pack> struct PreparedCoupledMatrix
@@ -174,9 +178,8 @@ void add_coupled_local_values(const PreparedCoupledMatrix<Pack>& prepared, typen
 
 /** @brief Insert into a fresh global graph or sum into a reused one. */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_SOLVERS_LOCAL
-void add_coupled_global_values(const PreparedCoupledMatrix<Pack>& prepared, typename Pack::global_ordinal_type row,
-    const Teuchos::ArrayView<const typename Pack::global_ordinal_type>& columns,
+SIMPLEFLUID_SOLVERS_LOCAL void add_coupled_global_values(const PreparedCoupledMatrix<Pack>& prepared,
+    typename Pack::global_ordinal_type row, const Teuchos::ArrayView<const typename Pack::global_ordinal_type>& columns,
     const Teuchos::ArrayView<const typename Pack::scalar_type>& values);
 
 /**
@@ -184,10 +187,10 @@ void add_coupled_global_values(const PreparedCoupledMatrix<Pack>& prepared, type
  *
  * @tparam Pack Tpetra type pack defining mesh ordinals and vectors.
  */
-template<TpetraTypePack Pack> struct AffinePressureGradientStencil
+template<TpetraTypePack Pack, class MeshType> struct AffinePressureGradientStencil
 {
-    FVM::detail::LeastSquaresGradientStencil<Mesh<Pack>> entries;
-    typename Mesh<Pack>::Vec3 constant{};
+    FVM::detail::LeastSquaresGradientStencil<MeshType> entries;
+    typename MeshType::Vec3 constant{};
 };
 
 /**
@@ -204,12 +207,10 @@ template<TpetraTypePack Pack> struct AffinePressureGradientStencil
  * @return One affine pressure-gradient stencil per owned cell.
  * @throws std::invalid_argument for unsupported pressure boundary types.
  */
-template<TpetraTypePack Pack>
+template<TpetraTypePack Pack, class MeshType>
 SIMPLEFLUID_SOLVERS_LOCAL auto pressure_gradient_stencils(
-    const Mesh<Pack>& mesh,
-    const BoundaryConditionMap& boundary_conditions,
-    typename Pack::scalar_type reference_density)
-    -> std::vector<AffinePressureGradientStencil<Pack>>;
+    const MeshType& mesh, const BoundaryConditionMap& boundary_conditions, typename Pack::scalar_type reference_density)
+    -> std::vector<AffinePressureGradientStencil<Pack, MeshType>>;
 
 /**
  * @brief Left-scale a gradient matrix by an inverse momentum diagonal.
@@ -284,14 +285,21 @@ template<TpetraTypePack Pack> class CoupledSchurPreconditioner;
  *
  * @tparam Pack Tpetra type pack defining distributed algebra types.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>>
 class SIMPLEFLUID_SOLVERS_EXPORT CoupledPressureVelocitySolver
 {
 public:
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
-    using face_flux_field_type = FaceField<Pack>;
-    using mesh_type = Mesh<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using velocity_field_type = typename field_traits::vector_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
+    using momentum_equation_type = IncompressibleMomentumEquation<Pack, mesh_type>;
+    using boussinesq_momentum_equation_type = BoussinesqMomentumEquation<Pack, mesh_type>;
+    using material_property_fields_type = MaterialPropertyFields<Pack, mesh_type>;
+    using velocity_boundary_cache_type = std::conditional_t<std::same_as<mesh_type, Mesh<Pack>>,
+        FVM::VelocityBoundaryCache<Pack>, FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -334,11 +342,10 @@ public:
      * @param pressure Current physical pressure in Pa.
      * @param reference_density Positive density used to normalize pressure.
      */
-    system_type assemble(const IncompressibleMomentumEquation<Pack>& momentum_equation,
-        const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
-        const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
-        scalar_type reference_density = scalar_type{1}) const;
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, scalar_type reference_density = scalar_type{1}) const;
 
     /**
      * @brief Assemble a thermally buoyant coupled system.
@@ -346,14 +353,14 @@ public:
      * @param reference_density Positive density used to normalize pressure.
      * @throws std::invalid_argument If supplied fields are incompatible.
      */
-    system_type assemble(const BoussinesqMomentumEquation<Pack>& momentum_equation, const velocity_field_type& velocity,
-        const field_type& pressure, const field_type& temperature, const face_flux_field_type& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    system_type assemble(const boussinesq_momentum_equation_type& momentum_equation,
+        const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+        const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
-        const MaterialPropertyFields<Pack>* material = nullptr, scalar_type reference_density = scalar_type{1},
+        const material_property_fields_type* material = nullptr, scalar_type reference_density = scalar_type{1},
         bool density_feedback_enabled = false, const field_type* dynamic_viscosity_override = nullptr,
         const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr,
-        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
+        const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
 private:
     using pressure_graph_signature_type = std::vector<std::pair<std::string, BoundaryConditionType>>;
@@ -362,7 +369,7 @@ private:
     {
         BoundaryConditionMap pressure_boundaries;
         scalar_type reference_density = {};
-        std::vector<detail::AffinePressureGradientStencil<Pack>> stencils;
+        std::vector<detail::AffinePressureGradientStencil<Pack, mesh_type>> stencils;
         std::array<Teuchos::RCP<matrix_type>, 3> gradient_operators;
         std::array<Teuchos::RCP<vector_type>, 3> gradient_constants;
 
@@ -382,7 +389,7 @@ private:
 
     SIMPLEFLUID_SOLVERS_LOCAL
     system_type assemble_coupled_system(const momentum_system_type& momentum, const velocity_field_type& velocity,
-        const field_type& pressure, const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const field_type& pressure, const velocity_boundary_cache_type& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
         scalar_type reference_density) const;
 
@@ -422,6 +429,7 @@ private:
  * Additional Tpetra packs require a deliberate explicit instantiation in the
  * solver implementation target.
  */
-extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes>;
+extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
+extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid

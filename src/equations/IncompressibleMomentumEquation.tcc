@@ -24,8 +24,8 @@ namespace SimpleFluid
  * @param mesh Computational mesh.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack>
-IncompressibleMomentumEquation<Pack>::IncompressibleMomentumEquation(
+template<TpetraTypePack Pack, class MeshType>
+IncompressibleMomentumEquation<Pack, MeshType>::IncompressibleMomentumEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "IncompressibleMomentumEquation")),
@@ -45,11 +45,11 @@ IncompressibleMomentumEquation<Pack>::IncompressibleMomentumEquation(
  * @param correction_field Optional lagged correction field.
  * @throws std::invalid_argument if an input violates the transport contract.
  */
-template<TpetraTypePack Pack>
-void IncompressibleMomentumEquation<Pack>::validate_transport_inputs(
+template<TpetraTypePack Pack, class MeshType>
+void IncompressibleMomentumEquation<Pack, MeshType>::validate_transport_inputs(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     const velocity_field_type* correction_field) const
 {
@@ -93,11 +93,11 @@ void IncompressibleMomentumEquation<Pack>::validate_transport_inputs(
  * @return Assembled vector transport system.
  * @throws std::invalid_argument if an input violates the transport contract.
  */
-template<TpetraTypePack Pack>
-auto IncompressibleMomentumEquation<Pack>::assemble_system(
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     const velocity_field_type* correction_field) const -> system_type
 {
@@ -123,11 +123,11 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
  * @return Assembled vector transport system.
  * @throws std::invalid_argument if an input violates the transport contract.
  */
-template<TpetraTypePack Pack>
-auto IncompressibleMomentumEquation<Pack>::assemble_system(
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     const source_type& right_hand_source,
     const velocity_field_type* correction_field) const -> system_type
@@ -146,8 +146,16 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
-            return FVM::detail::slip_face_velocity(
-                old_velocity, face_lid);
+            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+            {
+                return FVM::detail::slip_face_velocity(
+                    old_velocity, face_lid);
+            }
+            else
+            {
+                return FVM::detail::stored_slip_face_velocity(
+                    old_velocity, face_lid);
+            }
         }
         if (type == BoundaryConditionType::Neumann)
         {
@@ -223,11 +231,11 @@ auto IncompressibleMomentumEquation<Pack>::assemble_system(
  * @throws std::invalid_argument if an input violates the transport contract.
  * @throws std::runtime_error if a velocity solve fails or is non-finite.
  */
-template<TpetraTypePack Pack>
-auto IncompressibleMomentumEquation<Pack>::advance_velocity(
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const -> LinearSolveSummary
@@ -256,11 +264,11 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
  * @throws std::invalid_argument if an input violates the transport contract.
  * @throws std::runtime_error if a velocity solve fails or is non-finite.
  */
-template<TpetraTypePack Pack>
-auto IncompressibleMomentumEquation<Pack>::advance_velocity(
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     velocity_field_type& velocity,
     const source_type& right_hand_source,
@@ -374,17 +382,17 @@ auto IncompressibleMomentumEquation<Pack>::advance_velocity(
  * @return Assembled physical momentum system.
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  */
-template<TpetraTypePack Pack>
-auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     const field_type& dynamic_viscosity,
     scalar_type reference_density,
     const source_type& acceleration_source,
     const velocity_field_type* correction_field,
-    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+    const boundary_cache_type* boundary_dynamic_viscosity) const
     -> system_type
 {
     validate_transport_inputs(
@@ -409,8 +417,16 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
-            return FVM::detail::slip_face_velocity(
-                old_velocity, face_lid);
+            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+            {
+                return FVM::detail::slip_face_velocity(
+                    old_velocity, face_lid);
+            }
+            else
+            {
+                return FVM::detail::stored_slip_face_velocity(
+                    old_velocity, face_lid);
+            }
         }
         if (type == BoundaryConditionType::Neumann)
         {
@@ -499,18 +515,18 @@ auto IncompressibleMomentumEquation<Pack>::assemble_physical_system(
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if a velocity solve fails or is non-finite.
  */
-template<TpetraTypePack Pack>
-auto IncompressibleMomentumEquation<Pack>::advance_velocity_physical(
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
     const velocity_field_type& old_velocity,
-    const FaceField<Pack>& face_fluxes,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
     const field_type& dynamic_viscosity,
     scalar_type reference_density,
     velocity_field_type& velocity,
     const source_type& acceleration_source,
     const LinearSolverOptions& linear_options,
-    const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity) const
+    const boundary_cache_type* boundary_dynamic_viscosity) const
     -> LinearSolveSummary
 {
     EquationValidation::require_mesh_match(

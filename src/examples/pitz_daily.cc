@@ -86,8 +86,7 @@ double positive_environment_real(const char* name, double fallback)
     const double value = std::stod(text);
     if (!(value > 0.0) || !std::isfinite(value))
     {
-        throw std::invalid_argument(
-            std::string(name) + " must be finite and positive.");
+        throw std::invalid_argument(std::string(name) + " must be finite and positive.");
     }
     return value;
 }
@@ -118,8 +117,7 @@ std::vector<double> uniform_edges(double lower, double upper, int cells)
     for (int edge = 0; edge <= cells; ++edge)
     {
         edges[static_cast<size_t>(edge)] =
-            lower + (upper - lower) * static_cast<double>(edge)
-                  / static_cast<double>(cells);
+            lower + (upper - lower) * static_cast<double>(edge) / static_cast<double>(cells);
     }
     edges.front() = lower;
     edges.back() = upper;
@@ -143,9 +141,7 @@ public:
     stk::mesh::EntityId id(const Point& point)
     {
         constexpr double coordinate_scale = 1.0e12;
-        const NodeKey key{
-            std::llround(point.x * coordinate_scale),
-            std::llround(point.y * coordinate_scale),
+        const NodeKey key{std::llround(point.x * coordinate_scale), std::llround(point.y * coordinate_scale),
             std::llround(point.z * coordinate_scale)};
         const auto existing = d_ids.find(key);
         if (existing != d_ids.end())
@@ -159,11 +155,7 @@ public:
         return id;
     }
 
-    const std::vector<std::pair<stk::mesh::EntityId, Point>>&
-    coordinates() const noexcept
-    {
-        return d_coordinates;
-    }
+    const std::vector<std::pair<stk::mesh::EntityId, Point>>& coordinates() const noexcept { return d_coordinates; }
 
 private:
     stk::mesh::EntityId d_next_id = 1;
@@ -213,19 +205,15 @@ SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
     auto meta = mesh->meta();
     auto bulk = mesh->bulk();
 
-    auto& coordinates = meta->declare_field<double>(
-        stk::topology::NODE_RANK, "coordinates");
-    stk::mesh::put_field_on_mesh(
-        coordinates, meta->universal_part(), 3, nullptr);
+    auto& coordinates = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
+    stk::mesh::put_field_on_mesh(coordinates, meta->universal_part(), 3, nullptr);
     meta->set_coordinate_field(&coordinates);
 
-    auto& hex_part = meta->declare_part_with_topology(
-        "pitzDaily_hexes", stk::topology::HEX_8);
+    auto& hex_part = meta->declare_part_with_topology("pitzDaily_hexes", stk::topology::HEX_8);
     stk::io::put_io_part_attribute(hex_part);
 
     std::map<std::string, stk::mesh::Part*> boundary_parts;
-    for (const auto* name : {
-             "inlet", "outlet", "upperWall", "lowerWall", "frontAndBack"})
+    for (const auto* name : {"inlet", "outlet", "upperWall", "lowerWall", "frontAndBack"})
     {
         auto& part = meta->declare_part(name, meta->side_rank());
         stk::io::put_io_part_attribute(part);
@@ -242,25 +230,18 @@ SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
     const auto main_edges = uniform_edges(0.0, 0.206, main_x);
     const auto outlet_edges = uniform_edges(0.206, 0.290, outlet_x);
     const std::vector<BlockSpec> blocks{
-        {upstream_edges, upper_y, 0.0, 0.0, 0.0254, 0.0254,
-         true, false, false, true, true},
-        {main_edges, lower_y, -0.0254, -0.0254, 0.0, 0.0,
-         false, false, true, true, false},
-        {main_edges, upper_y, 0.0, 0.0, 0.0254, 0.0254,
-         false, false, false, false, true},
-        {outlet_edges, lower_y, -0.0254, -0.0166, 0.0, 0.0,
-         false, true, false, true, false},
-        {outlet_edges, upper_y, 0.0, 0.0, 0.0254, 0.0166,
-         false, true, false, false, true}};
+        {upstream_edges, upper_y, 0.0, 0.0, 0.0254, 0.0254, true, false, false, true, true},
+        {main_edges, lower_y, -0.0254, -0.0254, 0.0, 0.0, false, false, true, true, false},
+        {main_edges, upper_y, 0.0, 0.0, 0.0254, 0.0254, false, false, false, false, true},
+        {outlet_edges, lower_y, -0.0254, -0.0166, 0.0, 0.0, false, true, false, true, false},
+        {outlet_edges, upper_y, 0.0, 0.0, 0.0254, 0.0166, false, true, false, false, true}};
 
     NodeRegistry nodes;
     stk::mesh::EntityId next_element_id = 1;
     constexpr double zmin = -0.0005;
     constexpr double zmax = 0.0005;
 
-    auto declare_side = [&](stk::mesh::Entity element,
-                            unsigned side,
-                            const std::string& boundary)
+    auto declare_side = [&](stk::mesh::Entity element, unsigned side, const std::string& boundary)
     {
         stk::mesh::PartVector parts{boundary_parts.at(boundary)};
         bulk->declare_element_side(element, side, parts);
@@ -271,49 +252,29 @@ SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
     {
         const int x_cells = static_cast<int>(block.x_edges.size()) - 1;
         const double x_left = block.x_edges.front();
-        const double inverse_width =
-            1.0 / (block.x_edges.back() - block.x_edges.front());
+        const double inverse_width = 1.0 / (block.x_edges.back() - block.x_edges.front());
         for (int i = 0; i < x_cells; ++i)
         {
             const double xa = block.x_edges[static_cast<size_t>(i)];
             const double xb = block.x_edges[static_cast<size_t>(i + 1)];
             const double fa = (xa - x_left) * inverse_width;
             const double fb = (xb - x_left) * inverse_width;
-            const double lower_a = interpolate(
-                block.lower_left, block.lower_right, fa);
-            const double lower_b = interpolate(
-                block.lower_left, block.lower_right, fb);
-            const double upper_a = interpolate(
-                block.upper_left, block.upper_right, fa);
-            const double upper_b = interpolate(
-                block.upper_left, block.upper_right, fb);
+            const double lower_a = interpolate(block.lower_left, block.lower_right, fa);
+            const double lower_b = interpolate(block.lower_left, block.lower_right, fb);
+            const double upper_a = interpolate(block.upper_left, block.upper_right, fa);
+            const double upper_b = interpolate(block.upper_left, block.upper_right, fb);
 
             for (int j = 0; j < block.y_cells; ++j)
             {
-                const double ya0 = interpolate(
-                    lower_a, upper_a,
-                    static_cast<double>(j) / block.y_cells);
-                const double ya1 = interpolate(
-                    lower_a, upper_a,
-                    static_cast<double>(j + 1) / block.y_cells);
-                const double yb0 = interpolate(
-                    lower_b, upper_b,
-                    static_cast<double>(j) / block.y_cells);
-                const double yb1 = interpolate(
-                    lower_b, upper_b,
-                    static_cast<double>(j + 1) / block.y_cells);
+                const double ya0 = interpolate(lower_a, upper_a, static_cast<double>(j) / block.y_cells);
+                const double ya1 = interpolate(lower_a, upper_a, static_cast<double>(j + 1) / block.y_cells);
+                const double yb0 = interpolate(lower_b, upper_b, static_cast<double>(j) / block.y_cells);
+                const double yb1 = interpolate(lower_b, upper_b, static_cast<double>(j + 1) / block.y_cells);
 
-                const stk::mesh::EntityIdVector element_nodes{
-                    nodes.id({xa, ya0, zmin}),
-                    nodes.id({xb, yb0, zmin}),
-                    nodes.id({xb, yb1, zmin}),
-                    nodes.id({xa, ya1, zmin}),
-                    nodes.id({xa, ya0, zmax}),
-                    nodes.id({xb, yb0, zmax}),
-                    nodes.id({xb, yb1, zmax}),
-                    nodes.id({xa, ya1, zmax})};
-                const auto element = stk::mesh::declare_element(
-                    *bulk, hex_part, next_element_id++, element_nodes);
+                const stk::mesh::EntityIdVector element_nodes{nodes.id({xa, ya0, zmin}), nodes.id({xb, yb0, zmin}),
+                    nodes.id({xb, yb1, zmin}), nodes.id({xa, ya1, zmin}), nodes.id({xa, ya0, zmax}),
+                    nodes.id({xb, yb0, zmax}), nodes.id({xb, yb1, zmax}), nodes.id({xa, ya1, zmax})};
+                const auto element = stk::mesh::declare_element(*bulk, hex_part, next_element_id++, element_nodes);
 
                 if (block.lower_wall && j == 0)
                 {
@@ -347,8 +308,7 @@ SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
         double* values = stk::mesh::field_data(coordinates, node);
         if (values == nullptr)
         {
-            throw std::runtime_error(
-                "pitzDaily mesh failed to assign node coordinates.");
+            throw std::runtime_error("pitzDaily mesh failed to assign node coordinates.");
         }
         values[0] = point.x;
         values[1] = point.y;
@@ -372,31 +332,23 @@ SimpleFluid::BoundaryConditionSet pitz_daily_boundary_conditions()
     conditions.velocity["outlet"] = {Type::Neumann, {}};
     conditions.pressure["inlet"] = {Type::Neumann, 0.0};
     conditions.pressure["outlet"] = {Type::Dirichlet, 0.0};
-    conditions.turbulence.turbulent_kinetic_energy["inlet"] = {
-        Type::Dirichlet, 0.375};
-    conditions.turbulence.dissipation_rate["inlet"] = {
-        Type::Dirichlet, 14.855};
+    conditions.turbulence.turbulent_kinetic_energy["inlet"] = {Type::Dirichlet, 0.375};
+    conditions.turbulence.dissipation_rate["inlet"] = {Type::Dirichlet, 14.855};
 
     for (const auto* boundary : {"upperWall", "lowerWall"})
     {
         conditions.velocity[boundary] = {Type::NoSlip, {}};
         conditions.pressure[boundary] = {Type::Neumann, 0.0};
-        conditions.turbulence.turbulent_kinetic_energy[boundary] = {
-            Type::Neumann, 0.0};
-        conditions.turbulence.dissipation_rate[boundary] = {
-            Type::Neumann, 0.0};
+        conditions.turbulence.turbulent_kinetic_energy[boundary] = {Type::Neumann, 0.0};
+        conditions.turbulence.dissipation_rate[boundary] = {Type::Neumann, 0.0};
     }
 
     conditions.velocity["frontAndBack"] = {Type::Slip, {}};
     conditions.pressure["frontAndBack"] = {Type::Neumann, 0.0};
-    conditions.turbulence.turbulent_kinetic_energy["frontAndBack"] = {
-        Type::Neumann, 0.0};
-    conditions.turbulence.dissipation_rate["frontAndBack"] = {
-        Type::Neumann, 0.0};
-    conditions.turbulence.turbulent_kinetic_energy["outlet"] = {
-        Type::Neumann, 0.0};
-    conditions.turbulence.dissipation_rate["outlet"] = {
-        Type::Neumann, 0.0};
+    conditions.turbulence.turbulent_kinetic_energy["frontAndBack"] = {Type::Neumann, 0.0};
+    conditions.turbulence.dissipation_rate["frontAndBack"] = {Type::Neumann, 0.0};
+    conditions.turbulence.turbulent_kinetic_energy["outlet"] = {Type::Neumann, 0.0};
+    conditions.turbulence.dissipation_rate["outlet"] = {Type::Neumann, 0.0};
     return conditions;
 }
 
@@ -409,19 +361,12 @@ SimpleFluid::BoundaryConditionSet pitz_daily_boundary_conditions()
  * @param rank MPI rank used in the output filename.
  * @throws std::runtime_error if output cannot be opened or epsilon is unavailable.
  */
-void write_cells(
-    const Mesh& mesh,
-    const SimpleFluid::BoussinesqSolver<Pack>& solver,
-    const SimpleFluid::TurbulenceModel<Pack>& turbulence,
-    int rank)
+void write_cells(const Mesh& mesh, const SimpleFluid::BoussinesqSolver<Pack>& solver,
+    const SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence, int rank)
 {
-    const char* configured_prefix =
-        std::getenv("SIMPLEFLUID_PITZ_OUTPUT_PREFIX");
-    const std::string prefix = configured_prefix == nullptr
-                             ? "simplefluid_cells"
-                             : configured_prefix;
-    const std::string filename =
-        prefix + "_rank" + std::to_string(rank) + ".csv";
+    const char* configured_prefix = std::getenv("SIMPLEFLUID_PITZ_OUTPUT_PREFIX");
+    const std::string prefix = configured_prefix == nullptr ? "simplefluid_cells" : configured_prefix;
+    const std::string filename = prefix + "_rank" + std::to_string(rank) + ".csv";
     std::ofstream output(filename);
     if (!output)
     {
@@ -440,13 +385,10 @@ void write_cells(
         const auto lid = static_cast<Pack::local_ordinal_type>(owned);
         const auto center = mesh.cell_centroid(lid);
         const auto velocity = solver.velocity().value(lid);
-        output << center.x << ',' << center.y << ',' << center.z << ','
-               << velocity.x << ',' << velocity.y << ',' << velocity.z << ','
-               << solver.pressure().value(lid) << ','
-               << turbulence.turbulent_kinetic_energy().value(lid) << ','
-               << epsilon->value(lid) << ','
-               << turbulence.turbulent_kinematic_viscosity().value(lid)
-               << '\n';
+        output << center.x << ',' << center.y << ',' << center.z << ',' << velocity.x << ',' << velocity.y << ','
+               << velocity.z << ',' << solver.pressure().value(lid) << ','
+               << turbulence.turbulent_kinetic_energy().value(lid) << ',' << epsilon->value(lid) << ','
+               << turbulence.turbulent_kinematic_viscosity().value(lid) << '\n';
     }
 }
 
@@ -462,12 +404,9 @@ void write_cells(
 int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);
-    const int mesh_divisor = positive_environment_integer(
-        "SIMPLEFLUID_PITZ_MESH_DIVISOR", 4);
-    const int steps = positive_environment_integer(
-        "SIMPLEFLUID_PITZ_STEPS", 200);
-    const double time_step = positive_environment_real(
-        "SIMPLEFLUID_PITZ_DT", 1.0e-5);
+    const int mesh_divisor = positive_environment_integer("SIMPLEFLUID_PITZ_MESH_DIVISOR", 4);
+    const int steps = positive_environment_integer("SIMPLEFLUID_PITZ_STEPS", 200);
+    const double time_step = positive_environment_real("SIMPLEFLUID_PITZ_DT", 1.0e-5);
 
     auto mesh = make_pitz_daily_mesh(mesh_divisor);
     auto boundary_conditions = pitz_daily_boundary_conditions();
@@ -481,8 +420,7 @@ int main(int argc, char** argv)
     time_options.gravity_x = 0.0;
     time_options.gravity_y = 0.0;
     time_options.gravity_z = 0.0;
-    time_options.pressure_velocity_coupling =
-        SimpleFluid::PressureVelocityCoupling::SIMPLE;
+    time_options.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::SIMPLE;
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 500;
@@ -496,22 +434,15 @@ int main(int argc, char** argv)
     model_options.thermal_conductivity = 0.0;
 
     SimpleFluid::BoussinesqSolver<Pack> solver(
-        mesh,
-        std::move(boundary_conditions),
-        time_options,
-        linear_options,
-        model_options);
+        mesh, std::move(boundary_conditions), time_options, linear_options, model_options);
     solver.initialize_heated_box(0.0, 0.0);
 
     SimpleFluid::TurbulenceModelOptions turbulence_options;
-    turbulence_options.model =
-        SimpleFluid::TurbulenceModelType::StandardKEpsilon;
+    turbulence_options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
     turbulence_options.initial_turbulent_kinetic_energy = 0.375;
     turbulence_options.initial_dissipation_rate = 14.855;
-    turbulence_options.wall_treatment =
-        SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
-    turbulence_options.wall_options.boundary_names = {
-        "upperWall", "lowerWall"};
+    turbulence_options.wall_treatment = SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    turbulence_options.wall_options.boundary_names = {"upperWall", "lowerWall"};
     auto& turbulence = solver.configure_turbulence(turbulence_options);
 
     SimpleFluid::ProgressStream progress(std::cout);
@@ -526,10 +457,8 @@ int main(int argc, char** argv)
 
     if (rank == 0)
     {
-        std::cout << "pitzDaily: " << mesh->num_owned_cells()
-                  << " rank-zero owned cells, divisor=" << mesh_divisor
-                  << ", steps=" << steps << ", t=" << solver.time()
-                  << ", MPI ranks=" << comm->getSize() << '\n';
+        std::cout << "pitzDaily: " << mesh->num_owned_cells() << " rank-zero owned cells, divisor=" << mesh_divisor
+                  << ", steps=" << steps << ", t=" << solver.time() << ", MPI ranks=" << comm->getSize() << '\n';
     }
     return 0;
 }

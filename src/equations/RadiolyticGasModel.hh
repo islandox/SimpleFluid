@@ -13,6 +13,7 @@
 #include "equations/BoussinesqModel.hh"
 #include "equations/RadiolyticGasProperties.hh"
 #include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "FVM/TransportSystem.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -51,17 +52,19 @@ struct RadiolyticGasStepStatistics
  *
  * @tparam Pack Tpetra type pack used for mesh, field, and communicator types.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class RadiolyticGasModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
-    using face_flux_field_type = FaceField<Pack>;
-    using material_type = MaterialPropertyFields<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using velocity_field_type = typename field_traits::vector_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
+    using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using statistics_type = RadiolyticGasStepStatistics<scalar_type>;
 
     /**

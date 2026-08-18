@@ -17,6 +17,8 @@
 #include "equations/MaterialFeedbackModel.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 #include "dataclass/Database.hh"
+#include "geometry/MeshHandle.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
@@ -49,6 +51,18 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
+}
+
+/** @brief Build a native one-cell Cartesian handle without a legacy mesh. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+make_native_single_cell_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::move(cartesian));
 }
 
 /**
@@ -1496,6 +1510,73 @@ TEST(FeedbackMapTest, PreservesVolumeIntegralForCoarsenedField)
     ASSERT_EQ(averages.size(), 1u);
     EXPECT_NEAR(
         averages[0] * mapped_volume, source_integral, 1.0e-14);
+}
+
+/** @brief Advance the complete optional physical stack on a native handle. */
+TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesExtendedPhysicalStack)
+{
+    const auto mesh = make_native_single_cell_mesh();
+    auto time_options = make_energy_test_time_options(0.1);
+    auto model_options = make_energy_test_model_options();
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.initialize_heated_box(383.0, 383.0);
+
+    SimpleFluid::FissionPowerSourceOptions fission;
+    fission.profile = SimpleFluid::FissionPowerProfile::Constant;
+    fission.power_density = 100.0;
+    solver.configure_fission_power_source(fission);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.9;
+    void_options.initial_alpha = 0.1;
+    auto& void_model =
+        solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::RadiolyticGasOptions radiolysis;
+    radiolysis.mode = SimpleFluid::RadiolyticGasMode::IdealGasSource;
+    radiolysis.hydrogen_yield_mol_per_j = 1.0e-7;
+    radiolysis.max_source_alpha_rate = 1.0;
+    auto& radiolytic_model =
+        solver.configure_radiolytic_gas(radiolysis);
+
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 373.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+
+    SimpleFluid::MaterialFeedbackOptions feedback;
+    feedback.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
+    feedback.reference_density = 2.0;
+    feedback.liquid_density = 2.0;
+    feedback.gas_density = 1.0;
+    feedback.reference_dynamic_viscosity = 0.0;
+    feedback.min_viscosity = 0.0;
+    auto& feedback_model = solver.configure_material_feedback(feedback);
+
+    SimpleFluid::DelayedNeutronPrecursorOptions precursors;
+    precursors.group_count = 1;
+    precursors.decay_constants = {0.1};
+    precursors.initial_concentrations = {1.0};
+    precursors.power_yields = {1.0e-3};
+    auto& precursor_model = solver.configure_precursors(precursors);
+
+    solver.step();
+
+    EXPECT_FALSE(mesh->legacy_mesh());
+    EXPECT_EQ(solver.temperature().mesh_ptr(), mesh);
+    EXPECT_EQ(solver.material_properties().density.mesh_ptr(), mesh);
+    EXPECT_EQ(void_model.alpha_g().mesh_ptr(), mesh);
+    EXPECT_EQ(radiolytic_model.source_alpha_rad().mesh_ptr(), mesh);
+    EXPECT_EQ(boiling_model.source_alpha_boil().mesh_ptr(), mesh);
+    EXPECT_EQ(feedback_model.density_feedback().mesh_ptr(), mesh);
+    EXPECT_EQ(precursor_model.concentration(0).mesh_ptr(), mesh);
+    EXPECT_TRUE(std::isfinite(solver.temperature().value(0)));
+    EXPECT_TRUE(std::isfinite(void_model.alpha_g().value(0)));
+    EXPECT_TRUE(std::isfinite(precursor_model.concentration(0).value(0)));
 }
 
 /** @brief Verify configured multiphysics fields are published to VTU output. */

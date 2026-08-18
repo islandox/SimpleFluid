@@ -16,6 +16,7 @@
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/Operators.hh"
@@ -23,7 +24,9 @@
 
 #include <Teuchos_RCP.hpp>
 
+#include <concepts>
 #include <functional>
+#include <type_traits>
 #include <utility>
 
 namespace SimpleFluid
@@ -38,13 +41,20 @@ namespace SimpleFluid
  *
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack, class MeshType>
 class SIMPLEFLUID_EQUATIONS_EXPORT IncompressibleMomentumEquation
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using velocity_field_type = typename field_traits::vector_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
+    using velocity_boundary_cache_type = std::conditional_t<
+        std::same_as<mesh_type, Mesh<Pack>>,
+        FVM::VelocityBoundaryCache<Pack>,
+        FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using source_type =
@@ -59,16 +69,16 @@ public:
 
     LinearSolveSummary advance_velocity(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         velocity_field_type& velocity,
         const LinearSolverOptions& linear_options = {}) const;
 
     LinearSolveSummary advance_velocity(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         velocity_field_type& velocity,
         const source_type& right_hand_source,
@@ -76,15 +86,15 @@ public:
 
     system_type assemble_system(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         const velocity_field_type* correction_field = nullptr) const;
 
     system_type assemble_system(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
@@ -92,34 +102,34 @@ public:
     /** @brief Advance using dynamic viscosity divided by reference density. */
     LinearSolveSummary advance_velocity_physical(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         const field_type& dynamic_viscosity,
         scalar_type reference_density,
         velocity_field_type& velocity,
         const source_type& acceleration_source,
         const LinearSolverOptions& linear_options = {},
-        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
+        const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
     /** @brief Assemble using dynamic viscosity divided by reference density. */
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         const field_type& dynamic_viscosity,
         scalar_type reference_density,
         const source_type& acceleration_source,
         const velocity_field_type* correction_field = nullptr,
-        const FVM::BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr) const;
+        const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
 private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_transport_inputs(
         const velocity_field_type& old_velocity,
-        const FaceField<Pack>& face_fluxes,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         const velocity_field_type* correction_field) const;
 
@@ -137,6 +147,10 @@ private:
 };
 
 extern template class
-    IncompressibleMomentumEquation<DefaultTpetraTypes>;
+    IncompressibleMomentumEquation<DefaultTpetraTypes,
+                                   Mesh<DefaultTpetraTypes>>;
+extern template class
+    IncompressibleMomentumEquation<DefaultTpetraTypes,
+                                   MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid

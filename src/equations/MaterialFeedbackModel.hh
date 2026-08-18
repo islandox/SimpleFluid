@@ -11,6 +11,7 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
+#include "fields/MeshFieldTraits.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -177,16 +178,18 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class MaterialFeedbackModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using material_type = MaterialPropertyFields<Pack>;
-    using context_type = BoussinesqUpdateContext<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using material_type = MaterialPropertyFields<Pack, mesh_type>;
+    using context_type = BoussinesqUpdateContext<Pack, mesh_type>;
 
     /**
      * @brief Construct a material-feedback model on a mesh.

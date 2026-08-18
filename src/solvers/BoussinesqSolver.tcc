@@ -34,20 +34,11 @@ namespace SimpleFluid
  * @throws std::invalid_argument If the time step is non-positive.
  */
 template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(
-    SP<const mesh_type> mesh,
-    BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options,
-    LinearSolverOptions linear_options)
-    : BoussinesqSolver(
-          std::make_shared<MeshHandle<Pack>>(
-              require_mesh(std::move(mesh))),
-          std::move(boundary_conditions),
-          time_options,
-          linear_options,
-          BoussinesqModelOptions::legacy_defaults(time_options),
-          false,
-          PhysicalModelTag{})
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options)
+    : BoussinesqSolver(std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh))),
+          std::move(boundary_conditions), time_options, linear_options,
+          BoussinesqModelOptions::legacy_defaults(time_options), false, PhysicalModelTag{})
 {
 }
 
@@ -63,20 +54,10 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
  * @throws std::invalid_argument if the mesh or model options are invalid.
  */
 template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(
-    SP<const mesh_type> mesh,
-    BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options,
-    LinearSolverOptions linear_options,
-    BoussinesqModelOptions model_options)
-    : BoussinesqSolver(
-          std::make_shared<MeshHandle<Pack>>(
-              require_mesh(std::move(mesh))),
-          std::move(boundary_conditions),
-          time_options,
-          linear_options,
-          std::move(model_options),
-          true,
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options)
+    : BoussinesqSolver(std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh))),
+          std::move(boundary_conditions), time_options, linear_options, std::move(model_options), true,
           PhysicalModelTag{})
 {
 }
@@ -92,19 +73,10 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
  * @throws std::invalid_argument if the mesh or time-step options are invalid.
  */
 template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(
-    SP<const MeshHandle<Pack>> mesh,
-    BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options,
-    LinearSolverOptions linear_options)
-    : BoussinesqSolver(
-          std::move(mesh),
-          std::move(boundary_conditions),
-          time_options,
-          linear_options,
-          BoussinesqModelOptions::legacy_defaults(time_options),
-          false,
-          PhysicalModelTag{})
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options)
+    : BoussinesqSolver(std::move(mesh), std::move(boundary_conditions), time_options, linear_options,
+          BoussinesqModelOptions::legacy_defaults(time_options), false, PhysicalModelTag{})
 {
 }
 
@@ -120,20 +92,10 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
  * @throws std::invalid_argument if the mesh or model options are invalid.
  */
 template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(
-    SP<const MeshHandle<Pack>> mesh,
-    BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options,
-    LinearSolverOptions linear_options,
-    BoussinesqModelOptions model_options)
-    : BoussinesqSolver(
-          std::move(mesh),
-          std::move(boundary_conditions),
-          time_options,
-          linear_options,
-          std::move(model_options),
-          true,
-          PhysicalModelTag{})
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options)
+    : BoussinesqSolver(std::move(mesh), std::move(boundary_conditions), time_options, linear_options,
+          std::move(model_options), true, PhysicalModelTag{})
 {
 }
 
@@ -151,54 +113,40 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
  * @throws std::invalid_argument if model options or configured sources are invalid.
  */
 template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(
-    SP<const MeshHandle<Pack>> mesh,
-    BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options,
-    LinearSolverOptions linear_options,
-    BoussinesqModelOptions model_options,
-    bool physical_model_enabled,
-    PhysicalModelTag)
-    : base_type(
-          std::move(mesh),
-          std::move(boundary_conditions),
-          time_options,
-          linear_options,
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options,
+    bool physical_model_enabled, PhysicalModelTag)
+    : base_type(std::move(mesh), std::move(boundary_conditions), time_options, linear_options,
           typename base_type::DeferredMomentumEquationTag{}),
-      d_model_options(std::move(model_options)),
-      d_physical_model_enabled(physical_model_enabled)
+      d_model_options(std::move(model_options)), d_physical_model_enabled(physical_model_enabled)
 {
-    detail::validate_model_options(
-        d_model_options, d_problem.time_options());
+    detail::validate_model_options(d_model_options, d_problem.time_options());
 
-    d_problem.template emplace_object<TemperatureDiffusionEquation<Pack>>(
-        "temperature_equation",
-        d_mesh,
-        d_problem.boundary_conditions());
-    d_problem.template emplace_object<BoussinesqMomentumEquation<Pack>>(
-        "momentum_equation", d_mesh);
-    d_problem.template emplace_object<field_type>(
-        "temperature", d_mesh, "temperature");
-    d_problem.template emplace_object<MaterialPropertyFields<Pack>>(
-        "material_properties",
-        d_mesh,
-        d_model_options,
-        d_problem.time_options());
-    d_problem.template emplace_object<TurbulenceModel<Pack>>(
-        "turbulence_model",
-        d_mesh,
-        d_problem.boundary_conditions());
-    auto& sources =
-        d_problem.template emplace_object<
-            TemperatureSourceRegistry<Pack>>(
-                "temperature_sources", d_mesh);
-    for (size_t index = 0;
-         index < d_model_options.temperature_source_names.size();
-         ++index)
+    d_problem.add_field(ScalarCellFieldDescriptor<Pack>("temperature"));
+
+    d_problem.template emplace_object<temperature_equation_type>(
+        "temperature_equation", d_mesh, d_problem.boundary_conditions());
+    d_problem.template emplace_object<boussinesq_momentum_equation_type>("boussinesq_momentum_equation", d_mesh);
+    d_problem.template emplace_object<material_type>(
+        "material_properties", d_mesh, d_model_options, d_problem.time_options());
+    d_problem.template emplace_object<turbulence_model_type>(
+        "turbulence_model", d_mesh, d_problem.boundary_conditions());
+    auto& sources = d_problem.template emplace_object<temperature_source_registry_type>("temperature_sources", d_mesh);
+    if (uses_legacy_backend())
+    {
+        d_problem.template emplace_object<canonical_velocity_boundary_cache_type>("boussinesq_velocity_boundary_cache",
+            FVM::cache_velocity_boundary_conditions<Pack>(d_mesh, d_problem.boundary_conditions()));
+        d_problem.template emplace_object<canonical_face_flux_workspace_type>(
+            "boussinesq_pressure_face_flux_workspace", d_mesh);
+        d_problem.template emplace_object<canonical_coupled_solver_type>(
+            "boussinesq_coupled_pressure_velocity_solver", d_mesh);
+        d_problem.template emplace_object<BoussinesqMomentumEquation<Pack>>("momentum_equation", d_legacy_mesh);
+        d_problem.template emplace_object<legacy_field_type>("legacy_temperature", d_legacy_mesh, "temperature");
+    }
+    for (size_t index = 0; index < d_model_options.temperature_source_names.size(); ++index)
     {
         sources.add(
-            d_model_options.temperature_source_names[index],
-            d_model_options.temperature_source_power_densities[index]);
+            d_model_options.temperature_source_names[index], d_model_options.temperature_source_power_densities[index]);
     }
 }
 
@@ -208,9 +156,7 @@ BoussinesqSolver<Pack>::BoussinesqSolver(
  * @tparam Pack Tpetra type pack.
  * @return Stored cell-centered temperature field.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::temperature() const noexcept
-    -> const field_type&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature() const noexcept -> const field_type&
 {
     return d_problem.template object<field_type>("temperature");
 }
@@ -221,10 +167,32 @@ auto BoussinesqSolver<Pack>::temperature() const noexcept
  * @tparam Pack Tpetra type pack.
  * @return Stored cell-centered temperature field.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::temperature() noexcept -> field_type&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature() noexcept -> field_type&
 {
     return d_problem.template object<field_type>("temperature");
+}
+
+/** @brief Return the legacy equation stack's temperature mirror. */
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::legacy_temperature() -> legacy_field_type&
+{
+    return d_problem.template object<legacy_field_type>("legacy_temperature");
+}
+
+/** @brief Return the immutable legacy temperature mirror. */
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::legacy_temperature() const -> const legacy_field_type&
+{
+    return d_problem.template object<legacy_field_type>("legacy_temperature");
+}
+
+/** @brief Publish the public stored temperature to the legacy equation field. */
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::sync_temperature_to_legacy()
+{
+    if (!uses_legacy_backend())
+    {
+        return;
+    }
+    legacy_temperature().owned_data().update(scalar_type{1}, temperature().owned_data(), scalar_type{0});
+    d_legacy_mesh->sync_periodic_boundaries(legacy_temperature());
 }
 
 /**
@@ -233,12 +201,9 @@ auto BoussinesqSolver<Pack>::temperature() noexcept -> field_type&
  * @tparam Pack Tpetra type pack.
  * @return Problem-owned material-property fields.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::stored_material_properties()
-    -> MaterialPropertyFields<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::stored_material_properties() -> material_type&
 {
-    return d_problem.template object<
-        MaterialPropertyFields<Pack>>("material_properties");
+    return d_problem.template object<material_type>("material_properties");
 }
 
 /**
@@ -247,12 +212,9 @@ auto BoussinesqSolver<Pack>::stored_material_properties()
  * @tparam Pack Tpetra type pack.
  * @return Problem-owned material-property fields.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::stored_material_properties() const
-    -> const MaterialPropertyFields<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::stored_material_properties() const -> const material_type&
 {
-    return d_problem.template object<
-        MaterialPropertyFields<Pack>>("material_properties");
+    return d_problem.template object<material_type>("material_properties");
 }
 
 /**
@@ -261,9 +223,7 @@ auto BoussinesqSolver<Pack>::stored_material_properties() const
  * @tparam Pack Tpetra type pack.
  * @return Problem-owned material-property fields.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::material_properties() noexcept
-    -> MaterialPropertyFields<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::material_properties() -> material_type&
 {
     d_physical_model_enabled = true;
     return stored_material_properties();
@@ -275,9 +235,7 @@ auto BoussinesqSolver<Pack>::material_properties() noexcept
  * @tparam Pack Tpetra type pack.
  * @return Problem-owned material-property fields.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::material_properties() const noexcept
-    -> const MaterialPropertyFields<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::material_properties() const -> const material_type&
 {
     return stored_material_properties();
 }
@@ -288,12 +246,9 @@ auto BoussinesqSolver<Pack>::material_properties() const noexcept
  * @tparam Pack Tpetra type pack.
  * @return Problem-owned turbulence model.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::stored_turbulence_model()
-    -> TurbulenceModel<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::stored_turbulence_model() -> turbulence_model_type&
 {
-    return d_problem.template object<TurbulenceModel<Pack>>(
-        "turbulence_model");
+    return d_problem.template object<turbulence_model_type>("turbulence_model");
 }
 
 /**
@@ -303,11 +258,9 @@ auto BoussinesqSolver<Pack>::stored_turbulence_model()
  * @return Problem-owned turbulence model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::stored_turbulence_model() const
-    -> const TurbulenceModel<Pack>&
+auto BoussinesqSolver<Pack>::stored_turbulence_model() const -> const turbulence_model_type&
 {
-    return d_problem.template object<TurbulenceModel<Pack>>(
-        "turbulence_model");
+    return d_problem.template object<turbulence_model_type>("turbulence_model");
 }
 
 /**
@@ -316,8 +269,7 @@ auto BoussinesqSolver<Pack>::stored_turbulence_model() const
  * @tparam Pack Tpetra type pack.
  * @return true when a physical transport path must be used.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::physical_transport_enabled() const noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::physical_transport_enabled() const noexcept
 {
     return d_physical_model_enabled || stored_turbulence_model().enabled();
 }
@@ -330,14 +282,10 @@ bool BoussinesqSolver<Pack>::physical_transport_enabled() const noexcept
  * @return Configured turbulence model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_turbulence(
-    const TurbulenceModelOptions& options) -> TurbulenceModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_turbulence(const TurbulenceModelOptions& options) -> turbulence_model_type&
 {
     auto& model = stored_turbulence_model();
-    model.configure(
-        options,
-        stored_material_properties(),
-        d_model_options.reference_density);
+    model.configure(options, stored_material_properties(), d_model_options.reference_density);
     return model;
 }
 
@@ -349,14 +297,10 @@ auto BoussinesqSolver<Pack>::configure_turbulence(
  * @return Configured turbulence model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_turbulence(
-    const Database& database) -> TurbulenceModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_turbulence(const Database& database) -> turbulence_model_type&
 {
     auto& model = stored_turbulence_model();
-    model.configure(
-        database,
-        stored_material_properties(),
-        d_model_options.reference_density);
+    model.configure(database, stored_material_properties(), d_model_options.reference_density);
     return model;
 }
 
@@ -366,8 +310,7 @@ auto BoussinesqSolver<Pack>::configure_turbulence(
  * @tparam Pack Tpetra type pack.
  * @return true if an enabled model was disabled.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_turbulence_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_turbulence_model() noexcept
 {
     return stored_turbulence_model().disable();
 }
@@ -378,9 +321,7 @@ bool BoussinesqSolver<Pack>::remove_turbulence_model() noexcept
  * @tparam Pack Tpetra type pack.
  * @return Active model, or nullptr in laminar mode.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_turbulence_model() noexcept
-    -> TurbulenceModel<Pack>*
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::find_turbulence_model() noexcept -> turbulence_model_type*
 {
     auto& model = stored_turbulence_model();
     return model.enabled() ? &model : nullptr;
@@ -393,8 +334,7 @@ auto BoussinesqSolver<Pack>::find_turbulence_model() noexcept
  * @return Active model, or nullptr in laminar mode.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_turbulence_model() const noexcept
-    -> const TurbulenceModel<Pack>*
+auto BoussinesqSolver<Pack>::find_turbulence_model() const noexcept -> const turbulence_model_type*
 {
     const auto& model = stored_turbulence_model();
     return model.enabled() ? &model : nullptr;
@@ -407,11 +347,9 @@ auto BoussinesqSolver<Pack>::find_turbulence_model() const noexcept
  * @return Problem-owned source registry.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::stored_temperature_sources()
-    -> TemperatureSourceRegistry<Pack>&
+auto BoussinesqSolver<Pack>::stored_temperature_sources() -> temperature_source_registry_type&
 {
-    return d_problem.template object<
-        TemperatureSourceRegistry<Pack>>("temperature_sources");
+    return d_problem.template object<temperature_source_registry_type>("temperature_sources");
 }
 
 /**
@@ -421,11 +359,9 @@ auto BoussinesqSolver<Pack>::stored_temperature_sources()
  * @return Problem-owned source registry.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::stored_temperature_sources() const
-    -> const TemperatureSourceRegistry<Pack>&
+auto BoussinesqSolver<Pack>::stored_temperature_sources() const -> const temperature_source_registry_type&
 {
-    return d_problem.template object<
-        TemperatureSourceRegistry<Pack>>("temperature_sources");
+    return d_problem.template object<temperature_source_registry_type>("temperature_sources");
 }
 
 /**
@@ -434,9 +370,7 @@ auto BoussinesqSolver<Pack>::stored_temperature_sources() const
  * @tparam Pack Tpetra type pack.
  * @return Problem-owned source registry.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::temperature_sources() noexcept
-    -> TemperatureSourceRegistry<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature_sources() -> temperature_source_registry_type&
 {
     d_physical_model_enabled = true;
     return stored_temperature_sources();
@@ -449,8 +383,7 @@ auto BoussinesqSolver<Pack>::temperature_sources() noexcept
  * @return Problem-owned source registry.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::temperature_sources() const noexcept
-    -> const TemperatureSourceRegistry<Pack>&
+auto BoussinesqSolver<Pack>::temperature_sources() const -> const temperature_source_registry_type&
 {
     return stored_temperature_sources();
 }
@@ -464,14 +397,11 @@ auto BoussinesqSolver<Pack>::temperature_sources() const noexcept
  * @return Newly registered source.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::add_temperature_source(
-    std::string name,
-    scalar_type initial_power_density)
-    -> VolumetricScalarSource<Pack>&
+auto BoussinesqSolver<Pack>::add_temperature_source(std::string name, scalar_type initial_power_density)
+    -> volumetric_source_type&
 {
     d_physical_model_enabled = true;
-    return stored_temperature_sources().add(
-        std::move(name), initial_power_density);
+    return stored_temperature_sources().add(std::move(name), initial_power_density);
 }
 
 /**
@@ -481,19 +411,14 @@ auto BoussinesqSolver<Pack>::add_temperature_source(
  * @return Newly created fission source.
  * @throws std::invalid_argument if a fission source already exists.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::add_fission_power_source()
-    -> FissionPowerSource<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::add_fission_power_source() -> fission_power_source_type&
 {
     if (d_fission_power_source)
     {
-        throw std::invalid_argument(
-            "BoussinesqSolver already has a fission power source.");
+        throw std::invalid_argument("BoussinesqSolver already has a fission power source.");
     }
     d_physical_model_enabled = true;
-    d_fission_power_source =
-        std::make_unique<FissionPowerSource<Pack>>(
-            d_mesh, stored_temperature_sources());
+    d_fission_power_source = std::make_unique<fission_power_source_type>(d_mesh, stored_temperature_sources());
     return *d_fission_power_source;
 }
 
@@ -504,8 +429,7 @@ auto BoussinesqSolver<Pack>::add_fission_power_source()
  * @param options Fission source profile and normalization options.
  */
 template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::configure_fission_power_source(
-    const FissionPowerSourceOptions& options)
+void BoussinesqSolver<Pack>::configure_fission_power_source(const FissionPowerSourceOptions& options)
 {
     detail::validate_fission_power_options(options);
     if (options.profile == FissionPowerProfile::Disabled)
@@ -514,9 +438,7 @@ void BoussinesqSolver<Pack>::configure_fission_power_source(
         return;
     }
 
-    auto& source = d_fission_power_source
-        ? *d_fission_power_source
-        : add_fission_power_source();
+    auto& source = d_fission_power_source ? *d_fission_power_source : add_fission_power_source();
     source.configure(options);
 }
 
@@ -526,8 +448,7 @@ void BoussinesqSolver<Pack>::configure_fission_power_source(
  * @tparam Pack Tpetra type pack.
  * @return true if a source was removed.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_fission_power_source() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_fission_power_source() noexcept
 {
     if (!d_fission_power_source)
     {
@@ -544,8 +465,7 @@ bool BoussinesqSolver<Pack>::remove_fission_power_source() noexcept
  * @return Configured source, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_fission_power_source() noexcept
-    -> FissionPowerSource<Pack>*
+auto BoussinesqSolver<Pack>::find_fission_power_source() noexcept -> fission_power_source_type*
 {
     return d_fission_power_source.get();
 }
@@ -557,8 +477,7 @@ auto BoussinesqSolver<Pack>::find_fission_power_source() noexcept
  * @return Configured source, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept
-    -> const FissionPowerSource<Pack>*
+auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept -> const fission_power_source_type*
 {
     return d_fission_power_source.get();
 }
@@ -572,24 +491,19 @@ auto BoussinesqSolver<Pack>::find_fission_power_source() const noexcept
  * @throws std::invalid_argument if options or coupled-model combinations are invalid.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
-    const RadiolyticGasOptions& options) -> RadiolyticGasModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_radiolytic_gas(const RadiolyticGasOptions& options) -> radiolytic_gas_model_type&
 {
     validate_radiolytic_gas_options(options);
     bool scalar_void_was_reset = false;
-    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation
-        && d_boiling_source_model
-        && d_boiling_source_model->enabled())
+    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation && d_boiling_source_model &&
+        d_boiling_source_model->enabled())
     {
-        throw std::invalid_argument(
-            "Sheng two-population radiolysis cannot be combined with "
-            "boiling until vapor mass is coupled to bubble inventories.");
+        throw std::invalid_argument("Sheng two-population radiolysis cannot be combined with "
+                                    "boiling until vapor mass is coupled to bubble inventories.");
     }
     d_physical_model_enabled = true;
-    if (options.mode != RadiolyticGasMode::Disabled
-        && (!d_scalar_void_fraction_model
-            || (!d_scalar_void_fraction_explicitly_configured
-                && d_step_index == 0)))
+    if (options.mode != RadiolyticGasMode::Disabled &&
+        (!d_scalar_void_fraction_model || (!d_scalar_void_fraction_explicitly_configured && d_step_index == 0)))
     {
         ScalarVoidFractionOptions void_options;
         void_options.alpha_min = options.alpha_min;
@@ -597,9 +511,7 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
         void_options.initial_alpha = options.alpha_min;
         if (!d_scalar_void_fraction_model)
         {
-            d_scalar_void_fraction_model =
-                std::make_unique<ScalarVoidFractionModel<Pack>>(
-                    d_mesh, void_options);
+            d_scalar_void_fraction_model = std::make_unique<scalar_void_fraction_model_type>(d_mesh, void_options);
         }
         else
         {
@@ -613,43 +525,33 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
     }
     if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation)
     {
-        const auto& void_options =
-            d_scalar_void_fraction_model->options();
-        if (void_options.alpha_min != options.alpha_min
-            || void_options.alpha_max != options.alpha_max)
+        const auto& void_options = d_scalar_void_fraction_model->options();
+        if (void_options.alpha_min != options.alpha_min || void_options.alpha_max != options.alpha_max)
         {
-            throw std::invalid_argument(
-                "Sheng radiolysis and its scalar mirror require identical "
-                "void-fraction bounds.");
+            throw std::invalid_argument("Sheng radiolysis and its scalar mirror require identical "
+                                        "void-fraction bounds.");
         }
         if (std::isfinite(void_options.alpha_collapse_time))
         {
-            throw std::invalid_argument(
-                "Sheng radiolysis cannot use scalar void collapse until "
-                "bubble inventory removal is coupled conservatively.");
+            throw std::invalid_argument("Sheng radiolysis cannot use scalar void collapse until "
+                                        "bubble inventory removal is coupled conservatively.");
         }
     }
     if (!d_radiolytic_gas_model)
     {
-        d_radiolytic_gas_model =
-            std::make_unique<RadiolyticGasModel<Pack>>(
-                d_mesh, options);
+        d_radiolytic_gas_model = std::make_unique<radiolytic_gas_model_type>(d_mesh, options);
     }
     else
     {
         d_radiolytic_gas_model->configure(options);
     }
-    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation
-        && d_primary_fields_initialized)
+    if (options.mode == RadiolyticGasMode::Sheng2024TwoPopulation && d_primary_fields_initialized)
     {
         initialize_radiolytic_gas_state();
     }
-    else if (scalar_void_was_reset
-        && d_precursor_model
-        && d_step_index == 0)
+    else if (scalar_void_was_reset && d_precursor_model && d_step_index == 0)
     {
-        d_precursor_model->initialize_inventory(
-            d_scalar_void_fraction_model->alpha_l());
+        d_precursor_model->initialize_inventory(d_scalar_void_fraction_model->alpha_l());
     }
     return *d_radiolytic_gas_model;
 }
@@ -662,11 +564,9 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
  * @return Configured radiolytic-gas model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
-    const Database& database) -> RadiolyticGasModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_radiolytic_gas(const Database& database) -> radiolytic_gas_model_type&
 {
-    return configure_radiolytic_gas(
-        radiolytic_gas_options_from_database(database));
+    return configure_radiolytic_gas(radiolytic_gas_options_from_database(database));
 }
 
 /**
@@ -675,8 +575,7 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
 {
     if (!d_radiolytic_gas_model)
         return false;
@@ -691,8 +590,7 @@ bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() noexcept
-    -> RadiolyticGasModel<Pack>*
+auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() noexcept -> radiolytic_gas_model_type*
 {
     return d_radiolytic_gas_model.get();
 }
@@ -704,8 +602,7 @@ auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept
-    -> const RadiolyticGasModel<Pack>*
+auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept -> const radiolytic_gas_model_type*
 {
     return d_radiolytic_gas_model.get();
 }
@@ -719,25 +616,20 @@ auto BoussinesqSolver<Pack>::find_radiolytic_gas_model() const noexcept
  * @throws std::invalid_argument if options conflict with active radiolysis.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_boiling_source(
-    const BoilingSourceOptions& options) -> BoilingSourceModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_boiling_source(const BoilingSourceOptions& options) -> boiling_source_model_type&
 {
     validate_boiling_source_options(options);
-    if ((options.enable_bulk_boiling || options.enable_wall_boiling)
-        && d_radiolytic_gas_model
-        && d_radiolytic_gas_model->supplies_void_fraction())
+    if ((options.enable_bulk_boiling || options.enable_wall_boiling) && d_radiolytic_gas_model &&
+        d_radiolytic_gas_model->supplies_void_fraction())
     {
-        throw std::invalid_argument(
-            "Boiling cannot be combined with Sheng two-population "
-            "radiolysis until vapor mass is coupled to bubble inventories.");
+        throw std::invalid_argument("Boiling cannot be combined with Sheng two-population "
+                                    "radiolysis until vapor mass is coupled to bubble inventories.");
     }
     d_physical_model_enabled = true;
     ensure_scalar_void_fraction_model();
     if (!d_boiling_source_model)
     {
-        d_boiling_source_model =
-            std::make_unique<BoilingSourceModel<Pack>>(
-                d_mesh, options);
+        d_boiling_source_model = std::make_unique<boiling_source_model_type>(d_mesh, options);
     }
     else
     {
@@ -754,11 +646,9 @@ auto BoussinesqSolver<Pack>::configure_boiling_source(
  * @return Configured boiling source model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_boiling_source(
-    const Database& database) -> BoilingSourceModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_boiling_source(const Database& database) -> boiling_source_model_type&
 {
-    return configure_boiling_source(
-        boiling_source_options_from_database(database));
+    return configure_boiling_source(boiling_source_options_from_database(database));
 }
 
 /**
@@ -767,8 +657,7 @@ auto BoussinesqSolver<Pack>::configure_boiling_source(
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
 {
     if (!d_boiling_source_model)
         return false;
@@ -783,8 +672,7 @@ bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_boiling_source_model() noexcept
-    -> BoilingSourceModel<Pack>*
+auto BoussinesqSolver<Pack>::find_boiling_source_model() noexcept -> boiling_source_model_type*
 {
     return d_boiling_source_model.get();
 }
@@ -796,8 +684,7 @@ auto BoussinesqSolver<Pack>::find_boiling_source_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_boiling_source_model() const noexcept
-    -> const BoilingSourceModel<Pack>*
+auto BoussinesqSolver<Pack>::find_boiling_source_model() const noexcept -> const boiling_source_model_type*
 {
     return d_boiling_source_model.get();
 }
@@ -811,52 +698,40 @@ auto BoussinesqSolver<Pack>::find_boiling_source_model() const noexcept
  * @throws std::invalid_argument if options conflict with Sheng radiolysis.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
-    const ScalarVoidFractionOptions& options)
-    -> ScalarVoidFractionModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(const ScalarVoidFractionOptions& options)
+    -> scalar_void_fraction_model_type&
 {
     validate_scalar_void_fraction_options(options);
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->supplies_void_fraction()
-        && (options.alpha_min
-                != d_radiolytic_gas_model->options().alpha_min
-            || options.alpha_max
-                != d_radiolytic_gas_model->options().alpha_max))
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->supplies_void_fraction() &&
+        (options.alpha_min != d_radiolytic_gas_model->options().alpha_min ||
+            options.alpha_max != d_radiolytic_gas_model->options().alpha_max))
     {
-        throw std::invalid_argument(
-            "A Sheng radiolysis mirror requires its scalar void bounds.");
+        throw std::invalid_argument("A Sheng radiolysis mirror requires its scalar void bounds.");
     }
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->supplies_void_fraction()
-        && std::isfinite(options.alpha_collapse_time))
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->supplies_void_fraction() &&
+        std::isfinite(options.alpha_collapse_time))
     {
-        throw std::invalid_argument(
-            "Sheng radiolysis cannot use scalar void collapse until "
-            "bubble inventory removal is coupled conservatively.");
+        throw std::invalid_argument("Sheng radiolysis cannot use scalar void collapse until "
+                                    "bubble inventory removal is coupled conservatively.");
     }
     d_physical_model_enabled = true;
     if (!d_scalar_void_fraction_model)
     {
-        d_scalar_void_fraction_model =
-            std::make_unique<ScalarVoidFractionModel<Pack>>(
-                d_mesh, options);
+        d_scalar_void_fraction_model = std::make_unique<scalar_void_fraction_model_type>(d_mesh, options);
     }
     else
     {
         d_scalar_void_fraction_model->configure(options);
     }
     d_scalar_void_fraction_explicitly_configured = true;
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->supplies_void_fraction()
-        && d_radiolytic_gas_model->initial_state_initialized())
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->supplies_void_fraction() &&
+        d_radiolytic_gas_model->initial_state_initialized())
     {
-        d_scalar_void_fraction_model->initialize_from(
-            d_radiolytic_gas_model->alpha_g());
+        d_scalar_void_fraction_model->initialize_from(d_radiolytic_gas_model->alpha_g());
     }
     if (d_precursor_model && d_step_index == 0)
     {
-        d_precursor_model->initialize_inventory(
-            d_scalar_void_fraction_model->alpha_l());
+        d_precursor_model->initialize_inventory(d_scalar_void_fraction_model->alpha_l());
     }
     return *d_scalar_void_fraction_model;
 }
@@ -869,11 +744,10 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
  * @return Configured scalar void-fraction model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
-    const Database& database) -> ScalarVoidFractionModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(const Database& database)
+    -> scalar_void_fraction_model_type&
 {
-    return configure_scalar_void_fraction(
-        scalar_void_fraction_options_from_database(database));
+    return configure_scalar_void_fraction(scalar_void_fraction_options_from_database(database));
 }
 
 /**
@@ -883,8 +757,7 @@ auto BoussinesqSolver<Pack>::configure_scalar_void_fraction(
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() noexcept
-    -> ScalarVoidFractionModel<Pack>*
+auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() noexcept -> scalar_void_fraction_model_type*
 {
     return d_scalar_void_fraction_model.get();
 }
@@ -896,8 +769,7 @@ auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() const noexcept
-    -> const ScalarVoidFractionModel<Pack>*
+auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() const noexcept -> const scalar_void_fraction_model_type*
 {
     return d_scalar_void_fraction_model.get();
 }
@@ -910,24 +782,20 @@ auto BoussinesqSolver<Pack>::find_scalar_void_fraction_model() const noexcept
  * @return Configured feedback model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_material_feedback(
-    const MaterialFeedbackOptions& options)
-    -> MaterialFeedbackModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_material_feedback(const MaterialFeedbackOptions& options)
+    -> material_feedback_model_type&
 {
     validate_material_feedback_options(options);
     d_physical_model_enabled = true;
     if (!d_material_feedback_model)
     {
-        d_material_feedback_model =
-            std::make_unique<MaterialFeedbackModel<Pack>>(
-                d_mesh, options);
+        d_material_feedback_model = std::make_unique<material_feedback_model_type>(d_mesh, options);
     }
     else
     {
         d_material_feedback_model->configure(options);
     }
-    d_model_options.density_feedback_enabled =
-        d_material_feedback_model->density_feedback_enabled();
+    d_model_options.density_feedback_enabled = d_material_feedback_model->density_feedback_enabled();
     return *d_material_feedback_model;
 }
 
@@ -939,12 +807,10 @@ auto BoussinesqSolver<Pack>::configure_material_feedback(
  * @return Configured feedback model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_material_feedback(
-    const Database& database) -> MaterialFeedbackModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_material_feedback(const Database& database) -> material_feedback_model_type&
 {
     return configure_material_feedback(
-        material_feedback_options_from_database(
-            database, d_model_options, d_problem.time_options()));
+        material_feedback_options_from_database(database, d_model_options, d_problem.time_options()));
 }
 
 /**
@@ -953,8 +819,7 @@ auto BoussinesqSolver<Pack>::configure_material_feedback(
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
 {
     if (!d_material_feedback_model)
         return false;
@@ -970,8 +835,7 @@ bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_material_feedback_model() noexcept
-    -> MaterialFeedbackModel<Pack>*
+auto BoussinesqSolver<Pack>::find_material_feedback_model() noexcept -> material_feedback_model_type*
 {
     return d_material_feedback_model.get();
 }
@@ -983,8 +847,7 @@ auto BoussinesqSolver<Pack>::find_material_feedback_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_material_feedback_model() const noexcept
-    -> const MaterialFeedbackModel<Pack>*
+auto BoussinesqSolver<Pack>::find_material_feedback_model() const noexcept -> const material_feedback_model_type*
 {
     return d_material_feedback_model.get();
 }
@@ -997,9 +860,8 @@ auto BoussinesqSolver<Pack>::find_material_feedback_model() const noexcept
  * @return Configured precursor model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_precursors(
-    const DelayedNeutronPrecursorOptions& options)
-    -> DelayedNeutronPrecursorModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_precursors(const DelayedNeutronPrecursorOptions& options)
+    -> precursor_model_type&
 {
     validate_delayed_neutron_precursor_options(options);
     d_physical_model_enabled = true;
@@ -1010,16 +872,13 @@ auto BoussinesqSolver<Pack>::configure_precursors(
     ensure_scalar_void_fraction_model();
     if (!d_precursor_model)
     {
-        d_precursor_model =
-            std::make_unique<DelayedNeutronPrecursorModel<Pack>>(
-                d_mesh, options);
+        d_precursor_model = std::make_unique<precursor_model_type>(d_mesh, options);
     }
     else
     {
         d_precursor_model->configure(options);
     }
-    d_precursor_model->initialize_inventory(
-        *active_alpha_l_field());
+    d_precursor_model->initialize_inventory(*active_alpha_l_field());
     return *d_precursor_model;
 }
 
@@ -1031,11 +890,9 @@ auto BoussinesqSolver<Pack>::configure_precursors(
  * @return Configured precursor model.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::configure_precursors(
-    const Database& database) -> DelayedNeutronPrecursorModel<Pack>&
+auto BoussinesqSolver<Pack>::configure_precursors(const Database& database) -> precursor_model_type&
 {
-    return configure_precursors(
-        delayed_neutron_precursor_options_from_database(database));
+    return configure_precursors(delayed_neutron_precursor_options_from_database(database));
 }
 
 /**
@@ -1044,8 +901,7 @@ auto BoussinesqSolver<Pack>::configure_precursors(
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_precursor_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_precursor_model() noexcept
 {
     if (!d_precursor_model)
         return false;
@@ -1059,9 +915,7 @@ bool BoussinesqSolver<Pack>::remove_precursor_model() noexcept
  * @tparam Pack Tpetra type pack.
  * @return Configured model, or nullptr when absent.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_precursor_model() noexcept
-    -> DelayedNeutronPrecursorModel<Pack>*
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::find_precursor_model() noexcept -> precursor_model_type*
 {
     return d_precursor_model.get();
 }
@@ -1073,8 +927,7 @@ auto BoussinesqSolver<Pack>::find_precursor_model() noexcept
  * @return Configured model, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept
-    -> const DelayedNeutronPrecursorModel<Pack>*
+auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept -> const precursor_model_type*
 {
     return d_precursor_model.get();
 }
@@ -1086,9 +939,7 @@ auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept
  * @param name Registered source name.
  * @return true if a source was removed.
  */
-template<TpetraTypePack Pack>
-bool BoussinesqSolver<Pack>::remove_temperature_source(
-    const std::string& name)
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_temperature_source(const std::string& name)
 {
     return stored_temperature_sources().remove(name);
 }
@@ -1101,9 +952,7 @@ bool BoussinesqSolver<Pack>::remove_temperature_source(
  * @return Source pointer, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_temperature_source(
-    const std::string& name) noexcept
-    -> VolumetricScalarSource<Pack>*
+auto BoussinesqSolver<Pack>::find_temperature_source(const std::string& name) noexcept -> volumetric_source_type*
 {
     return stored_temperature_sources().find(name);
 }
@@ -1116,9 +965,8 @@ auto BoussinesqSolver<Pack>::find_temperature_source(
  * @return Source pointer, or nullptr when absent.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::find_temperature_source(
-    const std::string& name) const noexcept
-    -> const VolumetricScalarSource<Pack>*
+auto BoussinesqSolver<Pack>::find_temperature_source(const std::string& name) const noexcept
+    -> const volumetric_source_type*
 {
     return stored_temperature_sources().find(name);
 }
@@ -1130,8 +978,7 @@ auto BoussinesqSolver<Pack>::find_temperature_source(
  * @param updater Callable that updates material fields from solver context.
  */
 template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::set_material_updater(
-    typename MaterialPropertyFields<Pack>::updater_type updater)
+void BoussinesqSolver<Pack>::set_material_updater(typename material_type::updater_type updater)
 {
     d_physical_model_enabled = true;
     stored_material_properties().set_updater(std::move(updater));
@@ -1142,8 +989,7 @@ void BoussinesqSolver<Pack>::set_material_updater(
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::clear_material_updater() noexcept
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::clear_material_updater() noexcept
 {
     stored_material_properties().clear_updater();
 }
@@ -1153,16 +999,9 @@ void BoussinesqSolver<Pack>::clear_material_updater() noexcept
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::refresh_physical_models()
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::refresh_physical_models()
 {
-    BoussinesqUpdateContext<Pack> context{
-        d_time,
-        d_step_index,
-        *d_mesh,
-        temperature(),
-        pressure(),
-        velocity()};
+    update_context_type context{d_time, d_step_index, *d_mesh, temperature(), pressure(), velocity()};
     stored_material_properties().update(context);
     initialize_radiolytic_gas_state(d_step_index == 0);
     refresh_material_feedback(d_time);
@@ -1175,34 +1014,23 @@ void BoussinesqSolver<Pack>::refresh_physical_models()
  * @tparam Pack Tpetra type pack.
  * @param force Whether to reinitialize an already initialized model.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::initialize_radiolytic_gas_state(
-    bool force)
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::initialize_radiolytic_gas_state(bool force)
 {
-    if (!d_radiolytic_gas_model
-        || !d_radiolytic_gas_model->supplies_void_fraction()
-        || (!force
-            && d_radiolytic_gas_model->initial_state_initialized()))
+    if (!d_radiolytic_gas_model || !d_radiolytic_gas_model->supplies_void_fraction() ||
+        (!force && d_radiolytic_gas_model->initial_state_initialized()))
     {
         return;
     }
 
     d_radiolytic_gas_model->initialize_state(
-        d_time,
-        temperature(),
-        pressure(),
-        velocity(),
-        stored_material_properties(),
-        force);
+        d_time, temperature(), pressure(), velocity(), stored_material_properties(), force);
     if (d_scalar_void_fraction_model)
     {
-        d_scalar_void_fraction_model->initialize_from(
-            d_radiolytic_gas_model->alpha_g());
+        d_scalar_void_fraction_model->initialize_from(d_radiolytic_gas_model->alpha_g());
     }
     if (d_precursor_model && d_step_index == 0)
     {
-        d_precursor_model->initialize_inventory(
-            *active_alpha_l_field());
+        d_precursor_model->initialize_inventory(*active_alpha_l_field());
     }
 }
 
@@ -1212,22 +1040,14 @@ void BoussinesqSolver<Pack>::initialize_radiolytic_gas_state(
  * @tparam Pack Tpetra type pack.
  * @param time Physical time passed to feedback callbacks.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::refresh_material_feedback(scalar_type time)
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::refresh_material_feedback(scalar_type time)
 {
     if (!d_material_feedback_model)
     {
         return;
     }
-    BoussinesqUpdateContext<Pack> context{
-        time,
-        d_step_index,
-        *d_mesh,
-        temperature(),
-        pressure(),
-        velocity()};
-    d_material_feedback_model->apply(
-        context, active_alpha_g_field(), stored_material_properties());
+    update_context_type context{time, d_step_index, *d_mesh, temperature(), pressure(), velocity()};
+    d_material_feedback_model->apply(context, active_alpha_g_field(), stored_material_properties());
 }
 
 /**
@@ -1235,14 +1055,12 @@ void BoussinesqSolver<Pack>::refresh_material_feedback(scalar_type time)
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
 {
     if (!d_scalar_void_fraction_model)
     {
         d_scalar_void_fraction_model =
-            std::make_unique<ScalarVoidFractionModel<Pack>>(
-                d_mesh, ScalarVoidFractionOptions{});
+            std::make_unique<scalar_void_fraction_model_type>(d_mesh, ScalarVoidFractionOptions{});
     }
 }
 
@@ -1252,9 +1070,7 @@ void BoussinesqSolver<Pack>::ensure_scalar_void_fraction_model()
  * @tparam Pack Tpetra type pack.
  * @return Active gas fraction field, or nullptr when no model supplies one.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::active_alpha_g_field() const noexcept
-    -> const field_type*
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::active_alpha_g_field() const noexcept -> const field_type*
 {
     if (d_scalar_void_fraction_model)
     {
@@ -1273,9 +1089,7 @@ auto BoussinesqSolver<Pack>::active_alpha_g_field() const noexcept
  * @tparam Pack Tpetra type pack.
  * @return Active liquid fraction field, or nullptr when no model supplies one.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::active_alpha_l_field() const noexcept
-    -> const field_type*
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::active_alpha_l_field() const noexcept -> const field_type*
 {
     if (d_scalar_void_fraction_model)
     {
@@ -1294,39 +1108,27 @@ auto BoussinesqSolver<Pack>::active_alpha_l_field() const noexcept
  * @tparam Pack Tpetra type pack.
  * @param time_step Physical time-step size.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::update_void_fraction_models(
-    scalar_type time_step)
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::update_void_fraction_models(scalar_type time_step)
 {
     if (!d_scalar_void_fraction_model)
     {
         return;
     }
 
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->supplies_void_fraction())
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->supplies_void_fraction())
     {
-        d_scalar_void_fraction_model->mirror(
-            d_radiolytic_gas_model->alpha_g(),
-            time_step);
+        d_scalar_void_fraction_model->mirror(d_radiolytic_gas_model->alpha_g(), time_step);
         return;
     }
 
-    d_scalar_void_fraction_model->update_explicit(
-        time_step,
-        d_radiolytic_gas_model
-            ? &d_radiolytic_gas_model->source_alpha_rad()
-            : nullptr,
-        d_boiling_source_model
-            ? &d_boiling_source_model->source_alpha_boil()
-            : nullptr);
+    d_scalar_void_fraction_model->update_explicit(time_step,
+        d_radiolytic_gas_model ? &d_radiolytic_gas_model->source_alpha_rad() : nullptr,
+        d_boiling_source_model ? &d_boiling_source_model->source_alpha_boil() : nullptr);
 
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled())
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled())
     {
         d_radiolytic_gas_model->synchronize_void_fraction(
-            d_scalar_void_fraction_model->alpha_g(),
-            d_scalar_void_fraction_model->options().alpha_max);
+            d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
     }
 }
 
@@ -1336,12 +1138,49 @@ void BoussinesqSolver<Pack>::update_void_fraction_models(
  * @tparam Pack Tpetra type pack.
  * @return Stored temperature diffusion equation.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::temperature_equation()
-    -> TemperatureDiffusionEquation<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature_equation() -> temperature_equation_type&
 {
-    return d_problem.template object<
-        TemperatureDiffusionEquation<Pack>>("temperature_equation");
+    return d_problem.template object<temperature_equation_type>("temperature_equation");
+}
+
+/** @brief Return the canonical handle-backed Boussinesq momentum equation. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::boussinesq_momentum_equation() -> boussinesq_momentum_equation_type&
+{
+    return d_problem.template object<boussinesq_momentum_equation_type>("boussinesq_momentum_equation");
+}
+
+/** @brief Return the canonical velocity-boundary cache on either backend. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::boussinesq_velocity_boundary_cache() -> canonical_velocity_boundary_cache_type&
+{
+    if (!uses_legacy_backend())
+    {
+        return native_velocity_boundary_cache();
+    }
+    return d_problem.template object<canonical_velocity_boundary_cache_type>("boussinesq_velocity_boundary_cache");
+}
+
+/** @brief Return the canonical pressure-flux workspace on either backend. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::boussinesq_pressure_face_flux_workspace() -> canonical_face_flux_workspace_type&
+{
+    if (!uses_legacy_backend())
+    {
+        return native_pressure_face_flux_workspace();
+    }
+    return d_problem.template object<canonical_face_flux_workspace_type>("boussinesq_pressure_face_flux_workspace");
+}
+
+/** @brief Return the canonical coupled assembler on either backend. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::boussinesq_coupled_pressure_velocity_solver() -> canonical_coupled_solver_type&
+{
+    if (!uses_legacy_backend())
+    {
+        return native_coupled_pressure_velocity_solver();
+    }
+    return d_problem.template object<canonical_coupled_solver_type>("boussinesq_coupled_pressure_velocity_solver");
 }
 
 /**
@@ -1350,12 +1189,9 @@ auto BoussinesqSolver<Pack>::temperature_equation()
  * @tparam Pack Tpetra type pack.
  * @return Stored momentum equation.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::momentum_equation()
-    -> BoussinesqMomentumEquation<Pack>&
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::momentum_equation() -> BoussinesqMomentumEquation<Pack>&
 {
-    return d_problem.template object<
-        BoussinesqMomentumEquation<Pack>>("momentum_equation");
+    return d_problem.template object<BoussinesqMomentumEquation<Pack>>("momentum_equation");
 }
 
 /**
@@ -1364,85 +1200,44 @@ auto BoussinesqSolver<Pack>::momentum_equation()
  * @tparam Pack Tpetra type pack.
  * @return Aggregated linear solve summary.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
-    FVM::cell_gradient(
-        pressure(),
-        d_problem.boundary_conditions().pressure,
-        predictor_pressure_gradient(),
-        this->pressure_face_flux_workspace().gradient_cache(),
-        d_problem.time_options().pressure_gradient_scheme);
-    const auto inverse_reference_density =
-        scalar_type{1} / pressure_reference_density();
+    FVM::cell_gradient(pressure(), d_problem.boundary_conditions().pressure, predictor_pressure_gradient(),
+        boussinesq_pressure_face_flux_workspace().gradient_cache(), d_problem.time_options().pressure_gradient_scheme);
+    const auto inverse_reference_density = scalar_type{1} / pressure_reference_density();
     const auto* turbulence = find_turbulence_model();
-    const auto pressure_gradient_values =
-        predictor_pressure_gradient().owned_read_view();
-    using gradient_view_type =
-        decltype(predictor_pressure_gradient().owned_read_view());
+    const auto pressure_gradient_values = predictor_pressure_gradient().owned_read_view();
+    using gradient_view_type = decltype(predictor_pressure_gradient().owned_read_view());
     std::optional<gradient_view_type> turbulent_gradient_values;
     if (turbulence != nullptr)
     {
-        turbulent_gradient_values.emplace(
-            turbulence->turbulent_kinetic_energy_gradient()
-                .owned_read_view());
+        turbulent_gradient_values.emplace(turbulence->turbulent_kinetic_energy_gradient().owned_read_view());
     }
-    auto pressure_source =
-        [&](local_ordinal_type cell_lid) -> vec_type
+    auto pressure_source = [&](local_ordinal_type cell_lid) -> vec_type
     {
-        vec_type acceleration{
-            pressure_gradient_values(cell_lid, 0)
-                * (-inverse_reference_density),
-            pressure_gradient_values(cell_lid, 1)
-                * (-inverse_reference_density),
-            pressure_gradient_values(cell_lid, 2)
-                * (-inverse_reference_density)};
+        vec_type acceleration{pressure_gradient_values(cell_lid, 0) * (-inverse_reference_density),
+            pressure_gradient_values(cell_lid, 1) * (-inverse_reference_density),
+            pressure_gradient_values(cell_lid, 2) * (-inverse_reference_density)};
         if (turbulent_gradient_values)
         {
-            constexpr scalar_type turbulent_pressure_factor{
-                -2.0 / 3.0};
-            acceleration.x +=
-                (*turbulent_gradient_values)(cell_lid, 0)
-                * turbulent_pressure_factor;
-            acceleration.y +=
-                (*turbulent_gradient_values)(cell_lid, 1)
-                * turbulent_pressure_factor;
-            acceleration.z +=
-                (*turbulent_gradient_values)(cell_lid, 2)
-                * turbulent_pressure_factor;
+            constexpr scalar_type turbulent_pressure_factor{-2.0 / 3.0};
+            acceleration.x += (*turbulent_gradient_values)(cell_lid, 0) * turbulent_pressure_factor;
+            acceleration.y += (*turbulent_gradient_values)(cell_lid, 1) * turbulent_pressure_factor;
+            acceleration.z += (*turbulent_gradient_values)(cell_lid, 2) * turbulent_pressure_factor;
         }
         return acceleration;
     };
 
     if (physical_transport_enabled())
     {
-        return momentum_equation().advance_velocity_physical(
-            velocity(),
-            old_face_fluxes(),
-            temperature(),
-            velocity_boundary_cache(),
-            d_problem.time_options(),
-            stored_material_properties(),
-            d_model_options.reference_density,
-            d_model_options.density_feedback_enabled,
-            velocity(),
-            pressure_source,
-            d_problem.linear_options(),
-            turbulence != nullptr
-                ? &turbulence->effective_dynamic_viscosity()
-                : nullptr,
-            turbulence != nullptr
-                ? turbulence->effective_dynamic_viscosity_boundary_cache()
-                : nullptr);
+        return boussinesq_momentum_equation().advance_velocity_physical(velocity(), old_face_fluxes(), temperature(),
+            boussinesq_velocity_boundary_cache(), d_problem.time_options(), stored_material_properties(),
+            d_model_options.reference_density, d_model_options.density_feedback_enabled, velocity(), pressure_source,
+            d_problem.linear_options(), turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,
+            turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr);
     }
-    return momentum_equation().advance_velocity(
-        velocity(),
-        old_face_fluxes(),
-        temperature(),
-        velocity_boundary_cache(),
-        d_problem.time_options(),
-        velocity(),
-        pressure_source,
+    return boussinesq_momentum_equation().advance_velocity(velocity(), old_face_fluxes(), temperature(),
+        boussinesq_velocity_boundary_cache(), d_problem.time_options(), velocity(), pressure_source,
         d_problem.linear_options());
 }
 
@@ -1452,9 +1247,7 @@ auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
  * @tparam Pack Tpetra type pack.
  * @return Positive reference density.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::pressure_reference_density() const noexcept
-    -> scalar_type
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::pressure_reference_density() const noexcept -> scalar_type
 {
     return d_model_options.reference_density;
 }
@@ -1465,34 +1258,17 @@ auto BoussinesqSolver<Pack>::pressure_reference_density() const noexcept
  * @tparam Pack Tpetra type pack.
  * @return Monolithic coupled system with optional material and turbulence terms.
  */
-template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::assemble_coupled_system()
-    -> coupled_system_type
+template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::assemble_coupled_system() -> coupled_system_type
 {
     const auto* turbulence = find_turbulence_model();
-    return coupled_pressure_velocity_solver().assemble(
-        momentum_equation(),
-        velocity(),
-        pressure(),
-        temperature(),
-        old_face_fluxes(),
-        velocity_boundary_cache(),
-        d_problem.boundary_conditions(),
-        d_problem.time_options(),
-        physical_transport_enabled()
-            ? &stored_material_properties()
-            : nullptr,
-        d_model_options.reference_density,
+    return boussinesq_coupled_pressure_velocity_solver().assemble(boussinesq_momentum_equation(), velocity(),
+        pressure(), temperature(), old_face_fluxes(), boussinesq_velocity_boundary_cache(),
+        d_problem.boundary_conditions(), d_problem.time_options(),
+        physical_transport_enabled() ? &stored_material_properties() : nullptr, d_model_options.reference_density,
         d_model_options.density_feedback_enabled,
-        turbulence != nullptr
-            ? &turbulence->effective_dynamic_viscosity()
-            : nullptr,
-        turbulence != nullptr
-            ? &turbulence->turbulent_kinetic_energy_gradient()
-            : nullptr,
-        turbulence != nullptr
-            ? turbulence->effective_dynamic_viscosity_boundary_cache()
-            : nullptr);
+        turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,
+        turbulence != nullptr ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
+        turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr);
 }
 
 /**
@@ -1511,42 +1287,43 @@ auto BoussinesqSolver<Pack>::assemble_coupled_system()
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_linear_temperature(
-    const vec_type& direction,
-    scalar_type hot_at_min,
-    scalar_type cold_at_max,
-    scalar_type initial_pressure)
+    const vec_type& direction, scalar_type hot_at_min, scalar_type cold_at_max, scalar_type initial_pressure)
 {
     if (direction.norm() <= 0.0)
     {
         throw std::invalid_argument("BoussinesqSolver requires a nonzero initialization direction.");
     }
-    if (d_mesh->num_owned_cells() > 0)
+    auto local_min_projected = std::numeric_limits<scalar_type>::max();
+    auto local_max_projected = std::numeric_limits<scalar_type>::lowest();
+    for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
-        auto min_projected = d_mesh->cell_centroid(0).dot(direction);
-        auto max_projected = min_projected;
-        for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(cell);
-            const auto projected =
-                d_mesh->cell_centroid(cell_lid).dot(direction);
-            min_projected = std::min(min_projected, projected);
-            max_projected = std::max(max_projected, projected);
-        }
+        const auto cell_lid = static_cast<local_ordinal_type>(cell);
+        const auto projected = static_cast<scalar_type>(d_mesh->cell_centroid(cell_lid).dot(direction));
+        local_min_projected = std::min(local_min_projected, projected);
+        local_max_projected = std::max(local_max_projected, projected);
+    }
 
-        const auto width = max_projected > min_projected
-                         ? max_projected - min_projected
-                         : 1.0;
+    auto min_projected = local_min_projected;
+    auto max_projected = local_max_projected;
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(
+        *communicator, Teuchos::REDUCE_MIN, 1, &local_min_projected, &min_projected);
+    Teuchos::reduceAll(
+        *communicator, Teuchos::REDUCE_MAX, 1, &local_max_projected, &max_projected);
+
+    if (min_projected <= max_projected)
+    {
+        const auto width =
+            max_projected > min_projected ? max_projected - min_projected : scalar_type{1};
         for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(cell);
-            const auto projected =
-                d_mesh->cell_centroid(cell_lid).dot(direction);
+            const auto projected = static_cast<scalar_type>(d_mesh->cell_centroid(cell_lid).dot(direction));
             const auto blend = (projected - min_projected) / width;
-            temperature().set_value(
-                cell_lid,
-                hot_at_min * (1.0 - blend) + cold_at_max * blend);
-            pressure().set_value(cell_lid, initial_pressure);
-            velocity().set_value(cell_lid, {});
+            temperature().set_owned_value(
+                cell_lid, hot_at_min * (scalar_type{1} - blend) + cold_at_max * blend);
+            pressure().set_owned_value(cell_lid, initial_pressure);
+            velocity().set_owned_value(cell_lid, {});
         }
     }
 
@@ -1554,6 +1331,11 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
     d_mesh->sync_periodic_boundaries(pressure());
     d_mesh->sync_periodic_boundaries(velocity());
     d_primary_fields_initialized = true;
+    if (uses_legacy_backend())
+    {
+        sync_primary_fields_to_legacy();
+        sync_temperature_to_legacy();
+    }
     initialize_radiolytic_gas_state(true);
 }
 
@@ -1569,14 +1351,9 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_heated_box(
-    scalar_type hot_temperature,
-    scalar_type cold_temperature,
-    scalar_type initial_pressure)
+    scalar_type hot_temperature, scalar_type cold_temperature, scalar_type initial_pressure)
 {
-    initialize_linear_temperature({1.0, 0.0, 0.0},
-                                  hot_temperature,
-                                  cold_temperature,
-                                  initial_pressure);
+    initialize_linear_temperature({1.0, 0.0, 0.0}, hot_temperature, cold_temperature, initial_pressure);
 }
 
 /**
@@ -1591,14 +1368,9 @@ void BoussinesqSolver<Pack>::initialize_heated_box(
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
-    scalar_type hot_temperature,
-    scalar_type cold_temperature,
-    scalar_type initial_pressure)
+    scalar_type hot_temperature, scalar_type cold_temperature, scalar_type initial_pressure)
 {
-    initialize_linear_temperature({0.0, 0.0, 1.0},
-                                  hot_temperature,
-                                  cold_temperature,
-                                  initial_pressure);
+    initialize_linear_temperature({0.0, 0.0, 1.0}, hot_temperature, cold_temperature, initial_pressure);
 }
 
 /**
@@ -1613,49 +1385,34 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
  * @throws std::logic_error if incompatible Sheng radiolysis coupling is active.
  * @throws std::runtime_error if an enabled model lacks its required fraction field.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::step()
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
 {
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled()
-        && d_radiolytic_gas_model->supplies_void_fraction()
-        && d_boiling_source_model
-        && d_boiling_source_model->enabled())
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() &&
+        d_radiolytic_gas_model->supplies_void_fraction() && d_boiling_source_model && d_boiling_source_model->enabled())
     {
-        throw std::logic_error(
-            "Sheng two-population radiolysis cannot advance with boiling "
-            "until vapor mass is coupled to bubble inventories.");
+        throw std::logic_error("Sheng two-population radiolysis cannot advance with boiling "
+                               "until vapor mass is coupled to bubble inventories.");
     }
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled()
-        && d_radiolytic_gas_model->supplies_void_fraction()
-        && d_scalar_void_fraction_model
-        && (d_scalar_void_fraction_model->options().alpha_min
-                != d_radiolytic_gas_model->options().alpha_min
-            || d_scalar_void_fraction_model->options().alpha_max
-                != d_radiolytic_gas_model->options().alpha_max))
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() &&
+        d_radiolytic_gas_model->supplies_void_fraction() && d_scalar_void_fraction_model &&
+        (d_scalar_void_fraction_model->options().alpha_min != d_radiolytic_gas_model->options().alpha_min ||
+            d_scalar_void_fraction_model->options().alpha_max != d_radiolytic_gas_model->options().alpha_max))
     {
-        throw std::logic_error(
-            "Sheng radiolysis cannot advance with mismatched scalar mirror "
-            "void-fraction bounds.");
+        throw std::logic_error("Sheng radiolysis cannot advance with mismatched scalar mirror "
+                               "void-fraction bounds.");
     }
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled()
-        && d_radiolytic_gas_model->supplies_void_fraction()
-        && d_scalar_void_fraction_model
-        && std::isfinite(
-            d_scalar_void_fraction_model->options()
-                .alpha_collapse_time))
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() &&
+        d_radiolytic_gas_model->supplies_void_fraction() && d_scalar_void_fraction_model &&
+        std::isfinite(d_scalar_void_fraction_model->options().alpha_collapse_time))
     {
-        throw std::logic_error(
-            "Sheng radiolysis cannot advance with scalar void collapse "
-            "until bubble inventory removal is coupled conservatively.");
+        throw std::logic_error("Sheng radiolysis cannot advance with scalar void collapse "
+                               "until bubble inventory removal is coupled conservatively.");
     }
 
     begin_step();
     if (d_step_index == 0)
     {
-        d_mesh->sync_periodic_boundaries(temperature());
+        temperature().sync_ghosts();
     }
     if (d_physical_model_enabled)
     {
@@ -1663,65 +1420,39 @@ void BoussinesqSolver<Pack>::step()
     }
     if (auto* turbulence = find_turbulence_model())
     {
-        turbulence->refresh_effective_properties(
-            stored_material_properties(),
-            d_model_options.reference_density);
+        turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
     }
 
     solve_pressure_velocity_coupling();
     const auto time_step = d_problem.time_options().time_step;
     if (auto* turbulence = find_turbulence_model())
     {
-        const auto gravity =
-            d_problem.time_options().gravity_vector();
-        const TurbulenceBuoyancyContext<Pack> buoyancy_context{
-            &temperature(),
+        const auto gravity = d_problem.time_options().gravity_vector();
+        const turbulence_buoyancy_context_type buoyancy_context{&temperature(),
             &d_problem.boundary_conditions().temperature,
-            {static_cast<scalar_type>(gravity.x),
-             static_cast<scalar_type>(gravity.y),
-             static_cast<scalar_type>(gravity.z)},
-            static_cast<scalar_type>(
-                d_problem.time_options().thermal_expansion),
+            {static_cast<scalar_type>(gravity.x), static_cast<scalar_type>(gravity.y),
+                static_cast<scalar_type>(gravity.z)},
+            static_cast<scalar_type>(d_problem.time_options().thermal_expansion),
             d_model_options.density_feedback_enabled};
-        const auto turbulence_statistics = turbulence->advance(
-            velocity(),
-            projected_face_fluxes(),
-            velocity_boundary_cache(),
-            time_step,
-            stored_material_properties(),
-            d_model_options.reference_density,
-            d_problem.time_options().non_orthogonal_treatment,
-            d_problem.linear_options(),
-            &buoyancy_context);
+        const auto turbulence_statistics =
+            turbulence->advance(velocity(), projected_face_fluxes(), boussinesq_velocity_boundary_cache(), time_step,
+                stored_material_properties(), d_model_options.reference_density,
+                d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options(), &buoyancy_context);
         d_last_step_statistics.add(turbulence_statistics);
     }
     const auto advanced_radiolysis =
-        d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled()
-        && d_radiolytic_gas_model->supplies_void_fraction();
+        d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && d_radiolytic_gas_model->supplies_void_fraction();
 
-    if (d_radiolytic_gas_model
-        && d_radiolytic_gas_model->enabled()
-        && !advanced_radiolysis)
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && !advanced_radiolysis)
     {
         if (!d_scalar_void_fraction_model)
         {
-            throw std::runtime_error(
-                "Ideal radiolysis requires the authoritative scalar void model.");
+            throw std::runtime_error("Ideal radiolysis requires the authoritative scalar void model.");
         }
-        d_radiolytic_gas_model->advance(
-            d_time + time_step,
-            time_step,
-            temperature(),
-            pressure(),
-            velocity(),
-            projected_face_fluxes(),
-            stored_material_properties(),
-            d_fission_power_source
-                ? &d_fission_power_source->field()
-                : nullptr,
-            d_scalar_void_fraction_model->alpha_g(),
-            d_scalar_void_fraction_model->options().alpha_max);
+        d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
+            projected_face_fluxes(), stored_material_properties(),
+            d_fission_power_source ? &d_fission_power_source->field() : nullptr,
+            d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
     }
 
     if (!advanced_radiolysis)
@@ -1730,16 +1461,11 @@ void BoussinesqSolver<Pack>::step()
         {
             if (!d_scalar_void_fraction_model)
             {
-                throw std::runtime_error(
-                    "Boiling requires the authoritative scalar void model.");
+                throw std::runtime_error("Boiling requires the authoritative scalar void model.");
             }
-            d_boiling_source_model->update(
-                time_step,
-                temperature(),
-                stored_material_properties(),
+            d_boiling_source_model->update(time_step, temperature(), stored_material_properties(),
                 *d_scalar_void_fraction_model,
-                d_radiolytic_gas_model
-                        && d_radiolytic_gas_model->enabled()
+                d_radiolytic_gas_model && d_radiolytic_gas_model->enabled()
                     ? &d_radiolytic_gas_model->source_alpha_rad()
                     : nullptr);
         }
@@ -1750,67 +1476,38 @@ void BoussinesqSolver<Pack>::step()
     if (physical_transport_enabled())
     {
         const auto* turbulence = find_turbulence_model();
-        auto total_power_density =
-            [&](local_ordinal_type cell_lid)
+        auto total_power_density = [&](local_ordinal_type cell_lid)
         {
-            auto total = stored_temperature_sources()
-                .total_power_density(cell_lid);
+            auto total = stored_temperature_sources().total_power_density(cell_lid);
             if (d_boiling_source_model)
             {
-                total += d_boiling_source_model
-                    ->temperature_source(cell_lid);
+                total += d_boiling_source_model->temperature_source(cell_lid);
             }
             return total;
         };
-        temperature_statistics =
-            temperature_equation().advance_physical(
-                temperature(),
-                projected_face_fluxes(),
-                time_step,
-                stored_material_properties(),
-                temperature(),
-                total_power_density,
-                d_problem.time_options().non_orthogonal_treatment,
-                d_problem.linear_options(),
-                turbulence != nullptr
-                    ? &turbulence->effective_thermal_conductivity()
-                    : nullptr,
-                turbulence != nullptr
-                    ? turbulence->effective_thermal_conductivity_boundary_cache()
-                    : nullptr,
-                d_problem.time_options().coefficient_interpolation);
+        temperature_statistics = temperature_equation().advance_physical(temperature(), projected_face_fluxes(),
+            time_step, stored_material_properties(), temperature(), total_power_density,
+            d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options(),
+            turbulence != nullptr ? &turbulence->effective_thermal_conductivity() : nullptr,
+            turbulence != nullptr ? turbulence->effective_thermal_conductivity_boundary_cache() : nullptr,
+            d_problem.time_options().coefficient_interpolation);
     }
     else
     {
-        temperature_statistics =
-            temperature_equation().advance_semi_implicit(
-                temperature(),
-                projected_face_fluxes(),
-                time_step,
-                d_problem.time_options().thermal_diffusivity,
-                temperature(),
-                d_problem.linear_options());
+        temperature_statistics = temperature_equation().advance_semi_implicit(temperature(), projected_face_fluxes(),
+            time_step, d_problem.time_options().thermal_diffusivity, temperature(),
+            d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options());
     }
     d_last_step_statistics.add(temperature_statistics);
-    d_last_step_statistics.temperature =
-        temperature_statistics.achieved_tolerance;
+    d_last_step_statistics.temperature = temperature_statistics.achieved_tolerance;
 
-    d_mesh->sync_periodic_boundaries(temperature());
-    d_mesh->sync_periodic_boundaries(velocity());
+    temperature().sync_ghosts();
 
     if (advanced_radiolysis)
     {
-        d_radiolytic_gas_model->advance(
-            d_time + time_step,
-            time_step,
-            temperature(),
-            pressure(),
-            velocity(),
-            projected_face_fluxes(),
-            stored_material_properties(),
-            d_fission_power_source
-                ? &d_fission_power_source->field()
-                : nullptr);
+        d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
+            projected_face_fluxes(), stored_material_properties(),
+            d_fission_power_source ? &d_fission_power_source->field() : nullptr);
         update_void_fraction_models(time_step);
     }
 
@@ -1819,26 +1516,22 @@ void BoussinesqSolver<Pack>::step()
         const auto* alpha_l = active_alpha_l_field();
         if (alpha_l == nullptr)
         {
-            throw std::runtime_error(
-                "Precursor model requires a liquid fraction field.");
+            throw std::runtime_error("Precursor model requires a liquid fraction field.");
         }
         d_precursor_model->advance(
-            time_step,
-            *alpha_l,
-            d_fission_power_source
-                ? &d_fission_power_source->field()
-                : nullptr);
+            time_step, *alpha_l, d_fission_power_source ? &d_fission_power_source->field() : nullptr);
     }
 
-    refresh_material_feedback(
-        d_time + time_step);
+    refresh_material_feedback(d_time + time_step);
     if (auto* turbulence = find_turbulence_model())
     {
-        turbulence->refresh_effective_properties(
-            stored_material_properties(),
-            d_model_options.reference_density);
+        turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
     }
 
+    if (uses_legacy_backend())
+    {
+        sync_temperature_to_legacy();
+    }
     finish_step();
 }
 
@@ -1851,8 +1544,7 @@ void BoussinesqSolver<Pack>::step()
  * @tparam Pack Tpetra type pack.
  * @param filename Output .vtu file path.
  */
-template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) const
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) const
 {
     write_solution_vtu(filename, {});
 }
@@ -1865,34 +1557,23 @@ void BoussinesqSolver<Pack>::write_solution_vtu(const std::string& filename) con
  * @param output_options Field-selection controls for optional model data.
  */
 template<TpetraTypePack Pack>
-auto BoussinesqSolver<Pack>::solution_writer(
-    const SolutionOutputOptions& output_options) const -> VTUWriter
+auto BoussinesqSolver<Pack>::solution_writer(const SolutionOutputOptions& output_options) const -> VTUWriter
 {
     auto writer = fluid_solution_writer();
-    writer.add_scalar_cell_data(
-        "temperature", collect_scalar_field(temperature()));
+    writer.add_scalar_cell_data("temperature", collect_scalar_field(temperature()));
 
     if (output_options.include_material_properties)
     {
         const auto& material = stored_material_properties();
-        writer.add_scalar_cell_data(
-            "density", collect_scalar_field(material.density));
-        writer.add_scalar_cell_data(
-            "specific_heat_capacity",
-            collect_scalar_field(material.specific_heat_capacity));
-        writer.add_scalar_cell_data(
-            "dynamic_viscosity",
-            collect_scalar_field(material.dynamic_viscosity));
-        writer.add_scalar_cell_data(
-            "thermal_conductivity",
-            collect_scalar_field(material.thermal_conductivity));
+        writer.add_scalar_cell_data("density", collect_scalar_field(material.density));
+        writer.add_scalar_cell_data("specific_heat_capacity", collect_scalar_field(material.specific_heat_capacity));
+        writer.add_scalar_cell_data("dynamic_viscosity", collect_scalar_field(material.dynamic_viscosity));
+        writer.add_scalar_cell_data("thermal_conductivity", collect_scalar_field(material.thermal_conductivity));
         if (d_material_feedback_model)
         {
-            for (const auto& [name, field] :
-                 d_material_feedback_model->output_fields())
+            for (const auto& [name, field] : d_material_feedback_model->output_fields())
             {
-                writer.add_scalar_cell_data(
-                    name, collect_scalar_field(*field));
+                writer.add_scalar_cell_data(name, collect_scalar_field(*field));
             }
         }
     }
@@ -1902,87 +1583,62 @@ auto BoussinesqSolver<Pack>::solution_writer(
         {
             for (const auto& [name, field] : turbulence->output_fields())
             {
-                writer.add_scalar_cell_data(
-                    name, collect_scalar_field(*field));
+                writer.add_scalar_cell_data(name, collect_scalar_field(*field));
             }
         }
     }
     if (output_options.include_sources)
     {
-        for (const auto& [name, source] :
-             stored_temperature_sources().entries())
+        for (const auto& [name, source] : stored_temperature_sources().entries())
         {
-            writer.add_scalar_cell_data(
-                name, collect_scalar_field(source->field()));
+            writer.add_scalar_cell_data(name, collect_scalar_field(source->field()));
         }
         if (d_radiolytic_gas_model)
         {
             writer.add_scalar_cell_data(
-                "S_alpha_rad",
-                collect_scalar_field(
-                    d_radiolytic_gas_model->source_alpha_rad()));
+                "S_alpha_rad", collect_scalar_field(d_radiolytic_gas_model->source_alpha_rad()));
         }
         if (d_boiling_source_model)
         {
-            for (const auto& [name, field] :
-                 d_boiling_source_model->output_fields())
+            for (const auto& [name, field] : d_boiling_source_model->output_fields())
             {
-                writer.add_scalar_cell_data(
-                    name, collect_scalar_field(*field));
+                writer.add_scalar_cell_data(name, collect_scalar_field(*field));
             }
         }
         if (d_scalar_void_fraction_model)
         {
             writer.add_scalar_cell_data(
-                "S_alpha_total",
-                collect_scalar_field(
-                    d_scalar_void_fraction_model
-                        ->source_alpha_total()));
+                "S_alpha_total", collect_scalar_field(d_scalar_void_fraction_model->source_alpha_total()));
         }
     }
-    if (output_options.include_radiolytic_gas_fields
-        && d_scalar_void_fraction_model)
+    if (output_options.include_radiolytic_gas_fields && d_scalar_void_fraction_model)
     {
-        writer.add_scalar_cell_data(
-            "alpha_g",
-            collect_scalar_field(d_scalar_void_fraction_model->alpha_g()));
-        writer.add_scalar_cell_data(
-            "alpha_l",
-            collect_scalar_field(d_scalar_void_fraction_model->alpha_l()));
+        writer.add_scalar_cell_data("alpha_g", collect_scalar_field(d_scalar_void_fraction_model->alpha_g()));
+        writer.add_scalar_cell_data("alpha_l", collect_scalar_field(d_scalar_void_fraction_model->alpha_l()));
         if (!output_options.include_sources)
         {
             writer.add_scalar_cell_data(
-                "S_alpha_total",
-                collect_scalar_field(
-                    d_scalar_void_fraction_model
-                        ->source_alpha_total()));
+                "S_alpha_total", collect_scalar_field(d_scalar_void_fraction_model->source_alpha_total()));
         }
     }
-    if (output_options.include_radiolytic_gas_fields
-        && d_radiolytic_gas_model)
+    if (output_options.include_radiolytic_gas_fields && d_radiolytic_gas_model)
     {
-        for (const auto& [name, field] :
-             d_radiolytic_gas_model->output_fields())
+        for (const auto& [name, field] : d_radiolytic_gas_model->output_fields())
         {
             if (name == "S_alpha_rad")
                 continue;
-            if (d_scalar_void_fraction_model
-                && (name == "alpha_g" || name == "alpha_l"))
+            if (d_scalar_void_fraction_model && (name == "alpha_g" || name == "alpha_l"))
             {
                 continue;
             }
-            writer.add_scalar_cell_data(
-                name, collect_scalar_field(*field));
+            writer.add_scalar_cell_data(name, collect_scalar_field(*field));
         }
     }
-    if (output_options.include_precursor_fields
-        && d_precursor_model)
+    if (output_options.include_precursor_fields && d_precursor_model)
     {
-        for (const auto& [name, field] :
-             d_precursor_model->output_fields())
+        for (const auto& [name, field] : d_precursor_model->output_fields())
         {
-            writer.add_scalar_cell_data(
-                name, collect_scalar_field(*field));
+            writer.add_scalar_cell_data(name, collect_scalar_field(*field));
         }
     }
     return writer;
@@ -1991,11 +1647,9 @@ auto BoussinesqSolver<Pack>::solution_writer(
 /** @brief Write selected solution fields to one VTU piece. */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::write_solution_vtu(
-    const std::string& filename,
-    const SolutionOutputOptions& output_options) const
+    const std::string& filename, const SolutionOutputOptions& output_options) const
 {
-    solution_writer(output_options).write(
-        filename, VTUWriter::Encoding::AppendedBinary);
+    solution_writer(output_options).write(filename, VTUWriter::Encoding::AppendedBinary);
 }
 
 /**
@@ -2007,82 +1661,50 @@ void BoussinesqSolver<Pack>::write_solution_vtu(
  */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::write_parallel_solution_vtu(
-    const std::string& filename,
-    const SolutionOutputOptions& output_options) const
+    const std::string& filename, const SolutionOutputOptions& output_options) const
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
     const auto rank = communicator->getRank();
     const auto rank_count = communicator->getSize();
     if (rank_count > 1)
     {
-        const auto option_mask =
-            static_cast<int>(output_options.include_sources)
-          | (static_cast<int>(
-                 output_options.include_material_properties) << 1)
-          | (static_cast<int>(
-                 output_options.include_radiolytic_gas_fields) << 2)
-          | (static_cast<int>(
-                 output_options.include_precursor_fields) << 3)
-          | (static_cast<int>(
-                 output_options.include_turbulence_fields) << 4);
-        std::array<long long, 2> root_arguments{
-            rank == 0
-                ? static_cast<long long>(filename.size())
-                : 0LL,
+        const auto option_mask = static_cast<int>(output_options.include_sources) |
+                                 (static_cast<int>(output_options.include_material_properties) << 1) |
+                                 (static_cast<int>(output_options.include_radiolytic_gas_fields) << 2) |
+                                 (static_cast<int>(output_options.include_precursor_fields) << 3) |
+                                 (static_cast<int>(output_options.include_turbulence_fields) << 4);
+        std::array<long long, 2> root_arguments{rank == 0 ? static_cast<long long>(filename.size()) : 0LL,
             rank == 0 ? static_cast<long long>(option_mask) : 0LL};
-        Teuchos::broadcast(
-            *communicator,
-            0,
-            static_cast<int>(root_arguments.size()),
-            root_arguments.data());
-        if (root_arguments[0] < 0
-            || root_arguments[0]
-               > std::numeric_limits<int>::max())
+        Teuchos::broadcast(*communicator, 0, static_cast<int>(root_arguments.size()), root_arguments.data());
+        if (root_arguments[0] < 0 || root_arguments[0] > std::numeric_limits<int>::max())
         {
-            throw std::invalid_argument(
-                "Parallel VTU filename is too long for MPI broadcast.");
+            throw std::invalid_argument("Parallel VTU filename is too long for MPI broadcast.");
         }
 
-        std::string root_filename(
-            static_cast<size_t>(root_arguments[0]), '\0');
+        std::string root_filename(static_cast<size_t>(root_arguments[0]), '\0');
         if (rank == 0)
         {
             root_filename = filename;
         }
         if (!root_filename.empty())
         {
-            Teuchos::broadcast(
-                *communicator,
-                0,
-                static_cast<int>(root_filename.size()),
-                root_filename.data());
+            Teuchos::broadcast(*communicator, 0, static_cast<int>(root_filename.size()), root_filename.data());
         }
 
         const int local_arguments_mismatch =
-            (filename != root_filename
-             || option_mask != static_cast<int>(root_arguments[1]))
-                ? 1
-                : 0;
+            (filename != root_filename || option_mask != static_cast<int>(root_arguments[1])) ? 1 : 0;
         int any_arguments_mismatch = 0;
-        Teuchos::reduceAll(
-            *communicator,
-            Teuchos::REDUCE_MAX,
-            1,
-            &local_arguments_mismatch,
-            &any_arguments_mismatch);
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_arguments_mismatch, &any_arguments_mismatch);
         if (any_arguments_mismatch != 0)
         {
-            throw std::invalid_argument(
-                "Parallel VTU filename and output options must agree on "
-                "every rank.");
+            throw std::invalid_argument("Parallel VTU filename and output options must agree on "
+                                        "every rank.");
         }
     }
-    const auto piece_filename = VTUWriter::rank_piece_filename(
-        filename, rank, rank_count);
+    const auto piece_filename = VTUWriter::rank_piece_filename(filename, rank, rank_count);
     if (rank_count <= 1)
     {
-        solution_writer(output_options).write(
-            piece_filename, VTUWriter::Encoding::AppendedBinary);
+        solution_writer(output_options).write(piece_filename, VTUWriter::Encoding::AppendedBinary);
         return;
     }
 
@@ -2100,82 +1722,51 @@ void BoussinesqSolver<Pack>::write_parallel_solution_vtu(
     }
     const int local_preparation_failed = preparation_error ? 1 : 0;
     int any_preparation_failed = 0;
-    Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_MAX,
-        1,
-        &local_preparation_failed,
-        &any_preparation_failed);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_preparation_failed, &any_preparation_failed);
     if (any_preparation_failed != 0)
     {
         if (preparation_error)
         {
             std::rethrow_exception(preparation_error);
         }
-        throw std::runtime_error(
-            "VTU output preparation failed on another MPI rank.");
+        throw std::runtime_error("VTU output preparation failed on another MPI rank.");
     }
 
     const int local_schema_size_is_valid =
-        local_schema_key.size()
-                <= static_cast<size_t>(
-                    std::numeric_limits<int>::max())
-            ? 1
-            : 0;
+        local_schema_key.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) ? 1 : 0;
     int global_schema_size_is_valid = 0;
     Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_MIN,
-        1,
-        &local_schema_size_is_valid,
-        &global_schema_size_is_valid);
+        *communicator, Teuchos::REDUCE_MIN, 1, &local_schema_size_is_valid, &global_schema_size_is_valid);
     if (global_schema_size_is_valid == 0)
     {
-        throw std::invalid_argument(
-            "Parallel VTU CellData schema is too large for MPI "
-            "broadcast.");
+        throw std::invalid_argument("Parallel VTU CellData schema is too large for MPI "
+                                    "broadcast.");
     }
 
-    int root_schema_size = rank == 0
-        ? static_cast<int>(local_schema_key.size())
-        : 0;
-    Teuchos::broadcast(
-        *communicator, 0, 1, &root_schema_size);
-    std::string root_schema_key(
-        static_cast<size_t>(root_schema_size), '\0');
+    int root_schema_size = rank == 0 ? static_cast<int>(local_schema_key.size()) : 0;
+    Teuchos::broadcast(*communicator, 0, 1, &root_schema_size);
+    std::string root_schema_key(static_cast<size_t>(root_schema_size), '\0');
     if (rank == 0)
     {
         root_schema_key = local_schema_key;
     }
     if (!root_schema_key.empty())
     {
-        Teuchos::broadcast(
-            *communicator,
-            0,
-            root_schema_size,
-            root_schema_key.data());
+        Teuchos::broadcast(*communicator, 0, root_schema_size, root_schema_key.data());
     }
-    const int local_schema_mismatch =
-        local_schema_key == root_schema_key ? 0 : 1;
+    const int local_schema_mismatch = local_schema_key == root_schema_key ? 0 : 1;
     int any_schema_mismatch = 0;
-    Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_MAX,
-        1,
-        &local_schema_mismatch,
-        &any_schema_mismatch);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_schema_mismatch, &any_schema_mismatch);
     if (any_schema_mismatch != 0)
     {
-        throw std::invalid_argument(
-            "Parallel VTU CellData names, types, and component counts "
-            "must agree on every rank.");
+        throw std::invalid_argument("Parallel VTU CellData names, types, and component counts "
+                                    "must agree on every rank.");
     }
 
     std::exception_ptr piece_error;
     try
     {
-        writer->write(
-            piece_filename, VTUWriter::Encoding::AppendedBinary);
+        writer->write(piece_filename, VTUWriter::Encoding::AppendedBinary);
     }
     catch (...)
     {
@@ -2183,20 +1774,14 @@ void BoussinesqSolver<Pack>::write_parallel_solution_vtu(
     }
     const int local_piece_failed = piece_error ? 1 : 0;
     int any_piece_failed = 0;
-    Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_MAX,
-        1,
-        &local_piece_failed,
-        &any_piece_failed);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_piece_failed, &any_piece_failed);
     if (any_piece_failed != 0)
     {
         if (piece_error)
         {
             std::rethrow_exception(piece_error);
         }
-        throw std::runtime_error(
-            "A VTU piece failed to write on another MPI rank.");
+        throw std::runtime_error("A VTU piece failed to write on another MPI rank.");
     }
 
     std::exception_ptr index_error;
@@ -2206,17 +1791,11 @@ void BoussinesqSolver<Pack>::write_parallel_solution_vtu(
         {
             std::vector<std::string> piece_filenames;
             piece_filenames.reserve(static_cast<size_t>(rank_count));
-            for (int piece_rank = 0;
-                 piece_rank < rank_count;
-                 ++piece_rank)
+            for (int piece_rank = 0; piece_rank < rank_count; ++piece_rank)
             {
-                piece_filenames.push_back(
-                    VTUWriter::rank_piece_filename(
-                        filename, piece_rank, rank_count));
+                piece_filenames.push_back(VTUWriter::rank_piece_filename(filename, piece_rank, rank_count));
             }
-            writer->write_parallel_index(
-                VTUWriter::parallel_index_filename(filename),
-                piece_filenames);
+            writer->write_parallel_index(VTUWriter::parallel_index_filename(filename), piece_filenames);
         }
         catch (...)
         {
@@ -2225,20 +1804,14 @@ void BoussinesqSolver<Pack>::write_parallel_solution_vtu(
     }
     int local_index_failed = index_error ? 1 : 0;
     int any_index_failed = 0;
-    Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_MAX,
-        1,
-        &local_index_failed,
-        &any_index_failed);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_index_failed, &any_index_failed);
     if (any_index_failed != 0)
     {
         if (index_error)
         {
             std::rethrow_exception(index_error);
         }
-        throw std::runtime_error(
-            "The PVTU index failed to write on another MPI rank.");
+        throw std::runtime_error("The PVTU index failed to write on another MPI rank.");
     }
 }
 
