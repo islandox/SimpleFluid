@@ -23,9 +23,11 @@ using ScalarField = CellField<Pack>;
 using VectorField = VectorCellField<Pack>;
 using FluxField = FaceField<Pack>;
 using GeometryCache = TransportGeometryCache<Mesh<Pack>>;
+using MappedGeometryCache = TransportGeometryCache<MeshHandle<Pack>>;
 } // namespace
 
 template class TransportGeometryCache<Mesh<Pack>>;
+template class TransportGeometryCache<MeshHandle<Pack>>;
 
 template TransportSystem<Pack> transport_system<Pack>(const ScalarField&, const FluxField&, Scalar, Scalar,
     ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>,
@@ -39,6 +41,10 @@ template TransportSystem<Pack> transport_system<Pack>(const ScalarField&, const 
 
 template TransportSystem<Pack> transport_system<Pack>(
     const ScalarField&, const FluxField&, Scalar, Scalar, ScalarBoundaryValueProvider<Pack>, Teuchos::RCP<Matrix>);
+
+template TransportSystem<Pack> non_orthogonal_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
+    Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>,
+    NonOrthogonalTreatment, const ScalarField*, Teuchos::RCP<Matrix>, const GeometryCache*);
 
 template VectorTransportSystem<Pack> transport_system<Pack>(const VectorField&, const FluxField&, Scalar, Scalar,
     VectorBoundaryConditionProvider<Pack>, VectorBoundaryValueProvider<Pack>, VectorCellValueProvider<Pack>,

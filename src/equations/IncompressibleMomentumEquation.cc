@@ -15,4 +15,6 @@
 namespace SimpleFluid
 {
 template class IncompressibleMomentumEquation<DefaultTpetraTypes>;
+template class IncompressibleMomentumEquation<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 }

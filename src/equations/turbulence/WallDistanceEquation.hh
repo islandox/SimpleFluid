@@ -14,7 +14,8 @@
 #include "SimpleFluidExport.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "dataclass/typedefs.hh"
-#include "fields/CellField.hh"
+#include "fields/MeshFieldTraits.hh"
+#include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 namespace SimpleFluid
@@ -63,13 +64,15 @@ SIMPLEFLUID_EQUATIONS_EXPORT void validate_wall_distance_equation_options(
  * globally; ranks without a local selected wall participate normally.
  *
  * @tparam Pack Tpetra type pack used by the mesh and fields.
+ * @tparam MeshType Mesh and associated field-storage backend.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes>
+template <TpetraTypePack Pack = DefaultTpetraTypes,
+          class MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT PoissonWallDistanceEquation
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
+    using mesh_type = MeshType;
+    using field_type = typename MeshFieldTraits<Pack, mesh_type>::scalar_cell_type;
     using scalar_type = typename Pack::scalar_type;
 
     /**
@@ -99,5 +102,7 @@ private:
 };
 
 extern template class PoissonWallDistanceEquation<DefaultTpetraTypes>;
+extern template class PoissonWallDistanceEquation<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid

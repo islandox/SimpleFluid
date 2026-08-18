@@ -15,4 +15,6 @@
 namespace SimpleFluid
 {
 template class TurbulenceScalarTransportEquation<DefaultTpetraTypes>;
-}
+template class TurbulenceScalarTransportEquation<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
+} // namespace SimpleFluid

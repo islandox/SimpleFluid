@@ -50,4 +50,6 @@ void validate_wall_distance_equation_options(
 }
 
 template class PoissonWallDistanceEquation<DefaultTpetraTypes>;
-}
+template class PoissonWallDistanceEquation<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
+} // namespace SimpleFluid

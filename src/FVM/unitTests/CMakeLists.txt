@@ -17,9 +17,20 @@ if(MPIEXEC_EXECUTABLE
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
             "$<TARGET_FILE:testFvmOperators>"
-            "--gtest_filter=FvmOperatorsTest.ImplicitNonOrthogonalMatrixMatchesFullResidual:FvmOperatorsTest.ImplicitNonOrthogonalRejectsInconsistentPartitionCorrectionInputs:FvmOperatorsTest.TransportAssemblersRejectInconsistentPartitionGradientInputs:FvmOperatorsTest.HybridNonOrthogonalSolveSupportsPartitionFaces:FvmOperatorsTest.VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph:FvmOperatorsTest.ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients:FvmOperatorsTest.PhysicalTemperatureNonOrthogonalTreatmentsMatchExplicitResidual")
+            "--gtest_filter=FvmOperatorsTest.ImplicitNonOrthogonalMatrixMatchesFullResidual:FvmOperatorsTest.ImplicitNonOrthogonalRejectsInconsistentPartitionCorrectionInputs:FvmOperatorsTest.TransportAssemblersRejectInconsistentPartitionGradientInputs:FvmOperatorsTest.HybridNonOrthogonalSolveSupportsPartitionFaces:FvmOperatorsTest.VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph:FvmOperatorsTest.ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients:FvmOperatorsTest.PhysicalTemperatureNonOrthogonalTreatmentsMatchExplicitResidual:FvmOperatorsTest.MappedUpwindConvectionUsesPartitionFaceGhostFlux")
   set_tests_properties(NonOrthogonalPartitionFaces_2procs PROPERTIES
     LABELS "mpi;non_orthogonal"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME FieldStoredTransportValidation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testFieldStoredOperators>"
+            "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective")
+  set_tests_properties(FieldStoredTransportValidation_2procs PROPERTIES
+    LABELS "mpi;non_orthogonal;field_stored"
     PROCESSORS 2
     TIMEOUT 120)
 endif()

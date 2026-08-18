@@ -105,6 +105,12 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
             handle->overlap_face_map()->getLocalNumElements(),
             handle->num_faces());
         EXPECT_FALSE(handle->boundary_batches().empty());
+        const auto topology = handle->vtu_topology();
+        ASSERT_TRUE(topology);
+        EXPECT_EQ(
+            topology->cell_offsets.size(),
+            handle->num_owned_cells());
+        EXPECT_FALSE(topology->points.empty());
     }
 
     EXPECT_EQ(
@@ -147,6 +153,10 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
               legacy->owned_face_map()->getGlobalElement(0));
     EXPECT_EQ(handle.num_owned_cells(), legacy->num_owned_cells());
     EXPECT_EQ(handle.cell_centroid(0), legacy->cell_centroid(0));
+    const auto topology = handle.vtu_topology();
+    ASSERT_TRUE(topology);
+    EXPECT_EQ(topology->cell_offsets.size(), handle.num_owned_cells());
+    EXPECT_FALSE(topology->points.empty());
     const auto handle_faces = handle.faces(0);
     const auto& legacy_faces = legacy->faces(0);
     EXPECT_EQ(handle_faces.size(), legacy_faces.size());

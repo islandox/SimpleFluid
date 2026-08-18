@@ -72,7 +72,7 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
  * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class MeshHandle
+class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
 public:
     using scalar_type = typename Pack::scalar_type;
@@ -420,6 +420,14 @@ public:
      */
     void export_vtu(const std::string& filename) const;
 
+    /**
+     * @brief Build reusable VTU topology for the owned cells.
+     *
+     * The returned topology is independent of field values and can therefore
+     * be cached by transient solvers across output steps.
+     */
+    VTUWriter::TopologyHandle vtu_topology() const;
+
 private:
     template<class Pointer>
     static Pointer require_mesh(Pointer mesh)
@@ -477,23 +485,20 @@ private:
 
     void write_vtu(
         const std::string& filename,
-        VTUWriter::VectorData points,
-        VTUWriter::Int64Data connectivity,
-        VTUWriter::Int64Data offsets,
-        VTUWriter::UInt8Data cell_types) const;
+        VTUWriter::TopologyHandle topology) const;
+
+    VTUWriter::TopologyHandle legacy_vtu_topology(
+        const STKAdapter& mesh) const;
 
     template<class MeshType>
-    void export_orthogonal_vtu(
-        const MeshType& mesh,
-        const std::string& filename) const;
+    VTUWriter::TopologyHandle orthogonal_vtu_topology(
+        const MeshType& mesh) const;
 
-    void export_semi_structured_vtu(
-        const SemiStructured& mesh,
-        const std::string& filename) const;
+    VTUWriter::TopologyHandle semi_structured_vtu_topology(
+        const SemiStructured& mesh) const;
 
-    void export_unstructured_vtu(
-        const Unstructured& mesh,
-        const std::string& filename) const;
+    VTUWriter::TopologyHandle unstructured_vtu_topology(
+        const Unstructured& mesh) const;
 
     global_ordinal_type geometry_cell_lid(
         local_ordinal_type local_id) const

@@ -12,6 +12,7 @@
 
 #include "equations/BoussinesqModel.hh"
 #include "FVM/TransportSystem.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <algorithm>
@@ -142,14 +143,17 @@ delayed_neutron_precursor_options_from_database(
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class DelayedNeutronPrecursorModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
 
     /**
      * @brief Construct a precursor model on a mesh.
@@ -428,7 +432,7 @@ private:
         scalar_type time_step,
         const field_type& alpha_l)
     {
-        FaceField<Pack> zero_flux(
+        face_flux_field_type zero_flux(
             d_mesh, 0.0, "precursor_zero_face_flux");
         field_type storage_weight(
             d_mesh, 1.0, "precursor_storage_weight");

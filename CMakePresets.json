@@ -25,6 +25,7 @@
             "cacheVariables": {
                 "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-libcxx/lib/cmake/Trilinos",
                 "GTest_ROOT": "$env{HOME}/local/toolchains/gtest-clang-libc++",
+                "GTest_DIR": "$env{HOME}/local/toolchains/gtest-clang-libc++/lib/cmake/GTest",
                 "CMAKE_CXX_COMPILER": "clang++",
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_FLAGS": "-stdlib=libc++"
