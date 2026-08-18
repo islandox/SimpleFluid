@@ -13,8 +13,15 @@ benchmarking, physical heat sources, updateable material properties, prescribed
 fission heating, and the baseline radiolytic-gas source. Numerical verification
 gaps and later multiphysics acceptance work remain tracked in `TODO.md`.
 
-**The advanced Phase 14.1 two-population radiolytic-bubble model is implemented
-in part and remains under verification.**
+The pressure–velocity, Boussinesq, turbulence, and optional-physics stacks now
+run directly on `MeshHandle`/`FieldStored` data for supported mapped meshes,
+without reconstructing a legacy mesh. Existing callers that supply the legacy
+`Mesh` backend retain their established object identity and behavior through a
+separate compatibility path.
+
+**The advanced Phase 14.1 two-population radiolytic-bubble model has broad
+implementation and focused conservation/transport coverage, but remains under
+physical validation and acceptance.**
 
 **Turbulent bubbly-flow scope:** the single-continuum RANS models and the
 radiolytic bubble-population model can run in the same `BoussinesqSolver` with
@@ -24,7 +31,8 @@ two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
 | Capability | Status |
 | ---------- | ------ |
 | Mesh & geometry infrastructure | ✅ |
-| Scalar & vector fields (Tpetra) | ✅ |
+| Scalar, vector, and tensor fields (Tpetra) | ✅ |
+| Native `MeshHandle`/`FieldStored` FVM and solver path | ✅ |
 | Orthogonal diffusion operator | ✅ |
 | Non-orthogonal correction (explicit/implicit/hybrid) | ✅ |
 | Momentum equation (transient + convection + diffusion) | ✅ |
@@ -71,7 +79,8 @@ $$
   triangular-prism meshes
 - **First-order upwind** convection (implicit)
 - **Backward Euler** time integration
-- Gradient reconstruction via **least-squares** on extended stencils
+- Gradient reconstruction via cached **least-squares** stencils, with a
+  selectable **Gauss-linear** path for pressure and turbulence gradients
 
 ### Diffusion Operator
 
@@ -143,8 +152,11 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 
 - **Cell-centered** scalar and vector fields backed by Tpetra distributed vectors
 - **Face-centered** scalar and vector fields backed by Tpetra distributed vectors
-- `FieldStored` with mesh-aware construction and ghosted data exchange
-- `BoundaryFaceField` for sideset-indexed boundary data
+- `FieldStored` scalar, vector, and row-major tensor cell storage, plus scalar
+  and vector face/boundary-face storage
+- Mesh-aware owned/overlap maps, component and bulk host views, owned-face
+  indexing, and ghosted data exchange
+- `BoundaryFaceField` compatibility storage for sideset-indexed boundary data
 
 ### Solvers & Equations
 
@@ -156,6 +168,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - `TemperatureDiffusionEquation` — energy equation assembly
 - `CoupledPressureVelocitySolver` — monolithic block-Krylov solver
 - `BelosLinearSolver` — unified interface to Trilinos iterative solvers
+- Direct `MeshHandle` execution through `MeshFieldTraits` for mapped pressure,
+  velocity, temperature, turbulence, material, and optional-physics fields
+- Legacy `Mesh` execution through synchronized compatibility fields, without
+  replacing the mesh supplied by the caller
 - Runtime residual reporting for momentum, pressure, and continuity
 - Named volumetric heat sources and updateable physical material fields
 
@@ -212,11 +228,17 @@ currently advances both subsystems in a nontrivial flow.
 ### FVM Operators
 
 - `DiffusionSystem` — scalar/vector orthogonal diffusion assembly
-- `TransportSystem` — semi-implicit convection–diffusion assembly
+- `TransportSystem` — semi-implicit scalar/vector, weighted, temperature, and
+  physical-momentum convection–diffusion assembly
 - `NonOrthogonalCorrection` — cross-diffusion flux decomposition ($S_f = E_f + T_f$)
-- `CellOperators` — gradient, divergence, Laplacian reconstruction
-- `FaceFlux` — Rhie–Chow face-flux interpolation
-- `MatrixOperators` — sparse matrix assembly helpers
+- `CellOperators` — cached scalar/vector gradient, divergence, and Laplacian
+  reconstruction for legacy and stored fields
+- `FaceFlux` — face interpolation, normal fluxes, cell balances, and
+  FieldStored/legacy Rhie–Chow interpolation
+- `MatrixOperators` — sparse diffusion, upwind, and pressure-Poisson assembly
+  helpers for legacy and mapped meshes
+- Mapped boundary and transport caches — reusable boundary locations,
+  least-squares geometry, and compatible transport-matrix graphs
 
 ### Data & Utilities
 
@@ -255,6 +277,7 @@ short-running physical smoke cases:
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
+| Native mesh path | Cartesian, cylindrical, semi-structured, coupled-Krylov, optional-physics, and MPI regressions without legacy conversion |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
 and MPI coverage. A permanent combined RANS-plus-bubble regression and a
@@ -277,14 +300,16 @@ Pre-built example executables:
 | `natural_convection_cylinder` | Cylindrical domain natural convection |
 | `natural_convection_sphere` | Spherical domain natural convection |
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
+| `natural_convection_shiri` | MPI-capable annular natural convection with standard k-epsilon and adaptive steady-state search |
 | `pitz_daily` | OpenFOAM pitzDaily geometry with transient standard k-epsilon transport |
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
 | `fissile_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 
-Each example is configured via a `Database` object and runs a short transient
-simulation with VTU output. None is currently a combined turbulent
-radiolytic-bubble example.
+Examples use `Database` configuration, documented environment controls, or a
+combination of both. Their CTest smoke settings intentionally reduce mesh size
+and run length; production defaults can be substantially more expensive. None
+is currently a combined turbulent radiolytic-bubble example.
 
 ## Build
 
@@ -312,10 +337,14 @@ cmake --preset GCC-ninja-multi
 cmake --build --preset GCC-Release
 
 # Or manually
-cmake -B build -G "Ninja Multi-Config" \
+cmake -B build/manual -G "Ninja Multi-Config" \
   -DTrilinos_DIR=/path/to/trilinos/lib/cmake/Trilinos
-cmake --build build --config Release
+cmake --build build/manual --config Release
 ```
+
+The checked-in GCC and LLVM presets place their build trees under `build/gcc`
+and `build/llvm`, respectively. A manually configured tree uses whichever path
+was passed to `-B`.
 
 ### Run Tests
 
@@ -327,8 +356,8 @@ ctest --preset GCC-Debug
 ### Run Examples
 
 ```bash
-./build-gcc/bin/Release/natural_convection_box
-./build-gcc/bin/Release/natural_convection_cylinder
+./build/gcc/bin/Release/natural_convection_box
+./build/gcc/bin/Release/natural_convection_cylinder
 ```
 
 ## Performance Benchmarks
@@ -363,25 +392,25 @@ Run the larger profiling preset with frame pointers and debug symbols:
 
 ```bash
 cmake --build --preset GCC-RelWithDebInfo --target simplefluid_benchmark
-./build-gcc/bin/RelWithDebInfo/simplefluid_benchmark \
+./build/gcc/bin/RelWithDebInfo/simplefluid_benchmark \
   --preset release-profile \
-  --output build-gcc/benchmarks/release-profile.csv
+  --output build/gcc/benchmarks/release-profile.csv
 ```
 
 Run strong-scaling measurements sequentially:
 
 ```bash
-mpiexec -n 1 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
-mpiexec -n 2 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
-mpiexec -n 4 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
+mpiexec -n 1 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/gcc/benchmarks/mpi-strong.csv
+mpiexec -n 2 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/gcc/benchmarks/mpi-strong.csv
+mpiexec -n 4 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/gcc/benchmarks/mpi-strong.csv
 ```
 
 Run weak-scaling measurements with approximately `32x32x8` cells per rank:
 
 ```bash
-mpiexec -n 1 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
-mpiexec -n 2 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
-mpiexec -n 4 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
+mpiexec -n 1 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/gcc/benchmarks/mpi-weak.csv
+mpiexec -n 2 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/gcc/benchmarks/mpi-weak.csv
+mpiexec -n 4 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/gcc/benchmarks/mpi-weak.csv
 ```
 
 Use `--case`, `--configuration`, `--nx`, `--ny`, `--nz`, `--shear`,
@@ -480,10 +509,10 @@ for the scalar void, boiling, feedback, precursor, and output workflow.
 The fissile-solution tank smoke cases build as `fissile_solution_tank_demo`
 and `constant_power_cylinder_vessel`.
 After `cmake --build --preset GCC-Debug`, run
-`build-gcc/bin/Debug/fissile_solution_tank_demo` or
-`build-gcc/bin/Debug/constant_power_cylinder_vessel` and inspect the generated
+`build/gcc/bin/Debug/fissile_solution_tank_demo` or
+`build/gcc/bin/Debug/constant_power_cylinder_vessel` and inspect the generated
 VTU files in ParaView. Use the corresponding `LLVM-Debug` preset and
-`build-llvm/bin/Debug` path for the LLVM build. The Gaussian tank demo keeps
+`build/llvm/bin/Debug` path for the LLVM build. The Gaussian tank demo keeps
 boiling disabled by default; the constant-power cylinder variant enables
 radiolytic gas plus bulk and wall boiling so the generated VTU contains the
 coupled gas-source and latent-heat fields.
