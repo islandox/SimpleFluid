@@ -255,7 +255,11 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::TemperatureDiffusionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_physical[(]"
     "^SimpleFluid::BoussinesqMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity_physical[(]"
     "^SimpleFluid::TurbulenceModel<.*SimpleFluid::MeshHandle<.*>[ ]*::advance[(]"
-    "^SimpleFluid::AdaptiveSteadyStateController::observe[(]")
+    "^SimpleFluid::AdaptiveSteadyStateController::observe[(]"
+    "^SimpleFluid::AdaptiveSteadyStateController::observe[(].*, bool, bool[)]$"
+    "^SimpleFluid::AdaptiveLinearToleranceController::observe[(]"
+    "^SimpleFluid::AdaptiveLinearToleranceController::current_linear_tolerance[(]"
+    "^SimpleFluid::AdaptiveLinearToleranceController::full_accuracy_requested[(]")
 set(simplefluid_missing_api_patterns)
 foreach(simplefluid_required_api_pattern
         IN LISTS simplefluid_required_api_patterns)

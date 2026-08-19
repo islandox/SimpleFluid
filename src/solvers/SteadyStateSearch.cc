@@ -30,6 +30,9 @@ template class SteadyStateProgressLineFormatter<real_t>;
 
 template void SteadyStateProgressStream::write<real_t>(const SteadyStateStepStatistics<real_t>& statistics,
                                            const FluidStepStatistics<real_t>& solver_statistics);
+template void SteadyStateProgressStream::write<real_t>(const SteadyStateStepStatistics<real_t>& statistics,
+    const FluidStepStatistics<real_t>& solver_statistics, std::optional<real_t> requested_linear_tolerance,
+    std::optional<real_t> next_requested_linear_tolerance);
 template void SteadyStateProgressStream::write_retry<real_t>(int iteration, int retry,
                                            int maximum_retries, real_t time, real_t time_step,
                                            real_t next_time_step, std::string_view reason);
@@ -42,6 +45,61 @@ bool finite_positive(real_t value) { return std::isfinite(value) && value > 0.0;
 bool finite_non_negative(real_t value) { return std::isfinite(value) && value >= 0.0; }
 
 } // namespace
+
+AdaptiveLinearToleranceController::AdaptiveLinearToleranceController(
+    AdaptiveLinearToleranceOptions options, real_t physical_update_tolerance)
+    : d_options(std::move(options)), d_physical_update_tolerance(physical_update_tolerance),
+      d_current_linear_tolerance(d_options.relaxed_tolerance)
+{
+    if (!finite_positive(d_options.relaxed_tolerance) || !finite_positive(d_options.final_tolerance))
+    {
+        throw std::invalid_argument("Adaptive linear tolerances must be finite and positive.");
+    }
+    if (d_options.relaxed_tolerance < d_options.final_tolerance)
+    {
+        throw std::invalid_argument("Adaptive relaxed linear tolerance cannot be stricter than the "
+                                    "final tolerance.");
+    }
+    if (!std::isfinite(d_options.full_accuracy_update_ratio) || d_options.full_accuracy_update_ratio < 1.0)
+    {
+        throw std::invalid_argument("Adaptive full-accuracy update ratio must be finite and at least "
+                                    "one.");
+    }
+    if (!finite_positive(d_physical_update_tolerance))
+    {
+        throw std::invalid_argument("Adaptive physical-update tolerance must be finite and positive.");
+    }
+}
+
+real_t AdaptiveLinearToleranceController::current_linear_tolerance() const noexcept
+{
+    return d_current_linear_tolerance;
+}
+
+bool AdaptiveLinearToleranceController::full_accuracy_requested() const noexcept
+{
+    return d_current_linear_tolerance <= d_options.final_tolerance;
+}
+
+real_t AdaptiveLinearToleranceController::observe(real_t maximum_update_rate, bool solver_converged)
+{
+    if (!finite_non_negative(maximum_update_rate))
+    {
+        throw std::invalid_argument("Adaptive linear tolerance observation requires a finite "
+                                    "non-negative update rate.");
+    }
+    if (!solver_converged)
+    {
+        return d_current_linear_tolerance;
+    }
+
+    const auto normalized_update =
+        (maximum_update_rate / d_physical_update_tolerance) / d_options.full_accuracy_update_ratio;
+    const auto candidate = std::clamp(d_options.final_tolerance * std::max(real_t{1}, normalized_update),
+        d_options.final_tolerance, d_options.relaxed_tolerance);
+    d_current_linear_tolerance = std::min(d_current_linear_tolerance, candidate);
+    return d_current_linear_tolerance;
+}
 
 void validate_steady_state_search_options(const SteadyStateSearchOptions& options,
                                           real_t initial_time_step)
@@ -140,6 +198,13 @@ AdaptiveSteadyStateController::observe(real_t time, real_t time_step, real_t max
                                        SteadyStateUpdateRates<real_t> update_rates,
                                        bool solver_converged)
 {
+    return observe(time, time_step, maximum_courant_number, update_rates, solver_converged, true);
+}
+
+SteadyStateStepStatistics<real_t> AdaptiveSteadyStateController::observe(real_t time, real_t time_step,
+    real_t maximum_courant_number, SteadyStateUpdateRates<real_t> update_rates, bool solver_converged,
+    bool steady_sample_eligible)
+{
     if (!finite_non_negative(time) || !finite_positive(time_step) ||
         !finite_non_negative(maximum_courant_number) ||
         !finite_non_negative(update_rates.velocity) ||
@@ -152,7 +217,7 @@ AdaptiveSteadyStateController::observe(real_t time, real_t time_step, real_t max
 
     ++d_iterations;
     const bool below_tolerance = update_rates.maximum() <= d_options.relative_update_tolerance;
-    if (solver_converged && d_iterations >= d_options.minimum_steps && below_tolerance)
+    if (solver_converged && steady_sample_eligible && d_iterations >= d_options.minimum_steps && below_tolerance)
     {
         ++d_consecutive_converged_steps;
     }
