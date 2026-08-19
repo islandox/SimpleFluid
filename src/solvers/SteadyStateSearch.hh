@@ -20,8 +20,10 @@
 #include "geometry/Mesh.hh"
 
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -41,6 +43,21 @@ struct SteadyStateUpdateScales
     real_t velocity = 1.0e-6;    ///< Velocity scale floor [m/s].
     real_t temperature = 1.0;    ///< Temperature-difference scale floor [K].
     real_t turbulence = 1.0e-12; ///< Generic turbulence-field scale floor.
+};
+
+/**
+ * @brief Inexact linear-solve controls for pseudo-transient continuation.
+ *
+ * The first step uses `relaxed_tolerance`. Accepted converged steps tighten
+ * that tolerance monotonically as the maximum physical update approaches the
+ * steady-state target. Full linear accuracy is requested once the update is
+ * no larger than `full_accuracy_update_ratio` times that target.
+ */
+struct AdaptiveLinearToleranceOptions
+{
+    real_t relaxed_tolerance = 1.0e-6;
+    real_t final_tolerance = 1.0e-9;
+    real_t full_accuracy_update_ratio = 10.0;
 };
 
 /**
@@ -83,6 +100,39 @@ SIMPLEFLUID_SOLVERS_EXPORT void
 validate_steady_state_search_options(
     const SteadyStateSearchOptions& options,
     real_t initial_time_step);
+
+/**
+ * @brief Monotonically tighten linear solves during pseudo-transient search.
+ *
+ * This controller is deliberately independent of
+ * AdaptiveSteadyStateController so callers can opt in without changing the
+ * steady-search options or statistics layouts. A rejected step must not be
+ * observed; an accepted step whose solves did not converge leaves the current
+ * tolerance unchanged.
+ */
+class SIMPLEFLUID_SOLVERS_EXPORT AdaptiveLinearToleranceController
+{
+public:
+    AdaptiveLinearToleranceController(AdaptiveLinearToleranceOptions options, real_t physical_update_tolerance);
+
+    /** @brief Tolerance to request for the next accepted-step attempt. */
+    real_t current_linear_tolerance() const noexcept;
+
+    /** @brief Whether the next attempt requests the configured final tolerance. */
+    bool full_accuracy_requested() const noexcept;
+
+    /**
+     * @brief Observe an accepted step and return the next requested tolerance.
+     *
+     * The tolerance only tightens when @p solver_converged is true.
+     */
+    real_t observe(real_t maximum_update_rate, bool solver_converged);
+
+private:
+    AdaptiveLinearToleranceOptions d_options;
+    real_t d_physical_update_tolerance;
+    real_t d_current_linear_tolerance;
+};
 
 /** @brief Normalized physical-field change rates from one accepted step. */
 template <class Scalar>
@@ -138,6 +188,15 @@ public:
                                               real_t maximum_courant_number,
                                               SteadyStateUpdateRates<real_t> update_rates,
                                               bool solver_converged);
+
+    /**
+     * @brief Observe one accepted step with an external steady-sample gate.
+     *
+     * @param steady_sample_eligible Whether this step may extend the steady
+     *        window. This does not affect time-step adaptation.
+     */
+    SteadyStateStepStatistics<real_t> observe(real_t time, real_t time_step, real_t maximum_courant_number,
+        SteadyStateUpdateRates<real_t> update_rates, bool solver_converged, bool steady_sample_eligible);
 
     /**
      * @brief Reduce a rejected pseudo-time step without accepting an iteration.
@@ -296,6 +355,12 @@ public:
     static std::string format(const SteadyStateStepStatistics<Scalar>& statistics,
                        const FluidStepStatistics<Scalar>& solver_statistics);
 
+    /** @brief Format progress with optional requested-tolerance diagnostics. */
+    static std::string format(const SteadyStateStepStatistics<Scalar>& statistics,
+        const FluidStepStatistics<Scalar>& solver_statistics,
+        std::optional<std::type_identity_t<Scalar>> requested_linear_tolerance,
+        std::optional<std::type_identity_t<Scalar>> next_requested_linear_tolerance);
+
     static std::string format_retry(int iteration, int retry, int maximum_retries, Scalar time,
                              Scalar time_step, Scalar next_time_step,
                              std::string_view reason);
@@ -311,6 +376,12 @@ public:
     void write(const SteadyStateStepStatistics<Scalar>& statistics,
                const FluidStepStatistics<Scalar>& solver_statistics);
 
+    template<class Scalar>
+    void write(const SteadyStateStepStatistics<Scalar>& statistics,
+        const FluidStepStatistics<Scalar>& solver_statistics,
+        std::optional<std::type_identity_t<Scalar>> requested_linear_tolerance,
+        std::optional<std::type_identity_t<Scalar>> next_requested_linear_tolerance);
+
     template <class Scalar>
     void write_retry(int iteration, int retry, int maximum_retries, Scalar time, Scalar time_step,
                      Scalar next_time_step, std::string_view reason);
@@ -324,6 +395,9 @@ extern template class SteadyStateProgressLineFormatter<real_t>;
 extern template void SteadyStateProgressStream::write<real_t>(
     const SteadyStateStepStatistics<real_t>& statistics,
     const FluidStepStatistics<real_t>& solver_statistics);
+extern template void SteadyStateProgressStream::write<real_t>(const SteadyStateStepStatistics<real_t>& statistics,
+    const FluidStepStatistics<real_t>& solver_statistics, std::optional<real_t> requested_linear_tolerance,
+    std::optional<real_t> next_requested_linear_tolerance);
 extern template void SteadyStateProgressStream::write_retry<real_t>(
     int iteration, int retry, int maximum_retries,
     real_t time, real_t time_step, real_t next_time_step,

@@ -64,6 +64,28 @@ SIMPLEFLUID_PITZ_DT=1e-5 \
   verification/openfoam/pitzDaily/run_simplefluid.sh 6
 ```
 
+Set `SIMPLEFLUID_PITZ_STEADY_STATE=1` to run the adaptive pseudo-transient
+steady-state search. During that search, momentum and turbulence transport
+start with a relaxed `1e-6` linear tolerance and tighten monotonically to the
+final `1e-9` tolerance as the physical update rate falls. The pressure
+projection retains its independent strict tolerance throughout. Override the
+transport schedule with:
+
+```sh
+SIMPLEFLUID_PITZ_STEADY_RELAXED_LINEAR_TOLERANCE=1e-5 \
+SIMPLEFLUID_PITZ_LINEAR_TOLERANCE=1e-9 \
+SIMPLEFLUID_PITZ_STEADY_FULL_ACCURACY_UPDATE_RATIO=10 \
+SIMPLEFLUID_PITZ_STEADY_STATE=1 \
+  verification/openfoam/pitzDaily/run_simplefluid.sh 6
+```
+
+The controller never loosens a tolerance after an accepted step, preserves it
+across rejected attempts, and requires final-tolerance steps before the
+steady-state acceptance window can advance. If the configured final tolerance
+is looser than `1e-6`, the default relaxed tolerance is raised to match it.
+Progress lines report the requested current and next transport tolerances
+separately from the aggregate achieved `linear_tolerance`.
+
 The comparison script selects the SimpleFluid cell layer nearest each OpenFOAM
 sampling station, interpolates the OpenFOAM profile to the SimpleFluid cell
 centres, and reports RMS and maximum errors for `ux` and `uy`. Optional

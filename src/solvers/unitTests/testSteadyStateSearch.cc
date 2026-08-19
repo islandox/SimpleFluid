@@ -16,6 +16,7 @@
 #include "solvers/SteadyStateSearch.hh"
 #include "utils/testing_environment.hh"
 
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -110,6 +111,91 @@ TEST(AdaptiveSteadyStateControllerTest, RampsByCourantAndRequiresSustainedUpdate
     const auto lower_ceiling =
         controller.observe(1.49, 0.09, 0.1, small_updates, true);
     EXPECT_DOUBLE_EQ(lower_ceiling.next_time_step, 0.09);
+}
+
+TEST(AdaptiveLinearToleranceControllerTest, TightensMonotonicallyWithPhysicalUpdates)
+{
+    SimpleFluid::AdaptiveLinearToleranceController controller(SimpleFluid::AdaptiveLinearToleranceOptions{}, 1.0e-2);
+    EXPECT_DOUBLE_EQ(controller.current_linear_tolerance(), 1.0e-6);
+    EXPECT_FALSE(controller.full_accuracy_requested());
+
+    EXPECT_DOUBLE_EQ(controller.observe(100.0, true), 1.0e-6);
+    EXPECT_NEAR(controller.observe(10.0, true), 1.0e-7, 1.0e-20);
+
+    // A rebound in physical updates must not loosen an already tighter solve.
+    EXPECT_NEAR(controller.observe(100.0, true), 1.0e-7, 1.0e-20);
+    EXPECT_FALSE(controller.full_accuracy_requested());
+
+    EXPECT_DOUBLE_EQ(controller.observe(0.1, true), 1.0e-9);
+    EXPECT_DOUBLE_EQ(controller.current_linear_tolerance(), 1.0e-9);
+    EXPECT_TRUE(controller.full_accuracy_requested());
+}
+
+TEST(AdaptiveSteadyStateControllerTest, GatesSteadyWindowWithExternalSampleEligibility)
+{
+    SimpleFluid::SteadyStateSearchOptions options;
+    options.maximum_steps = 5;
+    options.minimum_steps = 1;
+    options.required_consecutive_steps = 2;
+    options.relative_update_tolerance = 1.0e-2;
+    options.minimum_time_step = 1.0e-3;
+    options.maximum_time_step = 1.0;
+
+    SimpleFluid::AdaptiveSteadyStateController controller(options, 1.0e-2);
+    const SimpleFluid::SteadyStateUpdateRates<double> converged_updates{5.0e-3, 4.0e-3, 3.0e-3};
+
+    const auto ineligible = controller.observe(1.0e-2, 1.0e-2, 0.4, converged_updates, true, false);
+    EXPECT_EQ(ineligible.consecutive_converged_steps, 0);
+    EXPECT_FALSE(ineligible.steady);
+    // Eligibility gates only the steady window; Courant adaptation still runs.
+    EXPECT_DOUBLE_EQ(ineligible.next_time_step, 1.5e-2);
+
+    const auto first_eligible = controller.observe(2.5e-2, 1.5e-2, 0.8, converged_updates, true, true);
+    EXPECT_EQ(first_eligible.consecutive_converged_steps, 1);
+    EXPECT_FALSE(first_eligible.steady);
+
+    const auto second_eligible = controller.observe(4.0e-2, 1.5e-2, 0.8, converged_updates, true, true);
+    EXPECT_EQ(second_eligible.consecutive_converged_steps, 2);
+    EXPECT_TRUE(second_eligible.steady);
+}
+
+TEST(AdaptiveLinearToleranceControllerTest, KeepsToleranceWithoutConvergedAcceptedObservation)
+{
+    SimpleFluid::AdaptiveLinearToleranceController linear_controller(
+        SimpleFluid::AdaptiveLinearToleranceOptions{}, 1.0e-4);
+    EXPECT_DOUBLE_EQ(linear_controller.observe(1.0e-6, false), 1.0e-6);
+
+    // A rejected attempt is not observed by the independent tolerance
+    // controller, so reducing pseudo-time cannot change its state.
+    SimpleFluid::AdaptiveSteadyStateController steady_controller({}, 1.0e-3);
+    EXPECT_LT(steady_controller.rejected_time_step(1.0e-3), 1.0e-3);
+    EXPECT_DOUBLE_EQ(linear_controller.current_linear_tolerance(), 1.0e-6);
+}
+
+TEST(AdaptiveLinearToleranceControllerTest, RejectsInvalidControlsAndObservations)
+{
+    SimpleFluid::AdaptiveLinearToleranceOptions options;
+    options.relaxed_tolerance = 1.0e-10;
+    EXPECT_THROW(SimpleFluid::AdaptiveLinearToleranceController(options, 1.0e-4), std::invalid_argument);
+
+    options = {};
+    options.final_tolerance = 0.0;
+    EXPECT_THROW(SimpleFluid::AdaptiveLinearToleranceController(options, 1.0e-4), std::invalid_argument);
+
+    options = {};
+    options.full_accuracy_update_ratio = 0.5;
+    EXPECT_THROW(SimpleFluid::AdaptiveLinearToleranceController(options, 1.0e-4), std::invalid_argument);
+
+    options = {};
+    options.relaxed_tolerance = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(SimpleFluid::AdaptiveLinearToleranceController(options, 1.0e-4), std::invalid_argument);
+
+    options = {};
+    EXPECT_THROW(SimpleFluid::AdaptiveLinearToleranceController(options, 0.0), std::invalid_argument);
+
+    SimpleFluid::AdaptiveLinearToleranceController controller(options, 1.0e-4);
+    EXPECT_THROW(controller.observe(-1.0, true), std::invalid_argument);
+    EXPECT_THROW(controller.observe(std::numeric_limits<double>::quiet_NaN(), true), std::invalid_argument);
 }
 
 TEST(AdaptiveSteadyStateControllerTest, RejectsInvalidControlsAndObservations)
@@ -277,11 +363,42 @@ TEST(SteadyStateProgressLineFormatterTest, FormatsAdaptiveAndPhysicalDiagnostics
     using Formatter = SimpleFluid::SteadyStateProgressLineFormatter<double>;
     const auto line = Formatter::format(statistics, solver_statistics);
 
+    EXPECT_EQ(line, "steady_step=3/20 time=7.000000e-01 dt=2.000000e-01 "
+                    "next_dt=2.500000e-01 max_Co=6.000000e-01 "
+                    "update_rates(U=1.000000e-03,T=2.000000e-03,"
+                    "turbulence=3.000000e-03,max=3.000000e-03) "
+                    "steady_window=2/4 steady=no linear_converged=yes "
+                    "krylov_iterations=17 linear_tolerance=1.000000e-09");
+
     EXPECT_NE(line.find("steady_step=3/20"), std::string::npos);
     EXPECT_NE(line.find("max_Co=6.000000e-01"), std::string::npos);
     EXPECT_NE(line.find("steady_window=2/4"), std::string::npos);
     EXPECT_NE(line.find("turbulence=3.000000e-03"), std::string::npos);
     EXPECT_NE(line.find("krylov_iterations=17"), std::string::npos);
+    EXPECT_NE(line.find("linear_tolerance=1.000000e-09"), std::string::npos);
+    EXPECT_EQ(line.find("requested_linear_tolerance="), std::string::npos);
+    EXPECT_EQ(line.find("next_requested_linear_tolerance="), std::string::npos);
+
+    const auto adaptive_line =
+        Formatter::format(statistics, solver_statistics, 1.0e-6, 1.0e-7);
+    EXPECT_NE(adaptive_line.find("linear_tolerance=1.000000e-09"), std::string::npos);
+    EXPECT_NE(adaptive_line.find("requested_linear_tolerance=1.000000e-06"), std::string::npos);
+    EXPECT_NE(adaptive_line.find("next_requested_linear_tolerance=1.000000e-07"), std::string::npos);
+
+    const auto requested_only =
+        Formatter::format(statistics, solver_statistics, std::optional<double>{1.0e-6}, std::nullopt);
+    EXPECT_NE(requested_only.find("requested_linear_tolerance="), std::string::npos);
+    EXPECT_EQ(requested_only.find("next_requested_linear_tolerance="), std::string::npos);
+
+    std::ostringstream legacy_output;
+    SimpleFluid::SteadyStateProgressStream legacy_progress(legacy_output);
+    legacy_progress.write(statistics, solver_statistics);
+    EXPECT_EQ(legacy_output.str(), line + '\n');
+
+    std::ostringstream output;
+    SimpleFluid::SteadyStateProgressStream progress(output);
+    progress.write(statistics, solver_statistics, 1.0e-6, 1.0e-7);
+    EXPECT_NE(output.str().find("next_requested_linear_tolerance=1.000000e-07"), std::string::npos);
 
     const auto retry_line =
         Formatter::format_retry(4, 1, 3, 0.7, 0.2, 0.1, "transport did not converge");

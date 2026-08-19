@@ -634,7 +634,8 @@ int main(int argc, char** argv)
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 500;
-    linear_options.tolerance = 1.0e-9;
+    linear_options.tolerance =
+        positive_environment_real("SIMPLEFLUID_PITZ_LINEAR_TOLERANCE", 1.0e-9);
 
     Solver solver(mesh, std::move(boundary_conditions), time_options, linear_options, 1.0);
 
@@ -652,6 +653,7 @@ int main(int argc, char** argv)
     std::optional<std::string> steady_state_failure;
     int rejected_steady_steps = 0;
     std::optional<SimpleFluid::SteadyStateStepStatistics<SimpleFluid::real_t>> final_steady_statistics;
+    std::optional<SimpleFluid::real_t> last_requested_transport_linear_tolerance;
     if (!search_for_steady_state)
     {
         SimpleFluid::ProgressStream progress(std::cout);
@@ -681,9 +683,22 @@ int main(int argc, char** argv)
             positive_environment_real("SIMPLEFLUID_PITZ_STEADY_DT_REDUCTION", 0.5);
         steady_options.rejection_time_step_safety_factor =
             positive_environment_real("SIMPLEFLUID_PITZ_STEADY_REJECTION_SAFETY", 0.9);
+        SimpleFluid::AdaptiveLinearToleranceOptions adaptive_linear_options;
+        adaptive_linear_options.final_tolerance = linear_options.tolerance;
+        adaptive_linear_options.relaxed_tolerance = positive_environment_real(
+            "SIMPLEFLUID_PITZ_STEADY_RELAXED_LINEAR_TOLERANCE",
+            std::max(1.0e-6, adaptive_linear_options.final_tolerance));
+        adaptive_linear_options.full_accuracy_update_ratio = positive_environment_real(
+            "SIMPLEFLUID_PITZ_STEADY_FULL_ACCURACY_UPDATE_RATIO", 10.0);
         const int progress_interval = positive_environment_integer("SIMPLEFLUID_PITZ_STEADY_PROGRESS_INTERVAL", 1);
 
         SimpleFluid::AdaptiveSteadyStateController controller(steady_options, time_step);
+        SimpleFluid::AdaptiveLinearToleranceController linear_tolerance_controller(
+            adaptive_linear_options, steady_options.relative_update_tolerance);
+        auto adaptive_transport_linear_options = solver.linear_solver_options();
+        adaptive_transport_linear_options.tolerance =
+            linear_tolerance_controller.current_linear_tolerance();
+        solver.set_linear_solver_options(adaptive_transport_linear_options);
         SimpleFluid::SteadyStateFieldMonitor<Pack> monitor(
             solver.velocity().mesh_ptr(), 0.0, steady_options.update_scales);
         const auto* epsilon = turbulence.dissipation_rate();
@@ -704,11 +719,19 @@ int main(int argc, char** argv)
                       << " rejection_recovery_steps=" << steady_options.rejection_recovery_steps
                       << " rejection_safety=" << steady_options.rejection_time_step_safety_factor
                       << " target_Co=" << steady_options.target_courant_number << " dt_range=["
-                      << steady_options.minimum_time_step << ',' << steady_options.maximum_time_step << "]\n";
+                      << steady_options.minimum_time_step << ',' << steady_options.maximum_time_step << ']'
+                      << " transport_linear_tolerance=" << adaptive_linear_options.relaxed_tolerance << "->"
+                      << adaptive_linear_options.final_tolerance
+                      << " full_accuracy_update_ratio=" << adaptive_linear_options.full_accuracy_update_ratio
+                      << " pressure_linear_tolerance=" << solver.pressure_linear_solver_options().tolerance << '\n';
         }
 
         for (int iteration = 0; iteration < steady_options.maximum_steps; ++iteration)
         {
+            const auto requested_transport_linear_tolerance =
+                linear_tolerance_controller.current_linear_tolerance();
+            const bool steady_sample_eligible =
+                linear_tolerance_controller.full_accuracy_requested();
             SimpleFluid::real_t accepted_time_step{};
             bool accepted = false;
             int retries = 0;
@@ -751,17 +774,27 @@ int main(int argc, char** argv)
             }
 
             const auto update_rates = monitor.observe(accepted_time_step);
+            const bool solver_converged = solver.last_step_statistics().converged;
+            const auto next_requested_transport_linear_tolerance =
+                linear_tolerance_controller.observe(
+                    static_cast<SimpleFluid::real_t>(update_rates.maximum()), solver_converged);
             const auto statistics =
                 controller.observe(solver.time(), accepted_time_step, solver.maximum_courant_number(),
                     {static_cast<SimpleFluid::real_t>(update_rates.velocity),
                         static_cast<SimpleFluid::real_t>(update_rates.temperature),
                         static_cast<SimpleFluid::real_t>(update_rates.turbulence)},
-                    solver.last_step_statistics().converged);
+                    solver_converged, steady_sample_eligible);
             final_steady_statistics = statistics;
+            last_requested_transport_linear_tolerance = requested_transport_linear_tolerance;
+            adaptive_transport_linear_options.tolerance =
+                next_requested_transport_linear_tolerance;
+            solver.set_linear_solver_options(adaptive_transport_linear_options);
             if (rank == 0 &&
                 (statistics.iteration == 1 || statistics.steady || statistics.iteration % progress_interval == 0))
             {
-                progress.write(statistics, solver.last_step_statistics());
+                progress.write(statistics, solver.last_step_statistics(),
+                    requested_transport_linear_tolerance,
+                    next_requested_transport_linear_tolerance);
             }
             if (statistics.steady)
             {
@@ -793,6 +826,11 @@ int main(int argc, char** argv)
                           << ", final_update_rate=" << statistics.update_rates.maximum()
                           << ", final_max_Co=" << statistics.maximum_courant_number
                           << ", final_dt=" << statistics.time_step;
+                if (last_requested_transport_linear_tolerance)
+                {
+                    std::cout << ", last_transport_linear_tolerance="
+                              << *last_requested_transport_linear_tolerance;
+                }
             }
             else
             {
