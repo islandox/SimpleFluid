@@ -7,10 +7,12 @@ inlet, `1e-5 m2/s` kinematic viscosity, standard k-epsilon closure, inlet
 `k=0.375 m2/s2`, and inlet `epsilon=14.855 m2/s3`. The checked-in OpenFOAM
 case adds vertical velocity samples at `x=0.05`, `0.10`, and `0.20 m`.
 
-The SimpleFluid executable uses the same duct outline and boundary names. Its
-mesh has the same five connected blocks but uses uniform block spacing and is
-coarsened from the tutorial by a factor of four in each in-plane direction by
-default. Set `SIMPLEFLUID_PITZ_MESH_DIVISOR=1` for the tutorial cell counts.
+The SimpleFluid executable uses the same duct outline, boundary names, five
+connected blocks, and OpenFOAM `simpleGrading`/`edgeGrading` distributions.
+This includes wall-normal clustering through the upper duct and a graded shear
+layer downstream of the step. The mesh is coarsened from the tutorial by a
+factor of four in each in-plane direction by default. Set
+`SIMPLEFLUID_PITZ_MESH_DIVISOR=1` for the tutorial cell counts and grading.
 
 ## Run
 
@@ -147,10 +149,11 @@ adjacent-cell epsilon and production constraints with the v2606 default
 `lowReCorrection false`. The front/back `empty` planes are
 represented as slip planes in the one-cell-thick SimpleFluid mesh.
 
-The wall model is now aligned, but the cases still differ in mesh spacing,
-time integration versus a steady solve, pressure-velocity iteration, and
-discretization details. This remains an end-to-end comparison rather than a
-claim of identical numerical solutions. OpenFOAM pressure is kinematic;
+The wall model and block grading are now aligned, but the cases still differ in
+mesh implementation, time integration versus a steady solve,
+pressure-velocity iteration, and discretization details. This remains an
+end-to-end comparison rather than a claim of identical numerical solutions.
+OpenFOAM pressure is kinematic;
 SimpleFluid uses a reference density of `1 kg/m3`, making pressure numerically
 comparable, while the automated profile comparison intentionally evaluates
 velocity only.
