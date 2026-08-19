@@ -98,6 +98,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME NativeUnstructuredPhysicalBoussinesq_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testBoussinesqSolver>"
+            "--gtest_filter=BoussinesqSolverTest.NativePhysicalModelsRunCoupledKrylovOnPartitionedUnstructuredMesh")
+  set_tests_properties(NativeUnstructuredPhysicalBoussinesq_2procs PROPERTIES
+    LABELS "mpi;boussinesq;physical_models;pressure_velocity;unstructured"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME TurbulentBoussinesq_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
@@ -109,6 +120,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME CombinedTurbulentReactionSource_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testTurbulentBoussinesqSolver>"
+            "--gtest_filter=TurbulentBoussinesqSolverTest.CouplesShearedRansShengTransportPrescribedHeatAndDensityFeedbackOnTwoRanks")
+  set_tests_properties(CombinedTurbulentReactionSource_2procs PROPERTIES
+    LABELS "mpi;turbulence;reaction_source;physical_models;pressure_velocity;acceptance"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME ScalarGroupNonOrthogonalConservation_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
@@ -116,6 +138,28 @@ if(MPIEXEC_EXECUTABLE
             "--gtest_filter=ScalarSourceDecayTransportTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection")
   set_tests_properties(ScalarGroupNonOrthogonalConservation_2procs PROPERTIES
     LABELS "mpi;scalar_groups"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME ScalarGroupAdvectionConservation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPhase13PlusModels>"
+            "--gtest_filter=ScalarSourceDecayTransportTest.LiquidAdvectionConservesDistributedInventory:ScalarSourceDecayTransportTest.CollectivelyRejectsRankDivergentAdvanceSelection")
+  set_tests_properties(ScalarGroupAdvectionConservation_2procs PROPERTIES
+    LABELS "mpi;scalar_groups;transport"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME ScalarGroupCollectiveConfiguration_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPhase13PlusModels>"
+            "--gtest_filter=ScalarSourceDecayTransportTest.CollectivelyRejectsRankDivergentConfigurationAndPower:ScalarSourceDecayTransportTest.SolverRejectsRankDivergentScalarGroupPresenceBeforeStep")
+  set_tests_properties(ScalarGroupCollectiveConfiguration_2procs PROPERTIES
+    LABELS "mpi;scalar_groups;validation"
     PROCESSORS 2
     TIMEOUT 120)
 

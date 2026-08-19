@@ -129,6 +129,30 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
     }
 }
 
+/** @brief Semi-structured handles enforce their documented serial contract. */
+TEST(MeshHandleTest, SemiStructuredConstructionIsSerialOnly)
+{
+    const auto mesh = std::make_shared<SemiStructured>(
+        SimpleFluid::Arr<SemiStructured::Vec3>{
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0}},
+        SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}},
+        SimpleFluid::ArrReal{0.0, 1.0});
+    const auto communicator = Tpetra::getDefaultComm();
+
+    if (communicator->getSize() == 1)
+    {
+        EXPECT_NO_THROW(static_cast<void>(Handle(mesh)));
+    }
+    else
+    {
+        EXPECT_THROW(
+            static_cast<void>(Handle(mesh)),
+            std::runtime_error);
+    }
+}
+
 /**
  * @brief Verifies wrapping a legacy STK mesh preserves maps, connectivity,
  * and geometric queries.

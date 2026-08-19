@@ -12,6 +12,7 @@
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_Array.hpp>
@@ -41,6 +42,22 @@ SimpleFluid::SP<const Handle> make_cartesian_handle()
     auto mesh = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0, 3.0}, {0.0, 1.0, 2.0, 3.0}, {0.0, 1.0, 2.0, 3.0}}});
     return std::make_shared<Handle>(std::move(mesh));
+}
+
+SimpleFluid::SP<const Handle> make_cartesian_line_handle()
+{
+    auto mesh = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0, 2.0, 3.0},
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+    return std::make_shared<Handle>(std::move(mesh));
+}
+
+SimpleFluid::SP<const Handle> make_unstructured_handle()
+{
+    return std::make_shared<Handle>(
+        SimpleFluid::test::make_unstructured_hex_line(3));
 }
 
 SimpleFluid::SP<const Handle> make_semi_structured_handle()
@@ -468,6 +485,71 @@ TEST(FieldStoredOperatorsTest, SupportsOrthogonalMeshHandle)
     expect_constant_velocity_fluxes(mesh);
     expect_stored_matrix_operators(mesh);
     expect_pressure_weighted_stored_fluxes(mesh);
+}
+
+/** @brief Native unstructured operators match an equivalent Cartesian line. */
+TEST(FieldStoredOperatorsTest,
+     SupportsUnstructuredMeshHandleWithCartesianOperatorParity)
+{
+    const auto unstructured = make_unstructured_handle();
+    const auto cartesian = make_cartesian_line_handle();
+
+    ASSERT_FALSE(unstructured->legacy_mesh());
+    ASSERT_EQ(
+        unstructured->num_owned_cells(),
+        cartesian->num_owned_cells());
+    ASSERT_EQ(
+        unstructured->num_local_cells(),
+        cartesian->num_local_cells());
+
+    expect_constant_velocity_fluxes(unstructured);
+    expect_stored_matrix_operators(unstructured);
+    expect_pressure_weighted_stored_fluxes(unstructured);
+
+    auto boundary_condition = [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.25};
+    };
+    auto source = [](Pack::local_ordinal_type cell_lid)
+    {
+        return 0.5 + static_cast<double>(cell_lid);
+    };
+    const auto unstructured_system =
+        SimpleFluid::FVM::diffusion_system<Pack>(
+            *unstructured, 0.7, boundary_condition, source);
+    const auto cartesian_system =
+        SimpleFluid::FVM::diffusion_system<Pack>(
+            *cartesian, 0.7, boundary_condition, source);
+
+    for (size_t row = 0;
+         row < unstructured->num_owned_cells();
+         ++row)
+    {
+        const auto row_lid =
+            static_cast<Pack::local_ordinal_type>(row);
+        EXPECT_NEAR(
+            unstructured_system.rhs->getData()[row],
+            cartesian_system.rhs->getData()[row],
+            1.0e-12);
+        for (size_t column = 0;
+             column < unstructured->num_local_cells();
+             ++column)
+        {
+            const auto column_lid =
+                static_cast<Pack::local_ordinal_type>(column);
+            EXPECT_NEAR(
+                stored_matrix_entry(
+                    *unstructured_system.matrix,
+                    row_lid,
+                    column_lid),
+                stored_matrix_entry(
+                    *cartesian_system.matrix,
+                    row_lid,
+                    column_lid),
+                1.0e-12);
+        }
+    }
 }
 
 /** @brief Covers static dispatch through PartitionedMesh and FieldStored. */

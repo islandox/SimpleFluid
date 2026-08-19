@@ -257,14 +257,18 @@ public:
 
     /**
      * @brief Configure delayed-neutron scalar_group groups from explicit options.
+     * @note Invoke collectively on every mesh rank.
      */
     scalar_group_model_type& configure_scalar_groups(const ScalarSourceDecayOptions& options);
     /**
      * @brief Configure delayed-neutron scalar_group groups from database keys.
+     * @note Invoke collectively on every mesh rank.
      */
     scalar_group_model_type& configure_scalar_groups(const Database& database);
     /**
      * @brief Remove the optional scalar_group model, if present.
+     * @note Invoke consistently on every mesh rank. A later step rejects a
+     *       rank-divergent scalar_group state collectively.
      */
     bool remove_scalar_group_model() noexcept;
     /**

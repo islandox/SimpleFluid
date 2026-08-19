@@ -33,4 +33,15 @@ if(MPIEXEC_EXECUTABLE
     LABELS "mpi;non_orthogonal;field_stored"
     PROCESSORS 2
     TIMEOUT 120)
+
+  add_test(
+    NAME ScalarTransportDiscretizationValidation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testScalarTransportDiscretization>"
+            "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively")
+  set_tests_properties(ScalarTransportDiscretizationValidation_2procs PROPERTIES
+    LABELS "mpi;scalar_transport"
+    PROCESSORS 2
+    TIMEOUT 120)
 endif()

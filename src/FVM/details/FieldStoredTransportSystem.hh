@@ -8,6 +8,7 @@
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
+#include "FVM/ScalarTransportDiscretization.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "fields/FieldStored.hh"
 
@@ -841,12 +842,22 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
     std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
     const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context)
+    FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
+    ScalarTransportDiscretization discretization,
+    const ScalarCellFieldStored<Pack, MeshType>* older_values)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_values.mesh();
+    const auto older_field_state =
+        older_values == nullptr
+            ? 0
+            : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
+    validate_scalar_transport_discretization(
+        mesh, discretization, older_field_state, context);
+    const auto transient_coefficients =
+        scalar_transient_coefficients<scalar_type>(discretization.time);
     const auto weights = validate_stored_non_orthogonal_selection<Pack>(mesh, treatment, correction_field, context);
 
     int invalid_boundary_cache = 0;
@@ -934,16 +945,81 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     auto boundary_face_diffusivity = [&](int batch_id, size_t in_batch_id, scalar_type owner_value)
     { return boundary_coefficient<Pack>(boundary_diffusivity, batch_id, in_batch_id, owner_value); };
 
-    std::vector<std::optional<scalar_type>> fixed_values(mesh.num_owned_cells());
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    std::vector<scalar_type> sink_values(
+        mesh.num_owned_cells(), scalar_type{});
+    std::vector<std::optional<scalar_type>> fixed_values(
+        mesh.num_owned_cells());
+    std::vector<scalar_type> source_values(
+        mesh.num_owned_cells(), scalar_type{});
+    int invalid_sink = 0;
+    int invalid_fixed_value = 0;
+    int invalid_source = 0;
+    std::exception_ptr local_callback_error;
+    try
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto fixed = fixed_cell_value ? fixed_cell_value(cell_lid) : std::optional<scalar_type>{};
-        if (fixed && !std::isfinite(*fixed))
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
         {
-            throw std::invalid_argument(prefix + " requires finite fixed-cell values.");
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto fixed = fixed_cell_value
+                ? fixed_cell_value(cell_lid)
+                : std::optional<scalar_type>{};
+            invalid_fixed_value = invalid_fixed_value
+                || (fixed.has_value() && !std::isfinite(*fixed));
+            fixed_values[owned] = fixed;
         }
-        fixed_values[owned] = fixed;
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto sink = implicit_sink
+                ? implicit_sink(cell_lid)
+                : scalar_type{};
+            const auto source_value = source(cell_lid);
+            invalid_sink = invalid_sink
+                || !std::isfinite(sink)
+                || sink < scalar_type{};
+            invalid_source = invalid_source
+                || !std::isfinite(source_value);
+            sink_values[owned] = sink;
+            source_values[owned] = source_value;
+        }
+    }
+    catch (...)
+    {
+        local_callback_error = std::current_exception();
+    }
+    const auto callback_validation =
+        reduce_stored_validation_state<Pack>(
+            mesh,
+            std::array<int, 4>{
+                local_callback_error ? 1 : 0,
+                invalid_sink,
+                invalid_fixed_value,
+                invalid_source});
+    if (callback_validation[0] != 0)
+    {
+        if (local_callback_error)
+        {
+            std::rethrow_exception(local_callback_error);
+        }
+        throw std::runtime_error(
+            prefix + " callback failed on another rank.");
+    }
+    if (callback_validation[1] != 0)
+    {
+        throw std::invalid_argument(
+            prefix + " requires a finite non-negative implicit sink.");
+    }
+    if (callback_validation[2] != 0)
+    {
+        throw std::invalid_argument(
+            prefix + " requires finite fixed-cell values.");
+    }
+    if (callback_validation[3] != 0)
+    {
+        throw std::invalid_argument(
+            prefix + " requires finite source values.");
     }
 
     std::vector<AffineLeastSquaresGradientStencil<MeshType>> gradient_stencils;
@@ -961,6 +1037,19 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         evaluate_stored_scalar_gradients(lagged, gradient_stencils, *partition_gradients);
     }
 
+    std::unique_ptr<VectorCellFieldStored<Pack, MeshType>>
+        convection_gradients;
+    if (discretization.convection
+        == ScalarConvectionScheme::BoundedLinearUpwind)
+    {
+        convection_gradients =
+            std::make_unique<VectorCellFieldStored<Pack, MeshType>>(
+                old_values.mesh_ptr(),
+                "stored_bounded_linear_upwind_gradient");
+        evaluate_stored_scalar_gradients(
+            old_values, gradient_stencils, *convection_gradients);
+    }
+
     auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
     FlatMatrixRow<local_ordinal_type, scalar_type> row_values(mesh.num_local_cells(), 64);
     std::vector<StoredTransportMatrixRow<Pack>> rows;
@@ -973,15 +1062,23 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         const auto cell_storage = storage_value(cell_lid);
         const auto cell_advection = advection_value(cell_lid);
         const auto transient = cell_storage * volume / time_step;
-        const auto sink = implicit_sink ? implicit_sink(cell_lid) : scalar_type{};
-        if (!std::isfinite(sink) || sink < scalar_type{})
-        {
-            throw std::invalid_argument(prefix + " requires a finite non-negative implicit sink.");
-        }
+        const auto sink = sink_values[owned];
 
         row_values.clear();
-        add_matrix_entry(row_values, cell_lid, transient + volume * sink);
-        auto rhs_value = transient * old_values.local_value(cell_lid) + volume * source(cell_lid);
+        add_matrix_entry(
+            row_values,
+            cell_lid,
+            transient_coefficients.diagonal * transient
+                + volume * sink);
+        auto rhs_value = transient
+                           * (transient_coefficients.previous
+                                  * old_values.local_value(cell_lid)
+                              + transient_coefficients.older
+                                  * (older_values == nullptr
+                                         ? scalar_type{}
+                                         : older_values->local_value(
+                                               cell_lid)))
+                       + volume * source_values[owned];
 
         auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
                                               scalar_type face_diffusivity,
@@ -1031,6 +1128,30 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                     rhs_value -=
                         outward_flux * cell_advection * boundary_value(location.batch_id, location.in_batch_id);
                 }
+            }
+
+            if (is_interior && convection_gradients != nullptr)
+            {
+                const auto upwind = outward_flux >= scalar_type{}
+                    ? cell_lid
+                    : other;
+                const auto downwind = outward_flux >= scalar_type{}
+                    ? other
+                    : cell_lid;
+                const auto upwind_value =
+                    old_values.local_value(upwind);
+                const auto face_value =
+                    bounded_linear_upwind_face_value(
+                        upwind_value,
+                        old_values.local_value(downwind),
+                        convection_gradients->local_value(upwind),
+                        mesh.face_centroid(face_lid)
+                            - mesh.cell_centroid(upwind));
+                rhs_value += deferred_convection_rhs_correction(
+                    outward_flux,
+                    advection_value(upwind),
+                    upwind_value,
+                    face_value);
             }
 
             if (is_interior)
@@ -1151,7 +1272,9 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
     std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
     std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
     const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation)
+    FaceCoefficientInterpolation coefficient_interpolation,
+    ScalarTransportDiscretization discretization,
+    const ScalarCellFieldStored<Pack, MeshType>* older_values)
 {
     const auto incompatible_fields = old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
                                              old_values.mesh_ptr().get() != storage_weight.mesh_ptr().get() ||
@@ -1166,7 +1289,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
         diffusion, std::move(boundary_condition), std::move(boundary_value), std::move(source), treatment,
         correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
         boundary_diffusivity, geometry_cache, coefficient_interpolation, incompatible_fields,
-        "weighted_scalar_transport_system");
+        "weighted_scalar_transport_system", discretization, older_values);
 }
 
 /** Assemble mapped conservative physical temperature transport. */
@@ -1181,7 +1304,9 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     BoundaryValue boundary_value, Source power_density, NonOrthogonalTreatment treatment,
     const ScalarCellFieldStored<Pack, MeshType>* correction_field,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, const BoundaryCache* boundary_thermal_conductivity,
-    const GeometryCache* geometry_cache, FaceCoefficientInterpolation coefficient_interpolation)
+    const GeometryCache* geometry_cache, FaceCoefficientInterpolation coefficient_interpolation,
+    ScalarTransportDiscretization discretization,
+    const ScalarCellFieldStored<Pack, MeshType>* older_temperature)
 {
     const auto incompatible_fields =
         old_temperature.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
@@ -1197,7 +1322,8 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, capacity,
         capacity, conductivity, std::move(boundary_condition), std::move(boundary_value), std::move(power_density),
         treatment, correction_field, std::move(cached_matrix), {}, {}, boundary_thermal_conductivity, geometry_cache,
-        coefficient_interpolation, incompatible_fields, "physical_temperature_transport_system");
+        coefficient_interpolation, incompatible_fields, "physical_temperature_transport_system", discretization,
+        older_temperature);
 }
 
 template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>
