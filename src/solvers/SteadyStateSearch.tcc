@@ -83,6 +83,29 @@ void SteadyStateFieldMonitor<Pack>::initialize(
 
 template <TpetraTypePack Pack>
 void SteadyStateFieldMonitor<Pack>::initialize(
+    const velocity_field_type& velocity,
+    std::vector<const field_type*> additional_scalar_fields)
+{
+    require_field_mesh(velocity, "velocity");
+    for (const auto* field : additional_scalar_fields)
+    {
+        if (field == nullptr)
+        {
+            throw std::invalid_argument(
+                "Steady-state additional field cannot be null.");
+        }
+        require_field_mesh(*field, "additional scalar field");
+    }
+
+    d_velocity = &velocity;
+    d_temperature = nullptr;
+    d_additional_scalar_fields = std::move(additional_scalar_fields);
+    capture_current_state();
+    d_initialized = true;
+}
+
+template <TpetraTypePack Pack>
+void SteadyStateFieldMonitor<Pack>::initialize(
     const stored_velocity_field_type& velocity,
     const stored_field_type& temperature,
     std::vector<stored_additional_field_type> additional_scalar_fields)
@@ -108,6 +131,30 @@ void SteadyStateFieldMonitor<Pack>::initialize(
 }
 
 template <TpetraTypePack Pack>
+void SteadyStateFieldMonitor<Pack>::initialize(
+    const stored_velocity_field_type& velocity,
+    std::vector<stored_additional_field_type> additional_scalar_fields)
+{
+    if (!d_stored_mesh)
+    {
+        throw std::invalid_argument(
+            "Steady-state FieldStored fields require a MeshHandle monitor.");
+    }
+    require_field_mesh(velocity, "velocity");
+    for (const auto& field : additional_scalar_fields)
+    {
+        require_field_mesh(field, "additional scalar field");
+    }
+
+    d_stored_velocity = &velocity;
+    d_stored_temperature = nullptr;
+    d_stored_additional_scalar_fields =
+        std::move(additional_scalar_fields);
+    capture_current_state();
+    d_initialized = true;
+}
+
+template <TpetraTypePack Pack>
 SteadyStateUpdateRates<typename Pack::scalar_type>
 SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
 {
@@ -125,9 +172,9 @@ SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
     {
         return observe_fields(
             time_step, *d_stored_mesh, *d_stored_velocity,
-            *d_stored_temperature, d_stored_additional_scalar_fields);
+            d_stored_temperature, d_stored_additional_scalar_fields);
     }
-    return observe_fields(time_step, *d_mesh, *d_velocity, *d_temperature,
+    return observe_fields(time_step, *d_mesh, *d_velocity, d_temperature,
                           d_additional_scalar_fields);
 }
 
@@ -139,13 +186,12 @@ SteadyStateFieldMonitor<Pack>::observe_fields(
     scalar_type time_step,
     const MeshType& mesh,
     const VelocityField& velocity,
-    const TemperatureField& temperature,
+    const TemperatureField* temperature,
     const AdditionalFields& additional_scalar_fields)
 {
     const size_t field_count = additional_scalar_fields.size();
     std::vector<scalar_type> local_sums(5 + 2 * field_count, scalar_type{});
     const auto velocity_values = velocity.owned_read_view();
-    const auto temperature_values = temperature.owned_read_view();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -166,13 +212,27 @@ SteadyStateFieldMonitor<Pack>::observe_fields(
         }
         local_sums[1] += velocity_delta_squared * volume;
         local_sums[2] += velocity_state_squared * volume;
+    }
 
-        const auto current_temperature = temperature_values(cell, 0);
-        const auto temperature_delta = current_temperature - d_previous_temperature[owned];
-        const auto relative_temperature = current_temperature - d_reference_temperature;
-        local_sums[3] += temperature_delta * temperature_delta * volume;
-        local_sums[4] += relative_temperature * relative_temperature * volume;
-        d_previous_temperature[owned] = current_temperature;
+    if (temperature != nullptr)
+    {
+        const auto temperature_values = temperature->owned_read_view();
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            const auto volume =
+                static_cast<scalar_type>(mesh.cell_volume(cell));
+            const auto current_temperature = temperature_values(cell, 0);
+            const auto temperature_delta =
+                current_temperature - d_previous_temperature[owned];
+            const auto relative_temperature =
+                current_temperature - d_reference_temperature;
+            local_sums[3] +=
+                temperature_delta * temperature_delta * volume;
+            local_sums[4] +=
+                relative_temperature * relative_temperature * volume;
+            d_previous_temperature[owned] = current_temperature;
+        }
     }
 
     for (size_t field_id = 0; field_id < field_count; ++field_id)
@@ -226,7 +286,11 @@ SteadyStateFieldMonitor<Pack>::observe_fields(
 
     SteadyStateUpdateRates<scalar_type> rates;
     rates.velocity = relative_rate(global_sums[1], global_sums[2], d_scales.velocity);
-    rates.temperature = relative_rate(global_sums[3], global_sums[4], d_scales.temperature);
+    if (temperature != nullptr)
+    {
+        rates.temperature = relative_rate(
+            global_sums[3], global_sums[4], d_scales.temperature);
+    }
     for (size_t field_id = 0; field_id < field_count; ++field_id)
     {
         rates.turbulence = std::max(rates.turbulence, relative_rate(global_sums[5 + 2 * field_id],
@@ -318,11 +382,11 @@ void SteadyStateFieldMonitor<Pack>::capture_current_state()
     if (d_stored_mesh)
     {
         capture_current_state(
-            *d_stored_mesh, *d_stored_velocity, *d_stored_temperature,
+            *d_stored_mesh, *d_stored_velocity, d_stored_temperature,
             d_stored_additional_scalar_fields);
         return;
     }
-    capture_current_state(*d_mesh, *d_velocity, *d_temperature,
+    capture_current_state(*d_mesh, *d_velocity, d_temperature,
                           d_additional_scalar_fields);
 }
 
@@ -332,17 +396,17 @@ template<class MeshType, class VelocityField, class TemperatureField,
 void SteadyStateFieldMonitor<Pack>::capture_current_state(
     const MeshType& mesh,
     const VelocityField& velocity,
-    const TemperatureField& temperature,
+    const TemperatureField* temperature,
     const AdditionalFields& additional_scalar_fields)
 {
     const auto owned_cells = mesh.num_owned_cells();
     d_previous_velocity.assign(3 * owned_cells, scalar_type{});
-    d_previous_temperature.assign(owned_cells, scalar_type{});
+    d_previous_temperature.assign(
+        temperature == nullptr ? 0 : owned_cells, scalar_type{});
     d_previous_additional_fields.assign(additional_scalar_fields.size(),
                                         std::vector<scalar_type>(owned_cells, scalar_type{}));
 
     const auto velocity_values = velocity.owned_read_view();
-    const auto temperature_values = temperature.owned_read_view();
     for (size_t owned = 0; owned < owned_cells; ++owned)
     {
         const auto cell = static_cast<local_ordinal_type>(owned);
@@ -350,7 +414,15 @@ void SteadyStateFieldMonitor<Pack>::capture_current_state(
         {
             d_previous_velocity[3 * owned + component] = velocity_values(cell, component);
         }
-        d_previous_temperature[owned] = temperature_values(cell, 0);
+    }
+    if (temperature != nullptr)
+    {
+        const auto temperature_values = temperature->owned_read_view();
+        for (size_t owned = 0; owned < owned_cells; ++owned)
+        {
+            d_previous_temperature[owned] = temperature_values(
+                static_cast<local_ordinal_type>(owned), 0);
+        }
     }
     for (size_t field_id = 0; field_id < additional_scalar_fields.size(); ++field_id)
     {
