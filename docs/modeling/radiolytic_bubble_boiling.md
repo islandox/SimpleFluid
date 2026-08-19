@@ -109,9 +109,11 @@ For each Boussinesq step:
    void into the scalar publication field. The mirror derives `S_alpha_total`
    from its actual old/new published state.
 7. Advance the conserved delayed-neutron precursor inventories
-   `alpha_l * C_i`, apply zero-flux diffusion with coefficient
-   `alpha_l * precursor_effective_diffusivity`, and reconstruct `C_i` from
-   the updated liquid fraction.
+   `alpha_l * C_i` with the projected liquid face flux, apply zero-flux
+   diffusion with coefficient `alpha_l * precursor_effective_diffusivity`,
+   integrate constant source and decay exactly, and reconstruct `C_i` from the
+   updated liquid fraction. Each group records globally reduced source, decay,
+   boundary-outflow, transport-positivity, and balance diagnostics.
 8. Refresh feedback material fields for output and the next step.
 
 ## Output Fields
@@ -128,16 +130,27 @@ Use `SolutionOutputOptions`:
 
 ## Feedback Mapping
 
-The Phase 20 interface is currently an in-memory utility layer, not a coupled
-neutronics driver. `FeedbackMap::volume_weighted_average` maps owned CFD cells
-into named feedback cells by volume-weighted averaging. Multiplying the mapped
-average by the mapped cell volume preserves the original scalar volume
-integral for coarsened cells. `FeedbackMap::import_power_density` copies an
-externally supplied owned-cell `qdot_fission` vector into a cell field after
-checking size, finiteness, and non-negativity.
+The Phase 20 interface is an in-memory coupling scaffold, not a production
+external-neutronics driver. `FeedbackMap::volume_weighted_average` maps owned
+CFD cells into named feedback cells by volume-weighted averaging. Multiplying
+the mapped average by the mapped cell volume preserves the original scalar
+volume integral for coarsened cells. `FeedbackMap::import_power_density`
+copies an externally supplied owned-cell `qdot_fission` vector into a cell
+field after checking size, finiteness, and non-negativity.
 
-Field registries, file export, and an outer neutronics/thermal-hydraulics
-iteration driver are intentionally deferred.
+`FeedbackFieldRegistry` references legacy or native scalar fields on one mesh
+and provides named registration for `T_liquid`, `alpha_g`, `rhoFeedback`, and
+one or more `C_i` fields. It exports deterministic `MappedFeedbackSnapshot`
+objects with stable field and coarse-cell ordering. The callback-driven
+`PlaceholderOuterCouplingDriver` imports an initial power vector, invokes a
+thermal-hydraulics callback for configured subcycles, exports feedback, calls
+a placeholder neutronics update, imports the returned power, and repeats.
+Registry contents, mesh identity, options, and exchanged field sizes are
+validated collectively for distributed runs.
+
+The scaffold deliberately owns neither solver and defines no file/network
+protocol. A production external-neutronics adapter, convergence policy, and
+coupled physical validation remain future work.
 
 ## Limitations
 
@@ -155,8 +168,10 @@ iteration driver are intentionally deferred.
 - Wall boiling uses a prescribed heat flux and does not implement RPI heat
   flux partitioning.
 - Viscosity feedback currently supports a constant model with a safety floor.
-- Precursor transport currently implements liquid-weighted source, decay, and
-  diffusion. Liquid-velocity advection and group inventory diagnostics are
-  reserved for the next refinement.
+- Precursor transport uses the projected liquid face flux supplied by the
+  Boussinesq step. It does not independently reconstruct a distinct phase
+  velocity or model precursor exchange with a gas phase.
+- The Phase 20 outer loop is an in-memory callback scaffold; it is not a
+  production external-neutronics transport, protocol, or convergence driver.
 - Full SILENE validation is deferred until point-kinetics or neutronics
   coupling is available.

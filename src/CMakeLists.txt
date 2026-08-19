@@ -428,6 +428,20 @@ add_executable(pitz_daily examples/pitz_daily.cc)
 target_link_libraries(pitz_daily PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(pitz_daily)
 
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME pitz_daily_profile_comparator_fixture
+    COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_compare_profiles.py")
+  set_tests_properties(pitz_daily_profile_comparator_fixture PROPERTIES
+    LABELS "verification;integration"
+    TIMEOUT 30)
+else()
+  message(WARNING
+    "Python 3 was not found; the pitzDaily profile-comparator fixture test is disabled")
+endif()
+
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
 target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)

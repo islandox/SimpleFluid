@@ -257,14 +257,18 @@ public:
 
     /**
      * @brief Configure delayed-neutron precursor groups from explicit options.
+     * @note Invoke collectively on every mesh rank.
      */
     precursor_model_type& configure_precursors(const DelayedNeutronPrecursorOptions& options);
     /**
      * @brief Configure delayed-neutron precursor groups from database keys.
+     * @note Invoke collectively on every mesh rank.
      */
     precursor_model_type& configure_precursors(const Database& database);
     /**
      * @brief Remove the optional precursor model, if present.
+     * @note Invoke consistently on every mesh rank. A later step rejects a
+     *       rank-divergent precursor state collectively.
      */
     bool remove_precursor_model() noexcept;
     /**

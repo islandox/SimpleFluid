@@ -26,6 +26,17 @@ natively through `MeshHandle` and `FieldStored`; callers that provide the
 legacy `Mesh` use synchronized compatibility fields. Preserve that boundary
 instead of converting a supplied native mesh into a legacy mesh.
 
+Within the native path, Cartesian and cylindrical meshes construct their
+distributed slab views directly. An `UnstructuredMesh` must first be
+partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
+multi-rank communicator. `SemiStructuredXY_Z` is serial-only; its
+`MeshHandle` constructor deliberately rejects multi-rank use until an owned,
+overlap, and ghost-indexing design is implemented for that topology.
+Focused native regressions cover unstructured geometry, operators,
+`FluidSolver`, and `BoussinesqSolver` directly in serial and across partition
+faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
+partitioned-unstructured coverage.
+
 ## Repository map and dependency direction
 
 Production code is layered from low-level data types toward applications:
@@ -244,6 +255,18 @@ construction in FVM, the physical residual/source definition in equations,
 and time-step orchestration in solvers. Test the algebra on a minimal mesh,
 then add an analytical or conservation case and the relevant native/legacy
 parity test.
+
+Legacy/native mapped weighted-scalar transport and native mapped
+physical-temperature transport preserve Backward Euler and first-order upwind
+as the default public behavior. The opt-in `ScalarTransportDiscretization`
+path supports constant-step BDF2, which requires an older field on the same
+mesh, and bounded linear-upwind convection, which retains the implicit upwind
+matrix and applies a conservative limited deferred correction. Keep new scalar
+policies in the shared legacy/mapped implementation seam, retain
+default-overload compatibility, validate policy and optional-field selections
+collectively, and add weighted-scalar parity tests across legacy `CellField`
+and native `FieldStored` paths. A higher-order policy for scalar transport does
+not by itself extend vector or momentum transport.
 
 ### Add coupled physics
 

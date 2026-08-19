@@ -863,7 +863,6 @@ template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_precursors(const DelayedNeutronPrecursorOptions& options)
     -> precursor_model_type&
 {
-    validate_delayed_neutron_precursor_options(options);
     d_physical_model_enabled = true;
     if (d_primary_fields_initialized)
     {
@@ -892,7 +891,37 @@ auto BoussinesqSolver<Pack>::configure_precursors(const DelayedNeutronPrecursorO
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_precursors(const Database& database) -> precursor_model_type&
 {
-    return configure_precursors(delayed_neutron_precursor_options_from_database(database));
+    DelayedNeutronPrecursorOptions options;
+    int local_parse_failed = 0;
+    std::string local_error;
+    try
+    {
+        options = delayed_neutron_precursor_options_from_database(database);
+    }
+    catch (const std::invalid_argument& error)
+    {
+        local_parse_failed = 1;
+        local_error = error.what();
+    }
+
+    int any_parse_failed = 0;
+    Teuchos::reduceAll(
+        *d_mesh->owned_cell_map()->getComm(),
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_parse_failed,
+        &any_parse_failed);
+    if (any_parse_failed != 0)
+    {
+        if (d_mesh->owned_cell_map()->getComm()->getSize() == 1
+            && !local_error.empty())
+        {
+            throw std::invalid_argument(local_error);
+        }
+        throw std::invalid_argument(
+            "Precursor database options must be valid on every rank.");
+    }
+    return configure_precursors(options);
 }
 
 /**
@@ -1387,6 +1416,26 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
  */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
 {
+    const int local_precursor_state =
+        d_precursor_model == nullptr
+            ? 0
+            : d_precursor_model->enabled() ? 2 : 1;
+    const std::array<int, 2> local_precursor_states{
+        local_precursor_state, -local_precursor_state};
+    std::array<int, 2> global_precursor_states{};
+    Teuchos::reduceAll(
+        *d_mesh->owned_cell_map()->getComm(),
+        Teuchos::REDUCE_MAX,
+        static_cast<int>(local_precursor_states.size()),
+        local_precursor_states.data(),
+        global_precursor_states.data());
+    if (global_precursor_states[0] != -global_precursor_states[1])
+    {
+        throw std::invalid_argument(
+            "Precursor model presence and enabled state must match on every "
+            "rank.");
+    }
+
     if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() &&
         d_radiolytic_gas_model->supplies_void_fraction() && d_boiling_source_model && d_boiling_source_model->enabled())
     {
@@ -1511,7 +1560,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         update_void_fraction_models(time_step);
     }
 
-    if (d_precursor_model && d_precursor_model->enabled())
+    if (d_precursor_model)
     {
         const auto* alpha_l = active_alpha_l_field();
         if (alpha_l == nullptr)
@@ -1519,7 +1568,9 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
             throw std::runtime_error("Precursor model requires a liquid fraction field.");
         }
         d_precursor_model->advance(
-            time_step, *alpha_l, d_fission_power_source ? &d_fission_power_source->field() : nullptr);
+            time_step, *alpha_l,
+            d_fission_power_source ? &d_fission_power_source->field() : nullptr,
+            &projected_face_fluxes());
     }
 
     refresh_material_feedback(d_time + time_step);
