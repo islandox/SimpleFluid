@@ -11,7 +11,7 @@
 
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "geometry/STKMesh.hh"
-#include "solvers/BoussinesqSolver.hh"
+#include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/SolverProgress.hh"
 #include "solvers/SteadyStateSearch.hh"
 
@@ -43,6 +43,7 @@ namespace
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::STKMesh<Pack>;
+using Solver = SimpleFluid::IncompressibleIsothermalSolver<Pack>;
 using Point = SimpleFluid::MeshUtils::Vec3;
 
 /**
@@ -575,8 +576,7 @@ SimpleFluid::BoundaryConditionSet pitz_daily_boundary_conditions()
  * @param rank MPI rank used in the output filename.
  * @throws std::runtime_error if output cannot be opened or epsilon is unavailable.
  */
-void write_cells(const Mesh& mesh, const SimpleFluid::BoussinesqSolver<Pack>& solver,
-    const SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence, int rank)
+void write_cells(const Mesh& mesh, const Solver& solver, const Solver::turbulence_model_type& turbulence, int rank)
 {
     const char* configured_prefix = std::getenv("SIMPLEFLUID_PITZ_OUTPUT_PREFIX");
     const std::string prefix = configured_prefix == nullptr ? "simplefluid_cells" : configured_prefix;
@@ -629,28 +629,14 @@ int main(int argc, char** argv)
     SimpleFluid::TimeStepperOptions time_options;
     time_options.time_step = time_step;
     time_options.steps = steps;
-    time_options.thermal_diffusivity = 0.0;
     time_options.kinematic_viscosity = 1.0e-5;
-    time_options.thermal_expansion = 0.0;
-    time_options.gravity_x = 0.0;
-    time_options.gravity_y = 0.0;
-    time_options.gravity_z = 0.0;
     time_options.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::SIMPLE;
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 500;
     linear_options.tolerance = 1.0e-9;
 
-    SimpleFluid::BoussinesqModelOptions model_options;
-    model_options.reference_density = 1.0;
-    model_options.density = 1.0;
-    model_options.specific_heat_capacity = 1.0;
-    model_options.dynamic_viscosity = 1.0e-5;
-    model_options.thermal_conductivity = 0.0;
-
-    SimpleFluid::BoussinesqSolver<Pack> solver(
-        mesh, std::move(boundary_conditions), time_options, linear_options, model_options);
-    solver.initialize_heated_box(0.0, 0.0);
+    Solver solver(mesh, std::move(boundary_conditions), time_options, linear_options, 1.0);
 
     SimpleFluid::TurbulenceModelOptions turbulence_options;
     turbulence_options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
@@ -699,13 +685,13 @@ int main(int argc, char** argv)
 
         SimpleFluid::AdaptiveSteadyStateController controller(steady_options, time_step);
         SimpleFluid::SteadyStateFieldMonitor<Pack> monitor(
-            solver.temperature().mesh_ptr(), time_options.reference_temperature, steady_options.update_scales);
+            solver.velocity().mesh_ptr(), 0.0, steady_options.update_scales);
         const auto* epsilon = turbulence.dissipation_rate();
         if (epsilon == nullptr)
         {
             throw std::logic_error("Steady pitzDaily search requires a dissipation-rate turbulence field.");
         }
-        monitor.initialize(solver.velocity(), solver.temperature(), {&turbulence.turbulent_kinetic_energy(), epsilon});
+        monitor.initialize(solver.velocity(), {&turbulence.turbulent_kinetic_energy(), epsilon});
         SimpleFluid::SteadyStateProgressStream progress(std::cout);
 
         if (rank == 0)

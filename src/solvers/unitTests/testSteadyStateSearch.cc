@@ -215,6 +215,30 @@ TEST(SteadyStateFieldMonitorTest,
     EXPECT_DOUBLE_EQ(unchanged.maximum(), 0.0);
 }
 
+TEST(SteadyStateFieldMonitorTest, SupportsIsothermalVelocityAndTurbulenceFields)
+{
+    auto legacy_mesh = make_single_cell_mesh();
+    auto mesh = std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy_mesh);
+    SimpleFluid::VectorCellFieldStored<Pack> velocity(mesh, SimpleFluid::vec3<double>{0.0, 0.0, 0.0}, "velocity");
+    SimpleFluid::ScalarCellFieldStored<Pack> turbulent_kinetic_energy(mesh, 1.0, "k");
+    SimpleFluid::CellField<Pack> dissipation_rate(legacy_mesh, 2.0, "epsilon");
+
+    SimpleFluid::SteadyStateUpdateScales scales;
+    scales.velocity = 1.0;
+    scales.turbulence = 0.5;
+    SimpleFluid::SteadyStateFieldMonitor<Pack> monitor(mesh, 0.0, scales);
+    monitor.initialize(velocity, {&turbulent_kinetic_energy, &dissipation_rate});
+
+    velocity.set_owned_value(0, {2.0, 0.0, 0.0});
+    turbulent_kinetic_energy.set_owned_value(0, 3.0);
+    dissipation_rate.set_owned_value(0, 6.0);
+    const auto rates = monitor.observe(2.0);
+
+    EXPECT_NEAR(rates.velocity, 0.5, 1.0e-14);
+    EXPECT_DOUBLE_EQ(rates.temperature, 0.0);
+    EXPECT_NEAR(rates.turbulence, 1.0 / 3.0, 1.0e-14);
+}
+
 TEST(FluidSolverAdaptiveTimeStepTest, UpdatesTimeStepAndComputesMaximumCourantNumber)
 {
     auto mesh = make_single_cell_mesh();

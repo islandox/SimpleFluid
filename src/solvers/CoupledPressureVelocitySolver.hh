@@ -348,6 +348,21 @@ public:
         const TimeStepperOptions& time_options, scalar_type reference_density = scalar_type{1}) const;
 
     /**
+     * @brief Assemble isothermal momentum with variable effective viscosity
+     *        and isotropic Reynolds stress.
+     * @param dynamic_viscosity_override Optional molecular-plus-turbulent
+     *        dynamic viscosity used by the momentum block.
+     * @param turbulent_kinetic_energy_gradient Optional gradient contributing
+     *        the isotropic Reynolds-stress acceleration.
+     */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, scalar_type reference_density,
+        const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+        const boundary_cache_type* boundary_dynamic_viscosity) const;
+
+    /**
      * @brief Assemble a thermally buoyant coupled system.
      * @param pressure Current physical pressure in Pa.
      * @param reference_density Positive density used to normalize pressure.
