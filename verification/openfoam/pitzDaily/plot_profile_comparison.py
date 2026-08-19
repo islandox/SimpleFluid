@@ -160,7 +160,9 @@ def panel_rectangle(column: int, row: int) -> tuple[float, float, float, float]:
 
 
 def render_distribution(
-    output: Path, profiles: dict[str, dict[str, object]]
+    output: Path,
+    profiles: dict[str, dict[str, object]],
+    simplefluid_label: str,
 ) -> None:
     elements: list[str] = []
     for column, (station_name, station) in enumerate(STATIONS.items()):
@@ -205,13 +207,13 @@ def render_distribution(
             f'stroke="{COLORS["openfoam"]}" stroke-width="3"/>',
             text_element(642, 858, "OpenFOAM v2606 (steady)", size=15),
             f'<circle cx="850" cy="852" r="5" fill="{COLORS["simplefluid"]}"/>',
-            text_element(864, 858, "SimpleFluid (t=0.002 s)", size=15),
+            text_element(864, 858, simplefluid_label, size=15),
         ]
     )
     output.write_text(
         document(
             "pitzDaily velocity-profile distributions",
-            "Converged OpenFOAM versus SimpleFluid diagnostic smoke profile; planar x-y case",
+            "Converged OpenFOAM versus SimpleFluid; planar x-y case",
             elements,
         ),
         encoding="utf-8",
@@ -304,13 +306,14 @@ def main() -> int:
     parser.add_argument("--openfoam-case", type=Path, required=True)
     parser.add_argument("--simplefluid-glob", nargs="+", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--simplefluid-label", default="SimpleFluid")
     arguments = parser.parse_args()
 
     profiles = collect_profiles(arguments.openfoam_case, arguments.simplefluid_glob)
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
     distribution_path = arguments.output_dir / "velocity_profile_distribution.svg"
     error_path = arguments.output_dir / "velocity_profile_relative_error.svg"
-    render_distribution(distribution_path, profiles)
+    render_distribution(distribution_path, profiles, arguments.simplefluid_label)
     summary = render_relative_error(error_path, profiles)
 
     print(f"distribution: {distribution_path}")

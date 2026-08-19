@@ -325,6 +325,16 @@ def simplefluid_profile(
     x = min({round(cell["x"], 12) for cell in cells},
             key=lambda value: abs(value - station))
     selected = [cell for cell in cells if abs(cell["x"] - x) < 5e-11]
+    expected_samples = None
+    if len(selected) < 2:
+        expected_samples = pitz_daily_profile_sample_count(len(cells))
+        if expected_samples is None:
+            raise ValueError(
+                "cannot identify a pitzDaily cell layer at the requested station")
+        selected = sorted(
+            cells, key=lambda cell: abs(cell["x"] - station)
+        )[:expected_samples]
+        x = sum(cell["x"] for cell in selected) / len(selected)
     by_y: dict[float, list[dict[str, float]]] = {}
     for cell in selected:
         by_y.setdefault(round(cell["y"], 12), []).append(cell)
@@ -337,7 +347,28 @@ def simplefluid_profile(
             sum(value["ux"] for value in values) / count,
             sum(value["uy"] for value in values) / count,
         ))
+    if expected_samples is not None and len(rows) != expected_samples:
+        raise ValueError(
+            "graded pitzDaily layer does not contain the expected transverse samples")
     return x, rows
+
+
+def pitz_daily_profile_sample_count(cell_count: int) -> int | None:
+    """Recover the transverse cell count from a supported pitzDaily mesh."""
+    for divisor in range(1, 1001):
+        upstream_x = max(1, (18 + divisor - 1) // divisor)
+        main_x = max(1, (180 + divisor - 1) // divisor)
+        outlet_x = max(1, (25 + divisor - 1) // divisor)
+        upper_y = max(1, (30 + divisor - 1) // divisor)
+        lower_y = max(1, (27 + divisor - 1) // divisor)
+        expected_cells = (
+            upstream_x * upper_y
+            + main_x * (lower_y + upper_y)
+            + outlet_x * (lower_y + upper_y)
+        )
+        if expected_cells == cell_count:
+            return lower_y + upper_y
+    return None
 
 
 def interpolate(

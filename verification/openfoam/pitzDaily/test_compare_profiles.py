@@ -55,6 +55,12 @@ class PitzDailyComparatorTest(unittest.TestCase):
                     abs_tol=1.0e-14,
                 ))
 
+    def test_profile_sample_counts_follow_supported_mesh_divisors(self) -> None:
+        self.assertEqual(compare_profiles.pitz_daily_profile_sample_count(820), 15)
+        self.assertEqual(compare_profiles.pitz_daily_profile_sample_count(3122), 29)
+        self.assertEqual(compare_profiles.pitz_daily_profile_sample_count(12225), 57)
+        self.assertIsNone(compare_profiles.pitz_daily_profile_sample_count(6))
+
     def test_fixture_passes_station_component_limits(self) -> None:
         self.assertEqual(
             compare_profiles.evaluate_metrics(
