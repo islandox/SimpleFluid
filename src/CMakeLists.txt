@@ -490,3 +490,13 @@ set_tests_properties(fissile_solution_tank_sst_smoke PROPERTIES
 set_tests_properties(pitz_daily_smoke PROPERTIES
     ENVIRONMENT
         "SIMPLEFLUID_PITZ_MESH_DIVISOR=40;SIMPLEFLUID_PITZ_STEPS=1;SIMPLEFLUID_PITZ_DT=1e-6")
+
+add_test(
+    NAME pitz_daily_steady_smoke
+    COMMAND ${CMAKE_COMMAND}
+        "-DSIMPLEFLUID_PITZ_DAILY_EXECUTABLE=$<TARGET_FILE:pitz_daily>"
+        "-DSIMPLEFLUID_PITZ_WORKING_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/pitz_daily_steady_smoke"
+        -P "${PROJECT_SOURCE_DIR}/cmake/RunPitzDailySteadySmoke.cmake")
+set_tests_properties(pitz_daily_steady_smoke PROPERTIES
+    LABELS integration
+    TIMEOUT 60)

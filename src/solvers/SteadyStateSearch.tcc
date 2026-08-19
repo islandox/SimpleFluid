@@ -472,6 +472,25 @@ SteadyStateProgressLineFormatter<Scalar>::format(const SteadyStateStepStatistics
     return line.str();
 }
 
+template<class Scalar>
+std::string SteadyStateProgressLineFormatter<Scalar>::format(const SteadyStateStepStatistics<Scalar>& statistics,
+    const FluidStepStatistics<Scalar>& solver_statistics,
+    std::optional<std::type_identity_t<Scalar>> requested_linear_tolerance,
+    std::optional<std::type_identity_t<Scalar>> next_requested_linear_tolerance)
+{
+    std::ostringstream line;
+    line << format(statistics, solver_statistics) << std::scientific << std::setprecision(6);
+    if (requested_linear_tolerance)
+    {
+        line << " requested_linear_tolerance=" << *requested_linear_tolerance;
+    }
+    if (next_requested_linear_tolerance)
+    {
+        line << " next_requested_linear_tolerance=" << *next_requested_linear_tolerance;
+    }
+    return line.str();
+}
+
 template <class Scalar>
 std::string SteadyStateProgressLineFormatter<Scalar>::format_retry(int iteration, int retry,
                                                            int maximum_retries, Scalar time,
@@ -490,6 +509,17 @@ void SteadyStateProgressStream::write(const SteadyStateStepStatistics<Scalar>& s
                                       const FluidStepStatistics<Scalar>& solver_statistics)
 {
     d_output << SteadyStateProgressLineFormatter<Scalar>::format(statistics, solver_statistics) << std::endl;
+}
+
+template<class Scalar>
+void SteadyStateProgressStream::write(const SteadyStateStepStatistics<Scalar>& statistics,
+    const FluidStepStatistics<Scalar>& solver_statistics,
+    std::optional<std::type_identity_t<Scalar>> requested_linear_tolerance,
+    std::optional<std::type_identity_t<Scalar>> next_requested_linear_tolerance)
+{
+    d_output << SteadyStateProgressLineFormatter<Scalar>::format(
+                    statistics, solver_statistics, requested_linear_tolerance, next_requested_linear_tolerance)
+             << std::endl;
 }
 
 template <class Scalar>
