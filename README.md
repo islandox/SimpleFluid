@@ -171,6 +171,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 ### Solvers & Equations
 
 - `FluidSolver` — reusable transient incompressible pressure-velocity driver
+- `IncompressibleIsothermalSolver` — transient constant-density flow with
+  optional RANS transport and no temperature solve
 - `BoussinesqSolver` — thermal natural-convection specialization
 - `IncompressibleMomentumEquation` — generic velocity-transport assembly
 - `BoussinesqMomentumEquation` — incompressible momentum with buoyancy
@@ -315,7 +317,7 @@ Pre-built example executables:
 | `natural_convection_sphere` | Spherical domain natural convection |
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
 | `natural_convection_shiri` | MPI-capable annular natural convection with standard k-epsilon and adaptive steady-state search |
-| `pitz_daily` | OpenFOAM pitzDaily geometry with transient standard k-epsilon transport |
+| `pitz_daily` | OpenFOAM pitzDaily geometry with transient isothermal standard k-epsilon transport |
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
 | `fissile_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |

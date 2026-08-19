@@ -198,6 +198,9 @@ mistaken for foundation or Phase 9 completion.
       MPI consistency tests.
 - [x] Add the transient `pitz_daily` standard-k-epsilon example and the
       OpenFOAM profile-comparison workflow.
+- [x] Add a transient isothermal incompressible solver that advances RANS
+      without allocating or solving a temperature equation, and use it for
+      `pitz_daily`.
 - [x] Add the matched 1000 W Gaussian fissile-solution-tank SST comparison,
       including 2 mm R-Z spacing, wall-layer refinement, and R-Z error figures.
 - [x] Document that the current RANS variables use single-continuum, full-cell

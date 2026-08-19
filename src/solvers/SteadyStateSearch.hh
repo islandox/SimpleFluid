@@ -196,6 +196,15 @@ public:
                     std::vector<const field_type*> additional_scalar_fields = {});
 
     /**
+     * @brief Capture an isothermal state with no transported temperature.
+     *
+     * The reported temperature update rate remains zero.
+     */
+    void initialize(
+        const velocity_field_type& velocity,
+        std::vector<const field_type*> additional_scalar_fields);
+
+    /**
      * @brief Capture MeshHandle-backed solver fields before the first step.
      *
      * Additional transported scalars may use FieldStored or, for a handle
@@ -205,6 +214,15 @@ public:
         const stored_velocity_field_type& velocity,
         const stored_field_type& temperature,
         std::vector<stored_additional_field_type> additional_scalar_fields = {});
+
+    /**
+     * @brief Capture an isothermal MeshHandle-backed state.
+     *
+     * The reported temperature update rate remains zero.
+     */
+    void initialize(
+        const stored_velocity_field_type& velocity,
+        std::vector<stored_additional_field_type> additional_scalar_fields);
 
     /**
      * @brief Compare the current fields with the preceding accepted state.
@@ -241,7 +259,7 @@ private:
         scalar_type time_step,
         const MeshType& mesh,
         const VelocityField& velocity,
-        const TemperatureField& temperature,
+        const TemperatureField* temperature,
         const AdditionalFields& additional_scalar_fields);
 
     template<class MeshType, class VelocityField, class TemperatureField,
@@ -250,7 +268,7 @@ private:
     void capture_current_state(
         const MeshType& mesh,
         const VelocityField& velocity,
-        const TemperatureField& temperature,
+        const TemperatureField* temperature,
         const AdditionalFields& additional_scalar_fields);
 
     SP<const mesh_type> d_mesh;

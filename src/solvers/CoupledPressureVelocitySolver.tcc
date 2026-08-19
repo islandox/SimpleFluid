@@ -666,13 +666,62 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& time_options, scalar_type reference_density) const
 {
+    return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, nullptr, nullptr, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
+    const velocity_field_type* turbulent_kinetic_energy_gradient,
+    const boundary_cache_type* boundary_dynamic_viscosity) const
+{
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
+    if (dynamic_viscosity_override != nullptr)
+    {
+        EquationValidation::require_mesh_match(*d_mesh, *dynamic_viscosity_override, "CoupledPressureVelocitySolver");
+    }
+    if (turbulent_kinetic_energy_gradient != nullptr)
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, *turbulent_kinetic_energy_gradient, "CoupledPressureVelocitySolver");
+    }
+    if (boundary_dynamic_viscosity != nullptr && dynamic_viscosity_override == nullptr)
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver requires a dynamic-viscosity "
+                                    "field when boundary viscosity data is supplied.");
+    }
 
     const auto* correction_field =
         time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
-    const auto momentum = momentum_equation.assemble_system(
-        velocity, face_fluxes, velocity_boundary_cache, time_options, correction_field);
+    auto turbulence_source = [&](local_ordinal_type cell_lid)
+    {
+        return turbulent_kinetic_energy_gradient == nullptr
+                   ? typename velocity_field_type::vec_type{}
+                   : turbulent_kinetic_energy_gradient->value(cell_lid) * scalar_type{-2.0 / 3.0};
+    };
+
+    typename momentum_equation_type::system_type momentum;
+    if (dynamic_viscosity_override != nullptr)
+    {
+        momentum = momentum_equation.assemble_physical_system(velocity, face_fluxes, velocity_boundary_cache,
+            time_options, *dynamic_viscosity_override, reference_density, turbulence_source, correction_field,
+            boundary_dynamic_viscosity);
+    }
+    else if (turbulent_kinetic_energy_gradient != nullptr)
+    {
+        momentum = momentum_equation.assemble_system(
+            velocity, face_fluxes, velocity_boundary_cache, time_options, turbulence_source, correction_field);
+    }
+    else
+    {
+        momentum = momentum_equation.assemble_system(
+            velocity, face_fluxes, velocity_boundary_cache, time_options, correction_field);
+    }
     return assemble_coupled_system(
         momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions, time_options, reference_density);
 }

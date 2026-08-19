@@ -174,6 +174,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     solvers/BoussinesqSolver.cc
     solvers/CoupledPressureVelocitySolver.cc
     solvers/FluidSolver.cc
+    solvers/IncompressibleIsothermalSolver.cc
     solvers/SteadyStateSearch.cc
 )
 

@@ -120,6 +120,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME IncompressibleIsothermalSolver_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testIncompressibleIsothermalSolver>"
+            "--gtest_filter=IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonThroughPisoAndCoupledKrylov:IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonOnNativeMeshHandle")
+  set_tests_properties(IncompressibleIsothermalSolver_2procs PROPERTIES
+    LABELS "mpi;turbulence;pressure_velocity;isothermal"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME CombinedTurbulentRadiolysis_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
