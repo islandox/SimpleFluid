@@ -65,9 +65,13 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
 /**
  * @brief Runtime-polymorphic distributed view of supported mesh families.
  *
- * MeshHandle normalizes structured, semi-structured, and legacy STK meshes
- * into one FVM-facing API. It builds owned/overlap maps and translates compact
- * local IDs to each concrete mesh's geometry IDs.
+ * MeshHandle normalizes structured, semi-structured, unstructured, and legacy
+ * STK meshes into one FVM-facing API. Cartesian and cylindrical meshes are
+ * distributed automatically. Unstructured meshes require explicit
+ * partitioning before multi-rank construction, while SemiStructuredXY_Z is
+ * currently serial-only and rejects construction on a multi-rank communicator.
+ * The handle builds owned/overlap maps and translates compact local IDs to each
+ * concrete mesh's geometry IDs.
  *
  * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
@@ -134,7 +138,10 @@ public:
     explicit MeshHandle(CylindricalPtr mesh,
                         DistributionOptions options = {});
 
-    /** @brief Build a handle for a semi-structured mesh. */
+    /**
+     * @brief Build a serial-only handle for a semi-structured mesh.
+     * @throws std::runtime_error On a communicator containing multiple ranks.
+     */
     explicit MeshHandle(SemiStructuredPtr mesh);
 
     /** @brief Build a serial unstructured mesh handle. */

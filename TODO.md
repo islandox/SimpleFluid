@@ -1,11 +1,12 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Status date:** August 18, 2026
+**Status date:** August 19, 2026
 
 **Near-term goal:** finish validation and integration of the implemented RANS,
 radiolytic-gas, boiling, void-fraction, and thermal-feedback stack; close the
-remaining precursor, feedback-map, and configuration-documentation gaps;
-and avoid prematurely presenting the current model as a full Euler–Euler
+remaining physical-reference, example, and configuration-documentation gaps;
+and avoid prematurely presenting the current in-memory coupling scaffold as
+production neutronics integration or the flow model as a full Euler–Euler
 two-fluid solver.
 
 ## Roadmap dashboard
@@ -16,39 +17,35 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
-1. Update `verification/environments.sh` for the current compiler-specific
-   preset directories and revalidate each OpenFOAM launcher.
-2. Add a tolerance-gated pitzDaily reference case.
-3. Add the Phase 20 feedback-field registry, mapped-feedback export path, and
-   placeholder outer-coupling driver.
-4. Add Phase 19 liquid-velocity precursor transport, precursor inventory
-   diagnostics, and the corresponding conservative transport test.
-5. Decide whether Phase 14's optional scalar-void transport/slip path is still
+1. Qualify the authenticated pitzDaily acceptance manifest with converged,
+   checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
+2. Decide whether Phase 14's optional scalar-void transport/slip path is still
    needed now that Phase 14.1 owns bubble transport; implement it or explicitly
    defer it.
-6. Add Phase 16 demo validation checks for ParaView-readable output and
+3. Add Phase 16 demo validation checks for ParaView-readable output and
    disabled-radiolysis/boiling baseline behavior.
-7. Complete the Phase 18 user-facing configuration reference.
-8. Revisit foundational numerics gaps: second-order time integration,
-   higher-order convection, Ghia profile checks, and bundled OpenFOAM
-   centerline tolerances.
+4. Complete the Phase 18 user-facing configuration reference.
+5. Add quantitative Phase 14.1 physical validation and a checked-in combined
+   RANS-plus-bubble user example.
+6. Close the remaining foundational validation gaps: Ghia profile checks and
+   bundled OpenFOAM centerline tolerances.
 
 ### Status map
 
 | Workstream | State | Principal open gate |
 | --- | --- | --- |
-| Foundation, Phases -1 to 8 | Implemented with gaps | Launcher paths and higher-order numerical verification |
+| Foundation, Phases -1 to 8 | Implemented with verification gaps | Ghia and bundled OpenFOAM profile validation |
 | Two-equation RANS | Implemented and focused-tested | Quantitative external validation and phase-aware bubbly-flow scope |
 | Phase 9, performance | Substantially complete | Backend-portable device assembly API |
 | Phases 10–12, sources/materials/radiolysis | Implemented | No open phase acceptance items |
 | Phase 13, boiling | Partial | Wall heat-flux partitioning interface |
 | Phase 14, scalar void | Partial | Advection and disposition of the low-order slip path |
-| Phase 14.1, bubble populations | Broad implementation | Physical reproduction, combined RANS coverage, and production hardening |
+| Phase 14.1, bubble populations | Broad implementation with combined regression | Physical reproduction, checked-in combined example, and production hardening |
 | Phases 15–16, feedback/demo | Partial | Property extensions and demo acceptance checks |
 | Phase 17, focused tests | Complete for supported scope | Reopen when model scope expands |
 | Phase 18, documentation | Partial | Complete key/default/unit/validity reference |
-| Phase 19, precursors | Partial | Liquid advection and inventory diagnostics |
-| Phase 20, TH/neutronics map | Partial | Registry, export, and outer-coupling driver |
+| Phase 19, precursors | Implemented and focused-tested | No open items for the supported transport scope |
+| Phase 20, TH/neutronics map | In-memory scaffold implemented and focused-tested | Production external-neutronics protocol and validation |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 
 ### Checklist conventions
@@ -98,6 +95,10 @@ verification items below mean the foundation as a whole is not yet complete.
   - [x] Boundary-condition-aware diffusion in transport systems
   - [x] First-order upwind convection
   - [x] Backward Euler time integration
+  - [x] Opt-in constant-step BDF2 for legacy/native mapped weighted-scalar and
+        native mapped physical-temperature transport, with a required older field
+  - [x] Opt-in bounded linear-upwind scalar convection through a conservative
+        deferred correction
 - [x] Momentum and pressure-velocity coupling
   - [x] Momentum equation assembly
   - [x] SIMPLE
@@ -124,8 +125,12 @@ verification items below mean the foundation as a whole is not yet complete.
         through the native field path
   - [x] Preserve exact legacy `Mesh` identity, public solver hooks, and
         established behavior through a distinct compatibility path
-  - [x] Cover Cartesian, cylindrical, semi-structured, statically partitioned,
-        and distributed MPI execution with focused regressions
+  - [x] Cover Cartesian and cylindrical serial/distributed execution with
+        focused regressions
+  - [x] Cover native unstructured execution directly in serial and through
+        `MeshPartitioner`/`PartitionedMesh` in MPI
+  - [x] Cover `SemiStructuredXY_Z` in serial and explicitly reject its
+        unsupported multi-rank construction
 - [x] I/O and utilities
   - [x] VTU output for ParaView
   - [x] STK Exodus II mesh input for `HEX_8` and `WEDGE_6` volume elements
@@ -149,8 +154,11 @@ verification items below mean the foundation as a whole is not yet complete.
 
 - [x] Align `verification/environments.sh` with the current preset output
       directories (`build/gcc` and `build/llvm`).
-- [ ] Add and verify Crank–Nicolson or another second-order time integrator.
-- [ ] Add a higher-order convection scheme or deferred-correction path.
+- [x] Add and verify opt-in constant-step BDF2 for legacy/native mapped
+      weighted-scalar and native mapped physical-temperature transport while
+      preserving Backward Euler defaults.
+- [x] Add and verify opt-in bounded linear-upwind deferred correction for
+      scalar transport while preserving first-order-upwind defaults.
 - [ ] Add quantitative lid-driven-cavity profile checks against Ghia et al.
 - [ ] Bundle validated OpenFOAM centerline profiles and enforce tolerances in
       an automated test.
@@ -198,8 +206,12 @@ mistaken for foundation or Phase 9 completion.
 #### Remaining work and acceptance
 
 - [ ] Establish a converged pitzDaily reference configuration and checked-in
-      velocity-profile tolerances. The current workflow reports errors and
-      accepts optional user thresholds, but has no default pass/fail tolerance.
+      velocity-profile tolerances. The comparator and launcher now fail closed
+      unless a qualified physical manifest authenticates retained inputs,
+      records exact run settings and rank count, and supplies finite-data,
+      sample-count, profile-span, station-offset, and error limits. The
+      checked-in physical manifest remains pending because no converged real
+      profile pair supports those tolerances yet.
 - [ ] Add quantitative validation for every closure before describing the
       turbulence program as validated rather than implemented and tested.
 - [ ] Define and validate the applicability range of single-continuum RANS in
@@ -565,7 +577,8 @@ Phase 12 remains the low-cost source model. Phase 14 remains the lower-order sca
 **Status:** broad implementation with focused conservation, transport, and MPI
 tests. End-to-end reproduction of the paper results, extrapolation warnings,
 source-Jacobian hooks, an allocation-free Kokkos-compatible local update, and
-permanent combined RANS-plus-bubble coverage remain open.
+a checked-in combined user example remain open. Permanent serial and
+exact-two-rank combined RANS-plus-bubble regression coverage is implemented.
 
 #### Model selection and scope
 
@@ -921,11 +934,12 @@ The microsecond dissolution time scales can be far shorter than the CFD time ste
 - [x] Serial/MPI consistency of global H₂ and void inventories.
 - [x] Finite-Courant serial/MPI escape balances and rate-field integrals.
 - [x] Globally reduce advanced-model event counters across MPI ranks.
-- [ ] Add a permanent serial integration test with nonzero liquid shear, an
+- [x] Add a permanent serial integration test with nonzero liquid shear, an
       active RANS closure, advected dissolved/bubble inventories, bubble slip,
-      fission production, and void-dependent density feedback.
-- [ ] Add an MPI counterpart after the serial combined test defines conserved
-      inventory and bounded-field acceptance checks.
+      fission production, and void-dependent density feedback; assert causal
+      turbulence, dissolved-advection, and density-feedback changes.
+- [x] Add an exact-two-rank MPI counterpart with the same conserved-inventory,
+      bounded-field, and causal acceptance checks.
 
 #### Phase 14.1 acceptance criteria
 
@@ -957,8 +971,9 @@ Known limitations:
 - [ ] A later Euler–Euler phase should solve gas velocity and use validated drag closures.
 - [ ] Current RANS transport is not weighted by liquid volume fraction and has
       no bubble-induced-turbulence or interphase turbulence-transfer closure.
-- [ ] No checked-in example or regression currently exercises RANS and the
-      advanced bubble model together in a nontrivial flow.
+- [ ] No checked-in user-facing example currently exercises RANS and the
+      advanced bubble model together in a nontrivial flow; permanent serial
+      and exact-two-rank integration regressions do cover the combined path.
 
 ---
 
@@ -1143,9 +1158,11 @@ those details remain distributed across implementation headers and model docs.
 
 After velocity, temperature, and void feedback fields are available, add precursor transport on the liquid phase.
 
-**Status:** partial. Liquid-fraction-weighted source, decay, and diffusion are
-implemented. Liquid-velocity advection and group inventory diagnostics remain
-open.
+**Status:** implemented and focused-tested for the currently supported
+transport scope. Conserved liquid-fraction-weighted inventories use the
+projected liquid face flux for advection, optional diffusion, exact source and
+decay integration, globally reduced balance diagnostics, and collective input
+validation.
 
 #### Target equation
 
@@ -1166,18 +1183,23 @@ $$
 - [x] Add per-group fields `C_1 ... C_N`.
 - [x] Add per-group decay constants `lambda_i`.
 - [x] Add per-group source fields from fission power or imported neutronics data.
-- [ ] Advect precursors with liquid velocity, not mixture velocity.
+- [x] Advect precursors with the projected liquid face flux, not a gas or
+      mixture-transport surrogate.
 - [x] Include `alpha_l = 1 - alpha_g` weighting.
 - [x] Add optional effective diffusivity.
 - [x] Write precursor fields to VTU.
-- [ ] Add group inventory diagnostics.
+- [x] Add globally reduced source, decay, boundary-outflow, transport
+      positivity-adjustment, before/after inventory, and balance diagnostics.
+- [x] Validate timestep, options, liquid fraction, optional flux/power fields,
+      and rank-consistent selections collectively.
 
 #### Phase 19 acceptance criteria
 
 - [x] Zero source and zero initial concentration remains zero.
 - [x] Pure decay one-cell test matches analytic exponential decay.
 - [x] Constant source plus decay one-cell test reaches correct asymptotic value.
-- [ ] Advective transport conserves precursor inventory up to decay, boundary flux, and source.
+- [x] Advective transport conserves precursor inventory up to decay, boundary
+      flux, source, and recorded positivity adjustment.
 - [x] Precursor fields remain finite and non-negative under bounded test cases.
 
 ---
@@ -1186,25 +1208,28 @@ $$
 
 Add data structures for mapping CFD feedback fields to a coarser neutronics mesh or external neutronics code.
 
-**Status:** partial. In-memory volume averaging, conservation tests, and power
-import are implemented. The field registry, feedback export, and placeholder
-outer-coupling driver remain open.
+**Status:** the in-memory scaffold is implemented and focused-tested. It
+provides volume averaging, power import, a standard feedback-field registry,
+deterministic mapped snapshots, and a callback-driven placeholder outer loop
+with thermal-hydraulic subcycles and power exchange. This is not a production
+external-neutronics interface or a neutronics solver.
 
-- [ ] Add feedback field registry:
-  - [ ] `T_liquid`
-  - [ ] `alpha_g`
-  - [ ] `rhoFeedback`
-  - [ ] `C_i`
+- [x] Add feedback field registry:
+  - [x] `T_liquid`
+  - [x] `alpha_g`
+  - [x] `rhoFeedback`
+  - [x] `C_i`
 - [x] Add volume-averaging utilities from CFD cells to feedback cells.
 - [x] Add conservative mapping tests for scalar fields.
 - [x] Add import path for externally supplied fission power density.
-- [ ] Add export path for mapped thermal-hydraulic feedback.
-- [ ] Add a simple outer-coupling driver stub:
-  - [ ] receive or compute `qdot_fission`
-  - [ ] advance TH by one time step or subcycle
-  - [ ] map feedback fields
-  - [ ] call placeholder neutronics update
-  - [ ] repeat
+- [x] Add deterministic in-memory snapshot export for mapped
+      thermal-hydraulic feedback.
+- [x] Add a simple outer-coupling driver stub:
+  - [x] receive or compute `qdot_fission`
+  - [x] advance TH by one time step or configured subcycles
+  - [x] map feedback fields
+  - [x] call placeholder neutronics update
+  - [x] repeat and import the returned power
 - [x] Keep the interface file-based or in-memory depending on the existing code style; do not force an external dependency.
 
 #### Phase 20 acceptance criteria
@@ -1212,7 +1237,9 @@ outer-coupling driver remain open.
 - [x] Constant CFD field maps to the same constant feedback field.
 - [x] Volume-weighted integral is preserved for mapped scalar fields.
 - [x] File or in-memory coupling path is documented.
-- [ ] Coupling driver can run with a placeholder neutronics model.
+- [x] Coupling driver can run with a placeholder neutronics callback.
+- [ ] Define, implement, and validate a production external-neutronics
+      transport/protocol when a target solver is selected.
 
 ---
 

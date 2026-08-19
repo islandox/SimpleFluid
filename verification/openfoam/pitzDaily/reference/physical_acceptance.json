@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "qualification": {
+    "status": "pending_external_qualification",
+    "scope": "physical_reference",
+    "reason": "No checked-in pair of mesh- and time-converged OpenFOAM v2606 and SimpleFluid profiles exists. Numeric CFD tolerances would therefore be unsubstantiated.",
+    "required_evidence": [
+      "OpenFOAM residual-control convergence and final x050/x100/x200 velocity profiles",
+      "SimpleFluid stationarity plus time-step and mesh-refinement evidence",
+      "matched case settings, compiler, MPI rank count, and source revisions",
+      "checked-in raw profiles with SHA-256 checksums",
+      "observed per-station ux/uy L2 and Linf errors with documented tolerance headroom"
+    ]
+  },
+  "reference_definition": {
+    "openfoam_case": "OpenFOAM.com v2606 incompressible/simpleFoam/pitzDaily",
+    "simplefluid_source_revision": "unqualified",
+    "simplefluid_run": {
+      "mesh_divisor": 1,
+      "steps": null,
+      "dt_s": null,
+      "mpi_ranks": null
+    },
+    "stations_m": {
+      "x050": 0.05,
+      "x100": 0.1,
+      "x200": 0.2
+    },
+    "velocity_units": "m/s"
+  },
+  "stations": {}
+}

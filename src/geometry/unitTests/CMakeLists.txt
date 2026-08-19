@@ -25,6 +25,17 @@ if(MPIEXEC_EXECUTABLE
     LABELS "mpi;turbulence;mesh_adaptation"
     PROCESSORS 2
     TIMEOUT 120)
+
+  add_test(
+    NAME SemiStructuredMeshHandleSerialOnly_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testMeshHandle>"
+            "--gtest_filter=MeshHandleTest.SemiStructuredConstructionIsSerialOnly")
+  set_tests_properties(SemiStructuredMeshHandleSerialOnly_2procs PROPERTIES
+    LABELS "mpi;mesh_handle;semi_structured"
+    PROCESSORS 2
+    TIMEOUT 120)
 endif()
 
 # The diffusion profiling test also needs the solvers library

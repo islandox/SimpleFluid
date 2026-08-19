@@ -15,7 +15,10 @@
 #include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -39,6 +42,23 @@ struct DelayedNeutronPrecursorOptions
     ArrReal source_terms;
     ArrReal power_yields; ///< Production per unit fission power density.
     real_t effective_diffusivity = 0.0; ///< Shared liquid-phase diffusivity.
+};
+
+/**
+ * @brief Globally reduced inventory balance for one precursor group and step.
+ *
+ * Every quantity is an integrated inventory rather than a rate.  A positive
+ * boundary_outflow is inventory that left the domain during the step.
+ */
+template<class Scalar> struct PrecursorInventoryDiagnostics
+{
+    Scalar inventory_before{};
+    Scalar source_added{};
+    Scalar decay_removed{};
+    Scalar positivity_adjustment{};
+    Scalar boundary_outflow{};
+    Scalar inventory_after{};
+    Scalar balance_error{};
 };
 
 /**
@@ -94,6 +114,22 @@ inline void validate_delayed_neutron_precursor_options(
                 "Precursor initial concentrations cannot be negative.");
         }
     }
+    for (const auto value : options.source_terms)
+    {
+        if (value < 0.0)
+        {
+            throw std::invalid_argument(
+                "Precursor source terms cannot be negative.");
+        }
+    }
+    for (const auto value : options.power_yields)
+    {
+        if (value < 0.0)
+        {
+            throw std::invalid_argument(
+                "Precursor power yields cannot be negative.");
+        }
+    }
     if (!std::isfinite(options.effective_diffusivity)
         || options.effective_diffusivity < 0.0)
     {
@@ -137,9 +173,10 @@ delayed_neutron_precursor_options_from_database(
  * @brief Conservative liquid-phase delayed-neutron precursor model.
  *
  * The persistent state is the mixture-volume inventory @f$\alpha_l C_i@f$.
- * Source and decay are integrated exactly over each step, then optional
- * diffusion solves for @f$C_i@f$ with coefficient
- * @f$\alpha_l D_i^{eff}@f$ and homogeneous zero-flux boundaries.
+ * Source and decay are integrated exactly over each step, then conservative
+ * liquid advection and optional diffusion solve for @f$C_i@f$ with storage
+ * and advection weight @f$\alpha_l@f$, diffusion coefficient
+ * @f$\alpha_l D_i^{eff}@f$, and homogeneous zero-flux diffusion boundaries.
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
@@ -154,9 +191,12 @@ public:
     using field_traits = MeshFieldTraits<Pack, mesh_type>;
     using field_type = typename field_traits::scalar_cell_type;
     using face_flux_field_type = typename field_traits::scalar_face_type;
+    using diagnostics_type = PrecursorInventoryDiagnostics<scalar_type>;
 
     /**
      * @brief Construct a precursor model on a mesh.
+     * @note Construction validates options collectively on the mesh
+     *       communicator.
      */
     DelayedNeutronPrecursorModel(
         SP<const mesh_type> mesh,
@@ -174,14 +214,17 @@ public:
 
     /**
      * @brief Replace precursor options and rebuild group fields.
+     * @note Invoke collectively on every mesh rank.
      */
     void configure(const DelayedNeutronPrecursorOptions& options)
     {
+        validate_collective_configuration(options);
         validate_delayed_neutron_precursor_options(options);
         d_options = options;
         d_fields.clear();
         d_inventories.clear();
         d_sources.clear();
+        d_last_inventory_diagnostics.clear();
         d_output_fields.clear();
         d_inventory_initialized = false;
         const auto count = static_cast<size_t>(d_options.group_count);
@@ -191,14 +234,14 @@ public:
             d_options.source_terms, count, 0.0);
         d_power_yields = complete_vector(
             d_options.power_yields, count, 0.0);
-        const auto initial = complete_vector(
+        d_initial_concentrations = complete_vector(
             d_options.initial_concentrations, count, 0.0);
 
         for (size_t group = 0; group < count; ++group)
         {
             const auto suffix = std::to_string(group + 1);
             auto field = std::make_unique<field_type>(
-                d_mesh, initial[group], "C_" + suffix);
+                d_mesh, d_initial_concentrations[group], "C_" + suffix);
             auto inventory = std::make_unique<field_type>(
                 d_mesh, 0.0, "alpha_l_C_" + suffix);
             auto source = std::make_unique<field_type>(
@@ -208,6 +251,7 @@ public:
             d_fields.push_back(std::move(field));
             d_inventories.push_back(std::move(inventory));
             d_sources.push_back(std::move(source));
+            d_last_inventory_diagnostics.emplace_back();
         }
     }
 
@@ -258,6 +302,16 @@ public:
     }
 
     /**
+     * @brief Last globally reduced inventory balance for a precursor group.
+     *
+     * The returned values are replicated on every rank after each advance.
+     */
+    const diagnostics_type& last_inventory_diagnostics(size_t group) const
+    {
+        return d_last_inventory_diagnostics.at(group);
+    }
+
+    /**
      * @brief Initialize conserved inventories from the current liquid fraction.
      *
      * This is called by the coupled solver when the model is configured so
@@ -289,40 +343,69 @@ public:
     }
 
     /**
-     * @brief Advance conserved precursor inventories by one reaction/diffusion step.
+     * @brief Advance reaction and diffusion without an advecting face flux.
+     *
+     * This compatibility overload retains the original public entry point.
      */
     void advance(
         scalar_type time_step,
         const field_type& alpha_l,
         const field_type* fission_power_density)
     {
+        advance(time_step, alpha_l, fission_power_density, nullptr);
+    }
+
+    /**
+     * @brief Advance conserved precursor inventories by one reaction/transport step.
+     *
+     * @param liquid_face_flux Optional owner-oriented volumetric liquid flux.
+     *        When absent, the transport solve contains diffusion only.
+     */
+    void advance(
+        scalar_type time_step,
+        const field_type& alpha_l,
+        const field_type* fission_power_density,
+        const face_flux_field_type* liquid_face_flux)
+    {
+        validate_collective_advance_selection(
+            time_step, fission_power_density, liquid_face_flux);
         if (!enabled())
         {
             return;
         }
-        if (!std::isfinite(time_step) || time_step <= 0.0)
-        {
-            throw std::invalid_argument(
-                "Precursor update requires a positive finite time step.");
-        }
-        if (&alpha_l.mesh() != d_mesh.get()
+        int local_invalid_input =
+            !std::isfinite(time_step) || time_step <= scalar_type{}
+            || &alpha_l.mesh() != d_mesh.get()
             || (fission_power_density != nullptr
-                && &fission_power_density->mesh() != d_mesh.get()))
+                && &fission_power_density->mesh() != d_mesh.get())
+            || (liquid_face_flux != nullptr
+                && &liquid_face_flux->mesh() != d_mesh.get());
+        const auto invalid_input = global_max(local_invalid_input);
+        if (invalid_input != 0)
         {
             throw std::invalid_argument(
-                "Precursor fields must be on the model mesh.");
+                "Precursor update requires a positive finite time step and "
+                "fields on the model mesh.");
         }
         validate_liquid_fraction_field(alpha_l);
-        if (!d_inventory_initialized)
+        int local_invalid_source = 0;
+        if (fission_power_density != nullptr)
         {
-            initialize_inventory(alpha_l);
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells();
+                 ++owned)
+            {
+                const auto value = fission_power_density->value(
+                    static_cast<local_ordinal_type>(owned));
+                if (!std::isfinite(value) || value < scalar_type{})
+                {
+                    local_invalid_source = 1;
+                }
+            }
         }
-
         for (size_t group = 0; group < d_fields.size(); ++group)
         {
-            auto& inventory = *d_inventories[group];
-            auto& source_field = *d_sources[group];
-            const auto lambda = d_decay_constants[group];
+            const auto& inventory = *d_inventories[group];
             for (size_t owned = 0;
                  owned < d_mesh->num_owned_cells();
                  ++owned)
@@ -335,47 +418,289 @@ public:
                          ? d_power_yields[group]
                          * fission_power_density->value(cell_lid)
                          : scalar_type{});
-                if (!std::isfinite(source))
-                {
-                    throw std::invalid_argument(
-                        "Precursor source values must be finite.");
-                }
                 const auto old_inventory = inventory.value(cell_lid);
+                if (!std::isfinite(source) || source < scalar_type{}
+                    || !std::isfinite(old_inventory)
+                    || old_inventory < scalar_type{})
+                {
+                    local_invalid_source = 1;
+                }
+            }
+        }
+        if (liquid_face_flux != nullptr)
+        {
+            for (const auto face_lid : liquid_face_flux->owned_face_ids())
+            {
+                if (!std::isfinite(liquid_face_flux->value(face_lid)))
+                {
+                    local_invalid_source = 1;
+                }
+            }
+        }
+        if (global_max(local_invalid_source) != 0)
+        {
+            throw std::invalid_argument(
+                "Precursor inventories, sources, fission power, and liquid "
+                "fluxes must be finite and non-negative where applicable.");
+        }
+        if (!d_inventory_initialized)
+        {
+            initialize_inventory(alpha_l);
+        }
+
+        for (size_t group = 0; group < d_fields.size(); ++group)
+        {
+            auto& inventory = *d_inventories[group];
+            auto& source_field = *d_sources[group];
+            auto& diagnostics = d_last_inventory_diagnostics[group];
+            diagnostics = {};
+            const auto lambda = d_decay_constants[group];
+            scalar_type local_inventory_before{};
+            scalar_type local_source_added{};
+            scalar_type local_decay_removed{};
+            scalar_type local_positivity_adjustment{};
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells();
+                 ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                const auto source =
+                    d_source_terms[group]
+                  + (fission_power_density
+                         ? d_power_yields[group]
+                         * fission_power_density->value(cell_lid)
+                         : scalar_type{});
+                const auto old_inventory = inventory.value(cell_lid);
+                const auto volume = d_mesh->cell_volume(cell_lid);
                 scalar_type new_inventory{};
+                scalar_type source_added{};
+                scalar_type decay_removed{};
                 if (lambda > scalar_type{})
                 {
                     const auto decay = std::exp(-lambda * time_step);
                     const auto reacted_fraction =
                         -std::expm1(-lambda * time_step);
+                    source_added = time_step * source;
+                    const auto surviving_source =
+                        source / lambda * reacted_fraction;
+                    decay_removed =
+                        old_inventory * reacted_fraction
+                      + (source_added - surviving_source);
                     new_inventory =
-                        old_inventory * decay
-                      + source / lambda * reacted_fraction;
+                        old_inventory + source_added - decay_removed;
                 }
                 else
                 {
-                    new_inventory =
-                        old_inventory + time_step * source;
+                    source_added = time_step * source;
+                    new_inventory = old_inventory + source_added;
                 }
-                new_inventory =
-                    std::max(new_inventory, scalar_type{});
+                const auto unclipped_inventory = new_inventory;
+                new_inventory = std::max(new_inventory, scalar_type{});
+                local_inventory_before += old_inventory * volume;
+                local_source_added += source_added * volume;
+                local_decay_removed += decay_removed * volume;
+                local_positivity_adjustment +=
+                    (new_inventory - unclipped_inventory) * volume;
                 inventory.set_owned_value(cell_lid, new_inventory);
                 source_field.set_owned_value(cell_lid, source);
             }
             inventory.sync_ghosts();
             source_field.sync_ghosts();
+            diagnostics.inventory_before = global_sum(local_inventory_before);
+            diagnostics.source_added = global_sum(local_source_added);
+            diagnostics.decay_removed = global_sum(local_decay_removed);
+            diagnostics.positivity_adjustment =
+                global_sum(local_positivity_adjustment);
         }
 
-        if (d_options.effective_diffusivity > scalar_type{})
+        if (liquid_face_flux != nullptr
+            || d_options.effective_diffusivity > scalar_type{})
         {
-            diffuse(time_step, alpha_l);
+            transport(time_step, alpha_l, liquid_face_flux);
         }
         else
         {
             reconstruct_concentrations(alpha_l);
         }
+        update_inventory_diagnostics(time_step, alpha_l, liquid_face_flux);
     }
 
 private:
+    /** @brief Validate options collectively before group-dependent allocation. */
+    void validate_collective_configuration(
+        const DelayedNeutronPrecursorOptions& options) const
+    {
+        const auto communicator = d_mesh->owned_cell_map()->getComm();
+        int local_options_are_valid = 1;
+        std::string local_error;
+        try
+        {
+            validate_delayed_neutron_precursor_options(options);
+        }
+        catch (const std::invalid_argument& error)
+        {
+            local_options_are_valid = 0;
+            local_error = error.what();
+        }
+
+        int all_options_are_valid = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            1,
+            &local_options_are_valid,
+            &all_options_are_valid);
+        if (all_options_are_valid == 0)
+        {
+            if (communicator->getSize() == 1 && !local_error.empty())
+            {
+                throw std::invalid_argument(local_error);
+            }
+            throw std::invalid_argument(
+                "Precursor options must be valid on every rank.");
+        }
+
+        const auto local_group_count = options.group_count;
+        int minimum_group_count = 0;
+        int maximum_group_count = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            1,
+            &local_group_count,
+            &minimum_group_count);
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_group_count,
+            &maximum_group_count);
+        if (minimum_group_count != maximum_group_count)
+        {
+            throw std::invalid_argument(
+                "Precursor group count must match on every rank.");
+        }
+
+        const auto count = static_cast<size_t>(minimum_group_count);
+        const auto decay_constants = complete_vector(
+            options.decay_constants, count, 0.0);
+        const auto initial_concentrations = complete_vector(
+            options.initial_concentrations, count, 0.0);
+        const auto source_terms = complete_vector(
+            options.source_terms, count, 0.0);
+        const auto power_yields = complete_vector(
+            options.power_yields, count, 0.0);
+        std::vector<real_t> local_configuration;
+        local_configuration.reserve(1 + 4 * count);
+        local_configuration.push_back(options.effective_diffusivity);
+        for (size_t group = 0; group < count; ++group)
+        {
+            local_configuration.push_back(decay_constants[group]);
+            local_configuration.push_back(initial_concentrations[group]);
+            local_configuration.push_back(source_terms[group]);
+            local_configuration.push_back(power_yields[group]);
+        }
+
+        std::vector<real_t> minimum_configuration(
+            local_configuration.size());
+        std::vector<real_t> maximum_configuration(
+            local_configuration.size());
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            static_cast<int>(local_configuration.size()),
+            local_configuration.data(),
+            minimum_configuration.data());
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            static_cast<int>(local_configuration.size()),
+            local_configuration.data(),
+            maximum_configuration.data());
+        if (minimum_configuration != maximum_configuration)
+        {
+            throw std::invalid_argument(
+                "Precursor decay, initial concentration, source, yield, and "
+                "diffusivity options must match on every rank.");
+        }
+    }
+
+    /** @brief Require every rank to select the same collective update path. */
+    void validate_collective_advance_selection(
+        scalar_type time_step,
+        const field_type* fission_power_density,
+        const face_flux_field_type* liquid_face_flux) const
+    {
+        const auto communicator = d_mesh->owned_cell_map()->getComm();
+        const std::array<int, 7> local_state{{
+            enabled() ? 1 : 0,
+            static_cast<int>(d_fields.size()),
+            fission_power_density != nullptr ? 1 : 0,
+            liquid_face_flux != nullptr ? 1 : 0,
+            d_inventory_initialized ? 1 : 0,
+            d_options.effective_diffusivity > scalar_type{} ? 1 : 0,
+            std::isfinite(time_step) && time_step > scalar_type{} ? 1 : 0}};
+        std::array<int, 7> minimum_state{};
+        std::array<int, 7> maximum_state{};
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            static_cast<int>(local_state.size()),
+            local_state.data(),
+            minimum_state.data());
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            static_cast<int>(local_state.size()),
+            local_state.data(),
+            maximum_state.data());
+        if (minimum_state != maximum_state)
+        {
+            throw std::invalid_argument(
+                "Precursor enabled state, group count, optional fields, and "
+                "valid timestep selection must agree on every rank.");
+        }
+
+        std::vector<scalar_type> local_configuration;
+        local_configuration.reserve(2 + 4 * d_fields.size());
+        local_configuration.push_back(d_options.effective_diffusivity);
+        if (minimum_state.back() != 0)
+        {
+            local_configuration.push_back(time_step);
+        }
+        for (size_t group = 0; group < d_fields.size(); ++group)
+        {
+            local_configuration.push_back(d_decay_constants[group]);
+            local_configuration.push_back(
+                d_initial_concentrations[group]);
+            local_configuration.push_back(d_source_terms[group]);
+            local_configuration.push_back(d_power_yields[group]);
+        }
+        std::vector<scalar_type> minimum_configuration(
+            local_configuration.size());
+        std::vector<scalar_type> maximum_configuration(
+            local_configuration.size());
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MIN,
+            static_cast<int>(local_configuration.size()),
+            local_configuration.data(),
+            minimum_configuration.data());
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            static_cast<int>(local_configuration.size()),
+            local_configuration.data(),
+            maximum_configuration.data());
+        if (minimum_configuration != maximum_configuration)
+        {
+            throw std::invalid_argument(
+                "Precursor timestep, decay, initial concentration, source, "
+                "yield, and diffusivity options must agree on every rank.");
+        }
+    }
+
     /** @brief Require a finite liquid fraction in the interval (0, 1]. */
     static scalar_type checked_liquid_fraction(scalar_type value)
     {
@@ -391,17 +716,27 @@ private:
 
     void validate_liquid_fraction_field(const field_type& alpha_l) const
     {
-        if (&alpha_l.mesh() != d_mesh.get())
+        int local_invalid = &alpha_l.mesh() != d_mesh.get();
+        if (local_invalid == 0)
+        {
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells();
+                 ++owned)
+            {
+                const auto value = alpha_l.value(
+                    static_cast<local_ordinal_type>(owned));
+                if (!std::isfinite(value) || value <= scalar_type{}
+                    || value > scalar_type{1})
+                {
+                    local_invalid = 1;
+                }
+            }
+        }
+        if (global_max(local_invalid) != 0)
         {
             throw std::invalid_argument(
-                "Precursor liquid fraction must be on the model mesh.");
-        }
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            checked_liquid_fraction(alpha_l.value(
-                static_cast<local_ordinal_type>(owned)));
+                "Precursor liquid fractions must be on the model mesh, "
+                "finite, and in (0, 1].");
         }
     }
 
@@ -427,13 +762,16 @@ private:
         }
     }
 
-    /** @brief Diffuse group concentrations while preserving liquid inventory. */
-    void diffuse(
+    /** @brief Advect/diffuse concentrations while preserving liquid inventory. */
+    void transport(
         scalar_type time_step,
-        const field_type& alpha_l)
+        const field_type& alpha_l,
+        const face_flux_field_type* liquid_face_flux)
     {
         face_flux_field_type zero_flux(
             d_mesh, 0.0, "precursor_zero_face_flux");
+        const auto& face_flux =
+            liquid_face_flux == nullptr ? zero_flux : *liquid_face_flux;
         field_type storage_weight(
             d_mesh, 1.0, "precursor_storage_weight");
         field_type advection_weight(
@@ -497,10 +835,11 @@ private:
                     std::abs(old_concentration.value(cell_lid)));
             }
             old_concentration.sync_ghosts();
+            concentration_scale = global_maximum(concentration_scale);
 
             auto system = FVM::weighted_scalar_transport_system<Pack>(
                 old_concentration,
-                zero_flux,
+                face_flux,
                 time_step,
                 storage_weight,
                 advection_weight,
@@ -522,16 +861,18 @@ private:
                     *system.rhs,
                     solution.owned_data(),
                     LinearSolverOptions{});
-            if (!statistics.converged)
+            if (global_max(statistics.converged ? 0 : 1) != 0)
             {
                 throw std::runtime_error(
-                    "Precursor diffusion solve did not converge.");
+                    "Precursor transport solve did not converge.");
             }
 
             const auto negative_tolerance =
                 scalar_type{100}
               * std::numeric_limits<scalar_type>::epsilon()
               * std::max(concentration_scale, scalar_type{1});
+            int local_nonfinite = 0;
+            int local_too_negative = 0;
             for (size_t owned = 0;
                  owned < d_mesh->num_owned_cells();
                  ++owned)
@@ -541,16 +882,37 @@ private:
                 auto concentration = solution.value(cell_lid);
                 if (!std::isfinite(concentration))
                 {
-                    throw std::runtime_error(
-                        "Precursor diffusion produced a non-finite value.");
+                    local_nonfinite = 1;
                 }
                 if (concentration < -negative_tolerance)
                 {
-                    throw std::runtime_error(
-                        "Precursor diffusion produced a negative value.");
+                    local_too_negative = 1;
                 }
+            }
+            if (global_max(local_nonfinite) != 0)
+            {
+                throw std::runtime_error(
+                    "Precursor transport produced a non-finite value.");
+            }
+            if (global_max(local_too_negative) != 0)
+            {
+                throw std::runtime_error(
+                    "Precursor transport produced a negative value.");
+            }
+
+            scalar_type local_positivity_adjustment{};
+            for (size_t owned = 0;
+                 owned < d_mesh->num_owned_cells();
+                 ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                auto concentration = solution.value(cell_lid);
                 if (concentration < scalar_type{})
                 {
+                    local_positivity_adjustment +=
+                        -concentration * storage_weight.value(cell_lid)
+                      * d_mesh->cell_volume(cell_lid);
                     concentration = scalar_type{};
                 }
                 field.set_owned_value(cell_lid, concentration);
@@ -558,9 +920,107 @@ private:
                     cell_lid,
                     storage_weight.value(cell_lid) * concentration);
             }
+            d_last_inventory_diagnostics[group].positivity_adjustment +=
+                global_sum(local_positivity_adjustment);
             field.sync_ghosts();
             inventory.sync_ghosts();
         }
+    }
+
+    /** @brief Finish the replicated step balance after transport. */
+    void update_inventory_diagnostics(
+        scalar_type time_step,
+        const field_type& alpha_l,
+        const face_flux_field_type* liquid_face_flux)
+    {
+        for (size_t group = 0; group < d_fields.size(); ++group)
+        {
+            scalar_type local_inventory_after{};
+            scalar_type local_boundary_outflow_rate{};
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                local_inventory_after += d_inventories[group]->value(cell_lid)
+                                         * d_mesh->cell_volume(cell_lid);
+            }
+
+            if (liquid_face_flux != nullptr)
+            {
+                for (const auto& [batch_id, boundary_batch] :
+                     d_mesh->boundary_batches())
+                {
+                    static_cast<void>(batch_id);
+                    for (const auto face_lid : boundary_batch.face_lids)
+                    {
+                        if (!d_mesh->is_boundary_face(face_lid)
+                            || !liquid_face_flux->is_owned_face(face_lid))
+                        {
+                            continue;
+                        }
+                        const auto out_flux = liquid_face_flux->value(face_lid);
+                        if (out_flux <= scalar_type{})
+                        {
+                            continue;
+                        }
+                        const auto owner = d_mesh->owner_cell(face_lid);
+                        local_boundary_outflow_rate +=
+                            out_flux * alpha_l.value(owner)
+                            * d_fields[group]->value(owner);
+                    }
+                }
+            }
+
+            auto& diagnostics = d_last_inventory_diagnostics[group];
+            diagnostics.inventory_after = global_sum(local_inventory_after);
+            diagnostics.boundary_outflow =
+                time_step * global_sum(local_boundary_outflow_rate);
+            const auto expected_inventory =
+                diagnostics.inventory_before + diagnostics.source_added
+                - diagnostics.decay_removed
+                + diagnostics.positivity_adjustment
+                - diagnostics.boundary_outflow;
+            diagnostics.balance_error =
+                diagnostics.inventory_after - expected_inventory;
+        }
+    }
+
+    /** @brief Sum a rank-local scalar and replicate it on every rank. */
+    scalar_type global_sum(scalar_type local_value) const
+    {
+        scalar_type result{};
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(),
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_value,
+            &result);
+        return result;
+    }
+
+    /** @brief Replicate the maximum of a rank-local integer flag. */
+    int global_max(int local_value) const
+    {
+        int result{};
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(),
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_value,
+            &result);
+        return result;
+    }
+
+    /** @brief Replicate the maximum of a rank-local scalar. */
+    scalar_type global_maximum(scalar_type local_value) const
+    {
+        scalar_type result{};
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(),
+            Teuchos::REDUCE_MAX,
+            1,
+            &local_value,
+            &result);
+        return result;
     }
 
     static ArrReal complete_vector(
@@ -580,11 +1040,13 @@ private:
         d_transport_geometry_cache;
     DelayedNeutronPrecursorOptions d_options;
     ArrReal d_decay_constants;
+    ArrReal d_initial_concentrations;
     ArrReal d_source_terms;
     ArrReal d_power_yields;
     std::vector<std::unique_ptr<field_type>> d_fields;
     std::vector<std::unique_ptr<field_type>> d_inventories;
     std::vector<std::unique_ptr<field_type>> d_sources;
+    std::vector<diagnostics_type> d_last_inventory_diagnostics;
     std::map<std::string, const field_type*> d_output_fields;
     BelosLinearSolver<Pack> d_transport_solver;
     bool d_inventory_initialized = false;

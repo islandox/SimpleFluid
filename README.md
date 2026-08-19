@@ -27,6 +27,10 @@ physical validation and acceptance.**
 radiolytic bubble-population model can run in the same `BoussinesqSolver` with
 sequential void-to-density/buoyancy feedback. This is not a full Euler–Euler
 two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
+Permanent serial and exact-two-rank regressions exercise that combined path,
+including causal changes from turbulence, dissolved-hydrogen advection, and
+void-dependent density feedback; a checked-in combined user example and
+quantitative bubbly-flow validation remain open.
 
 | Capability | Status |
 | ---------- | ------ |
@@ -51,7 +55,7 @@ two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
 | Two-population radiolytic-bubble model | 🚧 |
 | Weakly coupled RANS plus radiolytic bubble populations | 🚧 |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
-| TH/neutronics multiphysics coupling | ⬜ |
+| In-memory TH/neutronics feedback and coupling scaffold | 🚧 |
 
 ## Governing Equations
 
@@ -77,8 +81,11 @@ $$
 
 - **Collocated** finite-volume method on supported hexahedral and
   triangular-prism meshes
-- **First-order upwind** convection (implicit)
-- **Backward Euler** time integration
+- **First-order upwind** convection (implicit) and **Backward Euler** time
+  integration by default
+- Opt-in constant-step **BDF2** and bounded **linear-upwind** deferred
+  correction for legacy and native mapped weighted-scalar transport, plus the
+  native mapped physical-temperature path
 - Gradient reconstruction via cached **least-squares** stencils, with a
   selectable **Gauss-linear** path for pressure and turbulence gradients
 
@@ -134,7 +141,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - Runtime-switchable mesh types:
   - **Orthogonal Cartesian 3D** — structured hexahedral cells
   - **Orthogonal Cylindrical 3D** — polar-structured hexahedral cells
-  - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms
+  - **Unstructured mesh** — STK-free polyhedral connectivity; serial directly
+    and distributed after `MeshPartitioner`/`PartitionedMesh` adaptation
+  - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms,
+    currently serial-only
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
     other volume topologies are rejected during assembly
 - Owned + ghost cell decomposition for distributed-memory assembly
@@ -222,8 +232,11 @@ absent. Those capabilities belong to the deferred Euler–Euler program in
 
 The shipped `pitz_daily` and `fissile_solution_tank_sst` examples exercise
 RANS without radiolytic bubbles, while the fissile-solution smoke examples
-exercise radiolysis without RANS. No checked-in example or regression test
-currently advances both subsystems in a nontrivial flow.
+exercise radiolysis without RANS. A permanent serial and exact-two-rank
+regression advances both subsystems in a sheared flow and checks turbulence,
+dissolved-hydrogen advection, fission production, bubble slip, hydrogen
+balance, and void-dependent density feedback. There is not yet a checked-in
+combined user-facing example or quantitative bubbly-flow validation case.
 
 ### FVM Operators
 
@@ -275,13 +288,14 @@ short-running physical smoke cases:
 | Skewed diffusion | Non-orthogonal mesh convergence with all three treatments |
 | Natural convection cavity | Differentially heated square cavity |
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
-| OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
+| OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with an authenticated fail-closed comparator; the physical acceptance manifest remains pending qualification |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
-| Native mesh path | Cartesian, cylindrical, semi-structured, coupled-Krylov, optional-physics, and MPI regressions without legacy conversion |
+| Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
-and MPI coverage. A permanent combined RANS-plus-bubble regression and a
-quantitative turbulent bubbly-flow benchmark remain open.
+and MPI coverage plus a permanent combined serial and exact-two-rank
+regression. A checked-in combined user example and a quantitative turbulent
+bubbly-flow benchmark remain open.
 
 The cavity smoke tests do not currently assert agreement with Ghia et al. or
 with bundled OpenFOAM profile data. See
@@ -490,8 +504,12 @@ may scale the base profile once per step at `t_n`; the retained
 
 `qdot_fission` is included by
 `SolutionOutputOptions::include_sources` and is additive with other named
-temperature sources. Neutronics feedback and file-based power import remain
-future work.
+temperature sources. The in-memory Phase 20 scaffold can import owned-cell
+power, register `T_liquid`, `alpha_g`, `rhoFeedback`, and precursor fields,
+export deterministic volume-averaged snapshots, and drive a callback-based
+outer loop with thermal-hydraulic subcycles and returned-power exchange. It is
+not a production external-neutronics protocol or a neutronics solver;
+file-based exchange remains future work.
 
 ## Radiolytic Gas Models
 
@@ -500,6 +518,12 @@ model and an advanced two-population hydrogen-bubble model. The latter includes
 dissolved hydrogen, bubble populations, pressure-sensitive properties,
 transport, escape, and diagnostic inventory accounting, but is not yet fully
 accepted as a validated physical model.
+
+The delayed-neutron precursor model conservatively advances
+`alpha_l * C_i` with the projected liquid face flux, optional diffusion, and
+exact constant-source/decay integration. Its globally reduced diagnostics
+separate source addition, decay, boundary outflow, transport positivity
+adjustment, and balance error; distributed inputs are validated collectively.
 
 See [`docs/radiolytic-gas-models.md`](docs/radiolytic-gas-models.md) for the
 advanced radiolysis model and

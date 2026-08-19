@@ -14,8 +14,11 @@
 #include "FVM/Operators.hh"
 #include "geometry/MeshFactory.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
@@ -28,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace
@@ -35,6 +39,10 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
+using Handle = SimpleFluid::MeshHandle<Pack>;
+using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+using PartitionedUnstructured =
+    SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -105,6 +113,39 @@ SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_native_single_cell_car
     auto mesh = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
     return std::make_shared<SimpleFluid::MeshHandle<Pack>>(std::move(mesh));
+}
+
+/** @brief Build a three-cell native Cartesian line for backend parity. */
+SimpleFluid::SP<const Handle> make_native_cartesian_line_handle()
+{
+    auto mesh =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 1.0, 2.0, 3.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
+    return std::make_shared<Handle>(std::move(mesh));
+}
+
+/** @brief Build an equivalent three-cell native unstructured line. */
+SimpleFluid::SP<const Handle> make_native_unstructured_line_handle()
+{
+    return std::make_shared<Handle>(
+        SimpleFluid::test::make_unstructured_hex_line(3));
+}
+
+/** @brief Explicitly partition an unstructured line before wrapping it. */
+SimpleFluid::SP<const Handle>
+make_native_distributed_unstructured_handle()
+{
+    auto mesh = SimpleFluid::test::make_unstructured_hex_line(8, 0.125);
+    const auto communicator = Tpetra::getDefaultComm();
+    auto partition =
+        SimpleFluid::MeshPartitioner<Pack>::partition(
+            *mesh, communicator);
+    auto partitioned = std::make_shared<PartitionedUnstructured>(
+        mesh, std::move(partition.indexer), communicator);
+    return std::make_shared<Handle>(partitioned);
 }
 
 /** @brief Build an eight-cell natively partitioned Cartesian line. */
@@ -558,6 +599,98 @@ TEST(BoussinesqSolverTest, RunsPhysicalModelsOnNativeMeshHandle)
     EXPECT_TRUE(std::isfinite(velocity.z));
 }
 
+/** @brief Native unstructured physical transport matches Cartesian geometry. */
+TEST(BoussinesqSolverTest,
+     NativeUnstructuredPhysicalModelsMatchCartesianBackend)
+{
+    const auto cartesian_mesh = make_native_cartesian_line_handle();
+    const auto unstructured_mesh =
+        make_native_unstructured_line_handle();
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.25;
+    time_options.kinematic_viscosity = 0.0;
+    time_options.thermal_diffusivity = 0.0;
+    time_options.thermal_expansion = 0.0;
+    time_options.gravity_x = 0.0;
+    time_options.gravity_y = 0.0;
+    time_options.gravity_z = 0.0;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 2.0;
+    model_options.density = 2.0;
+    model_options.specific_heat_capacity = 4.0;
+    model_options.dynamic_viscosity = 2.0e-2;
+    model_options.thermal_conductivity = 1.0e-1;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 200;
+    linear_options.tolerance = 1.0e-12;
+    SimpleFluid::BoussinesqSolver<Pack> cartesian_solver(
+        cartesian_mesh,
+        SimpleFluid::BoundaryConditionSet{},
+        time_options,
+        linear_options,
+        model_options);
+    SimpleFluid::BoussinesqSolver<Pack> unstructured_solver(
+        unstructured_mesh,
+        SimpleFluid::BoundaryConditionSet{},
+        time_options,
+        linear_options,
+        model_options);
+
+    for (auto* solver : {&cartesian_solver, &unstructured_solver})
+    {
+        solver->initialize_linear_temperature(
+            {1.0, 0.0, 0.0}, 300.0, 300.0);
+        solver->add_temperature_source("uniform_heat", 24.0);
+        solver->step();
+        EXPECT_EQ(solver->step_index(), 1);
+    }
+
+    ASSERT_FALSE(unstructured_mesh->legacy_mesh());
+    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(
+        unstructured_mesh->variant()));
+    EXPECT_EQ(
+        unstructured_solver.material_properties().density.mesh_ptr(),
+        unstructured_mesh);
+    for (size_t owned = 0;
+         owned < unstructured_mesh->num_owned_cells();
+         ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        EXPECT_NEAR(
+            unstructured_solver.temperature().value(cell_lid),
+            cartesian_solver.temperature().value(cell_lid),
+            1.0e-10);
+        EXPECT_NEAR(
+            unstructured_solver.temperature().value(cell_lid),
+            300.75,
+            1.0e-10);
+        EXPECT_NEAR(
+            unstructured_solver.pressure().value(cell_lid),
+            cartesian_solver.pressure().value(cell_lid),
+            1.0e-10);
+        const auto unstructured_velocity =
+            unstructured_solver.velocity().value(cell_lid);
+        const auto cartesian_velocity =
+            cartesian_solver.velocity().value(cell_lid);
+        EXPECT_NEAR(
+            unstructured_velocity.x,
+            cartesian_velocity.x,
+            1.0e-10);
+        EXPECT_NEAR(
+            unstructured_velocity.y,
+            cartesian_velocity.y,
+            1.0e-10);
+        EXPECT_NEAR(
+            unstructured_velocity.z,
+            cartesian_velocity.z,
+            1.0e-10);
+    }
+}
+
 /** @brief Two ranks run native physical transport through coupled Krylov. */
 TEST(BoussinesqSolverTest, NativePhysicalModelsRunCoupledKrylovOnDistributedCartesianMesh)
 {
@@ -616,6 +749,139 @@ TEST(BoussinesqSolverTest, NativePhysicalModelsRunCoupledKrylovOnDistributedCart
         const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
         EXPECT_NEAR(solver.temperature().value(cell_lid), 300.1, 1.0e-8);
         EXPECT_TRUE(std::isfinite(solver.pressure().value(cell_lid)));
+        const auto velocity = solver.velocity().value(cell_lid);
+        EXPECT_TRUE(std::isfinite(velocity.x));
+        EXPECT_TRUE(std::isfinite(velocity.y));
+        EXPECT_TRUE(std::isfinite(velocity.z));
+    }
+}
+
+/** @brief Two ranks run physical transport on explicitly partitioned geometry. */
+TEST(BoussinesqSolverTest,
+     NativePhysicalModelsRunCoupledKrylovOnPartitionedUnstructuredMesh)
+{
+    const auto mesh =
+        make_native_distributed_unstructured_handle();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    ASSERT_FALSE(mesh->legacy_mesh());
+    ASSERT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(
+        mesh->variant()));
+    ASSERT_EQ(
+        mesh->owned_cell_map()->getGlobalNumElements(), 8U);
+    ASSERT_GT(mesh->num_owned_cells(), 0U);
+    ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 1;
+    time_options.thermal_expansion = 0.0;
+    time_options.gravity_x = 0.0;
+    time_options.gravity_y = 0.0;
+    time_options.gravity_z = 0.0;
+    time_options.pressure_velocity_coupling =
+        SimpleFluid::PressureVelocityCoupling::CoupledKrylov;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 2.0;
+    model_options.density = 2.0;
+    model_options.specific_heat_capacity = 4.0;
+    model_options.dynamic_viscosity = 2.0e-2;
+    model_options.thermal_conductivity = 1.0e-1;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 300;
+    linear_options.tolerance = 1.0e-10;
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        SimpleFluid::BoundaryConditionSet{},
+        time_options,
+        linear_options,
+        model_options);
+
+    solver.initialize_linear_temperature(
+        {1.0, 0.0, 0.0}, 301.0, 299.0);
+    constexpr double minimum_cell_center = 0.0625;
+    constexpr double maximum_cell_center = 0.9375;
+    for (size_t owned = 0;
+         owned < mesh->num_owned_cells();
+         ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        const auto x = mesh->cell_centroid(cell_lid).x;
+        const auto blend =
+            (x - minimum_cell_center)
+            / (maximum_cell_center - minimum_cell_center);
+        EXPECT_NEAR(
+            solver.temperature().value(cell_lid),
+            301.0 * (1.0 - blend) + 299.0 * blend,
+            1.0e-12);
+    }
+
+    constexpr size_t global_cell_count = 8;
+    constexpr double cell_width = 0.125;
+    const auto storage_coefficient =
+        model_options.density
+      * model_options.specific_heat_capacity
+      * cell_width / time_options.time_step;
+    const auto diffusion_coefficient =
+        model_options.thermal_conductivity.value() / cell_width;
+    std::vector<double> diagonal(
+        global_cell_count,
+        storage_coefficient + 2.0 * diffusion_coefficient);
+    diagonal.front() = storage_coefficient + diffusion_coefficient;
+    diagonal.back() = storage_coefficient + diffusion_coefficient;
+    std::vector<double> expected_temperature(global_cell_count);
+    for (size_t cell = 0; cell < global_cell_count; ++cell)
+    {
+        const auto blend = static_cast<double>(cell)
+                         / static_cast<double>(global_cell_count - 1);
+        expected_temperature[cell] =
+            storage_coefficient
+          * (301.0 * (1.0 - blend) + 299.0 * blend);
+    }
+    for (size_t cell = 1; cell < global_cell_count; ++cell)
+    {
+        const auto factor = -diffusion_coefficient / diagonal[cell - 1];
+        diagonal[cell] -= factor * -diffusion_coefficient;
+        expected_temperature[cell] -=
+            factor * expected_temperature[cell - 1];
+    }
+    expected_temperature.back() /= diagonal.back();
+    for (size_t cell = global_cell_count - 1; cell-- > 0;)
+    {
+        expected_temperature[cell] =
+            (expected_temperature[cell]
+             + diffusion_coefficient * expected_temperature[cell + 1])
+          / diagonal[cell];
+    }
+
+    solver.step();
+
+    EXPECT_TRUE(solver.last_step_statistics().converged);
+    EXPECT_TRUE(std::isfinite(
+        solver.last_pressure_velocity_residuals().continuity));
+    EXPECT_EQ(solver.material_properties().density.mesh_ptr(), mesh);
+    for (size_t owned = 0;
+         owned < mesh->num_owned_cells();
+         ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        const auto cell_gid = static_cast<size_t>(
+            mesh->owned_cell_map()->getGlobalElement(cell_lid));
+        ASSERT_LT(cell_gid, expected_temperature.size());
+        EXPECT_NEAR(
+            solver.temperature().value(cell_lid),
+            expected_temperature[cell_gid],
+            1.0e-8);
+        EXPECT_TRUE(std::isfinite(
+            solver.pressure().value(cell_lid)));
         const auto velocity = solver.velocity().value(cell_lid);
         EXPECT_TRUE(std::isfinite(velocity.x));
         EXPECT_TRUE(std::isfinite(velocity.y));

@@ -98,6 +98,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME NativeUnstructuredPhysicalBoussinesq_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testBoussinesqSolver>"
+            "--gtest_filter=BoussinesqSolverTest.NativePhysicalModelsRunCoupledKrylovOnPartitionedUnstructuredMesh")
+  set_tests_properties(NativeUnstructuredPhysicalBoussinesq_2procs PROPERTIES
+    LABELS "mpi;boussinesq;physical_models;pressure_velocity;unstructured"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME TurbulentBoussinesq_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
@@ -109,6 +120,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME CombinedTurbulentRadiolysis_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testTurbulentBoussinesqSolver>"
+            "--gtest_filter=TurbulentBoussinesqSolverTest.CouplesShearedRansShengTransportFissionAndDensityFeedbackOnTwoRanks")
+  set_tests_properties(CombinedTurbulentRadiolysis_2procs PROPERTIES
+    LABELS "mpi;turbulence;radiolysis;physical_models;pressure_velocity;acceptance"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME PrecursorNonOrthogonalConservation_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"
@@ -116,6 +138,28 @@ if(MPIEXEC_EXECUTABLE
             "--gtest_filter=DelayedNeutronPrecursorModelTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection")
   set_tests_properties(PrecursorNonOrthogonalConservation_2procs PROPERTIES
     LABELS "mpi;precursors"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME PrecursorAdvectionConservation_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPhase13PlusModels>"
+            "--gtest_filter=DelayedNeutronPrecursorModelTest.LiquidAdvectionConservesDistributedInventory:DelayedNeutronPrecursorModelTest.CollectivelyRejectsRankDivergentAdvanceSelection")
+  set_tests_properties(PrecursorAdvectionConservation_2procs PROPERTIES
+    LABELS "mpi;precursors;transport"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
+    NAME PrecursorCollectiveConfiguration_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testPhase13PlusModels>"
+            "--gtest_filter=DelayedNeutronPrecursorModelTest.CollectivelyRejectsRankDivergentConfigurationAndPower:DelayedNeutronPrecursorModelTest.SolverRejectsRankDivergentPrecursorPresenceBeforeStep")
+  set_tests_properties(PrecursorCollectiveConfiguration_2procs PROPERTIES
+    LABELS "mpi;precursors;validation"
     PROCESSORS 2
     TIMEOUT 120)
 

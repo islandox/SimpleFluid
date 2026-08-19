@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshFactory.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/FluidSolver.hh"
 #include "utils/testing_environment.hh"
@@ -265,6 +266,8 @@ TEST(FluidSolverTest, RunsNativeMeshHandlesWithoutLegacyConversion)
             SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{
                 {0, 1, 3}, {1, 2, 3}},
             SimpleFluid::ArrReal{0.0, 1.0})));
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        SimpleFluid::test::make_unstructured_hex_line(2)));
 
     SimpleFluid::TimeStepperOptions time_options;
     time_options.time_step = 1.0e-2;
@@ -317,6 +320,8 @@ TEST(FluidSolverTest, RunsCoupledKrylovOnNativeMeshHandle)
     meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(std::make_shared<SemiStructured>(
         SimpleFluid::Arr<SemiStructured::Vec3>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 3}, {1, 2, 3}}, SimpleFluid::ArrReal{0.0, 1.0})));
+    meshes.push_back(std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        SimpleFluid::test::make_unstructured_hex_line(2)));
 
     SimpleFluid::TimeStepperOptions time_options;
     time_options.time_step = 1.0e-2;
