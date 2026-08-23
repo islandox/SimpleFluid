@@ -448,6 +448,8 @@ public:
             initialize_inventory(alpha_l);
         }
 
+        std::vector<scalar_type> reaction_inventory_reference(
+            d_fields.size());
         for (size_t group = 0; group < d_fields.size(); ++group)
         {
             auto& inventory = *d_inventories[group];
@@ -458,6 +460,7 @@ public:
             scalar_type local_inventory_before{};
             scalar_type local_source_added{};
             scalar_type local_decay_removed{};
+            scalar_type local_reaction_inventory_reference{};
             scalar_type local_positivity_adjustment{};
             for (size_t owned = 0;
                  owned < d_mesh->num_owned_cells();
@@ -478,17 +481,23 @@ public:
                 scalar_type decay_removed{};
                 if (lambda > scalar_type{})
                 {
-                    const auto decay = std::exp(-lambda * time_step);
-                    const auto reacted_fraction =
-                        -std::expm1(-lambda * time_step);
+                    const auto decay_exponent = lambda * time_step;
+                    const auto decay = std::exp(-decay_exponent);
+                    const auto reacted_fraction = -std::expm1(-decay_exponent);
+                    // Exact source integral dt * phi_1(-decay_exponent).
+                    auto source_response = time_step;
+                    if (decay_exponent > scalar_type{})
+                    {
+                        source_response = std::isfinite(decay_exponent)
+                                              ? time_step * (reacted_fraction / decay_exponent)
+                                              : reacted_fraction / lambda;
+                    }
+                    const auto surviving_source = source * source_response;
                     source_added = time_step * source;
-                    const auto surviving_source =
-                        source / lambda * reacted_fraction;
                     decay_removed =
                         old_inventory * reacted_fraction
                       + (source_added - surviving_source);
-                    new_inventory =
-                        old_inventory + source_added - decay_removed;
+                    new_inventory = std::fma(old_inventory, decay, surviving_source);
                 }
                 else
                 {
@@ -500,6 +509,8 @@ public:
                 local_inventory_before += old_inventory * volume;
                 local_source_added += source_added * volume;
                 local_decay_removed += decay_removed * volume;
+                local_reaction_inventory_reference +=
+                    unclipped_inventory * volume;
                 local_positivity_adjustment +=
                     (new_inventory - unclipped_inventory) * volume;
                 inventory.set_owned_value(cell_lid, new_inventory);
@@ -510,6 +521,8 @@ public:
             diagnostics.inventory_before = global_sum(local_inventory_before);
             diagnostics.source_added = global_sum(local_source_added);
             diagnostics.decay_removed = global_sum(local_decay_removed);
+            reaction_inventory_reference[group] =
+                global_sum(local_reaction_inventory_reference);
             diagnostics.positivity_adjustment =
                 global_sum(local_positivity_adjustment);
         }
@@ -523,7 +536,11 @@ public:
         {
             reconstruct_concentrations(alpha_l);
         }
-        update_inventory_diagnostics(time_step, alpha_l, liquid_face_flux);
+        update_inventory_diagnostics(
+            time_step,
+            alpha_l,
+            liquid_face_flux,
+            reaction_inventory_reference);
     }
 
 private:
@@ -927,11 +944,16 @@ private:
         }
     }
 
-    /** @brief Finish the replicated step balance after transport. */
+    /**
+     * @brief Finish the replicated step balance after transport.
+     * @param reaction_inventory_reference Direct post-reaction inventories
+     *        before positivity clipping.
+     */
     void update_inventory_diagnostics(
         scalar_type time_step,
         const field_type& alpha_l,
-        const face_flux_field_type* liquid_face_flux)
+        const face_flux_field_type* liquid_face_flux,
+        const std::vector<scalar_type>& reaction_inventory_reference)
     {
         for (size_t group = 0; group < d_fields.size(); ++group)
         {
@@ -974,9 +996,11 @@ private:
             diagnostics.inventory_after = global_sum(local_inventory_after);
             diagnostics.boundary_outflow =
                 time_step * global_sum(local_boundary_outflow_rate);
+            // Gross production and decay can be nearly equal and cannot
+            // reliably reconstruct a small surviving inventory. Use the
+            // directly integrated reaction state for balance closure.
             const auto expected_inventory =
-                diagnostics.inventory_before + diagnostics.source_added
-                - diagnostics.decay_removed
+                reaction_inventory_reference[group]
                 + diagnostics.positivity_adjustment
                 - diagnostics.boundary_outflow;
             diagnostics.balance_error =

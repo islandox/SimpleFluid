@@ -303,6 +303,49 @@ TEST(FeedbackMapMultiRankTest,
     }
 }
 
+/** @brief Rank-dependent snapshot sequence numbers fail collectively. */
+TEST(FeedbackMapMultiRankTest,
+     RejectsInconsistentFeedbackSnapshotSequenceIndex)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    FieldType temperature(mesh, 300.0, "temperature");
+    SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
+    registry.register_liquid_temperature(temperature);
+
+    std::vector<Pack::local_ordinal_type> local_cells;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        local_cells.push_back(
+            static_cast<Pack::local_ordinal_type>(owned));
+    }
+    const std::vector<FeedbackCell> feedback_cells{
+        {"whole_domain", std::move(local_cells)}};
+    const auto sequence_index =
+        comm->getRank() == 0 ? size_t{7} : size_t{8};
+
+    bool rejected = false;
+    try
+    {
+        (void)registry.export_snapshot(
+            feedback_cells, sequence_index);
+    }
+    catch (const std::invalid_argument& error)
+    {
+        rejected = true;
+        EXPECT_NE(
+            std::string(error.what()).find("sequence index"),
+            std::string::npos);
+    }
+    EXPECT_TRUE(rejected);
+}
+
 /** @brief Rank-dependent coupling controls are rejected on every rank. */
 TEST(FeedbackMapMultiRankTest,
      RejectsInconsistentOuterCouplingConfiguration)
@@ -460,6 +503,79 @@ TEST(FeedbackMapMultiRankTest,
     EXPECT_TRUE(rejected);
     EXPECT_EQ(thermal_hydraulic_calls, 0u);
     EXPECT_EQ(neutronics_calls, 0u);
+}
+
+/** @brief Invalid coarse maps fail before coupled state is advanced. */
+TEST(FeedbackMapMultiRankTest,
+     RejectsOuterCouplingMapBeforeStateMutation)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    FieldType power(mesh, 9.0, "qdot_fission");
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType gas_fraction(mesh, 0.1, "alpha_g");
+    FieldType density(mesh, 950.0, "rhoFeedback");
+    SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
+    registry.register_liquid_temperature(temperature);
+    registry.register_gas_fraction(gas_fraction);
+    registry.register_density_feedback(density);
+
+    std::vector<Pack::local_ordinal_type> local_cells;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        local_cells.push_back(
+            static_cast<Pack::local_ordinal_type>(owned));
+    }
+    const auto feedback_cell_name = comm->getRank() == 0
+                                      ? "whole_domain"
+                                      : "different_domain";
+    CouplingDriver driver(
+        registry,
+        {{feedback_cell_name, std::move(local_cells)}});
+
+    size_t thermal_hydraulic_calls = 0;
+    size_t neutronics_calls = 0;
+    bool rejected = false;
+    try
+    {
+        (void)driver.run(
+            power,
+            std::vector<double>(mesh->num_owned_cells(), 1.0),
+            [&](size_t, size_t)
+            {
+                ++thermal_hydraulic_calls;
+            },
+            [&](const auto&)
+            {
+                ++neutronics_calls;
+                return std::vector<double>(
+                    mesh->num_owned_cells(), 2.0);
+            });
+    }
+    catch (const std::invalid_argument& error)
+    {
+        rejected = true;
+        EXPECT_NE(
+            std::string(error.what()).find(
+                "identical coarse-cell names and ordering"),
+            std::string::npos);
+    }
+    EXPECT_TRUE(rejected);
+    EXPECT_EQ(thermal_hydraulic_calls, 0u);
+    EXPECT_EQ(neutronics_calls, 0u);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        EXPECT_DOUBLE_EQ(power.value(cell_lid), 9.0);
+        EXPECT_DOUBLE_EQ(temperature.value(cell_lid), 300.0);
+    }
 }
 
 /** @brief A rank-local NaN is rejected before collective feedback sums. */

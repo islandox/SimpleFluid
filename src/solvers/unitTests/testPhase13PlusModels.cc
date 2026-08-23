@@ -1063,6 +1063,85 @@ TEST(DelayedNeutronPrecursorModelTest, SourceAndDecayAreAnalytic)
     EXPECT_NEAR(model.concentration(0).value(0), 2.0, 1.0e-12);
 }
 
+/** @brief Keep the source response finite as positive decay approaches zero. */
+TEST(DelayedNeutronPrecursorModelTest, TinyDecayConstantPreservesFiniteSourceLimit)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0e-320};
+    options.source_terms = {4.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(0.5, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_TRUE(std::isfinite(concentration));
+    EXPECT_NEAR(concentration, 2.0, 1.0e-12);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 2.0 * volume, 1.0e-12);
+    EXPECT_NEAR(diagnostics.decay_removed, 0.0, 1.0e-14);
+    EXPECT_TRUE(std::isfinite(diagnostics.balance_error));
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
+}
+
+/** @brief Avoid cancellation when decay is much faster than the time step. */
+TEST(DelayedNeutronPrecursorModelTest, LargeDecayStepUsesDirectExponentialResponse)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0};
+    options.source_terms = {1.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(1.0e16, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_TRUE(std::isfinite(concentration));
+    EXPECT_NEAR(concentration, 1.0, 1.0e-14);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(diagnostics.decay_removed, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        concentration * volume,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-14);
+}
+
+/** @brief Keep balance closure when a large inventory decays to a survivor. */
+TEST(DelayedNeutronPrecursorModelTest,
+     LargeInitialInventoryKeepsStableBalanceDiagnostic)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0};
+    options.initial_concentrations = {1.0e16};
+    options.source_terms = {1.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(1.0e16, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_NEAR(concentration, 1.0, 1.0e-14);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(diagnostics.decay_removed, 2.0e16 * volume, 8.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        concentration * volume,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-14);
+}
+
 /** @brief Verify precursor inventory survives a changing liquid fraction. */
 TEST(DelayedNeutronPrecursorModelTest,
      ChangingLiquidFractionPreservesInventory)

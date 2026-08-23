@@ -613,7 +613,8 @@ void write_cells(const Mesh& mesh, const Solver& solver, const Solver::turbulenc
  *
  * @param argc Argument count passed to Tpetra.
  * @param argv Argument vector passed to Tpetra.
- * @return Process exit code, zero on normal completion.
+ * @return Process exit code, zero only when the requested run completes or
+ *         reaches its configured steady-state criterion.
  */
 int main(int argc, char** argv)
 {
@@ -843,5 +844,5 @@ int main(int argc, char** argv)
             std::cout << '\n';
         }
     }
-    return 0;
+    return search_for_steady_state && !steady_state_reached ? EXIT_FAILURE : EXIT_SUCCESS;
 }

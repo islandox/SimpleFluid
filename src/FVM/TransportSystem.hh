@@ -258,7 +258,9 @@ TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStore
  *
  * Storage, advection, and diffusion coefficients are cell fields. The
  * overload mirrors the legacy weighted system while retaining the original
- * mapped mesh and FieldStored ownership.
+ * mapped mesh and FieldStored ownership. The current @p storage_weight is
+ * held as a coefficient multiplying d(phi)/dt; storage evolution is not
+ * differentiated by this API.
  */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
@@ -287,7 +289,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStor
  * @brief Assemble mapped weighted scalar transport with opt-in schemes.
  *
  * BDF2 requires @p older_values on the same mesh. Bounded linear upwind uses
- * the lagged @p old_values field for its limited deferred correction.
+ * the lagged @p old_values field for its limited deferred correction. The
+ * current @p storage_weight multiplies the complete BDF2 derivative; no
+ * historical storage weights are accepted or inferred.
  */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
@@ -316,7 +320,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStor
  * @brief Assemble conservative physical temperature transport on mapped fields.
  *
  * The transient and advective coefficient is rho*cp, diffusion uses thermal
- * conductivity, and the source is volumetric power density.
+ * conductivity, and the source is volumetric power density. The current
+ * rho*cp field multiplies d(T)/dt; material-property evolution is not part of
+ * the transient derivative.
  */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> physical_temperature_transport_system(
@@ -340,7 +346,13 @@ TransportSystem<Pack> physical_temperature_transport_system(
         static_cast<const ScalarCellFieldStored<Pack, MeshType>*>(nullptr));
 }
 
-/** @brief Assemble mapped physical temperature with opt-in scalar schemes. */
+/**
+ * @brief Assemble mapped physical temperature with opt-in scalar schemes.
+ *
+ * For BDF2, the current rho*cp field multiplies the complete temperature
+ * derivative. Historical density and heat-capacity fields are not accepted
+ * or inferred.
+ */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> physical_temperature_transport_system(
     const ScalarCellFieldStored<Pack, MeshType>& old_temperature,
@@ -604,12 +616,14 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
  *
  * The solved variable is phi:
  *
- *   d(storage_weight * phi)/dt
+ *   storage_weight * d(phi)/dt
  * + div(face_flux * advection_weight * phi)
  * = div(diffusivity * grad(phi)) + source - implicit_sink * phi.
  *
  * Boundary diffusion honors the supplied boundary-condition type, while
  * advection remains first-order upwind and outflow conservative.
+ * The current storage field is held as the coefficient of the complete time
+ * derivative; historical storage values are not part of this API.
  *
  * @param face_fluxes Oriented volumetric fluxes on the @p old_values mesh.
  * @param time_step Must be positive.
@@ -623,9 +637,10 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or a
- *         validated time step, coefficient, sink, or fixed value is invalid.
- * @throws std::runtime_error For a Robin boundary condition, which is not yet
+ *         validated time step, coefficient, sink, fixed value, boundary
+ *         condition, or boundary value is invalid. Robin conditions are not
  *         implemented by this assembly path.
+ * @throws std::runtime_error If a boundary callback fails on another rank.
  */
 template<TpetraTypePack Pack>
 TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& old_values,
@@ -648,7 +663,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
  * This overload is intentionally distinct from the historical ABI entry
  * point: @p discretization precedes @p treatment. BDF2 requires
  * @p older_values on the same mesh. All remaining defaults match the
- * established weighted transport path.
+ * established weighted transport path. The current @p storage_weight
+ * multiplies the complete BDF2 derivative; historical storage fields are not
+ * accepted or inferred.
  */
 template<TpetraTypePack Pack>
 TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& old_values,
@@ -680,9 +697,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or the
- *         time step is not positive.
- * @throws std::runtime_error For a Robin boundary condition, which is not yet
- *         implemented by this assembly path.
+ *         time step, boundary condition, or boundary value is invalid. Robin
+ *         conditions are not implemented by this assembly path.
+ * @throws std::runtime_error If a boundary callback fails on another rank.
  */
 template<TpetraTypePack Pack>
 TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack>& old_temperature,

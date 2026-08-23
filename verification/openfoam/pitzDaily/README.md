@@ -35,11 +35,21 @@ manifest, but it must be qualified with scope `physical_reference`.
 
 A qualified manifest must authenticate its declared retained source files with
 SHA-256 digests. For physical scope it must also record qualified OpenFOAM and
-SimpleFluid provenance plus exact positive `simplefluid_run` values for
-`mesh_divisor`, `steps`, `dt_s`, and `mpi_ranks`. The launcher asks the
-comparator to validate and print that contract before either solver starts,
-rejects a different requested rank count, and exports the recorded mesh,
-step-count, and timestep settings to the SimpleFluid run.
+SimpleFluid provenance plus an exact `simplefluid_run` contract. OpenFOAM
+provenance is restricted to the named OpenFOAM.com v2606 tutorial, and the
+SimpleFluid revision must be a full 40-digit Git revision. The three retained
+OpenFOAM station paths are assigned by `openfoam_profile_files`; the ordered
+`simplefluid_run.rank_csv_files` list must contain exactly one correctly named
+CSV per declared MPI rank. Every path assigned either role must have a matching
+SHA-256 entry. Nesting the CSV set with the mesh, step count, timestep, rank
+count, steady-state switch, linear tolerance, and every adaptive controller
+setting binds those retained outputs to one executable run contract.
+
+The launcher validates and exports all contract values before either solver
+starts, so ambient `SIMPLEFLUID_PITZ_*` solver controls cannot change a
+qualified run. `SIMPLEFLUID_PITZ_OUTPUT_DIR` may select the output directory;
+the launcher canonicalizes it, passes it to `run_simplefluid.sh`, and compares
+the rank CSVs from that same directory.
 
 Run either side independently with:
 
@@ -85,10 +95,16 @@ steady-state acceptance window can advance. If the configured final tolerance
 is looser than `1e-6`, the default relaxed tolerance is raised to match it.
 Progress lines report the requested current and next transport tolerances
 separately from the aggregate achieved `linear_tolerance`.
+When steady-state search is enabled, exhausting the step budget or retry budget
+without reaching the configured criterion is a failed run and returns exit
+status 1 after writing the diagnostic outputs.
 
-The comparison script selects the SimpleFluid cell layer nearest each OpenFOAM
-sampling station, interpolates the OpenFOAM profile to the SimpleFluid cell
-centres, and reports RMS and maximum errors for `ux` and `uy`. Optional
+The comparison script first selects the latest numeric OpenFOAM time containing
+all three required station profiles, so an incomplete final write cannot be
+mixed with older station data. It then selects the SimpleFluid cell layer
+nearest each OpenFOAM sampling station, interpolates the common-time OpenFOAM
+profile to the SimpleFluid cell centres, and reports RMS and maximum errors for
+`ux` and `uy`. Optional
 `--max-l2` and `--max-linf` arguments turn those metrics into pass/fail checks.
 For an acceptance run, `--tolerances` loads station-specific `ux`/`uy` RMS and
 maximum-error limits plus the maximum permitted station offset, minimum sample
@@ -136,19 +152,23 @@ Before changing `reference/physical_acceptance.json` to `qualified`, retain all
 of the following evidence in a checked-in reference directory:
 
 1. OpenFOAM.com v2606 source/case provenance, MPI rank count, solver log, and
-   residual-control convergence for the three final raw profiles.
+   residual-control convergence for the three final raw profiles. List those
+   profiles by station under `reference_definition.openfoam_profile_files`.
 2. The exact SimpleFluid revision, compiler/build configuration, MPI rank
    count, `SIMPLEFLUID_PITZ_*` settings, and rank CSVs. Record the executable
-   `mesh_divisor`, `steps`, `dt_s`, and `mpi_ranks` values under
+   mesh/time, linear-solver, and adaptive steady-state values under
    `reference_definition.simplefluid_run`; use the tutorial cell counts
-   (`SIMPLEFLUID_PITZ_MESH_DIVISOR=1`).
+   (`SIMPLEFLUID_PITZ_MESH_DIVISOR=1`). Every field in the checked-in pending
+   manifest is required when it is qualified. Record the ordered rank CSVs in
+   that same run object, one `simplefluid_cells_rankN.csv` path for every rank.
 3. Profile stationarity at the selected final SimpleFluid time, a time-step
    refinement comparison at that time, and the divisor-2 to divisor-1 mesh
    trend. The current 200-step, `1e-5 s` default is only a smoke/comparison
    setting and is not convergence evidence.
 4. SHA-256 checksums for every retained raw profile and CSV under
-   `qualification.source_files_sha256`; the comparator verifies these before
-   accepting the manifest.
+   `qualification.source_files_sha256`; the comparator verifies the content
+   and requires every role-specific profile/CSV path to name one of those
+   authenticated files before accepting the manifest.
 5. Observed `ux` and `uy` RMS/maximum errors at `x=0.05`, `0.10`, and `0.20 m`,
    along with per-metric headroom justified from the refinement/repeatability
    envelope rather than from one run.

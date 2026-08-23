@@ -57,9 +57,22 @@ def _manifest_positive_integer(value: Any, context: str) -> int:
     return value
 
 
+def _manifest_nonnegative_integer(value: Any, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ToleranceManifestError(
+            f"{context} must be a non-negative integer")
+    return value
+
+
+def _manifest_boolean(value: Any, context: str) -> bool:
+    if not isinstance(value, bool):
+        raise ToleranceManifestError(f"{context} must be a boolean")
+    return value
+
+
 def _validate_source_checksums(
     manifest_path: Path, qualification: dict[str, Any]
-) -> None:
+) -> dict[str, str]:
     """Require qualified manifests to authenticate their retained sources."""
     checksums = qualification.get("source_files_sha256")
     if not isinstance(checksums, dict) or not checksums:
@@ -94,6 +107,31 @@ def _validate_source_checksums(
         if actual_digest != expected_digest.lower():
             raise ToleranceManifestError(
                 f"{manifest_path}: SHA-256 mismatch for {relative_name!r}")
+    return {
+        relative_name: expected_digest.lower()
+        for relative_name, expected_digest in checksums.items()
+    }
+
+
+def _require_checksummed_output(
+    manifest_path: Path,
+    checksums: dict[str, str],
+    relative_name: Any,
+    context: str,
+    expected_basename: str,
+) -> str:
+    """Validate one role-specific retained output and its checksum binding."""
+    if not isinstance(relative_name, str) or not relative_name:
+        raise ToleranceManifestError(
+            f"{manifest_path}: {context} must be a non-empty path")
+    if Path(relative_name).name != expected_basename:
+        raise ToleranceManifestError(
+            f"{manifest_path}: {context} must name {expected_basename!r}")
+    if relative_name not in checksums:
+        raise ToleranceManifestError(
+            f"{manifest_path}: {context} {relative_name!r} has no "
+            "source_files_sha256 entry")
+    return relative_name
 
 
 def load_tolerance_manifest(
@@ -124,7 +162,7 @@ def load_tolerance_manifest(
     if required_scope is not None and scope != required_scope:
         raise ToleranceManifestError(
             f"{path} has scope {scope!r}; expected {required_scope!r}")
-    _validate_source_checksums(path, qualification)
+    source_checksums = _validate_source_checksums(path, qualification)
 
     simplefluid_run = None
     reference_definition = document.get("reference_definition")
@@ -133,13 +171,42 @@ def load_tolerance_manifest(
             raise ToleranceManifestError(
                 f"{path}: qualified physical references require a "
                 "reference_definition object")
-        for field_name in ("openfoam_case", "simplefluid_source_revision"):
-            value = reference_definition.get(field_name)
-            if (not isinstance(value, str) or not value.strip()
-                    or value.strip().lower() == "unqualified"):
-                raise ToleranceManifestError(
-                    f"{path}: reference_definition.{field_name} must record "
-                    "qualified provenance")
+        if reference_definition.get("openfoam_case") \
+                != "OpenFOAM.com v2606 incompressible/simpleFoam/pitzDaily":
+            raise ToleranceManifestError(
+                f"{path}: reference_definition.openfoam_case must identify "
+                "the OpenFOAM.com v2606 incompressible/simpleFoam/pitzDaily "
+                "tutorial exactly")
+        source_revision = reference_definition.get(
+            "simplefluid_source_revision")
+        if (not isinstance(source_revision, str)
+                or len(source_revision) != 40
+                or any(character not in "0123456789abcdefABCDEF"
+                       for character in source_revision)):
+            raise ToleranceManifestError(
+                f"{path}: reference_definition.simplefluid_source_revision "
+                "must be a full 40-digit hexadecimal Git revision")
+        openfoam_profile_document = reference_definition.get(
+            "openfoam_profile_files")
+        if (not isinstance(openfoam_profile_document, dict)
+                or set(openfoam_profile_document) != set(STATIONS)):
+            raise ToleranceManifestError(
+                f"{path}: reference_definition.openfoam_profile_files must "
+                f"contain exactly {sorted(STATIONS)}")
+        openfoam_profile_files = {
+            station_name: _require_checksummed_output(
+                path,
+                source_checksums,
+                openfoam_profile_document[station_name],
+                f"reference_definition.openfoam_profile_files."
+                f"{station_name}",
+                f"{station_name}_U.xy",
+            )
+            for station_name in STATIONS
+        }
+        if len(set(openfoam_profile_files.values())) != len(STATIONS):
+            raise ToleranceManifestError(
+                f"{path}: OpenFOAM stations must name distinct profile files")
         run_document = reference_definition.get("simplefluid_run")
         if not isinstance(run_document, dict):
             raise ToleranceManifestError(
@@ -157,7 +224,131 @@ def load_tolerance_manifest(
             "mpi_ranks": _manifest_positive_integer(
                 run_document.get("mpi_ranks"),
                 "reference_definition.simplefluid_run.mpi_ranks"),
+            "steady_state": _manifest_boolean(
+                run_document.get("steady_state"),
+                "reference_definition.simplefluid_run.steady_state"),
+            "linear_tolerance": _manifest_positive(
+                run_document.get("linear_tolerance"),
+                "reference_definition.simplefluid_run.linear_tolerance"),
+            "steady_consecutive_steps": _manifest_positive_integer(
+                run_document.get("steady_consecutive_steps"),
+                "reference_definition.simplefluid_run."
+                "steady_consecutive_steps"),
+            "steady_min_steps": _manifest_positive_integer(
+                run_document.get("steady_min_steps"),
+                "reference_definition.simplefluid_run.steady_min_steps"),
+            "steady_max_retries": _manifest_nonnegative_integer(
+                run_document.get("steady_max_retries"),
+                "reference_definition.simplefluid_run.steady_max_retries"),
+            "steady_rejection_recovery_steps":
+                _manifest_nonnegative_integer(
+                    run_document.get("steady_rejection_recovery_steps"),
+                    "reference_definition.simplefluid_run."
+                    "steady_rejection_recovery_steps"),
+            "steady_tolerance": _manifest_positive(
+                run_document.get("steady_tolerance"),
+                "reference_definition.simplefluid_run.steady_tolerance"),
+            "steady_min_dt_s": _manifest_positive(
+                run_document.get("steady_min_dt_s"),
+                "reference_definition.simplefluid_run.steady_min_dt_s"),
+            "steady_max_dt_s": _manifest_positive(
+                run_document.get("steady_max_dt_s"),
+                "reference_definition.simplefluid_run.steady_max_dt_s"),
+            "steady_target_courant": _manifest_positive(
+                run_document.get("steady_target_courant"),
+                "reference_definition.simplefluid_run."
+                "steady_target_courant"),
+            "steady_dt_growth_factor": _manifest_positive(
+                run_document.get("steady_dt_growth_factor"),
+                "reference_definition.simplefluid_run."
+                "steady_dt_growth_factor"),
+            "steady_dt_reduction_factor": _manifest_positive(
+                run_document.get("steady_dt_reduction_factor"),
+                "reference_definition.simplefluid_run."
+                "steady_dt_reduction_factor"),
+            "steady_rejection_safety_factor": _manifest_positive(
+                run_document.get("steady_rejection_safety_factor"),
+                "reference_definition.simplefluid_run."
+                "steady_rejection_safety_factor"),
+            "steady_relaxed_linear_tolerance": _manifest_positive(
+                run_document.get("steady_relaxed_linear_tolerance"),
+                "reference_definition.simplefluid_run."
+                "steady_relaxed_linear_tolerance"),
+            "steady_full_accuracy_update_ratio": _manifest_positive(
+                run_document.get("steady_full_accuracy_update_ratio"),
+                "reference_definition.simplefluid_run."
+                "steady_full_accuracy_update_ratio"),
+            "steady_progress_interval": _manifest_positive_integer(
+                run_document.get("steady_progress_interval"),
+                "reference_definition.simplefluid_run."
+                "steady_progress_interval"),
         }
+        if simplefluid_run["steady_min_dt_s"] \
+                > simplefluid_run["steady_max_dt_s"]:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run steady_min_dt_s cannot exceed "
+                "steady_max_dt_s")
+        if not simplefluid_run["steady_min_dt_s"] \
+                <= simplefluid_run["dt_s"] \
+                <= simplefluid_run["steady_max_dt_s"]:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run dt_s must lie within "
+                "[steady_min_dt_s, steady_max_dt_s]")
+        if simplefluid_run["steady_min_steps"] > simplefluid_run["steps"]:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run steady_min_steps cannot exceed "
+                "steps")
+        if simplefluid_run["steady_consecutive_steps"] \
+                > simplefluid_run["steps"]:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run steady_consecutive_steps cannot "
+                "exceed steps")
+        if simplefluid_run["steady_min_steps"] \
+                > simplefluid_run["steps"] \
+                - simplefluid_run["steady_consecutive_steps"] + 1:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run steady_min_steps and "
+                "steady_consecutive_steps do not fit within steps")
+        if simplefluid_run["steady_dt_growth_factor"] <= 1.0:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run steady_dt_growth_factor must be "
+                "greater than one")
+        for field_name in (
+                "steady_dt_reduction_factor",
+                "steady_rejection_safety_factor"):
+            if simplefluid_run[field_name] >= 1.0:
+                raise ToleranceManifestError(
+                    f"{path}: simplefluid_run {field_name} must lie in "
+                    "(0, 1)")
+        if simplefluid_run["steady_relaxed_linear_tolerance"] \
+                < simplefluid_run["linear_tolerance"]:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run steady_relaxed_linear_tolerance "
+                "cannot be stricter than linear_tolerance")
+        if simplefluid_run["steady_full_accuracy_update_ratio"] < 1.0:
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run "
+                "steady_full_accuracy_update_ratio must be at least one")
+        rank_csv_document = run_document.get("rank_csv_files")
+        if (not isinstance(rank_csv_document, list)
+                or len(rank_csv_document) != simplefluid_run["mpi_ranks"]):
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run.rank_csv_files must contain one "
+                "file per declared MPI rank")
+        rank_csv_files = [
+            _require_checksummed_output(
+                path,
+                source_checksums,
+                relative_name,
+                f"reference_definition.simplefluid_run.rank_csv_files[{rank}]",
+                f"simplefluid_cells_rank{rank}.csv",
+            )
+            for rank, relative_name in enumerate(rank_csv_document)
+        ]
+        if len(set(rank_csv_files)) != len(rank_csv_files):
+            raise ToleranceManifestError(
+                f"{path}: simplefluid_run.rank_csv_files must be distinct")
+        simplefluid_run["rank_csv_files"] = rank_csv_files
 
     stations = document.get("stations")
     if not isinstance(stations, dict):
@@ -241,20 +432,47 @@ def load_tolerance_manifest(
     }
 
 
-def latest_profile(case: Path, station: str) -> Path:
-    candidates = list(
-        case.glob(f"postProcessing/profiles/*/{station}_U.xy"))
+def latest_common_profiles(case: Path) -> dict[str, Path]:
+    """Select the newest numeric OpenFOAM time complete at every station."""
+    profiles_root = case / "postProcessing" / "profiles"
+    candidates: list[tuple[float, str, dict[str, Path]]] = []
+    try:
+        time_directories = list(profiles_root.iterdir())
+    except OSError as error:
+        raise FileNotFoundError(
+            f"cannot inspect OpenFOAM profiles below {profiles_root}: "
+            f"{error}") from error
+
+    for time_directory in time_directories:
+        if not time_directory.is_dir():
+            continue
+        try:
+            time_value = float(time_directory.name)
+        except ValueError:
+            continue
+        if not math.isfinite(time_value):
+            continue
+        profiles = {
+            station_name: time_directory / f"{station_name}_U.xy"
+            for station_name in STATIONS
+        }
+        if all(profile.is_file() for profile in profiles.values()):
+            candidates.append((time_value, time_directory.name, profiles))
+
     if not candidates:
         raise FileNotFoundError(
-            f"no {station}_U.xy below {case / 'postProcessing/profiles'}")
+            f"no common numeric OpenFOAM time below {profiles_root} contains "
+            f"every required profile {sorted(STATIONS)}")
+    return max(candidates, key=lambda candidate: candidate[:2])[2]
 
-    def time_value(path: Path) -> float:
-        try:
-            return float(path.parent.name)
-        except ValueError:
-            return -math.inf
 
-    return max(candidates, key=time_value)
+def latest_profile(case: Path, station: str) -> Path:
+    """Return one station from the newest complete OpenFOAM profile time."""
+    try:
+        return latest_common_profiles(case)[station]
+    except KeyError as error:
+        raise ValueError(f"unknown pitzDaily profile station {station!r}") \
+            from error
 
 
 def read_openfoam(path: Path) -> list[tuple[float, float, float]]:
@@ -415,9 +633,10 @@ def collect_metrics(
 ) -> dict[str, dict[str, Any]]:
     """Read all configured stations and compute component error norms."""
     cells = read_simplefluid(simplefluid_patterns)
+    openfoam_paths = latest_common_profiles(openfoam_case)
     metrics: dict[str, dict[str, Any]] = {}
     for station_name, station_x in STATIONS.items():
-        openfoam_path = latest_profile(openfoam_case, station_name)
+        openfoam_path = openfoam_paths[station_name]
         reference = read_openfoam(openfoam_path)
         actual_x, result = simplefluid_profile(cells, station_x)
         result_span = result[-1][0] - result[0][0]
@@ -577,6 +796,22 @@ def main(argv: list[str] | None = None) -> int:
                 settings["steps"],
                 repr(settings["dt_s"]),
                 settings["mpi_ranks"],
+                int(settings["steady_state"]),
+                repr(settings["linear_tolerance"]),
+                settings["steady_consecutive_steps"],
+                settings["steady_min_steps"],
+                settings["steady_max_retries"],
+                settings["steady_rejection_recovery_steps"],
+                repr(settings["steady_tolerance"]),
+                repr(settings["steady_min_dt_s"]),
+                repr(settings["steady_max_dt_s"]),
+                repr(settings["steady_target_courant"]),
+                repr(settings["steady_dt_growth_factor"]),
+                repr(settings["steady_dt_reduction_factor"]),
+                repr(settings["steady_rejection_safety_factor"]),
+                repr(settings["steady_relaxed_linear_tolerance"]),
+                repr(settings["steady_full_accuracy_update_ratio"]),
+                settings["steady_progress_interval"],
             )
             return 0
         if arguments.check_only:

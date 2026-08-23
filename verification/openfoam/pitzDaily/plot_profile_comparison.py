@@ -12,7 +12,7 @@ from compare_profiles import (
     COMPONENTS,
     STATIONS,
     interpolate,
-    latest_profile,
+    latest_common_profiles,
     read_openfoam,
     read_simplefluid,
     simplefluid_profile,
@@ -139,9 +139,10 @@ def collect_profiles(
     openfoam_case: Path, patterns: list[str]
 ) -> dict[str, dict[str, object]]:
     cells = read_simplefluid(patterns)
+    openfoam_paths = latest_common_profiles(openfoam_case)
     profiles: dict[str, dict[str, object]] = {}
     for station_name, station in STATIONS.items():
-        reference = read_openfoam(latest_profile(openfoam_case, station_name))
+        reference = read_openfoam(openfoam_paths[station_name])
         actual_x, result = simplefluid_profile(cells, station)
         profiles[station_name] = {
             "reference": reference,

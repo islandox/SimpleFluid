@@ -85,7 +85,8 @@ MeshHandle<Pack>::MeshHandle(
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_unstructured(
-        std::get<UnstructuredPtr>(d_mesh), indexer);
+        std::get<UnstructuredPtr>(d_mesh), indexer,
+        Tpetra::getDefaultComm());
 }
 
 /**
@@ -302,11 +303,13 @@ void MeshHandle<Pack>::initialize_unstructured(
  *
  * @param mesh Previously partitioned unstructured mesh.
  * @param indexer Mapping from mesh-local IDs to original global IDs.
+ * @param comm Communicator that owns the partition.
  */
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_unstructured(
     UnstructuredPtr mesh,
-    const unstructured_indexer_type& indexer)
+    const unstructured_indexer_type& indexer,
+    Teuchos::RCP<const typename Pack::comm_type> comm)
 {
     if (mesh->num_cells() != indexer.num_local_cells()
         || mesh->num_owned_cells() != indexer.num_owned_cells()
@@ -349,7 +352,7 @@ void MeshHandle<Pack>::initialize_unstructured(
         global_ids(indexer.node_global_ids())));
     initialize_cell_faces();
     initialize_boundary_batches(*mesh);
-    create_maps(Tpetra::getDefaultComm());
+    create_maps(comm ? std::move(comm) : Tpetra::getDefaultComm());
 }
 
 /**

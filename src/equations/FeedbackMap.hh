@@ -833,6 +833,11 @@ public:
         const std::vector<feedback_cell_type>& feedback_cells,
         size_t sequence_index = 0) const
     {
+        const auto collective_sequence_index =
+            detail::validate_collective_size(
+                *d_comm,
+                sequence_index,
+                "Feedback snapshot sequence index");
         const auto names = field_names();
         detail::validate_collective_names(
             *d_comm,
@@ -853,7 +858,9 @@ public:
             cell_names.push_back(cell.name);
         }
         return snapshot_type(
-            sequence_index, std::move(cell_names), std::move(fields));
+            collective_sequence_index,
+            std::move(cell_names),
+            std::move(fields));
     }
 
     template<class MeshType>
@@ -983,6 +990,9 @@ public:
                 "Outer-coupling power and feedback fields must share a mesh.");
         }
 
+        // Validate the fixed map before power import or TH callbacks can
+        // partially advance the coupled state.
+        (void)d_registry.export_snapshot(d_feedback_cells);
         import_power_density<Pack>(
             power_density, initial_owned_power);
         auto current_power = std::move(initial_owned_power);

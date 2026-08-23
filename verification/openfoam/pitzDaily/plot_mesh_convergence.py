@@ -12,7 +12,7 @@ from compare_profiles import (
     COMPONENTS,
     STATIONS,
     interpolate,
-    latest_profile,
+    latest_common_profiles,
     read_openfoam,
     read_simplefluid,
     simplefluid_profile,
@@ -58,8 +58,9 @@ def render_profiles(
     profiles: dict[str, dict[str, tuple[float, list[tuple[float, float, float]]]]],
 ) -> None:
     elements: list[str] = []
+    openfoam_paths = latest_common_profiles(openfoam_case)
     for column, (station_name, station_x) in enumerate(STATIONS.items()):
-        reference = read_openfoam(latest_profile(openfoam_case, station_name))
+        reference = read_openfoam(openfoam_paths[station_name])
         for row, (component_name, component) in enumerate(COMPONENTS.items()):
             rectangle = panel_rectangle(column, row)
             all_rows = [reference] + [profiles[name][station_name][1] for name in profiles]
