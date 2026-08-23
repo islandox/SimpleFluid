@@ -141,8 +141,9 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - Runtime-switchable mesh types:
   - **Orthogonal Cartesian 3D** — structured hexahedral cells
   - **Orthogonal Cylindrical 3D** — polar-structured hexahedral cells
-  - **Unstructured mesh** — STK-free polyhedral connectivity; serial directly
-    and distributed after `MeshPartitioner`/`PartitionedMesh` adaptation
+  - **Unstructured mesh** — STK-free hexahedral and triangular-prism
+    connectivity; serial directly and distributed after
+    `MeshPartitioner`/`PartitionedMesh` adaptation
   - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms,
     currently serial-only
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;

@@ -12,13 +12,17 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshHandle.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
+
+#include <Teuchos_DefaultMpiComm.hpp>
 
 #include <algorithm>
 #include <filesystem>
 #include <numbers>
 #include <span>
+#include <vector>
 
 namespace
 {
@@ -29,6 +33,8 @@ using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+using PartitionedUnstructured =
+    SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
@@ -151,6 +157,48 @@ TEST(MeshHandleTest, SemiStructuredConstructionIsSerialOnly)
             static_cast<void>(Handle(mesh)),
             std::runtime_error);
     }
+}
+
+/** @brief Existing partitions retain their non-default communicator. */
+TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
+{
+    const auto world = Tpetra::getDefaultComm();
+    if (world->getSize() < 2)
+    {
+        GTEST_SKIP() << "Requires at least two MPI ranks.";
+    }
+
+    const auto self = Teuchos::rcp(
+        new Teuchos::MpiComm<int>(MPI_COMM_SELF));
+    const auto mesh = SimpleFluid::test::make_unstructured_hex_line(1);
+    using Indexer = Handle::unstructured_indexer_type;
+    std::vector<Indexer::cell_id_t> owned_cells;
+    std::vector<Indexer::face_id_t> owned_faces;
+    std::vector<Indexer::node_id_t> nodes;
+    for (size_t cell = 0; cell < mesh->num_cells(); ++cell)
+    {
+        owned_cells.push_back(mesh->cell_id(cell));
+    }
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        owned_faces.push_back(mesh->face_id(face));
+    }
+    for (size_t node = 0; node < mesh->num_nodes(); ++node)
+    {
+        nodes.push_back(mesh->node_id(node));
+    }
+
+    const auto partitioned = std::make_shared<PartitionedUnstructured>(
+        mesh,
+        Indexer(std::move(owned_cells), {}, std::move(owned_faces), {},
+            std::move(nodes)),
+        self);
+    const Handle handle(partitioned);
+
+    EXPECT_EQ(handle.owned_cell_map()->getComm()->getSize(), 1);
+    EXPECT_EQ(handle.overlap_cell_map()->getComm()->getSize(), 1);
+    EXPECT_EQ(handle.owned_face_map()->getComm()->getSize(), 1);
+    EXPECT_EQ(handle.overlap_face_map()->getComm()->getSize(), 1);
 }
 
 /**

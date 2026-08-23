@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 
 namespace
 {
@@ -53,6 +54,44 @@ SimpleFluid::SP<const MappedMesh> make_distributed_mapped_line()
     auto cartesian = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0, 3.0}, {0.0, 1.0}, {0.0, 1.0}}});
     return std::make_shared<MappedMesh>(std::move(cartesian));
+}
+
+Pack::local_ordinal_type boundary_face(
+    const LegacyMesh& mesh, std::string_view name)
+{
+    for (const auto& [batch_id, batch] : mesh.boundary_batches())
+    {
+        if (mesh.boundary_batch_name(batch_id) == name
+            && !batch.face_lids.empty())
+        {
+            return batch.face_lids.front();
+        }
+    }
+    throw std::runtime_error("Requested boundary face was not found.");
+}
+
+SimpleFluid::SP<LegacyMesh> make_periodic_legacy_line()
+{
+    auto mesh = make_legacy_line();
+    const auto xmin = boundary_face(*mesh, "xmin");
+    const auto xmax = boundary_face(*mesh, "xmax");
+    mesh->set_periodic_face(xmin, mesh->owner_cell(xmax));
+    mesh->set_periodic_face(xmax, mesh->owner_cell(xmin));
+    return mesh;
+}
+
+template<class MeshPtr>
+auto periodic_scalar_condition(MeshPtr mesh)
+{
+    return [mesh = std::move(mesh)](int batch_id, size_t)
+    {
+        const auto& name = mesh->boundary_batch_name(batch_id);
+        return SimpleFluid::BoundaryCondition{
+            name == "xmin" || name == "xmax"
+                ? SimpleFluid::BoundaryConditionType::Periodic
+                : SimpleFluid::BoundaryConditionType::Neumann,
+            0.0};
+    };
 }
 
 Pack::scalar_type matrix_entry(
@@ -89,6 +128,30 @@ void expect_systems_equal(const TransportSystem& actual, const TransportSystem& 
                 matrix_entry(*expected.matrix, row_lid, column_lid), 1.0e-12);
         }
         EXPECT_NEAR(actual.rhs->getData()[row], expected.rhs->getData()[row], 1.0e-12);
+    }
+}
+
+void expect_system_scaled(
+    const TransportSystem& actual,
+    const TransportSystem& expected,
+    size_t cells,
+    double scale)
+{
+    ASSERT_EQ(actual.matrix->getLocalNumRows(), cells);
+    ASSERT_EQ(expected.matrix->getLocalNumRows(), cells);
+    for (size_t row = 0; row < cells; ++row)
+    {
+        const auto row_lid = static_cast<Pack::local_ordinal_type>(row);
+        for (size_t column = 0; column < cells; ++column)
+        {
+            const auto column_lid =
+                static_cast<Pack::local_ordinal_type>(column);
+            EXPECT_NEAR(matrix_entry(*actual.matrix, row_lid, column_lid),
+                scale * matrix_entry(*expected.matrix, row_lid, column_lid),
+                1.0e-12);
+        }
+        EXPECT_NEAR(actual.rhs->getData()[row],
+            scale * expected.rhs->getData()[row], 1.0e-12);
     }
 }
 
@@ -233,6 +296,112 @@ TEST(ScalarTransportDiscretizationTest, Bdf2RequiresACompatibleOlderFieldForLega
         std::invalid_argument);
 }
 
+TEST(ScalarTransportDiscretizationTest, Bdf2UsesCurrentStorageAsDerivativeCoefficient)
+{
+    using namespace SimpleFluid::FVM;
+
+    const ScalarTransportDiscretization bdf2{
+        ScalarTimeScheme::BDF2, ScalarConvectionScheme::Upwind};
+    constexpr auto base_storage = 2.0;
+    constexpr auto changed_storage = 5.0;
+    constexpr auto storage_ratio = changed_storage / base_storage;
+
+    auto legacy_mesh = make_legacy_line();
+    LegacyScalar old(legacy_mesh, 3.0, "old");
+    LegacyScalar older(legacy_mesh, 1.0, "older");
+    LegacyScalar storage(legacy_mesh, base_storage, "storage");
+    LegacyScalar changed(legacy_mesh, changed_storage, "changed_storage");
+    LegacyScalar advection(legacy_mesh, 0.0, "advection");
+    LegacyScalar diffusion(legacy_mesh, 0.0, "diffusion");
+    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+
+    const auto legacy_base = weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion,
+        dirichlet_condition(), zero_boundary_value(), [](Pack::local_ordinal_type) { return 0.0; }, bdf2,
+        NonOrthogonalTreatment::Explicit, &older);
+    const auto legacy_changed = weighted_scalar_transport_system<Pack>(old, flux, 0.25, changed, advection, diffusion,
+        dirichlet_condition(), zero_boundary_value(), [](Pack::local_ordinal_type) { return 0.0; }, bdf2,
+        NonOrthogonalTreatment::Explicit, &older);
+    expect_system_scaled(legacy_changed, legacy_base, 3, storage_ratio);
+
+    auto mapped_mesh = make_mapped_line();
+    MappedScalar mapped_old(mapped_mesh, 3.0, "old");
+    MappedScalar mapped_older(mapped_mesh, 1.0, "older");
+    MappedScalar mapped_storage(mapped_mesh, base_storage, "storage");
+    MappedScalar mapped_changed(mapped_mesh, changed_storage, "changed_storage");
+    MappedScalar mapped_advection(mapped_mesh, 0.0, "advection");
+    MappedScalar mapped_diffusion(mapped_mesh, 0.0, "diffusion");
+    MappedScalar density(mapped_mesh, 1.0, "density");
+    MappedScalar changed_density(mapped_mesh, storage_ratio, "changed_density");
+    MappedScalar specific_heat(mapped_mesh, base_storage, "specific_heat");
+    MappedFlux mapped_flux(mapped_mesh, 0.0, "flux");
+
+    const auto mapped_base = weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage,
+        mapped_advection, mapped_diffusion, dirichlet_condition(), zero_boundary_value(),
+        [](Pack::local_ordinal_type) { return 0.0; }, bdf2, NonOrthogonalTreatment::Explicit, &mapped_older);
+    const auto mapped_changed_system = weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25,
+        mapped_changed, mapped_advection, mapped_diffusion, dirichlet_condition(), zero_boundary_value(),
+        [](Pack::local_ordinal_type) { return 0.0; }, bdf2, NonOrthogonalTreatment::Explicit, &mapped_older);
+    expect_system_scaled(mapped_changed_system, mapped_base, 3, storage_ratio);
+
+    const auto physical_base = physical_temperature_transport_system<Pack>(mapped_old, mapped_flux, 0.25, density,
+        specific_heat, mapped_diffusion, dirichlet_condition(), zero_boundary_value(),
+        [](Pack::local_ordinal_type) { return 0.0; }, bdf2, NonOrthogonalTreatment::Explicit, &mapped_older);
+    const auto physical_changed = physical_temperature_transport_system<Pack>(mapped_old, mapped_flux, 0.25,
+        changed_density, specific_heat, mapped_diffusion, dirichlet_condition(), zero_boundary_value(),
+        [](Pack::local_ordinal_type) { return 0.0; }, bdf2, NonOrthogonalTreatment::Explicit, &mapped_older);
+    expect_system_scaled(physical_changed, physical_base, 3, storage_ratio);
+}
+
+TEST(ScalarTransportDiscretizationTest, PeriodicBoundedLinearUpwindUsesWrappedConservativeDisplacement)
+{
+    using namespace SimpleFluid::FVM;
+
+    const ScalarTransportDiscretization advanced{
+        ScalarTimeScheme::BackwardEuler,
+        ScalarConvectionScheme::BoundedLinearUpwind};
+    const ScalarTransportDiscretization upwind{
+        ScalarTimeScheme::BackwardEuler,
+        ScalarConvectionScheme::Upwind};
+
+    auto legacy_mesh = make_periodic_legacy_line();
+    LegacyScalar old(legacy_mesh, "old");
+    LegacyScalar storage(legacy_mesh, 1.0, "storage");
+    LegacyScalar advection(legacy_mesh, 1.0, "advection");
+    LegacyScalar diffusion(legacy_mesh, 0.0, "diffusion");
+    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    set_cell_values(old, {0.0, 0.0, 1.0});
+    flux.set_value(boundary_face(*legacy_mesh, "xmin"), -0.2);
+    flux.set_value(boundary_face(*legacy_mesh, "xmax"), 0.2);
+    const auto legacy_condition = periodic_scalar_condition(legacy_mesh);
+
+    const auto legacy_advanced = weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection,
+        diffusion, legacy_condition, zero_boundary_value(), [](Pack::local_ordinal_type) { return 0.0; }, advanced,
+        NonOrthogonalTreatment::Explicit);
+    const auto legacy_upwind = weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion,
+        legacy_condition, zero_boundary_value(), [](Pack::local_ordinal_type) { return 0.0; }, upwind,
+        NonOrthogonalTreatment::Explicit);
+    expect_systems_equal(legacy_advanced, legacy_upwind, 3);
+
+    const auto mapped_mesh = std::make_shared<MappedMesh>(legacy_mesh);
+    MappedScalar mapped_old(mapped_mesh, "old");
+    MappedScalar mapped_storage(mapped_mesh, 1.0, "storage");
+    MappedScalar mapped_advection(mapped_mesh, 1.0, "advection");
+    MappedScalar mapped_diffusion(mapped_mesh, 0.0, "diffusion");
+    MappedFlux mapped_flux(mapped_mesh, 0.0, "flux");
+    set_cell_values(mapped_old, {0.0, 0.0, 1.0});
+    mapped_flux.set_value(boundary_face(*legacy_mesh, "xmin"), -0.2);
+    mapped_flux.set_value(boundary_face(*legacy_mesh, "xmax"), 0.2);
+    const auto mapped_condition = periodic_scalar_condition(mapped_mesh);
+
+    const auto mapped_advanced = weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage,
+        mapped_advection, mapped_diffusion, mapped_condition, zero_boundary_value(),
+        [](Pack::local_ordinal_type) { return 0.0; }, advanced, NonOrthogonalTreatment::Explicit);
+    const auto mapped_upwind = weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage,
+        mapped_advection, mapped_diffusion, mapped_condition, zero_boundary_value(),
+        [](Pack::local_ordinal_type) { return 0.0; }, upwind, NonOrthogonalTreatment::Explicit);
+    expect_systems_equal(mapped_advanced, mapped_upwind, 3);
+}
+
 TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively)
 {
     using namespace SimpleFluid::FVM;
@@ -258,6 +427,14 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
     EXPECT_THROW(
         weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion, dirichlet_condition(),
             zero_boundary_value(), finite_source, rank_dependent_policy, NonOrthogonalTreatment::Explicit, &older),
+        std::invalid_argument);
+
+    const auto positive_rank_dependent_time_step =
+        communicator->getRank() == 0 ? 0.25 : 0.5;
+    EXPECT_THROW(weighted_scalar_transport_system<Pack>(old, flux,
+                     positive_rank_dependent_time_step, storage, advection,
+                     diffusion, dirichlet_condition(), zero_boundary_value(), finite_source,
+                     ScalarTransportDiscretization{}, NonOrthogonalTreatment::Explicit),
         std::invalid_argument);
 
     const auto rank_dependent_time_step = communicator->getRank() == 0 ? -0.25 : 0.25;
@@ -303,12 +480,62 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
             zero_boundary_value(), invalid_source, ScalarTransportDiscretization{}, NonOrthogonalTreatment::Explicit),
         std::invalid_argument);
 
+    const ScalarBoundaryConditionProvider<Pack> throwing_boundary_condition =
+        [rank = communicator->getRank()](int, size_t)
+    {
+        if (rank == 0)
+        {
+            throw std::runtime_error("rank-local boundary condition failure");
+        }
+        return SimpleFluid::BoundaryCondition{
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    };
+    EXPECT_THROW(
+        weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion,
+            throwing_boundary_condition, zero_boundary_value(), finite_source, ScalarTransportDiscretization{},
+            NonOrthogonalTreatment::Implicit),
+        std::runtime_error);
+
+    const ScalarBoundaryValueProvider<Pack> throwing_boundary_value =
+        [rank = communicator->getRank()](int, size_t)
+    {
+        if (rank == 0)
+        {
+            throw std::runtime_error("rank-local boundary value failure");
+        }
+        return 0.0;
+    };
+    EXPECT_THROW(
+        weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion,
+            dirichlet_condition(), throwing_boundary_value, finite_source, ScalarTransportDiscretization{},
+            NonOrthogonalTreatment::Implicit),
+        std::runtime_error);
+
+    const ScalarBoundaryConditionProvider<Pack> rank_dependent_robin =
+        [rank = communicator->getRank()](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{
+            rank == 0 ? SimpleFluid::BoundaryConditionType::Robin
+                      : SimpleFluid::BoundaryConditionType::Dirichlet,
+            0.0};
+    };
+    EXPECT_THROW(
+        weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion,
+            rank_dependent_robin, zero_boundary_value(), finite_source, ScalarTransportDiscretization{},
+            NonOrthogonalTreatment::Implicit),
+        std::invalid_argument);
+
     const auto mapped_mesh = make_distributed_mapped_line();
     MappedScalar mapped_old(mapped_mesh, 1.0, "old");
     MappedScalar mapped_storage(mapped_mesh, 2.0, "storage");
     MappedScalar mapped_advection(mapped_mesh, 2.0, "advection");
     MappedScalar mapped_diffusion(mapped_mesh, 0.25, "diffusion");
     MappedFlux mapped_flux(mapped_mesh, 0.0, "flux");
+    EXPECT_THROW(weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux,
+                     positive_rank_dependent_time_step, mapped_storage, mapped_advection, mapped_diffusion,
+                     dirichlet_condition(), zero_boundary_value(), finite_source, ScalarTransportDiscretization{},
+                     NonOrthogonalTreatment::Explicit),
+        std::invalid_argument);
     EXPECT_THROW(weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage, mapped_advection,
                      mapped_diffusion, dirichlet_condition(), zero_boundary_value(), finite_source,
                      ScalarTransportDiscretization{}, NonOrthogonalTreatment::Explicit,
@@ -324,6 +551,18 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
     EXPECT_THROW(weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage, mapped_advection,
                      mapped_diffusion, dirichlet_condition(), zero_boundary_value(), invalid_source,
                      ScalarTransportDiscretization{}, NonOrthogonalTreatment::Explicit),
+        std::invalid_argument);
+    EXPECT_THROW(weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage, mapped_advection,
+                     mapped_diffusion, throwing_boundary_condition, zero_boundary_value(), finite_source,
+                     ScalarTransportDiscretization{}, NonOrthogonalTreatment::Implicit),
+        std::runtime_error);
+    EXPECT_THROW(weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage, mapped_advection,
+                     mapped_diffusion, dirichlet_condition(), throwing_boundary_value, finite_source,
+                     ScalarTransportDiscretization{}, NonOrthogonalTreatment::Implicit),
+        std::runtime_error);
+    EXPECT_THROW(weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage, mapped_advection,
+                     mapped_diffusion, rank_dependent_robin, zero_boundary_value(), finite_source,
+                     ScalarTransportDiscretization{}, NonOrthogonalTreatment::Implicit),
         std::invalid_argument);
 }
 

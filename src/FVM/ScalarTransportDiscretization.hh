@@ -155,6 +155,22 @@ void validate_scalar_transport_discretization(
     }
 }
 
+/** @brief Return whether every rank supplied the same scalar value. */
+template<class MeshType, class Scalar>
+bool scalar_transport_value_agrees(const MeshType& mesh, Scalar value)
+{
+    const std::array<Scalar, 2> local_values{value, -value};
+    auto global_values = local_values;
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    if (communicator->getSize() > 1)
+    {
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX,
+            static_cast<int>(local_values.size()), local_values.data(),
+            global_values.data());
+    }
+    return global_values[0] == -global_values[1];
+}
+
 /**
  * @brief Reconstruct and locally bound a linear-upwind face value.
  *

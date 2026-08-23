@@ -175,7 +175,8 @@ public:
         d_mesh = UnstructuredPtr(partitioned->mesh_ptr());
         initialize_unstructured(
             std::get<UnstructuredPtr>(d_mesh),
-            partitioned->indexer());
+            partitioned->indexer(),
+            partitioned->owned_cell_map()->getComm());
     }
 
     /** @brief Build a handle around a legacy STK adapter. */
@@ -612,7 +613,8 @@ private:
 
     void initialize_unstructured(
         UnstructuredPtr mesh,
-        const unstructured_indexer_type& indexer);
+        const unstructured_indexer_type& indexer,
+        Teuchos::RCP<const typename Pack::comm_type> comm);
 
     void initialize_stk(STKAdapterPtr adapter);
 
