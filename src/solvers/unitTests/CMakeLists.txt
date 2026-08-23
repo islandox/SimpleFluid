@@ -109,6 +109,17 @@ if(MPIEXEC_EXECUTABLE
     TIMEOUT 120)
 
   add_test(
+    NAME NativeUnstructuredCoupledFlow_2procs
+    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
+            "${MPIEXEC_NUMPROC_FLAG}" "2"
+            "$<TARGET_FILE:testBoussinesqSolver>"
+            "--gtest_filter=BoussinesqSolverTest.NativePartitionedUnstructuredCoupledKrylovAdvancesForcedFlow")
+  set_tests_properties(NativeUnstructuredCoupledFlow_2procs PROPERTIES
+    LABELS "mpi;boussinesq;physical_models;pressure_velocity;unstructured"
+    PROCESSORS 2
+    TIMEOUT 120)
+
+  add_test(
     NAME TurbulentBoussinesq_2procs
     COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
             "${MPIEXEC_NUMPROC_FLAG}" "2"

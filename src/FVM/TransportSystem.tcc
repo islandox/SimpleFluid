@@ -17,6 +17,7 @@
 #include <array>
 #include <cmath>
 #include <exception>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -1109,6 +1110,12 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             "weighted_scalar_transport_system requires a positive "
             "time step.");
     }
+    if (!detail::scalar_transport_value_agrees(mesh, time_step))
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system requires every rank to use "
+            "the same time step.");
+    }
     if (validation_state[2] != 0)
     {
         throw std::invalid_argument(
@@ -1223,6 +1230,113 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             "weighted scalar transport requires finite source values.");
     }
 
+    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::boundary_locations_type local_boundary_locations;
+    if (geometry_cache == nullptr)
+    {
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+    }
+    const auto& boundary_locations =
+        geometry_cache == nullptr ? local_boundary_locations : geometry_cache->boundary_locations();
+
+    std::vector<BoundaryCondition> boundary_conditions(
+        boundary_locations.size());
+    std::vector<scalar_type> boundary_values(
+        boundary_locations.size(), scalar_type{});
+    const auto physical_boundary_faces =
+        detail::physical_boundary_face_mask(mesh);
+    std::map<std::pair<int, size_t>, size_t> boundary_indices;
+    int unsupported_boundary_condition = 0;
+    int invalid_boundary_condition_value = 0;
+    int invalid_boundary_value = 0;
+    std::exception_ptr local_boundary_callback_error;
+    try
+    {
+        for (size_t face = 0; face < boundary_locations.size(); ++face)
+        {
+            const auto& location = boundary_locations[face];
+            if (!location.active || !physical_boundary_faces[face])
+            {
+                continue;
+            }
+            boundary_indices.emplace(
+                std::pair{location.batch_id, location.in_batch_id}, face);
+            const auto condition =
+                boundary_condition(location.batch_id, location.in_batch_id);
+            const auto value =
+                boundary_value(location.batch_id, location.in_batch_id);
+            unsupported_boundary_condition = unsupported_boundary_condition
+                || (condition.type != BoundaryConditionType::Dirichlet
+                    && condition.type != BoundaryConditionType::Neumann);
+            invalid_boundary_condition_value =
+                invalid_boundary_condition_value
+                || !std::isfinite(condition.value);
+            invalid_boundary_value = invalid_boundary_value
+                || !std::isfinite(value);
+            boundary_conditions[face] = condition;
+            boundary_values[face] = value;
+        }
+    }
+    catch (...)
+    {
+        local_boundary_callback_error = std::current_exception();
+    }
+    const auto boundary_callback_validation =
+        detail::reduce_transport_validation_state(
+            mesh,
+            std::array<int, 4>{
+                local_boundary_callback_error ? 1 : 0,
+                unsupported_boundary_condition,
+                invalid_boundary_condition_value,
+                invalid_boundary_value});
+    if (boundary_callback_validation[0] != 0)
+    {
+        if (local_boundary_callback_error)
+        {
+            std::rethrow_exception(local_boundary_callback_error);
+        }
+        throw std::runtime_error(
+            "weighted scalar transport boundary callback failed on another rank.");
+    }
+    if (boundary_callback_validation[1] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport supports only Dirichlet and Neumann boundaries.");
+    }
+    if (boundary_callback_validation[2] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite boundary-condition values.");
+    }
+    if (boundary_callback_validation[3] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite boundary values.");
+    }
+
+    const auto boundary_index =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        const auto iter = boundary_indices.find(
+            std::pair{batch_id, in_batch_id});
+        if (iter == boundary_indices.end())
+        {
+            throw std::logic_error(
+                "weighted scalar transport requested an unknown boundary face.");
+        }
+        return iter->second;
+    };
+    const auto cached_boundary_condition =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_conditions[boundary_index(batch_id, in_batch_id)];
+    };
+    const auto cached_boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_values[boundary_index(batch_id, in_batch_id)];
+    };
+
     auto boundary_face_diffusivity =
         [&](int batch_id,
             size_t in_batch_id,
@@ -1238,20 +1352,17 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
     const auto implicit_weight = non_orthogonal_weights.implicit;
     const auto explicit_weight = non_orthogonal_weights.explicit_;
 
-    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
-    typename geometry_cache_type::boundary_locations_type local_boundary_locations;
     std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>> gradient_stencils;
     if (geometry_cache == nullptr)
     {
-        gradient_stencils = detail::scalar_affine_gradient_stencils(mesh, boundary_condition, boundary_value);
-        local_boundary_locations = detail::boundary_face_locations(mesh);
+        gradient_stencils = detail::scalar_affine_gradient_stencils(
+            mesh, cached_boundary_condition, cached_boundary_value);
     }
     else
     {
-        gradient_stencils = geometry_cache->scalar_affine_stencils(boundary_condition, boundary_value);
+        gradient_stencils = geometry_cache->scalar_affine_stencils(
+            cached_boundary_condition, cached_boundary_value);
     }
-    const auto& boundary_locations =
-        geometry_cache == nullptr ? local_boundary_locations : geometry_cache->boundary_locations();
 
     std::unique_ptr<VectorCellField<Pack>> partition_gradients;
     if (implicit_weight > scalar_type{})
@@ -1364,7 +1475,10 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             {
                 const auto location = boundary_locations[static_cast<size_t>(face_lid)];
                 rhs->sumIntoLocalValue(
-                    cell_lid, -out_flux * cell_advection * boundary_value(location.batch_id, location.in_batch_id));
+                    cell_lid,
+                    -out_flux * cell_advection
+                        * cached_boundary_value(
+                            location.batch_id, location.in_batch_id));
             }
 
             if (mesh.is_interior_face(face_lid)
@@ -1385,8 +1499,8 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
                         upwind_value,
                         old_values.local_value(downwind),
                         convection_gradients->local_value(upwind),
-                        mesh.face_centroid(face_lid)
-                            - mesh.cell_centroid(upwind));
+                        detail::cell_to_face_displacement(
+                            mesh, face_lid, upwind));
                 rhs->sumIntoLocalValue(
                     cell_lid,
                     detail::deferred_convection_rhs_correction(
@@ -1437,7 +1551,8 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
                 continue;
             }
             const auto location = boundary_locations[static_cast<size_t>(face_lid)];
-            const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+            const auto condition = cached_boundary_condition(
+                location.batch_id, location.in_batch_id);
             const auto face_diffusivity =
                 boundary_face_diffusivity(location.batch_id, location.in_batch_id, diffusivity_data(cell_lid, 0));
             if (condition.type == BoundaryConditionType::Dirichlet)
@@ -1448,7 +1563,10 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
                 {
                     detail::add_matrix_entry(row_values, cell_lid, coefficient);
                     rhs->sumIntoLocalValue(
-                        cell_lid, coefficient * boundary_value(location.batch_id, location.in_batch_id));
+                        cell_lid,
+                        coefficient
+                            * cached_boundary_value(
+                                location.batch_id, location.in_batch_id));
                 }
                 const auto tangential_area =
                     detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
@@ -1458,11 +1576,6 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             else if (condition.type == BoundaryConditionType::Neumann)
             {
                 rhs->sumIntoLocalValue(cell_lid, face_diffusivity * condition.value * mesh.face_area(face_lid));
-            }
-            else if (condition.type == BoundaryConditionType::Robin)
-            {
-                throw std::runtime_error(
-                    "Robin boundary conditions are not yet implemented in weighted_scalar_transport_system.");
             }
         }
 
@@ -1482,8 +1595,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
 
     if (correction_field != nullptr && explicit_weight > scalar_type{})
     {
-        add_variable_explicit_non_orthogonal_correction<Pack>(*correction_field, diffusivity, boundary_condition,
-            boundary_value, *rhs, explicit_weight, boundary_face_diffusivity, &gradient_stencils,
+        add_variable_explicit_non_orthogonal_correction<Pack>(*correction_field, diffusivity,
+            cached_boundary_condition, cached_boundary_value, *rhs, explicit_weight, boundary_face_diffusivity,
+            &gradient_stencils,
             coefficient_interpolation);
     }
     // An explicit correction is an RHS update, so restore constrained values

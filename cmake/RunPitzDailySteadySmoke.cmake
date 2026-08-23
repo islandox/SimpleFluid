@@ -15,6 +15,7 @@ execute_process(
           SIMPLEFLUID_PITZ_DT=1e-6
           SIMPLEFLUID_PITZ_STEADY_STATE=1
           SIMPLEFLUID_PITZ_STEADY_TOLERANCE=1e20
+          SIMPLEFLUID_PITZ_STEADY_CONSECUTIVE_STEPS=1
           SIMPLEFLUID_PITZ_STEADY_PROGRESS_INTERVAL=1
           "${SIMPLEFLUID_PITZ_DAILY_EXECUTABLE}"
   WORKING_DIRECTORY "${SIMPLEFLUID_PITZ_WORKING_DIRECTORY}"
@@ -41,4 +42,41 @@ if(NOT simplefluid_pitz_output MATCHES
   message(FATAL_ERROR
     "pitzDaily did not apply the tightened tolerance on the next step\n"
     "stdout:\n${simplefluid_pitz_output}")
+endif()
+
+if(NOT simplefluid_pitz_output MATCHES
+   "steady_state_search: reached=yes")
+  message(FATAL_ERROR
+    "pitzDaily successful steady smoke did not report convergence\n"
+    "stdout:\n${simplefluid_pitz_output}")
+endif()
+
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E env
+          SIMPLEFLUID_PITZ_MESH_DIVISOR=40
+          SIMPLEFLUID_PITZ_STEPS=1
+          SIMPLEFLUID_PITZ_DT=1e-6
+          SIMPLEFLUID_PITZ_STEADY_STATE=1
+          SIMPLEFLUID_PITZ_STEADY_TOLERANCE=1e-30
+          SIMPLEFLUID_PITZ_STEADY_CONSECUTIVE_STEPS=1
+          SIMPLEFLUID_PITZ_STEADY_MIN_STEPS=1
+          "${SIMPLEFLUID_PITZ_DAILY_EXECUTABLE}"
+  WORKING_DIRECTORY "${SIMPLEFLUID_PITZ_WORKING_DIRECTORY}"
+  RESULT_VARIABLE simplefluid_pitz_nonconverged_result
+  OUTPUT_VARIABLE simplefluid_pitz_nonconverged_output
+  ERROR_VARIABLE simplefluid_pitz_nonconverged_error)
+
+if(NOT simplefluid_pitz_nonconverged_result STREQUAL "1")
+  message(FATAL_ERROR
+    "pitzDaily nonconverged steady smoke exited "
+    "${simplefluid_pitz_nonconverged_result}, expected 1\n"
+    "stdout:\n${simplefluid_pitz_nonconverged_output}\n"
+    "stderr:\n${simplefluid_pitz_nonconverged_error}")
+endif()
+
+if(NOT simplefluid_pitz_nonconverged_output MATCHES
+   "steady_state_search: reached=no")
+  message(FATAL_ERROR
+    "pitzDaily nonconverged steady smoke did not report reached=no\n"
+    "stdout:\n${simplefluid_pitz_nonconverged_output}")
 endif()

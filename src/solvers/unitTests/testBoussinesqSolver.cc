@@ -22,6 +22,8 @@
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -887,6 +889,164 @@ TEST(BoussinesqSolverTest,
         EXPECT_TRUE(std::isfinite(velocity.y));
         EXPECT_TRUE(std::isfinite(velocity.z));
     }
+}
+
+/** @brief Two ranks carry forced flow across an unstructured partition. */
+TEST(BoussinesqSolverTest,
+     NativePartitionedUnstructuredCoupledKrylovAdvancesForcedFlow)
+{
+    const auto mesh =
+        make_native_distributed_unstructured_handle();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    EXPECT_FALSE(mesh->legacy_mesh());
+    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(
+        mesh->variant()));
+    EXPECT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+
+    constexpr double inlet_velocity = 0.25;
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.velocity["xmin"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        {inlet_velocity, 0.0, 0.0}};
+    boundaries.velocity["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Neumann, {}};
+    boundaries.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    for (const auto* name : {"ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.velocity[name] = {
+            SimpleFluid::BoundaryConditionType::Slip, {}};
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 1;
+    time_options.thermal_expansion = 0.0;
+    time_options.gravity_x = 0.0;
+    time_options.gravity_y = 0.0;
+    time_options.gravity_z = 0.0;
+    time_options.pressure_velocity_coupling =
+        SimpleFluid::PressureVelocityCoupling::CoupledKrylov;
+
+    SimpleFluid::BoussinesqModelOptions model_options;
+    model_options.reference_density = 2.0;
+    model_options.density = 2.0;
+    model_options.specific_heat_capacity = 4.0;
+    model_options.dynamic_viscosity = 2.0e-2;
+    model_options.thermal_conductivity = 0.0;
+
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 400;
+    linear_options.tolerance = 1.0e-11;
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh,
+        boundaries,
+        time_options,
+        linear_options,
+        model_options);
+    solver.initialize_linear_temperature(
+        {1.0, 0.0, 0.0}, 300.0, 300.0);
+
+    solver.step();
+
+    EXPECT_TRUE(solver.last_step_statistics().converged);
+    const auto& coupled_residuals =
+        solver.last_pressure_velocity_residuals();
+    EXPECT_GT(coupled_residuals.linear_iterations, 0);
+    EXPECT_TRUE(std::isfinite(coupled_residuals.achieved_tolerance));
+    EXPECT_LT(
+        coupled_residuals.continuity,
+        1.0e-8);
+
+    double local_minimum_x_velocity =
+        std::numeric_limits<double>::max();
+    double local_maximum_transverse_velocity = 0.0;
+    double local_maximum_pressure_magnitude = 0.0;
+    for (size_t owned = 0;
+         owned < mesh->num_owned_cells();
+         ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        const auto velocity = solver.velocity().value(cell_lid);
+        const auto pressure = solver.pressure().value(cell_lid);
+        EXPECT_TRUE(std::isfinite(velocity.x));
+        EXPECT_TRUE(std::isfinite(velocity.y));
+        EXPECT_TRUE(std::isfinite(velocity.z));
+        EXPECT_TRUE(std::isfinite(pressure));
+        local_minimum_x_velocity =
+            std::min(local_minimum_x_velocity, velocity.x);
+        local_maximum_transverse_velocity = std::max(
+            local_maximum_transverse_velocity,
+            std::hypot(velocity.y, velocity.z));
+        local_maximum_pressure_magnitude = std::max(
+            local_maximum_pressure_magnitude,
+            std::abs(pressure));
+    }
+
+    int local_partition_face_count = 0;
+    double local_partition_flux_magnitude = 0.0;
+    const auto& fluxes = solver.pressure_corrected_face_fluxes();
+    for (const auto face_lid : fluxes.owned_face_ids())
+    {
+        const auto neighbor = mesh->neighbor_cell(face_lid);
+        if (neighbor >= 0 && !mesh->is_owned_cell(neighbor))
+        {
+            ++local_partition_face_count;
+            local_partition_flux_magnitude = std::max(
+                local_partition_flux_magnitude,
+                std::abs(fluxes.value(face_lid)));
+        }
+    }
+
+    double global_minimum_x_velocity = 0.0;
+    double global_maximum_transverse_velocity = 0.0;
+    double global_maximum_pressure_magnitude = 0.0;
+    double global_partition_flux_magnitude = 0.0;
+    int global_partition_face_count = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MIN,
+        1,
+        &local_minimum_x_velocity,
+        &global_minimum_x_velocity);
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_maximum_transverse_velocity,
+        &global_maximum_transverse_velocity);
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_maximum_pressure_magnitude,
+        &global_maximum_pressure_magnitude);
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_MAX,
+        1,
+        &local_partition_flux_magnitude,
+        &global_partition_flux_magnitude);
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_partition_face_count,
+        &global_partition_face_count);
+
+    // The partition wrapper gives each adjacent rank an owned local
+    // representation of the shared geometric face.
+    EXPECT_EQ(global_partition_face_count, 2);
+    EXPECT_GT(global_minimum_x_velocity, 0.1 * inlet_velocity);
+    EXPECT_LT(global_maximum_transverse_velocity, 1.0e-8);
+    EXPECT_GT(global_maximum_pressure_magnitude, 1.0e-3);
+    EXPECT_GT(global_partition_flux_magnitude, 0.1 * inlet_velocity);
 }
 
 /**

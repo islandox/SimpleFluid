@@ -212,6 +212,19 @@ template<class Field> double global_integral(const Field& field)
     return global_sum(mesh, local_integral);
 }
 
+/** @brief Compute a distributed axial first moment of a cell field. */
+template<class Field> double global_axial_moment(const Field& field)
+{
+    const auto& mesh = field.mesh();
+    double local_moment = 0.0;
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        local_moment += field.value(cell_lid) * mesh.cell_volume(cell_lid) * mesh.cell_centroid(cell_lid).z;
+    }
+    return global_sum(mesh, local_moment);
+}
+
 /** @brief Return the distributed minimum and maximum of a cell field. */
 template<class Field> std::pair<double, double> global_range(const Field& field)
 {
@@ -366,10 +379,39 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     feedback_options.reference_dynamic_viscosity = 1.0e-3;
     auto& feedback = solver.configure_material_feedback(feedback_options);
 
+    InspectableTurbulentBoussinesqSolver zero_slip_solver(
+        mesh, slip_box_boundaries(), time_options, linear_options, model_options);
+    initialize_transporting_shear(zero_slip_solver);
+    zero_slip_solver.temperature().put_scalar(300.0);
+    zero_slip_solver.temperature().sync_ghosts();
+    zero_slip_solver.configure_turbulence(standard_k_epsilon_options());
+    zero_slip_solver.configure_prescribed_heat_source(prescribed_heat);
+    auto zero_slip_options = reaction_source_options;
+    zero_slip_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+    zero_slip_options.constant_slip_velocity = 0.0;
+    auto& zero_slip_reaction_source = zero_slip_solver.configure_reacting_gas(zero_slip_options);
+    zero_slip_solver.configure_material_feedback(feedback_options);
+
+    // Matched microbubble kinetics leave axial slip as the centroid discriminator.
+    const auto expect_upward_slip_shift = [&]
+    {
+        EXPECT_GT(global_maximum_flux(zero_slip_solver.transport_face_fluxes()), 1.0e-12);
+        const auto slip_inventory = global_integral(reaction_source.micro_moles());
+        const auto zero_slip_inventory = global_integral(zero_slip_reaction_source.micro_moles());
+        ASSERT_GT(slip_inventory, 0.0);
+        ASSERT_GT(zero_slip_inventory, 0.0);
+        EXPECT_NEAR(slip_inventory, zero_slip_inventory, std::max(slip_inventory, zero_slip_inventory) * 1.0e-10);
+        const auto slip_centroid = global_axial_moment(reaction_source.micro_moles()) / slip_inventory;
+        const auto zero_slip_centroid = global_axial_moment(zero_slip_reaction_source.micro_moles()) / zero_slip_inventory;
+        EXPECT_GT(slip_centroid - zero_slip_centroid, 1.0e-7);
+    };
+
     ASSERT_EQ(reaction_source.mode(), SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation);
     EXPECT_EQ(reaction_source.options().dissolved_transport, SimpleFluid::ReactingTransportMode::Advective);
     EXPECT_EQ(reaction_source.options().rise_velocity_mode, SimpleFluid::BubbleRiseVelocityMode::ConstantSlip);
     EXPECT_GT(reaction_source.options().constant_slip_velocity, 0.0);
+    EXPECT_EQ(zero_slip_reaction_source.options().rise_velocity_mode, SimpleFluid::BubbleRiseVelocityMode::ZeroSlip);
+    EXPECT_DOUBLE_EQ(zero_slip_reaction_source.options().constant_slip_velocity, 0.0);
     ASSERT_NE(solver.find_prescribed_heat_source(), nullptr);
     EXPECT_NEAR(
         solver.find_prescribed_heat_source()->integrated_power(),
@@ -421,6 +463,10 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     ASSERT_TRUE(solver.last_step_statistics().converged);
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
+    ASSERT_NO_THROW(zero_slip_solver.step());
+    ASSERT_TRUE(zero_slip_solver.last_step_statistics().converged);
+    EXPECT_EQ(zero_slip_solver.step_index(), 1);
+    expect_upward_slip_shift();
     expect_global_hydrogen_balance(reaction_source, hydrogen_before_prescribed_heat, expected_produced);
     expect_coupled_state();
 
@@ -482,10 +528,16 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
 
     solver.find_prescribed_heat_source()->initialize_constant(0.0);
     EXPECT_DOUBLE_EQ(solver.find_prescribed_heat_source()->integrated_power(), 0.0);
+    zero_slip_solver.find_prescribed_heat_source()->initialize_constant(0.0);
+    EXPECT_DOUBLE_EQ(zero_slip_solver.find_prescribed_heat_source()->integrated_power(), 0.0);
     ASSERT_NO_THROW(solver.step());
     ASSERT_TRUE(solver.last_step_statistics().converged);
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
+    ASSERT_NO_THROW(zero_slip_solver.step());
+    ASSERT_TRUE(zero_slip_solver.last_step_statistics().converged);
+    EXPECT_EQ(zero_slip_solver.step_index(), 2);
+    expect_upward_slip_shift();
     expect_global_hydrogen_balance(reaction_source, hydrogen_before_transport, 0.0);
     expect_coupled_state();
 
