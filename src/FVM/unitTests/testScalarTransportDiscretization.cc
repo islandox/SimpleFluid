@@ -240,7 +240,19 @@ TEST(ScalarTransportDiscretizationTest, HistoricalOverloadsForwardToBackwardEule
     const auto explicit_default =
         weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion, dirichlet_condition(),
             zero_boundary_value(), cell_source(), ScalarTransportDiscretization{}, NonOrthogonalTreatment::Explicit);
+    const auto named_request = weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{
+        .old_values = old,
+        .face_fluxes = flux,
+        .time_step = 0.25,
+        .storage_weight = storage,
+        .advection_weight = advection,
+        .diffusivity = diffusion,
+        .boundary_condition = dirichlet_condition(),
+        .boundary_value = zero_boundary_value(),
+        .source = cell_source(),
+        .treatment = NonOrthogonalTreatment::Explicit});
     expect_systems_equal(explicit_default, historical, 3);
+    expect_systems_equal(named_request, historical, 3);
 
     auto mapped_mesh = make_mapped_line();
     MappedScalar mapped_old(mapped_mesh, 1.0, "old");
@@ -256,7 +268,137 @@ TEST(ScalarTransportDiscretizationTest, HistoricalOverloadsForwardToBackwardEule
     const auto mapped_explicit_default = weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25,
         mapped_storage, mapped_advection, mapped_diffusion, dirichlet_condition(), zero_boundary_value(), cell_source(),
         ScalarTransportDiscretization{}, NonOrthogonalTreatment::Explicit);
+    const auto mapped_named_request = weighted_scalar_transport_system<Pack>(
+        FieldStoredWeightedScalarTransportRequest<Pack, MappedMesh>{
+            .old_values = mapped_old,
+            .face_fluxes = mapped_flux,
+            .time_step = 0.25,
+            .storage_weight = mapped_storage,
+            .advection_weight = mapped_advection,
+            .diffusivity = mapped_diffusion,
+            .boundary_condition = dirichlet_condition(),
+            .boundary_value = zero_boundary_value(),
+            .source = cell_source(),
+            .treatment = NonOrthogonalTreatment::Explicit});
     expect_systems_equal(mapped_explicit_default, mapped_historical, 3);
+    expect_systems_equal(mapped_named_request, mapped_historical, 3);
+}
+
+TEST(ScalarTransportDiscretizationTest, NamedRequestsPreserveAdvancedOptionsAcrossBackends)
+{
+    using namespace SimpleFluid::FVM;
+
+    const ScalarTransportDiscretization advanced{
+        ScalarTimeScheme::BDF2,
+        ScalarConvectionScheme::BoundedLinearUpwind};
+    auto boundary_value = [](int, size_t) { return 0.4; };
+    auto implicit_sink = [](Pack::local_ordinal_type cell_lid)
+    { return 0.02 * static_cast<double>(cell_lid + 1); };
+    auto fixed_cell_value = [](Pack::local_ordinal_type cell_lid) -> std::optional<Pack::scalar_type>
+    {
+        return cell_lid == 1 ? std::optional<Pack::scalar_type>{0.75} : std::nullopt;
+    };
+
+    auto legacy_mesh = make_legacy_line();
+    LegacyScalar old(legacy_mesh, "old");
+    LegacyScalar older(legacy_mesh, "older");
+    LegacyScalar storage(legacy_mesh, 2.0, "storage");
+    LegacyScalar advection(legacy_mesh, 1.5, "advection");
+    LegacyScalar diffusion(legacy_mesh, 0.25, "diffusion");
+    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    set_cell_values(old, {0.2, 1.1, 0.4});
+    set_cell_values(older, {0.1, 0.7, 0.3});
+    set_positive_x_flux(*legacy_mesh, flux);
+
+    SimpleFluid::BoundaryCache<Pack> legacy_boundary_diffusivity{{}, legacy_mesh};
+    for (const auto& [batch_id, batch] : legacy_mesh->boundary_batches())
+    {
+        legacy_boundary_diffusivity.value.emplace(
+            batch_id, SimpleFluid::Arr<Pack::scalar_type>(batch.face_lids.size(), 0.35));
+    }
+    TransportGeometryCache<LegacyMesh> legacy_geometry(*legacy_mesh);
+    auto assemble_legacy = [&](Teuchos::RCP<Pack::matrix_type> cached_matrix)
+    {
+        return weighted_scalar_transport_system<Pack>(old, flux, 0.25, storage, advection, diffusion,
+            dirichlet_condition(), boundary_value, cell_source(), advanced, NonOrthogonalTreatment::Hybrid, &older,
+            &old, std::move(cached_matrix), implicit_sink, fixed_cell_value, &legacy_boundary_diffusivity,
+            &legacy_geometry, FaceCoefficientInterpolation::Linear);
+    };
+    auto legacy_positional_cache = assemble_legacy(Teuchos::null).matrix;
+    auto legacy_request_cache = assemble_legacy(Teuchos::null).matrix;
+    const auto legacy_positional = assemble_legacy(legacy_positional_cache);
+    const auto legacy_request = weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{
+        .old_values = old,
+        .face_fluxes = flux,
+        .time_step = 0.25,
+        .storage_weight = storage,
+        .advection_weight = advection,
+        .diffusivity = diffusion,
+        .boundary_condition = dirichlet_condition(),
+        .boundary_value = boundary_value,
+        .source = cell_source(),
+        .treatment = NonOrthogonalTreatment::Hybrid,
+        .discretization = advanced,
+        .older_values = &older,
+        .correction_field = &old,
+        .cached_matrix = legacy_request_cache,
+        .implicit_sink = implicit_sink,
+        .fixed_cell_value = fixed_cell_value,
+        .boundary_diffusivity = &legacy_boundary_diffusivity,
+        .geometry_cache = &legacy_geometry,
+        .coefficient_interpolation = FaceCoefficientInterpolation::Linear});
+    expect_systems_equal(legacy_request, legacy_positional, 3);
+
+    auto mapped_mesh = make_mapped_line();
+    MappedScalar mapped_old(mapped_mesh, "old");
+    MappedScalar mapped_older(mapped_mesh, "older");
+    MappedScalar mapped_storage(mapped_mesh, 2.0, "storage");
+    MappedScalar mapped_advection(mapped_mesh, 1.5, "advection");
+    MappedScalar mapped_diffusion(mapped_mesh, 0.25, "diffusion");
+    MappedFlux mapped_flux(mapped_mesh, 0.0, "flux");
+    set_cell_values(mapped_old, {0.2, 1.1, 0.4});
+    set_cell_values(mapped_older, {0.1, 0.7, 0.3});
+    set_positive_x_flux(*mapped_mesh, mapped_flux);
+
+    SimpleFluid::FieldStoredBoundaryCache<Pack, MappedMesh> mapped_boundary_diffusivity{{}, mapped_mesh};
+    for (const auto& [batch_id, batch] : mapped_mesh->boundary_batches())
+    {
+        mapped_boundary_diffusivity.value.emplace(
+            batch_id, SimpleFluid::Arr<Pack::scalar_type>(batch.face_lids.size(), 0.35));
+    }
+    TransportGeometryCache<MappedMesh> mapped_geometry(*mapped_mesh);
+    auto assemble_mapped = [&](Teuchos::RCP<Pack::matrix_type> cached_matrix)
+    {
+        return weighted_scalar_transport_system<Pack>(mapped_old, mapped_flux, 0.25, mapped_storage, mapped_advection,
+            mapped_diffusion, dirichlet_condition(), boundary_value, cell_source(), advanced,
+            NonOrthogonalTreatment::Hybrid, &mapped_older, &mapped_old, std::move(cached_matrix), implicit_sink,
+            fixed_cell_value, &mapped_boundary_diffusivity, &mapped_geometry, FaceCoefficientInterpolation::Linear);
+    };
+    auto mapped_positional_cache = assemble_mapped(Teuchos::null).matrix;
+    auto mapped_request_cache = assemble_mapped(Teuchos::null).matrix;
+    const auto mapped_positional = assemble_mapped(mapped_positional_cache);
+    const auto mapped_request = weighted_scalar_transport_system<Pack>(
+        FieldStoredWeightedScalarTransportRequest<Pack, MappedMesh>{
+            .old_values = mapped_old,
+            .face_fluxes = mapped_flux,
+            .time_step = 0.25,
+            .storage_weight = mapped_storage,
+            .advection_weight = mapped_advection,
+            .diffusivity = mapped_diffusion,
+            .boundary_condition = dirichlet_condition(),
+            .boundary_value = boundary_value,
+            .source = cell_source(),
+            .treatment = NonOrthogonalTreatment::Hybrid,
+            .discretization = advanced,
+            .older_values = &mapped_older,
+            .correction_field = &mapped_old,
+            .cached_matrix = mapped_request_cache,
+            .implicit_sink = implicit_sink,
+            .fixed_cell_value = fixed_cell_value,
+            .boundary_diffusivity = &mapped_boundary_diffusivity,
+            .geometry_cache = &mapped_geometry,
+            .coefficient_interpolation = FaceCoefficientInterpolation::Linear});
+    expect_systems_equal(mapped_request, mapped_positional, 3);
 }
 
 TEST(ScalarTransportDiscretizationTest, Bdf2RequiresACompatibleOlderFieldForLegacyAndMappedStorage)

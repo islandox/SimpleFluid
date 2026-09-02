@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
 #include "equations/BoussinesqModel.hh"
 #include "fields/MeshFieldTraits.hh"
 
@@ -79,35 +81,6 @@ namespace detail
 {
 
 /**
- * @brief Read a required, typed prescribed_heat-source database value.
- * @tparam T Requested database value type.
- * @param database Source database.
- * @param key Required option name.
- * @return The decoded option value.
- * @throws std::invalid_argument If the option is absent or has the wrong type.
- */
-template<class T>
-T prescribed_heat_database_value(
-    const Database& database,
-    const std::string& key)
-{
-    if (!database.contains(key))
-    {
-        throw std::invalid_argument(
-            "Missing required prescribed_heat power option '" + key + "'.");
-    }
-    try
-    {
-        return database.get<T>(key);
-    }
-    catch (const std::out_of_range&)
-    {
-        throw std::invalid_argument(
-            "PrescribedHeat power option '" + key + "' has the wrong type.");
-    }
-}
-
-/**
  * @brief Validate a non-negative prescribed_heat-source scalar.
  * @param value Value to validate.
  * @param name Option name used in diagnostics.
@@ -133,11 +106,10 @@ inline void validate_non_negative_prescribed_heat_value(
  * @throws std::invalid_argument If the option is absent, malformed, or non-finite.
  */
 inline vec3<real_t> prescribed_heat_vec3(
-    const Database& database,
+    const DatabaseOptionReader& reader,
     const std::string& key)
 {
-    const auto values =
-        prescribed_heat_database_value<ArrReal>(database, key);
+    const auto values = reader.required<ArrReal>(key);
     if (values.size() != 3)
     {
         throw std::invalid_argument(
@@ -204,32 +176,31 @@ inline PrescribedHeatSourceOptions
 prescribed_heat_source_options_from_database(const Database& database)
 {
     PrescribedHeatSourceOptions options;
-    if (!database.contains("prescribed_heat_power_mode"))
+    const detail::DatabaseOptionReader reader(
+        database, "PrescribedHeat power model");
+    if (!reader.contains("prescribed_heat_power_mode"))
     {
         return options;
     }
 
     options.profile = prescribed_heat_profile_from_string(
-        detail::prescribed_heat_database_value<std::string>(
-            database, "prescribed_heat_power_mode"));
+        reader.required<std::string>("prescribed_heat_power_mode"));
     switch (options.profile)
     {
         case PrescribedHeatProfile::Disabled:
             break;
         case PrescribedHeatProfile::Constant:
             options.power_density =
-                detail::prescribed_heat_database_value<real_t>(
-                    database, "prescribed_heat_power_density");
+                reader.required<real_t>("prescribed_heat_power_density");
             break;
         case PrescribedHeatProfile::Gaussian:
             options.total_power =
-                detail::prescribed_heat_database_value<real_t>(
-                    database, "prescribed_heat_total_power");
+                reader.required<real_t>("prescribed_heat_total_power");
             options.center =
-                detail::prescribed_heat_vec3(database, "prescribed_heat_center");
+                detail::prescribed_heat_vec3(reader, "prescribed_heat_center");
             options.standard_deviation =
                 detail::prescribed_heat_vec3(
-                    database, "prescribed_heat_standard_deviation");
+                    reader, "prescribed_heat_standard_deviation");
             break;
     }
 

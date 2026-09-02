@@ -296,6 +296,26 @@ TEST(ReactingGasPropertiesTest, ParsesFlatRuntimeSelectors)
     EXPECT_DOUBLE_EQ(options.alpha_max, 0.95);
 }
 
+/** @brief Verifies contextual diagnostics for incorrectly typed gas options. */
+TEST(ReactingGasPropertiesTest, ReportsWrongTypedOptionContext)
+{
+    SimpleFluid::Database database;
+    database.set("enable_reaction_source", std::string{"yes"});
+
+    try
+    {
+        SimpleFluid::reacting_gas_options_from_database(database);
+        FAIL() << "Expected a typed reacting gas option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Reacting gas model"), std::string::npos);
+        EXPECT_NE(message.find("enable_reaction_source"), std::string::npos);
+        EXPECT_NE(message.find("wrong type"), std::string::npos);
+    }
+}
+
 /** @brief Verifies that enabled reaction_source requires yield and rate-limit inputs. */
 TEST(ReactingGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
 {

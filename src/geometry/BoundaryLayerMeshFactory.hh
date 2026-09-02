@@ -58,6 +58,24 @@ public:
     };
 
     /**
+     * @brief Validate boundary-layer specifications independently of a mesh.
+     * @param layer_specs Named layer stacks to validate.
+     * @throws std::invalid_argument If names are empty or duplicated, counts
+     *         or first-cell heights are not positive, or numeric values are
+     *         not finite.
+     */
+    static void validate_specs(const Arr<BoundaryLayerSpec>& layer_specs);
+
+    /**
+     * @brief Read and validate the flat boundary-layer database keys.
+     * @param database Configuration database containing the parallel arrays.
+     * @return Parsed specifications, or an empty array when no keys are set.
+     * @throws std::invalid_argument If the database or configuration is invalid.
+     */
+    static Arr<BoundaryLayerSpec> read_specs(
+        const SP<const Database>& database);
+
+    /**
      * @brief Construct from explicit boundary-layer specifications.
      * @param layer_specs Named layer stacks to validate and retain.
      * @throws std::invalid_argument If names are empty or duplicated, counts
@@ -124,9 +142,6 @@ public:
     }
 
 private:
-    static Arr<BoundaryLayerSpec> read_specs(
-        const SP<const Database>& database);
-
     const BoundaryLayerSpec* find_spec(
         const std::string& boundary_name) const noexcept;
 

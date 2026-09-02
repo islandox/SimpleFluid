@@ -27,7 +27,6 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -213,7 +212,7 @@ real_t geometric_layer_thickness(const Spec* spec)
 
     real_t thickness = 0.0;
     real_t width = spec->first_cell_height;
-    for (int layer = 0; layer < spec->count; ++layer)
+    for (size_t layer = 0; layer < spec->count; ++layer)
     {
         thickness += width;
         width *= spec->growth_ratio;
@@ -251,12 +250,10 @@ ArrReal graded_edges(real_t lower,
         return {};
     }
 
-    const auto lower_count = lower_spec == nullptr
-                           ? 0
-                           : static_cast<size_t>(lower_spec->count);
-    const auto upper_count = upper_spec == nullptr
-                           ? 0
-                           : static_cast<size_t>(upper_spec->count);
+    const auto lower_count =
+        lower_spec == nullptr ? 0 : lower_spec->count;
+    const auto upper_count =
+        upper_spec == nullptr ? 0 : upper_spec->count;
     if (lower_count + upper_count >= base_cell_count)
     {
         throw std::runtime_error("Boundary-layer counts overlap on " + axis_name + ".");
@@ -279,7 +276,7 @@ ArrReal graded_edges(real_t lower,
     if (lower_spec != nullptr)
     {
         real_t width = lower_spec->first_cell_height;
-        for (int layer = 0; layer < lower_spec->count; ++layer)
+        for (size_t layer = 0; layer < lower_spec->count; ++layer)
         {
             edges.push_back(edges.back() + width);
             width *= lower_spec->growth_ratio;
@@ -296,9 +293,9 @@ ArrReal graded_edges(real_t lower,
     if (upper_spec != nullptr)
     {
         ArrReal widths;
-        widths.reserve(static_cast<size_t>(upper_spec->count));
+        widths.reserve(upper_spec->count);
         real_t width = upper_spec->first_cell_height;
-        for (int layer = 0; layer < upper_spec->count; ++layer)
+        for (size_t layer = 0; layer < upper_spec->count; ++layer)
         {
             widths.push_back(width);
             width *= upper_spec->growth_ratio;
@@ -392,73 +389,9 @@ MeshFactory::MeshFactory(SP<const Database> db)
 
     d_domain_exterior_face_types = db->get<ArrString>("domain_exterior_face_types");
 
-    const bool has_boundary_layer_keys =
-        db->contains("boundary_layer_boundary_names")
-     || db->contains("boundary_layer_counts")
-     || db->contains("boundary_layer_first_cell_heights")
-     || db->contains("boundary_layer_growth_ratios");
-    if (has_boundary_layer_keys)
+    d_boundary_layer_specs = BoundaryLayerMeshFactory::read_specs(db);
+    if (!d_boundary_layer_specs.empty())
     {
-        if (!db->contains("boundary_layer_boundary_names")
-            || !db->contains("boundary_layer_counts")
-            || !db->contains("boundary_layer_first_cell_heights")
-            || !db->contains("boundary_layer_growth_ratios"))
-        {
-            throw std::runtime_error(
-                "Boundary-layer mesh configuration requires names, counts, "
-                "first-cell heights, and growth ratios.");
-        }
-
-        const auto& names = db->get<ArrString>("boundary_layer_boundary_names");
-        const auto& counts = db->get<ArrInt>("boundary_layer_counts");
-        const auto& first_heights =
-            db->get<ArrReal>("boundary_layer_first_cell_heights");
-        const auto& growth_ratios =
-            db->get<ArrReal>("boundary_layer_growth_ratios");
-        if (names.size() != counts.size()
-            || names.size() != first_heights.size()
-            || names.size() != growth_ratios.size())
-        {
-            throw std::runtime_error(
-                "Boundary-layer mesh configuration arrays must have matching sizes.");
-        }
-
-        std::unordered_set<std::string> unique_names;
-        d_boundary_layer_specs.reserve(names.size());
-        for (size_t i = 0; i < names.size(); ++i)
-        {
-            if (names[i].empty())
-            {
-                throw std::runtime_error("Boundary-layer boundary name cannot be empty.");
-            }
-            if (!unique_names.insert(names[i]).second)
-            {
-                throw std::runtime_error(
-                    "Boundary-layer boundary name is duplicated: " + names[i]);
-            }
-            if (counts[i] <= 0)
-            {
-                throw std::runtime_error(
-                    "Boundary-layer count must be positive for " + names[i] + ".");
-            }
-            if (first_heights[i] <= 0.0)
-            {
-                throw std::runtime_error(
-                    "Boundary-layer first-cell height must be positive for "
-                    + names[i] + ".");
-            }
-            if (growth_ratios[i] < 1.0)
-            {
-                throw std::runtime_error(
-                    "Boundary-layer growth ratio must be at least one for "
-                    + names[i] + ".");
-            }
-
-            d_boundary_layer_specs.push_back(
-                BoundaryLayerSpec{names[i], counts[i], first_heights[i],
-                                  growth_ratios[i]});
-        }
-
         validate_boundary_layer_names();
     }
 }

@@ -185,6 +185,41 @@ TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
     expect_invalid(non_finite);
 }
 
+/** @brief Verifies contextual diagnostics for required prescribed_heat options. */
+TEST(PrescribedHeatSourceTest, ReportsRequiredOptionContext)
+{
+    SimpleFluid::Database missing;
+    missing.set("prescribed_heat_power_mode", std::string{"constant"});
+    try
+    {
+        SimpleFluid::prescribed_heat_source_options_from_database(missing);
+        FAIL() << "Expected a missing prescribed_heat option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("PrescribedHeat power model"), std::string::npos);
+        EXPECT_NE(message.find("prescribed_heat_power_density"), std::string::npos);
+        EXPECT_NE(message.find("required"), std::string::npos);
+    }
+
+    SimpleFluid::Database wrong_type;
+    wrong_type.set("prescribed_heat_power_mode", std::string{"constant"});
+    wrong_type.set("prescribed_heat_power_density", std::string{"high"});
+    try
+    {
+        SimpleFluid::prescribed_heat_source_options_from_database(wrong_type);
+        FAIL() << "Expected a typed prescribed_heat option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("PrescribedHeat power model"), std::string::npos);
+        EXPECT_NE(message.find("prescribed_heat_power_density"), std::string::npos);
+        EXPECT_NE(message.find("wrong type"), std::string::npos);
+    }
+}
+
 /** @brief Verifies total-power normalization of constant and Gaussian profiles. */
 TEST(PrescribedHeatSourceTest, ConstantAndGaussianProfilesIntegrateCorrectly)
 {

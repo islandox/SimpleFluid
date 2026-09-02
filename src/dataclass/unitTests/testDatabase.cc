@@ -89,6 +89,37 @@ TEST(DatabaseTest, ReplacesExistingKeyAcrossTypes)
 }
 
 /**
+ * @brief Verifies mutable/const references and value-semantic copies remain independent.
+ */
+TEST(DatabaseTest, ProvidesReferencesAndIndependentCopies)
+{
+    SimpleFluid::Database db;
+    db.set("count", 1);
+    db.set("labels", SimpleFluid::ArrString{"inlet"});
+
+    int& count = db.get<int>("count");
+    count = 2;
+    EXPECT_EQ(db.get<int>("count"), 2);
+
+    SimpleFluid::ArrString& labels = db.get<SimpleFluid::ArrString>("labels");
+    labels.push_back("outlet");
+
+    const SimpleFluid::Database& const_db = db;
+    const SimpleFluid::ArrString& const_labels =
+        const_db.get<SimpleFluid::ArrString>("labels");
+    EXPECT_EQ(const_labels, (SimpleFluid::ArrString{"inlet", "outlet"}));
+
+    SimpleFluid::Database copy = db;
+    copy.get<int>("count") = 3;
+    copy.get<SimpleFluid::ArrString>("labels").push_back("wall");
+
+    EXPECT_EQ(db.get<int>("count"), 2);
+    EXPECT_EQ(db.get<SimpleFluid::ArrString>("labels").size(), 2u);
+    EXPECT_EQ(copy.get<int>("count"), 3);
+    EXPECT_EQ(copy.get<SimpleFluid::ArrString>("labels").size(), 3u);
+}
+
+/**
  * @brief Confirms individual entries can be erased and the entire store can be cleared.
  */
 TEST(DatabaseTest, ErasesAndClearsEntries)
@@ -120,9 +151,34 @@ TEST(DatabaseTest, ThrowsForMissingOrWrongTypedAccess)
 
     db.set("count", 4);
 
-    EXPECT_THROW(db.get<int>("missing"), std::out_of_range);
-    EXPECT_THROW(db.get<SimpleFluid::real_t>("count"), std::out_of_range);
+    try
+    {
+        (void)db.get<int>("missing");
+        FAIL() << "Expected missing-key access to throw";
+    }
+    catch (const std::out_of_range& error)
+    {
+        EXPECT_STREQ(error.what(), "Database key not found: missing");
+    }
+
+    try
+    {
+        (void)db.get<SimpleFluid::real_t>("count");
+        FAIL() << "Expected wrong-type access to throw";
+    }
+    catch (const std::out_of_range& error)
+    {
+        EXPECT_STREQ(error.what(), "Database key not found: count");
+    }
 
     const SimpleFluid::Database& const_db = db;
-    EXPECT_THROW(const_db.get<std::string>("missing"), std::out_of_range);
+    try
+    {
+        (void)const_db.get<std::string>("missing");
+        FAIL() << "Expected const missing-key access to throw";
+    }
+    catch (const std::out_of_range& error)
+    {
+        EXPECT_STREQ(error.what(), "Database key not found: missing");
+    }
 }

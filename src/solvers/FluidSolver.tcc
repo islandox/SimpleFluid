@@ -20,6 +20,110 @@
 
 namespace SimpleFluid
 {
+namespace
+{
+namespace fluid_solver_detail
+{
+
+/** @brief Compute a communicator-wide volume-weighted velocity-update norm. */
+template<class MeshType, class VelocityField, class GlobalSum>
+auto volume_weighted_velocity_update_norm(
+    const MeshType& mesh,
+    const VelocityField& before,
+    const VelocityField& after,
+    GlobalSum global_sum) -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+
+    EquationValidation::require_mesh_match(
+        mesh, before, "FluidSolver");
+    EquationValidation::require_mesh_match(
+        mesh, after, "FluidSolver");
+
+    scalar_type norm_squared{};
+    const auto before_values = before.owned_read_view();
+    const auto after_values = after.owned_read_view();
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto delta_x =
+            after_values(cell_lid, 0) - before_values(cell_lid, 0);
+        const auto delta_y =
+            after_values(cell_lid, 1) - before_values(cell_lid, 1);
+        const auto delta_z =
+            after_values(cell_lid, 2) - before_values(cell_lid, 2);
+        norm_squared +=
+            (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z)
+            * static_cast<scalar_type>(mesh.cell_volume(cell_lid));
+    }
+
+    using std::sqrt;
+    return sqrt(global_sum(norm_squared));
+}
+
+/** @brief Collect rank-owned scalar values in mesh-local cell order. */
+template<class MeshType, class Field>
+auto collect_owned_scalar_values(
+    const MeshType& mesh,
+    const Field& field) -> VTUWriter::ScalarData
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+
+    VTUWriter::ScalarData values;
+    values.reserve(mesh.num_owned_cells());
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        values.push_back(static_cast<real_t>(
+            field.local_value(
+                static_cast<local_ordinal_type>(owned))));
+    }
+    return values;
+}
+
+/** @brief Reduce a backend-provided cell metric to a global L2 norm. */
+template<class MeshType, class CellMetric, class GlobalSum>
+auto global_cell_metric_norm(
+    const MeshType& mesh,
+    CellMetric cell_metric,
+    GlobalSum global_sum) -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+
+    scalar_type norm_squared{};
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto value = cell_metric(cell_lid);
+        norm_squared += value * value;
+    }
+
+    using std::sqrt;
+    return sqrt(global_sum(norm_squared));
+}
+
+/** @brief Publish one accepted coupled solve into residual/statistics state. */
+template<class Result, class Scalar, class Residual, class Statistics>
+void record_coupled_result(
+    const Result& result,
+    Scalar momentum_norm,
+    Residual& residuals,
+    Statistics& statistics)
+{
+    residuals.momentum = momentum_norm;
+    residuals.pressure = result.achieved_tolerance;
+    residuals.achieved_tolerance = result.achieved_tolerance;
+    residuals.linear_iterations = result.iterations;
+    statistics.nonlinear_iterations = 1;
+    statistics.add(LinearSolveStatistics{
+        result.converged,
+        result.iterations,
+        result.achieved_tolerance});
+}
+
+} // namespace fluid_solver_detail
+} // namespace
 
 /**
  * @brief Validate and return a legacy mesh pointer.
@@ -669,30 +773,12 @@ auto FluidSolver<Pack>::velocity_update_norm(
     const velocity_field_type& before,
     const velocity_field_type& after) const -> scalar_type
 {
-    EquationValidation::require_mesh_match(
-        *d_mesh, before, "FluidSolver");
-    EquationValidation::require_mesh_match(
-        *d_mesh, after, "FluidSolver");
-
-    scalar_type norm_squared = {};
-    const auto before_values = before.owned_read_view();
-    const auto after_values = after.owned_read_view();
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto delta_x =
-            after_values(cell_lid, 0) - before_values(cell_lid, 0);
-        const auto delta_y =
-            after_values(cell_lid, 1) - before_values(cell_lid, 1);
-        const auto delta_z =
-            after_values(cell_lid, 2) - before_values(cell_lid, 2);
-        norm_squared +=
-            (delta_x * delta_x + delta_y * delta_y + delta_z * delta_z)
-            * static_cast<scalar_type>(d_mesh->cell_volume(cell_lid));
-    }
-
-    using std::sqrt;
-    return sqrt(global_sum(norm_squared));
+    return fluid_solver_detail::volume_weighted_velocity_update_norm(
+        *d_mesh,
+        before,
+        after,
+        [this](scalar_type local_value)
+        { return global_sum(local_value); });
 }
 
 /** @brief Compute the legacy backend's volume-weighted velocity update. */
@@ -701,29 +787,12 @@ auto FluidSolver<Pack>::velocity_update_norm(
     const legacy_velocity_field_type& before,
     const legacy_velocity_field_type& after) const -> scalar_type
 {
-    EquationValidation::require_mesh_match(
-        *d_legacy_mesh, before, "FluidSolver");
-    EquationValidation::require_mesh_match(
-        *d_legacy_mesh, after, "FluidSolver");
-    scalar_type norm_squared{};
-    const auto before_values = before.owned_read_view();
-    const auto after_values = after.owned_read_view();
-    for (size_t owned = 0;
-         owned < d_legacy_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto dx = after_values(cell_lid, 0)
-                      - before_values(cell_lid, 0);
-        const auto dy = after_values(cell_lid, 1)
-                      - before_values(cell_lid, 1);
-        const auto dz = after_values(cell_lid, 2)
-                      - before_values(cell_lid, 2);
-        norm_squared += (dx * dx + dy * dy + dz * dz)
-                      * static_cast<scalar_type>(
-                            d_legacy_mesh->cell_volume(cell_lid));
-    }
-    using std::sqrt;
-    return sqrt(global_sum(norm_squared));
+    return fluid_solver_detail::volume_weighted_velocity_update_norm(
+        *d_legacy_mesh,
+        before,
+        after,
+        [this](scalar_type local_value)
+        { return global_sum(local_value); });
 }
 
 /**
@@ -1009,27 +1078,28 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
             throw std::runtime_error("FluidSolver coupled Krylov solve did not converge.");
         }
 
-        pressure_velocity_residuals().momentum = velocity_update_norm(predictor_velocity(), velocity());
-        pressure_velocity_residuals().pressure = result.achieved_tolerance;
-        pressure_velocity_residuals().achieved_tolerance = result.achieved_tolerance;
-        pressure_velocity_residuals().linear_iterations = result.iterations;
-        d_last_step_statistics.nonlinear_iterations = 1;
-        d_last_step_statistics.add(
-            LinearSolveStatistics{result.converged, result.iterations, result.achieved_tolerance});
+        const auto momentum_norm =
+            velocity_update_norm(predictor_velocity(), velocity());
+        fluid_solver_detail::record_coupled_result(
+            result,
+            momentum_norm,
+            pressure_velocity_residuals(),
+            d_last_step_statistics);
 
         FVM::pressure_weighted_face_fluxes(velocity(), pressure(),
             d_problem.time_options().time_step / pressure_reference_density(), native_velocity_boundary_cache(),
             d_problem.boundary_conditions().pressure, native_pressure_face_flux_workspace(), projected_face_fluxes(),
             d_problem.time_options().pressure_gradient_scheme);
-        scalar_type continuity_norm_squared = {};
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            const auto balance = FVM::cell_flux_balance<Pack>(*d_mesh, projected_face_fluxes(), cell_lid);
-            continuity_norm_squared += balance * balance;
-        }
-        using std::sqrt;
-        pressure_velocity_residuals().continuity = sqrt(global_sum(continuity_norm_squared));
+        pressure_velocity_residuals().continuity =
+            fluid_solver_detail::global_cell_metric_norm(
+                *d_mesh,
+                [this](local_ordinal_type cell_lid)
+                {
+                    return FVM::cell_flux_balance<Pack>(
+                        *d_mesh, projected_face_fluxes(), cell_lid);
+                },
+                [this](scalar_type local_value)
+                { return global_sum(local_value); });
         return;
     }
     sync_primary_fields_to_legacy();
@@ -1064,20 +1134,13 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
             "FluidSolver coupled Krylov solve did not converge.");
     }
 
-    pressure_velocity_residuals().momentum =
-        velocity_update_norm(
-            legacy_predictor_velocity(), legacy_velocity());
-    pressure_velocity_residuals().pressure =
-        result.achieved_tolerance;
-    pressure_velocity_residuals().achieved_tolerance =
-        result.achieved_tolerance;
-    pressure_velocity_residuals().linear_iterations =
-        result.iterations;
-    d_last_step_statistics.nonlinear_iterations = 1;
-    d_last_step_statistics.add(LinearSolveStatistics{
-        result.converged,
-        result.iterations,
-        result.achieved_tolerance});
+    const auto momentum_norm = velocity_update_norm(
+        legacy_predictor_velocity(), legacy_velocity());
+    fluid_solver_detail::record_coupled_result(
+        result,
+        momentum_norm,
+        pressure_velocity_residuals(),
+        d_last_step_statistics);
 
     FVM::pressure_weighted_face_fluxes(
         legacy_velocity(), legacy_pressure(),
@@ -1088,28 +1151,21 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
         legacy_pressure_face_flux_workspace(),
         legacy_projected_face_fluxes(),
         d_problem.time_options().pressure_gradient_scheme);
-    scalar_type continuity_norm_squared = {};
-    {
-        const auto projected_flux_values =
-            legacy_projected_face_fluxes().owned_read_view();
-        for (size_t owned = 0;
-             owned < d_legacy_mesh->num_owned_cells();
-             ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto balance =
-                FVM::cell_flux_balance<Pack>(
+    const auto projected_flux_values =
+        legacy_projected_face_fluxes().owned_read_view();
+    pressure_velocity_residuals().continuity =
+        fluid_solver_detail::global_cell_metric_norm(
+            *d_legacy_mesh,
+            [this, projected_flux_values](local_ordinal_type cell_lid)
+            {
+                return FVM::cell_flux_balance<Pack>(
                     *d_legacy_mesh,
                     legacy_projected_face_fluxes(),
                     projected_flux_values,
                     cell_lid);
-            continuity_norm_squared += balance * balance;
-        }
-    }
-    using std::sqrt;
-    pressure_velocity_residuals().continuity =
-        sqrt(global_sum(continuity_norm_squared));
+            },
+            [this](scalar_type local_value)
+            { return global_sum(local_value); });
     sync_primary_fields_from_legacy();
 }
 
@@ -1402,15 +1458,8 @@ template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::collect_scalar_field(
     const field_type& field) const -> VTUWriter::ScalarData
 {
-    VTUWriter::ScalarData values;
-    values.reserve(d_mesh->num_owned_cells());
-    for (size_t lid = 0; lid < d_mesh->num_owned_cells(); ++lid)
-    {
-        values.push_back(static_cast<real_t>(
-            field.local_value(
-                static_cast<local_ordinal_type>(lid))));
-    }
-    return values;
+    return fluid_solver_detail::collect_owned_scalar_values(
+        *d_mesh, field);
 }
 
 /** @brief Gather a legacy backend scalar field into VTU cell-data order. */
@@ -1424,16 +1473,8 @@ auto FluidSolver<Pack>::collect_scalar_field(
             "FluidSolver cannot collect a legacy field without a legacy "
             "mesh backend.");
     }
-    VTUWriter::ScalarData values;
-    values.reserve(d_legacy_mesh->num_owned_cells());
-    for (size_t lid = 0;
-         lid < d_legacy_mesh->num_owned_cells(); ++lid)
-    {
-        values.push_back(static_cast<real_t>(
-            field.local_value(
-                static_cast<local_ordinal_type>(lid))));
-    }
-    return values;
+    return fluid_solver_detail::collect_owned_scalar_values(
+        *d_legacy_mesh, field);
 }
 
 /**

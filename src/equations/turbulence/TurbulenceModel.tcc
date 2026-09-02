@@ -9,7 +9,7 @@
  *
  */
 
-#include "TurbulenceCollectiveValidation.hh"
+#include "equations/CollectiveValidation.hh"
 #include "TurbulenceModel.hh"
 
 #include "FVM/CellOperators.hh"
@@ -644,7 +644,7 @@ TurbulenceModel<Pack, MeshType>::TurbulenceModel(SP<const mesh_type> mesh,
     d_wall_velocity_boundary_cache =
         FVM::cache_velocity_boundary_conditions<Pack>(d_mesh, boundary_conditions);
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence boundary-condition validation",
         [&]
         {
@@ -683,7 +683,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const Database& database,
                                       scalar_type reference_density)
 {
     TurbulenceModelOptions parsed_options;
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence database parsing",
         [&]
         { parsed_options = turbulence_model_options_from_database(database); });
@@ -704,54 +704,54 @@ template <TpetraTypePack Pack, class MeshType>
 void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& options,
                                       const material_type& material, scalar_type reference_density)
 {
-    turbulence_detail::collective_local_validation(*d_mesh, "Turbulence model option validation",
+    collective_detail::collective_local_validation(*d_mesh, "Turbulence model option validation",
                                                    [&]
                                                    { validate_turbulence_model_options(options); });
-    turbulence_detail::require_uniform_integral(*d_mesh, static_cast<int>(options.model),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(options.model),
                                                 "Turbulence model type");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.wall_treatment),
         "Turbulence wall-treatment type");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.buoyancy_model),
         "Turbulence buoyancy model");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.gradient_scheme),
         "Turbulence cell-gradient scheme");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.coefficient_interpolation),
         "Turbulence face-coefficient interpolation");
-    turbulence_detail::require_uniform_real(
+    collective_detail::require_uniform_value(
         *d_mesh, options.buoyancy_coefficient,
         "Turbulence buoyancy coefficient");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         static_cast<int>(
             options.wall_distance_equation
                 .non_orthogonal_treatment),
         "Turbulence wall-distance non-orthogonal treatment");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         options.wall_distance_equation.non_orthogonal_correctors,
         "Turbulence wall-distance correctors");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         options.wall_distance_equation.linear_solver.max_iterations,
         "Turbulence wall-distance maximum iterations");
-    turbulence_detail::require_uniform_real(
+    collective_detail::require_uniform_value(
         *d_mesh,
         options.wall_distance_equation.linear_solver.tolerance,
         "Turbulence wall-distance linear tolerance");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         options.wall_distance_equation.linear_solver.verbosity,
         "Turbulence wall-distance linear verbosity");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         static_cast<int>(
             options.wall_distance_equation.linear_solver.preconditioner),
         "Turbulence wall-distance preconditioner");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         options.wall_distance_equation.linear_solver
                 .reuse_preconditioner
@@ -766,10 +766,10 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
         options.wall_options.sst_omega_wall_coefficient};
     for (const auto value : wall_scalar_options)
     {
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh, value, "Turbulence wall scalar options");
     }
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.wall_options.epsilon_low_re_correction ? 1 : 0,
         "Turbulence wall epsilon low-Re correction");
     const std::array<real_t, 7> scalar_options{options.initial_turbulent_kinetic_energy,
@@ -781,14 +781,14 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                                                options.turbulent_prandtl_number};
     for (const auto value : scalar_options)
     {
-        turbulence_detail::require_uniform_real(*d_mesh, value, "Turbulence scalar options");
+        collective_detail::require_uniform_value(*d_mesh, value, "Turbulence scalar options");
     }
-    turbulence_detail::require_uniform_integral(*d_mesh,
+    collective_detail::require_uniform_value(*d_mesh,
                                                 options.initial_wall_distance.has_value() ? 1 : 0,
                                                 "Turbulence wall-distance presence");
     if (options.initial_wall_distance)
     {
-        turbulence_detail::require_uniform_real(*d_mesh, *options.initial_wall_distance,
+        collective_detail::require_uniform_value(*d_mesh, *options.initial_wall_distance,
                                                 "Turbulence wall distance");
     }
     if (options.model == TurbulenceModelType::Laminar)
@@ -797,7 +797,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
         d_state.reset();
         return;
     }
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Active turbulence boundary-condition validation",
         [&]
         {
@@ -865,7 +865,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                                : options.min_specific_dissipation_rate,
                 epsilon_family ? "Dissipation rate" : "Specific dissipation rate");
         });
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence reference-density validation",
         [&]
         {
@@ -875,7 +875,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                                             "density.");
             }
         });
-    turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
 
     BoundaryConditionSet configured_boundaries;
@@ -913,7 +913,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
         candidate->k, candidate->wall_velocity,
         configured_velocity_boundary_cache, material, reference_density,
         static_cast<scalar_type>(options.turbulent_prandtl_number));
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Initial turbulence-gradient reconstruction",
         [&]
         {
@@ -1006,7 +1006,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                 .at(batch_id)
                 .at(in_batch_id);
         };
-        turbulence_detail::collective_local_validation(
+        collective_detail::collective_local_validation(
             *d_mesh, "Initial SST eddy-viscosity evaluation",
             [&]
             {
@@ -1219,7 +1219,7 @@ void TurbulenceModel<Pack, MeshType>::stage_effective_properties(
     State& state, const field_type& turbulent_kinematic_viscosity, const material_type& material,
     scalar_type reference_density, scalar_type turbulent_prandtl_number) const
 {
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence effective-property validation",
         [&]
         {
@@ -1330,7 +1330,7 @@ void TurbulenceModel<Pack, MeshType>::stage_menter_eddy_viscosity(
     const material_type& material, scalar_type reference_density,
     std::string_view context) const
 {
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, context,
         [&]
         {
@@ -1468,10 +1468,10 @@ template <TpetraTypePack Pack, class MeshType>
 void TurbulenceModel<Pack, MeshType>::refresh_effective_properties(const material_type& material,
                                                          scalar_type reference_density)
 {
-    turbulence_detail::require_uniform_integral(*d_mesh, enabled() ? 1 : 0,
+    collective_detail::require_uniform_value(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
     auto& state = require_state();
-    turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
     auto wall_evaluation = state.evaluate_wall(
         state.k, state.wall_velocity, d_wall_velocity_boundary_cache,
@@ -1518,15 +1518,15 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
     const material_type& material,
     scalar_type reference_density)
 {
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, enabled() ? 1 : 0,
         "Turbulence enabled state");
-    turbulence_detail::require_uniform_real(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<real_t>(reference_density),
         "Turbulence reference density");
     auto& state = require_state();
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence restart-state validation",
         [&]
         {
@@ -1621,7 +1621,7 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
     auto wall_publication =
         state.stage_wall_publication(std::move(wall_evaluation));
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence restart-gradient reconstruction",
         [&]
         {
@@ -1761,48 +1761,48 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                                     const TurbulenceBuoyancyContext<Pack, mesh_type>*
                                         buoyancy_context) -> LinearSolveSummary
 {
-    turbulence_detail::require_uniform_integral(*d_mesh, enabled() ? 1 : 0,
+    collective_detail::require_uniform_value(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
     auto& state = require_state();
-    turbulence_detail::require_uniform_integral(*d_mesh, static_cast<int>(d_options.model),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_options.model),
                                                 "Active turbulence model type");
-    turbulence_detail::require_uniform_integral(*d_mesh, static_cast<int>(treatment),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(treatment),
                                                 "Turbulence non-orthogonal treatment");
-    turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(time_step),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(time_step),
                                             "Turbulence time step");
-    turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
     const auto direct_buoyancy =
         d_options.buoyancy_model
         == TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, buoyancy_context != nullptr ? 1 : 0,
         "Turbulence buoyancy-context presence");
     if (direct_buoyancy && buoyancy_context != nullptr)
     {
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh,
             static_cast<real_t>(
                 buoyancy_context->thermal_expansion),
             "Turbulence thermal expansion");
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh,
             static_cast<real_t>(buoyancy_context->gravity.x),
             "Turbulence gravity x");
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh,
             static_cast<real_t>(buoyancy_context->gravity.y),
             "Turbulence gravity y");
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh,
             static_cast<real_t>(buoyancy_context->gravity.z),
             "Turbulence gravity z");
-        turbulence_detail::require_uniform_integral(
+        collective_detail::require_uniform_value(
             *d_mesh,
             buoyancy_context->density_feedback_enabled ? 1 : 0,
             "Turbulence density-feedback mode");
     }
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence advance input validation",
         [&]
         {
@@ -1970,7 +1970,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
             secondary_gradient.sync_ghosts();
         }
     };
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence gradient reconstruction",
         [&]
         {
@@ -2019,7 +2019,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                   const velocity_field_type& secondary_gradient,
                   const typename State::wall_evaluation_type& wall_evaluation)
     {
-        turbulence_detail::collective_local_validation(
+        collective_detail::collective_local_validation(
             *d_mesh, "Turbulence closure evaluation",
             [&]
             {
@@ -2585,7 +2585,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         state.stage_wall_publication(
             std::move(candidate_wall_evaluation));
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence candidate-gradient reconstruction",
         [&]
         {
@@ -2652,16 +2652,16 @@ void TurbulenceModel<Pack, MeshType>::set_wall_distance(
     const field_type& wall_distance, const material_type& material,
     scalar_type reference_density)
 {
-    turbulence_detail::require_uniform_integral(*d_mesh, enabled() ? 1 : 0,
+    collective_detail::require_uniform_value(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
     auto& state = require_state();
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(d_options.model),
         "Active turbulence model type");
-    turbulence_detail::require_uniform_real(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<real_t>(reference_density),
         "Turbulence reference density");
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall-distance validation",
         [&]
         {
@@ -2715,7 +2715,7 @@ void TurbulenceModel<Pack, MeshType>::set_wall_distance(
         scalar_type{1}, wall_distance.owned_data(), scalar_type{0});
     candidate_wall_distance.sync_ghosts();
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Synchronized turbulence wall-distance validation",
         [&]
         {
