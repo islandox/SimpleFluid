@@ -41,6 +41,9 @@
 namespace SimpleFluid
 {
 
+template<TpetraTypePack Pack>
+class MeshReorderingFactory;
+
 namespace detail
 {
 
@@ -78,6 +81,8 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
+    friend class MeshReorderingFactory<Pack>;
+
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -223,6 +228,12 @@ public:
         return std::holds_alternative<STKAdapterPtr>(d_mesh);
     }
 
+    /** @brief True after a factory has changed this handle's local cell order. */
+    bool has_reordered_cells() const noexcept
+    {
+        return d_cells_reordered;
+    }
+
     SP<const SimpleFluid::Mesh<Pack>> legacy_mesh() const noexcept
     {
         if (const auto* adapter = std::get_if<STKAdapterPtr>(&d_mesh))
@@ -358,6 +369,8 @@ public:
                             local_ordinal_type cell_lid) const;
     real_t cell_to_face_distance(local_ordinal_type face_lid,
                                  local_ordinal_type cell_lid) const;
+    /** @brief True if the underlying geometry has no cell across a face. */
+    bool is_geometry_exterior_face(local_ordinal_type face_lid) const;
     bool is_exterior_face(local_ordinal_type face_lid) const;
     bool is_interior_face(local_ordinal_type face_lid) const;
     int boundary_id(local_ordinal_type face_lid) const;
@@ -512,6 +525,10 @@ private:
         local_ordinal_type local_id) const
     {
         check_cell(local_id);
+        if (!d_cell_geometry_lids.empty())
+        {
+            return d_cell_geometry_lids[static_cast<size_t>(local_id)];
+        }
         if (std::holds_alternative<UnstructuredPtr>(d_mesh)
             || is_stk())
         {
@@ -751,6 +768,12 @@ private:
     local_ordinal_type geometry_to_local_cell(
         size_t geometry_lid) const noexcept
     {
+        if (!d_cell_local_lids_by_geometry.empty())
+        {
+            return geometry_lid < d_cell_local_lids_by_geometry.size()
+                ? d_cell_local_lids_by_geometry[geometry_lid]
+                : invalid_local_id();
+        }
         if (std::holds_alternative<UnstructuredPtr>(d_mesh)
             || is_stk())
         {
@@ -803,6 +826,9 @@ private:
     variant_type d_mesh;
     mutable indexer_type d_indexer;
     mutable bool d_legacy_indexer_materialized = false;
+    bool d_cells_reordered = false;
+    std::vector<global_ordinal_type> d_cell_geometry_lids;
+    std::vector<local_ordinal_type> d_cell_local_lids_by_geometry;
     std::vector<local_ordinal_type> d_legacy_face_geometry_lids;
     std::vector<local_ordinal_type> d_legacy_face_local_lids;
     std::vector<size_t> d_cell_face_offsets;

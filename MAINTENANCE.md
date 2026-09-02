@@ -83,6 +83,10 @@ Important entry points for a manual review are:
 
 - `src/geometry/mesh/MeshBase.hh` for the CRTP mesh contract.
 - `src/geometry/MeshHandle.hh` for runtime mesh type erasure.
+- `src/geometry/MeshReorderingFactory.hh` for collective selected-first local
+  cell ordering and its owned/ghost range certificate.
+- `src/geometry/SolidSubdomain.hh` for compact selected-cell mesh views and
+  synthetic solid-interface boundaries.
 - `src/fields/FieldStored.hh` for mesh-aware distributed field storage.
 - `src/fields/MeshFieldTraits.hh` for native-versus-legacy field selection.
 - `src/FVM/Operators.hh` and `src/FVM/TransportSystem.hh` for the public FVM
@@ -93,6 +97,8 @@ Important entry points for a manual review are:
   ownership model.
 - `src/solvers/FluidSolver.hh` for incompressible flow orchestration.
 - `src/solvers/BoussinesqSolver.hh` for thermal and multiphysics integration.
+- `src/equations/SolidHeatConductionEquation.hh` for zero-advection physical
+  heat conduction in a solid region.
 
 Template declarations and definitions are intentionally split among `.hh`,
 `.tcc`, `.ipp`, and `FVM/details` files in several modules. Public FVM headers
@@ -154,6 +160,14 @@ behavioral changes separable during review.
   overlap storage may require `sync_ghosts()` before a stencil read.
 - Keep fields, caches, equations, and solvers bound to the same mesh object;
   reject mismatches instead of relying on equivalent-looking topology.
+- Apply `MeshReorderingFactory` before constructing fields or caches. Preserve
+  its separate owned-selected and ghost-selected prefixes: combining them into
+  one local interval would violate the owned-first distributed-map contract.
+- Transfer a uniquely owned mutable `MeshHandle` into a required reordering;
+  do not restore the former full-handle copy, which duplicates parent-sized
+  indexers and connectivity.
+- Keep `SolidSubdomain` range-backed. Do not reintroduce parent-sized selection
+  masks or dense parent-to-subdomain cell/face reverse arrays.
 - Select native and legacy field families through `MeshFieldTraits` rather
   than adding another parallel equation implementation.
 - Keep mapped FVM implementation bodies under `src/FVM/details` and preserve

@@ -253,6 +253,7 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::Mesh<.*>[ ]*::solve[(]"
     "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::MeshHandle<.*>[ ]*::solve[(]"
     "^SimpleFluid::TemperatureDiffusionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_physical[(]"
+    "^SimpleFluid::SolidHeatConductionEquation<.*SimpleFluid::SolidSubdomain<.*>[ ]*::advance[(]"
     "^SimpleFluid::BoussinesqMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity_physical[(]"
     "^SimpleFluid::TurbulenceModel<.*SimpleFluid::MeshHandle<.*>[ ]*::advance[(]"
     "^SimpleFluid::AdaptiveSteadyStateController::observe[(]"
@@ -364,13 +365,14 @@ if(simplefluid_forbidden_api_symbols)
         "SimpleFluid definitions:\n  "
         "${simplefluid_forbidden_api_symbol_sample}")
 endif()
-# The isothermal-solver and adaptive steady-state APIs extend the validated
-# Release library shape by five public symbols without widening the export map.
+# The isothermal/adaptive APIs and default solid-conduction specialization
+# extend the reviewed library shape without widening the export map to vendor
+# or implementation-detail namespaces.
 if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 605)
+   OR simplefluid_api_symbol_count GREATER 615)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 605")
+        "SimpleFluid symbols; the reviewed public-API range is 300 to 615")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)

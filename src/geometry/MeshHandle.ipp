@@ -68,7 +68,9 @@ MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const
     {
         if (const auto legacy = legacy_mesh())
         {
-            const auto& face_lids = legacy->faces(cell_lid);
+            const auto geometry_lid = geometry_cell_lid(cell_lid);
+            const auto& face_lids = legacy->faces(checked_local(
+                static_cast<size_t>(geometry_lid)));
             return {
                 face_lids.empty() ? nullptr : &face_lids[0],
                 face_lids.size()};
@@ -269,6 +271,37 @@ MeshHandle<Pack>::cell_to_face_distance(
     local_ordinal_type cell_lid) const
 {
     return (face_centroid(face_lid) - cell_centroid(cell_lid)).norm();
+}
+
+/// @brief Return whether the underlying geometry has no cell across a face.
+/// @param face_lid Local index of the query face.
+/// @return True for a physical exterior, independent of overlap depth.
+template<TpetraTypePack Pack>
+inline bool
+MeshHandle<Pack>::is_geometry_exterior_face(
+    local_ordinal_type face_lid) const
+{
+    const auto geometry_lid = geometry_face_lid(face_lid);
+    return std::visit(
+        [geometry_lid](const auto& mesh_pointer)
+        {
+            const auto& mesh = *mesh_pointer;
+            const auto id = mesh.face_id(
+                static_cast<size_t>(geometry_lid));
+            const auto neighbor = mesh.neighbor_cell(id);
+            if constexpr (std::is_same_v<
+                              std::decay_t<decltype(mesh)>,
+                              STKAdapter>)
+            {
+                return neighbor == invalid_id<local_ordinal_type>();
+            }
+            else
+            {
+                return neighbor
+                    == std::decay_t<decltype(mesh)>::invalid_cell_id();
+            }
+        },
+        d_mesh);
 }
 
 /// @brief Returns true if the face lies on the domain boundary (no neighbor cell).

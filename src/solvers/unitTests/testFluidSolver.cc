@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshFactory.hh"
+#include "geometry/MeshReorderingFactory.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/FluidSolver.hh"
@@ -222,6 +223,26 @@ TEST(FluidSolverTest, ReusesExactLegacyMeshWithoutConversion)
     EXPECT_EQ(solver.velocity_mesh_handle(), solver.runtime_mesh_handle());
     EXPECT_EQ(solver.historical_pressure_flux_workspace(),
               solver.explicit_legacy_pressure_flux_workspace());
+}
+
+/** @brief Reordered legacy handles cannot use ordinal-based field mirrors. */
+TEST(FluidSolverTest, RejectsReorderedLegacyCompatibilityHandle)
+{
+    auto handle = std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        make_two_cell_line_mesh());
+    const auto layout =
+        SimpleFluid::MeshReorderingFactory<Pack>::selected_cells_first(
+            std::move(handle),
+            [](Pack::global_ordinal_type,
+               const SimpleFluid::MeshHandle<Pack>::Vec3& center)
+            {
+                return center.x > 0.5;
+            });
+
+    ASSERT_TRUE(layout.mesh->has_reordered_cells());
+    EXPECT_THROW(
+        static_cast<void>(TestFluidSolver(layout.mesh, {})),
+        std::invalid_argument);
 }
 
 /** @brief Legacy mirrors do not overwrite a derived public momentum update. */

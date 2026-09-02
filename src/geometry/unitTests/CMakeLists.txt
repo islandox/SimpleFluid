@@ -36,6 +36,14 @@ simplefluid_add_mpi_test(
     LABELS "mpi;mesh_handle;partitioned_unstructured"
     TIMEOUT 120)
 
+simplefluid_add_mpi_test(
+    NAME MeshReorderingFactory_2procs
+    TARGET testMeshReorderingFactory
+    PROCS 2
+    ARGS "--gtest_filter=MeshReorderingFactoryMultiRankTest.*"
+    LABELS "mpi;mesh_reordering;solid_subdomain"
+    TIMEOUT 120)
+
 # The diffusion profiling test also needs the solvers library
 add_executable(testOrthogonalDiffusionProfile testOrthogonalDiffusionProfile.cc)
 target_link_libraries(testOrthogonalDiffusionProfile
