@@ -107,6 +107,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
     geometry/Mesh.cc
     geometry/MeshHandle.cc
+    geometry/MeshReorderingFactory.cc
+    geometry/SolidSubdomain.cc
     geometry/STKMesh.cc
     geometry/MeshFactory.cc
     geometry/mesh/LocalGlobalIndexer.cc
@@ -164,6 +166,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     equations/PressureProjectionEquation.cc
     equations/RadiolyticGasPhysics.cc
     equations/RadiolyticGasProperties.cc
+    equations/SolidHeatConductionEquation.cc
     equations/TemperatureDiffusionEquation.cc
     equations/turbulence/TurbulenceModel.cc
     equations/turbulence/TurbulenceScalarTransportEquation.cc
@@ -412,11 +415,13 @@ simplefluid_require_complete_pgo(SimpleFluidCore)
 simplefluid_require_complete_pgo(SimpleFluidFVM)
 simplefluid_require_complete_pgo(SimpleFluidSolvers)
 
-# Require profiles for every Mesh archive member linked into Shiri. The four
+# Require profiles for every Mesh archive member linked into Shiri. The six
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
+    geometry/MeshReorderingFactory.cc
+    geometry/SolidSubdomain.cc
     geometry/mesh/OrthogonalLocalGlobalIndexer.cc
     geometry/mesh/PartitionedMeshBase.cc
     geometry/mesh/SemiStructuredXY_Z.cc)

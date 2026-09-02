@@ -1,6 +1,6 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Status date:** August 19, 2026
+**Status date:** September 3, 2026
 
 **Near-term goal:** finish validation and integration of the implemented RANS,
 radiolytic-gas, boiling, void-fraction, and thermal-feedback stack; close the
@@ -113,6 +113,9 @@ verification items below mean the foundation as a whole is not yet complete.
   - [x] Boussinesq buoyancy
   - [x] Temperature transport
   - [x] Natural-convection driver
+  - [x] Compact solid-cell subdomains with synthetic interface boundaries
+  - [x] Selected-first mesh reordering with range-backed solid membership
+  - [x] Transient conservative solid heat conduction
 - [x] Native runtime-mesh solver path
   - [x] Run `FluidSolver` and `BoussinesqSolver` directly on supported
         `MeshHandle` backends without reconstructing a legacy mesh

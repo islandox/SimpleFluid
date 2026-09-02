@@ -48,6 +48,7 @@ quantitative bubbly-flow validation remain open.
 | Boussinesq natural convection examples | ✅ |
 | Performance benchmarks & scaling tests | ✅ |
 | Physical heat sources & material-property fields | ✅ |
+| Solid subdomains & transient heat conduction | ✅ |
 | Prescribed fission power-density profiles | ✅ |
 | Baseline ideal-gas radiolytic source | ✅ |
 | Six two-equation RANS closures and wall treatments | ✅ |
@@ -73,6 +74,14 @@ $$
 
 $$
 \frac{\partial T}{\partial t} + \nabla\cdot(\mathbf{u}T) = \alpha\nabla^2 T
+$$
+
+For a solid region, the velocity term is absent and the conservative thermal
+equation is
+
+$$
+\rho_s c_{p,s}\frac{\partial T_s}{\partial t}
+= \nabla\cdot(k_s\nabla T_s) + \dot q_s.
 $$
 
 ## Numerical Methods
@@ -152,6 +161,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends
 - Boundary condition support via sideset / side-part name mapping
+- Compact solid-cell subdomains with independent distributed maps and named
+  synthetic boundaries at solid/non-solid interfaces
 
 ### Mesh Generation
 
@@ -179,10 +190,14 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - `BoussinesqMomentumEquation` — incompressible momentum with buoyancy
 - `PressureProjectionEquation` — pressure-correction / Poisson system
 - `TemperatureDiffusionEquation` — energy equation assembly
+- `SolidHeatConductionEquation` — conservative, zero-advection solid energy
+  equation on a `SolidSubdomain`
 - `CoupledPressureVelocitySolver` — monolithic block-Krylov solver
 - `BelosLinearSolver` — unified interface to Trilinos iterative solvers
 - Direct `MeshHandle` execution through `MeshFieldTraits` for mapped pressure,
   velocity, temperature, turbulence, material, and optional-physics fields
+- Selected-first `MeshReorderingFactory` layouts for range-backed solid
+  subdomains without parent-sized selection or reverse-index tables
 - Legacy `Mesh` execution through synchronized compatibility fields, without
   replacing the mesh supplied by the caller
 - Runtime residual reporting for momentum, pressure, and continuity
@@ -468,6 +483,96 @@ solver.write_solution_vtu(
     {.include_sources = true,
      .include_material_properties = true});
 ```
+
+## Solid Vessel Heat Conduction
+
+`MeshReorderingFactory::selected_cells_first()` evaluates a solid selector by
+stable geometry ID and centroid, then reorders local cell ordinals into a
+selected-owned prefix and a selected-ghost prefix. MPI ownership requires two
+ranges rather than one range spanning owned and ghost cells. Geometry IDs,
+Tpetra global IDs, face order, and ownership are preserved. The factory
+consumes a uniquely owned mutable handle and reorders it in place, avoiding a
+second parent-sized mesh/indexer; pass the handle with `std::move` before
+constructing fields or caches. Shared ownership is rejected when a permutation
+is needed. If every rank is already selected-first, the original ordering is
+retained.
+
+The reordered handle is intended to back the returned range layout and its
+subdomains. Reordered legacy/STK handles are rejected by `FluidSolver` because
+that compatibility path mirrors fields in the legacy mesh's original ordinal
+order. Native structured handles do not use that compatibility path.
+
+`SolidSubdomain` consumes that range certificate and builds compact
+owned/overlap cell and face maps. Cell membership and parent/subdomain
+translation are arithmetic; the subdomain retains no parent-sized selection,
+cell-reverse, or face-reverse arrays. Its only reverse face search is over the
+solid-sized face records. Native structured handles reuse their existing
+local/global indexer and add no persistent parent-sized permutation. Because
+explicit unstructured and STK storage cannot be physically reordered, those
+parent handles retain one forward and one reverse local-cell permutation; the
+subdomain does not duplicate them. A face between selected and unselected
+cells becomes a boundary named `solid_interface` by default; the face owner
+and normal are oriented outward from the solid. Selection runs only on owned
+cells and is imported to ghosts, so the same API works when the solid crosses
+MPI partitions or the parent is a legacy mesh wrapped in `MeshHandle`. The
+parent must retain every face-neighbor of a selected owned cell (normally one
+ghost layer); insufficient overlap is rejected.
+
+`SolidHeatConductionEquation` advances the physical solid energy balance with
+no advective-flux argument. It reuses the temperature operator's variable
+conductivity interpolation, non-orthogonal treatment, matrix cache, and
+publish-on-convergence behavior:
+
+```cpp
+using Pack = SimpleFluid::DefaultTpetraTypes;
+using Solid = SimpleFluid::SolidSubdomain<Pack>;
+using Reordering = SimpleFluid::MeshReorderingFactory<Pack>;
+
+// parent_mesh may contain fluid and solid cells. Here the outer radial cells
+// form the vessel wall. Reordering happens before any field or cache is bound
+// to the resulting mesh layout.
+auto wall_layout = Reordering::selected_cells_first(
+    std::move(parent_mesh),
+    [](Pack::global_ordinal_type, const Reordering::Vec3& center) {
+        return std::hypot(center.x, center.y) >= inner_wall_radius;
+    });
+auto wall = std::make_shared<Solid>(std::move(wall_layout));
+
+// Selecting every cell is also supported by constructing Solid(parent_mesh).
+
+SimpleFluid::ScalarCellFieldStored<Pack, Solid> wall_temperature(
+    wall, 300.0, "solid_temperature");
+
+SimpleFluid::BoussinesqModelOptions material_options;
+material_options.reference_density = 7850.0;
+material_options.density = 7850.0;                 // kg/m^3
+material_options.specific_heat_capacity = 500.0;  // J/(kg K)
+material_options.thermal_conductivity = 16.0;      // W/(m K)
+SimpleFluid::TimeStepperOptions time_options;
+SimpleFluid::MaterialPropertyFields<Pack, Solid> material(
+    wall, material_options, time_options);
+
+SimpleFluid::BoundaryConditionSet boundaries;
+boundaries.temperature["solid_interface"] = {
+    SimpleFluid::BoundaryConditionType::Dirichlet, 350.0};
+boundaries.temperature["rmax"] = {
+    SimpleFluid::BoundaryConditionType::Dirichlet, 300.0};
+
+SimpleFluid::SolidHeatConductionEquation<Pack> conduction(
+    wall, boundaries);
+conduction.advance(
+    wall_temperature, 0.1, material, wall_temperature,
+    [](Pack::local_ordinal_type) { return 0.0; }); // W/m^3
+```
+
+Missing temperature boundaries are homogeneous Neumann. A Neumann value is
+the outward temperature gradient in K/m, so a prescribed inward wall heat
+flux is converted consistently with its sign and the local conductivity. Use
+`set_boundary_conditions()` to replace prescribed interface or exterior data
+between time steps.
+Robin boundaries and automatic two-way temperature/flux continuity with a
+fluid solve are not yet implemented; the current interface is a standalone or
+prescribed-boundary solid solve, not a full conjugate-heat-transfer driver.
 
 ## Fission Power Source
 

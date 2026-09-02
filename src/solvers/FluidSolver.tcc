@@ -259,6 +259,13 @@ FluidSolver<Pack>::FluidSolver(
                 time_options,
                 linear_options)
 {
+    if (d_legacy_mesh && d_mesh->has_reordered_cells())
+    {
+        throw std::invalid_argument(
+            "FluidSolver legacy compatibility fields do not support a "
+            "reordered MeshHandle; use the layout through SolidSubdomain "
+            "or a native mesh backend.");
+    }
     if (d_problem.time_options().time_step <= 0.0)
     {
         throw std::invalid_argument(
