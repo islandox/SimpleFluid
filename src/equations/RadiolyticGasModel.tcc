@@ -753,22 +753,19 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     auto source =
         [](local_ordinal_type) -> scalar_type { return 0.0; };
     auto system = FVM::weighted_scalar_transport_system<Pack>(
-        old_values,
-        transport_flux,
-        time_step,
-        storage_weight,
-        advection_weight,
-        diffusion_weight,
-        boundary_condition,
-        boundary_value,
-        source,
-        FVM::NonOrthogonalTreatment::Hybrid,
-        &old_values,
-        Teuchos::null,
-        {},
-        {},
-        nullptr,
-        &d_transport_geometry_cache);
+        FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
+            .old_values = old_values,
+            .face_fluxes = transport_flux,
+            .time_step = time_step,
+            .storage_weight = storage_weight,
+            .advection_weight = advection_weight,
+            .diffusivity = diffusion_weight,
+            .boundary_condition = boundary_condition,
+            .boundary_value = boundary_value,
+            .source = source,
+            .treatment = FVM::NonOrthogonalTreatment::Hybrid,
+            .correction_field = &old_values,
+            .geometry_cache = &d_transport_geometry_cache});
 
     field_type solution(d_mesh, "radiolytic_transport_solution");
     const auto solve_statistics =

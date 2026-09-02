@@ -10,8 +10,10 @@
  */
 #pragma once
 
-#include "equations/BoussinesqModel.hh"
 #include "FVM/TransportSystem.hh"
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
+#include "dataclass/typedefs.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -99,18 +101,19 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
     const Database& database)
 {
     ScalarVoidFractionOptions options;
-    options.alpha_min = detail::database_value_or<real_t>(
-        database, "alpha_min", options.alpha_min);
-    options.alpha_max = detail::database_value_or<real_t>(
-        database, "alpha_max", options.alpha_max);
-    options.initial_alpha = detail::database_value_or<real_t>(
-        database, "initial_alpha_g", options.initial_alpha);
-    options.alpha_collapse_time = detail::database_value_or<real_t>(
-        database,
+    const detail::DatabaseOptionReader reader(
+        database, "Scalar void-fraction model");
+    options.alpha_min = reader.value_or<real_t>(
+        "alpha_min", options.alpha_min);
+    options.alpha_max = reader.value_or<real_t>(
+        "alpha_max", options.alpha_max);
+    options.initial_alpha = reader.value_or<real_t>(
+        "initial_alpha_g", options.initial_alpha);
+    options.alpha_collapse_time = reader.value_or<real_t>(
         "alpha_collapse_time",
         options.alpha_collapse_time);
-    options.alpha_diffusivity = detail::database_value_or<real_t>(
-        database, "alpha_diffusivity", options.alpha_diffusivity);
+    options.alpha_diffusivity = reader.value_or<real_t>(
+        "alpha_diffusivity", options.alpha_diffusivity);
     validate_scalar_void_fraction_options(options);
     return options;
 }
@@ -362,22 +365,18 @@ private:
         };
 
         auto system = FVM::weighted_scalar_transport_system<Pack>(
-            d_alpha_g,
-            zero_flux,
-            time_step,
-            unit_weight,
-            unit_weight,
-            diffusivity,
-            zero_neumann,
-            zero_boundary_value,
-            zero_source,
-            FVM::NonOrthogonalTreatment::Explicit,
-            nullptr,
-            Teuchos::null,
-            {},
-            {},
-            nullptr,
-            &*d_transport_geometry_cache);
+            FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
+                .old_values = d_alpha_g,
+                .face_fluxes = zero_flux,
+                .time_step = time_step,
+                .storage_weight = unit_weight,
+                .advection_weight = unit_weight,
+                .diffusivity = diffusivity,
+                .boundary_condition = zero_neumann,
+                .boundary_value = zero_boundary_value,
+                .source = zero_source,
+                .treatment = FVM::NonOrthogonalTreatment::Explicit,
+                .geometry_cache = &*d_transport_geometry_cache});
         field_type solution(d_mesh, "alpha_diffusion_solution");
         const auto statistics =
             d_diffusion_solver.solve_with_statistics(

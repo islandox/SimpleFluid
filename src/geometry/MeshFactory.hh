@@ -14,6 +14,7 @@
 #include "MeshHandle.hh"
 #include "STKMesh.hh"
 #include "dataclass/Database.hh"
+#include "geometry/BoundaryLayerMeshFactory.hh"
 
 #include <optional>
 
@@ -55,16 +56,8 @@ public:
     static SP<Mesh<Pack>> build_empty_mesh();
 
 private:
-    /**
-     * @brief Specification for a boundary layer mesh refinement region.
-     */
-    struct BoundaryLayerSpec
-    {
-        std::string boundary_name;
-        int count = 0;
-        real_t first_cell_height = 0.0;
-        real_t growth_ratio = 1.0;
-    };
+    using BoundaryLayerSpec =
+        BoundaryLayerMeshFactory::BoundaryLayerSpec;
 
     template <TpetraTypePack Pack>
     void build_box_mesh(SP<STKMesh<Pack>>& mesh);

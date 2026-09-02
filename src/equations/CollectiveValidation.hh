@@ -11,8 +11,6 @@
 
 #pragma once
 
-#include "geometry/Mesh.hh"
-
 #include <Teuchos_CommHelpers.hpp>
 
 #include <exception>
@@ -68,6 +66,21 @@ void collective_local_validation(const MeshType& mesh, std::string_view context,
         std::rethrow_exception(local_error);
     }
     throw std::runtime_error(std::string(context) + " failed on another rank.");
+}
+
+/** @brief Require one scalar configuration value on every rank. */
+template<class MeshType, class Value>
+void require_uniform_value(const MeshType& mesh, Value local_value, std::string_view context)
+{
+    Value minimum = {};
+    Value maximum = {};
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_value, &minimum);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_value, &maximum);
+    if (minimum != maximum)
+    {
+        throw std::invalid_argument(std::string(context) + " must agree on every rank.");
+    }
 }
 
 /**

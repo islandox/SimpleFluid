@@ -922,6 +922,8 @@ TEST(Phase13PlusCouplingTest,
 
         radiolysis.configure(make_sheng_test_options());
         EXPECT_THROW(solver.step(), std::logic_error);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+        EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
@@ -975,6 +977,8 @@ TEST(Phase13PlusCouplingTest,
         void_model->configure(collapse_options);
 
         EXPECT_THROW(solver.step(), std::logic_error);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+        EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
@@ -1530,6 +1534,8 @@ TEST(DelayedNeutronPrecursorModelTest,
     }
 
     EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_EQ(solver.step_index(), 0);
 }
 
 /** @brief Verify an implicit outlet loss is included in the diagnostics. */
@@ -1887,6 +1893,70 @@ TEST(Phase13PlusDatabaseTest, ParsesFlatKeysAndDefaults)
     EXPECT_EQ(
         precursors.decay_constants,
         (SimpleFluid::ArrReal{0.1, 0.2}));
+}
+
+/** @brief Verify each Phase 13 parser identifies an ill-typed option and owner. */
+TEST(Phase13PlusDatabaseTest, ReportsWrongTypedOptionContext)
+{
+    auto expect_context =
+        [](auto&& parse, const std::string& context, const std::string& key)
+    {
+        try
+        {
+            parse();
+            FAIL() << "Expected a typed model option failure.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            const std::string message(error.what());
+            EXPECT_NE(message.find(context), std::string::npos);
+            EXPECT_NE(message.find(key), std::string::npos);
+            EXPECT_NE(message.find("wrong type"), std::string::npos);
+        }
+    };
+
+    SimpleFluid::Database boiling;
+    boiling.set("enable_bulk_boiling", std::string{"yes"});
+    expect_context(
+        [&] { SimpleFluid::boiling_source_options_from_database(boiling); },
+        "Boiling source model",
+        "enable_bulk_boiling");
+
+    SimpleFluid::Database scalar_void;
+    scalar_void.set("alpha_min", std::string{"zero"});
+    expect_context(
+        [&]
+        {
+            SimpleFluid::scalar_void_fraction_options_from_database(
+                scalar_void);
+        },
+        "Scalar void-fraction model",
+        "alpha_min");
+
+    SimpleFluid::Database feedback;
+    feedback.set("density_feedback_model", SimpleFluid::real_t{1.0});
+    SimpleFluid::TimeStepperOptions time_options;
+    const auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
+    expect_context(
+        [&]
+        {
+            SimpleFluid::material_feedback_options_from_database(
+                feedback, model_options, time_options);
+        },
+        "Material feedback model",
+        "density_feedback_model");
+
+    SimpleFluid::Database precursor;
+    precursor.set("precursor_group_count", SimpleFluid::real_t{2.0});
+    expect_context(
+        [&]
+        {
+            SimpleFluid::delayed_neutron_precursor_options_from_database(
+                precursor);
+        },
+        "Delayed-neutron precursor model",
+        "precursor_group_count");
 }
 
 /** @brief Verify feedback mapping preserves a constant field average. */

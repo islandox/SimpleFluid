@@ -382,6 +382,17 @@ private:
     const field_type* active_alpha_l_field() const noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL
     void ensure_scalar_void_fraction_model();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_step_coupling() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_turbulence(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    bool advance_pre_temperature_models(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_temperature_transport(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_post_temperature_models(
+        scalar_type time_step, bool sheng_after_temperature);
 
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;

@@ -12,42 +12,29 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()
 
-if(MPIEXEC_EXECUTABLE
-   AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
-        OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
-  add_test(
+simplefluid_add_mpi_test(
     NAME WallYPlusStatistics_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testYPlusBoundaryLayerController>"
-            "--gtest_filter=WallYPlusStatisticsTest.ReducesAcrossRanksWhenSomeRanksOwnNoWallFaces")
-  set_tests_properties(WallYPlusStatistics_2procs PROPERTIES
+    TARGET testYPlusBoundaryLayerController
+    PROCS 2
+    ARGS "--gtest_filter=WallYPlusStatisticsTest.ReducesAcrossRanksWhenSomeRanksOwnNoWallFaces"
     LABELS "mpi;turbulence;mesh_adaptation"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME SemiStructuredMeshHandleSerialOnly_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testMeshHandle>"
-            "--gtest_filter=MeshHandleTest.SemiStructuredConstructionIsSerialOnly")
-  set_tests_properties(SemiStructuredMeshHandleSerialOnly_2procs PROPERTIES
+    TARGET testMeshHandle
+    PROCS 2
+    ARGS "--gtest_filter=MeshHandleTest.SemiStructuredConstructionIsSerialOnly"
     LABELS "mpi;mesh_handle;semi_structured"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME PartitionedMeshHandleCommunicator_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testMeshHandle>"
-            "--gtest_filter=MeshHandleTest.PreservesPartitionedMeshCommunicator")
-  set_tests_properties(PartitionedMeshHandleCommunicator_2procs PROPERTIES
+    TARGET testMeshHandle
+    PROCS 2
+    ARGS "--gtest_filter=MeshHandleTest.PreservesPartitionedMeshCommunicator"
     LABELS "mpi;mesh_handle;partitioned_unstructured"
-    PROCESSORS 2
     TIMEOUT 120)
-endif()
 
 # The diffusion profiling test also needs the solvers library
 add_executable(testOrthogonalDiffusionProfile testOrthogonalDiffusionProfile.cc)

@@ -13,6 +13,7 @@
 #include "SimpleFluidExport.hh"
 #include "equations/EquationForward.hh"
 #include "equations/EquationValidation.hh"
+#include "equations/MomentumSolveException.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"

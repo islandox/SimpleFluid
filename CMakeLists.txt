@@ -22,6 +22,7 @@ option(SIMPLEFLUID_BUILD_DOCS
        "Enable the Doxygen API-documentation target" OFF)
 option(SIMPLEFLUID_ENABLE_LTO
        "Enable link-time optimization in Release and RelWithDebInfo" ON)
+include(CTest)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/profileGuidedOptimization.cmake")
 
 if(SIMPLEFLUID_ENABLE_LTO AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
@@ -80,6 +81,11 @@ set(CMAKE_JOB_POOL_LINK link_pool)
 
 set(SIMPLEFLUID_MAX_TEST_PROCS "0" CACHE STRING
     "Maximum MPI processes for tests (0 = unlimited). Set to 2 for free-tier runners.")
+if(NOT SIMPLEFLUID_MAX_TEST_PROCS MATCHES "^(0|[1-9][0-9]*)$")
+    message(FATAL_ERROR
+        "SIMPLEFLUID_MAX_TEST_PROCS must be a non-negative integer; got "
+        "'${SIMPLEFLUID_MAX_TEST_PROCS}'")
+endif()
 if(SIMPLEFLUID_ENABLE_COVERAGE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(--coverage -O0 -g)
@@ -114,8 +120,6 @@ find_package(MPI REQUIRED COMPONENTS CXX)
 
 set(SIMPLEFLUID_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrecompiledHeaders.hh")
 
-find_package(GTest)
-
 if(SIMPLEFLUID_BUILD_DOCS)
     find_package(Doxygen REQUIRED)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -134,17 +138,20 @@ if(SIMPLEFLUID_BUILD_DOCS)
     )
 endif()
 
-enable_testing()
-include(GoogleTest)
+if(BUILD_TESTING)
+    find_package(GTest REQUIRED)
+    include(GoogleTest)
+    include("${CMAKE_CURRENT_LIST_DIR}/cmake/SimpleFluidTesting.cmake")
 
-set(SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT "30" CACHE STRING
-    "Maximum seconds allowed for GoogleTest test discovery")
+    set(SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT "30" CACHE STRING
+        "Maximum seconds allowed for GoogleTest test discovery")
 
-function(simplefluid_discover_tests target)
-    gtest_discover_tests(
-        ${target}
-        DISCOVERY_TIMEOUT ${SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT}
-        ${ARGN})
-endfunction()
+    function(simplefluid_discover_tests target)
+        gtest_discover_tests(
+            ${target}
+            DISCOVERY_TIMEOUT ${SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT}
+            ${ARGN})
+    endfunction()
+endif()
 
 add_subdirectory(src)

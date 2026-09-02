@@ -296,6 +296,26 @@ TEST(RadiolyticGasPropertiesTest, ParsesFlatRuntimeSelectors)
     EXPECT_DOUBLE_EQ(options.alpha_max, 0.95);
 }
 
+/** @brief Verifies contextual diagnostics for incorrectly typed gas options. */
+TEST(RadiolyticGasPropertiesTest, ReportsWrongTypedOptionContext)
+{
+    SimpleFluid::Database database;
+    database.set("enable_radiolysis", std::string{"yes"});
+
+    try
+    {
+        SimpleFluid::radiolytic_gas_options_from_database(database);
+        FAIL() << "Expected a typed radiolytic gas option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Radiolytic gas model"), std::string::npos);
+        EXPECT_NE(message.find("enable_radiolysis"), std::string::npos);
+        EXPECT_NE(message.find("wrong type"), std::string::npos);
+    }
+}
+
 /** @brief Verifies that enabled radiolysis requires yield and rate-limit inputs. */
 TEST(RadiolyticGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
 {

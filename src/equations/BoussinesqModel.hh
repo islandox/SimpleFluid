@@ -11,6 +11,7 @@
 #pragma once
 
 #include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/CellField.hh"
@@ -68,32 +69,6 @@ struct BoussinesqModelOptions
 
 namespace detail
 {
-
-/**
- * @brief Read an optional Boussinesq database value.
- * @tparam T Requested database value type.
- * @param database Source database.
- * @param key Option key.
- * @param fallback Value used when @p key is absent.
- * @return Parsed value or @p fallback.
- * @throws std::invalid_argument if the stored value has the wrong type.
- */
-template<class T> T database_value_or(const Database& database, const std::string& key, T fallback)
-{
-    if (!database.contains(key))
-    {
-        return fallback;
-    }
-
-    try
-    {
-        return database.get<T>(key);
-    }
-    catch (const std::out_of_range&)
-    {
-        throw std::invalid_argument("Boussinesq model option '" + key + "' has the wrong type.");
-    }
-}
 
 /**
  * @brief Require a finite model option.
@@ -183,32 +158,33 @@ inline BoussinesqModelOptions boussinesq_model_options_from_database(
     const Database& database, const TimeStepperOptions& time_options)
 {
     auto options = BoussinesqModelOptions::legacy_defaults(time_options);
+    const detail::DatabaseOptionReader reader(database, "Boussinesq model");
     options.reference_density =
-        detail::database_value_or<real_t>(database, "reference_density", options.reference_density);
-    options.density = detail::database_value_or<real_t>(database, "density", options.reference_density);
+        reader.value_or<real_t>("reference_density", options.reference_density);
+    options.density = reader.value_or<real_t>("density", options.reference_density);
     options.specific_heat_capacity =
-        detail::database_value_or<real_t>(database, "specific_heat_capacity", options.specific_heat_capacity);
-    if (database.contains("dynamic_viscosity"))
+        reader.value_or<real_t>("specific_heat_capacity", options.specific_heat_capacity);
+    if (reader.contains("dynamic_viscosity"))
     {
-        options.dynamic_viscosity = detail::database_value_or<real_t>(database, "dynamic_viscosity", 0.0);
+        options.dynamic_viscosity = reader.required<real_t>("dynamic_viscosity");
     }
     else
     {
         options.dynamic_viscosity = options.reference_density * time_options.kinematic_viscosity;
     }
-    if (database.contains("thermal_conductivity"))
+    if (reader.contains("thermal_conductivity"))
     {
-        options.thermal_conductivity = detail::database_value_or<real_t>(database, "thermal_conductivity", 0.0);
+        options.thermal_conductivity = reader.required<real_t>("thermal_conductivity");
     }
     else
     {
         options.thermal_conductivity =
             options.reference_density * options.specific_heat_capacity * time_options.thermal_diffusivity;
     }
-    options.density_feedback_enabled = detail::database_value_or<bool>(database, "density_feedback_enabled", false);
-    options.temperature_source_names = detail::database_value_or<ArrString>(database, "temperature_source_names", {});
+    options.density_feedback_enabled = reader.value_or<bool>("density_feedback_enabled", false);
+    options.temperature_source_names = reader.value_or<ArrString>("temperature_source_names", {});
     options.temperature_source_power_densities =
-        detail::database_value_or<ArrReal>(database, "temperature_source_power_densities", {});
+        reader.value_or<ArrReal>("temperature_source_power_densities", {});
 
     detail::validate_model_options(options, time_options);
     return options;

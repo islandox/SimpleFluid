@@ -14,7 +14,7 @@
 #include "FVM/CellOperators.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "equations/EquationValidation.hh"
-#include "equations/turbulence/TurbulenceCollectiveValidation.hh"
+#include "equations/CollectiveValidation.hh"
 #include "fields/MeshFieldTraits.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -42,7 +42,7 @@ template <class MeshType>
 void require_uniform_wall_names(const MeshType& mesh,
                                 const ArrString& names)
 {
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         mesh, static_cast<int>(names.size()),
         "Poisson wall-distance boundary count");
     const auto communicator = mesh.owned_cell_map()->getComm();
@@ -50,7 +50,7 @@ void require_uniform_wall_names(const MeshType& mesh,
     {
         const auto& name = names[name_id];
         const auto local_length = static_cast<int>(name.size());
-        turbulence_detail::require_uniform_integral(
+        collective_detail::require_uniform_value(
             mesh, local_length,
             "Poisson wall-distance boundary-name length");
         for (const char character : name)
@@ -122,7 +122,7 @@ void PoissonWallDistanceEquation<Pack, MeshType>::solve(
     constexpr const char* class_name = "PoissonWallDistanceEquation";
     ArrString selected_names = wall_boundary_names;
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance input validation",
         [&]
         {
@@ -178,26 +178,26 @@ void PoissonWallDistanceEquation<Pack, MeshType>::solve(
 
     wall_distance_detail::require_uniform_wall_names(
         *d_mesh, selected_names);
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         static_cast<int>(options.non_orthogonal_treatment),
         "Poisson wall-distance non-orthogonal treatment");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.non_orthogonal_correctors,
         "Poisson wall-distance non-orthogonal correctors");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.max_iterations,
         "Poisson wall-distance maximum iterations");
-    turbulence_detail::require_uniform_real(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.tolerance,
         "Poisson wall-distance linear tolerance");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.verbosity,
         "Poisson wall-distance linear verbosity");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.linear_solver.preconditioner),
         "Poisson wall-distance preconditioner");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.reuse_preconditioner ? 1 : 0,
         "Poisson wall-distance preconditioner reuse");
 
@@ -263,7 +263,7 @@ void PoissonWallDistanceEquation<Pack, MeshType>::solve(
             potential, options.non_orthogonal_treatment,
             options.non_orthogonal_correctors, options.linear_solver);
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance potential validation",
         [&]
         {
@@ -294,7 +294,7 @@ void PoissonWallDistanceEquation<Pack, MeshType>::solve(
     {
         return boundary_condition(batch_id, in_batch_id).value;
     };
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance gradient reconstruction",
         [&]
         {
@@ -304,7 +304,7 @@ void PoissonWallDistanceEquation<Pack, MeshType>::solve(
         });
 
     field_type candidate(d_mesh, "wall_distance_candidate");
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance reconstruction validation",
         [&]
         {
@@ -338,7 +338,7 @@ void PoissonWallDistanceEquation<Pack, MeshType>::solve(
         });
 
     candidate.sync_ghosts();
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Synchronized Poisson wall-distance validation",
         [&]
         {

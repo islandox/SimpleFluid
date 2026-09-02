@@ -919,11 +919,24 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
     const BoundaryCache<Pack>* boundary_diffusivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
-    return weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
-        advection_weight, diffusivity, std::move(boundary_condition), std::move(boundary_value), std::move(source),
-        ScalarTransportDiscretization{}, treatment, nullptr, correction_field, std::move(cached_matrix),
-        std::move(implicit_sink), std::move(fixed_cell_value), boundary_diffusivity, geometry_cache,
-        coefficient_interpolation);
+    return weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation});
 }
 
 template<TpetraTypePack Pack>
@@ -939,8 +952,53 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
     const BoundaryCache<Pack>* boundary_diffusivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
+    return weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .discretization = discretization,
+        .older_values = older_values,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation});
+}
+
+template<TpetraTypePack Pack>
+TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRequest<Pack> request)
+{
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    const auto& old_values = request.old_values;
+    const auto& face_fluxes = request.face_fluxes;
+    const auto time_step = request.time_step;
+    const auto& storage_weight = request.storage_weight;
+    const auto& advection_weight = request.advection_weight;
+    const auto& diffusivity = request.diffusivity;
+    auto boundary_condition = std::move(request.boundary_condition);
+    auto boundary_value = std::move(request.boundary_value);
+    auto source = std::move(request.source);
+    const auto treatment = request.treatment;
+    const auto discretization = request.discretization;
+    const auto* older_values = request.older_values;
+    const auto* correction_field = request.correction_field;
+    auto cached_matrix = std::move(request.cached_matrix);
+    auto implicit_sink = std::move(request.implicit_sink);
+    auto fixed_cell_value = std::move(request.fixed_cell_value);
+    const auto* boundary_diffusivity = request.boundary_diffusivity;
+    const auto* geometry_cache = request.geometry_cache;
+    const auto coefficient_interpolation = request.coefficient_interpolation;
 
     const auto& mesh = old_values.mesh();
     const auto older_field_state =
