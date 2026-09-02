@@ -8,6 +8,8 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testPressureProjectionMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testSolidHeatConductionMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testTurbulenceModelMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
@@ -51,6 +53,15 @@ target_link_libraries(
 simplefluid_configure_test_executable(testPressureProjectionMultiRank)
 
 add_executable(
+  testSolidHeatConductionMultiRank
+  testSolidHeatConductionMultiRank.cc)
+target_link_libraries(
+  testSolidHeatConductionMultiRank
+  SimpleFluid::Equations
+  GTest::gtest_main)
+simplefluid_configure_test_executable(testSolidHeatConductionMultiRank)
+
+add_executable(
   testTurbulenceModelMultiRank
   testTurbulenceModelMultiRank.cc)
 target_link_libraries(
@@ -78,6 +89,13 @@ simplefluid_add_mpi_test(
     TARGET testPressureProjectionMultiRank
     PROCS 2
     LABELS "mpi;pressure_projection"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME SolidHeatConduction_2procs
+    TARGET testSolidHeatConductionMultiRank
+    PROCS 2
+    LABELS "mpi;solid_conduction"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(

@@ -549,7 +549,8 @@ void MeshHandle<Pack>::materialize_legacy_indexer() const
         (local < legacy->num_owned_cells()
              ? owned_cells
              : ghost_cells)
-            .push_back(local);
+            .push_back(static_cast<size_t>(geometry_cell_lid(
+                checked_local(local))));
     }
 
     std::vector<size_t> owned_faces;
@@ -863,7 +864,9 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::legacy_vtu_topology(
 
     for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
-        const auto& cell = legacy.cell(checked_local(lid));
+        const auto geometry_lid = geometry_cell_lid(checked_local(lid));
+        const auto& cell = legacy.cell(checked_local(
+            static_cast<size_t>(geometry_lid)));
         for (const auto node_gid : cell.node_gids)
         {
             connectivity.push_back(append_node(node_gid));
