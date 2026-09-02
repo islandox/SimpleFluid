@@ -15,7 +15,9 @@
 #include "utils/testing_environment.hh"
 
 #include <cstddef>
+#include <limits>
 #include <numbers>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 
@@ -320,6 +322,58 @@ TEST(MeshFactoryTest, BoundaryLayersRejectOverlappingOppositeSides)
 
     SimpleFluid::MeshFactory factory(db);
     EXPECT_THROW(factory.template build<>(), std::runtime_error);
+}
+
+/**
+ * @brief Verifies both mesh factories reject the same non-finite layer inputs.
+ */
+TEST(MeshFactoryTest,
+     BoundaryLayerValidationRejectsNonFiniteParametersConsistently)
+{
+    const auto expect_rejected =
+        [](SimpleFluid::real_t first_cell_height,
+           SimpleFluid::real_t growth_ratio)
+        {
+            auto database = std::const_pointer_cast<SimpleFluid::Database>(
+                make_boundary_layer_box_database());
+            database->set(
+                "boundary_layer_first_cell_heights",
+                SimpleFluid::ArrReal{first_cell_height, 0.2});
+            database->set(
+                "boundary_layer_growth_ratios",
+                SimpleFluid::ArrReal{growth_ratio, 1.0});
+
+            EXPECT_THROW(
+                (void)SimpleFluid::BoundaryLayerMeshFactory(database),
+                std::invalid_argument);
+            EXPECT_THROW(
+                (void)SimpleFluid::MeshFactory(database),
+                std::invalid_argument);
+        };
+    const auto expect_count_rejected = [](int count)
+        {
+            auto database = std::const_pointer_cast<SimpleFluid::Database>(
+                make_boundary_layer_box_database());
+            database->set(
+                "boundary_layer_counts", SimpleFluid::ArrInt{count, 1});
+
+            EXPECT_THROW(
+                (void)SimpleFluid::BoundaryLayerMeshFactory(database),
+                std::invalid_argument);
+            EXPECT_THROW(
+                (void)SimpleFluid::MeshFactory(database),
+                std::invalid_argument);
+        };
+
+    const auto nan = std::numeric_limits<SimpleFluid::real_t>::quiet_NaN();
+    const auto infinity =
+        std::numeric_limits<SimpleFluid::real_t>::infinity();
+    expect_rejected(nan, 1.0);
+    expect_rejected(infinity, 1.0);
+    expect_rejected(0.1, nan);
+    expect_rejected(0.1, infinity);
+    expect_count_rejected(0);
+    expect_count_rejected(-1);
 }
 
 /**

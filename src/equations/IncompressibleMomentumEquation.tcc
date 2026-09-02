@@ -311,7 +311,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
         summary.add(statistics);
         if (!statistics.converged)
         {
-            throw std::runtime_error(
+            throw RetryableMomentumNonconvergence(
                 "IncompressibleMomentumEquation velocity transport solve "
                 "did not converge.");
         }
@@ -561,7 +561,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
         summary.add(statistics);
         if (!statistics.converged)
         {
-            throw std::runtime_error(
+            throw RetryableMomentumNonconvergence(
                 "IncompressibleMomentumEquation physical transport solve "
                 "did not converge.");
         }

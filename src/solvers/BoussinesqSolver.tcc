@@ -1403,18 +1403,15 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
 }
 
 /**
- * @brief Advance the solution by one time step.
+ * @brief Reject incompatible cross-model selections before a step starts.
  *
- * Performs: face-flux computation, momentum advance, pressure projection,
- * corrected face fluxes, and semi-implicit temperature advance.  Periodic
- * boundary synchronisation is applied at the start of the first step and
- * after the updates.
+ * Field availability remains a phase-local validation because authoritative
+ * fraction fields may be initialized or updated earlier in the same step.
  *
  * @tparam Pack Tpetra type pack.
- * @throws std::logic_error if incompatible Sheng radiolysis coupling is active.
- * @throws std::runtime_error if an enabled model lacks its required fraction field.
  */
-template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::validate_step_coupling() const
 {
     const int local_precursor_state =
         d_precursor_model == nullptr
@@ -1457,23 +1454,17 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         throw std::logic_error("Sheng radiolysis cannot advance with scalar void collapse "
                                "until bubble inventory removal is coupled conservatively.");
     }
+}
 
-    begin_step();
-    if (d_step_index == 0)
-    {
-        temperature().sync_ghosts();
-    }
-    if (d_physical_model_enabled)
-    {
-        refresh_physical_models();
-    }
-    if (auto* turbulence = find_turbulence_model())
-    {
-        turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
-    }
-
-    solve_pressure_velocity_coupling();
-    const auto time_step = d_problem.time_options().time_step;
+/**
+ * @brief Advance the active turbulence equations after flow coupling.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time_step Physical time-step size captured after flow coupling.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::advance_turbulence(scalar_type time_step)
+{
     if (auto* turbulence = find_turbulence_model())
     {
         const auto gravity = d_problem.time_options().gravity_vector();
@@ -1489,10 +1480,22 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
                 d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options(), &buoyancy_context);
         d_last_step_statistics.add(turbulence_statistics);
     }
-    const auto advanced_radiolysis =
+}
+
+/**
+ * @brief Advance optional sources whose state is needed by temperature transport.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time_step Physical time-step size.
+ * @return true when Sheng radiolysis must be advanced after temperature.
+ */
+template<TpetraTypePack Pack>
+bool BoussinesqSolver<Pack>::advance_pre_temperature_models(scalar_type time_step)
+{
+    const auto sheng_after_temperature =
         d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && d_radiolytic_gas_model->supplies_void_fraction();
 
-    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && !advanced_radiolysis)
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && !sheng_after_temperature)
     {
         if (!d_scalar_void_fraction_model)
         {
@@ -1504,7 +1507,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
             d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
     }
 
-    if (!advanced_radiolysis)
+    if (!sheng_after_temperature)
     {
         if (d_boiling_source_model)
         {
@@ -1521,6 +1524,18 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         update_void_fraction_models(time_step);
     }
 
+    return sheng_after_temperature;
+}
+
+/**
+ * @brief Advance temperature, record its solve, and synchronize its ghosts.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time_step Physical time-step size.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::advance_temperature_transport(scalar_type time_step)
+{
     LinearSolveStatistics temperature_statistics;
     if (physical_transport_enabled())
     {
@@ -1551,8 +1566,23 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     d_last_step_statistics.temperature = temperature_statistics.achieved_tolerance;
 
     temperature().sync_ghosts();
+}
 
-    if (advanced_radiolysis)
+/**
+ * @brief Advance temperature-dependent models and refresh transport fields.
+ *
+ * Required authoritative fields are checked here, after upstream models have
+ * had their normal opportunity to publish them.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @param time_step Physical time-step size.
+ * @param sheng_after_temperature Whether Sheng radiolysis advances in this phase.
+ */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::advance_post_temperature_models(
+    scalar_type time_step, bool sheng_after_temperature)
+{
+    if (sheng_after_temperature)
     {
         d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
             projected_face_fluxes(), stored_material_properties(),
@@ -1578,6 +1608,44 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     {
         turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
     }
+}
+
+/**
+ * @brief Advance the solution by one time step.
+ *
+ * Performs: face-flux computation, momentum advance, pressure projection,
+ * corrected face fluxes, and semi-implicit temperature advance.  Periodic
+ * boundary synchronisation is applied at the start of the first step and
+ * after the updates.
+ *
+ * @tparam Pack Tpetra type pack.
+ * @throws std::logic_error if incompatible Sheng radiolysis coupling is active.
+ * @throws std::runtime_error if an enabled model lacks its required fraction field.
+ */
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
+{
+    validate_step_coupling();
+    begin_step();
+    if (d_step_index == 0)
+    {
+        temperature().sync_ghosts();
+    }
+    if (d_physical_model_enabled)
+    {
+        refresh_physical_models();
+    }
+    if (auto* turbulence = find_turbulence_model())
+    {
+        turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
+    }
+
+    solve_pressure_velocity_coupling();
+    const auto time_step = d_problem.time_options().time_step;
+    advance_turbulence(time_step);
+    const auto sheng_after_temperature =
+        advance_pre_temperature_models(time_step);
+    advance_temperature_transport(time_step);
+    advance_post_temperature_models(time_step, sheng_after_temperature);
 
     if (uses_legacy_backend())
     {

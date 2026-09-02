@@ -10,6 +10,7 @@
  */
 
 #include "dataclass/Database.hh"
+#include "equations/MomentumSolveException.hh"
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/SolverProgress.hh"
@@ -122,22 +123,6 @@ bool environment_boolean(const char* name, bool fallback)
     throw std::invalid_argument(
         std::string(name)
         + " must be one of 0/1, false/true, no/yes, or off/on.");
-}
-
-/**
- * @brief Identify a failed momentum predictor that is safe to retry.
- *
- * The momentum equation solves into a candidate and publishes velocity only
- * after convergence. A rejected predictor therefore leaves every accepted
- * primary and turbulence field unchanged.
- */
-bool retryable_steady_state_failure(const std::runtime_error& error)
-{
-    const std::string_view message{error.what()};
-    return message.find("IncompressibleMomentumEquation")
-               != std::string_view::npos
-        && message.find("did not converge")
-               != std::string_view::npos;
 }
 
 /**
@@ -1357,11 +1342,8 @@ int main(int argc, char** argv)
                     solver.step();
                     accepted = true;
                 }
-                catch (const std::runtime_error& error)
+                catch (const SimpleFluid::RetryableMomentumNonconvergence& error)
                 {
-                    if (!retryable_steady_state_failure(error))
-                        throw;
-
                     ++rejected_steady_steps;
                     const auto reduced_time_step =
                         controller.rejected_time_step(

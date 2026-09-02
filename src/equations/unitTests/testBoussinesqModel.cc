@@ -73,10 +73,19 @@ TEST(BoussinesqModelTest, RejectsInvalidDatabaseValues)
 
     SimpleFluid::Database wrong_type;
     wrong_type.set("density", std::string{"heavy"});
-    EXPECT_THROW(
+    try
+    {
         SimpleFluid::boussinesq_model_options_from_database(
-            wrong_type, time_options),
-        std::invalid_argument);
+            wrong_type, time_options);
+        FAIL() << "Expected a typed Boussinesq option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Boussinesq model"), std::string::npos);
+        EXPECT_NE(message.find("density"), std::string::npos);
+        EXPECT_NE(message.find("wrong type"), std::string::npos);
+    }
 
     SimpleFluid::Database negative_viscosity;
     negative_viscosity.set(

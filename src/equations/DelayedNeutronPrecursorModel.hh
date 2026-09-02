@@ -10,8 +10,10 @@
  */
 #pragma once
 
-#include "equations/BoussinesqModel.hh"
 #include "FVM/TransportSystem.hh"
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
+#include "dataclass/typedefs.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -149,20 +151,20 @@ delayed_neutron_precursor_options_from_database(
     const Database& database)
 {
     DelayedNeutronPrecursorOptions options;
-    options.group_count = detail::database_value_or<int>(
-        database, "precursor_group_count", options.group_count);
-    options.decay_constants = detail::database_value_or<ArrReal>(
-        database, "precursor_decay_constants", options.decay_constants);
-    options.initial_concentrations = detail::database_value_or<ArrReal>(
-        database,
+    const detail::DatabaseOptionReader reader(
+        database, "Delayed-neutron precursor model");
+    options.group_count = reader.value_or<int>(
+        "precursor_group_count", options.group_count);
+    options.decay_constants = reader.value_or<ArrReal>(
+        "precursor_decay_constants", options.decay_constants);
+    options.initial_concentrations = reader.value_or<ArrReal>(
         "precursor_initial_concentrations",
         options.initial_concentrations);
-    options.source_terms = detail::database_value_or<ArrReal>(
-        database, "precursor_source_terms", options.source_terms);
-    options.power_yields = detail::database_value_or<ArrReal>(
-        database, "precursor_power_yields", options.power_yields);
-    options.effective_diffusivity = detail::database_value_or<real_t>(
-        database,
+    options.source_terms = reader.value_or<ArrReal>(
+        "precursor_source_terms", options.source_terms);
+    options.power_yields = reader.value_or<ArrReal>(
+        "precursor_power_yields", options.power_yields);
+    options.effective_diffusivity = reader.value_or<real_t>(
         "precursor_effective_diffusivity",
         options.effective_diffusivity);
     validate_delayed_neutron_precursor_options(options);
@@ -855,22 +857,19 @@ private:
             concentration_scale = global_maximum(concentration_scale);
 
             auto system = FVM::weighted_scalar_transport_system<Pack>(
-                old_concentration,
-                face_flux,
-                time_step,
-                storage_weight,
-                advection_weight,
-                diffusion_weight,
-                boundary_condition,
-                boundary_value,
-                zero_source,
-                FVM::NonOrthogonalTreatment::Explicit,
-                &old_concentration,
-                Teuchos::null,
-                {},
-                {},
-                nullptr,
-                &*d_transport_geometry_cache);
+                FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
+                    .old_values = old_concentration,
+                    .face_fluxes = face_flux,
+                    .time_step = time_step,
+                    .storage_weight = storage_weight,
+                    .advection_weight = advection_weight,
+                    .diffusivity = diffusion_weight,
+                    .boundary_condition = boundary_condition,
+                    .boundary_value = boundary_value,
+                    .source = zero_source,
+                    .treatment = FVM::NonOrthogonalTreatment::Explicit,
+                    .correction_field = &old_concentration,
+                    .geometry_cache = &*d_transport_geometry_cache});
             field_type solution(d_mesh, "precursor_diffusion_solution");
             const auto statistics =
                 d_transport_solver.solve_with_statistics(

@@ -18,6 +18,7 @@
 #include "FVM/details/OperatorDetails.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 #include "geometry/Mesh.hh"
 
@@ -199,6 +200,68 @@ private:
 extern template class TransportGeometryCache<Mesh<DefaultTpetraTypes>>;
 extern template class TransportGeometryCache<MeshHandle<DefaultTpetraTypes>>;
 
+namespace detail
+{
+
+/**
+ * @brief Backend-independent named inputs for weighted scalar transport.
+ *
+ * Field and cache references or pointers are non-owning and are not retained
+ * after assembly. Callback and matrix-cache members are owned by value and
+ * consumed during the call. The discretization defaults reproduce the
+ * historical backward-Euler/upwind path.
+ *
+ * @tparam Pack Tpetra type pack used by the transport fields.
+ * @tparam ScalarField Backend-specific scalar cell field.
+ * @tparam FaceFluxField Backend-specific scalar face-flux field.
+ * @tparam BoundaryCacheType Backend-specific boundary-coefficient cache.
+ * @tparam GeometryCacheType Backend-specific transport-geometry cache.
+ */
+template<TpetraTypePack Pack, class ScalarField, class FaceFluxField, class BoundaryCacheType, class GeometryCacheType>
+struct BasicWeightedScalarTransportRequest
+{
+    const ScalarField& old_values;
+    const FaceFluxField& face_fluxes;
+    typename Pack::scalar_type time_step;
+    const ScalarField& storage_weight;
+    const ScalarField& advection_weight;
+    const ScalarField& diffusivity;
+    ScalarBoundaryConditionProvider<Pack> boundary_condition;
+    ScalarBoundaryValueProvider<Pack> boundary_value;
+    ScalarCellValueProvider<Pack> source;
+    NonOrthogonalTreatment treatment;
+    ScalarTransportDiscretization discretization{};
+    const ScalarField* older_values = nullptr;
+    const ScalarField* correction_field = nullptr;
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
+    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink = {};
+    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value = {};
+    const BoundaryCacheType* boundary_diffusivity = nullptr;
+    const GeometryCacheType* geometry_cache = nullptr;
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
+};
+
+} // namespace detail
+
+/** @brief Named inputs for legacy weighted scalar transport assembly. */
+template<TpetraTypePack Pack>
+using WeightedScalarTransportRequest = detail::BasicWeightedScalarTransportRequest<Pack, CellField<Pack>,
+    FaceField<Pack>, BoundaryCache<Pack>, TransportGeometryCache<Mesh<Pack>>>;
+
+/** @brief Named inputs for mapped FieldStored weighted scalar transport. */
+template<TpetraTypePack Pack, class MeshType>
+using FieldStoredWeightedScalarTransportRequest =
+    detail::BasicWeightedScalarTransportRequest<Pack, ScalarCellFieldStored<Pack, MeshType>,
+        ScalarFaceFieldStored<Pack, MeshType>, FieldStoredBoundaryCache<Pack, MeshType>,
+        TransportGeometryCache<MeshType>>;
+
+/** @brief Select the legacy or FieldStored request for a mesh backend. */
+template<TpetraTypePack Pack, class MeshType>
+using MeshWeightedScalarTransportRequest = detail::BasicWeightedScalarTransportRequest<Pack,
+    typename MeshFieldTraits<Pack, std::remove_cv_t<MeshType>>::scalar_cell_type,
+    typename MeshFieldTraits<Pack, std::remove_cv_t<MeshType>>::scalar_face_type,
+    MeshBoundaryCache<Pack, std::remove_cv_t<MeshType>>, TransportGeometryCache<std::remove_cv_t<MeshType>>>;
+
 /**
  * @brief Assemble scalar transport directly on a mapped FieldStored mesh.
  *
@@ -253,8 +316,21 @@ TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStore
         correction_field, std::move(cached_matrix), geometry_cache);
 }
 
+/** @brief Assemble mapped weighted scalar transport from named inputs. */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> weighted_scalar_transport_system(
+    FieldStoredWeightedScalarTransportRequest<Pack, MeshType> request)
+{
+    return detail::stored_weighted_scalar_transport_system<Pack>(request.old_values, request.face_fluxes,
+        request.time_step, request.storage_weight, request.advection_weight, request.diffusivity,
+        std::move(request.boundary_condition), std::move(request.boundary_value), std::move(request.source),
+        request.treatment, request.correction_field, std::move(request.cached_matrix), std::move(request.implicit_sink),
+        std::move(request.fixed_cell_value), request.boundary_diffusivity, request.geometry_cache,
+        request.coefficient_interpolation, request.discretization, request.older_values);
+}
+
 /**
- * @brief Assemble weighted scalar transport directly on mapped fields.
+ * @brief Compatibility overload for weighted scalar transport on mapped fields.
  *
  * Storage, advection, and diffusion coefficients are cell fields. The
  * overload mirrors the legacy weighted system while retaining the original
@@ -278,11 +354,24 @@ TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStor
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
 {
-    return detail::stored_weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
-        advection_weight, diffusivity, std::move(boundary_condition), std::move(boundary_value), std::move(source),
-        treatment, correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
-        boundary_diffusivity, geometry_cache, coefficient_interpolation, ScalarTransportDiscretization{},
-        static_cast<const ScalarCellFieldStored<Pack, MeshType>*>(nullptr));
+    return weighted_scalar_transport_system<Pack>(FieldStoredWeightedScalarTransportRequest<Pack, MeshType>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation});
 }
 
 /**
@@ -310,10 +399,26 @@ TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStor
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
 {
-    return detail::stored_weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
-        advection_weight, diffusivity, std::move(boundary_condition), std::move(boundary_value), std::move(source),
-        treatment, correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
-        boundary_diffusivity, geometry_cache, coefficient_interpolation, discretization, older_values);
+    return weighted_scalar_transport_system<Pack>(FieldStoredWeightedScalarTransportRequest<Pack, MeshType>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .discretization = discretization,
+        .older_values = older_values,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation});
 }
 
 /**
@@ -610,8 +715,12 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr);
 
+/** @brief Assemble legacy weighted scalar transport from named inputs. */
+template<TpetraTypePack Pack>
+TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRequest<Pack> request);
+
 /**
- * @brief Assemble conservative scalar transport with independent storage,
+ * @brief Compatibility overload for conservative scalar transport with independent storage,
  *        advection, and diffusion weights.
  *
  * The solved variable is phi:

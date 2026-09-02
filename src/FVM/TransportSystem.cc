@@ -60,6 +60,8 @@ template VectorTransportSystem<Pack> non_orthogonal_transport_system<Pack>(const
     Scalar, VectorBoundaryValueProvider<Pack>, VectorCellValueProvider<Pack>, NonOrthogonalTreatment,
     const VectorField*, Teuchos::RCP<Matrix>, BoundaryFaceSelector, const GeometryCache*);
 
+template TransportSystem<Pack> weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>);
+
 template TransportSystem<Pack> weighted_scalar_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
     const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
     ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,

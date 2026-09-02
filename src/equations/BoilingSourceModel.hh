@@ -10,6 +10,9 @@
  */
 #pragma once
 
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
+#include "equations/BoussinesqModel.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 #include "fields/MeshFieldTraits.hh"
 
@@ -104,34 +107,32 @@ inline BoilingSourceOptions boiling_source_options_from_database(
     const Database& database)
 {
     BoilingSourceOptions options;
-    options.enable_bulk_boiling = detail::database_value_or<bool>(
-        database, "enable_bulk_boiling", options.enable_bulk_boiling);
-    options.enable_wall_boiling = detail::database_value_or<bool>(
-        database, "enable_wall_boiling", options.enable_wall_boiling);
-    options.saturation_temperature = detail::database_value_or<real_t>(
-        database,
+    const detail::DatabaseOptionReader reader(
+        database, "Boiling source model");
+    options.enable_bulk_boiling = reader.value_or<bool>(
+        "enable_bulk_boiling", options.enable_bulk_boiling);
+    options.enable_wall_boiling = reader.value_or<bool>(
+        "enable_wall_boiling", options.enable_wall_boiling);
+    options.saturation_temperature = reader.value_or<real_t>(
         "saturation_temperature",
         options.saturation_temperature);
     options.boiling_activation_delta_t =
-        detail::database_value_or<real_t>(
-            database,
+        reader.value_or<real_t>(
             "boiling_activation_delta_t",
             options.boiling_activation_delta_t);
-    options.boiling_time_scale = detail::database_value_or<real_t>(
-        database, "boiling_time_scale", options.boiling_time_scale);
-    options.latent_heat = detail::database_value_or<real_t>(
-        database, "latent_heat", options.latent_heat);
-    options.gas_density = detail::database_value_or<real_t>(
-        database, "gas_density", options.gas_density);
+    options.boiling_time_scale = reader.value_or<real_t>(
+        "boiling_time_scale", options.boiling_time_scale);
+    options.latent_heat = reader.value_or<real_t>(
+        "latent_heat", options.latent_heat);
+    options.gas_density = reader.value_or<real_t>(
+        "gas_density", options.gas_density);
     options.wall_evaporation_fraction =
-        detail::database_value_or<real_t>(
-            database,
+        reader.value_or<real_t>(
             "wall_evaporation_fraction",
             options.wall_evaporation_fraction);
-    options.wall_heat_flux = detail::database_value_or<real_t>(
-        database, "wall_heat_flux", options.wall_heat_flux);
-    options.wall_boiling_patches = detail::database_value_or<ArrString>(
-        database,
+    options.wall_heat_flux = reader.value_or<real_t>(
+        "wall_heat_flux", options.wall_heat_flux);
+    options.wall_boiling_patches = reader.value_or<ArrString>(
         "wall_boiling_patches",
         options.wall_boiling_patches);
     validate_boiling_source_options(options);

@@ -12,7 +12,7 @@
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
 
 #include "FVM/details/OperatorDetails.hh"
-#include "equations/turbulence/TurbulenceCollectiveValidation.hh"
+#include "equations/CollectiveValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -65,11 +65,11 @@ template <class MeshType>
 void require_uniform_string(const MeshType& mesh, const std::string& value,
                             const std::string& context)
 {
-    turbulence_detail::require_uniform_integral(mesh, static_cast<int>(value.size()),
+    collective_detail::require_uniform_value(mesh, static_cast<int>(value.size()),
                                                 context + " length");
     for (const auto character : value)
     {
-        turbulence_detail::require_uniform_integral(mesh, static_cast<unsigned char>(character),
+        collective_detail::require_uniform_value(mesh, static_cast<int>(static_cast<unsigned char>(character)),
                                                     context + " characters");
     }
 }
@@ -491,7 +491,7 @@ TurbulenceWallTreatment<Pack, Policy, MeshType>::TurbulenceWallTreatment(
     : d_mesh(std::move(mesh)), d_options(std::move(options))
 {
     initialize(velocity_boundary_cache.type_by_name);
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall velocity-cache validation",
         [&]
         {
@@ -521,10 +521,10 @@ void TurbulenceWallTreatment<Pack, Policy, MeshType>::initialize(
         throw std::invalid_argument("TurbulenceWallTreatment requires a non-null mesh.");
     }
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall option validation",
         [&] { validate_turbulence_wall_treatment_options(d_options); });
-    turbulence_detail::require_uniform_integral(*d_mesh,
+    collective_detail::require_uniform_value(*d_mesh,
                                                 static_cast<int>(d_options.boundary_names.size()),
                                                 "Turbulence wall boundary-name count");
     for (size_t index = 0; index < d_options.boundary_names.size(); ++index)
@@ -533,52 +533,52 @@ void TurbulenceWallTreatment<Pack, Policy, MeshType>::initialize(
                                                        "Turbulence wall boundary name " +
                                                            std::to_string(index));
     }
-    turbulence_detail::require_uniform_real(*d_mesh, d_options.c_mu, "Turbulence wall Cmu");
-    turbulence_detail::require_uniform_real(*d_mesh, d_options.kappa, "Turbulence wall kappa");
-    turbulence_detail::require_uniform_real(*d_mesh, d_options.log_layer_e, "Turbulence wall E");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(*d_mesh, d_options.c_mu, "Turbulence wall Cmu");
+    collective_detail::require_uniform_value(*d_mesh, d_options.kappa, "Turbulence wall kappa");
+    collective_detail::require_uniform_value(*d_mesh, d_options.log_layer_e, "Turbulence wall E");
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(d_options.thermal_wall_law),
         "Turbulence thermal wall law");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, d_options.thermal_turbulent_prandtl_number.has_value() ? 1 : 0,
         "Turbulence thermal wall Prandtl presence");
     if (d_options.thermal_turbulent_prandtl_number.has_value())
     {
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh, *d_options.thermal_turbulent_prandtl_number,
             "Turbulence thermal wall Prandtl number");
     }
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(d_options.roughness_models.size()),
         "Turbulence wall roughness-model count");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(d_options.roughness_heights.size()),
         "Turbulence wall roughness-height count");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(d_options.roughness_constants.size()),
         "Turbulence wall roughness-constant count");
     for (size_t index = 0; index < d_options.roughness_models.size(); ++index)
     {
-        turbulence_detail::require_uniform_integral(
+        collective_detail::require_uniform_value(
             *d_mesh, static_cast<int>(d_options.roughness_models[index]),
             "Turbulence wall roughness model " + std::to_string(index));
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh, d_options.roughness_heights[index],
             "Turbulence wall roughness height " + std::to_string(index));
-        turbulence_detail::require_uniform_real(
+        collective_detail::require_uniform_value(
             *d_mesh, d_options.roughness_constants[index],
             "Turbulence wall roughness constant " + std::to_string(index));
     }
-    turbulence_detail::require_uniform_integral(*d_mesh,
+    collective_detail::require_uniform_value(*d_mesh,
                                                 d_options.epsilon_low_re_correction ? 1 : 0,
                                                 "Turbulence wall epsilon low-Re correction");
-    turbulence_detail::require_uniform_real(*d_mesh, d_options.sst_beta_1, "Turbulence wall beta1");
-    turbulence_detail::require_uniform_real(*d_mesh, d_options.sst_omega_wall_coefficient,
+    collective_detail::require_uniform_value(*d_mesh, d_options.sst_beta_1, "Turbulence wall beta1");
+    collective_detail::require_uniform_value(*d_mesh, d_options.sst_omega_wall_coefficient,
                                             "Turbulence wall omega coefficient");
 
     if constexpr (turbulence_wall_detail::resolved_wall_policy_v<Policy>)
     {
-        turbulence_detail::collective_local_validation(
+        collective_detail::collective_local_validation(
             *d_mesh, "Resolved wall-treatment compatibility",
             [&]
             {
@@ -609,7 +609,7 @@ void TurbulenceWallTreatment<Pack, Policy, MeshType>::initialize(
             });
     }
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall boundary-condition validation",
         [&]
         {
@@ -672,7 +672,7 @@ template <TpetraTypePack Pack, class Policy, class MeshType>
 void TurbulenceWallTreatment<Pack, Policy, MeshType>::validate_velocity_cache(
     const velocity_boundary_cache_type& velocity_boundary_cache) const
 {
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall velocity-cache validation",
         [&]
         {
@@ -727,13 +727,13 @@ auto TurbulenceWallTreatment<Pack, Policy, MeshType>::evaluate(
     scalar_type reference_density, scalar_type turbulent_prandtl_number,
     const Evaluation* accepted_evaluation) const -> Evaluation
 {
-    turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(reference_density),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence wall reference density");
-    turbulence_detail::require_uniform_real(*d_mesh, static_cast<real_t>(turbulent_prandtl_number),
+    collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(turbulent_prandtl_number),
                                             "Turbulence wall turbulent Prandtl number");
     validate_velocity_cache(velocity_boundary_cache);
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall input validation",
         [&]
         {
@@ -783,7 +783,7 @@ auto TurbulenceWallTreatment<Pack, Policy, MeshType>::evaluate(
         material.thermal_conductivity.local_read_view();
     const auto velocity_values = velocity.local_read_view();
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence wall face evaluation",
         [&]
         {
