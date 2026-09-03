@@ -248,6 +248,42 @@ public:
     }
 
     /**
+     * @brief Evaluate the material (bubble-free) liquid density.
+     *
+     * Free-surface and inventory closures must use this value rather than the
+     * mixture density published through `material.density` by the void-aware
+     * feedback modes.  The argument is an absolute temperature in K and the
+     * return value has units kg/m^3.
+     */
+    [[nodiscard]] scalar_type pure_liquid_density(scalar_type temperature) const
+    {
+        if (!std::isfinite(temperature))
+        {
+            throw std::invalid_argument("Pure-liquid density requires a finite temperature.");
+        }
+
+        scalar_type density = d_options.reference_density;
+        switch (d_options.density_mode)
+        {
+            case DensityFeedbackMode::Constant:
+                density = d_options.reference_density;
+                break;
+            case DensityFeedbackMode::BoussinesqTemperatureOnly:
+            case DensityFeedbackMode::BoussinesqVoid:
+                density = boussinesq_liquid_density(temperature);
+                break;
+            case DensityFeedbackMode::Mixture:
+                density = d_options.liquid_density;
+                break;
+        }
+        if (!std::isfinite(density) || density <= scalar_type{})
+        {
+            throw std::runtime_error("Pure-liquid density is non-positive or non-finite.");
+        }
+        return density;
+    }
+
+    /**
      * @brief Density feedback field written during the last apply call.
      */
     const field_type& density_feedback() const noexcept
@@ -331,13 +367,10 @@ private:
             case DensityFeedbackMode::Constant:
                 return d_options.reference_density;
             case DensityFeedbackMode::BoussinesqTemperatureOnly:
-                return boussinesq_liquid_density(
-                    context.temperature.value(cell_lid));
+                return pure_liquid_density(context.temperature.value(cell_lid));
             case DensityFeedbackMode::BoussinesqVoid:
             {
-                const auto liquid =
-                    boussinesq_liquid_density(
-                        context.temperature.value(cell_lid));
+                const auto liquid = pure_liquid_density(context.temperature.value(cell_lid));
                 return liquid * (1.0 - alpha)
                      + d_options.gas_density * alpha;
             }

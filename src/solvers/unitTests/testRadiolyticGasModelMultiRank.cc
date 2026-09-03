@@ -205,6 +205,10 @@ TEST(RadiolyticGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
         statistics.hydrogen_produced,
         expected_produced,
         expected_produced * 1.0e-10);
+    EXPECT_DOUBLE_EQ(statistics.cumulative_hydrogen_produced, statistics.hydrogen_produced);
+    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), statistics.cumulative_hydrogen_produced);
+    EXPECT_DOUBLE_EQ(statistics.cumulative_dissolved_hydrogen_outflow, 0.0);
+    EXPECT_DOUBLE_EQ(statistics.cumulative_submerged_bubble_hydrogen_escaped, 0.0);
     EXPECT_NEAR(
         statistics.inventory_error,
         0.0,
@@ -216,9 +220,35 @@ TEST(RadiolyticGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
         global_integral(model.alpha_g()),
         std::max(1.0e-14, statistics.void_volume * 1.0e-10));
 
+    const auto dissolved_moles = model.global_dissolved_hydrogen_moles();
+    const auto microbubble_moles = model.global_microbubble_hydrogen_moles();
+    const auto large_bubble_moles = model.global_large_bubble_hydrogen_moles();
+    const auto bubble_moles = model.global_submerged_bubble_hydrogen_moles();
+    const auto total_submerged_moles = model.global_submerged_hydrogen_moles();
+    const auto raw_bubble_volume = model.global_submerged_bubble_volume();
+    EXPECT_NEAR(dissolved_moles, global_integral(model.dissolved_hydrogen_inventory()),
+        std::max(1.0e-14, std::abs(dissolved_moles) * 1.0e-12));
+    EXPECT_NEAR(microbubble_moles, global_integral(model.micro_moles()),
+        std::max(1.0e-14, std::abs(microbubble_moles) * 1.0e-12));
+    EXPECT_NEAR(large_bubble_moles, global_integral(model.large_moles()),
+        std::max(1.0e-14, std::abs(large_bubble_moles) * 1.0e-12));
+    EXPECT_DOUBLE_EQ(bubble_moles, microbubble_moles + large_bubble_moles);
+    EXPECT_DOUBLE_EQ(total_submerged_moles, dissolved_moles + bubble_moles);
+    EXPECT_NEAR(raw_bubble_volume, global_integral(*model.output_fields().at("alpha_g_raw")),
+        std::max(1.0e-14, std::abs(raw_bubble_volume) * 1.0e-12));
+
     expect_same_on_all_ranks(*mesh, statistics.hydrogen_produced);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_hydrogen_produced);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_dissolved_hydrogen_outflow);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_submerged_bubble_hydrogen_escaped);
     expect_same_on_all_ranks(*mesh, statistics.inventory_error);
     expect_same_on_all_ranks(*mesh, statistics.void_volume);
+    expect_same_on_all_ranks(*mesh, dissolved_moles);
+    expect_same_on_all_ranks(*mesh, microbubble_moles);
+    expect_same_on_all_ranks(*mesh, large_bubble_moles);
+    expect_same_on_all_ranks(*mesh, bubble_moles);
+    expect_same_on_all_ranks(*mesh, total_submerged_moles);
+    expect_same_on_all_ranks(*mesh, raw_bubble_volume);
 
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
@@ -292,6 +322,12 @@ TEST(RadiolyticGasModelMultiRankTest,
         *model.output_fields().at("bubble_escape_number_rate");
 
     EXPECT_GT(statistics.hydrogen_escaped, 0.0);
+    EXPECT_DOUBLE_EQ(statistics.dissolved_hydrogen_outflow, 0.0);
+    EXPECT_NEAR(statistics.submerged_bubble_hydrogen_escaped, statistics.hydrogen_escaped, 1.0e-13);
+    EXPECT_NEAR(statistics.microbubble_hydrogen_escaped, statistics.submerged_bubble_hydrogen_escaped, 1.0e-13);
+    EXPECT_DOUBLE_EQ(
+        model.cumulative_submerged_bubble_hydrogen_escaped(), statistics.submerged_bubble_hydrogen_escaped);
+    EXPECT_DOUBLE_EQ(statistics.large_bubble_hydrogen_escaped, 0.0);
     EXPECT_GT(statistics.escaped_bubble_count, 0.0);
     EXPECT_NEAR(
         statistics.hydrogen_after + statistics.hydrogen_escaped,
@@ -312,10 +348,14 @@ TEST(RadiolyticGasModelMultiRankTest,
         count_before * 1.0e-10);
 
     expect_same_on_all_ranks(*mesh, statistics.hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.submerged_bubble_hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.microbubble_hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.large_bubble_hydrogen_escaped);
     expect_same_on_all_ranks(*mesh, statistics.escaped_bubble_count);
     expect_same_on_all_ranks(*mesh, statistics.inventory_error);
     expect_same_on_all_ranks(
         *mesh, statistics.cumulative_hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_submerged_bubble_hydrogen_escaped);
     expect_same_on_all_ranks(
         *mesh, statistics.cumulative_escaped_bubble_count);
 }
@@ -363,7 +403,59 @@ TEST(RadiolyticGasModelMultiRankTest, ReducesClippedCellCountGlobally)
         mesh->owned_cell_map()->getGlobalNumElements());
     EXPECT_EQ(
         model.last_statistics().clipped_cells, expected_clipped);
+    const auto raw_bubble_volume = model.global_submerged_bubble_volume();
+    const auto bounded_bubble_volume = global_integral(model.alpha_g());
+    const auto unrepresented_bubble_volume = model.global_unrepresented_bubble_volume();
+    EXPECT_GT(raw_bubble_volume, bounded_bubble_volume);
+    EXPECT_NEAR(unrepresented_bubble_volume, raw_bubble_volume - bounded_bubble_volume, raw_bubble_volume * 1.0e-12);
+    EXPECT_NEAR(
+        raw_bubble_volume, global_integral(*model.output_fields().at("alpha_g_raw")), raw_bubble_volume * 1.0e-12);
     expect_same_on_all_ranks(
         *mesh,
         static_cast<double>(model.last_statistics().clipped_cells));
+    expect_same_on_all_ranks(*mesh, raw_bubble_volume);
+    expect_same_on_all_ranks(*mesh, unrepresented_bubble_volume);
+}
+
+/** @brief Reconstructed pressure domains and rejected candidates are global. */
+TEST(RadiolyticGasModelMultiRankTest, CollectivelyValidatesReconstructedPressureOffset)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 1, 1, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto options = sheng_options();
+    options.pressure_mode = SimpleFluid::RadiolyticPressureMode::Reconstructed;
+    options.minimum_absolute_pressure = 5.0e4;
+    options.initial_micro_number_density = 2.0e8;
+    options.initial_micro_moles = 3.0e-6;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        pressure.set_owned_value(static_cast<Pack::local_ordinal_type>(owned), comm->getRank() == 0 ? -1000.0 : 1000.0);
+    }
+    pressure.sync_ghosts();
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    const auto minimum_offset = model.minimum_valid_absolute_pressure_offset();
+    EXPECT_NEAR(minimum_offset, options.minimum_absolute_pressure + 1000.0, 1.0e-10);
+    expect_same_on_all_ranks(*mesh, minimum_offset);
+
+    const auto rank_divergent_candidate = comm->getRank() == 0 ? minimum_offset - 1.0 : 2.0e5;
+    EXPECT_THROW(model.evaluate_submerged_bubble_volume(rank_divergent_candidate), std::invalid_argument);
+    const auto old_offset = model.absolute_pressure_offset();
+    EXPECT_THROW(model.set_absolute_pressure_offset(comm->getRank() == 0 ? 1.5e5 : 2.0e5), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(model.absolute_pressure_offset(), old_offset);
+
+    const auto expected_volume = model.evaluate_submerged_bubble_volume(2.0e5);
+    model.set_absolute_pressure_offset(2.0e5);
+    EXPECT_NEAR(model.global_submerged_bubble_volume(), expected_volume, std::max(1.0e-14, expected_volume * 1.0e-11));
+    expect_same_on_all_ranks(*mesh, model.global_submerged_bubble_volume());
 }

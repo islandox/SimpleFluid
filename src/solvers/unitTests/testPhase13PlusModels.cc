@@ -31,6 +31,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -176,6 +177,10 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
     model.update(1.0e-6, temperature, material, void_model);
     EXPECT_DOUBLE_EQ(model.source_alpha_boil().value(0), 0.0);
     EXPECT_DOUBLE_EQ(model.latent_heat_sink().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_rate().value(0), 0.0);
+    void_model.update_explicit(1.0e-6, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(1.0e-6, void_model, true);
 
     temperature.put_scalar(383.0);
     model.update(1.0e-6, temperature, material, void_model);
@@ -191,6 +196,16 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
         -model.temperature_source(0),
         model.latent_heat_sink().value(0),
         1.0e-12);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), model.latent_heat_sink().value(0) / options.latent_heat);
+    const auto expected_accepted_mass = expected_energy / options.latent_heat * mesh->cell_volume(0) * 1.0e-6;
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), expected_accepted_mass, 1.0e-12);
+    EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_this_step(), 0.0);
+
+    void_model.update_explicit(1.0e-6, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(1.0e-6, void_model, true);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), expected_accepted_mass, 1.0e-12);
+    EXPECT_NEAR(model.global_submerged_steam_volume(), expected_accepted_mass / options.gas_density, 1.0e-12);
+    EXPECT_NEAR(model.last_phase_change_diagnostics().mass_balance_residual, 0.0, 1.0e-14);
 }
 
 /** @brief Verify wall boiling power is distributed to the owning cell. */
@@ -238,6 +253,8 @@ TEST(BoilingSourceModelTest, WallSourceDistributesToOwnerCell)
         model.source_alpha_boil().value(0),
         expected_mass_rate / options.gas_density,
         1.0e-12);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), model.latent_heat_sink().value(0) / options.latent_heat);
+    EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_rate().value(0), 0.0);
 }
 
 /** @brief Verify active boiling modes reject nonphysical parameters. */
@@ -319,9 +336,21 @@ TEST(BoilingSourceModelTest,
         boiling_model.source_alpha_boil().value(0), 0.02, 1.0e-14);
     EXPECT_NEAR(
         boiling_model.latent_heat_sink().value(0), 0.2, 1.0e-14);
+    EXPECT_DOUBLE_EQ(boiling_model.phase_change_mass_rate().value(0),
+        boiling_model.latent_heat_sink().value(0) / boiling_options.latent_heat);
     EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-14);
     EXPECT_NEAR(
         void_model.source_alpha_total().value(0), 0.1, 1.0e-14);
+    const auto requested_mass = 1000.0 * 4200.0 * (383.0 - 373.0) / boiling_options.boiling_time_scale /
+                                boiling_options.latent_heat * mesh->cell_volume(0);
+    const auto accepted_mass = 0.02 * boiling_options.gas_density * mesh->cell_volume(0);
+    EXPECT_NEAR(boiling_model.accepted_evaporation_mass_this_step(), accepted_mass, 1.0e-14);
+    EXPECT_NEAR(boiling_model.rejected_vapor_mass_this_step(), requested_mass - accepted_mass, 1.0e-9);
+    EXPECT_NEAR(
+        boiling_model.last_phase_change_diagnostics().rejected_void_volume, requested_mass - accepted_mass, 1.0e-9);
+    boiling_model.complete_void_fraction_update(1.0, void_model, true);
+    EXPECT_NEAR(boiling_model.global_submerged_steam_mass(), accepted_mass, 1.0e-14);
+    EXPECT_NEAR(boiling_model.last_phase_change_diagnostics().void_balance_residual, 0.0, 1.0e-14);
 
     radiolysis.put_scalar(0.0);
     boiling_model.update(
@@ -332,6 +361,12 @@ TEST(BoilingSourceModelTest,
         &radiolysis);
     EXPECT_DOUBLE_EQ(boiling_model.source_alpha_boil().value(0), 0.0);
     EXPECT_DOUBLE_EQ(boiling_model.latent_heat_sink().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(boiling_model.phase_change_mass_rate().value(0), 0.0);
+    EXPECT_NEAR(boiling_model.rejected_vapor_mass_this_step(), requested_mass, 1.0e-9);
+    void_model.update_explicit(1.0, nullptr, &boiling_model.source_alpha_boil());
+    boiling_model.complete_void_fraction_update(1.0, void_model, true);
+    EXPECT_NEAR(
+        boiling_model.last_phase_change_diagnostics().cumulative_accepted_evaporation_mass, accepted_mass, 1.0e-14);
 }
 
 /** @brief Verify collapse-created void capacity is bounded by the time step. */
@@ -372,6 +407,265 @@ TEST(BoilingSourceModelTest, CollapseCapacityIsTimestepBounded)
     EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-14);
     EXPECT_NEAR(
         void_model.source_alpha_total().value(0), 0.0, 1.0e-14);
+    boiling_model.complete_void_fraction_update(2.0, void_model, true);
+    EXPECT_NEAR(boiling_model.accepted_evaporation_mass_this_step(), 0.2, 1.0e-14);
+    EXPECT_NEAR(boiling_model.condensed_liquid_mass_this_step(), 0.0, 1.0e-14);
+    EXPECT_NEAR(boiling_model.global_submerged_steam_mass(), 0.2, 1.0e-14);
+    EXPECT_NEAR(boiling_model.last_phase_change_diagnostics().nonsteam_collapse_volume, 0.2, 1.0e-14);
+    EXPECT_DOUBLE_EQ(boiling_model.condensation_latent_heat_release().value(0), 0.0);
+    EXPECT_NEAR(boiling_model.temperature_source(0), -1.0, 1.0e-14);
+    EXPECT_NEAR(boiling_model.last_phase_change_diagnostics().mass_balance_residual, 0.0, 1.0e-14);
+}
+
+/** @brief Legacy boiling does not add condensate heat without free-surface ownership. */
+TEST(BoilingSourceModelTest, PhaseInventoryCouplingIsExplicitAndDefaultOff)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.initial_alpha = 0.1;
+    void_options.alpha_collapse_time = 1.0;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh, void_options);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    model.update(0.1, temperature, material, void_model);
+    void_model.update_explicit(0.1, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(0.1, void_model);
+
+    EXPECT_DOUBLE_EQ(model.condensed_liquid_mass_this_step(), 0.0);
+    EXPECT_DOUBLE_EQ(model.global_submerged_steam_mass(), 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_latent_heat_release().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.temperature_source(0), -model.latent_heat_sink().value(0));
+}
+
+/** @brief Verify accepted mass is the sole liquid-inventory decrement input. */
+TEST(BoilingSourceModelTest, PublishesAcceptedEvaporationMassWithoutSilentCapLoss)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 300.0, "temperature");
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.1;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh, void_options);
+
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_wall_boiling = true;
+    options.latent_heat = 20.0;
+    options.gas_density = 4.0;
+    options.wall_evaporation_fraction = 0.5;
+    options.wall_heat_flux = 80.0;
+    options.wall_boiling_patches = {"zmax"};
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    constexpr double time_step = 0.5;
+    model.update(time_step, temperature, material, void_model);
+
+    // Requested wall evaporation is 2 kg/(m^3 s), but the void cap admits
+    // only 0.8 kg/(m^3 s): a liquid inventory must remove the accepted 0.4 kg.
+    EXPECT_NEAR(model.phase_change_mass_rate().value(0), 0.8, 1.0e-14);
+    EXPECT_NEAR(model.rejected_vapor_mass_rate().value(0), 1.2, 1.0e-14);
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.rejected_vapor_mass_this_step(), 0.6, 1.0e-14);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), model.latent_heat_sink().value(0) / options.latent_heat);
+
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.global_submerged_steam_volume(), 0.1, 1.0e-14);
+    EXPECT_NEAR(model.last_phase_change_diagnostics().mass_balance_residual, 0.0, 1.0e-14);
+}
+
+/** @brief Verify scalar collapse returns tracked steam mass conservatively. */
+TEST(BoilingSourceModelTest, CompletionBalancesEvaporationCollapseAndCondensateReturn)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.alpha_collapse_time = 0.5;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh, void_options);
+
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 2.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    constexpr double time_step = 0.1;
+    model.update(time_step, temperature, material, void_model);
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.global_submerged_steam_volume(), 0.2, 1.0e-14);
+
+    temperature.put_scalar(300.0);
+    model.update(time_step, temperature, material, void_model);
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+
+    const auto& diagnostics = model.last_phase_change_diagnostics();
+    EXPECT_DOUBLE_EQ(diagnostics.accepted_evaporation_mass, 0.0);
+    EXPECT_NEAR(diagnostics.scalar_void_collapse_volume, 0.04, 1.0e-14);
+    EXPECT_DOUBLE_EQ(diagnostics.nonsteam_collapse_volume, 0.0);
+    EXPECT_NEAR(diagnostics.condensed_liquid_mass, 0.08, 1.0e-14);
+    EXPECT_NEAR(diagnostics.condensation_latent_energy_release, diagnostics.condensed_liquid_mass * options.latent_heat,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.submerged_steam_mass, 0.32, 1.0e-14);
+    EXPECT_NEAR(diagnostics.submerged_steam_volume, 0.16, 1.0e-14);
+    EXPECT_NEAR(diagnostics.cumulative_accepted_evaporation_mass, 0.4, 1.0e-14);
+    EXPECT_NEAR(diagnostics.cumulative_condensed_liquid_mass, 0.08, 1.0e-14);
+    EXPECT_NEAR(diagnostics.mass_balance_residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(diagnostics.void_balance_residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(diagnostics.latent_energy_balance_residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(model.condensation_latent_heat_release().value(0),
+        diagnostics.condensed_liquid_mass * options.latent_heat / (mesh->cell_volume(0) * time_step), 1.0e-14);
+    EXPECT_NEAR(model.temperature_source(0), model.condensation_latent_heat_release().value(0), 1.0e-14);
+}
+
+/** @brief Verify source acceptance and inventory completion cannot overlap. */
+TEST(BoilingSourceModelTest, EnforcesPhaseChangeCompletionOrder)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    model.update(0.1, temperature, material, void_model);
+    EXPECT_TRUE(model.phase_change_completion_pending());
+    EXPECT_THROW(model.update(0.1, temperature, material, void_model), std::logic_error);
+
+    void_model.update_explicit(0.1, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(0.1, void_model, true);
+    EXPECT_FALSE(model.phase_change_completion_pending());
+    EXPECT_THROW(model.complete_void_fraction_update(0.1, void_model, true), std::logic_error);
+
+    SimpleFluid::BoilingSourceModel<Pack> disabled(mesh);
+    EXPECT_NO_THROW(disabled.complete_void_fraction_update(0.1, void_model));
+}
+
+/** @brief A failed void closure leaves steam and cumulative state uncommitted. */
+TEST(BoilingSourceModelTest, FailedCompletionIsTransactionalAndCanBeRetried)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    constexpr double time_step = 0.1;
+    model.update(time_step, temperature, material, void_model);
+    const auto accepted = model.accepted_evaporation_mass_this_step();
+    ASSERT_GT(accepted, 0.0);
+
+    // Deliberately omit the accepted boiling source from the scalar update.
+    void_model.update_explicit(time_step, nullptr, nullptr);
+    EXPECT_THROW(model.complete_void_fraction_update(time_step, void_model, true), std::runtime_error);
+    EXPECT_TRUE(model.phase_change_completion_pending());
+    EXPECT_DOUBLE_EQ(model.global_submerged_steam_mass(), 0.0);
+    EXPECT_DOUBLE_EQ(model.last_phase_change_diagnostics().cumulative_accepted_evaporation_mass, 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_latent_heat_release().value(0), 0.0);
+
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    EXPECT_NO_THROW(model.complete_void_fraction_update(time_step, void_model, true));
+    EXPECT_FALSE(model.phase_change_completion_pending());
+    EXPECT_NEAR(model.global_submerged_steam_mass(), accepted, 1.0e-14);
+}
+
+/** @brief Rank-local invalid inputs are rejected collectively before reductions. */
+TEST(BoilingSourceModelTest, CollectivelyRejectsRankAsymmetricInvalidCellState)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 1, 1));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() < 2)
+    {
+        GTEST_SKIP() << "requires at least two MPI ranks";
+    }
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    FieldType reserved(mesh, 0.0, "reserved_alpha_source");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    int local_injected = 0;
+    if (communicator->getRank() == 1 && mesh->num_owned_cells() > 0)
+    {
+        reserved.set_owned_value(0, std::numeric_limits<Pack::scalar_type>::quiet_NaN());
+        local_injected = 1;
+    }
+    int injected = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_injected, &injected);
+    ASSERT_EQ(injected, 1);
+    reserved.sync_ghosts();
+    EXPECT_THROW(model.update(0.1, temperature, material, void_model, &reserved), std::invalid_argument);
+    EXPECT_FALSE(model.phase_change_completion_pending());
+
+    reserved.put_scalar(0.0);
+    if (communicator->getRank() == 1 && mesh->num_owned_cells() > 0)
+    {
+        temperature.set_owned_value(0, std::numeric_limits<Pack::scalar_type>::quiet_NaN());
+    }
+    temperature.sync_ghosts();
+    EXPECT_THROW(model.update(0.1, temperature, material, void_model, &reserved), std::runtime_error);
+    EXPECT_FALSE(model.phase_change_completion_pending());
+}
+
+/** @brief Verify accepted evaporation is reduced over owned cells only. */
+TEST(BoilingSourceModelTest, GloballyReducesAcceptedEvaporationMass)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 374.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 1.0e8;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    double local_volume = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        local_volume += mesh->cell_volume(static_cast<MeshType::local_ordinal_type>(owned));
+    }
+    double global_volume = 0.0;
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_volume, &global_volume);
+
+    constexpr double time_step = 0.1;
+    constexpr double accepted_mass_rate = 0.042;
+    model.update(time_step, temperature, material, void_model);
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), accepted_mass_rate * global_volume * time_step, 1.0e-14);
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), accepted_mass_rate * global_volume * time_step, 1.0e-14);
 }
 
 /** @brief Verify radiolysis and boiling sources aggregate within void bounds. */
@@ -1012,6 +1306,12 @@ TEST(MaterialFeedbackModelTest, BoussinesqVoidDensityAndFloors)
     EXPECT_NEAR(material.density.value(0), expected_density, 1.0e-12);
     EXPECT_DOUBLE_EQ(material.dynamic_viscosity.value(0), 2.0e-3);
     EXPECT_DOUBLE_EQ(model.density_feedback().value(0), expected_density);
+    EXPECT_DOUBLE_EQ(model.pure_liquid_density(temperature.value(0)), expected_liquid_density);
+
+    alpha.put_scalar(0.75);
+    model.apply(context, &alpha, material);
+    EXPECT_NE(material.density.value(0), expected_density);
+    EXPECT_DOUBLE_EQ(model.pure_liquid_density(temperature.value(0)), expected_liquid_density);
 }
 
 /** @brief Compare precursor source and decay integration with analytic values. */
@@ -2121,6 +2421,7 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
     EXPECT_NE(contents.find("Name=\"S_alpha_boil\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"S_alpha_total\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"latentHeatSink\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"condensationLatentHeatRelease\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"rhoFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"muFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"C_1\""), std::string::npos);

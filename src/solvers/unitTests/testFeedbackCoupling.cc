@@ -129,6 +129,33 @@ TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
     EXPECT_THROW(snapshot.field("missing"), std::out_of_range);
 }
 
+/** @brief Optional planar free-surface fields use stable external names. */
+TEST(FeedbackFieldRegistryTest, ExportsPlanarFreeSurfaceFields)
+{
+    const auto mesh = make_legacy_mesh();
+    LegacyField liquid_density(mesh, 998.0, "rhoLiquid");
+    LegacyField clear_level(mesh, 0.7, "clearLevel");
+    LegacyField pool_level(mesh, 0.72, "poolLevel");
+    LegacyField headspace_pressure(mesh, 101325.0, "headspacePressure");
+    LegacyField pool_occupancy(mesh, 1.0, "poolOccupancy");
+
+    SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
+    registry.register_pure_liquid_density(liquid_density);
+    registry.register_clear_level(clear_level);
+    registry.register_pool_level(pool_level);
+    registry.register_headspace_pressure(headspace_pressure);
+    registry.register_pool_occupancy(pool_occupancy);
+
+    ASSERT_NO_THROW(registry.require_planar_free_surface_fields());
+    const std::vector<FeedbackCell> feedback_cells{{"whole_pool", {0, 1}}};
+    const auto snapshot = registry.export_snapshot(feedback_cells);
+    EXPECT_DOUBLE_EQ(snapshot.field("rhoLiquid").front(), 998.0);
+    EXPECT_DOUBLE_EQ(snapshot.field("clearLevel").front(), 0.7);
+    EXPECT_DOUBLE_EQ(snapshot.field("poolLevel").front(), 0.72);
+    EXPECT_DOUBLE_EQ(snapshot.field("headspacePressure").front(), 101325.0);
+    EXPECT_DOUBLE_EQ(snapshot.field("poolOccupancy").front(), 1.0);
+}
+
 /** @brief Native FieldStored fields share the same mapping and import API. */
 TEST(FeedbackFieldRegistryTest, SupportsNativeFieldStoredAndMeshHandle)
 {

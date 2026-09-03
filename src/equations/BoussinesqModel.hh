@@ -858,6 +858,7 @@ struct SolutionOutputOptions
     bool include_radiolytic_gas_fields = false;
     bool include_precursor_fields = false;
     bool include_turbulence_fields = false;
+    bool include_free_surface_fields = false;
 };
 
 } // namespace SimpleFluid

@@ -578,6 +578,11 @@ void import_power_density(
 inline constexpr std::string_view liquid_temperature_name = "T_liquid";
 inline constexpr std::string_view gas_fraction_name = "alpha_g";
 inline constexpr std::string_view density_feedback_name = "rhoFeedback";
+inline constexpr std::string_view pure_liquid_density_name = "rhoLiquid";
+inline constexpr std::string_view clear_level_name = "clearLevel";
+inline constexpr std::string_view pool_level_name = "poolLevel";
+inline constexpr std::string_view headspace_pressure_name = "headspacePressure";
+inline constexpr std::string_view pool_occupancy_name = "poolOccupancy";
 
 /**
  * @brief Return the canonical one-based delayed-precursor field name.
@@ -749,6 +754,46 @@ public:
         register_field(std::string(density_feedback_name), field);
     }
 
+    /** @brief Register bubble-free liquid density for material mapping. */
+    template<class Field>
+        requires detail::ScalarFeedbackField<Field, Pack>
+    void register_pure_liquid_density(const Field& field)
+    {
+        register_field(std::string(pure_liquid_density_name), field);
+    }
+
+    /** @brief Register the planar clear-liquid level field. */
+    template<class Field>
+        requires detail::ScalarFeedbackField<Field, Pack>
+    void register_clear_level(const Field& field)
+    {
+        register_field(std::string(clear_level_name), field);
+    }
+
+    /** @brief Register the actual bubble-displaced pool level field. */
+    template<class Field>
+        requires detail::ScalarFeedbackField<Field, Pack>
+    void register_pool_level(const Field& field)
+    {
+        register_field(std::string(pool_level_name), field);
+    }
+
+    /** @brief Register the absolute thermodynamic headspace pressure field. */
+    template<class Field>
+        requires detail::ScalarFeedbackField<Field, Pack>
+    void register_headspace_pressure(const Field& field)
+    {
+        register_field(std::string(headspace_pressure_name), field);
+    }
+
+    /** @brief Register the documented planar pool-occupancy approximation. */
+    template<class Field>
+        requires detail::ScalarFeedbackField<Field, Pack>
+    void register_pool_occupancy(const Field& field)
+    {
+        register_field(std::string(pool_occupancy_name), field);
+    }
+
     template<class Field>
         requires detail::ScalarFeedbackField<Field, Pack>
     void register_precursor_group(
@@ -814,6 +859,44 @@ public:
         {
             std::string message =
                 "Feedback registry is missing required field(s): ";
+            for (size_t index = 0; index < missing.size(); ++index)
+            {
+                if (index != 0)
+                {
+                    message += ", ";
+                }
+                message += missing[index];
+            }
+            throw std::invalid_argument(message);
+        }
+    }
+
+    /**
+     * @brief Require fields needed by planar liquid-occupancy feedback.
+     *
+     * This is separate from require_standard_fields() so existing coupling
+     * clients retain their historical three-field contract when the optional
+     * free-surface model is disabled.
+     */
+    void require_planar_free_surface_fields() const
+    {
+        const auto names = field_names();
+        detail::validate_collective_names(*d_comm, names,
+            "Feedback field registry requires identical field names and "
+            "ordering");
+
+        std::vector<std::string> missing;
+        for (const auto name :
+            {pure_liquid_density_name, clear_level_name, pool_level_name, headspace_pressure_name, pool_occupancy_name})
+        {
+            if (!contains(name))
+            {
+                missing.emplace_back(name);
+            }
+        }
+        if (!missing.empty())
+        {
+            std::string message = "Feedback registry is missing planar free-surface field(s): ";
             for (size_t index = 0; index < missing.size(); ++index)
             {
                 if (index != 0)

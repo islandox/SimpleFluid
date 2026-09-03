@@ -178,6 +178,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     solvers/CoupledPressureVelocitySolver.cc
     solvers/FluidSolver.cc
     solvers/IncompressibleIsothermalSolver.cc
+    solvers/PlanarFreeSurfaceModel.cc
     solvers/SteadyStateSearch.cc
 )
 
@@ -390,6 +391,17 @@ if(SIMPLEFLUID_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
 
+add_executable(
+    planar_free_surface_verification
+    examples/planar_free_surface_verification.cc)
+target_link_libraries(planar_free_surface_verification PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(planar_free_surface_verification)
+
+# This analytic verification driver is not part of the production PGO training
+# workload, so optimize it normally in profile-use builds.
+simplefluid_exclude_from_pgo_sources(
+    examples/planar_free_surface_verification.cc)
+
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(natural_convection_box)
@@ -473,6 +485,7 @@ simplefluid_exe_reuse_precompiled_header(constant_power_cylinder_vessel)
 # the training run. The presets build Shiri only; building another application
 # later therefore fails loudly until its workload is added to training.
 set(SIMPLEFLUID_EXAMPLE_TARGETS
+    planar_free_surface_verification
     natural_convection_box
     natural_convection_cylinder
     natural_convection_sphere
@@ -491,6 +504,22 @@ if(BUILD_TESTING)
     add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
     set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
         LABELS integration
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endforeach()
+
+  set(SIMPLEFLUID_PLANAR_FREE_SURFACE_VERIFICATION_SUBCASES
+      uniformHeating
+      gasGeneration
+      completeEscape
+      closedHeadspace
+      boilingMassLoss)
+  foreach(SUBCASE IN LISTS SIMPLEFLUID_PLANAR_FREE_SURFACE_VERIFICATION_SUBCASES)
+    add_test(
+        NAME planar_free_surface_${SUBCASE}
+        COMMAND planar_free_surface_verification ${SUBCASE})
+    set_tests_properties(planar_free_surface_${SUBCASE} PROPERTIES
+        LABELS verification
+        TIMEOUT 10
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
   endforeach()
 

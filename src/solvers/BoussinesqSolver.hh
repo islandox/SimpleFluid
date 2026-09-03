@@ -21,6 +21,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "solvers/FluidSolver.hh"
+#include "solvers/PlanarFreeSurfaceModel.hh"
 
 #include <algorithm>
 #include <optional>
@@ -75,6 +76,20 @@ public:
     using scalar_void_fraction_model_type = ScalarVoidFractionModel<Pack, mesh_type>;
     using material_feedback_model_type = MaterialFeedbackModel<Pack, mesh_type>;
     using precursor_model_type = DelayedNeutronPrecursorModel<Pack, mesh_type>;
+    using free_surface_model_type = PlanarFreeSurfaceModel;
+    using liquid_mass_inventory_type = LiquidMassInventory<Pack, mesh_type>;
+    using free_surface_diagnostics_type = FreeSurfaceDiagnostics;
+    using liquid_mass_diagnostics_type = typename liquid_mass_inventory_type::diagnostics_type;
+    using boiling_diagnostics_type = typename boiling_source_model_type::diagnostics_type;
+    struct FreeSurfaceHistoryRecord
+    {
+        free_surface_diagnostics_type free_surface;
+        liquid_mass_diagnostics_type liquid_mass;
+        scalar_type pool_occupancy_volume_error = {};
+        scalar_type microbubble_hydrogen_moles = {};
+        scalar_type large_bubble_hydrogen_moles = {};
+        std::optional<boiling_diagnostics_type> boiling;
+    };
     // Retain the historical legacy cell alias for downstream code that uses
     // it for STK-only model helpers.
     using cell_type = typename legacy_mesh_type::CellType;
@@ -280,6 +295,63 @@ public:
      */
     const precursor_model_type* find_precursor_model() const noexcept;
 
+    /**
+     * @brief Configure the optional fixed-grid planar free-surface budget.
+     *
+     * Disabled options remove any existing model and return nullptr.  The
+     * model is initialized after the primary fields, or lazily at the first
+     * step when callers use the fields' default initial state.
+     *
+     * @note Invoke collectively on every mesh rank.
+     */
+    free_surface_model_type* configure_free_surface(const FreeSurfaceOptions& options);
+    /** Configure the optional fixed-grid planar budget from flat keys. */
+    free_surface_model_type* configure_free_surface(const Database& database);
+    /**
+     * Remove the free-surface model, inventory, and published fields.
+     *
+     * @note Invoke consistently on every mesh rank before the next collective
+     *       solver step. Rank-divergent removal is rejected collectively.
+     */
+    bool remove_free_surface_model() noexcept;
+    /** Return the mutable configured free-surface model, or nullptr. */
+    free_surface_model_type* find_free_surface_model() noexcept;
+    /** Return the configured free-surface model, or nullptr. */
+    const free_surface_model_type* find_free_surface_model() const noexcept;
+
+    /** Return the accepted free-surface diagnostics snapshot. */
+    free_surface_diagnostics_type free_surface_diagnostics() const;
+    /** Return the mutable liquid-mass inventory; throws when disabled. */
+    liquid_mass_inventory_type& liquid_mass_inventory();
+    /** Return the liquid-mass inventory; throws when disabled. */
+    const liquid_mass_inventory_type& liquid_mass_inventory() const;
+    /** Return the liquid-mass inventory, or nullptr when disabled. */
+    liquid_mass_inventory_type* find_liquid_mass_inventory() noexcept;
+    /** Return the liquid-mass inventory, or nullptr when disabled. */
+    const liquid_mass_inventory_type* find_liquid_mass_inventory() const noexcept;
+
+    /** Pure (bubble-free) liquid-density field [kg/m^3]. */
+    const field_type& rho_liquid() const;
+    /** Spatially constant diagnostic clear-level field [m]. */
+    const field_type& clear_level() const;
+    /** Spatially constant diagnostic pool-level field [m]. */
+    const field_type& pool_level() const;
+    /** Spatially constant absolute headspace-pressure field [Pa]. */
+    const field_type& headspace_pressure() const;
+    /**
+     * Cell-centre planar pool indicator (0 or 1).
+     *
+     * This is a visualization/feedback approximation, not a conservative
+     * cut-cell volume fraction.
+     */
+    const field_type& pool_occupancy() const;
+    /** Global signed occupancy-volume error relative to pool volume [m^3]. */
+    scalar_type pool_occupancy_volume_error() const;
+    /** Accepted initialization and per-step global free-surface history. */
+    const std::vector<FreeSurfaceHistoryRecord>& free_surface_history() const noexcept;
+    /** Write the accepted history on mesh rank zero using a fixed CSV schema. */
+    void write_free_surface_history_csv(const std::string& filename) const;
+
     void set_material_updater(typename material_type::updater_type updater);
     void clear_material_updater() noexcept;
 
@@ -391,8 +463,34 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     void advance_temperature_transport(scalar_type time_step);
     SIMPLEFLUID_SOLVERS_LOCAL
-    void advance_post_temperature_models(
-        scalar_type time_step, bool sheng_after_temperature);
+    void advance_post_temperature_models(scalar_type time_step, bool sheng_after_temperature);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_collective_model_state() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_free_surface_configuration(const FreeSurfaceOptions& options) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void initialize_free_surface_if_needed(
+        bool allow_default_fields = false, bool dependencies_already_refreshed = false);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_free_surface(scalar_type time_step);
+    struct FreeSurfaceAccountingPreview
+    {
+        typename liquid_mass_inventory_type::diagnostics_type liquid;
+        scalar_type liquid_volume_deficit = {};
+    };
+    SIMPLEFLUID_SOLVERS_LOCAL
+    FreeSurfaceUpdate make_free_surface_update(
+        scalar_type time, bool initializing, const FreeSurfaceAccountingPreview* preview = nullptr);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type pure_liquid_density(local_ordinal_type cell_lid) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type headspace_temperature(scalar_type time) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type scalar_void_volume() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void publish_free_surface_fields();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void record_free_surface_history();
 
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
@@ -404,6 +502,16 @@ private:
     bool d_scalar_void_fraction_explicitly_configured = false;
     std::unique_ptr<material_feedback_model_type> d_material_feedback_model;
     std::unique_ptr<precursor_model_type> d_precursor_model;
+    std::unique_ptr<free_surface_model_type> d_free_surface_model;
+    std::unique_ptr<liquid_mass_inventory_type> d_liquid_mass_inventory;
+    std::unique_ptr<field_type> d_clear_level;
+    std::unique_ptr<field_type> d_pool_level;
+    std::unique_ptr<field_type> d_headspace_pressure;
+    std::unique_ptr<field_type> d_pool_occupancy;
+    FreeSurfaceOptions d_free_surface_options;
+    scalar_type d_pool_occupancy_volume_error = {};
+    std::vector<FreeSurfaceHistoryRecord> d_free_surface_history;
+    bool d_free_surface_step_failed = false;
 };
 
 extern template class BoussinesqSolver<DefaultTpetraTypes>;

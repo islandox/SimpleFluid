@@ -27,7 +27,9 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 4. Complete the Phase 18 user-facing configuration reference.
 5. Add quantitative Phase 14.1 physical validation and a checked-in combined
    RANS-plus-bubble user example.
-6. Close the remaining foundational validation gaps: Ghia profile checks and
+6. Add the remaining Phase 20.1 conservative cellwise-liquid/steam ownership
+   before widening its claims.
+7. Close the remaining foundational validation gaps: Ghia profile checks and
    bundled OpenFOAM centerline tolerances.
 
 ### Status map
@@ -46,6 +48,7 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 | Phase 18, documentation | Partial | Complete key/default/unit/validity reference |
 | Phase 19, precursors | Implemented and focused-tested | No open items for the supported transport scope |
 | Phase 20, TH/neutronics map | In-memory scaffold implemented and focused-tested | Production external-neutronics protocol and validation |
+| Phase 20.1, planar free surface | Partial fixed-grid path integrated and full-tested | Cellwise liquid mass and steam escape; immutable mesh blocks ALE and conservative mapping |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 
 ### Checklist conventions
@@ -1246,6 +1249,136 @@ external-neutronics interface or a neutronics solver.
 - [x] Coupling driver can run with a placeholder neutronics callback.
 - [ ] Define, implement, and validate a production external-neutronics
       transport/protocol when a target solver is selected.
+
+---
+
+### Phase 20.1 — Planar free-surface volume budget and ALE follow-on
+
+Add liquid-level bookkeeping without confusing a global reported level with a
+resolved interface or moving-mesh solver.
+
+**Status:** the supported Milestone-A fixed-grid component path is implemented
+and full-tested, including accepted-step Boussinesq integration, automatic
+accepted-state history with an explicit CSV writer, opt-in VTU fields, an explicitly
+approximate cell-centre occupancy with volume error, and a checked-in analytic
+verification driver. Cellwise liquid-mass transport and steam escape remain
+open. Milestone B
+planar ALE is unsupported on every current mesh backend, and Milestone C does
+not yet provide conservative pool occupancy or moving-mesh mapping.
+
+#### Milestone A — implemented fixed-grid components
+
+- [x] Add analytic constant-area and monotone tabulated vessel maps with
+      guarded inversion, area queries, endpoint/range diagnostics, and explicit
+      `error` or `clampAndReport` handling.
+- [x] Parse and validate the flat `free_surface_*` model, vessel, fill,
+      headspace, and nonlinear-coupling keys without changing disabled default
+      behavior.
+- [x] Add the explicitly limited `globalConstantMass` liquid inventory with
+      MPI reductions, accepted evaporation/condensation, mass residuals, and
+      bubble-free `rhoLiquid` evaluation.
+- [x] Keep `cellMassInventory` reserved and reject it instead of claiming local
+      liquid-mass conservation.
+- [x] Extend the two-population radiolytic model with MPI-reduced dissolved,
+      microbubble, and large-bubble inventories; unbounded EOS bubble volume;
+      void-cap discrepancy; and non-mutating candidate-pressure evaluation
+      through its existing surface-tension/Laplace-radius physics.
+- [x] Define bubble escape as the exact before/after submerged micro-plus-large
+      mole decrement and keep dissolved boundary outflow separate.
+- [x] Give boiling one accepted phase-change path: cap-consistent evaporation
+      and latent energy, rejected-vapor diagnostics, submerged steam ownership,
+      and explicit condensate return after scalar-void collapse.
+- [x] Add vented constant-pressure and closed lumped ideal-gas headspaces with
+      by-species transfer, positive absolute-pressure/volume guards, and a
+      safeguarded nonlinear pressure/level closure.
+- [x] Report old/current clear and pool levels, volume closure, overflow/dry-out,
+      headspace state, nonlinear convergence, fixed-grid validity, and
+      per-species gas closure through immutable diagnostic snapshots.
+- [x] Add optional stable feedback registry names for `rhoLiquid`,
+      `clearLevel`, `poolLevel`, `headspacePressure`, and `poolOccupancy` while
+      preserving the disabled/legacy field contract.
+- [x] Wire one authoritative accepted-step sequence through
+      `BoussinesqSolver`: post-temperature bubble/void and precursor updates,
+      material refresh, accepted boiling mass/condensate once, pure-density
+      refresh, exact H2 escape transfer, level/headspace closure, next-step
+      pressure offset, and diagnostic publication.
+- [x] Leave headspace, liquid phase-change ledgers, and history uncommitted on
+      a rejected closure and fail-stop the solver after any later step error;
+      full-field rollback is not available, so unsafe whole-step retries are
+      rejected explicitly.
+- [x] Add opt-in VTU output for `rhoLiquid`, `clearLevel`, `poolLevel`,
+      `headspacePressure`, and a clearly labeled cell-centre `poolOccupancy`;
+      report its signed global volume error.
+- [x] Retain initialization and per-accepted-step global history and provide a
+      rank-zero fixed-schema CSV writer with liquid, separate H2 population,
+      headspace, boiling-energy, and normalized closure diagnostics.
+- [x] Add the deterministic `planar_free_surface_verification` driver for
+      uniform heating, gas generation, complete escape, closed headspace, and
+      boiling liquid-mass loss, with analytic tolerances and CSV stdout.
+- [x] Verify the focused fixed-grid/core/solver scope in serial and with all
+      five related MPI tests under host networking; run the complete Debug
+      non-MPI/MPI suites and a full GCC RelWithDebInfo build.
+- [x] Document equations, ownership, all current flat keys/defaults/SI units,
+      diagnostics, tests, and fixed-grid limitations in
+      `docs/modeling/planar_free_surface_volume_budget.md`.
+
+#### Milestone A — remaining integration and acceptance
+
+- [x] Retain automatic global history for liquid mass/volume, gas compartments,
+      clear/pool levels, headspace state, and normalized closure residuals
+      without repeating reductions, with an explicit rank-zero CSV writer.
+- [x] Run the complete Debug suite and a practical Release/RelWithDebInfo build
+      after the focused acceptance gates.
+- [ ] Add a cellwise conservative liquid-mass/solvent inventory before claiming
+      local liquid-mass conservation or composition-preserving evaporation.
+- [ ] Add conservative steam transport and an exact steam escape transfer
+      before sending boiling vapor to the headspace/vent.
+- [ ] Couple boiling saturation to absolute headspace pressure before allowing
+      active boiling with a closed headspace; retain the explicit setup
+      rejection while saturation temperature is fixed.
+
+#### Milestone B — blocked planar ALE and generalized continuity
+
+`MeshHandle` owns all concrete geometries through const pointers and has no
+fixed-topology motion API. It also lacks accepted old/new cell volumes, swept
+face mesh flux, a geometry epoch, and a centralized invalidation contract for
+least-squares/interpolation/diffusion geometry, Rhie-Chow data, wall distance,
+mesh quality, FVM coefficients, VTU topology, and solver numeric state.
+Accordingly `planarALE` fails at setup and the supported moving-mesh family set
+is currently empty.
+
+- [ ] Add transactional fixed-topology geometry motion for each explicitly
+      supported mesh family, with MPI-conforming partition faces and quality
+      rejection.
+- [ ] Store old/new cell volumes and exact swept-face mesh flux, then verify the
+      cellwise geometric conservation law and constant-field preservation.
+- [ ] Add geometry epochs and explicit cache invalidation/rebuild rules while
+      preserving only topology-safe graphs and partitioning.
+- [ ] Generalize every extensive transient/convection operator to old/new
+      volumes and mesh-relative flux; do not post-correct fixed-volume results.
+- [ ] Add an owned low-Mach volume-source field and generalized continuity RHS
+      for SIMPLE, PISO, PIMPLE, Rhie-Chow, and coupled Krylov paths, with one
+      common target-residual definition.
+- [ ] Implement the moving-surface kinematic/dynamic and exact bubble-escape
+      boundary contracts.
+- [ ] Add serial/MPI GCL, expand-contract, mesh-quality, nonzero-divergence, and
+      conservative liquid/gas/precursor/energy tests.
+
+#### Milestone C — feedback and conservative mapping
+
+- [ ] Replace or augment the diagnostic cell-centre occupancy with geometric
+      cut fractions or a demonstrably conservative mapper; do not call the
+      current Heaviside field conservative.
+- [ ] Export pure-liquid composition and occupancy without using void-reduced
+      mixture density to derive material number density.
+- [ ] Preserve liquid/fissile mass, gas species, precursor inventory, and energy
+      under same-topology motion and cross-mesh mapping, with global residuals.
+- [ ] Validate pool-volume and extensive-inventory closure across supported MPI
+      partition counts.
+
+Full VOF interface capturing, macroscopic surface breakup, and Euler–Euler gas
+momentum remain separate deferred programs; completing this planar phase must
+not imply those capabilities.
 
 ---
 

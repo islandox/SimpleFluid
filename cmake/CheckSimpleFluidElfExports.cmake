@@ -365,14 +365,14 @@ if(simplefluid_forbidden_api_symbols)
         "SimpleFluid definitions:\n  "
         "${simplefluid_forbidden_api_symbol_sample}")
 endif()
-# The isothermal/adaptive APIs and default solid-conduction specialization
-# extend the reviewed library shape without widening the export map to vendor
-# or implementation-detail namespaces.
+# The isothermal/adaptive, solid-conduction, and fixed-grid planar free-surface
+# APIs extend the reviewed library shape without widening the export map to
+# vendor or implementation-detail namespaces.
 if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 615)
+   OR simplefluid_api_symbol_count GREATER 750)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 615")
+        "SimpleFluid symbols; the reviewed public-API range is 300 to 750")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)
