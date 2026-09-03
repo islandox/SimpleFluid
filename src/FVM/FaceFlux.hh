@@ -138,8 +138,7 @@ public:
         return d_pressure_gradient;
     }
 
-    const std::vector<boundary_location_type>&
-    boundary_locations() const noexcept
+    const std::vector<boundary_location_type>& boundary_locations() const
     {
         return d_gradient_cache.boundary_locations();
     }
@@ -149,6 +148,9 @@ public:
     {
         return d_gradient_cache;
     }
+
+    /** @brief Refresh Rhie--Chow reconstruction geometry after mesh motion. */
+    void refresh_geometry() { d_gradient_cache.refresh(); }
 
 private:
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
@@ -219,8 +221,7 @@ public:
         return d_pressure_gradient;
     }
 
-    const std::vector<boundary_location_type>&
-    boundary_locations() const noexcept
+    const std::vector<boundary_location_type>& boundary_locations() const
     {
         return d_gradient_cache.boundary_locations();
     }
@@ -229,6 +230,9 @@ public:
     {
         return d_gradient_cache;
     }
+
+    /** @brief Refresh Rhie--Chow reconstruction geometry after mesh motion. */
+    void refresh_geometry() { d_gradient_cache.refresh(); }
 
 private:
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)

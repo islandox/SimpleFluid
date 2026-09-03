@@ -11,16 +11,20 @@
 
 #pragma once
 
+#include "OrthogonalIndexer.hh"
+#include "geometry/GeometryEpoch.hh"
 #include "geometry/mesh/MeshBase.hh"
 #include "geometry/mesh/OrthoMeshTopo.hh"
-#include "OrthogonalIndexer.hh"
 
 #include <array>
-#include <cstddef>
 #include <compare>
+#include <cstddef>
+#include <cstdint>
 
 namespace SimpleFluid::Meshes
 {
+
+class PlanarALEGeometryAccess;
 
 /**
  * @brief Serial orthogonal Cartesian mesh defined by edge coordinates.
@@ -87,8 +91,14 @@ public:
     const Indexer& indexer() const { return d_indexer; }
     const OrthoMeshTopo& topology() const noexcept { return d_topology; }
 
+    /** @brief Revision shared by all handles observing this geometry. */
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_state.epoch; }
+
 private:
     friend Base;
+    friend class PlanarALEGeometryAccess;
+
+    void replace_axis_edges_fixed_topology(size_t axis, Arr<real_t> edges);
 
     void check_cell_id(cell_id_t cell_id) const;
     void check_face_id(face_id_t face_id) const;
@@ -119,6 +129,8 @@ private:
     Vec3D<Arr<real_t>> d_cell_edges;
     Vec3D<Arr<real_t>> d_cell_centroids;
     Vec3D<Arr<real_t>> d_cell_widths;
+
+    GeometryEpochState d_geometry_state;
 
     Indexer d_indexer;
     OrthoMeshTopo d_topology;

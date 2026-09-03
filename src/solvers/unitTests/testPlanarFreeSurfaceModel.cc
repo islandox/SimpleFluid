@@ -167,7 +167,7 @@ TEST(FreeSurfaceOptionsTest, DefaultIsDisabledAndFactoryReturnsNull)
     EXPECT_EQ(SimpleFluid::make_planar_free_surface_model(options), nullptr);
 }
 
-TEST(FreeSurfaceOptionsTest, PlanarAleUsesStableUnsupportedMotionDiagnostic)
+TEST(FreeSurfaceOptionsTest, PlanarAleUsesStableUnavailableSolverDiagnostic)
 {
     SimpleFluid::Database database;
     database.set("free_surface_model", std::string("planarALE"));
@@ -178,7 +178,8 @@ TEST(FreeSurfaceOptionsTest, PlanarAleUsesStableUnsupportedMotionDiagnostic)
     }
     catch (const std::invalid_argument& error)
     {
-        EXPECT_EQ(std::string(error.what()), SimpleFluid::planar_ale_immutable_mesh_diagnostic);
+        EXPECT_EQ(std::string(error.what()), SimpleFluid::planar_ale_unavailable_diagnostic);
+        EXPECT_EQ(SimpleFluid::planar_ale_unavailable_diagnostic, SimpleFluid::planar_ale_immutable_mesh_diagnostic);
     }
 }
 
@@ -210,6 +211,29 @@ TEST(FreeSurfaceOptionsTest, RequiresAnExplicitInitialLiquidInventory)
     auto options = enabled_constant_area_options();
     options.initial_liquid_volume.reset();
     EXPECT_THROW(SimpleFluid::validate_free_surface_options(options), std::invalid_argument);
+}
+
+TEST(FreeSurfaceOptionsTest, AcceptsCellMassInventoryOnlyWithErrorDepletion)
+{
+    auto options = enabled_constant_area_options();
+    options.liquid_mass.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    EXPECT_NO_THROW(SimpleFluid::validate_free_surface_options(options));
+
+    options.range_policy = SimpleFluid::FreeSurfaceRangePolicy::ClampAndReport;
+    options.liquid_mass.depletion_policy = options.range_policy;
+    EXPECT_THROW(SimpleFluid::validate_free_surface_options(options), std::invalid_argument);
+
+    SimpleFluid::Database database;
+    database.set("free_surface_enabled", true);
+    database.set("free_surface_model", std::string("planarVolumeBudget"));
+    database.set("free_surface_vessel_model", std::string("constantArea"));
+    database.set("free_surface_bottom_elevation", 0.0);
+    database.set("free_surface_top_elevation", 2.0);
+    database.set("free_surface_cross_section_area", 1.0);
+    database.set("free_surface_initial_liquid_volume", 1.0);
+    database.set("free_surface_liquid_volume_model", std::string("cellMassInventory"));
+    const auto parsed = SimpleFluid::free_surface_options_from_database(database);
+    EXPECT_EQ(parsed.liquid_mass.mode, SimpleFluid::LiquidVolumeMode::CellMassInventory);
 }
 
 TEST(FreeSurfaceOptionsTest, ClampPolicyRetainsConfiguredInitialLevelRangeReport)
@@ -561,6 +585,25 @@ TEST(LiquidMassInventoryTest, PhaseChangePreviewDoesNotMutateUntilCommitted)
     EXPECT_THROW(inventory.commitPhaseChange(preview), std::logic_error);
 }
 
+TEST(LiquidMassInventoryTest, DensityChangeInvalidatesGlobalPhaseChangePreview)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::LiquidMassInventory<Pack> inventory(mesh);
+    inventory.initialize(1.0, [](Pack::local_ordinal_type) { return 1000.0; });
+
+    const auto stale = inventory.previewPhaseChange(100.0);
+    inventory.updatePureLiquidDensity([](Pack::local_ordinal_type) { return 500.0; });
+
+    EXPECT_THROW(inventory.commitPhaseChange(stale), std::logic_error);
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 1000.0);
+    EXPECT_DOUBLE_EQ(inventory.liquidVolume(), 2.0);
+
+    const auto current = inventory.previewPhaseChange(100.0);
+    EXPECT_NO_THROW(inventory.commitPhaseChange(current));
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 900.0);
+    EXPECT_DOUBLE_EQ(inventory.liquidVolume(), 1.8);
+}
+
 TEST(LiquidMassInventoryTest, NonuniformDensityUsesFixedMassWeights)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
@@ -604,4 +647,175 @@ TEST(LiquidMassInventoryTest, ClampPolicyReportsMassDryout)
     EXPECT_DOUBLE_EQ(diagnostics.cumulative_evaporated_mass, 10.0);
     EXPECT_DOUBLE_EQ(diagnostics.dryout_mass_deficit, 2.0);
     EXPECT_DOUBLE_EQ(diagnostics.mass_balance_residual, 0.0);
+}
+
+TEST(LiquidMassInventoryTest, CellwisePhaseChangeIsTransactionalAndSpatiallyResolved)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(2.0, [](Pack::local_ordinal_type) { return 100.0; });
+    EXPECT_EQ(inventory.mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
+    EXPECT_EQ(inventory.cellMassInventory().name(), "liquidMassInventory");
+
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    Inventory::field_type evaporation(mesh, 0.0, "evaporationMassRate");
+    Inventory::field_type condensation(mesh, 0.0, "condensationMassRate");
+    evaporation.set_owned_value(0, 10.0);
+    condensation.set_owned_value(1, 4.0);
+    evaporation.sync_ghosts();
+    condensation.sync_ghosts();
+
+    const auto before_0 = inventory.cellMassInventory().value(0);
+    const auto before_1 = inventory.cellMassInventory().value(1);
+    const auto preview = inventory.previewCellwiseAdvance(0.5, flux, &evaporation, &condensation);
+    ASSERT_TRUE(preview.transportStatistics().has_value());
+    EXPECT_TRUE(preview.transportStatistics()->converged);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), before_0);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(1), before_1);
+    EXPECT_NEAR(preview.diagnostics().total_mass, 197.0, 1.0e-10);
+    EXPECT_NEAR(preview.diagnostics().cumulative_evaporated_mass, 5.0, 1.0e-12);
+    EXPECT_NEAR(preview.diagnostics().cumulative_condensed_mass, 2.0, 1.0e-12);
+    EXPECT_NEAR(preview.diagnostics().liquid_volume, 1.97, 1.0e-12);
+    EXPECT_NEAR(preview.diagnostics().step_mass_balance_residual, 0.0, 1.0e-10);
+
+    inventory.commitPhaseChange(preview);
+    EXPECT_NEAR(inventory.cellMassInventory().value(0), 95.0, 1.0e-10);
+    EXPECT_NEAR(inventory.cellMassInventory().value(1), 102.0, 1.0e-10);
+    EXPECT_NEAR(inventory.totalMass(), 197.0, 1.0e-10);
+    EXPECT_THROW(inventory.commitPhaseChange(preview), std::logic_error);
+}
+
+TEST(LiquidMassInventoryTest, CellwiseInternalAdvectionRedistributesButConservesMass)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(2.0, [](Pack::local_ordinal_type cell) { return cell == 0 ? 200.0 : 100.0; });
+    inventory.updatePureLiquidDensity([](Pack::local_ordinal_type) { return 100.0; });
+
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    Pack::local_ordinal_type interior_face = -1;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
+        if (mesh->is_interior_face(face_lid) && flux.is_owned_face(face_lid))
+        {
+            interior_face = face_lid;
+            break;
+        }
+    }
+    ASSERT_GE(interior_face, 0);
+    flux.set_value(interior_face, 0.2);
+    const auto old_owner = inventory.cellMassInventory().value(mesh->owner_cell(interior_face));
+    const auto old_neighbor = inventory.cellMassInventory().value(mesh->neighbor_cell(interior_face));
+
+    const auto preview = inventory.previewCellwiseAdvance(0.5, flux);
+    EXPECT_NEAR(preview.diagnostics().total_mass, 300.0, 1.0e-8);
+    EXPECT_NEAR(preview.diagnostics().liquid_volume, 3.0, 1.0e-10);
+    inventory.commitPhaseChange(preview);
+    EXPECT_LT(inventory.cellMassInventory().value(mesh->owner_cell(interior_face)), old_owner);
+    EXPECT_GT(inventory.cellMassInventory().value(mesh->neighbor_cell(interior_face)), old_neighbor);
+    EXPECT_NEAR(inventory.totalMass(), 300.0, 1.0e-8);
+}
+
+TEST(LiquidMassInventoryTest, CellwiseDryoutAndBoundaryFluxRejectWithoutCommit)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(1.0, [](Pack::local_ordinal_type) { return 10.0; });
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    Inventory::field_type evaporation(mesh, 20.0, "evaporationMassRate");
+    const auto mass_before = inventory.totalMass();
+    EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(1.0, flux, &evaporation)), std::out_of_range);
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), mass_before);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), 10.0);
+
+    ASSERT_FALSE(flux.owned_face_ids().empty());
+    flux.set_value(flux.owned_face_ids().front(), 1.0e-3);
+    EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux)), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), mass_before);
+
+    flux.put_scalar(0.0);
+    SimpleFluid::LinearSolverOptions cg_options;
+    cg_options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, cg_options)),
+        std::invalid_argument);
+}
+
+TEST(LiquidMassInventoryTest, NewCellwisePreviewInvalidatesOlderTrialToken)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(1.0, [](Pack::local_ordinal_type) { return 1000.0; });
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+
+    const auto first = inventory.previewCellwiseAdvance(0.1, flux);
+    const auto second = inventory.previewCellwiseAdvance(0.1, flux);
+    EXPECT_THROW(inventory.commitPhaseChange(first), std::logic_error);
+    EXPECT_NO_THROW(inventory.commitPhaseChange(second));
+}
+
+TEST(LiquidMassInventoryTest, DensityChangeInvalidatesCellwiseTransportPreview)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(2.0, [](Pack::local_ordinal_type) { return 100.0; });
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+
+    const auto stale = inventory.previewCellwiseAdvance(0.1, flux);
+    inventory.updatePureLiquidDensity([](Pack::local_ordinal_type) { return 50.0; });
+
+    EXPECT_THROW(inventory.commitPhaseChange(stale), std::logic_error);
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 200.0);
+    EXPECT_DOUBLE_EQ(inventory.liquidVolume(), 4.0);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), 100.0);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(1), 100.0);
+
+    const auto current = inventory.previewCellwiseAdvance(0.1, flux);
+    EXPECT_NO_THROW(inventory.commitPhaseChange(current));
+    EXPECT_NEAR(inventory.liquidVolume(), 4.0, 1.0e-12);
+}
+
+TEST(LiquidMassInventoryTest, LooseLinearToleranceCannotRelaxPhysicalMassClosure)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(2.0, [](Pack::local_ordinal_type) { return 100.0; });
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    Inventory::field_type evaporation(mesh, 0.0, "evaporationMassRate");
+    evaporation.set_owned_value(0, 50.0);
+    evaporation.sync_ghosts();
+
+    SimpleFluid::LinearSolverOptions loose;
+    loose.max_iterations = 1;
+    loose.tolerance = 2.0;
+    try
+    {
+        static_cast<void>(inventory.previewCellwiseAdvance(1.0, flux, &evaporation, nullptr, loose));
+        FAIL() << "Expected strict physical mass closure to reject the loose transport solve.";
+    }
+    catch (const std::runtime_error& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("strict physical tolerance"), std::string::npos);
+    }
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 200.0);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), 100.0);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(1), 100.0);
 }

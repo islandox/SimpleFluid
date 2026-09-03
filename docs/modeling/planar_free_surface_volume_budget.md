@@ -2,17 +2,21 @@
 
 This note describes the fixed-grid planar volume-budget components introduced
 for thermally and bubble-driven liquid-level evolution. The implemented scope
-is the currently supported portion of Milestone A: vessel-volume maps, a
-global liquid-mass fallback, conservative gas-compartment bookkeeping, vented
+is the currently supported portion of Milestone A: vessel-volume maps, global
+and cellwise liquid-mass inventories, conservative gas-compartment bookkeeping, vented
 and closed ideal-gas headspaces, a
 pressure/level closure, accepted-step `BoussinesqSolver` integration, and
 opt-in diagnostic fields. It is a weak geometry-feedback model. It does not
-move the CFD mesh, change the liquid-domain boundary, alter finite-volume
-transport, or implement a resolved interface.
+move the CFD mesh, change the liquid-domain boundary, alter the existing
+flow/temperature control volumes or continuity equation, or implement a
+resolved interface. The opt-in cellwise liquid inventory adds its own
+fixed-grid finite-volume transport equation as described below.
 
-Milestone B planar ALE and the conservative part of Milestone C feedback are
-not supported. Their repository-level blockers are recorded below so a
-reported level cannot be mistaken for moving-mesh physics.
+Full Milestone B planar ALE and the conservative part of Milestone C feedback
+are not supported. A standalone B0 geometry-motion/GCL substrate is available,
+but it is deliberately disconnected from the free-surface solver until
+transport and pressure coupling are conservative. The remaining blockers are
+recorded below so a reported level cannot be mistaken for moving-mesh physics.
 
 ## Applicability and State Ownership
 
@@ -26,9 +30,9 @@ $$
 Ownership is deliberately split along existing model boundaries:
 
 - `LiquidMassInventory` owns total liquid mass, accepted evaporation and
-  condensation totals, fixed reference mass fractions, and the derived
-  pure-liquid volume. Its currently supported mode is explicitly named
-  `globalConstantMass`.
+  condensation totals, the optional cellwise `liquidMassInventory` field, and
+  the derived pure-liquid volume. `globalConstantMass` retains fixed reference
+  mass fractions; `cellMassInventory` owns the transported local state.
 - `RadiolyticGasModel` remains authoritative for dissolved hydrogen,
   microbubble moles/count, large-bubble moles/count, bubble thermodynamics,
   and transport escape. Its raw EOS-derived bubble volume, rather than the
@@ -47,7 +51,8 @@ Ownership is deliberately split along existing model boundaries:
 post-temperature order is: advance the Sheng bubble/void state when selected;
 advance precursors; refresh material properties and pure-liquid density;
 preview accepted boiling mass and condensate without committing the liquid
-ledger; read the radiolytic model's authoritative cumulative H2 ledgers; solve
+ledger, including a conservative cellwise transport solve when selected; read
+the radiolytic model's authoritative cumulative H2 ledgers; solve
 the level/headspace closure; commit the liquid ledger and exact pending escape;
 update the constant or reconstructed radiolytic absolute-pressure offset; then
 publish diagnostic fields and append the accepted history record.
@@ -130,7 +135,7 @@ It does not yet supply composition-dependent density or a liquid
 compressibility law. The planar model accepts a pressure-dependent liquid
 volume callback so those laws can be added without changing its ownership.
 
-The supported Milestone-A fallback retains total liquid mass $M_l$ and fixed
+The `globalConstantMass` fallback retains total liquid mass $M_l$ and fixed
 reference mass fractions $w_c$ initialized from
 $\rho_{l,c}^0 V_c$ over owned cells. It evaluates
 
@@ -160,10 +165,47 @@ the available mass while recording a dry-out deficit under
 
 `globalConstantMass` is not a locally conservative liquid-mass transport
 scheme. The fixed $w_c$ distribution is a mass-weighted specific-volume
-approximation; it cannot represent advection, local solvent removal,
-composition redistribution, or preservation of separate fissile/solvent
-inventories. `cellMassInventory` is reserved but rejected at setup until the
-finite-volume operators support that conservative state.
+approximation.
+
+`cellMassInventory` instead stores the conservative fixed-control-volume
+inventory $m_{l,c}^*$ in kg/m3. Its implemented cell equation is
+
+$$
+\frac{V_c\left(m_{l,c}^{*,n+1}-m_{l,c}^{*,n}\right)}{\Delta t}
++\sum_{f\in c}\phi_f m_{l,f}^{*,\mathrm{upwind},n+1}
+=V_c\left(\dot m_{\mathrm{cond},c}-\dot m_{\mathrm{evap},c}\right),
+$$
+
+with the existing backward-Euler/upwind scalar transport operator, unit
+storage/advection weights, zero diffusivity, and the accepted projected
+single-continuum face-volume flux $\phi_f$ in m3/s. This is not a separate
+phase velocity or liquid-fraction-weighted flux. The phase-change rates use
+kg/(m3 s). The trial field and diagnostics remain uncommitted until the planar
+volume/headspace closure succeeds. Liquid volume is then evaluated directly:
+
+$$
+M_l=\sum_c V_cm_{l,c}^*,\qquad
+V_l=\sum_c V_c\frac{m_{l,c}^*}{\rho_{l,c}}.
+$$
+
+The initial field is distributed without a cell-centre pool mask:
+
+$$
+m_{l,c}^{*,0}=M_l^0\frac{\rho_{l,c}^0}
+{\sum_j\rho_{l,j}^0V_j}.
+$$
+
+When mass is inferred from fill volume this is a uniform smeared reference-
+volume fill fraction and reproduces the configured global volume exactly; it
+is not a resolved pool interface. Until a liquid inlet/composition boundary
+contract exists, cellwise mode collectively rejects nonzero physical-boundary
+liquid flux. It also requires `error` depletion handling: locally clipping a
+sink after boiling has accepted vapor would break phase conservation. The
+accepted history and per-step mass residuals use a strict normalized tolerance
+of `max(4096 * machine epsilon, 1e-10)`, independent of the linear-solver
+tolerance. The current state is effective total liquid mass, not separate
+solvent and fissile inventories, so composition-preserving evaporation remains
+deferred.
 
 ## Bubble Volume, Boiling, and Exact Escape
 
@@ -231,7 +273,10 @@ bubble volume or owned submerged steam volume, never an unowned aggregate.
 Vented boiling liquid-mass/steam-volume accounting is supported. Closed
 headspace with active boiling is rejected because the current boiling model
 uses a configured fixed `saturation_temperature`; it does not yet evaluate
-pressure-dependent saturation from the absolute headspace pressure.
+pressure-dependent saturation from the absolute headspace pressure. Once this
+coupling owns nonzero submerged steam, `remove_free_surface_model()` also
+rejects removal or replacement until that inventory has returned to zero; no
+implicit discard or transfer to the default-off path is allowed.
 
 ## Absolute Pressure and Headspace Models
 
@@ -296,7 +341,7 @@ have no meaningful default.
 | Key | Default | Unit / allowed values | Notes |
 | --- | --- | --- | --- |
 | `free_surface_enabled` | `false` | boolean | Disabled construction returns no model and preserves existing behavior. |
-| `free_surface_model` | `fixed` | `fixed`, `planarVolumeBudget`, `planarALE` | Enabling currently requires `planarVolumeBudget`; `planarALE` always fails as unsupported. |
+| `free_surface_model` | `fixed` | `fixed`, `planarVolumeBudget`, `planarALE` | Enabling currently requires `planarVolumeBudget`; `planarALE` fails because its standalone geometry/GCL substrate is not connected to conservative ALE transport or solver coupling. |
 | `free_surface_gravity_axis` | `z` | `x`, `y`, `z` | Records the planar elevation axis; Milestone A does not reorient or move the mesh. |
 | `free_surface_validity_warning_relative_level_change` | `0.05` | dimensionless, >= 0 | Warn when `abs(poolLevel - initialPoolLevel) / vesselHeight` exceeds this value. |
 | `free_surface_overflow_policy` | `error` | `error`, `clampAndReport` | Applies to vessel range and liquid depletion handling. |
@@ -312,7 +357,7 @@ have no meaningful default.
 
 | Key | Default | Unit / allowed values | Notes |
 | --- | --- | --- | --- |
-| `free_surface_liquid_volume_model` | `globalConstantMass` | `globalConstantMass`, `cellMassInventory` | `cellMassInventory` is reserved and currently rejected. |
+| `free_surface_liquid_volume_model` | `globalConstantMass` | `globalConstantMass`, `cellMassInventory` | Cellwise mode transports kg/m3 reference-volume inventory and currently requires `error` depletion plus zero physical-boundary liquid flux. |
 | `free_surface_initial_liquid_mass` | not set | kg | Finite and nonnegative. |
 | `free_surface_initial_liquid_volume` | not set | m3 | Finite, nonnegative, and within the vessel policy range. |
 | `free_surface_initial_clear_level` | not set | m | Converted through the vessel map. |
@@ -408,11 +453,11 @@ $$
 
 `LiquidMassInventoryDiagnostics` separately reports initial/current mass,
 cumulative accepted evaporation and condensation, dry-out mass deficit,
-mass-weighted specific volume, liquid volume, and absolute/normalized mass
-residual. `BoilingPhaseChangeDiagnostics` separates requested, accepted, and
+mass-weighted specific volume, liquid volume, and absolute/normalized
+accepted-history and per-step mass residuals. `BoilingPhaseChangeDiagnostics` separates requested, accepted, and
 rejected evaporation; steam and non-steam collapse; condensate; submerged
 steam; and phase-change residuals. The boiling output registry exposes
-`phaseChangeMassRate`, `rejectedVaporMassRate`, and
+`phaseChangeMassRate`, `condensationMassRate`, `rejectedVaporMassRate`, and
 `condensationLatentHeatRelease` alongside the existing `S_alpha_boil` and
 `latentHeatSink` fields. The radiolytic output retains raw,
 bounded, and excess void/inventory diagnostics.
@@ -434,7 +479,8 @@ so its geometric error is explicit.
 
 `SolutionOutputOptions::include_free_surface_fields` defaults to `false`.
 When enabled, VTU output includes `rhoLiquid`, `clearLevel`, `poolLevel`,
-`headspacePressure`, and `poolOccupancy`. The default preserves the existing
+`headspacePressure`, and `poolOccupancy`; cellwise mode additionally writes
+`liquidMassInventory`. The default preserves the existing
 output schema. `BoussinesqSolver::free_surface_history()` automatically retains
 the initialization snapshot and one record per accepted step without repeating
 the underlying reductions. `write_free_surface_history_csv()` writes that
@@ -453,6 +499,9 @@ Focused tests cover the implemented component contracts:
   malformed/zero-area tables, endpoint handling, and range policies;
 - fixed-density, temperature-dependent, phase-change, pure-versus-mixture
   density, and distributed liquid-inventory behavior;
+- cellwise initialization, transactional local phase change, internal
+  advection, dryout/boundary rejection, density/stale-token rejection, strict
+  solver-independent mass closure, and partition-face transport;
 - vented constant pressure, closed ideal-gas analytic closure, nonlinear
   pressure-sensitive liquid/bubble volume, exact species transfer, gas closure,
   overfill, and convergence failures;
@@ -464,9 +513,11 @@ Focused tests cover the implemented component contracts:
 - deterministic registration/export of the optional free-surface feedback
   field names;
 - Boussinesq disabled-baseline equivalence, thermal expansion from pure-liquid
-  density, accepted boiling mass exactly once, exact H2 bubble escape to the
-  vent, pressure-mode/ownership rejection, opt-in VTU fields, and the reported
-  cell-centre occupancy error.
+  density, initialization/update ordering, accepted boiling mass in both
+  inventory modes, positive cellwise condensate return exactly once, zero-flow
+  cellwise preservation, guarded removal with retained steam, exact H2 bubble
+  escape to the vent, pressure-mode/ownership rejection, opt-in VTU fields, and
+  the reported cell-centre occupancy error.
 
 `PlanarFreeSurfaceModel_2procs` checks a nonuniform pure-density liquid volume
 against an independently reduced value and verifies that liquid mass, volume,
@@ -475,15 +526,32 @@ The existing two-rank radiolytic regression separately checks global raw
 bubble volume, population moles, cap discrepancy, and conservative finite-
 Courant escape.
 
-The focused solver/core-related selection passed 110 tests, with five
-intentional single-rank skips for MPI-only cases. All five related registered
-MPI tests passed under host networking: `RadiolyticGasModel_2procs`,
-`BoilingCollectiveValidation_2procs`, `PlanarFreeSurfaceModel_2procs`,
-`BoussinesqFreeSurfaceConfig_2procs`, and
-`BoussinesqFreeSurfaceStepPreflight_2procs`. The complete GCC Debug non-MPI
-selection passed 771 tests (MPI-only cases skip in a one-rank process), and all
-38 registered MPI-labeled tests passed. The full GCC RelWithDebInfo build and
-the `docs` target also completed successfully.
+The standalone B0 motion tests cover Cartesian motion on every axis,
+cylindrical and semi-structured axial motion, buffered/repeated motion,
+transaction accept/rollback, quality rejection, exclusive shared-geometry
+ownership, unchanged topology/IDs/maps/boundary tags, per-cell GCL, MPI
+partition-face swept-flux agreement, and collective target/timestep/action
+validation. Geometry-cache tests verify stale epoch rejection and analytic
+coefficient/gradient recovery after explicit refresh.
+
+The final post-fix focused selection passed 73/73 tests; seven MPI-only cases
+were intentionally skipped by their single-rank guards. Six related
+host-network MPI registrations also passed: `PlanarALEMeshMotion_2procs`,
+`RadiolyticGasModel_2procs`, `BoilingCollectiveValidation_2procs`,
+`PlanarFreeSurfaceModel_2procs`, `BoussinesqFreeSurfaceConfig_2procs`, and
+`BoussinesqFreeSurfaceStepPreflight_2procs`.
+
+A fresh GCC Debug registry contained 842 tests. These two disjoint full
+executions covered that registry:
+
+- `ctest --test-dir build/gcc -C Debug -LE mpi -j 4` passed 803/803 with 29
+  expected single-rank skips;
+- the host-network `ctest --test-dir build/gcc -C Debug -L mpi -j 2` run passed
+  39/39.
+
+After the final formatting pass, the GCC Debug and RelWithDebInfo builds
+completed 198 and 253 scheduled steps, respectively; repeated builds reported
+no work. The documentation target also completed successfully.
 
 The `planar_free_surface_verification` executable provides five deterministic
 constant-area analytic cases. Run all cases or one named case with:
@@ -519,7 +587,8 @@ absolute volume closure `4.440892099e-16 m3`, maximum absolute gas closure
 `0 mol`, and closed nonlinear residual `2.910383046e-11 Pa`.
 
 These are analytic component/conservation verifications, not a physical
-validation of pool dynamics. No ALE/GCL test is claimed.
+validation of pool dynamics. Separate B0 tests verify geometry-only GCL; they
+do not validate an ALE transport or free-surface solve.
 
 ## Fixed-Grid Limitations
 
@@ -537,53 +606,79 @@ escape continues at the existing actual boundary. The model does not:
 - resolve surface shape, curvature, capillary waves, splash, foam, or overflow
   hydrodynamics.
 
+Cellwise liquid mass is conservative on the fixed reference mesh, but its
+initial fill is deliberately smeared over that modeled domain and physical
+boundary mass flux is not yet supported. It uses the projected
+single-continuum face flux rather than a liquid-fraction-weighted phase flux.
+No separate solvent, solute, or fissile-mass field exists, so local total-liquid
+conservation must not be described as composition-preserving evaporation.
+
 The `validity_warning` threshold is therefore an applicability diagnostic, not
 an error correction. A small reported level change can still be inaccurate if
 the fixed top boundary or unmodified flow domain materially changes escape or
 circulation. `clampAndReport` exposes a bookkeeping excess; it does not model
 overflow fluid.
 
-## Milestone B/C Blocker: Mutable Ownership, but No ALE Contract
+## Milestone B0 Geometry/GCL Substrate and Remaining B/C Blocker
 
-Planar ALE is intentionally supported on **no mesh family at present**.
-`free_surface_model = planarALE` fails during option validation with the stable
-diagnostic that SimpleFluid meshes do not support fixed-topology geometry
-motion. This applies to Cartesian, cylindrical, semi-structured,
-unstructured/partitioned, and STK/legacy `MeshHandle` alternatives.
+`PlanarALEMeshMotion` now provides a standalone, transactional geometry layer.
+It owns reference coordinates, accepted/trial surface elevation, old/new local
+cell volumes, and owner-oriented swept-volume face rates. A trial applies the
+configured full-column or buffered mapping, evaluates
 
-Mutable ownership is now available as groundwork, but the immediate blocker is
-still architectural rather than a missing vertical-coordinate formula:
+$$
+E_{\mathrm{GCL},c}=
+\frac{V_c^{n+1}-V_c^n}{\Delta t}-\sum_f\phi_{m,f},
+$$
 
-- `MeshHandle` retains the caller's mutable concrete geometry when constructed
-  from a mutable mesh or partition and exposes an explicit mutable visitor.
-  Existing const-backed construction and const visitation remain read-only.
-  The solver ownership path is still const, and there is no fixed-topology
-  point-motion or geometry-update API. Raw mutation after fields or caches are
-  built remains unsupported.
-- Mesh/transport interfaces provide one current `cell_volume`; they do not
-  provide accepted old/new cell volumes or a transactional trial/accept/
-  rollback geometry state.
-- There is no swept-face volume or face mesh-flux field, so the discrete
-  geometric conservation law cannot be formed and physical face flux cannot
-  be converted to mesh-relative flux.
-- There is no geometry epoch/version. Geometry-dependent least-squares
-  stencils, interpolation weights, non-orthogonal diffusion data, Rhie-Chow
-  coefficients, wall distance/y+, mesh quality, cached FVM numeric values,
-  VTU topology, and solver/preconditioner numeric state therefore have no
-  centralized invalidation/rebuild contract.
-- Transient/convection operators assume one fixed control volume and do not
-  implement `(V_new q_new - V_old q_old) / dt` with swept mesh flux.
-- Pressure projection, SIMPLE/PISO/PIMPLE, and coupled Krylov continuity paths
-  still target the existing incompressible zero-divergence equation. There is
-  no owned `VolumeSourceModel`, generalized continuity right-hand side, or
-  common residual definition for a nonzero source.
+checks every owned-cell residual and the distributed mesh-quality gate, and is
+then explicitly accepted or rolled back. Rejected trials restore coordinates;
+topology, global IDs, Tpetra maps, boundary tags, and partitioning do not
+change. A geometry epoch and exclusive controller lease live on the shared
+concrete geometry so alias `MeshHandle`s observe the same revision.
 
-Milestone B can begin only after those primitives exist for each explicitly
-selected backend, including MPI partition-face agreement and cell-quality
-rejection. Acceptance requires per-cell GCL, constant-field preservation,
-mesh-relative conservative transport, and atomic rollback on a rejected
-motion. Merely changing the reported level or reconstructing a new mesh each
-step is not ALE.
+The truthful B0 support set is:
+
+- Cartesian X/Y/Z motion, serial and MPI;
+- cylindrical axial-Z motion, serial and MPI;
+- `SemiStructuredXY_Z` axial-Z motion, serial only.
+
+B0 is constructed programmatically and is not selected through the
+free-surface `Database`. `PlanarALEMeshMotionOptions` defaults to axis `z`, a
+full-column deformation beginning at the reference bottom, no per-trial level
+limit, `1e-12 m3/s` absolute plus `1e-10` relative GCL tolerance, and the
+existing `MeshQualityLimits` defaults. Supplying a deformation-start elevation
+creates a monotone upper deformation zone above a fixed lower region;
+`maximum_level_change` is an optional positive pre-mutation rejection limit.
+
+Const-backed handles, non-axial cylindrical/semi-structured motion, general
+unstructured/partitioned geometry, and STK/legacy meshes fail explicitly.
+Direct raw mutation through a retained concrete pointer or `visit_mutable()`
+cannot publish an epoch and remains unsupported after fields or caches exist.
+
+`CellGradientCache`, `TransportGeometryCache`, and both Rhie--Chow face-flux
+workspaces capture the geometry epoch, reject stale access, and expose explicit
+numeric refresh. This is not yet a centralized refresh of every solver-owned
+cache.
+
+`free_surface_model = planarALE` therefore remains rejected. The remaining
+solver-level blockers are:
+
+- `FluidSolver` still owns a const `MeshHandle`, and no accepted multiphysics
+  step owns geometry trial/accept/rollback together with fields and inventories;
+- transient/convection operators still use one current control volume rather
+  than `(V_new q_new - V_old q_old) / dt` and do not subtract mesh flux;
+- wall distance/y+, pressure matrices, coupled-system numeric state, VTU
+  points, and other solver caches do not yet share one epoch refresh path;
+- pressure projection, SIMPLE/PISO/PIMPLE, and coupled Krylov paths do not all
+  accept and report one generalized nonzero continuity target;
+- moving-top kinematic/dynamic and exact bubble-escape boundary conditions do
+  not exist.
+
+Consequently constant-field preservation under motion, ALE liquid/gas/
+precursor/energy conservation, and a moving free-surface solve are not claimed.
+Merely connecting the reported level to this geometry layer before those
+operators exist would still be false ALE.
 
 Milestone C currently stops at stable feedback names and an explicitly
 nonconservative cell-centre occupancy visualization with a measured volume
@@ -592,6 +687,6 @@ whose approximation error is part of its acceptance contract; the current
 Heaviside field is not that mapper. Moving-mesh and cross-mesh feedback also
 need conservative handling of liquid/fissile mass, gas species, precursor
 inventory, and energy, plus reported mapping residuals. Those capabilities
-remain unsupported until the Milestone-B geometry and ALE transport contract
-exists. Full VOF and Euler-Euler phase momentum remain separate deferred model
-families, not implicit future claims of this planar budget.
+remain unsupported until the remaining Milestone-B solver and ALE transport
+contract exists. Full VOF and Euler-Euler phase momentum remain separate
+deferred model families, not implicit future claims of this planar budget.

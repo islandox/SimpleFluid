@@ -44,6 +44,14 @@ simplefluid_add_mpi_test(
     LABELS "mpi;mesh_reordering;solid_subdomain"
     TIMEOUT 120)
 
+simplefluid_add_mpi_test(
+    NAME PlanarALEMeshMotion_2procs
+    TARGET testPlanarALEMeshMotion
+    PROCS 2
+    ARGS "--gtest_filter=PlanarALEMeshMotionMultiRankTest.*"
+    LABELS "mpi;mesh_motion;ale;gcl"
+    TIMEOUT 120)
+
 # The diffusion profiling test also needs the solvers library
 add_executable(testOrthogonalDiffusionProfile testOrthogonalDiffusionProfile.cc)
 target_link_libraries(testOrthogonalDiffusionProfile

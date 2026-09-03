@@ -20,6 +20,7 @@
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
+#include "geometry/GeometryEpoch.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -154,8 +155,8 @@ template<TpetraTypePack Pack> struct VectorTransportSystem
  * The cache owns only topology- and geometry-dependent data. Boundary
  * condition types and values remain callback-driven and are materialized for
  * each assembly, so changing boundary data does not require rebuilding this
- * cache. The referenced mesh topology and geometry must remain unchanged for
- * the cache lifetime; construct a new cache after any mesh revision.
+ * cache. Fixed-topology geometry motion invalidates the cache until refresh()
+ * rebuilds its numeric data; topology changes require a new cache.
  *
  * @tparam MeshType Mesh interface used by the transport fields.
  */
@@ -170,11 +171,17 @@ public:
     /** @brief Throw if this cache was built for another mesh instance. */
     void require_mesh(const MeshType& mesh) const;
 
-    const interior_stencils_type& interior_stencils() const noexcept;
+    /** @brief Rebuild all geometry-dependent data at the mesh's current epoch. */
+    void refresh();
 
-    const boundary_locations_type& boundary_locations() const noexcept;
+    /** @brief Geometry epoch represented by this cache. */
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
 
-    const boundary_geometry_type& boundary_geometry() const noexcept;
+    const interior_stencils_type& interior_stencils() const;
+
+    const boundary_locations_type& boundary_locations() const;
+
+    const boundary_geometry_type& boundary_geometry() const;
 
     std::vector<detail::AffineLeastSquaresGradientStencil<MeshType>> scalar_affine_stencils(
         std::function<BoundaryCondition(int, size_t)> boundary_condition,
@@ -185,6 +192,7 @@ public:
 
 private:
     const MeshType* d_mesh;
+    std::uint64_t d_geometry_epoch = 0;
     interior_stencils_type d_interior_stencils;
     boundary_locations_type d_boundary_locations;
     boundary_geometry_type d_boundary_geometry;

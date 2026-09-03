@@ -10,14 +10,15 @@
  */
 #pragma once
 
+#include "FVM/CellGradientScheme.hh"
+#include "FVM/details/FieldStoredCellOperators.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
-#include "FVM/CellGradientScheme.hh"
-#include "FVM/details/FieldStoredCellOperators.hh"
-#include "FVM/details/OperatorDetails.hh"
+#include "geometry/GeometryEpoch.hh"
 
 #include <algorithm>
 #include <array>
@@ -39,10 +40,12 @@ namespace SimpleFluid::FVM
  * reconstruction variants: an interior-neighbor-only stencil and a
  * boundary-aware stencil. Boundary condition types and values remain dynamic;
  * only topology, directions, normal distances, and least-squares weights are
- * cached. Rebuild the cache after any mesh topology or geometry revision.
+ * cached. Fixed-topology geometry motion invalidates the cache until refresh()
+ * rebuilds its numeric data; topology changes require a new cache.
  *
- * Cached data are immutable after construction, so one cache may be read by
- * concurrent evaluations provided their fields and callbacks are independent.
+ * Cached data are read-only between refreshes, so one cache may be read by
+ * concurrent evaluations provided refresh() is not running and their fields
+ * and callbacks are independent.
  *
  * @tparam Pack Tpetra type pack used by the mesh and fields.
  * @tparam MeshType Runtime or statically dispatched mesh interface.
@@ -85,15 +88,10 @@ public:
      * @throws std::invalid_argument if @p mesh is null.
      */
     explicit CellGradientCache(SP<const mesh_type> mesh)
-        : d_mesh(require_mesh(std::move(mesh))),
-          d_boundary_locations(
-              detail::boundary_face_locations(*d_mesh)),
-          d_interior_geometry(
-              build_geometry(
-                  *d_mesh, d_boundary_locations, false)),
-          d_boundary_geometry(
-              build_geometry(
-                  *d_mesh, d_boundary_locations, true))
+        : d_mesh(require_mesh(std::move(mesh))), d_boundary_locations(detail::boundary_face_locations(*d_mesh)),
+          d_interior_geometry(build_geometry(*d_mesh, d_boundary_locations, false)),
+          d_boundary_geometry(build_geometry(*d_mesh, d_boundary_locations, true)),
+          d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
     {
     }
 
@@ -118,26 +116,45 @@ public:
             throw std::invalid_argument(
                 "Cell-gradient cache belongs to another mesh.");
         }
+        if (mesh_geometry_epoch(mesh) != d_geometry_epoch)
+        {
+            throw std::invalid_argument("Cell-gradient cache is stale for the mesh geometry epoch.");
+        }
     }
 
-    /** @brief Return interior-neighbor-only reconstruction weights. */
-    const std::vector<CellGeometry>&
-    interior_geometry() const noexcept
+    /** @brief Rebuild geometry-dependent weights at the current mesh epoch. */
+    void refresh()
     {
+        auto locations = detail::boundary_face_locations(*d_mesh);
+        auto interior = build_geometry(*d_mesh, locations, false);
+        auto boundary = build_geometry(*d_mesh, locations, true);
+        d_boundary_locations = std::move(locations);
+        d_interior_geometry = std::move(interior);
+        d_boundary_geometry = std::move(boundary);
+        d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+    }
+
+    /** @brief Geometry epoch represented by this cache. */
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
+
+    /** @brief Return interior-neighbor-only reconstruction weights. */
+    const std::vector<CellGeometry>& interior_geometry() const
+    {
+        require_mesh(*d_mesh);
         return d_interior_geometry;
     }
 
     /** @brief Return boundary-aware reconstruction weights. */
-    const std::vector<CellGeometry>&
-    boundary_geometry() const noexcept
+    const std::vector<CellGeometry>& boundary_geometry() const
     {
+        require_mesh(*d_mesh);
         return d_boundary_geometry;
     }
 
     /** @brief Return the cached per-face boundary lookup. */
-    const std::vector<boundary_location_type>&
-    boundary_locations() const noexcept
+    const std::vector<boundary_location_type>& boundary_locations() const
     {
+        require_mesh(*d_mesh);
         return d_boundary_locations;
     }
 
@@ -291,6 +308,7 @@ private:
     std::vector<boundary_location_type> d_boundary_locations;
     std::vector<CellGeometry> d_interior_geometry;
     std::vector<CellGeometry> d_boundary_geometry;
+    std::uint64_t d_geometry_epoch = 0;
 };
 
 namespace detail

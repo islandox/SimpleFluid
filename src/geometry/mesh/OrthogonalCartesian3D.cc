@@ -129,6 +129,39 @@ OrthogonalCartesian3D::OrthogonalCartesian3D(
 }
 
 /**
+ * @brief Replace one coordinate direction without changing structured topology.
+ * @param axis Cartesian axis index.
+ * @param edges Strictly increasing replacement edges with the existing size.
+ * @throws std::invalid_argument If the axis or replacement layout is invalid.
+ */
+void OrthogonalCartesian3D::replace_axis_edges_fixed_topology(size_t axis, Arr<real_t> edges)
+{
+    if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
+    {
+        throw std::overflow_error("OrthogonalCartesian3D geometry epoch overflow.");
+    }
+    if (axis >= d_cell_edges.size())
+    {
+        throw std::invalid_argument("OrthogonalCartesian3D fixed-topology update axis is invalid.");
+    }
+    if (edges.size() != d_cell_edges[axis].size())
+    {
+        throw std::invalid_argument("OrthogonalCartesian3D fixed-topology update cannot change "
+                                    "the edge count.");
+    }
+
+    constexpr std::array<const char*, 3> axis_names{{"x", "y", "z"}};
+    validate_edges(edges, axis_names[axis]);
+    auto centroids = MeshUtils::consec_mid(edges);
+    auto widths = MeshUtils::consec_diff(edges);
+
+    d_cell_edges[axis] = std::move(edges);
+    d_cell_centroids[axis] = std::move(centroids);
+    d_cell_widths[axis] = std::move(widths);
+    ++d_geometry_state.epoch;
+}
+
+/**
  * @brief Return a physical boundary batch name.
  * @param batch_id Boundary batch identifier.
  * @return Configured lower or upper axis name.

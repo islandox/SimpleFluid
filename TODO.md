@@ -27,8 +27,8 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 4. Complete the Phase 18 user-facing configuration reference.
 5. Add quantitative Phase 14.1 physical validation and a checked-in combined
    RANS-plus-bubble user example.
-6. Add the remaining Phase 20.1 conservative cellwise-liquid/steam ownership
-   before widening its claims.
+6. Add the remaining Phase 20.1 conservative steam transport/escape and
+   composition-resolved liquid transport before widening its claims.
 7. Close the remaining foundational validation gaps: Ghia profile checks and
    bundled OpenFOAM centerline tolerances.
 
@@ -48,7 +48,7 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 | Phase 18, documentation | Partial | Complete key/default/unit/validity reference |
 | Phase 19, precursors | Implemented and focused-tested | No open items for the supported transport scope |
 | Phase 20, TH/neutronics map | In-memory scaffold implemented and focused-tested | Production external-neutronics protocol and validation |
-| Phase 20.1, planar free surface | Partial fixed-grid path integrated and full-tested | Cellwise liquid mass and steam escape; geometry motion/GCL and conservative mapping remain open |
+| Phase 20.1, planar free surface | Fixed-grid path plus standalone geometry/GCL substrate | Steam transport/escape, composition transport, solver-integrated ALE transport/continuity, and conservative mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 
 ### Checklist conventions
@@ -1261,9 +1261,10 @@ resolved interface or moving-mesh solver.
 and full-tested, including accepted-step Boussinesq integration, automatic
 accepted-state history with an explicit CSV writer, opt-in VTU fields, an explicitly
 approximate cell-centre occupancy with volume error, and a checked-in analytic
-verification driver. Cellwise liquid-mass transport and steam escape remain
-open. Milestone B
-planar ALE is unsupported on every current mesh backend, and Milestone C does
+verification driver. Cellwise effective-liquid-mass transport is supported;
+composition-resolved solvent/fissile transport and steam transport/escape
+remain open. Milestone B now has a standalone structured geometry/GCL
+substrate, but solver-integrated planar ALE remains disabled. Milestone C does
 not yet provide conservative pool occupancy or moving-mesh mapping.
 
 #### Milestone A — implemented fixed-grid components
@@ -1277,8 +1278,12 @@ not yet provide conservative pool occupancy or moving-mesh mapping.
 - [x] Add the explicitly limited `globalConstantMass` liquid inventory with
       MPI reductions, accepted evaporation/condensation, mass residuals, and
       bubble-free `rhoLiquid` evaluation.
-- [x] Keep `cellMassInventory` reserved and reject it instead of claiming local
-      liquid-mass conservation.
+- [x] Add opt-in `cellMassInventory` transport on the fixed reference mesh
+      with the projected single-continuum face flux, transactional trial/commit,
+      local boiling/condensation sources, pure-density volume evaluation,
+      strict solver-independent conservation residuals, and serial/MPI
+      partition tests. Require error depletion and zero physical-boundary flux
+      until phase-acceptance and inlet-composition contracts exist.
 - [x] Extend the two-population radiolytic model with MPI-reduced dissolved,
       microbubble, and large-bubble inventories; unbounded EOS bubble volume;
       void-cap discrepancy; and non-mutating candidate-pressure evaluation
@@ -1288,6 +1293,8 @@ not yet provide conservative pool occupancy or moving-mesh mapping.
 - [x] Give boiling one accepted phase-change path: cap-consistent evaporation
       and latent energy, rejected-vapor diagnostics, submerged steam ownership,
       and explicit condensate return after scalar-void collapse.
+- [x] Reject removal or replacement of free-surface tracking while boiling
+      still owns nonzero submerged steam rather than stranding that inventory.
 - [x] Add vented constant-pressure and closed lumped ideal-gas headspaces with
       by-species transfer, positive absolute-pressure/volume guards, and a
       safeguarded nonlinear pressure/level closure.
@@ -1315,9 +1322,9 @@ not yet provide conservative pool occupancy or moving-mesh mapping.
 - [x] Add the deterministic `planar_free_surface_verification` driver for
       uniform heating, gas generation, complete escape, closed headspace, and
       boiling liquid-mass loss, with analytic tolerances and CSV stdout.
-- [x] Verify the focused fixed-grid/core/solver scope in serial and with all
-      five related MPI tests under host networking; run the complete Debug
-      non-MPI/MPI suites and a full GCC RelWithDebInfo build.
+- [x] Verify the focused fixed-grid/B0/core/solver scope in serial and with all
+      six related MPI registrations under host networking; run the complete
+      Debug non-MPI/MPI suites.
 - [x] Document equations, ownership, all current flat keys/defaults/SI units,
       diagnostics, tests, and fixed-grid limitations in
       `docs/modeling/planar_free_surface_volume_budget.md`.
@@ -1327,35 +1334,41 @@ not yet provide conservative pool occupancy or moving-mesh mapping.
 - [x] Retain automatic global history for liquid mass/volume, gas compartments,
       clear/pool levels, headspace state, and normalized closure residuals
       without repeating reductions, with an explicit rank-zero CSV writer.
-- [x] Run the complete Debug suite and a practical Release/RelWithDebInfo build
-      after the focused acceptance gates.
-- [ ] Add a cellwise conservative liquid-mass/solvent inventory before claiming
-      local liquid-mass conservation or composition-preserving evaporation.
+- [x] Complete the current full GCC RelWithDebInfo rebuild after the B0 and
+      cellwise-inventory changes.
+- [x] Add a cellwise conservative effective-liquid-mass inventory without
+      claiming composition-preserving evaporation.
+- [ ] Split solvent, solute, and fissile extensive inventories before claiming
+      composition-preserving evaporation or boundary transport.
 - [ ] Add conservative steam transport and an exact steam escape transfer
       before sending boiling vapor to the headspace/vent.
 - [ ] Couple boiling saturation to absolute headspace pressure before allowing
       active boiling with a closed headspace; retain the explicit setup
       rejection while saturation temperature is fixed.
 
-#### Milestone B — blocked planar ALE and generalized continuity
+#### Milestone B — geometry/GCL substrate; solver-integrated ALE still blocked
 
-`MeshHandle` now retains mutable concrete geometry when constructed from a
-mutable mesh or partition while preserving its existing const-observer path.
-This is ownership groundwork only: there is no fixed-topology motion API, and
-the solver ownership path remains read-only. The framework also lacks accepted
-old/new cell volumes, swept face mesh flux, a geometry epoch, and a centralized
-invalidation contract for least-squares/interpolation/diffusion geometry,
-Rhie-Chow data, wall distance, mesh quality, FVM coefficients, VTU topology,
-and solver numeric state. Accordingly `planarALE` still fails at setup and the
-supported moving-mesh family set is empty.
+`PlanarALEMeshMotion` now supplies a standalone B0 substrate for Cartesian
+X/Y/Z and cylindrical axial motion in serial/MPI plus serial
+`SemiStructuredXY_Z` axial motion. It retains topology/IDs/maps, owns
+transactional trial/accept/rollback, old/new volumes, exact structured swept
+face flux, quality rejection, shared geometry epochs, and cellwise GCL checks.
+Core gradient, transport-geometry, and Rhie--Chow caches reject stale epochs
+and support explicit refresh. This substrate is deliberately not wired to the
+const-owned solver path, so `planarALE` still fails at setup.
 
-- [ ] Add transactional fixed-topology geometry motion for each explicitly
-      supported mesh family, with MPI-conforming partition faces and quality
-      rejection.
-- [ ] Store old/new cell volumes and exact swept-face mesh flux, then verify the
-      cellwise geometric conservation law and constant-field preservation.
-- [ ] Add geometry epochs and explicit cache invalidation/rebuild rules while
-      preserving only topology-safe graphs and partitioning.
+- [x] Add transactional fixed-topology geometry motion for the explicitly
+      supported structured/extruded families, with MPI-conforming partition
+      faces, controller ownership, and quality rollback.
+- [x] Store old/new local cell volumes and exact structured swept-face mesh
+      flux, then verify the cellwise geometric conservation law in serial/MPI.
+- [ ] Demonstrate constant-field preservation after transport operators consume
+      old/new volumes and mesh-relative flux.
+- [x] Add shared geometry epochs and stale detection/refresh for the core
+      gradient, transport-geometry, and Rhie--Chow caches while preserving
+      topology-safe graphs and partitioning.
+- [ ] Extend epoch refresh/invalidation to every solver-owned geometry-dependent
+      cache and numeric preconditioner state.
 - [ ] Generalize every extensive transient/convection operator to old/new
       volumes and mesh-relative flux; do not post-correct fixed-volume results.
 - [ ] Add an owned low-Mach volume-source field and generalized continuity RHS
@@ -1363,8 +1376,10 @@ supported moving-mesh family set is empty.
       common target-residual definition.
 - [ ] Implement the moving-surface kinematic/dynamic and exact bubble-escape
       boundary contracts.
-- [ ] Add serial/MPI GCL, expand-contract, mesh-quality, nonzero-divergence, and
-      conservative liquid/gas/precursor/energy tests.
+- [x] Add B0 serial/MPI GCL, expand-contract, shared-face, controller-alias,
+      stale-cache, and mesh-quality rollback tests.
+- [ ] Add constant-field, nonzero-divergence, and conservative ALE liquid/gas/
+      precursor/energy tests with the solver-integrated operators.
 
 #### Milestone C — feedback and conservative mapping
 
