@@ -55,6 +55,8 @@ quantitative bubbly-flow validation remain open.
 | Scalar void, boiling, feedback, and precursor infrastructure | 🚧 |
 | Two-population radiolytic-bubble model | 🚧 |
 | Weakly coupled RANS plus radiolytic bubble populations | 🚧 |
+| Fixed-grid planar volume budget and weak Boussinesq integration | 🚧 |
+| Planar ALE, generalized continuity, and conservative pool mapping | ⬜ |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
 | In-memory TH/neutronics feedback and coupling scaffold | 🚧 |
 
@@ -309,6 +311,7 @@ short-running physical smoke cases:
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with an authenticated fail-closed comparator; the physical acceptance manifest remains pending qualification |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
 | Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
+| Planar volume budget | Fixed-grid analytic/component, Boussinesq integration, and two-rank inventory/diagnostic checks; no ALE/GCL claim |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
 and MPI coverage plus a permanent combined serial and exact-two-rank
@@ -337,6 +340,7 @@ Pre-built example executables:
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
 | `fissile_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
+| `planar_free_surface_verification` | Five analytic fixed-grid volume-budget cases with CSV diagnostics |
 
 Examples use `Database` configuration, documented environment controls, or a
 combination of both. Their CTest smoke settings intentionally reduce mesh size
@@ -648,6 +652,42 @@ VTU files in ParaView. Use the corresponding `LLVM-Debug` preset and
 boiling disabled by default; the constant-power cylinder variant enables
 radiolytic gas plus bulk and wall boiling so the generated VTU contains the
 coupled gas-source and latent-heat fields.
+
+## Planar Free-Surface Volume Budget
+
+The optional fixed-grid Milestone-A component layer computes separate pure-liquid and
+submerged-bubble volumes, `clearLevel` and `poolLevel`, and either a vented
+constant-pressure or closed ideal-gas headspace closure. It uses the
+two-population model's raw EOS-derived bubble volume and exact transported
+bubble-inventory decrement, so dissolved gas and void hidden by the alpha cap
+are not lost or double counted. Liquid material volume uses `rhoLiquid`, not
+the void-reduced mixture density. The current liquid option is the explicitly
+approximate `globalConstantMass` model; a cellwise transported liquid-mass
+inventory is not yet supported.
+
+`BoussinesqSolver` can own this fixed-grid budget and advances it after the
+temperature, bubble/boiling, precursor, and material updates. The accepted
+headspace pressure becomes the constant/reconstructed gas-pressure offset for
+the next step. This integration requires the dimensional physical-model
+constructor; the legacy/default solver path rejects it. `free_surface_history()` retains initialization and accepted
+step snapshots, and `write_free_surface_history_csv()` writes their global
+liquid/gas/headspace/closure data on rank zero. Setting
+`SolutionOutputOptions::include_free_surface_fields`
+writes opt-in `rhoLiquid`, `clearLevel`, `poolLevel`, `headspacePressure`, and
+`poolOccupancy` arrays; the last is a cell-centre visualization approximation
+with an explicitly reported volume error.
+
+This coupling does not move the mesh, relocate the escape boundary, change
+incompressible continuity, or provide conservative pool mapping. Planar ALE is
+rejected on every current mesh backend because `MeshHandle` has immutable
+geometry and no old/new volume, swept mesh-flux, geometry-epoch, or
+cache-invalidation contract. See
+[`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md)
+for equations, all flat configuration keys/defaults/SI units, diagnostics,
+verification scope, and the Milestone-B/C blockers. Vented boiling mass
+accounting is supported, but closed-headspace boiling and steam escape remain
+deferred until saturation depends on absolute pressure and steam has a
+conservative escape path.
 
 ## Dependencies
 

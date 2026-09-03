@@ -34,10 +34,19 @@ struct RadiolyticGasStepStatistics
 {
     Scalar hydrogen_before = {};
     Scalar hydrogen_produced = {};
+    Scalar dissolved_hydrogen_outflow = {};
+    Scalar microbubble_hydrogen_escaped = {};
+    Scalar large_bubble_hydrogen_escaped = {};
+    Scalar submerged_bubble_hydrogen_escaped = {};
     Scalar hydrogen_escaped = {};
     Scalar hydrogen_after = {};
     Scalar inventory_error = {}; ///< Hydrogen conservation residual.
+    Scalar escaped_microbubble_count = {};
+    Scalar escaped_large_bubble_count = {};
     Scalar escaped_bubble_count = {};
+    Scalar cumulative_hydrogen_produced = {};
+    Scalar cumulative_dissolved_hydrogen_outflow = {};
+    Scalar cumulative_submerged_bubble_hydrogen_escaped = {};
     Scalar cumulative_hydrogen_escaped = {};
     Scalar cumulative_escaped_bubble_count = {};
     Scalar void_volume = {};
@@ -244,6 +253,74 @@ public:
     {
         return d_large_moles;
     }
+
+    /** @brief Global dissolved H2 inventory in moles. */
+    scalar_type global_dissolved_hydrogen_moles() const;
+    /** @brief Global submerged microbubble H2 inventory in moles. */
+    scalar_type global_microbubble_hydrogen_moles() const;
+    /** @brief Global submerged large-bubble H2 inventory in moles. */
+    scalar_type global_large_bubble_hydrogen_moles() const;
+    /** @brief Global gas-phase H2 inventory still submerged in the liquid. */
+    scalar_type global_submerged_bubble_hydrogen_moles() const;
+    /** @brief Global dissolved plus gas-phase H2 inventory still submerged. */
+    scalar_type global_submerged_hydrogen_moles() const;
+    /** @brief Total H2 generated over all accepted model advances. */
+    scalar_type cumulative_hydrogen_produced() const noexcept { return d_cumulative_hydrogen_produced; }
+    /** @brief Total dissolved H2 transported out of the modeled pool. */
+    scalar_type cumulative_dissolved_hydrogen_outflow() const noexcept
+    {
+        return d_cumulative_dissolved_hydrogen_outflow;
+    }
+    /** @brief Total H2 transferred out of submerged bubble populations. */
+    scalar_type cumulative_submerged_bubble_hydrogen_escaped() const noexcept
+    {
+        return d_cumulative_submerged_bubble_hydrogen_escaped;
+    }
+
+    /**
+     * @brief Current EOS-derived submerged bubble volume before alpha bounds.
+     *
+     * This is the volume integral of `alpha_g_raw`, not the bounded
+     * hydrodynamic void fraction.
+     */
+    scalar_type global_submerged_bubble_volume() const;
+    /** @brief Raw bubble volume hidden by the configured upper alpha bound. */
+    scalar_type global_unrepresented_bubble_volume() const;
+    /**
+     * @brief Re-evaluate raw bubble volume at an absolute-pressure offset.
+     *
+     * The candidate replaces the uniform thermodynamic pressure offset while
+     * retaining the accepted reconstructed gauge-pressure variation.  Current
+     * temperatures, population number densities, gas moles, the configured
+     * surface-tension correlation, and the existing Laplace/EOS radius solve
+     * are reused.  The accepted model fields are not modified.
+     */
+    scalar_type evaluate_submerged_bubble_volume(scalar_type candidate_absolute_pressure_offset) const;
+
+    /**
+     * @brief Lowest offset that keeps every reconstructed pressure valid.
+     *
+     * The returned collective value accounts for both the configured absolute
+     * pressure floor and the most negative accepted gauge-pressure variation.
+     * Constant and reconstructed pressure modes are supported.  All ranks in
+     * the model communicator must call this query together.
+     */
+    scalar_type minimum_valid_absolute_pressure_offset() const;
+
+    /** @brief Uniform absolute-pressure offset used by gas thermodynamics. */
+    scalar_type absolute_pressure_offset() const noexcept { return d_absolute_pressure_offset; }
+    /**
+     * @brief Shift the thermodynamic pressure offset and published pressure.
+     *
+     * Only constant and reconstructed pressure modes support an externally
+     * coupled offset.  Reconstructed mode retains every accepted gauge-pressure
+     * variation exactly.  For initialized two-population state, every
+     * pressure-dependent bubble diagnostic is reconstructed at the accepted
+     * offset without modifying conserved inventories or escape ledgers.  This
+     * is a collective operation.
+     */
+    void set_absolute_pressure_offset(scalar_type pressure_offset);
+
     /**
      * @brief Diagnostics from the most recent advance call.
      */
@@ -320,20 +397,15 @@ private:
         bool diffuse,
         bool liquid_weighted,
         field_type& escape_rate);
-    CellProperties cell_properties(
-        local_ordinal_type cell_lid,
-        const field_type& temperature,
-        const velocity_field_type& velocity,
-        const material_type& material) const;
+    CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
+        const field_type& density, const field_type& dynamic_viscosity) const;
     CellKineticsState integrate_cell_kinetics(
         local_ordinal_type cell_lid,
         scalar_type time_step,
         scalar_type power_density,
         const CellProperties& properties);
-    void reconstruct_derived_fields(
-        const field_type& temperature,
-        const velocity_field_type& velocity,
-        const material_type& material);
+    void reconstruct_derived_fields(const field_type& temperature, const field_type& density,
+        const field_type& dynamic_viscosity, bool record_event_statistics = true);
     void update_inertial_pressure(
         scalar_type time_step,
         const field_type& temperature,
@@ -344,6 +416,8 @@ private:
     scalar_type global_integral(const field_type& field) const;
     /** @brief Sum a rank-local scalar and replicate it on every rank. */
     scalar_type global_sum(scalar_type local_value) const;
+    /** @brief Compute and replicate the communicator-wide scalar minimum. */
+    scalar_type global_min(scalar_type local_value) const;
     /** @brief Compute and replicate the communicator-wide integer maximum. */
     int global_max(int local_value) const;
     void reduce_event_statistics();
@@ -370,6 +444,7 @@ private:
     field_type d_absolute_pressure;
     field_type d_previous_temperature;
     field_type d_previous_density;
+    field_type d_previous_dynamic_viscosity;
     field_type d_previous_alpha_g;
 
     field_type d_dissolved_hydrogen;
@@ -402,6 +477,10 @@ private:
 
     bool d_history_initialized = false;
     bool d_initial_state_initialized = false;
+    scalar_type d_absolute_pressure_offset = {};
+    scalar_type d_cumulative_hydrogen_produced = {};
+    scalar_type d_cumulative_dissolved_hydrogen_outflow = {};
+    scalar_type d_cumulative_submerged_bubble_hydrogen_escaped = {};
     scalar_type d_cumulative_hydrogen_escaped = {};
     scalar_type d_cumulative_escaped_bubble_count = {};
     BelosLinearSolver<Pack> d_transport_solver;

@@ -7,6 +7,8 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFluidSolverMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFeedbackMapMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testPlanarFreeSurfaceModelMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
@@ -51,6 +53,15 @@ target_link_libraries(
   SimpleFluid::Solvers
   GTest::gtest_main)
 simplefluid_configure_test_executable(testFeedbackMapMultiRank)
+
+add_executable(
+  testPlanarFreeSurfaceModelMultiRank
+  testPlanarFreeSurfaceModelMultiRank.cc)
+target_link_libraries(
+  testPlanarFreeSurfaceModelMultiRank
+  SimpleFluid::Solvers
+  GTest::gtest_main)
+simplefluid_configure_test_executable(testPlanarFreeSurfaceModelMultiRank)
 
 simplefluid_add_mpi_test(
     NAME RadiolyticGasModel_2procs
@@ -155,8 +166,39 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME BoilingCollectiveValidation_2procs
+    TARGET testPhase13PlusModels
+    PROCS 2
+    ARGS "--gtest_filter=BoilingSourceModelTest.CollectivelyRejectsRankAsymmetricInvalidCellState"
+    LABELS "mpi;boiling;validation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME FeedbackMap_2procs
     TARGET testFeedbackMapMultiRank
     PROCS 2
     LABELS "mpi;feedback_mapping"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME PlanarFreeSurfaceModel_2procs
+    TARGET testPlanarFreeSurfaceModelMultiRank
+    PROCS 2
+    LABELS "mpi;free_surface"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME BoussinesqFreeSurfaceConfig_2procs
+    TARGET testBoussinesqFreeSurface
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqFreeSurfaceTest.CollectivelyRejectsRankDivergentOptions"
+    LABELS "mpi;free_surface;boussinesq;configuration"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME BoussinesqFreeSurfaceStepPreflight_2procs
+    TARGET testBoussinesqFreeSurface
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqFreeSurfaceTest.CollectivelyRejectsRankDivergentExistingStateDuringConfiguration:BoussinesqFreeSurfaceTest.CollectivelyRejectsRankDivergentPresenceBeforeStep:BoussinesqFreeSurfaceTest.CollectivelyRejectsPositiveRankDivergentTimestepBeforeStep"
+    LABELS "mpi;free_surface;boussinesq;validation"
     TIMEOUT 120)
