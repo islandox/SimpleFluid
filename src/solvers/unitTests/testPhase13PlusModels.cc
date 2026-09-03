@@ -177,6 +177,7 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
     model.update(1.0e-6, temperature, material, void_model);
     EXPECT_DOUBLE_EQ(model.source_alpha_boil().value(0), 0.0);
     EXPECT_DOUBLE_EQ(model.latent_heat_sink().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_mass_rate().value(0), 0.0);
     EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), 0.0);
     EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_rate().value(0), 0.0);
     void_model.update_explicit(1.0e-6, nullptr, &model.source_alpha_boil());
@@ -531,6 +532,10 @@ TEST(BoilingSourceModelTest, CompletionBalancesEvaporationCollapseAndCondensateR
     EXPECT_NEAR(diagnostics.latent_energy_balance_residual, 0.0, 1.0e-14);
     EXPECT_NEAR(model.condensation_latent_heat_release().value(0),
         diagnostics.condensed_liquid_mass * options.latent_heat / (mesh->cell_volume(0) * time_step), 1.0e-14);
+    EXPECT_NEAR(model.condensation_mass_rate().value(0),
+        diagnostics.condensed_liquid_mass / (mesh->cell_volume(0) * time_step), 1.0e-14);
+    EXPECT_NEAR(model.condensation_latent_heat_release().value(0),
+        model.condensation_mass_rate().value(0) * options.latent_heat, 1.0e-14);
     EXPECT_NEAR(model.temperature_source(0), model.condensation_latent_heat_release().value(0), 1.0e-14);
 }
 
@@ -585,6 +590,7 @@ TEST(BoilingSourceModelTest, FailedCompletionIsTransactionalAndCanBeRetried)
     EXPECT_DOUBLE_EQ(model.global_submerged_steam_mass(), 0.0);
     EXPECT_DOUBLE_EQ(model.last_phase_change_diagnostics().cumulative_accepted_evaporation_mass, 0.0);
     EXPECT_DOUBLE_EQ(model.condensation_latent_heat_release().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_mass_rate().value(0), 0.0);
 
     void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
     EXPECT_NO_THROW(model.complete_void_fraction_update(time_step, void_model, true));
@@ -2422,6 +2428,7 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
     EXPECT_NE(contents.find("Name=\"S_alpha_total\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"latentHeatSink\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"condensationLatentHeatRelease\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"condensationMassRate\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"rhoFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"muFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"C_1\""), std::string::npos);

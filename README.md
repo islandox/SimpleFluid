@@ -56,7 +56,8 @@ quantitative bubbly-flow validation remain open.
 | Two-population radiolytic-bubble model | 🚧 |
 | Weakly coupled RANS plus radiolytic bubble populations | 🚧 |
 | Fixed-grid planar volume budget and weak Boussinesq integration | 🚧 |
-| Planar ALE, generalized continuity, and conservative pool mapping | ⬜ |
+| Standalone structured planar geometry-motion/GCL substrate | 🚧 |
+| Solver-integrated planar ALE, generalized continuity, and conservative pool mapping | ⬜ |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
 | In-memory TH/neutronics feedback and coupling scaffold | 🚧 |
 
@@ -311,7 +312,8 @@ short-running physical smoke cases:
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with an authenticated fail-closed comparator; the physical acceptance manifest remains pending qualification |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
 | Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
-| Planar volume budget | Fixed-grid analytic/component, Boussinesq integration, and two-rank inventory/diagnostic checks; no ALE/GCL claim |
+| Fixed-grid planar volume budget | Analytic/component, global/cellwise inventory, Boussinesq integration, and two-rank conservation checks; no moving-surface claim |
+| Planar geometry/GCL substrate | Structured/extruded motion, transactions, epoch/cache staleness, quality, and serial/two-rank GCL/shared-face checks; no ALE transport or free-surface solve |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
 and MPI coverage plus a permanent combined serial and exact-two-rank
@@ -661,35 +663,49 @@ constant-pressure or closed ideal-gas headspace closure. It uses the
 two-population model's raw EOS-derived bubble volume and exact transported
 bubble-inventory decrement, so dissolved gas and void hidden by the alpha cap
 are not lost or double counted. Liquid material volume uses `rhoLiquid`, not
-the void-reduced mixture density. The current liquid option is the explicitly
-approximate `globalConstantMass` model; a cellwise transported liquid-mass
-inventory is not yet supported.
+the void-reduced mixture density. The default liquid option is the explicitly
+approximate `globalConstantMass` model. The opt-in `cellMassInventory` mode
+conservatively transports local liquid mass on the fixed reference mesh with
+the projected single-continuum face-volume flux, applies accepted boiling and
+condensation sources transactionally, and evaluates volume with pure-liquid
+density. Its initial fill is a documented smeared distribution; a separate
+phase-weighted liquid flux, nonzero physical-boundary liquid flux, and separate
+solvent/fissile inventories remain unsupported.
 
 `BoussinesqSolver` can own this fixed-grid budget and advances it after the
 temperature, bubble/boiling, precursor, and material updates. The accepted
 headspace pressure becomes the constant/reconstructed gas-pressure offset for
 the next step. This integration requires the dimensional physical-model
-constructor; the legacy/default solver path rejects it. `free_surface_history()` retains initialization and accepted
-step snapshots, and `write_free_surface_history_csv()` writes their global
+constructor; the legacy/default solver path rejects it.
+`free_surface_history()` retains initialization and accepted step snapshots,
+and `write_free_surface_history_csv()` writes their global
 liquid/gas/headspace/closure data on rank zero. Setting
 `SolutionOutputOptions::include_free_surface_fields`
 writes opt-in `rhoLiquid`, `clearLevel`, `poolLevel`, `headspacePressure`, and
-`poolOccupancy` arrays; the last is a cell-centre visualization approximation
+`poolOccupancy` arrays, plus `liquidMassInventory` in cellwise mode; the
+occupancy field is a cell-centre visualization approximation
 with an explicitly reported volume error.
 
 This coupling does not move the mesh, relocate the escape boundary, change
 incompressible continuity, or provide conservative pool mapping. `MeshHandle`
 can now retain mutable concrete geometry without weakening its existing
-const-observer path, but this is ownership groundwork only. Planar ALE remains
-rejected on every current mesh backend because there is no transactional
-fixed-topology motion API, mutable solver ownership, old/new volume, swept
-mesh-flux, geometry epoch, or cache-invalidation contract. See
+const-observer path. A standalone B0 substrate now provides transactional
+fixed-topology Cartesian X/Y/Z and cylindrical axial motion in serial/MPI,
+plus semi-structured axial motion in serial. It also provides shared geometry
+epochs, old/new volumes, swept mesh flux, per-cell GCL checks, quality rollback,
+and explicit refresh for the core gradient/transport/Rhie--Chow caches. It is
+not connected to a solver. Planar ALE remains rejected because
+mesh-relative old/new-volume transport, generalized continuity, moving-surface
+conditions, complete cache refresh, and atomic multiphysics acceptance are
+still missing. See
 [`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md)
 for equations, all flat configuration keys/defaults/SI units, diagnostics,
 verification scope, and the Milestone-B/C blockers. Vented boiling mass
-accounting is supported, but closed-headspace boiling and steam escape remain
-deferred until saturation depends on absolute pressure and steam has a
-conservative escape path.
+accounting is supported, but closed-headspace boiling and steam transport/
+escape remain deferred until saturation depends on absolute pressure and steam
+has a conservative escape path. Removing or replacing the free-surface model is
+rejected while boiling still owns nonzero submerged steam; the inventory is
+never silently discarded.
 
 ## Dependencies
 

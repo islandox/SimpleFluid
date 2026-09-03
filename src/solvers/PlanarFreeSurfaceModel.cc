@@ -744,7 +744,7 @@ void validate_free_surface_options(const FreeSurfaceOptions& options)
 {
     if (options.mode == FreeSurfaceMode::PlanarALE)
     {
-        throw std::invalid_argument(std::string(planar_ale_immutable_mesh_diagnostic));
+        throw std::invalid_argument(std::string(planar_ale_unavailable_diagnostic));
     }
     if (!std::isfinite(options.validity_warning_relative_level_change) ||
         options.validity_warning_relative_level_change < 0.0)
@@ -760,10 +760,17 @@ void validate_free_surface_options(const FreeSurfaceOptions& options)
     {
         throw std::invalid_argument("free_surface_enabled=true requires free_surface_model='planarVolumeBudget'.");
     }
-    if (options.liquid_mass.mode != LiquidVolumeMode::GlobalConstantMass)
+    if (options.liquid_mass.mode != LiquidVolumeMode::GlobalConstantMass &&
+        options.liquid_mass.mode != LiquidVolumeMode::CellMassInventory)
     {
-        throw std::invalid_argument("free_surface_liquid_volume_model 'cellMassInventory' is not available in "
-                                    "Milestone A; use the explicitly named globalConstantMass fallback.");
+        throw std::invalid_argument("free_surface_liquid_volume_model is invalid.");
+    }
+    if (options.liquid_mass.mode == LiquidVolumeMode::CellMassInventory &&
+        options.liquid_mass.depletion_policy != FreeSurfaceRangePolicy::Error)
+    {
+        throw std::invalid_argument("free_surface_liquid_volume_model 'cellMassInventory' currently requires "
+                                    "free_surface_overflow_policy='error'; local phase acceptance cannot be "
+                                    "conservatively clamped after boiling has accepted vapor.");
     }
     if (options.liquid_mass.initial_liquid_mass &&
         (!std::isfinite(*options.liquid_mass.initial_liquid_mass) || *options.liquid_mass.initial_liquid_mass < 0.0))

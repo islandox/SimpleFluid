@@ -198,6 +198,7 @@ public:
         : d_mesh(std::move(mesh)), d_options(std::move(options)), d_source_alpha_boil(d_mesh, "S_alpha_boil"),
           d_latent_heat_sink(d_mesh, "latentHeatSink"),
           d_condensation_latent_heat_release(d_mesh, "condensationLatentHeatRelease"),
+          d_condensation_mass_rate(d_mesh, "condensationMassRate"),
           d_phase_change_mass_rate(d_mesh, "phaseChangeMassRate"),
           d_rejected_vapor_mass_rate(d_mesh, "rejectedVaporMassRate")
     {
@@ -219,6 +220,7 @@ public:
         d_source_alpha_boil.put_scalar(0.0);
         d_latent_heat_sink.put_scalar(0.0);
         d_condensation_latent_heat_release.put_scalar(0.0);
+        d_condensation_mass_rate.put_scalar(0.0);
         d_phase_change_mass_rate.put_scalar(0.0);
         d_rejected_vapor_mass_rate.put_scalar(0.0);
         d_submerged_steam_mass = {};
@@ -279,6 +281,14 @@ public:
      * global-conservative spatial approximation, not a local steam fraction.
      */
     const field_type& condensation_latent_heat_release() const noexcept { return d_condensation_latent_heat_release; }
+
+    /**
+     * @brief Accepted condensation mass source in kg/(m^3 s).
+     *
+     * This is the local conservative liquid-mass return corresponding exactly
+     * to `condensationLatentHeatRelease / latent_heat`.
+     */
+    const field_type& condensation_mass_rate() const noexcept { return d_condensation_mass_rate; }
 
     /**
      * @brief Accepted evaporation mass source in kg/(m^3 s).
@@ -606,9 +616,12 @@ public:
 
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
+            const auto condensation_mass_rate = d_condensation_release_scratch[owned] / d_options.latent_heat;
+            d_condensation_mass_rate.set_owned_value(static_cast<local_ordinal_type>(owned), condensation_mass_rate);
             d_condensation_latent_heat_release.set_owned_value(
                 static_cast<local_ordinal_type>(owned), d_condensation_release_scratch[owned]);
         }
+        d_condensation_mass_rate.sync_ghosts();
         d_condensation_latent_heat_release.sync_ghosts();
         d_cumulative_accepted_evaporation_mass = diagnostics.cumulative_accepted_evaporation_mass;
         d_cumulative_condensed_liquid_mass = diagnostics.cumulative_condensed_liquid_mass;
@@ -624,6 +637,7 @@ private:
         d_source_alpha_boil.put_scalar(0.0);
         d_latent_heat_sink.put_scalar(0.0);
         d_condensation_latent_heat_release.put_scalar(0.0);
+        d_condensation_mass_rate.put_scalar(0.0);
         d_phase_change_mass_rate.put_scalar(0.0);
         d_rejected_vapor_mass_rate.put_scalar(0.0);
         std::fill(d_pending_collapse_rate.begin(), d_pending_collapse_rate.end(), scalar_type{});
@@ -824,7 +838,8 @@ private:
     {
         d_output_fields = {{"S_alpha_boil", &d_source_alpha_boil}, {"latentHeatSink", &d_latent_heat_sink},
             {"condensationLatentHeatRelease", &d_condensation_latent_heat_release},
-            {"phaseChangeMassRate", &d_phase_change_mass_rate}, {"rejectedVaporMassRate", &d_rejected_vapor_mass_rate}};
+            {"condensationMassRate", &d_condensation_mass_rate}, {"phaseChangeMassRate", &d_phase_change_mass_rate},
+            {"rejectedVaporMassRate", &d_rejected_vapor_mass_rate}};
     }
 
     void add_bulk_boiling(scalar_type time_step, const field_type& temperature, const material_type& material)
@@ -896,6 +911,7 @@ private:
     field_type d_source_alpha_boil;
     field_type d_latent_heat_sink;
     field_type d_condensation_latent_heat_release;
+    field_type d_condensation_mass_rate;
     field_type d_phase_change_mass_rate;
     field_type d_rejected_vapor_mass_rate;
     scalar_type d_submerged_steam_mass = {};

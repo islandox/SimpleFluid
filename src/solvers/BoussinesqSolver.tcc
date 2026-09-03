@@ -681,7 +681,7 @@ auto BoussinesqSolver<Pack>::configure_radiolytic_gas(const Database& database) 
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_radiolytic_gas_model()
 {
     if (!d_radiolytic_gas_model)
         return false;
@@ -779,7 +779,7 @@ auto BoussinesqSolver<Pack>::configure_boiling_source(const Database& database) 
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_boiling_source_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_boiling_source_model()
 {
     if (!d_boiling_source_model)
         return false;
@@ -961,7 +961,7 @@ auto BoussinesqSolver<Pack>::configure_material_feedback(const Database& databas
  * @tparam Pack Tpetra type pack.
  * @return true if a model was removed.
  */
-template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_material_feedback_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_material_feedback_model()
 {
     if (!d_material_feedback_model)
         return false;
@@ -1212,9 +1212,39 @@ auto BoussinesqSolver<Pack>::configure_free_surface(const Database& database) ->
 }
 
 /** @brief Remove all optional free-surface state. */
-template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_free_surface_model() noexcept
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_free_surface_model()
 {
     const auto removed = static_cast<bool>(d_free_surface_model) || static_cast<bool>(d_liquid_mass_inventory);
+    if (removed && d_boiling_source_model)
+    {
+        const auto local_steam_mass = d_boiling_source_model->global_submerged_steam_mass();
+        const int local_invalid_mass = !std::isfinite(local_steam_mass) || local_steam_mass < scalar_type{} ? 1 : 0;
+        int any_invalid_mass = 0;
+        const auto communicator = d_mesh->owned_cell_map()->getComm();
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid_mass, &any_invalid_mass);
+        if (any_invalid_mass != 0)
+        {
+            throw std::logic_error(
+                "Cannot remove the planar free-surface model while the boiling steam inventory is invalid.");
+        }
+
+        scalar_type minimum_steam_mass{};
+        scalar_type maximum_steam_mass{};
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_steam_mass, &minimum_steam_mass);
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_steam_mass, &maximum_steam_mass);
+        if (minimum_steam_mass != maximum_steam_mass)
+        {
+            throw std::logic_error(
+                "Cannot remove the planar free-surface model because the boiling steam inventory does not match on "
+                "every mesh rank.");
+        }
+        if (maximum_steam_mass > scalar_type{})
+        {
+            throw std::logic_error(
+                "Cannot remove the planar free-surface model while boiling owns nonzero submerged steam; retain the "
+                "free-surface owner or reconstruct the solver from a state with zero submerged steam.");
+        }
+    }
     d_free_surface_model.reset();
     d_liquid_mass_inventory.reset();
     d_clear_level.reset();
@@ -1365,7 +1395,8 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
     }
     output << "time_s,time_step_s,liquid_mass_kg,cumulative_evaporated_mass_kg,"
               "cumulative_condensed_mass_kg,dryout_mass_deficit_kg,liquid_mass_residual_kg,"
-              "liquid_mass_residual_normalized,liquid_volume_m3,submerged_bubble_volume_m3,pool_volume_m3,"
+              "liquid_mass_residual_normalized,liquid_step_mass_residual_kg,"
+              "liquid_step_mass_residual_normalized,liquid_volume_m3,submerged_bubble_volume_m3,pool_volume_m3,"
               "clear_level_m,pool_level_m,clear_level_rate_m_per_s,pool_level_rate_m_per_s,"
               "surface_area_m2,headspace_volume_m3,headspace_pressure_pa,headspace_temperature_k,"
               "headspace_total_moles,overflow_volume_m3,dryout_volume_deficit_m3,"
@@ -1391,7 +1422,8 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
         output << surface.time << ',' << surface.time_step << ',' << liquid.total_mass << ','
                << liquid.cumulative_evaporated_mass << ',' << liquid.cumulative_condensed_mass << ','
                << liquid.dryout_mass_deficit << ',' << liquid.mass_balance_residual << ','
-               << liquid.normalized_mass_balance_residual << ',' << surface.liquid_volume << ','
+               << liquid.normalized_mass_balance_residual << ',' << liquid.step_mass_balance_residual << ','
+               << liquid.normalized_step_mass_balance_residual << ',' << surface.liquid_volume << ','
                << surface.submerged_bubble_volume << ',' << surface.pool_volume << ',' << surface.clear_level << ','
                << surface.pool_level << ',' << surface.clear_level_rate << ',' << surface.pool_level_rate << ','
                << surface.surface_area << ',' << surface.headspace.volume << ',' << surface.headspace.pressure << ','
@@ -1826,8 +1858,7 @@ void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
         if (!dependencies_already_refreshed)
         {
             initialize_radiolytic_gas_state(d_step_index == 0);
-            if (d_material_feedback_model && d_radiolytic_gas_model &&
-                d_radiolytic_gas_model->supplies_void_fraction())
+            if (d_material_feedback_model && d_radiolytic_gas_model && d_radiolytic_gas_model->supplies_void_fraction())
             {
                 refresh_material_feedback(d_time);
             }
@@ -1881,6 +1912,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_free_surface(
 
     scalar_type evaporated_mass{};
     scalar_type condensed_mass{};
+    const field_type* evaporation_mass_rate = nullptr;
+    const field_type* condensation_mass_rate = nullptr;
     if (d_boiling_source_model && d_boiling_source_model->enabled())
     {
         if (d_boiling_source_model->phase_change_completion_pending())
@@ -1890,18 +1923,48 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_free_surface(
         }
         evaporated_mass = d_boiling_source_model->accepted_evaporation_mass_this_step();
         condensed_mass = d_boiling_source_model->condensed_liquid_mass_this_step();
+        evaporation_mass_rate = &d_boiling_source_model->phase_change_mass_rate();
+        condensation_mass_rate = &d_boiling_source_model->condensation_mass_rate();
     }
     d_liquid_mass_inventory->updatePureLiquidDensity(
         [this](local_ordinal_type cell_lid) { return pure_liquid_density(cell_lid); });
 
     FreeSurfaceAccountingPreview preview;
     const auto current_liquid = d_liquid_mass_inventory->diagnostics();
-    const auto phase_change_preview = d_liquid_mass_inventory->previewPhaseChange(evaporated_mass, condensed_mass);
+    const auto phase_change_preview = [&]
+    {
+        if (d_liquid_mass_inventory->mode() == LiquidVolumeMode::CellMassInventory)
+        {
+            return d_liquid_mass_inventory->previewCellwiseAdvance(time_step, projected_face_fluxes(),
+                evaporation_mass_rate, condensation_mass_rate, LinearSolverOptions{});
+        }
+        return d_liquid_mass_inventory->previewPhaseChange(evaporated_mass, condensed_mass);
+    }();
     preview.liquid = phase_change_preview.diagnostics();
+    if (d_liquid_mass_inventory->mode() == LiquidVolumeMode::CellMassInventory && d_boiling_source_model &&
+        d_boiling_source_model->enabled())
+    {
+        const auto integrated_evaporation =
+            preview.liquid.cumulative_evaporated_mass - current_liquid.cumulative_evaporated_mass;
+        const auto integrated_condensation =
+            preview.liquid.cumulative_condensed_mass - current_liquid.cumulative_condensed_mass;
+        const auto scale = std::max({scalar_type{1}, std::abs(evaporated_mass), std::abs(condensed_mass)});
+        const auto tolerance = scalar_type{1024} * std::numeric_limits<scalar_type>::epsilon() * scale;
+        if (std::abs(integrated_evaporation - evaporated_mass) > tolerance ||
+            std::abs(integrated_condensation - condensed_mass) > tolerance)
+        {
+            throw std::runtime_error(
+                "Cellwise liquid-mass sources disagree with the accepted boiling phase-change totals.");
+        }
+    }
     preview.liquid_volume_deficit = (preview.liquid.dryout_mass_deficit - current_liquid.dryout_mass_deficit) *
                                     preview.liquid.mass_weighted_specific_volume;
     d_free_surface_model->update(make_free_surface_update(d_time + time_step, false, &preview));
     d_liquid_mass_inventory->commitPhaseChange(phase_change_preview);
+    if (phase_change_preview.transportStatistics())
+    {
+        d_last_step_statistics.add(*phase_change_preview.transportStatistics());
+    }
     if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && d_radiolytic_gas_model->supplies_void_fraction())
     {
         const auto pressure_mode = d_radiolytic_gas_model->options().pressure_mode;
@@ -2709,6 +2772,11 @@ auto BoussinesqSolver<Pack>::solution_writer(const SolutionOutputOptions& output
     if (output_options.include_free_surface_fields && d_free_surface_model && d_free_surface_model->initialized())
     {
         writer.add_scalar_cell_data("rhoLiquid", collect_scalar_field(rho_liquid()));
+        if (d_liquid_mass_inventory->mode() == LiquidVolumeMode::CellMassInventory)
+        {
+            writer.add_scalar_cell_data(
+                "liquidMassInventory", collect_scalar_field(d_liquid_mass_inventory->cellMassInventory()));
+        }
         writer.add_scalar_cell_data("clearLevel", collect_scalar_field(clear_level()));
         writer.add_scalar_cell_data("poolLevel", collect_scalar_field(pool_level()));
         writer.add_scalar_cell_data("headspacePressure", collect_scalar_field(headspace_pressure()));

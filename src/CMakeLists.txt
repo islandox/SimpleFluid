@@ -107,6 +107,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
     geometry/Mesh.cc
     geometry/MeshHandle.cc
+    geometry/PlanarALEMeshMotion.cc
     geometry/MeshReorderingFactory.cc
     geometry/SolidSubdomain.cc
     geometry/STKMesh.cc
@@ -433,6 +434,7 @@ simplefluid_require_complete_pgo(SimpleFluidSolvers)
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
     geometry/MeshReorderingFactory.cc
+    geometry/PlanarALEMeshMotion.cc
     geometry/SolidSubdomain.cc
     geometry/mesh/OrthogonalLocalGlobalIndexer.cc
     geometry/mesh/PartitionedMeshBase.cc

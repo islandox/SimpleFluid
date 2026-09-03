@@ -72,6 +72,13 @@ SimpleFluid::FreeSurfaceOptions free_surface_options(double initial_volume = 0.5
     return options;
 }
 
+SimpleFluid::FreeSurfaceOptions cell_mass_free_surface_options(double initial_volume = 0.5)
+{
+    auto options = free_surface_options(initial_volume);
+    options.liquid_mass.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    return options;
+}
+
 SimpleFluid::RadiolyticGasOptions sheng_options()
 {
     SimpleFluid::RadiolyticGasOptions options;
@@ -317,6 +324,162 @@ TEST(BoussinesqFreeSurfaceTest, BoilingCompletionRemovesAcceptedLiquidMassExactl
         phase.accepted_evaporation_mass, 1.0e-14);
 }
 
+TEST(BoussinesqFreeSurfaceTest, CellMassInventoryZeroFlowStepPreservesLocalAndGlobalMass)
+{
+    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    solver.configure_free_surface(cell_mass_free_surface_options());
+    solver.initialize_heated_box(300.0, 300.0);
+    const auto initial_cell_mass = solver.liquid_mass_inventory().cellMassInventory().value(0);
+    const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+
+    solver.step();
+
+    const auto diagnostics = solver.liquid_mass_inventory().diagnostics();
+    EXPECT_EQ(solver.liquid_mass_inventory().mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
+    EXPECT_NEAR(solver.liquid_mass_inventory().cellMassInventory().value(0), initial_cell_mass, 1.0e-10);
+    EXPECT_NEAR(diagnostics.total_mass, initial_mass, 1.0e-10);
+    EXPECT_NEAR(diagnostics.liquid_volume, 0.5, 1.0e-12);
+    EXPECT_NEAR(diagnostics.step_mass_balance_residual, 0.0, 1.0e-10);
+    EXPECT_NEAR(diagnostics.mass_balance_residual, 0.0, 1.0e-10);
+}
+
+TEST(BoussinesqFreeSurfaceTest, CellMassInventoryConsumesAcceptedLocalBoilingSourceOnce)
+{
+    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.9;
+    solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 300.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+    solver.configure_free_surface(cell_mass_free_surface_options());
+    solver.initialize_heated_box(301.0, 301.0);
+    const auto initial_cell_mass = solver.liquid_mass_inventory().cellMassInventory().value(0);
+    const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+
+    solver.step();
+
+    const auto& phase = boiling_model.last_phase_change_diagnostics();
+    const auto liquid = solver.liquid_mass_inventory().diagnostics();
+    ASSERT_GT(phase.accepted_evaporation_mass, 0.0);
+    EXPECT_NEAR(
+        liquid.total_mass, initial_mass - phase.accepted_evaporation_mass + phase.condensed_liquid_mass, 1.0e-9);
+    EXPECT_NEAR(solver.liquid_mass_inventory().cellMassInventory().value(0),
+        initial_cell_mass - phase.accepted_evaporation_mass + phase.condensed_liquid_mass, 1.0e-9);
+    EXPECT_NEAR(liquid.cumulative_evaporated_mass, phase.accepted_evaporation_mass, 1.0e-14);
+    EXPECT_NEAR(liquid.cumulative_condensed_mass, phase.condensed_liquid_mass, 1.0e-14);
+    EXPECT_NEAR(liquid.step_mass_balance_residual, 0.0, 1.0e-9);
+}
+
+TEST(BoussinesqFreeSurfaceTest, CellMassInventoryReturnsPositiveCondensateExactlyOnce)
+{
+    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.9;
+    void_options.alpha_collapse_time = 0.5;
+    solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 300.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+    solver.configure_free_surface(cell_mass_free_surface_options());
+    solver.initialize_heated_box(301.0, 301.0);
+    const auto initial_liquid_mass = solver.liquid_mass_inventory().totalMass();
+
+    solver.step();
+    const auto first_phase = boiling_model.last_phase_change_diagnostics();
+    const auto first_liquid = solver.liquid_mass_inventory().diagnostics();
+    const auto first_cell_mass = solver.liquid_mass_inventory().cellMassInventory().value(0);
+    ASSERT_GT(first_phase.accepted_evaporation_mass, 0.0);
+    EXPECT_DOUBLE_EQ(first_phase.condensed_liquid_mass, 0.0);
+    EXPECT_NEAR(first_phase.submerged_steam_mass, first_phase.accepted_evaporation_mass, 1.0e-14);
+    EXPECT_NEAR(first_liquid.total_mass, initial_liquid_mass - first_phase.accepted_evaporation_mass, 1.0e-9);
+
+    solver.temperature().put_scalar(299.0);
+    solver.step();
+
+    const auto second_phase = boiling_model.last_phase_change_diagnostics();
+    const auto second_liquid = solver.liquid_mass_inventory().diagnostics();
+    const auto cell_volume = solver.temperature().mesh().cell_volume(0);
+    const auto returned_mass = boiling_model.condensation_mass_rate().value(0) * cell_volume * time_options().time_step;
+    ASSERT_GT(second_phase.condensed_liquid_mass, 0.0);
+    EXPECT_DOUBLE_EQ(second_phase.accepted_evaporation_mass, 0.0);
+    EXPECT_NEAR(returned_mass, second_phase.condensed_liquid_mass, 1.0e-14);
+    EXPECT_NEAR(boiling_model.condensation_latent_heat_release().value(0),
+        boiling_model.condensation_mass_rate().value(0) * boiling.latent_heat, 1.0e-14);
+    EXPECT_NEAR(second_liquid.total_mass, first_liquid.total_mass + second_phase.condensed_liquid_mass, 1.0e-9);
+    EXPECT_NEAR(solver.liquid_mass_inventory().cellMassInventory().value(0),
+        first_cell_mass + second_phase.condensed_liquid_mass / cell_volume, 1.0e-9);
+    EXPECT_NEAR(second_liquid.cumulative_evaporated_mass, first_phase.accepted_evaporation_mass, 1.0e-14);
+    EXPECT_NEAR(second_liquid.cumulative_condensed_mass, second_phase.condensed_liquid_mass, 1.0e-14);
+    EXPECT_NEAR(second_liquid.cumulative_evaporated_mass, second_phase.cumulative_accepted_evaporation_mass, 1.0e-14);
+    EXPECT_NEAR(second_liquid.cumulative_condensed_mass, second_phase.cumulative_condensed_liquid_mass, 1.0e-14);
+    EXPECT_NEAR(second_phase.submerged_steam_mass,
+        first_phase.submerged_steam_mass - second_phase.condensed_liquid_mass, 1.0e-14);
+    EXPECT_NEAR(second_liquid.total_mass + second_phase.submerged_steam_mass, initial_liquid_mass, 1.0e-9);
+    EXPECT_NEAR(second_phase.condensation_latent_energy_release,
+        second_phase.condensed_liquid_mass * boiling.latent_heat, 1.0e-14);
+    EXPECT_NEAR(second_liquid.step_mass_balance_residual, 0.0, 1.0e-9);
+}
+
+TEST(BoussinesqFreeSurfaceTest, RejectsRemovalWhileBoilingOwnsSubmergedSteam)
+{
+    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.9;
+    solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 300.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+    solver.configure_free_surface(free_surface_options());
+    solver.initialize_heated_box(301.0, 301.0);
+    solver.step();
+
+    const auto steam_mass = boiling_model.global_submerged_steam_mass();
+    ASSERT_GT(steam_mass, 0.0);
+    try
+    {
+        static_cast<void>(solver.remove_free_surface_model());
+        FAIL() << "Expected nonzero submerged steam to block free-surface removal.";
+    }
+    catch (const std::logic_error& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("nonzero submerged steam"), std::string::npos);
+    }
+    EXPECT_NE(solver.find_free_surface_model(), nullptr);
+    EXPECT_NE(solver.find_liquid_mass_inventory(), nullptr);
+    EXPECT_DOUBLE_EQ(boiling_model.global_submerged_steam_mass(), steam_mass);
+}
+
+TEST(BoussinesqFreeSurfaceTest, AllowsRemovalWhileBoilingSteamInventoryIsZero)
+{
+    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+    solver.configure_free_surface(free_surface_options());
+    solver.initialize_heated_box(300.0, 300.0);
+
+    ASSERT_DOUBLE_EQ(boiling_model.global_submerged_steam_mass(), 0.0);
+    EXPECT_TRUE(solver.remove_free_surface_model());
+    EXPECT_EQ(solver.find_free_surface_model(), nullptr);
+    EXPECT_EQ(solver.find_liquid_mass_inventory(), nullptr);
+}
+
 TEST(BoussinesqFreeSurfaceTest, TransfersOnlyExactSubmergedBubbleEscapeToVent)
 {
     Solver solver(make_mesh(), {}, time_options(), {}, material_options());
@@ -372,6 +535,7 @@ TEST(BoussinesqFreeSurfaceTest, PublishesOptInFieldsAndOccupancyApproximationErr
     SimpleFluid::Database database;
     database.set("free_surface_enabled", true);
     database.set("free_surface_model", std::string("planarVolumeBudget"));
+    database.set("free_surface_liquid_volume_model", std::string("cellMassInventory"));
     database.set("free_surface_initial_liquid_volume", 0.75);
     database.set("free_surface_vessel_model", std::string("constantArea"));
     database.set("free_surface_bottom_elevation", 0.0);
@@ -395,7 +559,9 @@ TEST(BoussinesqFreeSurfaceTest, PublishesOptInFieldsAndOccupancyApproximationErr
 
     const auto default_contents = read_file(default_file);
     const auto selected_contents = read_file(selected_file);
-    for (const auto* name : {"rhoLiquid", "clearLevel", "poolLevel", "headspacePressure", "poolOccupancy"})
+    EXPECT_EQ(solver.liquid_mass_inventory().mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
+    for (const auto* name :
+        {"rhoLiquid", "liquidMassInventory", "clearLevel", "poolLevel", "headspacePressure", "poolOccupancy"})
     {
         const auto marker = std::string("Name=\"") + name + "\"";
         EXPECT_EQ(default_contents.find(marker), std::string::npos);
@@ -440,6 +606,8 @@ TEST(BoussinesqFreeSurfaceTest, RecordsInitializationAndAcceptedStepHistoryWithF
     EXPECT_NE(contents.find("volume_closure_residual_normalized"), std::string::npos);
     EXPECT_NE(contents.find("gas_closure_normalized"), std::string::npos);
     EXPECT_NE(contents.find("dryout_mass_deficit_kg"), std::string::npos);
+    EXPECT_NE(contents.find("liquid_step_mass_residual_kg"), std::string::npos);
+    EXPECT_NE(contents.find("liquid_step_mass_residual_normalized"), std::string::npos);
     EXPECT_NE(contents.find("configured_level_underflow_m"), std::string::npos);
     EXPECT_NE(contents.find("configured_level_overflow_m"), std::string::npos);
     EXPECT_NE(contents.find("boiling_condensation_latent_energy_release_j"), std::string::npos);
@@ -644,6 +812,37 @@ TEST(BoussinesqFreeSurfaceTest, FailedStepRetainsEscapeButRejectsUnsafeFullStepR
     EXPECT_EQ(solver.step_index(), 0);
 }
 
+TEST(BoussinesqFreeSurfaceTest, CellMassInventoryStepIsPartitionIndependent)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 1, 1));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() < 2)
+    {
+        GTEST_SKIP() << "requires at least two MPI ranks";
+    }
+    Solver solver(mesh, {}, time_options(), {}, material_options());
+    solver.configure_free_surface(cell_mass_free_surface_options());
+    solver.initialize_heated_box(300.0, 300.0);
+
+    solver.step();
+
+    const auto diagnostics = solver.liquid_mass_inventory().diagnostics();
+    EXPECT_NEAR(diagnostics.total_mass, 500.0, 1.0e-8);
+    EXPECT_NEAR(diagnostics.liquid_volume, 0.5, 1.0e-10);
+    EXPECT_NEAR(diagnostics.step_mass_balance_residual, 0.0, 1.0e-8);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        EXPECT_NEAR(
+            solver.liquid_mass_inventory().cellMassInventory().value(static_cast<Pack::local_ordinal_type>(owned)),
+            125.0, 1.0e-8);
+    }
+    double minimum_mass{};
+    double maximum_mass{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &diagnostics.total_mass, &minimum_mass);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &diagnostics.total_mass, &maximum_mass);
+    EXPECT_DOUBLE_EQ(minimum_mass, maximum_mass);
+}
+
 TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentOptions)
 {
     // Give every rank owned work so an early rank-local empty-mesh failure
@@ -662,6 +861,44 @@ TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentOptions)
     }
     EXPECT_THROW(solver.configure_free_surface(options), std::invalid_argument);
     EXPECT_EQ(solver.find_free_surface_model(), nullptr);
+}
+
+TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRemovalWhileBoilingOwnsSubmergedSteam)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 1, 1));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() < 2)
+    {
+        GTEST_SKIP() << "requires at least two MPI ranks";
+    }
+
+    Solver solver(mesh, {}, time_options(), {}, material_options());
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.9;
+    solver.configure_scalar_void_fraction(void_options);
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 300.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+    solver.configure_free_surface(free_surface_options());
+    solver.initialize_heated_box(301.0, 301.0);
+    solver.step();
+
+    ASSERT_GT(boiling_model.global_submerged_steam_mass(), 0.0);
+    try
+    {
+        static_cast<void>(solver.remove_free_surface_model());
+        FAIL() << "Expected nonzero submerged steam to block free-surface removal.";
+    }
+    catch (const std::logic_error& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("nonzero submerged steam"), std::string::npos);
+    }
+    EXPECT_NE(solver.find_free_surface_model(), nullptr);
+    EXPECT_NE(solver.find_liquid_mass_inventory(), nullptr);
 }
 
 TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentExistingStateDuringConfiguration)

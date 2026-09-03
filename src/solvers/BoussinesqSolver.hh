@@ -201,7 +201,7 @@ public:
     /**
      * @brief Remove the optional radiolytic gas model, if present.
      */
-    bool remove_radiolytic_gas_model() noexcept;
+    bool remove_radiolytic_gas_model();
     /**
      * @brief Return the mutable radiolytic gas model, or nullptr when absent.
      */
@@ -222,7 +222,7 @@ public:
     /**
      * @brief Remove the optional boiling source model, if present.
      */
-    bool remove_boiling_source_model() noexcept;
+    bool remove_boiling_source_model();
     /**
      * @brief Return the mutable boiling source model, or nullptr when absent.
      */
@@ -260,7 +260,7 @@ public:
     /**
      * @brief Remove the optional material-feedback model, if present.
      */
-    bool remove_material_feedback_model() noexcept;
+    bool remove_material_feedback_model();
     /**
      * @brief Return the mutable material-feedback model, or nullptr.
      */
@@ -313,7 +313,7 @@ public:
      * @note Invoke consistently on every mesh rank before the next collective
      *       solver step. Rank-divergent removal is rejected collectively.
      */
-    bool remove_free_surface_model() noexcept;
+    bool remove_free_surface_model();
     /** Return the mutable configured free-surface model, or nullptr. */
     free_surface_model_type* find_free_surface_model() noexcept;
     /** Return the configured free-surface model, or nullptr. */

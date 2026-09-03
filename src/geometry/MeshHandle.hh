@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <concepts>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -362,10 +363,10 @@ public:
      * mutable mesh pointer. The const visit() overload remains a read-only
      * observer for every handle.
      *
-     * @warning This is mutable-ownership groundwork, not a geometry-motion
-     *          transaction. Changing geometry after fields or geometry caches
-     *          have been built is unsupported until epoch-based invalidation
-     *          and fixed-topology motion are implemented.
+     * @warning This low-level ownership seam does not publish a geometry epoch.
+     *          Direct geometry changes through it after fields or geometry
+     *          caches have been constructed are unsupported. Use a controlled
+     *          mesh-motion transaction instead.
      *
      * @throws std::logic_error If the handle was built from a const mesh.
      */
@@ -389,6 +390,30 @@ public:
     bool has_mutable_geometry() const noexcept
     {
         return d_mutable_mesh.has_value();
+    }
+
+    /**
+     * @brief Monotone revision of the fixed-topology geometry.
+     *
+     * Topology, global IDs, maps, and partitioning are not part of this
+     * revision. Geometry-dependent caches may retain their graph structure,
+     * but must refresh numeric data whenever this value changes.
+     */
+    std::uint64_t geometry_epoch() const noexcept
+    {
+        return std::visit(
+            [](const auto& mesh) noexcept -> std::uint64_t
+            {
+                if constexpr (requires { mesh->geometry_epoch(); })
+                {
+                    return mesh->geometry_epoch();
+                }
+                else
+                {
+                    return 0;
+                }
+            },
+            d_mesh);
     }
 
     bool is_stk() const noexcept

@@ -37,6 +37,48 @@ Focused native regressions cover unstructured geometry, operators,
 faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
 partitioned-unstructured coverage.
 
+### Liquid-mass inventory transactions
+
+`LiquidMassInventory` defaults to the global `globalConstantMass` approximation.
+The opt-in `cellMassInventory` mode owns `liquidMassInventory` in kg/m3 of fixed
+reference volume and advances it with the accepted projected single-continuum
+face-volume flux through `previewCellwiseAdvance()`. This is not a separate
+phase-weighted liquid flux. Keep that trial state private until
+`commitPhaseChange()` follows a successful planar closure; do not publish or
+consume the trial field directly. Refreshing `rhoLiquid` invalidates every
+older global or cellwise preview because its derived volume is stale. Cellwise
+mode currently requires `error` depletion and zero physical-boundary liquid
+flux because inlet composition and post-boiling local clipping have no
+conservative contract. Always derive liquid volume from this inventory and
+pure `rhoLiquid`, never void-reduced mixture density. Its physical mass-closure
+gate must remain independent of the Krylov tolerance; a loose linear solve must
+fail conservation rather than relax it. Separate solvent, solute, and fissile
+inventories remain future work.
+
+When free-surface coupling has enabled boiling phase-inventory tracking,
+`remove_free_surface_model()` must reject removal while submerged steam remains.
+Do not weaken that guard or silently reset the steam ledger; add a conservative
+transfer/disposition policy first.
+
+### Geometry epochs and motion transactions
+
+`PlanarALEMeshMotion` is a geometry/GCL substrate, not an enabled ALE solver.
+It supports fixed-topology Cartesian X/Y/Z and cylindrical axial motion in
+serial/MPI plus serial `SemiStructuredXY_Z` axial motion. Use its
+`begin_trial()` and exactly one of `accept_trial()` or `rollback_trial()`;
+never update structured edge arrays directly after fields or caches exist.
+The exclusive controller lease and geometry epoch belong to the shared
+concrete mesh, so every alias `MeshHandle` observes the same revision.
+
+`CellGradientCache`, `TransportGeometryCache`, and Rhie--Chow face-flux
+workspaces reject access after an epoch change until explicitly refreshed.
+Preserve that fail-stale behavior when adding geometry-dependent caches. A
+topology-stable graph may survive motion, but numeric coefficients and any
+preconditioner built from them may not. Solver integration must refresh every
+remaining geometry consumer atomically before `planarALE` can be enabled.
+Raw mutation through `MeshHandle::visit_mutable()` does not publish an epoch
+and is therefore unsupported after field/cache construction.
+
 ## Repository map and dependency direction
 
 Production code is layered from low-level data types toward applications:
@@ -83,6 +125,8 @@ Important entry points for a manual review are:
 
 - `src/geometry/mesh/MeshBase.hh` for the CRTP mesh contract.
 - `src/geometry/MeshHandle.hh` for runtime mesh type erasure.
+- `src/geometry/MeshMotionModel.hh` and `src/geometry/PlanarALEMeshMotion.hh`
+  for the standalone fixed-topology motion transaction and GCL substrate.
 - `src/geometry/MeshReorderingFactory.hh` for collective selected-first local
   cell ordering and its owned/ghost range certificate.
 - `src/geometry/SolidSubdomain.hh` for compact selected-cell mesh views and
@@ -91,6 +135,8 @@ Important entry points for a manual review are:
 - `src/fields/MeshFieldTraits.hh` for native-versus-legacy field selection.
 - `src/FVM/Operators.hh` and `src/FVM/TransportSystem.hh` for the public FVM
   operator surface.
+- `src/solvers/PlanarFreeSurfaceModel.hh` for vessel/headspace closure and the
+  global or cellwise liquid-mass inventory contracts.
 - `src/FVM/details` for mapped-mesh implementations and reusable geometry,
   boundary, gradient, and flux caches.
 - `src/equations/Equation.hh` and `src/problems/Problem.hh` for the framework
