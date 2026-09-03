@@ -678,10 +678,12 @@ writes opt-in `rhoLiquid`, `clearLevel`, `poolLevel`, `headspacePressure`, and
 with an explicitly reported volume error.
 
 This coupling does not move the mesh, relocate the escape boundary, change
-incompressible continuity, or provide conservative pool mapping. Planar ALE is
-rejected on every current mesh backend because `MeshHandle` has immutable
-geometry and no old/new volume, swept mesh-flux, geometry-epoch, or
-cache-invalidation contract. See
+incompressible continuity, or provide conservative pool mapping. `MeshHandle`
+can now retain mutable concrete geometry without weakening its existing
+const-observer path, but this is ownership groundwork only. Planar ALE remains
+rejected on every current mesh backend because there is no transactional
+fixed-topology motion API, mutable solver ownership, old/new volume, swept
+mesh-flux, geometry epoch, or cache-invalidation contract. See
 [`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md)
 for equations, all flat configuration keys/defaults/SI units, diagnostics,
 verification scope, and the Milestone-B/C blockers. Vented boiling mass

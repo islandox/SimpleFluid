@@ -34,6 +34,21 @@ MeshHandle<Pack>::MeshHandle(
 }
 
 /**
+ * @brief Construct and distribute a mutable Cartesian mesh handle.
+ *
+ * @param mesh Mutable Cartesian mesh to retain.
+ * @param options Partition override and ghost-layer configuration.
+ */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableCartesianPtr mesh,
+    DistributionOptions options)
+    : MeshHandle(CartesianPtr(mesh), options)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
+/**
  * @brief Construct and distribute a cylindrical mesh handle.
  *
  * @param mesh Cylindrical mesh to wrap.
@@ -49,6 +64,21 @@ MeshHandle<Pack>::MeshHandle(
 }
 
 /**
+ * @brief Construct and distribute a mutable cylindrical mesh handle.
+ *
+ * @param mesh Mutable cylindrical mesh to retain.
+ * @param options Partition override and ghost-layer configuration.
+ */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableCylindricalPtr mesh,
+    DistributionOptions options)
+    : MeshHandle(CylindricalPtr(mesh), options)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
+/**
  * @brief Construct a serial semi-structured mesh handle.
  *
  * @param mesh Semi-structured mesh to wrap.
@@ -58,6 +88,14 @@ MeshHandle<Pack>::MeshHandle(SemiStructuredPtr mesh)
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_semi_structured(std::get<SemiStructuredPtr>(d_mesh));
+}
+
+/** @brief Construct a mutable serial semi-structured mesh handle. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableSemiStructuredPtr mesh)
+    : MeshHandle(SemiStructuredPtr(mesh))
+{
+    d_mutable_mesh.emplace(std::move(mesh));
 }
 
 /**
@@ -70,6 +108,14 @@ MeshHandle<Pack>::MeshHandle(UnstructuredPtr mesh)
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_unstructured(std::get<UnstructuredPtr>(d_mesh));
+}
+
+/** @brief Construct a mutable serial unstructured mesh handle. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableUnstructuredPtr mesh)
+    : MeshHandle(UnstructuredPtr(mesh))
+{
+    d_mutable_mesh.emplace(std::move(mesh));
 }
 
 /**
@@ -89,6 +135,16 @@ MeshHandle<Pack>::MeshHandle(
         Tpetra::getDefaultComm());
 }
 
+/** @brief Construct a mutable handle from an indexed unstructured mesh. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableUnstructuredPtr mesh,
+    const unstructured_indexer_type& indexer)
+    : MeshHandle(UnstructuredPtr(mesh), indexer)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
 /**
  * @brief Construct a handle from an existing STK mesh adapter.
  *
@@ -101,6 +157,20 @@ MeshHandle<Pack>::MeshHandle(STKAdapterPtr mesh)
     initialize_stk(std::get<STKAdapterPtr>(d_mesh));
 }
 
+/** @brief Construct a mutable handle around a legacy STK adapter. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableSTKAdapterPtr mesh)
+    : MeshHandle(STKAdapterPtr(mesh))
+{
+    if (!mesh->has_mutable_mesh())
+    {
+        throw std::invalid_argument(
+            "MeshHandle requires mutable legacy geometry when constructed "
+            "from a mutable STK adapter pointer.");
+    }
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
 /**
  * @brief Adapt a legacy distributed mesh and construct its handle.
  *
@@ -108,6 +178,14 @@ MeshHandle<Pack>::MeshHandle(STKAdapterPtr mesh)
  */
 template<TpetraTypePack Pack>
 MeshHandle<Pack>::MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh)
+    : MeshHandle(STKAdapterPtr(
+          std::make_shared<STKAdapter>(std::move(mesh))))
+{
+}
+
+/** @brief Adapt a mutable legacy distributed mesh and construct its handle. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh)
     : MeshHandle(std::make_shared<STKAdapter>(std::move(mesh)))
 {
 }
