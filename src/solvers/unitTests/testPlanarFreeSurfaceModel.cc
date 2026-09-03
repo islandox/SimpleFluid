@@ -167,7 +167,7 @@ TEST(FreeSurfaceOptionsTest, DefaultIsDisabledAndFactoryReturnsNull)
     EXPECT_EQ(SimpleFluid::make_planar_free_surface_model(options), nullptr);
 }
 
-TEST(FreeSurfaceOptionsTest, PlanarAleUsesStableImmutableMeshDiagnostic)
+TEST(FreeSurfaceOptionsTest, PlanarAleUsesStableUnsupportedMotionDiagnostic)
 {
     SimpleFluid::Database database;
     database.set("free_surface_model", std::string("planarALE"));

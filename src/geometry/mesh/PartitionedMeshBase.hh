@@ -19,6 +19,7 @@
 #include <Tpetra_Map.hpp>
 
 #include <concepts>
+#include <cstddef>
 #include <limits>
 #include <ranges>
 #include <span>
@@ -88,8 +89,54 @@ public:
         Teuchos::RCP<const typename Pack::comm_type> comm =
             Tpetra::getDefaultComm());
 
+    /**
+     * @brief Couple mutable rank-local geometry with global indexing and maps.
+     *
+     * The read-only mesh_ptr() API remains available to fields and operators;
+     * mutable_mesh_ptr() exposes the retained mutable owner to MeshHandle.
+     */
+    PartitionedMesh(
+        SP<mesh_type> mesh,
+        indexer_type indexer,
+        Teuchos::RCP<const typename Pack::comm_type> comm =
+            Tpetra::getDefaultComm());
+
+    /** @brief Preserve null-pointer validation without cv-overload ambiguity. */
+    PartitionedMesh(
+        std::nullptr_t,
+        indexer_type indexer,
+        Teuchos::RCP<const typename Pack::comm_type> comm =
+            Tpetra::getDefaultComm())
+        : PartitionedMesh(
+              SP<const mesh_type>{},
+              std::move(indexer),
+              std::move(comm))
+    {
+    }
+
+    /** @brief Retain mutable geometry supplied through a mesh subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, mesh_type>
+                  && std::derived_from<Derived, mesh_type>)
+    PartitionedMesh(
+        SP<Derived> mesh,
+        indexer_type indexer,
+        Teuchos::RCP<const typename Pack::comm_type> comm =
+            Tpetra::getDefaultComm())
+        : PartitionedMesh(
+              std::static_pointer_cast<mesh_type>(std::move(mesh)),
+              std::move(indexer),
+              std::move(comm))
+    {
+    }
+
     const mesh_type& mesh() const noexcept;
     SP<const mesh_type> mesh_ptr() const noexcept;
+    SP<mesh_type> mutable_mesh_ptr() noexcept
+    {
+        return d_mutable_mesh;
+    }
     const indexer_type& indexer() const noexcept;
 
     size_t num_global_cells() const noexcept;
@@ -213,6 +260,7 @@ private:
         const Teuchos::RCP<const typename Pack::comm_type>& comm);
 
     SP<const mesh_type> d_mesh;
+    SP<mesh_type> d_mutable_mesh;
     indexer_type d_indexer;
     std::unordered_map<int, BoundaryFaceBatch> d_boundary_batches;
     Teuchos::RCP<const map_type> d_owned_cell_map;

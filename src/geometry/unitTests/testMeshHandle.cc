@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshHandle.hh"
+#include "geometry/STKMesh.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -20,8 +21,10 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <numbers>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -33,6 +36,7 @@ using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+using ConcreteSTK = SimpleFluid::STKMesh<Pack>;
 using PartitionedUnstructured =
     SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
 
@@ -98,6 +102,7 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
          {&cartesian_handle, &cylindrical_handle,
           &semi_structured_handle, &unstructured_handle})
     {
+        EXPECT_TRUE(handle->has_mutable_geometry());
         EXPECT_EQ(
             handle->indexer().num_owned_cells(),
             handle->num_owned_cells());
@@ -133,6 +138,126 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
             unstructured_handle.indexer().cell_local_id(global_id),
             local_id);
     }
+}
+
+/**
+ * @brief Mutable-backed handles expose the original geometry while const
+ *        visitation remains deeply read-only.
+ */
+TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
+{
+    static_assert(std::is_same_v<
+                  Handle::MutableCartesianPtr,
+                  SimpleFluid::SP<Cartesian>>);
+    static_assert(std::is_same_v<
+                  Handle::MutableCylindricalPtr,
+                  SimpleFluid::SP<Cylindrical>>);
+    static_assert(std::is_same_v<
+                  Handle::MutableSemiStructuredPtr,
+                  SimpleFluid::SP<SemiStructured>>);
+    static_assert(std::is_same_v<
+                  Handle::MutableUnstructuredPtr,
+                  SimpleFluid::SP<Unstructured>>);
+    static_assert(std::is_same_v<
+                  Handle::MutableSTKAdapterPtr,
+                  SimpleFluid::SP<Handle::STKAdapter>>);
+    static_assert(std::is_constructible_v<
+                  Handle,
+                  SimpleFluid::SP<ConcreteSTK>>);
+    static_assert(std::is_constructible_v<
+                  Handle,
+                  SimpleFluid::SP<const ConcreteSTK>>);
+    static_assert(std::is_constructible_v<
+                  Handle::STKAdapter,
+                  SimpleFluid::SP<ConcreteSTK>>);
+    static_assert(std::is_constructible_v<
+                  Handle::STKAdapter,
+                  SimpleFluid::SP<const ConcreteSTK>>);
+    static_assert(std::is_constructible_v<
+                  Handle::STKAdapter,
+                  std::nullptr_t>);
+    static_assert(std::is_constructible_v<
+                  PartitionedUnstructured,
+                  std::nullptr_t,
+                  Handle::unstructured_indexer_type>);
+
+    auto cartesian = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0},
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+    Handle handle(cartesian);
+
+    ASSERT_TRUE(handle.has_mutable_geometry());
+    auto* mutable_address = handle.visit_mutable(
+        []<class Mesh>(Mesh& mesh) -> void*
+        {
+            static_assert(!std::is_const_v<Mesh>);
+            return std::addressof(mesh);
+        });
+    EXPECT_EQ(mutable_address, cartesian.get());
+
+    const auto* const_address = std::as_const(handle).visit(
+        []<class Mesh>(Mesh& mesh) -> const void*
+        {
+            static_assert(std::is_const_v<Mesh>);
+            return std::addressof(mesh);
+        });
+    EXPECT_EQ(const_address, cartesian.get());
+
+    Handle::CartesianPtr read_only_geometry = cartesian;
+    Handle read_only_handle(std::move(read_only_geometry));
+    EXPECT_FALSE(read_only_handle.has_mutable_geometry());
+    EXPECT_THROW(
+        read_only_handle.visit_mutable([](auto&) {}),
+        std::logic_error);
+    EXPECT_THROW(
+        static_cast<void>(Handle::STKAdapter(nullptr)),
+        std::invalid_argument);
+    EXPECT_THROW(
+        static_cast<void>(PartitionedUnstructured(
+            nullptr, Handle::unstructured_indexer_type{})),
+        std::invalid_argument);
+}
+
+/** @brief Partition adaptation preserves mutable ownership and const opt-out. */
+TEST(MeshHandleTest, RetainsMutablePartitionGeometry)
+{
+    const auto mesh = SimpleFluid::test::make_unstructured_hex_line(1);
+    using Indexer = Handle::unstructured_indexer_type;
+    std::vector<Indexer::cell_id_t> owned_cells;
+    std::vector<Indexer::face_id_t> owned_faces;
+    std::vector<Indexer::node_id_t> nodes;
+    for (size_t cell = 0; cell < mesh->num_cells(); ++cell)
+    {
+        owned_cells.push_back(mesh->cell_id(cell));
+    }
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        owned_faces.push_back(mesh->face_id(face));
+    }
+    for (size_t node = 0; node < mesh->num_nodes(); ++node)
+    {
+        nodes.push_back(mesh->node_id(node));
+    }
+
+    const auto partitioned = std::make_shared<PartitionedUnstructured>(
+        mesh,
+        Indexer(std::move(owned_cells), {}, std::move(owned_faces), {},
+            std::move(nodes)));
+    Handle mutable_handle(partitioned);
+    EXPECT_TRUE(mutable_handle.has_mutable_geometry());
+    EXPECT_EQ(
+        mutable_handle.visit_mutable(
+            [](auto& geometry) -> void*
+            {
+                return std::addressof(geometry);
+            }),
+        mesh.get());
+
+    SimpleFluid::SP<const PartitionedUnstructured> read_only_partition =
+        partitioned;
+    EXPECT_FALSE(Handle(read_only_partition).has_mutable_geometry());
 }
 
 /** @brief Semi-structured handles enforce their documented serial contract. */
@@ -193,8 +318,13 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
         Indexer(std::move(owned_cells), {}, std::move(owned_faces), {},
             std::move(nodes)),
         self);
-    const Handle handle(partitioned);
+    Handle handle(partitioned);
 
+    EXPECT_EQ(partitioned->mutable_mesh_ptr().get(), mesh.get());
+    EXPECT_TRUE(handle.has_mutable_geometry());
+    SimpleFluid::SP<const PartitionedUnstructured> read_only_partition =
+        partitioned;
+    EXPECT_FALSE(Handle(read_only_partition).has_mutable_geometry());
     EXPECT_EQ(handle.owned_cell_map()->getComm()->getSize(), 1);
     EXPECT_EQ(handle.overlap_cell_map()->getComm()->getSize(), 1);
     EXPECT_EQ(handle.owned_face_map()->getComm()->getSize(), 1);
@@ -209,10 +339,35 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
 {
     auto legacy = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
-    const Handle handle(legacy);
+    auto concrete_legacy =
+        std::dynamic_pointer_cast<ConcreteSTK>(legacy);
+    ASSERT_TRUE(concrete_legacy);
+    Handle handle(legacy);
+    Handle derived_handle(concrete_legacy);
 
     EXPECT_TRUE(handle.is_stk());
+    EXPECT_TRUE(handle.has_mutable_geometry());
     EXPECT_EQ(handle.legacy_mesh(), legacy);
+    EXPECT_EQ(
+        handle.visit_mutable(
+            [](auto& mesh) -> SimpleFluid::Mesh<Pack>*
+            {
+                using Mesh = std::remove_cvref_t<decltype(mesh)>;
+                if constexpr (std::is_same_v<Mesh, Handle::STKAdapter>)
+                {
+                    return mesh.mutable_mesh_ptr().get();
+                }
+                return nullptr;
+            }),
+        legacy.get());
+    SimpleFluid::SP<const SimpleFluid::Mesh<Pack>> read_only_legacy = legacy;
+    EXPECT_FALSE(Handle(read_only_legacy).has_mutable_geometry());
+    SimpleFluid::SP<const ConcreteSTK> read_only_concrete = concrete_legacy;
+    Handle read_only_derived_handle(read_only_concrete);
+    EXPECT_FALSE(read_only_derived_handle.has_mutable_geometry());
+    EXPECT_EQ(read_only_derived_handle.legacy_mesh().get(), legacy.get());
+    EXPECT_TRUE(derived_handle.has_mutable_geometry());
+    EXPECT_EQ(derived_handle.legacy_mesh().get(), legacy.get());
     EXPECT_EQ(handle.owned_cell_map(), legacy->owned_cell_map());
     EXPECT_EQ(handle.overlap_cell_map(), legacy->overlap_cell_map());
     EXPECT_EQ(handle.owned_face_map(), legacy->owned_face_map());

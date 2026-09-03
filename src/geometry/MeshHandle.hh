@@ -27,7 +27,9 @@
 #include <Tpetra_Core.hpp>
 
 #include <algorithm>
+#include <concepts>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -74,7 +76,9 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
  * partitioning before multi-rank construction, while SemiStructuredXY_Z is
  * currently serial-only and rejects construction on a multi-rank communicator.
  * The handle builds owned/overlap maps and translates compact local IDs to each
- * concrete mesh's geometry IDs.
+ * concrete mesh's geometry IDs. Construction from a mutable mesh retains that
+ * exact object for controlled mutable visitation while the established
+ * variant() and visit() observer surface remains deeply const.
  *
  * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
@@ -112,11 +116,21 @@ public:
     using SemiStructuredPtr = SP<const SemiStructured>;
     using UnstructuredPtr = SP<const Unstructured>;
     using STKAdapterPtr = SP<const STKAdapter>;
+    using MutableCartesianPtr = SP<Cartesian>;
+    using MutableCylindricalPtr = SP<Cylindrical>;
+    using MutableSemiStructuredPtr = SP<SemiStructured>;
+    using MutableUnstructuredPtr = SP<Unstructured>;
+    using MutableSTKAdapterPtr = SP<STKAdapter>;
     using variant_type = std::variant<CartesianPtr,
                                       CylindricalPtr,
                                       SemiStructuredPtr,
                                       UnstructuredPtr,
                                       STKAdapterPtr>;
+    using mutable_variant_type = std::variant<MutableCartesianPtr,
+                                              MutableCylindricalPtr,
+                                              MutableSemiStructuredPtr,
+                                              MutableUnstructuredPtr,
+                                              MutableSTKAdapterPtr>;
 
     /** @brief Locally visible faces belonging to one boundary batch. */
     struct BoundaryFaceBatch
@@ -139,9 +153,45 @@ public:
     explicit MeshHandle(CartesianPtr mesh,
                         DistributionOptions options = {});
 
+    /** @brief Retain mutable ownership of a distributed Cartesian mesh. */
+    explicit MeshHandle(MutableCartesianPtr mesh,
+                        DistributionOptions options = {});
+
+    /** @brief Retain mutable ownership supplied through a Cartesian subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, Cartesian>
+                  && std::derived_from<Derived, Cartesian>)
+    explicit MeshHandle(
+        SP<Derived> mesh,
+        DistributionOptions options = {})
+        : MeshHandle(
+              std::static_pointer_cast<Cartesian>(std::move(mesh)),
+              options)
+    {
+    }
+
     /** @brief Build a distributed handle for a cylindrical mesh. */
     explicit MeshHandle(CylindricalPtr mesh,
                         DistributionOptions options = {});
+
+    /** @brief Retain mutable ownership of a distributed cylindrical mesh. */
+    explicit MeshHandle(MutableCylindricalPtr mesh,
+                        DistributionOptions options = {});
+
+    /** @brief Retain mutable ownership supplied through a cylindrical subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, Cylindrical>
+                  && std::derived_from<Derived, Cylindrical>)
+    explicit MeshHandle(
+        SP<Derived> mesh,
+        DistributionOptions options = {})
+        : MeshHandle(
+              std::static_pointer_cast<Cylindrical>(std::move(mesh)),
+              options)
+    {
+    }
 
     /**
      * @brief Build a serial-only handle for a semi-structured mesh.
@@ -149,12 +199,45 @@ public:
      */
     explicit MeshHandle(SemiStructuredPtr mesh);
 
+    /** @brief Retain mutable ownership of a serial semi-structured mesh. */
+    explicit MeshHandle(MutableSemiStructuredPtr mesh);
+
+    /** @brief Retain mutable ownership supplied through a semi-structured subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, SemiStructured>
+                  && std::derived_from<Derived, SemiStructured>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<SemiStructured>(
+              std::move(mesh)))
+    {
+    }
+
     /** @brief Build a serial unstructured mesh handle. */
     explicit MeshHandle(UnstructuredPtr mesh);
+
+    /** @brief Retain mutable ownership of a serial unstructured mesh. */
+    explicit MeshHandle(MutableUnstructuredPtr mesh);
+
+    /** @brief Retain mutable ownership supplied through an unstructured subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, Unstructured>
+                  && std::derived_from<Derived, Unstructured>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<Unstructured>(
+              std::move(mesh)))
+    {
+    }
 
     /** @brief Build a handle from a previously partitioned mesh. */
     MeshHandle(
         UnstructuredPtr mesh,
+        const unstructured_indexer_type& indexer);
+
+    /** @brief Retain mutable ownership of an indexed unstructured mesh. */
+    MeshHandle(
+        MutableUnstructuredPtr mesh,
         const unstructured_indexer_type& indexer);
 
     /**
@@ -178,6 +261,27 @@ public:
                 "MeshHandle requires a non-null partitioned mesh.");
         }
         d_mesh = UnstructuredPtr(partitioned->mesh_ptr());
+        if constexpr (!std::is_const_v<Partitioned>
+                      && requires { partitioned->mutable_mesh_ptr(); })
+        {
+            if (auto mutable_mesh = partitioned->mutable_mesh_ptr())
+            {
+                const auto& read_only_mesh =
+                    std::get<UnstructuredPtr>(d_mesh);
+                const bool same_owner =
+                    !mutable_mesh.owner_before(read_only_mesh)
+                    && !read_only_mesh.owner_before(mutable_mesh);
+                if (mutable_mesh.get() != read_only_mesh.get()
+                    || !same_owner)
+                {
+                    throw std::invalid_argument(
+                        "MeshHandle partition views must reference the same "
+                        "geometry object.");
+                }
+                d_mutable_mesh.emplace(
+                    MutableUnstructuredPtr(std::move(mutable_mesh)));
+            }
+        }
         initialize_unstructured(
             std::get<UnstructuredPtr>(d_mesh),
             partitioned->indexer(),
@@ -187,8 +291,36 @@ public:
     /** @brief Build a handle around a legacy STK adapter. */
     explicit MeshHandle(STKAdapterPtr mesh);
 
+    /** @brief Retain mutable ownership of a legacy STK adapter. */
+    explicit MeshHandle(MutableSTKAdapterPtr mesh);
+
+    /** @brief Retain mutable ownership supplied through an STK-adapter subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, STKAdapter>
+                  && std::derived_from<Derived, STKAdapter>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<STKAdapter>(
+              std::move(mesh)))
+    {
+    }
+
     /** @brief Adapt a legacy distributed mesh and build a runtime handle. */
     explicit MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh);
+
+    /** @brief Adapt and retain mutable ownership of a legacy distributed mesh. */
+    explicit MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh);
+
+    /** @brief Adapt mutable ownership supplied through a legacy-mesh subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, SimpleFluid::Mesh<Pack>>
+                  && std::derived_from<Derived, SimpleFluid::Mesh<Pack>>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<SimpleFluid::Mesh<Pack>>(
+              std::move(mesh)))
+    {
+    }
 
     const variant_type& variant() const noexcept { return d_mesh; }
     /**
@@ -221,6 +353,42 @@ public:
                 return std::forward<Visitor>(visitor)(*mesh);
             },
             d_mesh);
+    }
+
+    /**
+     * @brief Invoke a visitor with mutable access to the concrete geometry.
+     *
+     * Mutable access is available only when the handle was built from a
+     * mutable mesh pointer. The const visit() overload remains a read-only
+     * observer for every handle.
+     *
+     * @warning This is mutable-ownership groundwork, not a geometry-motion
+     *          transaction. Changing geometry after fields or geometry caches
+     *          have been built is unsupported until epoch-based invalidation
+     *          and fixed-topology motion are implemented.
+     *
+     * @throws std::logic_error If the handle was built from a const mesh.
+     */
+    template<class Visitor>
+    decltype(auto) visit_mutable(Visitor&& visitor)
+    {
+        if (!d_mutable_mesh)
+        {
+            throw std::logic_error(
+                "MeshHandle does not retain mutable geometry ownership.");
+        }
+        return std::visit(
+            [&](auto& mesh) -> decltype(auto)
+            {
+                return std::forward<Visitor>(visitor)(*mesh);
+            },
+            *d_mutable_mesh);
+    }
+
+    /** @brief True when visit_mutable() can access the concrete geometry. */
+    bool has_mutable_geometry() const noexcept
+    {
+        return d_mutable_mesh.has_value();
     }
 
     bool is_stk() const noexcept
@@ -824,6 +992,7 @@ private:
     }
 
     variant_type d_mesh;
+    std::optional<mutable_variant_type> d_mutable_mesh;
     mutable indexer_type d_indexer;
     mutable bool d_legacy_indexer_materialized = false;
     bool d_cells_reordered = false;

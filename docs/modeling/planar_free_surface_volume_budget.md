@@ -543,7 +543,7 @@ the fixed top boundary or unmodified flow domain materially changes escape or
 circulation. `clampAndReport` exposes a bookkeeping excess; it does not model
 overflow fluid.
 
-## Milestone B/C Blocker: No Mutable Geometry or ALE Contract
+## Milestone B/C Blocker: Mutable Ownership, but No ALE Contract
 
 Planar ALE is intentionally supported on **no mesh family at present**.
 `free_surface_model = planarALE` fails during option validation with the stable
@@ -551,12 +551,15 @@ diagnostic that SimpleFluid meshes do not support fixed-topology geometry
 motion. This applies to Cartesian, cylindrical, semi-structured,
 unstructured/partitioned, and STK/legacy `MeshHandle` alternatives.
 
-The immediate blocker is architectural, not a missing vertical-coordinate
-formula:
+Mutable ownership is now available as groundwork, but the immediate blocker is
+still architectural rather than a missing vertical-coordinate formula:
 
-- `MeshHandle` stores each concrete geometry through `shared_ptr<const ...>`
-  and exposes const geometry queries. There is no fixed-topology point-motion
-  or geometry-update API.
+- `MeshHandle` retains the caller's mutable concrete geometry when constructed
+  from a mutable mesh or partition and exposes an explicit mutable visitor.
+  Existing const-backed construction and const visitation remain read-only.
+  The solver ownership path is still const, and there is no fixed-topology
+  point-motion or geometry-update API. Raw mutation after fields or caches are
+  built remains unsupported.
 - Mesh/transport interfaces provide one current `cell_volume`; they do not
   provide accepted old/new cell volumes or a transactional trial/accept/
   rollback geometry state.

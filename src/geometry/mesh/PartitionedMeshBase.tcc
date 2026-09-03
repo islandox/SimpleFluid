@@ -47,6 +47,27 @@ PartitionedMesh<GeometryMesh, Pack>::PartitionedMesh(
 }
 
 /**
+ * @brief Couple mutable rank-local geometry with global indexing and maps.
+ * @tparam GeometryMesh Rank-local CRTP geometry mesh type.
+ * @tparam Pack Tpetra type pack.
+ * @param mesh Mutable rank-local geometry shared with the wrapper.
+ * @param indexer Owned-first local/global entity indexer.
+ * @param comm Communicator used to construct distributed maps.
+ */
+template<MeshClass GeometryMesh, TpetraTypePack Pack>
+PartitionedMesh<GeometryMesh, Pack>::PartitionedMesh(
+    SP<mesh_type> mesh,
+    indexer_type indexer,
+    Teuchos::RCP<const typename Pack::comm_type> comm)
+    : PartitionedMesh(
+          SP<const mesh_type>(mesh),
+          std::move(indexer),
+          std::move(comm))
+{
+    d_mutable_mesh = std::move(mesh);
+}
+
+/**
  * @brief Translate a cell's geometry face IDs to local ordinals.
  * @tparam GeometryMesh Rank-local geometry mesh type.
  * @tparam Pack Tpetra type pack.

@@ -48,7 +48,7 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 | Phase 18, documentation | Partial | Complete key/default/unit/validity reference |
 | Phase 19, precursors | Implemented and focused-tested | No open items for the supported transport scope |
 | Phase 20, TH/neutronics map | In-memory scaffold implemented and focused-tested | Production external-neutronics protocol and validation |
-| Phase 20.1, planar free surface | Partial fixed-grid path integrated and full-tested | Cellwise liquid mass and steam escape; immutable mesh blocks ALE and conservative mapping |
+| Phase 20.1, planar free surface | Partial fixed-grid path integrated and full-tested | Cellwise liquid mass and steam escape; geometry motion/GCL and conservative mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 
 ### Checklist conventions
@@ -1339,13 +1339,15 @@ not yet provide conservative pool occupancy or moving-mesh mapping.
 
 #### Milestone B — blocked planar ALE and generalized continuity
 
-`MeshHandle` owns all concrete geometries through const pointers and has no
-fixed-topology motion API. It also lacks accepted old/new cell volumes, swept
-face mesh flux, a geometry epoch, and a centralized invalidation contract for
-least-squares/interpolation/diffusion geometry, Rhie-Chow data, wall distance,
-mesh quality, FVM coefficients, VTU topology, and solver numeric state.
-Accordingly `planarALE` fails at setup and the supported moving-mesh family set
-is currently empty.
+`MeshHandle` now retains mutable concrete geometry when constructed from a
+mutable mesh or partition while preserving its existing const-observer path.
+This is ownership groundwork only: there is no fixed-topology motion API, and
+the solver ownership path remains read-only. The framework also lacks accepted
+old/new cell volumes, swept face mesh flux, a geometry epoch, and a centralized
+invalidation contract for least-squares/interpolation/diffusion geometry,
+Rhie-Chow data, wall distance, mesh quality, FVM coefficients, VTU topology,
+and solver numeric state. Accordingly `planarALE` still fails at setup and the
+supported moving-mesh family set is empty.
 
 - [ ] Add transactional fixed-topology geometry motion for each explicitly
       supported mesh family, with MPI-conforming partition faces and quality
