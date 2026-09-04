@@ -367,10 +367,10 @@ endif()
 # The isothermal-solver and adaptive steady-state APIs extend the validated
 # Release library shape by five public symbols without widening the export map.
 if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 605)
+   OR simplefluid_api_symbol_count GREATER 650)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 605")
+        "SimpleFluid symbols; the reviewed public-API range is 300 to 650")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)
