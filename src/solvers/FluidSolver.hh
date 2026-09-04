@@ -24,6 +24,8 @@
 #include "solvers/CoupledPressureVelocitySolver.hh"
 #include "solvers/SolverProgress.hh"
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -67,6 +69,8 @@ public:
     using residual_type = PressureVelocityResiduals<scalar_type>;
     using step_statistics_type = FluidStepStatistics<scalar_type>;
     using coupled_system_type = CoupledPressureVelocitySystem<Pack>;
+    using continuity_target_type = VolumeContinuityTarget<Pack, mesh_type>;
+    using continuity_residual_type = VolumeContinuityResiduals<scalar_type>;
 
     FluidSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
@@ -75,6 +79,16 @@ public:
      * @brief Construct directly on a runtime mesh handle.
      */
     FluidSolver(SP<const mesh_type> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
+
+    /**
+     * @brief Construct on a mutable runtime handle without weakening observers.
+     *
+     * Fields and equations still retain const views of this exact handle.  The
+     * mutable owner is kept separately for controlled mesh-motion setup and is
+     * never exposed to ordinary equation consumers.
+     */
+    FluidSolver(SP<mesh_type> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
 
     virtual ~FluidSolver() = default;
@@ -93,6 +107,12 @@ public:
 
     scalar_type time() const noexcept { return d_time; }
     int step_index() const noexcept { return d_step_index; }
+
+    /** @brief Whether this solver retained a mutable native runtime handle. */
+    bool has_mutable_mesh_handle() const noexcept
+    {
+        return static_cast<bool>(d_mutable_mesh);
+    }
     /** @brief Return the physical or pseudo-time step used by the next step. */
     scalar_type time_step() const noexcept
     {
@@ -126,6 +146,11 @@ public:
     velocity_field_type& velocity() noexcept;
 
     const residual_type& last_pressure_velocity_residuals() const noexcept;
+    /** Detailed residual of sum(phi_abs)-Q_V from the latest correction. */
+    const continuity_residual_type& last_volume_continuity_residuals() const noexcept
+    {
+        return d_last_volume_continuity_residuals;
+    }
     const step_statistics_type& last_step_statistics() const noexcept
     {
         return d_last_step_statistics;
@@ -183,6 +208,12 @@ protected:
                 LinearSolverOptions linear_options,
                 DeferredMomentumEquationTag);
 
+    FluidSolver(SP<mesh_type> mesh,
+                BoundaryConditionSet boundary_conditions,
+                TimeStepperOptions time_options,
+                LinearSolverOptions linear_options,
+                DeferredMomentumEquationTag);
+
     static SP<const legacy_mesh_type> require_mesh(
         SP<const legacy_mesh_type> mesh);
     static SP<const mesh_type> require_mesh_handle(
@@ -203,6 +234,36 @@ protected:
     void begin_step();
     void finish_step();
     void solve_pressure_velocity_coupling();
+
+    /** Apply bounded pressure-only correctors to a strict physical target gate. */
+    continuity_residual_type refine_volume_continuity(int maximum_corrections, scalar_type maximum_residual);
+
+    /** Refresh all base-solver numeric geometry after an epoch transition. */
+    virtual void refresh_geometry_dependent_state();
+
+    /** Refresh pressure/flux/coupled/output state shared by derived solvers. */
+    void refresh_pressure_velocity_geometry_state();
+
+    /** Install one immutable integrated target for the next coupling solve. */
+    void set_volume_continuity_target(const continuity_target_type& target);
+
+    /** Restore the legacy zero-target pressure/velocity path. */
+    void clear_volume_continuity_target() noexcept;
+
+    /** Return the active target, or nullptr for the fixed incompressible path. */
+    const continuity_target_type* volume_continuity_target() const noexcept
+    {
+        return d_volume_continuity_target ? &*d_volume_continuity_target : nullptr;
+    }
+
+    /** Mutable owner reserved for a controlled mesh-motion implementation. */
+    const SP<mesh_type>& mutable_mesh_handle() const noexcept
+    {
+        return d_mutable_mesh;
+    }
+
+    /** Retain a mutable view only when it is the exact native solver handle. */
+    void retain_mutable_mesh_handle(SP<mesh_type> mesh);
 
     PressureProjectionEquation<Pack>& pressure_projection();
     pressure_projection_type& native_pressure_projection();
@@ -255,12 +316,16 @@ protected:
         const legacy_field_type& field) const;
 
     SP<const mesh_type> d_mesh;
+    SP<mesh_type> d_mutable_mesh;
     SP<const legacy_mesh_type> d_legacy_mesh;
     Problem<Pack> d_problem;
     scalar_type d_time = 0.0;
     int d_step_index = 0;
     step_statistics_type d_last_step_statistics;
     mutable VTUWriter::TopologyHandle d_vtu_topology;
+    mutable std::uint64_t d_vtu_geometry_epoch = 0;
+    std::optional<continuity_target_type> d_volume_continuity_target;
+    continuity_residual_type d_last_volume_continuity_residuals;
 
 private:
     SIMPLEFLUID_SOLVERS_LOCAL
@@ -268,7 +333,8 @@ private:
                 BoundaryConditionSet boundary_conditions,
                 TimeStepperOptions time_options,
                 LinearSolverOptions linear_options,
-                bool register_momentum_equation);
+                bool register_momentum_equation,
+                SP<mesh_type> mutable_mesh = {});
 
     SIMPLEFLUID_SOLVERS_LOCAL
     LinearSolveSummary run_momentum_predictor();

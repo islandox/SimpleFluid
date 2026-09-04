@@ -14,6 +14,7 @@
 #include <Teuchos_CommHelpers.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -174,11 +175,28 @@ FluidSolver<Pack>::FluidSolver(
     TimeStepperOptions time_options,
     LinearSolverOptions linear_options)
     : FluidSolver(
-          std::make_shared<MeshHandle<Pack>>(
-              require_mesh(std::move(mesh))),
+          SP<const mesh_type>(std::make_shared<MeshHandle<Pack>>(
+              require_mesh(std::move(mesh)))),
           std::move(boundary_conditions),
           time_options,
           linear_options)
+{
+}
+
+/** Construct on a retained mutable native runtime handle. */
+template<TpetraTypePack Pack>
+FluidSolver<Pack>::FluidSolver(
+    SP<mesh_type> mesh,
+    BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options,
+    LinearSolverOptions linear_options)
+    : FluidSolver(
+          SP<const mesh_type>(mesh),
+          std::move(boundary_conditions),
+          time_options,
+          linear_options,
+          true,
+          mesh)
 {
 }
 
@@ -204,6 +222,24 @@ FluidSolver<Pack>::FluidSolver(
           time_options,
           linear_options,
           true)
+{
+}
+
+/** Construct a derived solver while retaining controlled mutable ownership. */
+template<TpetraTypePack Pack>
+FluidSolver<Pack>::FluidSolver(
+    SP<mesh_type> mesh,
+    BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options,
+    LinearSolverOptions linear_options,
+    DeferredMomentumEquationTag)
+    : FluidSolver(
+          SP<const mesh_type>(mesh),
+          std::move(boundary_conditions),
+          time_options,
+          linear_options,
+          false,
+          mesh)
 {
 }
 
@@ -251,7 +287,8 @@ FluidSolver<Pack>::FluidSolver(
     BoundaryConditionSet boundary_conditions,
     TimeStepperOptions time_options,
     LinearSolverOptions linear_options,
-    bool register_momentum_equation)
+    bool register_momentum_equation,
+    SP<mesh_type> mutable_mesh)
     : d_mesh(require_mesh_handle(std::move(mesh))),
       d_legacy_mesh(d_mesh->legacy_mesh()),
       d_problem(d_mesh,
@@ -259,6 +296,7 @@ FluidSolver<Pack>::FluidSolver(
                 time_options,
                 linear_options)
 {
+    retain_mutable_mesh_handle(std::move(mutable_mesh));
     if (d_legacy_mesh && d_mesh->has_reordered_cells())
     {
         throw std::invalid_argument(
@@ -350,6 +388,75 @@ FluidSolver<Pack>::FluidSolver(
         d_problem.template emplace_object<native_coupled_solver_type>("coupled_pressure_velocity_solver", d_mesh);
     }
     d_problem.template emplace_object<residual_type>("pressure_velocity_residuals");
+}
+
+/** Retain a controlled mutable view of the exact native runtime handle. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::retain_mutable_mesh_handle(SP<mesh_type> mesh)
+{
+    d_mutable_mesh.reset();
+    if (!mesh)
+    {
+        return;
+    }
+
+    const SP<const mesh_type> mutable_view = mesh;
+    const bool same_owner =
+        !mutable_view.owner_before(d_mesh)
+        && !d_mesh.owner_before(mutable_view);
+    if (mesh.get() != d_mesh.get() || !same_owner)
+    {
+        throw std::invalid_argument(
+            "FluidSolver mutable and const mesh views must share the same "
+            "runtime handle.");
+    }
+
+    // A mutable shared_ptr to the handle object alone is not a geometry-
+    // mutation capability. Preserve historical const/legacy behavior unless
+    // the handle retains an actual mutable native concrete mesh.
+    if (!d_legacy_mesh && mesh->has_mutable_geometry())
+    {
+        d_mutable_mesh = std::move(mesh);
+    }
+}
+
+/** Refresh momentum plus the common pressure/flux/output geometry state. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::refresh_geometry_dependent_state()
+{
+    if (uses_legacy_backend())
+    {
+        momentum_equation().refresh_geometry();
+    }
+    else
+    {
+        native_momentum_equation().refresh_geometry();
+    }
+    refresh_pressure_velocity_geometry_state();
+}
+
+/** Refresh base pressure coupling and invalidate every numeric reuse owner. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::refresh_pressure_velocity_geometry_state()
+{
+    if (uses_legacy_backend())
+    {
+        velocity_boundary_cache() = FVM::cache_velocity_boundary_conditions<Pack>(
+            d_legacy_mesh, d_problem.boundary_conditions());
+        pressure_face_flux_workspace().refresh_geometry();
+        pressure_projection().refresh_geometry();
+        coupled_pressure_velocity_solver().clear_cache();
+    }
+    else
+    {
+        native_velocity_boundary_cache() = FVM::cache_velocity_boundary_conditions<Pack>(
+            d_mesh, d_problem.boundary_conditions());
+        native_pressure_face_flux_workspace().refresh_geometry();
+        native_pressure_projection().refresh_geometry();
+        native_coupled_pressure_velocity_solver().clear_cache();
+    }
+    d_vtu_topology.reset();
+    d_vtu_geometry_epoch = d_mesh->geometry_epoch();
 }
 
 /**
@@ -951,15 +1058,19 @@ auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
         return linear_summary;
     }
 
+    auto& projection = native_pressure_projection();
+    const auto predictor_boundary_cache =
+        projection.pressure_flux_boundary_cache(native_velocity_boundary_cache());
     FVM::pressure_weighted_face_fluxes(
         velocity(), pressure(),
         d_problem.time_options().time_step
             / pressure_reference_density(),
-        native_velocity_boundary_cache(),
+        predictor_boundary_cache,
         d_problem.boundary_conditions().pressure,
         native_pressure_face_flux_workspace(),
         old_face_fluxes(),
         d_problem.time_options().pressure_gradient_scheme);
+    projection.apply_fixed_boundary_fluxes(old_face_fluxes());
     const auto linear_summary = advance_momentum();
     // A derived native hook may update only authoritative owned storage.
     // Pressure projection immediately consumes overlap values, so normalize
@@ -1013,31 +1124,31 @@ auto FluidSolver<Pack>::run_pressure_correction(
     }
 
     auto& projection = native_pressure_projection();
-    const auto native_result =
-        reuse_cached_predictor_flux
-      ? projection.project_reusing_cached_predictor(
-            pressure(),
-            pressure_correction(),
-            d_problem.time_options().time_step,
-            pressure_reference_density(),
-            native_velocity_boundary_cache(),
-            velocity())
-      : projection.project(
-            pressure(),
-            pressure_correction(),
-            d_problem.time_options().time_step,
-            pressure_reference_density(),
-            native_velocity_boundary_cache(),
-            velocity());
+    const auto* target = volume_continuity_target();
+    const auto native_result = target != nullptr
+        ? (reuse_cached_predictor_flux
+                  ? projection.project_reusing_cached_predictor(pressure(), pressure_correction(),
+                        d_problem.time_options().time_step, pressure_reference_density(),
+                        native_velocity_boundary_cache(), velocity(), *target)
+                  : projection.project(pressure(), pressure_correction(), d_problem.time_options().time_step,
+                        pressure_reference_density(), native_velocity_boundary_cache(), velocity(), *target))
+        : (reuse_cached_predictor_flux
+                  ? projection.project_reusing_cached_predictor(pressure(), pressure_correction(),
+                        d_problem.time_options().time_step, pressure_reference_density(),
+                        native_velocity_boundary_cache(), velocity())
+                  : projection.project(pressure(), pressure_correction(), d_problem.time_options().time_step,
+                        pressure_reference_density(), native_velocity_boundary_cache(), velocity()));
     projected_face_fluxes().data().update(
         scalar_type{1},
         projection.corrected_face_fluxes().data(),
         scalar_type{0});
     projected_face_fluxes().sync_ghosts();
+    d_last_volume_continuity_residuals = native_result.continuity_residuals;
     return {
         native_result.pressure_correction,
         native_result.continuity,
-        native_result.linear_solve};
+        native_result.linear_solve,
+        native_result.continuity_residuals};
 }
 
 /**
@@ -1050,6 +1161,12 @@ template<TpetraTypePack Pack> auto FluidSolver<Pack>::assemble_coupled_system() 
 {
     if (!uses_legacy_backend())
     {
+        if (const auto* target = volume_continuity_target())
+        {
+            return native_coupled_pressure_velocity_solver().assemble(native_momentum_equation(), velocity(),
+                pressure(), old_face_fluxes(), native_velocity_boundary_cache(), d_problem.boundary_conditions(),
+                d_problem.time_options(), *target, pressure_reference_density());
+        }
         return native_coupled_pressure_velocity_solver().assemble(native_momentum_equation(), velocity(), pressure(),
             old_face_fluxes(), native_velocity_boundary_cache(), d_problem.boundary_conditions(),
             d_problem.time_options(), pressure_reference_density());
@@ -1073,40 +1190,63 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
         predictor_velocity().owned_data().update(scalar_type{1}, velocity().owned_data(), scalar_type{0});
         predictor_velocity().sync_ghosts();
 
+        auto& coupled_solver = native_coupled_pressure_velocity_solver();
+        const auto predictor_boundary_cache =
+            coupled_solver.pressure_flux_boundary_cache(native_velocity_boundary_cache());
         FVM::pressure_weighted_face_fluxes(velocity(), pressure(),
-            d_problem.time_options().time_step / pressure_reference_density(), native_velocity_boundary_cache(),
+            d_problem.time_options().time_step / pressure_reference_density(), predictor_boundary_cache,
             d_problem.boundary_conditions().pressure, native_pressure_face_flux_workspace(), old_face_fluxes(),
             d_problem.time_options().pressure_gradient_scheme);
+        coupled_solver.apply_fixed_boundary_fluxes(old_face_fluxes());
         const auto system = assemble_coupled_system();
-        const auto result =
-            native_coupled_pressure_velocity_solver().solve(system, velocity(), pressure(), d_problem.linear_options());
+        const auto result = coupled_solver.solve(system, velocity(), pressure(), d_problem.linear_options());
         if (!result.converged)
         {
             throw std::runtime_error("FluidSolver coupled Krylov solve did not converge.");
         }
 
-        const auto momentum_norm =
-            velocity_update_norm(predictor_velocity(), velocity());
+        const auto momentum_norm = velocity_update_norm(predictor_velocity(), velocity());
         fluid_solver_detail::record_coupled_result(
-            result,
-            momentum_norm,
-            pressure_velocity_residuals(),
-            d_last_step_statistics);
+            result, momentum_norm, pressure_velocity_residuals(), d_last_step_statistics);
 
+        const auto final_boundary_cache = coupled_solver.pressure_flux_boundary_cache(native_velocity_boundary_cache());
         FVM::pressure_weighted_face_fluxes(velocity(), pressure(),
-            d_problem.time_options().time_step / pressure_reference_density(), native_velocity_boundary_cache(),
+            d_problem.time_options().time_step / pressure_reference_density(), final_boundary_cache,
             d_problem.boundary_conditions().pressure, native_pressure_face_flux_workspace(), projected_face_fluxes(),
             d_problem.time_options().pressure_gradient_scheme);
-        pressure_velocity_residuals().continuity =
-            fluid_solver_detail::global_cell_metric_norm(
-                *d_mesh,
-                [this](local_ordinal_type cell_lid)
-                {
-                    return FVM::cell_flux_balance<Pack>(
-                        *d_mesh, projected_face_fluxes(), cell_lid);
-                },
-                [this](scalar_type local_value)
-                { return global_sum(local_value); });
+        coupled_solver.apply_fixed_boundary_fluxes(projected_face_fluxes());
+
+        // The coupled block-row residual is useful linear algebra evidence,
+        // but the physical contract is defined from the reconstructed final
+        // absolute face flux: R_c = sum_f(phi_abs,f) - Q_V,c.
+        scalar_type local_norm_squared{};
+        scalar_type local_scale_squared{};
+        scalar_type local_maximum{};
+        const auto flux_values = projected_face_fluxes().owned_read_view();
+        const auto* target = volume_continuity_target();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            const auto balance = FVM::cell_flux_balance<Pack>(*d_mesh, projected_face_fluxes(), flux_values, cell);
+            const auto target_rate = target == nullptr ? scalar_type{} : target->integrated_rate(cell);
+            const auto residual = balance - target_rate;
+            local_norm_squared += residual * residual;
+            local_scale_squared += std::max(balance * balance, target_rate * target_rate);
+            local_maximum = std::max(local_maximum, std::abs(residual));
+        }
+        const std::array<scalar_type, 2> local_sums{local_norm_squared, local_scale_squared};
+        std::array<scalar_type, 2> global_sums{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+            static_cast<int>(local_sums.size()), local_sums.data(), global_sums.data());
+        scalar_type global_maximum{};
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_maximum, &global_maximum);
+        using std::sqrt;
+        const auto l2 = sqrt(global_sums[0]);
+        const auto normalization = sqrt(global_sums[1]);
+        d_last_volume_continuity_residuals = {
+            l2, global_maximum, normalization > scalar_type{} ? l2 / normalization : scalar_type{}, normalization};
+        pressure_velocity_residuals().continuity = l2;
         return;
     }
     sync_primary_fields_to_legacy();
@@ -1185,6 +1325,15 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_pressure_velocity_coupling()
 {
+    if (const auto* target = volume_continuity_target())
+    {
+        if (uses_legacy_backend())
+        {
+            throw std::invalid_argument(
+                "A generalized volume-continuity target requires the native MeshHandle backend.");
+        }
+        target->validate(*d_mesh, "FluidSolver volume-continuity target");
+    }
     pressure_velocity_residuals() = {};
     if (d_problem.time_options().pressure_velocity_coupling
         == PressureVelocityCoupling::CoupledKrylov)
@@ -1240,6 +1389,39 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
         d_last_step_statistics.achieved_tolerance;
 }
 
+/** @brief Tighten an already predicted native state against the active target. */
+template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::refine_volume_continuity(int maximum_corrections,
+    scalar_type maximum_residual) -> continuity_residual_type
+{
+    if (uses_legacy_backend() || volume_continuity_target() == nullptr)
+    {
+        throw std::logic_error(
+            "Strict volume-continuity refinement requires a native active target.");
+    }
+    if (maximum_corrections < 0 || !std::isfinite(maximum_residual) || maximum_residual < scalar_type{})
+    {
+        throw std::invalid_argument(
+            "Volume-continuity refinement controls must be finite and non-negative.");
+    }
+    auto residuals = d_last_volume_continuity_residuals;
+    bool reuse_predictor = d_problem.time_options().pressure_velocity_coupling !=
+                           PressureVelocityCoupling::CoupledKrylov;
+    for (int correction = 0;
+         correction < maximum_corrections && residuals.maximum > maximum_residual;
+         ++correction)
+    {
+        const auto result = run_pressure_correction(reuse_predictor);
+        reuse_predictor = true;
+        d_last_step_statistics.add(result.linear_solve);
+        pressure_velocity_residuals().pressure = result.pressure_correction;
+        pressure_velocity_residuals().continuity = result.continuity;
+        residuals = result.continuity_residuals;
+    }
+    d_last_volume_continuity_residuals = residuals;
+    return residuals;
+}
+
 /**
  * @brief Reset per-step statistics and synchronize initial velocity ghosts.
  *
@@ -1249,6 +1431,7 @@ template<TpetraTypePack Pack>
 void FluidSolver<Pack>::begin_step()
 {
     d_last_step_statistics = {};
+    d_last_volume_continuity_residuals = {};
     if (uses_legacy_backend())
     {
         sync_primary_fields_to_legacy();
@@ -1263,6 +1446,25 @@ void FluidSolver<Pack>::begin_step()
     {
         d_mesh->sync_periodic_boundaries(velocity());
     }
+}
+
+/** @brief Retain one validated target for every corrector in a coupling solve. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::set_volume_continuity_target(const continuity_target_type& target)
+{
+    if (uses_legacy_backend())
+    {
+        throw std::invalid_argument(
+            "A generalized volume-continuity target requires the native MeshHandle backend.");
+    }
+    target.validate(*d_mesh, "FluidSolver volume-continuity target");
+    d_volume_continuity_target = target;
+}
+
+/** @brief Clear the opt-in target without changing fixed-grid state. */
+template<TpetraTypePack Pack> void FluidSolver<Pack>::clear_volume_continuity_target() noexcept
+{
+    d_volume_continuity_target.reset();
 }
 
 /**
@@ -1493,9 +1695,11 @@ auto FluidSolver<Pack>::collect_scalar_field(
 template<TpetraTypePack Pack>
 VTUWriter FluidSolver<Pack>::fluid_solution_writer() const
 {
-    if (!d_vtu_topology)
+    const auto geometry_epoch = d_mesh->geometry_epoch();
+    if (!d_vtu_topology || d_vtu_geometry_epoch != geometry_epoch)
     {
         d_vtu_topology = d_mesh->vtu_topology();
+        d_vtu_geometry_epoch = geometry_epoch;
     }
 
     VTUWriter::VectorData velocity_values;

@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "FVM/ALEControlVolumeState.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -841,6 +842,25 @@ void face_fluxes(
 {
     detail::assemble_stored_normal_face_fluxes(
         velocity, &boundary_cache, fluxes);
+}
+
+/**
+ * @brief Subtract the exact swept-volume rate from an absolute face flux.
+ *
+ * Both input and output use mesh-owner orientation and units of m^3/s. Owned
+ * values are authoritative; the completed relative flux is synchronized to
+ * overlap faces before returning. Input and output must be distinct so an
+ * absolute flux retained by pressure correction and diagnostics is never
+ * overwritten in place.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void mesh_relative_face_fluxes(
+    const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
+    const ALEControlVolumeState& ale,
+    ScalarFaceFieldStored<Pack, MeshType>& relative_fluxes)
+{
+    detail::stored_mesh_relative_face_fluxes(
+        absolute_fluxes, ale, relative_fluxes);
 }
 
 namespace detail

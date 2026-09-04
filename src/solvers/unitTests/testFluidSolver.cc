@@ -11,13 +11,16 @@
 
 #include <gtest/gtest.h>
 
+#include "FVM/FaceFlux.hh"
 #include "geometry/MeshFactory.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/FluidSolver.hh"
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -115,20 +118,19 @@ public:
         return d_legacy_mesh;
     }
 
-    bool has_legacy_backend() const
-    {
-        return uses_legacy_backend();
-    }
+    bool has_legacy_backend() const { return uses_legacy_backend(); }
 
-    auto* historical_pressure_flux_workspace()
-    {
-        return &pressure_face_flux_workspace();
-    }
+    auto mutable_runtime_mesh_handle() const { return mutable_mesh_handle(); }
 
-    auto* explicit_legacy_pressure_flux_workspace()
-    {
-        return &legacy_pressure_face_flux_workspace();
-    }
+    void refresh_geometry_after_motion() { refresh_geometry_dependent_state(); }
+
+    auto solution_topology() const { return fluid_solution_writer().topology_handle(); }
+
+    const auto& final_face_fluxes() { return projected_face_fluxes(); }
+
+    auto* historical_pressure_flux_workspace() { return &pressure_face_flux_workspace(); }
+
+    auto* explicit_legacy_pressure_flux_workspace() { return &legacy_pressure_face_flux_workspace(); }
 };
 
 /** @brief Override pressure normalization to represent water-density scaling. */
@@ -138,15 +140,11 @@ public:
     using SimpleFluid::FluidSolver<Pack>::FluidSolver;
 
 protected:
-    Pack::scalar_type pressure_reference_density() const noexcept override
-    {
-        return 1000.0;
-    }
+    Pack::scalar_type pressure_reference_density() const noexcept override { return 1000.0; }
 };
 
 /** @brief Exercise the public FieldStored contract of the virtual hook. */
-class PublicMomentumHookFluidSolver
-    : public SimpleFluid::FluidSolver<Pack>
+class PublicMomentumHookFluidSolver : public SimpleFluid::FluidSolver<Pack>
 {
 public:
     using SimpleFluid::FluidSolver<Pack>::FluidSolver;
@@ -154,13 +152,9 @@ public:
 protected:
     SimpleFluid::LinearSolveSummary advance_momentum() override
     {
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            velocity().set_value(
-                static_cast<Pack::local_ordinal_type>(owned),
-                {2.0, 0.0, 0.0});
+            velocity().set_value(static_cast<Pack::local_ordinal_type>(owned), {2.0, 0.0, 0.0});
         }
         return {};
     }
@@ -208,6 +202,83 @@ TEST(FluidSolverTest, ReusesProvidedRuntimeMeshHandle)
     EXPECT_EQ(solver.velocity_mesh_handle(), handle);
     EXPECT_EQ(solver.wrapped_legacy_mesh(), legacy);
     EXPECT_TRUE(solver.has_legacy_backend());
+    EXPECT_FALSE(solver.has_mutable_mesh_handle());
+}
+
+/** @brief Mutable construction retains the exact native handle only. */
+TEST(FluidSolverTest, MutableNativeConstructionPreservesOneHandleAndConstViews)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    using Cartesian = Handle::Cartesian;
+    auto geometry = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
+    auto handle = std::make_shared<Handle>(geometry);
+
+    TestFluidSolver mutable_solver(handle, {});
+    EXPECT_TRUE(mutable_solver.has_mutable_mesh_handle());
+    EXPECT_EQ(mutable_solver.mutable_runtime_mesh_handle(), handle);
+    EXPECT_EQ(mutable_solver.runtime_mesh_handle().get(), handle.get());
+    EXPECT_EQ(mutable_solver.pressure_mesh_handle().get(), handle.get());
+    EXPECT_EQ(mutable_solver.velocity_mesh_handle().get(), handle.get());
+    EXPECT_EQ(
+        mutable_solver.runtime_mesh_handle()->geometry_identity(),
+        geometry.get());
+
+    SimpleFluid::SP<const Handle> const_view = handle;
+    TestFluidSolver const_solver(const_view, {});
+    EXPECT_FALSE(const_solver.has_mutable_mesh_handle());
+    EXPECT_FALSE(const_solver.mutable_runtime_mesh_handle());
+    EXPECT_EQ(const_solver.runtime_mesh_handle(), const_view);
+
+    Handle::CartesianPtr read_only_geometry = geometry;
+    auto read_only_handle =
+        std::make_shared<Handle>(std::move(read_only_geometry));
+    TestFluidSolver read_only_solver(read_only_handle, {});
+    EXPECT_FALSE(read_only_solver.has_mutable_mesh_handle());
+    EXPECT_EQ(read_only_solver.runtime_mesh_handle().get(),
+              read_only_handle.get());
+}
+
+/** @brief Motion stales core caches until the central solver refresh runs. */
+TEST(FluidSolverTest, CentralGeometryRefreshRestoresCoreCachesAndVtuPoints)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    using Cartesian = Handle::Cartesian;
+    auto geometry = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
+    auto handle = std::make_shared<Handle>(geometry);
+    TestFluidSolver solver(handle, {});
+
+    const auto old_topology = solver.solution_topology();
+    ASSERT_TRUE(old_topology);
+    const auto old_max_z = std::ranges::max(
+        old_topology->points, {}, [](const auto& point) { return point.z; }).z;
+    EXPECT_DOUBLE_EQ(old_max_z, 2.0);
+
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(handle);
+    motion.begin_trial(3.0, 1.0);
+    EXPECT_THROW(solver.advance_momentum_once(), std::invalid_argument);
+
+    solver.refresh_geometry_after_motion();
+    EXPECT_NO_THROW(solver.advance_momentum_once());
+    const auto trial_topology = solver.solution_topology();
+    ASSERT_TRUE(trial_topology);
+    EXPECT_NE(trial_topology, old_topology);
+    const auto trial_max_z = std::ranges::max(
+        trial_topology->points, {}, [](const auto& point) { return point.z; }).z;
+    EXPECT_DOUBLE_EQ(trial_max_z, 3.0);
+
+    motion.rollback_trial();
+    EXPECT_THROW(solver.advance_momentum_once(), std::invalid_argument);
+    solver.refresh_geometry_after_motion();
+    EXPECT_NO_THROW(solver.advance_momentum_once());
+    const auto restored_topology = solver.solution_topology();
+    ASSERT_TRUE(restored_topology);
+    const auto restored_max_z = std::ranges::max(
+        restored_topology->points, {}, [](const auto& point) { return point.z; }).z;
+    EXPECT_DOUBLE_EQ(restored_max_z, 2.0);
 }
 
 /** @brief The legacy constructor wraps, but never rebuilds, its input mesh. */
@@ -366,6 +437,22 @@ TEST(FluidSolverTest, RunsCoupledKrylovOnNativeMeshHandle)
             EXPECT_TRUE(std::isfinite(velocity.y));
             EXPECT_TRUE(std::isfinite(velocity.z));
         }
+        const auto flux_values = solver.final_face_fluxes().owned_read_view();
+        double continuity_norm_squared = 0.0;
+        double continuity_maximum = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto balance = SimpleFluid::FVM::cell_flux_balance<Pack>(
+                *mesh, solver.final_face_fluxes(), flux_values, cell);
+            continuity_norm_squared += balance * balance;
+            continuity_maximum =
+                std::max(continuity_maximum, std::abs(balance));
+        }
+        EXPECT_NEAR(solver.last_volume_continuity_residuals().l2,
+            std::sqrt(continuity_norm_squared), 1.0e-14);
+        EXPECT_NEAR(solver.last_volume_continuity_residuals().maximum,
+            continuity_maximum, 1.0e-14);
     }
 }
 

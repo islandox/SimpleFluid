@@ -24,6 +24,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -135,6 +136,16 @@ public:
     using field_type = typename field_traits::scalar_cell_type;
     using face_flux_field_type = typename field_traits::scalar_face_type;
 
+    class StateSnapshot
+    {
+    private:
+        friend class ScalarVoidFractionModel;
+        const ScalarVoidFractionModel* d_owner = nullptr;
+        std::vector<scalar_type> d_alpha_g;
+        std::vector<scalar_type> d_alpha_l;
+        std::vector<scalar_type> d_source;
+    };
+
     /**
      * @brief Construct a scalar void-fraction model on a mesh.
      */
@@ -224,6 +235,56 @@ public:
         noexcept
     {
         return d_output_fields;
+    }
+
+    [[nodiscard]] StateSnapshot snapshot() const
+    {
+        StateSnapshot result;
+        result.d_owner = this;
+        result.d_alpha_g.resize(d_mesh->num_owned_cells());
+        result.d_alpha_l.resize(d_mesh->num_owned_cells());
+        result.d_source.resize(d_mesh->num_owned_cells());
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            result.d_alpha_g[owned] = d_alpha_g.value(cell);
+            result.d_alpha_l[owned] = d_alpha_l.value(cell);
+            result.d_source[owned] = d_source_alpha_total.value(cell);
+        }
+        return result;
+    }
+
+    void restore(const StateSnapshot& snapshot)
+    {
+        const int local_invalid = snapshot.d_owner != this ||
+                                  snapshot.d_alpha_g.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_alpha_l.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_source.size() != d_mesh->num_owned_cells();
+        int any_invalid = 0;
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::invalid_argument("ScalarVoidFractionModel snapshot is foreign or incompatible.");
+        }
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            d_alpha_g.set_owned_value(cell, snapshot.d_alpha_g[owned]);
+            d_alpha_l.set_owned_value(cell, snapshot.d_alpha_l[owned]);
+            d_source_alpha_total.set_owned_value(cell, snapshot.d_source[owned]);
+        }
+        sync_fields();
+        refresh_geometry();
+    }
+
+    void refresh_geometry()
+    {
+        if (d_transport_geometry_cache)
+        {
+            d_transport_geometry_cache->refresh();
+        }
+        d_diffusion_solver.reset();
     }
 
     /**

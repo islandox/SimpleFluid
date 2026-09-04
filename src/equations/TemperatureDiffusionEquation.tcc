@@ -70,6 +70,18 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_boundary_cache()
     }
 }
 
+/** Refresh geometry-dependent transport data after fixed-topology motion. */
+template<TpetraTypePack Pack, class MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry()
+{
+    d_cached_transport_matrix = Teuchos::null;
+    d_cached_transport_graph_supports_non_orthogonal_correction = false;
+    d_cached_physical_transport_matrix = Teuchos::null;
+    d_cached_physical_graph_supports_non_orthogonal_correction = false;
+    d_linear_solver.reset();
+    d_transport_geometry_cache.refresh();
+}
+
 /**
  * @brief Advance the temperature field explicitly with a zero source term.
  *
@@ -397,6 +409,22 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     const boundary_cache_type* boundary_thermal_conductivity,
     FVM::FaceCoefficientInterpolation coefficient_interpolation) const -> LinearSolveStatistics
 {
+    return advance_physical(old_temperature, face_fluxes, time_step, material, temperature, power_density,
+        treatment, linear_options, thermal_conductivity_override, boundary_thermal_conductivity,
+        coefficient_interpolation, nullptr, nullptr, nullptr, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, const material_type& material,
+    field_type& temperature, const source_type& power_density, FVM::NonOrthogonalTreatment treatment,
+    const LinearSolverOptions& linear_options, const field_type* thermal_conductivity_override,
+    const boundary_cache_type* boundary_thermal_conductivity,
+    FVM::FaceCoefficientInterpolation coefficient_interpolation,
+    const FVM::ALEControlVolumeState* ale, const field_type* old_density,
+    const field_type* old_specific_heat_capacity,
+    const field_type* transport_density_override) const -> LinearSolveStatistics
+{
     collective_detail::collective_local_validation(*d_mesh, "TemperatureDiffusionEquation physical input validation",
         [&]
         {
@@ -408,6 +436,33 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                 *d_mesh, material.specific_heat_capacity, "TemperatureDiffusionEquation");
             EquationValidation::require_mesh_match(
                 *d_mesh, material.thermal_conductivity, "TemperatureDiffusionEquation");
+            if (old_density != nullptr)
+            {
+                EquationValidation::require_mesh_match(
+                    *d_mesh, *old_density, "TemperatureDiffusionEquation");
+            }
+            if (old_specific_heat_capacity != nullptr)
+            {
+                EquationValidation::require_mesh_match(
+                    *d_mesh, *old_specific_heat_capacity,
+                    "TemperatureDiffusionEquation");
+            }
+            if (transport_density_override != nullptr)
+            {
+                EquationValidation::require_mesh_match(
+                    *d_mesh, *transport_density_override, "TemperatureDiffusionEquation");
+            }
+            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+            {
+                if (ale != nullptr || old_density != nullptr
+                    || old_specific_heat_capacity != nullptr || transport_density_override != nullptr)
+                {
+                    throw std::invalid_argument(
+                        "TemperatureDiffusionEquation ALE transport and "
+                        "accepted-old properties require a native mapped "
+                        "mesh.");
+                }
+            }
             if (!std::isfinite(time_step) || time_step <= scalar_type{})
             {
                 throw std::invalid_argument("TemperatureDiffusionEquation requires a finite positive time step.");
@@ -438,9 +493,19 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         "TemperatureDiffusionEquation conductivity-override selection");
     collective_detail::require_uniform_value(*d_mesh, boundary_thermal_conductivity == nullptr ? 0 : 1,
         "TemperatureDiffusionEquation boundary-conductivity-cache selection");
+    collective_detail::require_uniform_value(*d_mesh, ale == nullptr ? 0 : 1,
+        "TemperatureDiffusionEquation ALE-state selection");
+    collective_detail::require_uniform_value(*d_mesh, old_density == nullptr ? 0 : 1,
+        "TemperatureDiffusionEquation accepted-old-density selection");
+    collective_detail::require_uniform_value(*d_mesh, old_specific_heat_capacity == nullptr ? 0 : 1,
+        "TemperatureDiffusionEquation accepted-old-heat-capacity selection");
+    collective_detail::require_uniform_value(*d_mesh, transport_density_override == nullptr ? 0 : 1,
+        "TemperatureDiffusionEquation transport-density-override selection");
 
     const auto& thermal_conductivity =
         thermal_conductivity_override == nullptr ? material.thermal_conductivity : *thermal_conductivity_override;
+    const auto& transport_density =
+        transport_density_override == nullptr ? material.density : *transport_density_override;
     const auto conductivity_values = thermal_conductivity.local_read_view();
 
     const auto old_temperature_values = old_temperature.local_read_view();
@@ -483,10 +548,21 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     {
         try
         {
-            return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
-                material.density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
-                boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
-                boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation);
+            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+            {
+                return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
+                    transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
+                    boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
+                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation);
+            }
+            else
+            {
+                return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
+                    transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
+                    boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
+                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation,
+                    ale, old_density, old_specific_heat_capacity);
+            }
         }
         catch (...)
         {

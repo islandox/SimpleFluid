@@ -24,6 +24,16 @@ namespace
     return std::isfinite(value) && value > 0.0;
 }
 
+[[nodiscard]] std::size_t invalidated_generation(std::size_t current, std::size_t saved, std::string_view owner)
+{
+    const auto newest = std::max(current, saved);
+    if (newest == std::numeric_limits<std::size_t>::max())
+    {
+        throw std::overflow_error(std::string(owner) + " preview generation exhausted.");
+    }
+    return newest + 1;
+}
+
 [[nodiscard]] real_t sum_moles(const GasMolesBySpecies& moles)
 {
     real_t total = 0.0;
@@ -225,6 +235,41 @@ void validate_coupling_options(const FreeSurfaceCouplingOptions& coupling)
     {
         throw std::invalid_argument("Free-surface volume and gas closure tolerances must be finite and non-negative.");
     }
+}
+
+void validate_ale_options(const FreeSurfaceALEOptions& ale, bool enabled)
+{
+    if (enabled && ale.top_boundary.empty())
+    {
+        throw std::invalid_argument("free_surface_ale_top_boundary must name the moving planar boundary.");
+    }
+    if (ale.deformation_start_elevation && !std::isfinite(*ale.deformation_start_elevation))
+    {
+        throw std::invalid_argument("free_surface_ale_deformation_start_elevation must be finite [m].");
+    }
+    if (ale.maximum_level_change && (!std::isfinite(*ale.maximum_level_change) || *ale.maximum_level_change <= 0.0))
+    {
+        throw std::invalid_argument("free_surface_ale_maximum_level_change must be finite and positive [m].");
+    }
+    if (!std::isfinite(ale.gcl_absolute_tolerance) || ale.gcl_absolute_tolerance < 0.0 ||
+        !std::isfinite(ale.gcl_relative_tolerance) || ale.gcl_relative_tolerance < 0.0)
+    {
+        throw std::invalid_argument("Planar ALE GCL tolerances must be finite and non-negative.");
+    }
+    if (ale.maximum_correctors <= 0)
+    {
+        throw std::invalid_argument("free_surface_ale_maximum_correctors must be positive.");
+    }
+    if (!std::isfinite(ale.level_absolute_tolerance) || ale.level_absolute_tolerance < 0.0 ||
+        !std::isfinite(ale.level_relative_tolerance) || ale.level_relative_tolerance < 0.0)
+    {
+        throw std::invalid_argument("Planar ALE level tolerances must be finite and non-negative.");
+    }
+    if (!std::isfinite(ale.relaxation) || ale.relaxation <= 0.0 || ale.relaxation > 1.0)
+    {
+        throw std::invalid_argument("free_surface_ale_relaxation must be in (0, 1].");
+    }
+    static_cast<void>(MeshQualityGate(ale.quality_limits));
 }
 
 void validate_headspace_options(const HeadspaceOptions& headspace)
@@ -631,7 +676,8 @@ FreeSurfaceOptions free_surface_options_from_database(const Database& database)
     }
 
     options.vessel.mode = parse_vessel_mode(reader.value_or<std::string>("free_surface_vessel_model", "constantArea"));
-    if (options.enabled && options.mode == FreeSurfaceMode::PlanarVolumeBudget &&
+    if (options.enabled &&
+        (options.mode == FreeSurfaceMode::PlanarVolumeBudget || options.mode == FreeSurfaceMode::PlanarALE) &&
         options.vessel.mode == VesselVolumeMapMode::ConstantArea)
     {
         options.vessel.bottom_elevation = reader.required<real_t>("free_surface_bottom_elevation");
@@ -736,16 +782,44 @@ FreeSurfaceOptions free_surface_options_from_database(const Database& database)
     options.coupling.gas_relative_tolerance =
         reader.value_or<real_t>("free_surface_gas_closure_relative_tolerance", options.coupling.gas_relative_tolerance);
 
+    options.ale.top_boundary = reader.value_or<std::string>("free_surface_ale_top_boundary", options.ale.top_boundary);
+    if (reader.contains("free_surface_ale_deformation_start_elevation"))
+    {
+        options.ale.deformation_start_elevation =
+            reader.required<real_t>("free_surface_ale_deformation_start_elevation");
+    }
+    if (reader.contains("free_surface_ale_maximum_level_change"))
+    {
+        options.ale.maximum_level_change = reader.required<real_t>("free_surface_ale_maximum_level_change");
+    }
+    options.ale.gcl_absolute_tolerance =
+        reader.value_or<real_t>("free_surface_ale_gcl_absolute_tolerance", options.ale.gcl_absolute_tolerance);
+    options.ale.gcl_relative_tolerance =
+        reader.value_or<real_t>("free_surface_ale_gcl_relative_tolerance", options.ale.gcl_relative_tolerance);
+    options.ale.maximum_correctors =
+        reader.value_or<int>("free_surface_ale_maximum_correctors", options.ale.maximum_correctors);
+    options.ale.level_absolute_tolerance =
+        reader.value_or<real_t>("free_surface_ale_level_absolute_tolerance", options.ale.level_absolute_tolerance);
+    options.ale.level_relative_tolerance =
+        reader.value_or<real_t>("free_surface_ale_level_relative_tolerance", options.ale.level_relative_tolerance);
+    options.ale.relaxation = reader.value_or<real_t>("free_surface_ale_relaxation", options.ale.relaxation);
+    options.ale.quality_limits.maximum_growth_ratio = reader.value_or<real_t>(
+        "free_surface_ale_maximum_growth_ratio", *options.ale.quality_limits.maximum_growth_ratio);
+    options.ale.quality_limits.maximum_non_orthogonality_degrees =
+        reader.value_or<real_t>("free_surface_ale_maximum_non_orthogonality_degrees",
+            *options.ale.quality_limits.maximum_non_orthogonality_degrees);
+    options.ale.quality_limits.maximum_skewness =
+        reader.value_or<real_t>("free_surface_ale_maximum_skewness", *options.ale.quality_limits.maximum_skewness);
+    options.ale.quality_limits.maximum_aspect_ratio = reader.value_or<real_t>(
+        "free_surface_ale_maximum_aspect_ratio", *options.ale.quality_limits.maximum_aspect_ratio);
+
     validate_free_surface_options(options);
     return options;
 }
 
 void validate_free_surface_options(const FreeSurfaceOptions& options)
 {
-    if (options.mode == FreeSurfaceMode::PlanarALE)
-    {
-        throw std::invalid_argument(std::string(planar_ale_unavailable_diagnostic));
-    }
+    validate_ale_options(options.ale, options.enabled && options.mode == FreeSurfaceMode::PlanarALE);
     if (!std::isfinite(options.validity_warning_relative_level_change) ||
         options.validity_warning_relative_level_change < 0.0)
     {
@@ -756,9 +830,26 @@ void validate_free_surface_options(const FreeSurfaceOptions& options)
     {
         return;
     }
-    if (options.mode != FreeSurfaceMode::PlanarVolumeBudget)
+    if (options.mode != FreeSurfaceMode::PlanarVolumeBudget && options.mode != FreeSurfaceMode::PlanarALE)
     {
-        throw std::invalid_argument("free_surface_enabled=true requires free_surface_model='planarVolumeBudget'.");
+        throw std::invalid_argument(
+            "free_surface_enabled=true requires free_surface_model='planarVolumeBudget' or 'planarALE'.");
+    }
+    if (options.mode == FreeSurfaceMode::PlanarALE)
+    {
+        if (options.vessel.mode != VesselVolumeMapMode::ConstantArea)
+        {
+            throw std::invalid_argument("planarALE initially requires free_surface_vessel_model='constantArea'.");
+        }
+        if (options.range_policy != FreeSurfaceRangePolicy::Error)
+        {
+            throw std::invalid_argument("planarALE initially requires free_surface_overflow_policy='error'.");
+        }
+        if (options.liquid_mass.mode != LiquidVolumeMode::CellMassInventory)
+        {
+            throw std::invalid_argument(
+                "planarALE initially requires free_surface_liquid_volume_model='cellMassInventory'.");
+        }
     }
     if (options.liquid_mass.mode != LiquidVolumeMode::GlobalConstantMass &&
         options.liquid_mass.mode != LiquidVolumeMode::CellMassInventory)
@@ -1195,6 +1286,8 @@ void PlanarFreeSurfaceModel::initialize(const FreeSurfaceUpdate& update)
         throw std::logic_error("PlanarFreeSurfaceModel is already initialized.");
     }
     validateUpdate(update, true);
+    const auto next_generation =
+        invalidated_generation(d_update_generation, d_update_generation, "PlanarFreeSurfaceModel");
     auto rollback_headspace = d_headspace->clone();
     try
     {
@@ -1226,6 +1319,7 @@ void PlanarFreeSurfaceModel::initialize(const FreeSurfaceUpdate& update)
         d_diagnostics.old_pool_level = d_diagnostics.pool_level;
         d_diagnostics.old_clear_level = d_diagnostics.clear_level;
         d_initialized = true;
+        d_update_generation = next_generation;
     }
     catch (...)
     {
@@ -1239,18 +1333,80 @@ void PlanarFreeSurfaceModel::initialize(const FreeSurfaceUpdate& update)
     }
 }
 
-void PlanarFreeSurfaceModel::update(const FreeSurfaceUpdate& update)
+PlanarFreeSurfaceModel::UpdatePreview PlanarFreeSurfaceModel::previewUpdate(const FreeSurfaceUpdate& update) const
 {
     if (!d_initialized)
     {
-        throw std::logic_error("PlanarFreeSurfaceModel must be initialized before update.");
+        throw std::logic_error("PlanarFreeSurfaceModel must be initialized before previewUpdate.");
     }
     validateUpdate(update, false);
     const auto closure = solveClosure(update);
     auto diagnostics = makeDiagnostics(closure, update, false);
-    d_headspace->commit(closure.headspace, update.gas.escaped_moles_this_step);
-    add_moles(d_committed_escaped_moles, update.gas.escaped_moles_this_step);
-    d_diagnostics = std::move(diagnostics);
+    return UpdatePreview(
+        this, d_update_generation, closure.headspace, update.gas.escaped_moles_this_step, std::move(diagnostics));
+}
+
+void PlanarFreeSurfaceModel::commitUpdate(const UpdatePreview& preview)
+{
+    if (preview.d_owner != this || preview.d_generation != d_update_generation)
+    {
+        throw std::logic_error("PlanarFreeSurfaceModel update preview is stale or belongs to another model.");
+    }
+
+    const auto next_generation =
+        invalidated_generation(d_update_generation, d_update_generation, "PlanarFreeSurfaceModel");
+    auto committed_escape = d_committed_escaped_moles;
+    add_moles(committed_escape, preview.d_escaped_moles);
+    d_headspace->commit(preview.d_headspace, preview.d_escaped_moles);
+    d_committed_escaped_moles = std::move(committed_escape);
+    d_diagnostics = preview.d_diagnostics;
+    d_update_generation = next_generation;
+}
+
+void PlanarFreeSurfaceModel::update(const FreeSurfaceUpdate& update)
+{
+    const auto preview = previewUpdate(update);
+    commitUpdate(preview);
+}
+
+PlanarFreeSurfaceModel::StateSnapshot PlanarFreeSurfaceModel::snapshot() const
+{
+    StateSnapshot result;
+    result.d_owner = this;
+    result.d_headspace = d_headspace->clone();
+    result.d_initialized = d_initialized;
+    result.d_initial_pool_level = d_initial_pool_level;
+    result.d_initial_gas_moles = d_initial_gas_moles;
+    result.d_committed_escaped_moles = d_committed_escaped_moles;
+    result.d_diagnostics = d_diagnostics;
+    result.d_update_generation = d_update_generation;
+    return result;
+}
+
+void PlanarFreeSurfaceModel::restore(const StateSnapshot& snapshot)
+{
+    if (snapshot.d_owner != this || !snapshot.d_headspace)
+    {
+        throw std::invalid_argument("PlanarFreeSurfaceModel snapshot is foreign or incomplete.");
+    }
+
+    // Prepare all potentially throwing copies before replacing accepted state.
+    auto restored_headspace = snapshot.d_headspace->clone();
+    auto restored_initial_gas = snapshot.d_initial_gas_moles;
+    auto restored_escape = snapshot.d_committed_escaped_moles;
+    auto restored_diagnostics = snapshot.d_diagnostics;
+    const auto next_generation =
+        invalidated_generation(d_update_generation, snapshot.d_update_generation, "PlanarFreeSurfaceModel");
+
+    d_headspace = std::move(restored_headspace);
+    d_initialized = snapshot.d_initialized;
+    d_initial_pool_level = snapshot.d_initial_pool_level;
+    d_initial_gas_moles = std::move(restored_initial_gas);
+    d_committed_escaped_moles = std::move(restored_escape);
+    d_diagnostics = std::move(restored_diagnostics);
+    // Accepted values roll back exactly, while the token epoch only moves
+    // forward so previews from either side of the rollback cannot revive.
+    d_update_generation = next_generation;
 }
 
 PlanarFreeSurfaceModel::ClosureResult PlanarFreeSurfaceModel::solveClosure(const FreeSurfaceUpdate& update) const

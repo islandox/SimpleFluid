@@ -11,6 +11,7 @@
 #include "dataclass/typedefs.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "geometry/Mesh.hh"
+#include "geometry/MeshQuality.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -30,10 +31,10 @@
 namespace SimpleFluid
 {
 
-/** Stable setup diagnostic for the deliberately unavailable solver mode. */
+/** Stable setup diagnostic for a solver that lacks mutable ALE ownership. */
 inline constexpr std::string_view planar_ale_unavailable_diagnostic =
-    "free_surface_model 'planarALE' is unavailable: standalone geometry/GCL primitives exist, but conservative "
-    "ALE transport and solver coupling are not implemented.";
+    "free_surface_model 'planarALE' requires the mutable native solver constructor and the supported conservative "
+    "ALE model matrix.";
 
 /** Compatibility alias retained for callers of the earlier diagnostic name. */
 inline constexpr std::string_view planar_ale_immutable_mesh_diagnostic = planar_ale_unavailable_diagnostic;
@@ -130,7 +131,8 @@ protected:
     [[nodiscard]] virtual real_t levelForVolumeInRange(real_t volume) const = 0;
 
 private:
-    [[nodiscard]] VesselRangeEvaluation boundAndEvaluate(real_t requested, real_t lower, real_t upper,
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL VesselRangeEvaluation boundAndEvaluate(
+        real_t requested, real_t lower, real_t upper,
         std::string_view quantity, const std::function<real_t(real_t)>& evaluator) const;
 
     FreeSurfaceRangePolicy d_range_policy;
@@ -149,9 +151,9 @@ public:
     [[nodiscard]] real_t totalUsableVolume() const noexcept override;
 
 protected:
-    [[nodiscard]] real_t volumeBelowInRange(real_t height) const override;
-    [[nodiscard]] real_t areaAtInRange(real_t height) const override;
-    [[nodiscard]] real_t levelForVolumeInRange(real_t volume) const override;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL real_t volumeBelowInRange(real_t height) const override;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL real_t areaAtInRange(real_t height) const override;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL real_t levelForVolumeInRange(real_t volume) const override;
 
 private:
     real_t d_bottom_elevation;
@@ -171,13 +173,13 @@ public:
     [[nodiscard]] real_t totalUsableVolume() const noexcept override;
 
 protected:
-    [[nodiscard]] real_t volumeBelowInRange(real_t height) const override;
-    [[nodiscard]] real_t areaAtInRange(real_t height) const override;
-    [[nodiscard]] real_t levelForVolumeInRange(real_t volume) const override;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL real_t volumeBelowInRange(real_t height) const override;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL real_t areaAtInRange(real_t height) const override;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL real_t levelForVolumeInRange(real_t volume) const override;
 
 private:
-    [[nodiscard]] size_t heightSegment(real_t height) const;
-    [[nodiscard]] size_t volumeSegment(real_t volume) const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL size_t heightSegment(real_t height) const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL size_t volumeSegment(real_t volume) const;
 
     ArrReal d_heights;
     ArrReal d_volumes;
@@ -235,7 +237,25 @@ struct FreeSurfaceCouplingOptions
     real_t gas_relative_tolerance = 1.0e-10;
 };
 
-/** Complete fixed-grid free-surface configuration. */
+/** Solver-integrated planar-ALE controls; all dimensional values use SI units. */
+struct FreeSurfaceALEOptions
+{
+    /** Name of the planar moving liquid/headspace boundary batch. */
+    std::string top_boundary;
+    /** Elevation below which mesh points remain fixed [m]. */
+    std::optional<real_t> deformation_start_elevation;
+    /** Maximum accepted-to-trial surface displacement [m]. */
+    std::optional<real_t> maximum_level_change;
+    real_t gcl_absolute_tolerance = 1.0e-12; ///< [m^3/s]
+    real_t gcl_relative_tolerance = 1.0e-10;
+    int maximum_correctors = 12;
+    real_t level_absolute_tolerance = 1.0e-10; ///< [m]
+    real_t level_relative_tolerance = 1.0e-10;
+    real_t relaxation = 0.5;
+    MeshQualityLimits quality_limits;
+};
+
+/** Complete fixed-grid or solver-integrated planar free-surface configuration. */
 struct FreeSurfaceOptions
 {
     bool enabled = false;
@@ -249,6 +269,7 @@ struct FreeSurfaceOptions
     LiquidMassInventoryOptions liquid_mass;
     HeadspaceOptions headspace;
     FreeSurfaceCouplingOptions coupling;
+    FreeSurfaceALEOptions ale;
 };
 
 /** Parse and validate flat `free_surface_*` Database keys. */
@@ -427,12 +448,66 @@ struct FreeSurfaceUpdate
 class SIMPLEFLUID_SOLVERS_EXPORT PlanarFreeSurfaceModel
 {
 public:
+    /** Opaque accepted-state snapshot used by an outer solver transaction. */
+    class StateSnapshot
+    {
+    public:
+        StateSnapshot(StateSnapshot&&) noexcept = default;
+        StateSnapshot& operator=(StateSnapshot&&) noexcept = default;
+        StateSnapshot(const StateSnapshot&) = delete;
+        StateSnapshot& operator=(const StateSnapshot&) = delete;
+        ~StateSnapshot() = default;
+
+    private:
+        friend class PlanarFreeSurfaceModel;
+        StateSnapshot() = default;
+
+        const PlanarFreeSurfaceModel* d_owner = nullptr;
+        std::unique_ptr<HeadspaceModel> d_headspace;
+        bool d_initialized = false;
+        real_t d_initial_pool_level = 0.0;
+        GasMolesBySpecies d_initial_gas_moles;
+        GasMolesBySpecies d_committed_escaped_moles;
+        FreeSurfaceDiagnostics d_diagnostics;
+        std::size_t d_update_generation = 0;
+    };
+
+    /** Opaque non-mutating closure result committed by generation. */
+    class UpdatePreview
+    {
+    public:
+        [[nodiscard]] const FreeSurfaceDiagnostics& diagnostics() const noexcept { return d_diagnostics; }
+        [[nodiscard]] real_t headspacePressure() const noexcept { return d_headspace.pressure; }
+
+    private:
+        friend class PlanarFreeSurfaceModel;
+        UpdatePreview(const PlanarFreeSurfaceModel* owner, std::size_t generation, HeadspaceState headspace,
+            GasMolesBySpecies escaped_moles, FreeSurfaceDiagnostics diagnostics) noexcept
+            : d_owner(owner), d_generation(generation), d_headspace(std::move(headspace)),
+              d_escaped_moles(std::move(escaped_moles)), d_diagnostics(std::move(diagnostics))
+        {
+        }
+
+        const PlanarFreeSurfaceModel* d_owner = nullptr;
+        std::size_t d_generation = 0;
+        HeadspaceState d_headspace;
+        GasMolesBySpecies d_escaped_moles;
+        FreeSurfaceDiagnostics d_diagnostics;
+    };
+
     PlanarFreeSurfaceModel(std::shared_ptr<const VesselVolumeMap> volume_map, std::unique_ptr<HeadspaceModel> headspace,
         FreeSurfaceCouplingOptions coupling = {}, real_t validity_warning_relative_level_change = 0.05,
         real_t configured_level_underflow = 0.0, real_t configured_level_overflow = 0.0);
 
     void initialize(const FreeSurfaceUpdate& update);
+    [[nodiscard]] UpdatePreview previewUpdate(const FreeSurfaceUpdate& update) const;
+    void commitUpdate(const UpdatePreview& preview);
     void update(const FreeSurfaceUpdate& update);
+
+    /** Capture every mutable accepted ledger and headspace state. */
+    [[nodiscard]] StateSnapshot snapshot() const;
+    /** Restore accepted state and monotonically invalidate all outstanding previews. */
+    void restore(const StateSnapshot& snapshot);
 
     [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] FreeSurfaceDiagnostics diagnostics() const;
@@ -457,13 +532,14 @@ private:
         real_t residual = 0.0;
     };
 
-    [[nodiscard]] ClosureResult solveClosure(const FreeSurfaceUpdate& update) const;
-    [[nodiscard]] ClosureResult solveVented(const FreeSurfaceUpdate& update) const;
-    [[nodiscard]] ClosureResult solveClosed(const FreeSurfaceUpdate& update) const;
-    [[nodiscard]] ClosureResult evaluateClosedTrial(const FreeSurfaceUpdate& update, real_t pressure) const;
-    [[nodiscard]] FreeSurfaceDiagnostics makeDiagnostics(
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL ClosureResult solveClosure(const FreeSurfaceUpdate& update) const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL ClosureResult solveVented(const FreeSurfaceUpdate& update) const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL ClosureResult solveClosed(const FreeSurfaceUpdate& update) const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL ClosureResult evaluateClosedTrial(
+        const FreeSurfaceUpdate& update, real_t pressure) const;
+    [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL FreeSurfaceDiagnostics makeDiagnostics(
         const ClosureResult& closure, const FreeSurfaceUpdate& update, bool initializing) const;
-    void validateUpdate(const FreeSurfaceUpdate& update, bool initializing) const;
+    SIMPLEFLUID_SOLVERS_LOCAL void validateUpdate(const FreeSurfaceUpdate& update, bool initializing) const;
 
     std::shared_ptr<const VesselVolumeMap> d_volume_map;
     std::unique_ptr<HeadspaceModel> d_headspace;
@@ -476,6 +552,7 @@ private:
     GasMolesBySpecies d_initial_gas_moles;
     GasMolesBySpecies d_committed_escaped_moles;
     FreeSurfaceDiagnostics d_diagnostics;
+    std::size_t d_update_generation = 0;
 };
 
 /** Construct the enabled planar-volume-budget model; disabled returns null. */
@@ -504,10 +581,11 @@ template<class Scalar> struct LiquidMassInventoryDiagnostics
  * Fixed reference mass fractions are initialized from pure-liquid density
  * times cell volume. The global fallback therefore evaluates
  * `V_l=M_l sum(w_c/rho_l,c)` without claiming local conservative transport.
- * Cellwise mode stores `m_l_star` [kg/m^3 reference volume], transports it
- * conservatively with unit storage/advection weights, and evaluates
- * `V_l=sum(V_c*m_l_star_c/rho_l,c)`. Mixture density and void fraction are
- * intentionally absent from both paths.
+ * On a fixed mesh, cellwise mode stores `m_l_star` [kg/m^3 reference volume].
+ * With an active ALE descriptor the same compatibility field is explicitly a
+ * current-control-volume mass density whose conserved product is `V*m_l_star`;
+ * accepted-old and trial-new volumes are never applied twice. Mixture density
+ * and void fraction are intentionally absent from both paths.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> class LiquidMassInventory
 {
@@ -518,6 +596,21 @@ public:
     using field_type = typename MeshFieldTraits<Pack, mesh_type>::scalar_cell_type;
     using face_flux_field_type = typename MeshFieldTraits<Pack, mesh_type>::scalar_face_type;
     using diagnostics_type = LiquidMassInventoryDiagnostics<scalar_type>;
+
+    /** Opaque accepted-state snapshot used by the ALE step transaction. */
+    class StateSnapshot
+    {
+    private:
+        friend class LiquidMassInventory;
+        const LiquidMassInventory* d_owner = nullptr;
+        std::vector<scalar_type> d_pure_density;
+        std::vector<scalar_type> d_cell_mass;
+        std::vector<scalar_type> d_trial_cell_mass;
+        diagnostics_type d_diagnostics;
+        size_t d_phase_change_generation = 0;
+        size_t d_cellwise_trial_nonce = 0;
+        bool d_initialized = false;
+    };
 
     /** Opaque, single-generation phase-change transaction prepared collectively. */
     class PhaseChangePreview
@@ -579,6 +672,10 @@ public:
         {
             throw std::logic_error("LiquidMassInventory is already initialized.");
         }
+        const auto next_phase_change_generation =
+            invalidatedCounter(d_phase_change_generation, d_phase_change_generation, "phase-change generation");
+        const auto next_cellwise_trial_nonce =
+            invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
 
         const int local_invalid_volume =
             !std::isfinite(initial_liquid_volume) || initial_liquid_volume < scalar_type{} ? 1 : 0;
@@ -690,8 +787,8 @@ public:
         d_cell_mass_inventory.sync_ghosts();
         d_trial_cell_mass_inventory.sync_ghosts();
         d_initialized = true;
-        d_phase_change_generation = 0;
-        d_cellwise_trial_nonce = 0;
+        d_phase_change_generation = next_phase_change_generation;
+        d_cellwise_trial_nonce = next_cellwise_trial_nonce;
         updateVolumeFromStoredDensity();
         updateMassBalance();
     }
@@ -742,7 +839,8 @@ public:
             // A preview contains a liquid volume evaluated with the density
             // accepted at its creation.  Changing that density is an accepted
             // state mutation and must make every older preview uncommittable.
-            ++d_phase_change_generation;
+            d_phase_change_generation =
+                invalidatedCounter(d_phase_change_generation, d_phase_change_generation, "phase-change generation");
         }
     }
 
@@ -812,22 +910,23 @@ public:
      */
     [[nodiscard]] PhaseChangePreview previewCellwiseAdvance(scalar_type time_step,
         const face_flux_field_type& liquid_face_flux, const field_type* evaporation_mass_rate = nullptr,
-        const field_type* condensation_mass_rate = nullptr, const LinearSolverOptions& linear_options = {})
+        const field_type* condensation_mass_rate = nullptr, const LinearSolverOptions& linear_options = {},
+        const FVM::ALEControlVolumeState* ale = nullptr)
     {
         requireInitialized();
         const auto communicator = d_mesh->owned_cell_map()->getComm();
 
         const int backend = static_cast<int>(linear_options.backend);
         const int preconditioner = static_cast<int>(linear_options.preconditioner);
-        const std::array<int, 12> local_control{static_cast<int>(d_options.mode),
+        const std::array<int, 13> local_control{static_cast<int>(d_options.mode),
             d_options.depletion_policy == FreeSurfaceRangePolicy::Error ? 1 : 0,
             evaporation_mass_rate != nullptr ? 1 : 0, condensation_mass_rate != nullptr ? 1 : 0,
             std::isfinite(time_step) && time_step > scalar_type{} ? 1 : 0,
             std::isfinite(linear_options.tolerance) && linear_options.tolerance > 0.0 ? 1 : 0,
             linear_options.max_iterations > 0 ? 1 : 0, linear_options.max_iterations, linear_options.verbosity, backend,
-            preconditioner, linear_options.reuse_preconditioner ? 1 : 0};
-        std::array<int, 12> minimum_control{};
-        std::array<int, 12> maximum_control{};
+            preconditioner, linear_options.reuse_preconditioner ? 1 : 0, ale != nullptr ? 1 : 0};
+        std::array<int, 13> minimum_control{};
+        std::array<int, 13> maximum_control{};
         Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_control.size()),
             local_control.data(), minimum_control.data());
         Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_control.size()),
@@ -865,6 +964,10 @@ public:
             throw std::invalid_argument(
                 "Cellwise liquid-mass timestep and linear tolerance must match exactly on every rank.");
         }
+        if (ale != nullptr)
+        {
+            ale->validate(*d_mesh, static_cast<real_t>(time_step));
+        }
 
         const int local_mesh_mismatch =
             &liquid_face_flux.mesh() != d_mesh.get() ||
@@ -895,13 +998,18 @@ public:
                 evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_mass_rate->value(cell);
             const auto condensation =
                 condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
-            const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
+            const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                                                   : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume =
+                ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
             local_invalid_value = local_invalid_value || !std::isfinite(mass_density) || mass_density < scalar_type{} ||
                                   !std::isfinite(evaporation) || evaporation < scalar_type{} ||
                                   !std::isfinite(condensation) || condensation < scalar_type{} ||
-                                  !std::isfinite(volume) || volume <= scalar_type{};
+                                  !std::isfinite(new_volume) || new_volume <= scalar_type{} ||
+                                  !std::isfinite(old_volume) || old_volume <= scalar_type{};
             local_depleted_cell =
-                local_depleted_cell || mass_density + time_step * (condensation - evaporation) < scalar_type{};
+                local_depleted_cell ||
+                mass_density * old_volume + time_step * (condensation - evaporation) * new_volume < scalar_type{};
         }
         const std::array<int, 3> local_validation{local_invalid_value, local_boundary_flux, local_depleted_cell};
         std::array<int, 3> global_validation{};
@@ -924,7 +1032,8 @@ public:
 
         // Invalidate every older cellwise token before changing shared trial
         // storage, including when the following assembly or solve fails.
-        ++d_cellwise_trial_nonce;
+        d_cellwise_trial_nonce =
+            invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
         d_trial_cell_mass_inventory.owned_data().update(
             scalar_type{1}, d_cell_mass_inventory.owned_data(), scalar_type{});
         d_trial_cell_mass_inventory.sync_ghosts();
@@ -951,7 +1060,8 @@ public:
                 .boundary_value = zero_boundary_value,
                 .source = phase_change_source,
                 .treatment = FVM::NonOrthogonalTreatment::Explicit,
-                .cached_matrix = d_transport_matrix});
+                .cached_matrix = d_transport_matrix,
+                .ale = ale});
         d_transport_matrix = system.matrix;
         auto transport_linear_options = linear_options;
         // The cached graph is refilled with new transient/flux/source values;
@@ -966,6 +1076,10 @@ public:
         {
             throw std::runtime_error("Cellwise liquid-mass transport solve did not converge on every rank.");
         }
+        // The solver writes authoritative owned storage directly. Publish the
+        // trial to overlap storage before any ALE ledger or partition-face
+        // consumer requests mesh-local values from the preview field.
+        d_trial_cell_mass_inventory.sync_ghosts();
 
         scalar_type local_mass_before{};
         scalar_type local_evaporated{};
@@ -976,7 +1090,10 @@ public:
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell = static_cast<local_ordinal_type>(owned);
-            const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
+            const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                                                   : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume =
+                ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
             const auto mass_before = d_cell_mass_inventory.value(cell);
             const auto mass_after = d_trial_cell_mass_inventory.value(cell);
             const auto density = d_pure_liquid_density.value(cell);
@@ -986,11 +1103,11 @@ public:
                 condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
             local_invalid_value = local_invalid_value || !std::isfinite(mass_after) || mass_after < scalar_type{} ||
                                   !std::isfinite(density) || density <= scalar_type{};
-            local_mass_before += mass_before * volume;
-            local_evaporated += evaporation * volume * time_step;
-            local_condensed += condensation * volume * time_step;
-            local_mass_after += mass_after * volume;
-            local_liquid_volume += mass_after / density * volume;
+            local_mass_before += mass_before * old_volume;
+            local_evaporated += evaporation * new_volume * time_step;
+            local_condensed += condensation * new_volume * time_step;
+            local_mass_after += mass_after * new_volume;
+            local_liquid_volume += mass_after / density * new_volume;
         }
         int any_invalid_trial = 0;
         Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid_value, &any_invalid_trial);
@@ -1051,6 +1168,8 @@ public:
             throw std::logic_error(
                 "LiquidMassInventory phase-change preview is stale, foreign, or inconsistent across ranks.");
         }
+        const auto next_generation =
+            invalidatedCounter(d_phase_change_generation, d_phase_change_generation, "phase-change generation");
         if (cellwise_mode)
         {
             d_cell_mass_inventory.owned_data().update(
@@ -1062,7 +1181,7 @@ public:
         {
             updateGlobalCellMassField();
         }
-        ++d_phase_change_generation;
+        d_phase_change_generation = next_generation;
     }
 
     void updatePhaseChange(scalar_type evaporated_mass, scalar_type condensed_mass = scalar_type{})
@@ -1090,10 +1209,108 @@ public:
     /** Canonical pure-liquid material-density output field [kg/m^3]. */
     [[nodiscard]] const field_type& rhoLiquid() const noexcept { return d_pure_liquid_density; }
 
-    /** Conserved liquid-mass inventory per fixed reference volume [kg/m^3]. */
+    /** Fixed-reference or ALE current-control-volume mass density [kg/m^3]. */
     [[nodiscard]] const field_type& cellMassInventory() const noexcept { return d_cell_mass_inventory; }
 
+    /** Discard numeric transport state after a geometry-epoch transition. */
+    void refresh_geometry() { invalidateGeometry(); }
+
+    /**
+     * Trial current-control-volume mass density owned by a live cellwise preview.
+     *
+     * The returned field remains valid only until another cellwise preview,
+     * commit, restore, density update, or reinitialization invalidates the token.
+     */
+    [[nodiscard]] const field_type& trialCellMassInventory(const PhaseChangePreview& preview) const
+    {
+        const auto cellwise_mode = d_options.mode == LiquidVolumeMode::CellMassInventory;
+        const int local_invalid = !d_initialized || preview.d_owner != this ||
+                                  preview.d_generation != d_phase_change_generation || !preview.d_cellwise ||
+                                  !cellwise_mode || preview.d_trial_nonce != d_cellwise_trial_nonce;
+        int any_invalid = 0;
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::logic_error("LiquidMassInventory trial field preview is stale, foreign, non-cellwise, or "
+                                   "inconsistent across ranks.");
+        }
+        return d_trial_cell_mass_inventory;
+    }
+
+    /** Capture all mutable accepted/trial inventory state without communication. */
+    [[nodiscard]] StateSnapshot snapshot() const
+    {
+        StateSnapshot result;
+        result.d_owner = this;
+        result.d_pure_density.resize(d_mesh->num_owned_cells());
+        result.d_cell_mass.resize(d_mesh->num_owned_cells());
+        result.d_trial_cell_mass.resize(d_mesh->num_owned_cells());
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            result.d_pure_density[owned] = d_pure_liquid_density.value(cell);
+            result.d_cell_mass[owned] = d_cell_mass_inventory.value(cell);
+            result.d_trial_cell_mass[owned] = d_trial_cell_mass_inventory.value(cell);
+        }
+        result.d_diagnostics = d_diagnostics;
+        result.d_phase_change_generation = d_phase_change_generation;
+        result.d_cellwise_trial_nonce = d_cellwise_trial_nonce;
+        result.d_initialized = d_initialized;
+        return result;
+    }
+
+    /** Restore a snapshot and invalidate numeric transport state. */
+    void restore(const StateSnapshot& snapshot)
+    {
+        const int local_invalid = snapshot.d_owner != this ||
+                                  snapshot.d_pure_density.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_cell_mass.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_trial_cell_mass.size() != d_mesh->num_owned_cells();
+        int any_invalid = 0;
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::invalid_argument("LiquidMassInventory snapshot is foreign or has incompatible storage.");
+        }
+        const auto next_phase_change_generation = invalidatedCounter(
+            d_phase_change_generation, snapshot.d_phase_change_generation, "phase-change generation");
+        const auto next_cellwise_trial_nonce =
+            invalidatedCounter(d_cellwise_trial_nonce, snapshot.d_cellwise_trial_nonce, "cellwise trial nonce");
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            d_pure_liquid_density.set_owned_value(cell, snapshot.d_pure_density[owned]);
+            d_cell_mass_inventory.set_owned_value(cell, snapshot.d_cell_mass[owned]);
+            d_trial_cell_mass_inventory.set_owned_value(cell, snapshot.d_trial_cell_mass[owned]);
+        }
+        d_pure_liquid_density.sync_ghosts();
+        d_cell_mass_inventory.sync_ghosts();
+        d_trial_cell_mass_inventory.sync_ghosts();
+        d_diagnostics = snapshot.d_diagnostics;
+        d_phase_change_generation = next_phase_change_generation;
+        d_cellwise_trial_nonce = next_cellwise_trial_nonce;
+        d_initialized = snapshot.d_initialized;
+        invalidateGeometry();
+    }
+
+    /** Invalidate geometry-dependent matrix and retained solver setup. */
+    void invalidateGeometry()
+    {
+        d_transport_matrix = Teuchos::null;
+        d_transport_solver = {};
+    }
+
 private:
+    [[nodiscard]] static size_t invalidatedCounter(size_t current, size_t saved, std::string_view name)
+    {
+        const auto newest = std::max(current, saved);
+        if (newest == std::numeric_limits<size_t>::max())
+        {
+            throw std::overflow_error("LiquidMassInventory " + std::string(name) + " exhausted.");
+        }
+        return newest + 1;
+    }
+
     [[nodiscard]] static SP<const mesh_type> checkedMesh(SP<const mesh_type> mesh)
     {
         if (!mesh)

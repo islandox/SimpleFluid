@@ -213,6 +213,11 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::BoussinesqSolver<.*>[ ]*::(temperature_equation|stored_material_properties|stored_turbulence_model|physical_transport_enabled|solution_writer|stored_temperature_sources|refresh_physical_models|refresh_material_feedback|initialize_radiolytic_gas_state|update_void_fraction_models|active_alpha_g_field|active_alpha_l_field|ensure_scalar_void_fraction_model)[(]"
     "SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::(isothermal_momentum_equation|isothermal_velocity_boundary_cache|isothermal_pressure_face_flux_workspace|isothermal_coupled_pressure_velocity_solver|stored_material_properties|stored_turbulence_model|solution_writer)[(]"
     "PhysicalModelTag"
+    "SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::(detect_family|current_axis_edges|geometry_edge_coordinates|geometry_motion_available|geometry_motion_owned|claim_geometry_motion|release_geometry_motion|replace_axis_edges|candidate_axis_edges|candidate_geometry_edges|capture_cell_volumes|capture_face_centroids|validate_collective_construction|validate_collective_trial|validate_collective_transaction|compute_trial_state|rollback_impl|reset_stationary_state)[(]"
+    "SimpleFluid::MeshHandle<.*>[ ]*::(require_mesh|checked_local|checked_global_ids|local_output_filename|add_geometry_cell_data|collect_vtu_points|write_vtu|legacy_vtu_topology|orthogonal_vtu_topology|semi_structured_vtu_topology|unstructured_vtu_topology|geometry_cell_lid|geometry_face_lid|visit_geometry_cell|visit_geometry_face|adjacent_cell|cell_local_id|face_local_id|initialize_orthogonal|initialize_semi_structured|initialize_unstructured|initialize_stk|initialize_serial|initialize_cells|initialize_faces|initialize_indexer|initialize_cell_faces|materialize_legacy_indexer|initialize_boundary_batches|make_map|create_maps|check_cell|check_face|visit_indexed_cell|visit_indexed_face|geometry_to_local_cell|geometry_to_local_face)[(]"
+    "SimpleFluid::VesselVolumeMap::boundAndEvaluate[(]"
+    "SimpleFluid::(ConstantAreaVesselVolumeMap|TabulatedVesselVolumeMap)::(volumeBelowInRange|areaAtInRange|levelForVolumeInRange|heightSegment|volumeSegment)[(]"
+    "SimpleFluid::PlanarFreeSurfaceModel::(solveClosure|solveVented|solveClosed|evaluateClosedTrial|makeDiagnostics|validateUpdate)[(]"
     "SimpleFluid::BoussinesqMomentumEquation<.*>[ ]*::select_dynamic_viscosity[(]"
     "SimpleFluid::IncompressibleMomentumEquation<.*>[ ]*::validate_transport_inputs[(]"
     "SimpleFluid::PressureProjectionEquation<.*>[ ]*::(require_owned_cell_map|project_impl)[(]"
@@ -278,6 +283,219 @@ foreach(simplefluid_required_api_pattern
     endif()
 endforeach()
 
+# Exact-count anchors distinguish overload families that a broad method-name
+# match cannot. Constructor counts are two because the Itanium ABI emits both
+# complete-object and base-object constructor entry points.
+set(simplefluid_required_exact_api_patterns)
+set(simplefluid_required_exact_api_counts)
+macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
+    list(APPEND simplefluid_required_exact_api_patterns
+         "${simplefluid_pattern}")
+    list(APPEND simplefluid_required_exact_api_counts
+         "${simplefluid_count}")
+endmacro()
+
+# Preserve all seven established FluidSolver/BoussinesqSolver constructor
+# signatures and the four mutable-MeshHandle additions.
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::Mesh<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::FluidSolver<.*>::DeferredMomentumEquationTag[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::Mesh<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::Mesh<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::BoussinesqModelOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::BoussinesqModelOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> >, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> >, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::FluidSolver<.*>::DeferredMomentumEquationTag[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> >, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> >, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::BoussinesqModelOptions[)]$"
+    2)
+
+# ALE adds overloads; it does not replace either explicitly instantiated Mesh
+# family. Anchor every pre-ALE endpoint and its ALEControlVolumeState peer.
+set(simplefluid_exact_mesh_specialization_patterns
+    "SimpleFluid::Mesh<.*>"
+    "SimpleFluid::MeshHandle<.*>")
+foreach(simplefluid_exact_mesh_specialization_pattern
+        IN LISTS simplefluid_exact_mesh_specialization_patterns)
+    if(simplefluid_exact_mesh_specialization_pattern MATCHES "MeshHandle")
+        set(simplefluid_legacy_vector_pointer_pattern
+            "SimpleFluid::MeshHandle<.*> > const[*]")
+        set(simplefluid_legacy_boundary_pointer_pattern
+            "SimpleFluid::MeshHandle<.*> > const[*]")
+    else()
+        set(simplefluid_legacy_vector_pointer_pattern
+            "SimpleFluid::VectorCellField<.*> const[*]")
+        set(simplefluid_legacy_boundary_pointer_pattern
+            "SimpleFluid::BoundaryCache<.*> const[*]")
+    endif()
+
+    foreach(simplefluid_momentum_equation
+            IN ITEMS IncompressibleMomentumEquation BoussinesqMomentumEquation)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity[(].*SimpleFluid::LinearSolverOptions const&[)] const$"
+            2)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity[(].*SimpleFluid::LinearSolverOptions const&, SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
+            2)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_system[(].*, ${simplefluid_legacy_vector_pointer_pattern}[)] const$"
+            2)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_system[(].*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
+            2)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity_physical[(].*, ${simplefluid_legacy_boundary_pointer_pattern}[)] const$"
+            1)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity_physical[(].*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
+            1)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_physical_system[(].*, ${simplefluid_legacy_boundary_pointer_pattern}[)] const$"
+            1)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_physical_system[(].*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
+            1)
+    endforeach()
+
+    simplefluid_require_exact_api(
+        "^SimpleFluid::TemperatureDiffusionEquation<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_physical[(].*SimpleFluid::FVM::FaceCoefficientInterpolation[)] const$"
+        1)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::TemperatureDiffusionEquation<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_physical[(].*SimpleFluid::FVM::FaceCoefficientInterpolation, SimpleFluid::FVM::ALEControlVolumeState const[*], .* const[*], .* const[*], .* const[*][)] const$"
+        1)
+
+    # Geometry refresh, continuity-target projection/assembly, and fixed-flux
+    # control are public for both explicit mesh specializations.
+    foreach(simplefluid_geometry_equation
+            IN ITEMS IncompressibleMomentumEquation PressureProjectionEquation TemperatureDiffusionEquation)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_geometry_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::refresh_geometry[(][)]$"
+            1)
+    endforeach()
+    simplefluid_require_exact_api(
+        "^SimpleFluid::PressureProjectionEquation<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::project[(].*SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
+        2)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::CoupledPressureVelocitySolver<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble[(].*SimpleFluid::VolumeContinuityTarget<.*> const&.*[)] const$"
+        3)
+    foreach(simplefluid_fixed_flux_owner
+            IN ITEMS PressureProjectionEquation CoupledPressureVelocitySolver)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_fixed_flux_owner}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::set_fixed_boundary_flux_provider[(].*[)]$"
+            1)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_fixed_flux_owner}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::clear_fixed_boundary_flux_provider[(][)]$"
+            1)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_fixed_flux_owner}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::pressure_flux_boundary_cache[(].*[)] const$"
+            1)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_fixed_flux_owner}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::apply_fixed_boundary_fluxes[(].*[)] const$"
+            1)
+    endforeach()
+endforeach()
+
+# The protected solver seam owns target installation and geometry invalidation.
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::refine_volume_continuity[(].*[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::refresh_geometry_dependent_state[(][)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::refresh_pressure_velocity_geometry_state[(][)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::set_volume_continuity_target[(].*[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::clear_volume_continuity_target[(][)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::refresh_geometry_dependent_state[(][)]$" 1)
+
+# Anchor the out-of-line planar-motion lifecycle and solver observer. Inline
+# getters remain consumer-instantiable and are not stable per-configuration
+# dynamic-symbol anchors.
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::PlanarALEMeshMotion[(].*[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::~PlanarALEMeshMotion[(][)]$" 3)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::begin_trial[(].*[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::accept_trial[(][)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::rollback_trial[(][)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::mesh_relative_face_fluxes[(][)] const$" 1)
+
+# The fixed-grid closure exposes an explicit preview/commit transaction and an
+# accepted-state snapshot/restore transaction.
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarFreeSurfaceModel::previewUpdate[(]SimpleFluid::FreeSurfaceUpdate const&[)] const$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarFreeSurfaceModel::commitUpdate[(]SimpleFluid::PlanarFreeSurfaceModel::UpdatePreview const&[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarFreeSurfaceModel::snapshot[(][)] const$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PlanarFreeSurfaceModel::restore[(]SimpleFluid::PlanarFreeSurfaceModel::StateSnapshot const&[)]$" 1)
+
+# Intentional private test seam: testPhysicalEquations calls these two member
+# overloads from a separate executable, so the explicit Mesh and MeshHandle
+# instantiations must remain dynamically linkable. Keep exactly four exports;
+# do not treat this as permission to export other private equation helpers.
+simplefluid_require_exact_api(
+    "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::(VectorCellField|FieldStored)<.*>[ ]*&[)]$"
+    2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
+    2)
+
+set(simplefluid_missing_exact_api_patterns)
+list(LENGTH simplefluid_required_exact_api_patterns
+     simplefluid_required_exact_api_pattern_count)
+math(EXPR simplefluid_required_exact_api_last
+     "${simplefluid_required_exact_api_pattern_count} - 1")
+foreach(simplefluid_required_exact_api_index
+        RANGE 0 ${simplefluid_required_exact_api_last})
+    list(GET simplefluid_required_exact_api_patterns
+         ${simplefluid_required_exact_api_index}
+         simplefluid_required_exact_api_pattern)
+    list(GET simplefluid_required_exact_api_counts
+         ${simplefluid_required_exact_api_index}
+         simplefluid_required_exact_api_count)
+    set(simplefluid_found_exact_api_count 0)
+    foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
+        if(simplefluid_demangled_symbol MATCHES
+           "${simplefluid_required_exact_api_pattern}")
+            math(EXPR simplefluid_found_exact_api_count
+                 "${simplefluid_found_exact_api_count} + 1")
+        endif()
+    endforeach()
+    if(NOT simplefluid_found_exact_api_count EQUAL
+       simplefluid_required_exact_api_count)
+        list(APPEND simplefluid_missing_exact_api_patterns
+             "${simplefluid_required_exact_api_pattern} (expected ${simplefluid_required_exact_api_count}, found ${simplefluid_found_exact_api_count})")
+    endif()
+endforeach()
+
 set(simplefluid_required_kokkos_patterns
     "^Kokkos::initialize[(]Kokkos::InitializationSettings const&[)]$"
     "^Kokkos::finalize[(][)]$"
@@ -329,6 +547,13 @@ if(simplefluid_missing_api_patterns)
         "${SIMPLEFLUID_LIBRARY} is missing required public API anchors:\n  "
         "${simplefluid_missing_api_patterns}")
 endif()
+if(simplefluid_missing_exact_api_patterns)
+    list(JOIN simplefluid_missing_exact_api_patterns "\n  "
+         simplefluid_missing_exact_api_patterns)
+    message(FATAL_ERROR
+        "${SIMPLEFLUID_LIBRARY} has missing or duplicated exact API anchors:\n  "
+        "${simplefluid_missing_exact_api_patterns}")
+endif()
 if(simplefluid_missing_kokkos_patterns)
     list(JOIN simplefluid_missing_kokkos_patterns "\n  "
          simplefluid_missing_kokkos_patterns)
@@ -368,11 +593,17 @@ endif()
 # The isothermal/adaptive, solid-conduction, and fixed-grid planar free-surface
 # APIs extend the reviewed library shape without widening the export map to
 # vendor or implementation-detail namespaces.
+# The planar-ALE API adds explicit old/new-volume overloads while retaining
+# the established protected solver subclass seam and exact pre-ALE entry
+# points. A current GCC Debug build has 787 exported SimpleFluid symbols; 800
+# leaves narrow growth headroom without claiming that an untested compiler or
+# configuration has the same symbol count. Private-family exclusions and exact
+# API anchors above remain authoritative.
 if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 750)
+   OR simplefluid_api_symbol_count GREATER 800)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 750")
+        "SimpleFluid symbols; the reviewed public-API range is 300 to 800")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)

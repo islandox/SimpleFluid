@@ -1,22 +1,21 @@
-# Planar Free-Surface Volume Budget
+# Planar Free-Surface Volume Budget and Constrained ALE
 
-This note describes the fixed-grid planar volume-budget components introduced
-for thermally and bubble-driven liquid-level evolution. The implemented scope
-is the currently supported portion of Milestone A: vessel-volume maps, global
-and cellwise liquid-mass inventories, conservative gas-compartment bookkeeping, vented
-and closed ideal-gas headspaces, a
-pressure/level closure, accepted-step `BoussinesqSolver` integration, and
-opt-in diagnostic fields. It is a weak geometry-feedback model. It does not
-move the CFD mesh, change the liquid-domain boundary, alter the existing
-flow/temperature control volumes or continuity equation, or implement a
-resolved interface. The opt-in cellwise liquid inventory adds its own
-fixed-grid finite-volume transport equation as described below.
+This note describes two related planar free-surface paths. The Milestone-A
+`planarVolumeBudget` path retains the fixed CFD grid while closing liquid,
+submerged-gas, level, and headspace inventories. The constrained Milestone-B
+`planarALE` path connects that same ownership to `PlanarALEMeshMotion`,
+conservative old/new-volume transport, mesh-relative convection, a generalized
+low-Mach volume-continuity target, and an atomic accepted-step transaction.
 
-Full Milestone B planar ALE and the conservative part of Milestone C feedback
-are not supported. A standalone B0 geometry-motion/GCL substrate is available,
-but it is deliberately disconnected from the free-surface solver until
-transport and pressure coupling are conservative. The remaining blockers are
-recorded below so a reported level cannot be mistaken for moving-mesh physics.
+The ALE path is deliberately narrow: native mutable structured/extruded
+geometry, a constant-area vessel, Backward Euler, laminar dimensional
+Boussinesq temperature transport, pure-liquid thermal-density feedback,
+`cellMassInventory`, vented headspace, and either no radiolysis or the supported
+Sheng two-population H2 transport/escape configuration. It is a flat moving
+boundary, not an interface-capturing method, and its verification is currently
+conservation- and solver-contract-focused rather than physical validation of
+pool dynamics. Composition-resolved liquid transport, conservative steam
+transport/escape, and conservative cross-mesh or cut-cell mapping remain open.
 
 ## Applicability and State Ownership
 
@@ -47,8 +46,9 @@ Ownership is deliberately split along existing model boundaries:
   closure, headspace closure state, and a reporting snapshot. It neither
   recomputes bubble kinetics nor material properties.
 
-`BoussinesqSolver` owns the optional model and liquid inventory. Its accepted
-post-temperature order is: advance the Sheng bubble/void state when selected;
+`BoussinesqSolver` owns the optional model and liquid inventory. In fixed-grid
+mode its accepted post-temperature order is: advance the Sheng bubble/void
+state when selected;
 advance precursors; refresh material properties and pure-liquid density;
 preview accepted boiling mass and condensate without committing the liquid
 ledger, including a conservative cellwise transport solve when selected; read
@@ -89,8 +89,9 @@ h_{\mathrm{pool}}=\mathcal V^{-1}(V_l+V_b).
 $$
 
 `clearLevel` is the hypothetical level after dispersed bubbles disappear.
-`poolLevel` is the bubble-displaced mixture-surface level. In Milestone A it is
-a global diagnostic, not a boundary location used by the flow solver.
+`poolLevel` is the bubble-displaced mixture-surface level. In fixed-grid mode it
+is a global diagnostic, not a boundary location used by the flow solver. In
+`planarALE` it is the accepted target elevation of the named planar top patch.
 
 For a constant-area vessel with bottom elevation $h_b$ and area $A$,
 
@@ -167,8 +168,9 @@ the available mass while recording a dry-out deficit under
 scheme. The fixed $w_c$ distribution is a mass-weighted specific-volume
 approximation.
 
-`cellMassInventory` instead stores the conservative fixed-control-volume
-inventory $m_{l,c}^*$ in kg/m3. Its implemented cell equation is
+`cellMassInventory` instead stores the conservative liquid-mass density
+$m_{l,c}^*$ in kg/m3 of the active control volume. On a fixed grid its cell
+equation is
 
 $$
 \frac{V_c\left(m_{l,c}^{*,n+1}-m_{l,c}^{*,n}\right)}{\Delta t}
@@ -187,6 +189,23 @@ $$
 M_l=\sum_c V_cm_{l,c}^*,\qquad
 V_l=\sum_c V_c\frac{m_{l,c}^*}{\rho_{l,c}}.
 $$
+
+For `planarALE`, the same inventory uses accepted-old and trial-new volumes and
+the mesh-relative carrier flux:
+
+$$
+\frac{V_c^{n+1}m_{l,c}^{*,n+1}-V_c^nm_{l,c}^{*,n}}{\Delta t}
++\sum_{f\in c}\phi_{rel,f}m_{l,f}^{*,\mathrm{upwind},n+1}
+=V_c^{n+1}\left(\dot m_{\mathrm{cond},c}
+-\dot m_{\mathrm{evap},c}\right),
+$$
+
+where $\phi_{rel,f}=\phi_{abs,f}-\phi_{m,f}$. The first ALE support matrix
+rejects boiling, so the right-hand side is zero there; retaining the source form
+states the contract that boiling must satisfy before that rejection can be
+relaxed. A constant intensive inventory is preserved under pure mesh motion by
+the cellwise GCL, while the extensive liquid mass is evaluated with
+$V_c^{n+1}$ only after the trial is accepted.
 
 The initial field is distributed without a cell-centre pool mask:
 
@@ -246,8 +265,17 @@ authoritative cumulative submerged-bubble escape minus the planar model's
 committed-transfer watermark. Every positive decrement is retained, including
 values small relative to a large remaining inventory. Because upstream flow,
 temperature, gas, boiling, void, and precursor states are not generally
-transactional, `BoussinesqSolver` fail-stops after such a step error and rejects
-a full-step retry; reconstruct the solver from an accepted state instead.
+transactional in the fixed-grid path, `BoussinesqSolver` fail-stops after such a
+step error and rejects a full-step retry; reconstruct the solver from an
+accepted state instead. The constrained ALE path instead snapshots its complete
+supported state and restores it together with the geometry on rejection.
+
+With ALE, bubble populations are transported by the liquid carrier flux
+$\phi_{rel}$ plus the configured category slip flux. Escape is evaluated on the
+named moving top patch from that relative bubble flux, so the mesh motion is not
+counted as gas leaving the liquid domain. The accepted before/after decrement
+remains the authoritative H2 transfer and is committed exactly once; the
+reconstructed `alpha_g` cap still cannot delete gas.
 
 The boiling path likewise has one owner. Accepted
 `phaseChangeMassRate = latentHeatSink / latent_heat` removes liquid mass; vapor
@@ -293,6 +321,25 @@ supported combinations. It also rejects `idealGasSource`, which has no
 conservative gas inventory, and nonzero scalar void that cannot be matched to
 an authoritative submerged-gas owner.
 
+For `planarALE`, the vent owns the absolute thermodynamic pressure $p_h$, while
+the CFD pressure remains the gauge/dynamic field $p'$. The moving top requires
+a zero-gauge Dirichlet physical-pressure condition. During pressure correction,
+the exact prescribed absolute face flux is enforced as a correction-Neumann
+condition rather than allowing a pressure correction to change the kinematic
+boundary flux. The radiolytic reconstruction subtracts the volume-weighted
+gauge mean, so the ALE coupling supplies $p_h+\overline{p'}$ as its internal
+offset:
+
+$$
+p_{l,\mathrm{abs},c}=
+(p_h+\overline{p'})+p'_c-\overline{p'}=p_h+p'_c.
+$$
+
+At the zero-gauge top this gives $p_{l,\mathrm{abs}}=p_h$; the headspace
+pressure is neither omitted nor added twice. The flat boundary has no
+curvature-pressure jump. That is an explicit planar approximation, not
+surface-tension shape resolution.
+
 Two headspace choices are implemented:
 
 - `vented` fixes $p_h=p_{\mathrm{ambient}}$. Escaped species accumulate in
@@ -330,6 +377,181 @@ inference, and must reproduce that configured initial thermodynamic state.
 `restrictedVent` is reserved and deliberately rejected;
 there is no validated orifice law.
 
+## Conservative Planar ALE Contract
+
+All face-volume fluxes use m3/s and the mesh owner normal. The existing
+projected field remains the absolute liquid flux
+
+$$
+\phi_{abs,f}=\int_f\mathbf u\cdot\mathbf n_o\,dA.
+$$
+
+`PlanarALEMeshMotion` supplies the exact swept-volume rate $\phi_{m,f}$ for the
+same face and timestep. ALE convection uses a separate synchronized field
+
+$$
+\phi_{rel,f}=\phi_{abs,f}-\phi_{m,f}.
+$$
+
+The absolute field is never overwritten with relative values. Pressure,
+kinematic-boundary enforcement, and existing diagnostics continue to consume
+$\phi_{abs}$; momentum, temperature, liquid inventory, and enabled H2
+transports consume $\phi_{rel}$. The non-owning `ALEControlVolumeState` carries
+accepted-old and active-trial-new volumes in mesh-local cell order, mesh fluxes
+in mesh-local face order, timestep, concrete geometry identity, and old/new
+epochs. It is valid only while the originating motion trial is active and
+validates sizes, finiteness, positivity, identity, epoch, and the cellwise GCL.
+
+For a conservative intensive unknown $q$ with storage weight $a$, advective
+weight $b$, and volumetric source $S$, the Backward-Euler assembly is
+
+$$
+\frac{V_c^{n+1}a_c^{n+1}q_c^{n+1}
+      -V_c^na_c^nq_c^n}{\Delta t}
++\sum_{f\in c}\phi_{rel,f}(bq)_f^{\mathrm{upwind},n+1}
+=\mathcal D_c^{n+1}+V_c^{n+1}S_c^{n+1}.
+$$
+
+The first enabled path uses unit storage for momentum and local liquid/gas
+inventories. Physical temperature instead uses the conservative cellwise
+liquid-mass density $m_{l,c}^*$ and heat capacity $c_{p,c}$:
+
+$$
+E_T^n=\sum_c V_c^n m_{l,c}^{*,n}c_{p,c}^nT_c^n,
+$$
+
+and its moving-volume transient term is
+
+$$
+\frac{V_c^{n+1}m_{l,c}^{*,n+1}c_{p,c}^{n+1}T_c^{n+1}
+      -V_c^nm_{l,c}^{*,n}c_{p,c}^nT_c^n}{\Delta t}.
+$$
+
+The accepted-old inventory supplies the old storage density and a conservative
+trial inventory preview supplies the new storage and advective density. This
+does not use pure-liquid density or void-reduced mixture density over the
+bubble-displaced pool volume: $\rho_l$ remains the conversion from liquid mass
+to material volume. New-time diffusion and source geometry use the trial mesh.
+Only Backward Euler is enabled: fixed-grid BDF2 support does not imply a valid
+moving-volume history and is rejected at ALE setup.
+
+### Material-volume source and generalized continuity
+
+`VolumeContinuityTarget` stores one immutable integrated target $Q_{V,c}$ in
+m3/s for each owned cell. Every segregated SIMPLE, PISO, and PIMPLE pressure
+correction and the coupled Krylov path uses the same constraint and residual:
+
+$$
+\sum_{f\in c}\phi_{abs,f}-Q_{V,c}=0.
+$$
+
+It is an integrated cell rate, not a volumetric source in 1/s, so pressure
+assembly must not multiply it by cell volume. Target identity, geometry epoch,
+generation, rank parity, and finiteness are validated before collective
+assembly; predictor and numeric caches include those values in their reuse
+contract.
+
+For the supported liquid-plus-bubble material ledger, let
+
+$$
+W_c=\frac{m_{l,c}^*}{\rho_{l,c}}V_c
+    +\alpha_{g,\mathrm{raw},c}V_c.
+$$
+
+Liquid mass uses its implicit trial-new upwind value. Each bubble population
+retains a post-transport/pre-kinetics raw volume fraction, with the upwind cell
+selected by the same combined $\phi_{rel}+\phi_{slip,k}$ sign used by its
+number/mole transport. The resulting carrier and slip material-volume face
+fluxes are
+
+$$
+\Phi_{carrier,f}=\phi_{rel,f}
+  \left(\frac{m_l^*}{\rho_l}\right)_f^{n+1,up(\phi_{rel})}
+  +\sum_k\phi_{rel,f}\alpha_{b,k,f}^{tr,up(\phi_{rel}+\phi_{slip,k})},
+$$
+
+$$
+\Phi_{slip,f}=\sum_k\phi_{slip,k,f}
+  \alpha_{b,k,f}^{tr,up(\phi_{rel}+\phi_{slip,k})}.
+$$
+
+The final $W^{n+1}$ is evaluated after local gas kinetics/EOS reconstruction,
+so subtracting these exact transport-state fluxes leaves generation,
+dissolution, conversion-volume, thermal, and pressure effects in the physical
+material source rather than advecting them retroactively. The per-cell
+material-volume rate and liquid-carrier target are
+
+$$
+Q_{mat,c}=\frac{W_c^{n+1}-W_c^n}{\Delta t}
++\sum_{f\in c}\Phi_{carrier,f}
++\sum_{f\in c}\Phi_{slip,f},
+$$
+
+$$
+Q_{V,c}=Q_{mat,c}-\sum_{f\in c}\Phi_{slip,f}.
+$$
+
+Thus bubble slip changes the material-volume ledger without being imposed as
+liquid-carrier divergence. Internal owner/neighbour face terms cancel
+pairwise. The global acceptance check is
+
+$$
+\sum_cQ_{mat,c}=
+\frac{V_{pool}^{n+1}-V_{pool}^n}{\Delta t}
++\dot V_{b,escape}+\dot V_{other,out},
+$$
+
+within the configured physical volume tolerances. `volumeSourceRate`,
+`bubbleSlipVolumeRate`, and `continuityTarget` publish the accepted cellwise
+terms; trial values remain private.
+
+### Moving top and accepted-trial sequence
+
+The configured top batch must exist globally, be coplanar, face outward along
+the selected gravity axis, and have area and enclosed mesh volume consistent
+with the constant-area vessel map. Its liquid kinematic condition is imposed
+exactly as
+
+$$
+\phi_{abs,f}=\phi_{m,f},\qquad \phi_{rel,f}=0,
+$$
+
+with the boundary velocity set as a full Dirichlet vector
+$\mathbf u_f=(\phi_{m,f}/A_f)\mathbf n_f$. Its two tangential components are
+zero; the active ALE top is not a free-slip boundary. A configured `Slip` or
+zero-velocity `Dirichlet` marker is accepted at setup, but the trial cache uses
+this moving Dirichlet value. Bubble slip may still carry H2 outward relative to
+that moving face. The zero-gauge physical-pressure condition supplies the flat
+dynamic boundary; pressure correction treats the prescribed flux as Neumann
+so it cannot undo the kinematic condition.
+
+One accepted ALE step proceeds as a single logical transaction:
+
+1. Snapshot accepted flow/temperature fields, old absolute flux, material
+   properties, liquid and optional H2 state, free-surface/headspace ledgers,
+   diagnostics, time, and history position.
+2. Start one geometry trial from the accepted surface to the current relaxed
+   level candidate. Retain both volume states and the exact mesh flux.
+3. Refresh every geometry-dependent equation, boundary, pressure/coupled
+   numeric cache, preconditioner, and VTU point cache for the trial epoch.
+4. Restore the accepted physical snapshot at each outer corrector, solve the
+   selected pressure--velocity algorithm, and apply the bounded pressure-only
+   refinements needed by the strict continuity gate. Then derive $\phi_{rel}$,
+   solve the enabled equations, and preview the liquid, H2 escape,
+   level/headspace, and $Q_V$ ledgers without publishing them.
+5. Repeat until level, continuity-target, material-property, and gas-primary
+   state changes satisfy their tolerances. Then require the actual trial mesh
+   volume to match the closure-implied pool volume and require mesh quality,
+   GCL, pressure continuity, pool/source, liquid mass, H2 inventory, and
+   adiabatic sensible-energy closure.
+6. Commit rollback-capable ledgers and publications exactly once, finalize time
+   and one history record while the geometry trial is still reversible, and
+   accept the geometry last.
+
+Any failed solve or acceptance gate rolls back the active geometry, restores
+all supported field/model snapshots, refreshes accepted-epoch caches, and
+leaves time, history, and transfer watermarks unchanged.
+
 ## Flat Database Configuration
 
 The parser follows the repository's flat underscore-separated `Database`
@@ -341,8 +563,8 @@ have no meaningful default.
 | Key | Default | Unit / allowed values | Notes |
 | --- | --- | --- | --- |
 | `free_surface_enabled` | `false` | boolean | Disabled construction returns no model and preserves existing behavior. |
-| `free_surface_model` | `fixed` | `fixed`, `planarVolumeBudget`, `planarALE` | Enabling currently requires `planarVolumeBudget`; `planarALE` fails because its standalone geometry/GCL substrate is not connected to conservative ALE transport or solver coupling. |
-| `free_surface_gravity_axis` | `z` | `x`, `y`, `z` | Records the planar elevation axis; Milestone A does not reorient or move the mesh. |
+| `free_surface_model` | `fixed` | `fixed`, `planarVolumeBudget`, `planarALE` | `fixed` is the disabled sentinel and is rejected when `free_surface_enabled=true`; `planarVolumeBudget` is fixed-grid, while `planarALE` is accepted only for the support matrix below. |
+| `free_surface_gravity_axis` | `z` | `x`, `y`, `z` | Planar elevation/motion axis; cylindrical and semi-structured ALE are axial-Z only. |
 | `free_surface_validity_warning_relative_level_change` | `0.05` | dimensionless, >= 0 | Warn when `abs(poolLevel - initialPoolLevel) / vesselHeight` exceeds this value. |
 | `free_surface_overflow_policy` | `error` | `error`, `clampAndReport` | Applies to vessel range and liquid depletion handling. |
 | `free_surface_vessel_model` | `constantArea` | `constantArea`, `tabulated` | Selects the monotone map. |
@@ -357,7 +579,7 @@ have no meaningful default.
 
 | Key | Default | Unit / allowed values | Notes |
 | --- | --- | --- | --- |
-| `free_surface_liquid_volume_model` | `globalConstantMass` | `globalConstantMass`, `cellMassInventory` | Cellwise mode transports kg/m3 reference-volume inventory and currently requires `error` depletion plus zero physical-boundary liquid flux. |
+| `free_surface_liquid_volume_model` | `globalConstantMass` | `globalConstantMass`, `cellMassInventory` | On a fixed grid, cellwise mode retains its kg/m3 fixed-reference-volume interpretation. In `planarALE`, the same output field is a current-control-volume mass density whose conserved product is `V m_l^*`; it requires `error` depletion plus zero physical-boundary liquid flux. |
 | `free_surface_initial_liquid_mass` | not set | kg | Finite and nonnegative. |
 | `free_surface_initial_liquid_volume` | not set | m3 | Finite, nonnegative, and within the vessel policy range. |
 | `free_surface_initial_clear_level` | not set | m | Converted through the vessel map. |
@@ -370,6 +592,26 @@ inventory infers it from the selected initial volume and the global
 volume-weighted pure-liquid density. If mass and a volume/level are both
 provided, `BoussinesqSolver` verifies that the initialized pure-density volume
 is consistent rather than silently choosing one.
+
+### Planar ALE controls
+
+These keys are parsed in every mode but are active only for `planarALE`.
+
+| Key | Default | Unit / allowed values | Notes |
+| --- | --- | --- | --- |
+| `free_surface_ale_top_boundary` | empty | boundary name | Required; the only moving liquid/headspace patch and, with Sheng H2, the only escape patch. |
+| `free_surface_ale_deformation_start_elevation` | unset | m | When unset, deform the full column from the reference bottom; otherwise keep points at and below this elevation fixed. A configured value must be at least the reference bottom and strictly below the reference top. |
+| `free_surface_ale_maximum_level_change` | unset | m | Optional positive accepted-to-trial displacement limit. |
+| `free_surface_ale_gcl_absolute_tolerance` | `1e-12` | m3/s | Nonnegative cellwise absolute GCL tolerance. |
+| `free_surface_ale_gcl_relative_tolerance` | `1e-10` | dimensionless | Nonnegative cellwise relative GCL tolerance. |
+| `free_surface_ale_maximum_correctors` | `12` | integer | Positive limit used independently for the outer geometry/physics/source Picard trials and for strict pressure-only continuity refinements within each outer trial. Enabled Sheng H2 requires at least two outer trials. |
+| `free_surface_ale_level_absolute_tolerance` | `1e-10` | m | Nonnegative absolute level-corrector tolerance. |
+| `free_surface_ale_level_relative_tolerance` | `1e-10` | dimensionless | Nonnegative tolerance scaled by the level/elevation magnitude. |
+| `free_surface_ale_relaxation` | `0.5` | dimensionless | Outer level/source relaxation in `(0, 1]`. |
+| `free_surface_ale_maximum_growth_ratio` | `5` | dimensionless | Finite mesh-quality limit >= 1. |
+| `free_surface_ale_maximum_non_orthogonality_degrees` | `75` | degrees | Finite nonnegative mesh-quality limit. |
+| `free_surface_ale_maximum_skewness` | `4` | dimensionless | Nonnegative mesh-quality limit. |
+| `free_surface_ale_maximum_aspect_ratio` | `1e6` | dimensionless | Finite mesh-quality limit >= 1. |
 
 ### Headspace and nonlinear closure
 
@@ -423,6 +665,50 @@ The examples in this repository configure `Database` programmatically; this
 block documents keys and is not a promise of a general file-backed case
 parser.
 
+A minimal ALE selection, in addition to a matching dimensional Boussinesq
+problem and material configuration, is conceptually:
+
+```text
+free_surface_enabled = true
+free_surface_model = planarALE
+free_surface_gravity_axis = z
+free_surface_vessel_model = constantArea
+free_surface_bottom_elevation = 0.0
+free_surface_top_elevation = 1.2
+free_surface_cross_section_area = 0.5
+free_surface_initial_clear_level = 0.8
+free_surface_liquid_volume_model = cellMassInventory
+free_surface_overflow_policy = error
+free_surface_headspace_model = vented
+free_surface_ambient_pressure = 101325.0
+free_surface_ale_top_boundary = top
+```
+
+The initial pool level, actual top-patch elevation, total current mesh volume,
+and constant-area vessel map must already agree within the configured closure
+tolerances. Configuration alone does not create or trim a liquid domain. The
+physical boundary set supplies zero-gauge Dirichlet pressure and either a
+`Slip` or zero-velocity `Dirichlet` marker on the named top; during each ALE
+trial that velocity marker is replaced by the full moving Dirichlet vector
+with zero tangential components.
+
+### Enabled and rejected ALE combinations
+
+| Concern | Initially supported | Rejected until separately migrated and tested |
+| --- | --- | --- |
+| Geometry | Mutable native Cartesian X/Y/Z, serial/MPI; mutable native cylindrical axial-Z, serial/MPI; mutable native `SemiStructuredXY_Z` axial-Z, serial only | Const-only handles, legacy mesh compatibility, general unstructured/partitioned-unstructured/STK motion, non-axial cylindrical or semi-structured motion, topology change, remeshing, repartitioning |
+| Vessel/range | `constantArea`; `error` range and depletion policies | Tabulated vessel ALE and `clampAndReport` |
+| Time/flow | Backward Euler; laminar dimensional Boussinesq; SIMPLE, PISO, PIMPLE, or coupled Krylov using the common target; gravity zero or inward along the top axis | BDF2/other moving-volume histories, transverse/outward gravity, and RANS/wall-distance/wall-law paths |
+| Thermal/material | Physical temperature transport with accepted/trial $V m_l^*c_pT$ storage; nonzero `BoussinesqTemperatureOnly` pure-liquid expansion; adiabatic boundaries; rollback-safe static volumetric sources | Legacy nondimensional temperature, solids/conjugate heat transfer, nonadiabatic boundaries, pressure/composition material laws, dynamic material or source callbacks |
+| Liquid | `cellMassInventory`; every nonmoving patch has a closed velocity condition and absent or homogeneous-Neumann pressure, giving zero physical-boundary liquid flux | `globalConstantMass`, liquid inlet/outlet composition, separate solvent/solute/fissile inventories |
+| Gas/void | No gas model, or `sheng2024TwoPopulation` with a uniform geometry-invariant fission-power source, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | Sheng without fission power, Gaussian/spatial fission profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
+| Headspace/phase change | Fixed-temperature vented headspace with prescribed positive ambient absolute pressure | Closed/restricted headspace, non-fixed headspace-temperature policies, boiling, steam/condensation transport or escape |
+| Other transported physics | None beyond the supported liquid, temperature, momentum, and optional H2 equations | Delayed-neutron precursors and any optional extensive equation without ALE storage/flux/cache/rollback tests |
+
+Setup and step preflight validate the applicable choices collectively. An
+unsupported mixture fails before rank-divergent assembly rather than running
+some equations on new volumes and others on fixed volumes.
+
 ## Diagnostics, Output, and Feedback Fields
 
 `FreeSurfaceDiagnostics` is an immutable-by-value accepted-state snapshot. It
@@ -462,6 +748,47 @@ steam; and phase-change residuals. The boiling output registry exposes
 `latentHeatSink` fields. The radiolytic output retains raw,
 bounded, and excess void/inventory diagnostics.
 
+`BoussinesqSolver::planar_ale_diagnostics()` adds the latest accepted old/new
+geometry epochs and mesh volumes, actual mesh-to-closure-pool mismatch, maximum absolute and
+normalized GCL residual, mesh-quality metrics, outer-corrector count, level and
+pressure, material-state, and gas-primary-state residuals, sensible-energy and liquid/H2 inventory residuals, the
+material-volume/continuity diagnostics above, and cumulative rejected-
+transaction count plus the last rejection reason. These are acceptance and
+debugging diagnostics; they are not measurements of physical free-surface
+accuracy.
+
+The same accepted diagnostic snapshot retains
+`level_residual_history`, `target_change_history`,
+`continuity_maximum_history`, `material_state_residual_history`, and
+`gas_state_residual_history`, with one entry per completed outer Picard trial.
+It is copied into the corresponding accepted `free_surface_history()` record;
+a rejected attempt restores the preceding accepted histories and appends no
+record. The CSV writer reports accepted final diagnostics rather than
+flattening these variable-length sequences.
+
+GCL and level convergence use the configured absolute-plus-relative ALE
+tolerances. Target change and generalized-continuity maximum residual use
+`free_surface_volume_closure_absolute_tolerance / dt` plus the configured
+relative tolerance scaled by `max(1 m3/s, integrated-target scale)`. A
+succeeding Picard trial must also change material coefficients and gas primary
+inventories by no more than `1e-10` in the reported scale-normalized maximum.
+Actual trial mesh volume versus closure-implied pool volume uses the configured
+volume absolute-plus-relative tolerance with `max(1 m3, mesh/pool-volume
+scale)`. The adiabatic sensible-energy gate applies to
+$\sum_c V_cm_{l,c}^*c_{p,c}T_c$ and uses
+`4096 * machine epsilon + 1e-9` relative to the largest of 1 J, old energy, new
+energy, and added volumetric heat. Liquid mass, H2 inventory, and pool/source
+closure retain their model-specific physical tolerances. None of these
+conservation gates is relaxed when a Krylov solve is configured with a looser
+algebraic tolerance.
+
+The source-to-pool diagnostic is a rate in m3/s, so its absolute term is
+`free_surface_volume_closure_absolute_tolerance / dt`; the relative term uses
+the reported rate scale. Moving-patch geometry checks do not compare unlike
+units: the same configured volume tolerance is divided by the global patch
+area for coplanarity and by the vessel height for cross-sectional-area
+agreement before the relative term is added.
+
 The feedback-field registry has stable optional names `rhoLiquid`,
 `clearLevel`, `poolLevel`, `headspacePressure`, and `poolOccupancy`, and can
 collectively require that set without changing the older standard-field
@@ -480,8 +807,12 @@ so its geometric error is explicit.
 `SolutionOutputOptions::include_free_surface_fields` defaults to `false`.
 When enabled, VTU output includes `rhoLiquid`, `clearLevel`, `poolLevel`,
 `headspacePressure`, and `poolOccupancy`; cellwise mode additionally writes
-`liquidMassInventory`. The default preserves the existing
-output schema. `BoussinesqSolver::free_surface_history()` automatically retains
+`liquidMassInventory`. In `planarALE` mode it also writes the cellwise rates
+`meshVolumeRate = (V_new-V_old)/dt`, `volumeSourceRate = Q_material`,
+`bubbleSlipVolumeRate = -div(Phi_b,slip)`, `continuityTarget = Q_V`, and
+`continuityResidual = sum(phi_abs)-Q_V`, all as signed cell rates in m3/s.
+Their underlying face fluxes use owner-normal signs. The default preserves the
+existing output schema. `BoussinesqSolver::free_surface_history()` automatically retains
 the initialization snapshot and one record per accepted step without repeating
 the underlying reductions. `write_free_surface_history_csv()` writes that
 history on mesh rank zero with fixed SI-unit columns for liquid mass and
@@ -526,7 +857,7 @@ The existing two-rank radiolytic regression separately checks global raw
 bubble volume, population moles, cap discrepancy, and conservative finite-
 Courant escape.
 
-The standalone B0 motion tests cover Cartesian motion on every axis,
+The geometry-motion tests cover Cartesian motion on every axis,
 cylindrical and semi-structured axial motion, buffered/repeated motion,
 transaction accept/rollback, quality rejection, exclusive shared-geometry
 ownership, unchanged topology/IDs/maps/boundary tags, per-cell GCL, MPI
@@ -534,24 +865,24 @@ partition-face swept-flux agreement, and collective target/timestep/action
 validation. Geometry-cache tests verify stale epoch rejection and analytic
 coefficient/gradient recovery after explicit refresh.
 
-The final post-fix focused selection passed 73/73 tests; seven MPI-only cases
-were intentionally skipped by their single-rank guards. Six related
-host-network MPI registrations also passed: `PlanarALEMeshMotion_2procs`,
-`RadiolyticGasModel_2procs`, `BoilingCollectiveValidation_2procs`,
-`PlanarFreeSurfaceModel_2procs`, `BoussinesqFreeSurfaceConfig_2procs`, and
-`BoussinesqFreeSurfaceStepPreflight_2procs`.
+Additional ALE-focused tests exercise stationary identity against the fixed
+operator, expansion/contraction constant-field preservation, old/new scalar
+storage and liquid-mass-weighted temperature energy, conservative round trips,
+BDF2 and stale/wrong-descriptor rejection, and the equation-layer momentum and
+physical-temperature forwarding seams. Pressure tests exercise nonzero
+integrated targets, PISO reuse, bounded pressure-only refinement,
+fixed-boundary flux ownership, coupled/segregated residual agreement, and
+generation/epoch cache invalidation. Moving-boundary and material-volume tests
+check planar/area/vessel validation,
+$\phi_{abs}=\phi_m$, zero carrier-relative top flux, thermal expansion, bubble
+slip/escape subtraction, zero tangential moving-top velocity, and strict
+pool/source closure. Solver-level tests retain the disabled-path baseline and
+exercise collective setup rejection, accepted residual histories, and
+accepted/rejected ALE transaction behavior on the supported serial/MPI paths.
 
-A fresh GCC Debug registry contained 842 tests. These two disjoint full
-executions covered that registry:
-
-- `ctest --test-dir build/gcc -C Debug -LE mpi -j 4` passed 803/803 with 29
-  expected single-rank skips;
-- the host-network `ctest --test-dir build/gcc -C Debug -L mpi -j 2` run passed
-  39/39.
-
-After the final formatting pass, the GCC Debug and RelWithDebInfo builds
-completed 198 and 253 scheduled steps, respectively; repeated builds reported
-no work. The documentation target also completed successfully.
+Exact build and test commands and their results belong in the change report;
+this modeling note describes coverage rather than freezing a machine-specific
+test count.
 
 The `planar_free_surface_verification` executable provides five deterministic
 constant-area analytic cases. Run all cases or one named case with:
@@ -579,6 +910,33 @@ pressure residual, volume residual, and gas residual. The cases check:
   case does not synthesize steam moles or steam escape; those remain
   unsupported in the production boiling path.
 
+`planar_ale_verification` is the separate solver-integrated driver. It runs the
+native mutable mesh, pressure--velocity coupling, old/new-volume transports,
+volume-source ledger, moving boundary, and whole-step transaction, and prints
+the accepted GCL, continuity, liquid-mass, gas, mesh/pool, source/pool, and
+energy residuals:
+
+```bash
+./build/gcc/bin/Debug/planar_ale_verification
+./build/gcc/bin/Debug/planar_ale_verification aleUniformHeating
+./build/gcc/bin/Debug/planar_ale_verification aleGasGeneration
+./build/gcc/bin/Debug/planar_ale_verification aleCompleteEscape
+./build/gcc/bin/Debug/planar_ale_verification aleFailureRollback
+```
+
+The four named `verification;ale;conservation` CTests check the analytic
+constant-mass thermal level, uniform-power H2 production, isolated repeated-
+step near-complete micro/large-bubble decrement and exact-once vent transfer
+with a falling level, and restoration
+plus safe retry after forced outer nonconvergence. These remain deterministic
+conservation checks, not quantitative validation of real surface dynamics.
+The escape case starts from known nonzero micro- and large-bubble inventories,
+suppresses conversion and dissolution kinetics, uses zero fission/thermal
+source, and repeats stable implicit high-slip steps until the remaining bubble
+moles are no more than `1e-18 mol + 1e-10` times the initial bubble inventory.
+It checks each population decrement, cumulative and vent transfer, and the
+accepted pool/raw-bubble-volume drop independently.
+
 General level, volume, and species checks use an absolute-plus-relative
 tolerance of `5e-12`. The closed-pressure check uses `5e-7 Pa + 2e-12`
 relative, its $pV-nRT$ check uses `2e-6 J`, and its nonlinear pressure residual
@@ -587,8 +945,10 @@ absolute volume closure `4.440892099e-16 m3`, maximum absolute gas closure
 `0 mol`, and closed nonlinear residual `2.910383046e-11 Pa`.
 
 These are analytic component/conservation verifications, not a physical
-validation of pool dynamics. Separate B0 tests verify geometry-only GCL; they
-do not validate an ALE transport or free-surface solve.
+validation of pool dynamics. The ALE regressions verify discrete algebra,
+boundary ownership, transactional restoration, and conservation for the
+constrained matrix; they do not validate physical surface trajectories,
+circulation, or radiolytic-bubble experiments.
 
 ## Fixed-Grid Limitations
 
@@ -619,74 +979,51 @@ the fixed top boundary or unmodified flow domain materially changes escape or
 circulation. `clampAndReport` exposes a bookkeeping excess; it does not model
 overflow fluid.
 
-## Milestone B0 Geometry/GCL Substrate and Remaining B/C Blocker
+## Constrained ALE Limitations and Deferred Mapping
 
-`PlanarALEMeshMotion` now provides a standalone, transactional geometry layer.
-It owns reference coordinates, accepted/trial surface elevation, old/new local
-cell volumes, and owner-oriented swept-volume face rates. A trial applies the
-configured full-column or buffered mapping, evaluates
+`PlanarALEMeshMotion` remains the geometry authority. It owns reference
+coordinates, accepted/trial surface elevation, old/new local cell volumes, and
+owner-oriented swept-volume face rates. Every trial checks
 
 $$
 E_{\mathrm{GCL},c}=
-\frac{V_c^{n+1}-V_c^n}{\Delta t}-\sum_f\phi_{m,f},
+\frac{V_c^{n+1}-V_c^n}{\Delta t}-\sum_f\phi_{m,f}
 $$
 
-checks every owned-cell residual and the distributed mesh-quality gate, and is
-then explicitly accepted or rolled back. Rejected trials restore coordinates;
-topology, global IDs, Tpetra maps, boundary tags, and partitioning do not
-change. A geometry epoch and exclusive controller lease live on the shared
-concrete geometry so alias `MeshHandle`s observe the same revision.
+and the distributed mesh-quality gate before the solver may accept it.
+Rejected trials restore coordinates; topology, global IDs, Tpetra maps,
+boundary tags, and partitioning do not change. A shared geometry epoch and
+exclusive controller lease make the revision visible through alias handles.
 
-The truthful B0 support set is:
+The solver-integrated scope is exactly the matrix in the configuration section.
+It should not be generalized by analogy: geometry-only support in
+`PlanarALEMeshMotion` does not make an optional transport ALE-safe, and
+fixed-grid support for an optional model does not permit it in `planarALE`.
 
-- Cartesian X/Y/Z motion, serial and MPI;
-- cylindrical axial-Z motion, serial and MPI;
-- `SemiStructuredXY_Z` axial-Z motion, serial only.
+In particular, the current ALE path does not:
 
-B0 is constructed programmatically and is not selected through the
-free-surface `Database`. `PlanarALEMeshMotionOptions` defaults to axis `z`, a
-full-column deformation beginning at the reference bottom, no per-trial level
-limit, `1e-12 m3/s` absolute plus `1e-10` relative GCL tolerance, and the
-existing `MeshQualityLimits` defaults. Supplying a deformation-start elevation
-creates a monotone upper deformation zone above a fixed lower region;
-`maximum_level_change` is an optional positive pre-mutation rejection limit.
+- resolve a nonplanar interface, curvature, capillary waves, splash, foam,
+  breakup, sloshing, or overflow hydrodynamics;
+- perform topology changes, remeshing, repartitioning, or arbitrary
+  unstructured deformation;
+- provide composition-resolved solvent, solute, or fissile transport, or claim
+  composition-preserving evaporation or boundary flow;
+- transport steam conservatively or transfer steam across the moving surface;
+- support closed-headspace pressure coupling, pressure-dependent boiling
+  saturation, RANS/wall laws, precursor transport, solids, or another optional
+  extensive equation outside the listed matrix;
+- make the cell-centre `poolOccupancy` indicator a cut-cell volume fraction or
+  use it to modify the ALE equations; or
+- provide conservative cross-mesh feedback mapping.
 
-Const-backed handles, non-axial cylindrical/semi-structured motion, general
-unstructured/partitioned geometry, and STK/legacy meshes fail explicitly.
-Direct raw mutation through a retained concrete pointer or `visit_mutable()`
-cannot publish an epoch and remains unsupported after fields or caches exist.
+Milestone C therefore remains open. Conservative pool occupancy needs
+geometric cut fractions or a mapper whose approximation error is part of its
+acceptance contract. Cross-mesh feedback must separately preserve
+liquid/fissile mass, gas species, precursor inventory, and energy and report
+mapping residuals across supported MPI partitions. Same-topology ALE
+conservation does not satisfy that requirement.
 
-`CellGradientCache`, `TransportGeometryCache`, and both Rhie--Chow face-flux
-workspaces capture the geometry epoch, reject stale access, and expose explicit
-numeric refresh. This is not yet a centralized refresh of every solver-owned
-cache.
-
-`free_surface_model = planarALE` therefore remains rejected. The remaining
-solver-level blockers are:
-
-- `FluidSolver` still owns a const `MeshHandle`, and no accepted multiphysics
-  step owns geometry trial/accept/rollback together with fields and inventories;
-- transient/convection operators still use one current control volume rather
-  than `(V_new q_new - V_old q_old) / dt` and do not subtract mesh flux;
-- wall distance/y+, pressure matrices, coupled-system numeric state, VTU
-  points, and other solver caches do not yet share one epoch refresh path;
-- pressure projection, SIMPLE/PISO/PIMPLE, and coupled Krylov paths do not all
-  accept and report one generalized nonzero continuity target;
-- moving-top kinematic/dynamic and exact bubble-escape boundary conditions do
-  not exist.
-
-Consequently constant-field preservation under motion, ALE liquid/gas/
-precursor/energy conservation, and a moving free-surface solve are not claimed.
-Merely connecting the reported level to this geometry layer before those
-operators exist would still be false ALE.
-
-Milestone C currently stops at stable feedback names and an explicitly
-nonconservative cell-centre occupancy visualization with a measured volume
-error. Conservative pool occupancy needs geometric cut fractions or a mapper
-whose approximation error is part of its acceptance contract; the current
-Heaviside field is not that mapper. Moving-mesh and cross-mesh feedback also
-need conservative handling of liquid/fissile mass, gas species, precursor
-inventory, and energy, plus reported mapping residuals. Those capabilities
-remain unsupported until the remaining Milestone-B solver and ALE transport
-contract exists. Full VOF and Euler-Euler phase momentum remain separate
-deferred model families, not implicit future claims of this planar budget.
+Full VOF/interface capturing and Euler--Euler gas momentum remain separate
+deferred model families. The present conservation tests establish the discrete
+contract for a flat moving boundary; they do not constitute quantitative
+physical validation.

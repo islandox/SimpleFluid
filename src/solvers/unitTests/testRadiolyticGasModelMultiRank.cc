@@ -19,6 +19,9 @@
 
 #include <array>
 #include <cmath>
+#include <exception>
+#include <limits>
+#include <string>
 
 namespace
 {
@@ -458,4 +461,76 @@ TEST(RadiolyticGasModelMultiRankTest, CollectivelyValidatesReconstructedPressure
     model.set_absolute_pressure_offset(2.0e5);
     EXPECT_NEAR(model.global_submerged_bubble_volume(), expected_volume, std::max(1.0e-14, expected_volume * 1.0e-11));
     expect_same_on_all_ranks(*mesh, model.global_submerged_bubble_volume());
+}
+
+/** @brief A rank-local slip-property failure is reported before bubble transport. */
+TEST(RadiolyticGasModelMultiRankTest,
+     RankLocalBubbleSlipFailureThrowsCoherently)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto options = sheng_options();
+    options.initial_large_number_density = 100.0;
+    options.initial_large_moles = 1.0e-6;
+    options.rise_velocity_mode =
+        SimpleFluid::BubbleRiseVelocityMode::Celata2007;
+    options.bubble_gas_density = 1.2;
+    RadiolyticModelType model(mesh, options);
+
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(
+        0.0, temperature, pressure, velocity, material);
+
+    ASSERT_GT(mesh->num_owned_cells(), 0U);
+    if (comm->getRank() == 0)
+    {
+        // Deliberately leave overlap values untouched: only rank 0's owned
+        // cell may fail the purely local bubble-slip validation stage.
+        material.dynamic_viscosity.set_owned_value(
+            0, std::numeric_limits<double>::quiet_NaN());
+    }
+
+    bool rejected = false;
+    std::string message;
+    try
+    {
+        model.advance(
+            1.0e-6,
+            1.0e-6,
+            temperature,
+            pressure,
+            velocity,
+            flux,
+            material,
+            &power);
+    }
+    catch (const std::exception& error)
+    {
+        rejected = true;
+        message = error.what();
+    }
+
+    EXPECT_TRUE(rejected);
+    if (comm->getRank() == 0)
+    {
+        EXPECT_NE(message.find("dynamic viscosity"), std::string::npos);
+    }
+    else
+    {
+        EXPECT_NE(
+            message.find(
+                "Radiolytic bubble-slip evaluation failed on another rank"),
+            std::string::npos);
+    }
 }

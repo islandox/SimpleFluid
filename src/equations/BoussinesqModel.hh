@@ -18,6 +18,8 @@
 #include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
@@ -482,6 +484,12 @@ public:
 
     const auto& entries() const noexcept { return d_sources; }
 
+    bool has_dynamic_updates() const noexcept
+    {
+        return std::ranges::any_of(d_sources,
+            [](const auto& entry) { return entry.second->requires_dynamic_update(); });
+    }
+
     /**
      * @brief Refresh enabled dynamic sources with one collective validation.
      *
@@ -668,6 +676,14 @@ template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields
     using context_type = BoussinesqUpdateContext<Pack, mesh_type>;
     using updater_type = std::function<void(const context_type&, MaterialPropertyFields&)>;
 
+    class StateSnapshot
+    {
+    private:
+        friend struct MaterialPropertyFields;
+        const MaterialPropertyFields* owner = nullptr;
+        std::array<std::vector<scalar_type>, 4> values;
+    };
+
     MaterialPropertyFields(
         SP<const mesh_type> mesh, const BoussinesqModelOptions& options, const TimeStepperOptions& time_options)
         : density(mesh, options.density, "density"),
@@ -744,6 +760,8 @@ template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields
 
     void clear_updater() noexcept { updater = {}; }
 
+    bool has_updater() const noexcept { return static_cast<bool>(updater); }
+
     /**
      * @brief Run a dynamic updater, validate bounds, and synchronize ghosts.
      *
@@ -765,6 +783,49 @@ template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields
                 }
                 validate_local();
             });
+        sync_ghosts();
+    }
+
+    [[nodiscard]] StateSnapshot snapshot() const
+    {
+        StateSnapshot result;
+        result.owner = this;
+        const field_type* fields[]{&density, &specific_heat_capacity, &dynamic_viscosity, &thermal_conductivity};
+        for (size_t field_index = 0; field_index < std::size(fields); ++field_index)
+        {
+            result.values[field_index].resize(density.mesh().num_owned_cells());
+            for (size_t owned = 0; owned < density.mesh().num_owned_cells(); ++owned)
+            {
+                result.values[field_index][owned] =
+                    fields[field_index]->value(static_cast<typename Pack::local_ordinal_type>(owned));
+            }
+        }
+        return result;
+    }
+
+    void restore(const StateSnapshot& snapshot)
+    {
+        int local_invalid = snapshot.owner != this;
+        for (const auto& values : snapshot.values)
+        {
+            local_invalid = local_invalid || values.size() != density.mesh().num_owned_cells();
+        }
+        int any_invalid = 0;
+        Teuchos::reduceAll(*density.mesh().owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+            1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::invalid_argument("MaterialPropertyFields snapshot is foreign or incompatible.");
+        }
+        field_type* fields[]{&density, &specific_heat_capacity, &dynamic_viscosity, &thermal_conductivity};
+        for (size_t field_index = 0; field_index < std::size(fields); ++field_index)
+        {
+            for (size_t owned = 0; owned < density.mesh().num_owned_cells(); ++owned)
+            {
+                fields[field_index]->set_owned_value(
+                    static_cast<typename Pack::local_ordinal_type>(owned), snapshot.values[field_index][owned]);
+            }
+        }
         sync_ghosts();
     }
 

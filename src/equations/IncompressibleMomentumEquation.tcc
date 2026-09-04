@@ -35,6 +35,18 @@ IncompressibleMomentumEquation<Pack, MeshType>::IncompressibleMomentumEquation(
 {
 }
 
+/** Refresh geometry-dependent transport data after fixed-topology motion. */
+template<TpetraTypePack Pack, class MeshType>
+void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry()
+{
+    d_cached_transport_matrix = Teuchos::null;
+    d_cached_graph_supports_non_orthogonal_correction = false;
+    d_cached_physical_transport_matrix = Teuchos::null;
+    d_cached_physical_graph_supports_non_orthogonal_correction = false;
+    d_linear_solver.reset();
+    d_transport_geometry_cache.refresh();
+}
+
 /**
  * @brief Validate fields, time-step options, and cached boundary data.
  * @tparam Pack Tpetra type pack used by the equation.
@@ -51,7 +63,8 @@ void IncompressibleMomentumEquation<Pack, MeshType>::validate_transport_inputs(
     const face_flux_field_type& face_fluxes,
     const velocity_boundary_cache_type& velocity_boundary_cache,
     const TimeStepperOptions& options,
-    const velocity_field_type* correction_field) const
+    const velocity_field_type* correction_field,
+    const FVM::ALEControlVolumeState* ale) const
 {
     EquationValidation::require_mesh_match(
         *d_mesh, old_velocity, "IncompressibleMomentumEquation");
@@ -69,6 +82,15 @@ void IncompressibleMomentumEquation<Pack, MeshType>::validate_transport_inputs(
     {
         EquationValidation::require_mesh_match(
             *d_mesh, *correction_field, "IncompressibleMomentumEquation");
+    }
+    if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+    {
+        if (ale != nullptr)
+        {
+            throw std::invalid_argument(
+                "IncompressibleMomentumEquation ALE transport requires "
+                "a native mapped mesh.");
+        }
     }
     if (velocity_boundary_cache.value.size()
             != d_mesh->boundary_batches().size()
@@ -101,6 +123,20 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const TimeStepperOptions& options,
     const velocity_field_type* correction_field) const -> system_type
 {
+    return assemble_system(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        correction_field, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const velocity_field_type* correction_field,
+    const FVM::ALEControlVolumeState* ale) const -> system_type
+{
     auto zero_source =
         [](local_ordinal_type) -> typename velocity_field_type::vec_type
     {
@@ -108,7 +144,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     };
     return assemble_system(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
-        zero_source, correction_field);
+        zero_source, correction_field, ale);
 }
 
 /**
@@ -132,9 +168,24 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const source_type& right_hand_source,
     const velocity_field_type* correction_field) const -> system_type
 {
+    return assemble_system(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        right_hand_source, correction_field, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const source_type& right_hand_source,
+    const velocity_field_type* correction_field,
+    const FVM::ALEControlVolumeState* ale) const -> system_type
+{
     validate_transport_inputs(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
-        correction_field);
+        correction_field, ale);
 
     const auto old_velocity_values = old_velocity.local_read_view();
     auto boundary_value =
@@ -191,13 +242,26 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     {
         try
         {
-            return FVM::non_orthogonal_transport_system<Pack>(
-                old_velocity, face_fluxes, options.time_step,
-                options.kinematic_viscosity, boundary_value,
-                right_hand_source,
-                options.non_orthogonal_treatment, correction_field,
-                d_cached_transport_matrix, boundary_diffusion,
-                &d_transport_geometry_cache);
+            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+            {
+                return FVM::non_orthogonal_transport_system<Pack>(
+                    old_velocity, face_fluxes, options.time_step,
+                    options.kinematic_viscosity, boundary_value,
+                    right_hand_source,
+                    options.non_orthogonal_treatment, correction_field,
+                    d_cached_transport_matrix, boundary_diffusion,
+                    &d_transport_geometry_cache);
+            }
+            else
+            {
+                return FVM::non_orthogonal_transport_system<Pack>(
+                    old_velocity, face_fluxes, options.time_step,
+                    options.kinematic_viscosity, boundary_value,
+                    right_hand_source,
+                    options.non_orthogonal_treatment, correction_field,
+                    d_cached_transport_matrix, boundary_diffusion,
+                    &d_transport_geometry_cache, ale);
+            }
         }
         catch (...)
         {
@@ -240,6 +304,21 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     velocity_field_type& velocity,
     const LinearSolverOptions& linear_options) const -> LinearSolveSummary
 {
+    return advance_velocity(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        velocity, linear_options, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    velocity_field_type& velocity,
+    const LinearSolverOptions& linear_options,
+    const FVM::ALEControlVolumeState* ale) const -> LinearSolveSummary
+{
     auto zero_source =
         [](local_ordinal_type) -> typename velocity_field_type::vec_type
     {
@@ -247,7 +326,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     };
     return advance_velocity(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
-        velocity, zero_source, linear_options);
+        velocity, zero_source, linear_options, ale);
 }
 
 /**
@@ -273,6 +352,22 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     velocity_field_type& velocity,
     const source_type& right_hand_source,
     const LinearSolverOptions& linear_options) const -> LinearSolveSummary
+{
+    return advance_velocity(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        velocity, right_hand_source, linear_options, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    velocity_field_type& velocity,
+    const source_type& right_hand_source,
+    const LinearSolverOptions& linear_options,
+    const FVM::ALEControlVolumeState* ale) const -> LinearSolveSummary
 {
     EquationValidation::require_mesh_match(
         *d_mesh, velocity, "IncompressibleMomentumEquation");
@@ -352,7 +447,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
             corrector == 0 ? nullptr : &candidate_velocity;
         const auto system = assemble_system(
             old_velocity, face_fluxes, velocity_boundary_cache,
-            options, right_hand_source, correction_field);
+            options, right_hand_source, correction_field, ale);
         solve_system(system);
 
         if (options.non_orthogonal_treatment
@@ -395,9 +490,29 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const boundary_cache_type* boundary_dynamic_viscosity) const
     -> system_type
 {
+    return assemble_physical_system(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        dynamic_viscosity, reference_density, acceleration_source,
+        correction_field, boundary_dynamic_viscosity, nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const field_type& dynamic_viscosity,
+    scalar_type reference_density,
+    const source_type& acceleration_source,
+    const velocity_field_type* correction_field,
+    const boundary_cache_type* boundary_dynamic_viscosity,
+    const FVM::ALEControlVolumeState* ale) const
+    -> system_type
+{
     validate_transport_inputs(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
-        correction_field);
+        correction_field, ale);
     EquationValidation::require_mesh_match(
         *d_mesh, dynamic_viscosity, "IncompressibleMomentumEquation");
     if (reference_density <= scalar_type{})
@@ -473,14 +588,28 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     {
         try
         {
-            return FVM::physical_momentum_transport_system<Pack>(
-                old_velocity, face_fluxes, options.time_step,
-                dynamic_viscosity, reference_density, boundary_value,
-                acceleration_source, options.non_orthogonal_treatment,
-                correction_field, d_cached_physical_transport_matrix,
-                boundary_diffusion, boundary_dynamic_viscosity,
-                &d_transport_geometry_cache,
-                options.coefficient_interpolation);
+            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+            {
+                return FVM::physical_momentum_transport_system<Pack>(
+                    old_velocity, face_fluxes, options.time_step,
+                    dynamic_viscosity, reference_density, boundary_value,
+                    acceleration_source, options.non_orthogonal_treatment,
+                    correction_field, d_cached_physical_transport_matrix,
+                    boundary_diffusion, boundary_dynamic_viscosity,
+                    &d_transport_geometry_cache,
+                    options.coefficient_interpolation);
+            }
+            else
+            {
+                return FVM::physical_momentum_transport_system<Pack>(
+                    old_velocity, face_fluxes, options.time_step,
+                    dynamic_viscosity, reference_density, boundary_value,
+                    acceleration_source, options.non_orthogonal_treatment,
+                    correction_field, d_cached_physical_transport_matrix,
+                    boundary_diffusion, boundary_dynamic_viscosity,
+                    &d_transport_geometry_cache,
+                    options.coefficient_interpolation, ale);
+            }
         }
         catch (...)
         {
@@ -529,6 +658,28 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
     const boundary_cache_type* boundary_dynamic_viscosity) const
     -> LinearSolveSummary
 {
+    return advance_velocity_physical(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        dynamic_viscosity, reference_density, velocity,
+        acceleration_source, linear_options, boundary_dynamic_viscosity,
+        nullptr);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const field_type& dynamic_viscosity,
+    scalar_type reference_density,
+    velocity_field_type& velocity,
+    const source_type& acceleration_source,
+    const LinearSolverOptions& linear_options,
+    const boundary_cache_type* boundary_dynamic_viscosity,
+    const FVM::ALEControlVolumeState* ale) const
+    -> LinearSolveSummary
+{
     EquationValidation::require_mesh_match(
         *d_mesh, velocity, "IncompressibleMomentumEquation");
 
@@ -552,7 +703,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
         const auto system = assemble_physical_system(
             old_velocity, face_fluxes, velocity_boundary_cache, options,
             dynamic_viscosity, reference_density, acceleration_source,
-            correction_field, boundary_dynamic_viscosity);
+            correction_field, boundary_dynamic_viscosity, ale);
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto statistics =
             d_linear_solver.solve_with_statistics(

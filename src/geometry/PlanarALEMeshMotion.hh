@@ -166,24 +166,25 @@ private:
         Rollback = 2
     };
 
-    [[nodiscard]] Family detect_family() const noexcept;
-    [[nodiscard]] ArrReal current_axis_edges() const;
-    [[nodiscard]] std::array<ArrReal, 3> geometry_edge_coordinates() const;
-    [[nodiscard]] bool geometry_motion_available() const noexcept;
-    [[nodiscard]] bool geometry_motion_owned() const noexcept;
-    void claim_geometry_motion();
-    void release_geometry_motion() noexcept;
-    void replace_axis_edges(ArrReal edges);
-    [[nodiscard]] ArrReal candidate_axis_edges(real_t surface_elevation) const;
-    [[nodiscard]] std::array<ArrReal, 3> candidate_geometry_edges(real_t surface_elevation) const;
-    [[nodiscard]] std::vector<real_t> capture_cell_volumes() const;
-    [[nodiscard]] std::vector<typename mesh_type::Vec3> capture_face_centroids() const;
-    void validate_collective_construction();
-    void validate_collective_trial(real_t surface_elevation, real_t time_step) const;
-    void validate_collective_transaction(TransactionAction action) const;
-    void compute_trial_state(const std::vector<typename mesh_type::Vec3>& old_face_centroids, real_t time_step);
-    void rollback_impl();
-    void reset_stationary_state();
+    [[nodiscard]] SIMPLEFLUID_LOCAL Family detect_family() const noexcept;
+    [[nodiscard]] SIMPLEFLUID_LOCAL ArrReal current_axis_edges() const;
+    [[nodiscard]] SIMPLEFLUID_LOCAL std::array<ArrReal, 3> geometry_edge_coordinates() const;
+    [[nodiscard]] SIMPLEFLUID_LOCAL bool geometry_motion_available() const noexcept;
+    [[nodiscard]] SIMPLEFLUID_LOCAL bool geometry_motion_owned() const noexcept;
+    SIMPLEFLUID_LOCAL void claim_geometry_motion();
+    SIMPLEFLUID_LOCAL void release_geometry_motion() noexcept;
+    SIMPLEFLUID_LOCAL void replace_axis_edges(ArrReal edges);
+    [[nodiscard]] SIMPLEFLUID_LOCAL ArrReal candidate_axis_edges(real_t surface_elevation) const;
+    [[nodiscard]] SIMPLEFLUID_LOCAL std::array<ArrReal, 3> candidate_geometry_edges(real_t surface_elevation) const;
+    [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<real_t> capture_cell_volumes() const;
+    [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<typename mesh_type::Vec3> capture_face_centroids() const;
+    SIMPLEFLUID_LOCAL void validate_collective_construction();
+    SIMPLEFLUID_LOCAL void validate_collective_trial(real_t surface_elevation, real_t time_step) const;
+    SIMPLEFLUID_LOCAL void validate_collective_transaction(TransactionAction action) const;
+    SIMPLEFLUID_LOCAL void compute_trial_state(
+        const std::vector<typename mesh_type::Vec3>& old_face_centroids, real_t time_step);
+    SIMPLEFLUID_LOCAL void rollback_impl();
+    SIMPLEFLUID_LOCAL void reset_stationary_state();
 
     SP<mesh_type> d_mesh;
     PlanarALEMeshMotionOptions d_options;

@@ -4,9 +4,13 @@
  */
 #pragma once
 
+#include "FVM/ALEControlVolumeState.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "fields/FieldStored.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -205,6 +209,44 @@ void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshTy
         fluxes.set_owned_value(
             face_lid, value.dot(mesh.face_normal(face_id)) * static_cast<scalar_type>(mesh.face_area(face_id)));
     }
+}
+
+/** @brief Form and synchronize owner-oriented mesh-relative face fluxes. */
+template<TpetraTypePack Pack, class MeshType>
+void stored_mesh_relative_face_fluxes(
+    const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
+    const ALEControlVolumeState& ale,
+    ScalarFaceFieldStored<Pack, MeshType>& relative_fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    const auto& mesh = absolute_fluxes.mesh();
+    const std::array<int, 2> local_output_error{
+        absolute_fluxes.mesh_ptr().get() != relative_fluxes.mesh_ptr().get() ? 1 : 0,
+        &absolute_fluxes == &relative_fluxes ? 1 : 0};
+    std::array<int, 2> global_output_error{};
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        static_cast<int>(local_output_error.size()), local_output_error.data(), global_output_error.data());
+    if (global_output_error[0] != 0)
+    {
+        throw std::invalid_argument("mesh_relative_face_fluxes requires input and output fields on one mesh.");
+    }
+    if (global_output_error[1] != 0)
+    {
+        throw std::invalid_argument(
+            "mesh_relative_face_fluxes requires a distinct output field and never overwrites absolute flux.");
+    }
+    ale.validate(mesh);
+    const auto mesh_fluxes = ale.face_mesh_fluxes();
+    for (const auto face_lid : relative_fluxes.owned_face_ids())
+    {
+        relative_fluxes.set_owned_value(face_lid,
+            absolute_fluxes.value(face_lid)
+                - static_cast<scalar_type>(
+                    mesh_fluxes[static_cast<size_t>(face_lid)]));
+    }
+    relative_fluxes.sync_ghosts();
 }
 
 } // namespace SimpleFluid::FVM::detail

@@ -134,7 +134,10 @@ private:
 
     LinearSolveSummary advance_momentum() override;
     coupled_system_type assemble_coupled_system() override;
-    scalar_type pressure_reference_density() const noexcept override { return d_reference_density; }
+    scalar_type pressure_reference_density() const noexcept override
+    {
+        return d_reference_density;
+    }
 
     scalar_type d_reference_density;
 };

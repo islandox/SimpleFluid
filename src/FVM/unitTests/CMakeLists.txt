@@ -10,6 +10,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME ALETransport_2procs
+    TARGET testALETransport
+    PROCS 2
+    LABELS "mpi;ale;transport;conservation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME NonOrthogonalPartitionFaces_2procs
     TARGET testFvmOperators
     PROCS 2

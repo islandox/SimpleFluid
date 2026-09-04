@@ -85,6 +85,13 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME ALEEquations_2procs
+    TARGET testALEEquations
+    PROCS 2
+    LABELS "mpi;ale;equations;conservation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME PressureProjection_2procs
     TARGET testPressureProjectionMultiRank
     PROCS 2

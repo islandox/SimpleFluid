@@ -13,6 +13,7 @@
 
 #include <Teuchos_CommHelpers.hpp>
 
+#include <algorithm>
 #include <array>
 #include <exception>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -98,6 +100,241 @@ namespace
     scalar(options.coupling.volume_relative_tolerance);
     scalar(options.coupling.gas_absolute_tolerance);
     scalar(options.coupling.gas_relative_tolerance);
+
+    string(options.ale.top_boundary);
+    optional_scalar(options.ale.deformation_start_elevation);
+    optional_scalar(options.ale.maximum_level_change);
+    scalar(options.ale.gcl_absolute_tolerance);
+    scalar(options.ale.gcl_relative_tolerance);
+    scalar(options.ale.maximum_correctors);
+    scalar(options.ale.level_absolute_tolerance);
+    scalar(options.ale.level_relative_tolerance);
+    scalar(options.ale.relaxation);
+    optional_scalar(options.ale.quality_limits.maximum_growth_ratio);
+    optional_scalar(options.ale.quality_limits.maximum_non_orthogonality_degrees);
+    optional_scalar(options.ale.quality_limits.maximum_skewness);
+    optional_scalar(options.ale.quality_limits.maximum_aspect_ratio);
+    return encoded.str();
+}
+
+/** Deterministically encode every rank-global choice used by planar ALE. */
+[[nodiscard]] std::string encode_planar_ale_runtime_options(
+    const TimeStepperOptions& time, const LinearSolverOptions& linear,
+    const LinearSolverOptions& pressure_linear,
+    const BoussinesqModelOptions& model,
+    const MaterialFeedbackOptions* feedback,
+    const RadiolyticGasOptions* gas,
+    const BoundaryConditionSet& boundaries,
+    const std::vector<std::pair<std::string, bool>>& temperature_sources,
+    bool mutable_mesh, bool legacy_backend, bool physical_transport,
+    bool turbulence_enabled, bool boiling_enabled, bool precursor_enabled,
+    bool scalar_void_explicit, bool material_updater,
+    bool dynamic_temperature_sources)
+{
+    std::ostringstream encoded;
+    encoded << std::hexfloat;
+    const auto scalar = [&encoded](const auto value)
+    {
+        encoded << value << ';';
+    };
+    const auto string = [&encoded](const std::string& value)
+    {
+        encoded << value.size() << ':' << value << ';';
+    };
+    const auto real_array = [&scalar](const auto& values)
+    {
+        scalar(values.size());
+        for (const auto value : values)
+        {
+            scalar(value);
+        }
+    };
+    const auto string_array = [&scalar, &string](const auto& values)
+    {
+        scalar(values.size());
+        for (const auto& value : values)
+        {
+            string(value);
+        }
+    };
+    const auto optional_real = [&scalar](const std::optional<real_t>& value)
+    {
+        scalar(value.has_value());
+        if (value)
+        {
+            scalar(*value);
+        }
+    };
+    const auto linear_options = [&scalar](const LinearSolverOptions& value)
+    {
+        scalar(value.max_iterations);
+        scalar(value.tolerance);
+        scalar(value.verbosity);
+        scalar(static_cast<int>(value.backend));
+        scalar(static_cast<int>(value.preconditioner));
+        scalar(value.reuse_preconditioner);
+    };
+    const auto scalar_boundaries = [&scalar, &string](const BoundaryConditionMap& values)
+    {
+        std::vector<std::string> names;
+        names.reserve(values.size());
+        for (const auto& [name, condition] : values)
+        {
+            (void)condition;
+            names.push_back(name);
+        }
+        std::ranges::sort(names);
+        scalar(names.size());
+        for (const auto& name : names)
+        {
+            const auto& condition = values.at(name);
+            string(name);
+            scalar(static_cast<int>(condition.type));
+            scalar(condition.value);
+            scalar(condition.robin_coefficient);
+        }
+    };
+    const auto vector_boundaries = [&scalar, &string](const VectorBoundaryConditionMap& values)
+    {
+        std::vector<std::string> names;
+        names.reserve(values.size());
+        for (const auto& [name, condition] : values)
+        {
+            (void)condition;
+            names.push_back(name);
+        }
+        std::ranges::sort(names);
+        scalar(names.size());
+        for (const auto& name : names)
+        {
+            const auto& condition = values.at(name);
+            string(name);
+            scalar(static_cast<int>(condition.type));
+            scalar(condition.value.x);
+            scalar(condition.value.y);
+            scalar(condition.value.z);
+            scalar(condition.robin_coefficient);
+        }
+    };
+
+    scalar(time.time_step);
+    scalar(time.steps);
+    scalar(time.thermal_diffusivity);
+    scalar(time.kinematic_viscosity);
+    scalar(time.thermal_expansion);
+    scalar(time.gravity_x);
+    scalar(time.gravity_y);
+    scalar(time.gravity_z);
+    scalar(time.reference_temperature);
+    scalar(static_cast<int>(time.non_orthogonal_treatment));
+    scalar(static_cast<int>(time.pressure_gradient_scheme));
+    scalar(static_cast<int>(time.coefficient_interpolation));
+    scalar(time.n_non_orthogonal_correctors);
+    scalar(static_cast<int>(time.pressure_velocity_coupling));
+    scalar(time.n_pressure_correctors);
+    scalar(time.n_outer_correctors);
+    linear_options(linear);
+    linear_options(pressure_linear);
+
+    scalar(model.reference_density);
+    scalar(model.density);
+    scalar(model.specific_heat_capacity);
+    optional_real(model.dynamic_viscosity);
+    optional_real(model.thermal_conductivity);
+    scalar(model.density_feedback_enabled);
+    string_array(model.temperature_source_names);
+    real_array(model.temperature_source_power_densities);
+
+    scalar(feedback != nullptr);
+    if (feedback != nullptr)
+    {
+        scalar(static_cast<int>(feedback->density_mode));
+        scalar(static_cast<int>(feedback->viscosity_mode));
+        scalar(feedback->reference_density);
+        scalar(feedback->liquid_density);
+        scalar(feedback->gas_density);
+        scalar(feedback->reference_temperature);
+        scalar(feedback->thermal_expansion);
+        scalar(feedback->reference_dynamic_viscosity);
+        scalar(feedback->min_density);
+        scalar(feedback->min_viscosity);
+    }
+
+    scalar(gas != nullptr);
+    if (gas != nullptr)
+    {
+        scalar(static_cast<int>(gas->mode));
+        scalar(static_cast<int>(gas->pressure_mode));
+        scalar(static_cast<int>(gas->dissolved_transport));
+        scalar(static_cast<int>(gas->bubble_transport));
+        scalar(static_cast<int>(gas->heaviside_mode));
+        scalar(static_cast<int>(gas->rise_velocity_mode));
+        scalar(static_cast<int>(gas->surface_tension_mode));
+        scalar(static_cast<int>(gas->diffusivity_mode));
+        scalar(gas->hydrogen_yield_mol_per_j);
+        scalar(gas->gas_release_efficiency);
+        scalar(gas->reference_pressure);
+        scalar(gas->gas_constant);
+        scalar(gas->alpha_min);
+        scalar(gas->alpha_max);
+        scalar(gas->max_source_alpha_rate);
+        scalar(gas->henry_coefficient);
+        scalar(gas->surface_tension);
+        scalar(gas->hydrogen_diffusivity);
+        scalar(gas->atmospheric_pressure);
+        scalar(gas->uranium_concentration_mol_per_m3);
+        scalar(gas->hydrogen_yield_molecules_per_100_ev);
+        scalar(gas->microbubble_lifetime);
+        scalar(gas->large_bubble_dissolution_time);
+        scalar(gas->micro_to_large_conversion_coefficient);
+        scalar(gas->smooth_heaviside_width);
+        scalar(gas->constant_slip_velocity);
+        scalar(gas->bubble_gas_density);
+        scalar(gas->bubble_gravity);
+        scalar(gas->rise_velocity_tolerance);
+        scalar(gas->max_rise_velocity_iterations);
+        scalar(gas->initial_dissolved_hydrogen);
+        scalar(gas->initial_micro_number_density);
+        scalar(gas->initial_micro_moles);
+        scalar(gas->initial_large_number_density);
+        scalar(gas->initial_large_moles);
+        scalar(gas->min_radius);
+        scalar(gas->max_radius);
+        scalar(gas->min_population);
+        scalar(gas->max_population);
+        scalar(gas->max_concentration);
+        scalar(gas->local_ode_tolerance);
+        scalar(gas->max_subcycles);
+        scalar(gas->max_radius_iterations);
+        scalar(gas->liquid_compressibility);
+        scalar(gas->liquid_thermal_expansion);
+        scalar(gas->minimum_absolute_pressure);
+        real_array(gas->pressure_history_times);
+        real_array(gas->pressure_history_values);
+        string_array(gas->free_surface_patches);
+    }
+
+    scalar_boundaries(boundaries.temperature);
+    vector_boundaries(boundaries.velocity);
+    scalar_boundaries(boundaries.pressure);
+    scalar_boundaries(boundaries.turbulence.turbulent_kinetic_energy);
+    scalar_boundaries(boundaries.turbulence.dissipation_rate);
+    scalar_boundaries(boundaries.turbulence.specific_dissipation_rate);
+    scalar(temperature_sources.size());
+    for (const auto& [name, enabled] : temperature_sources)
+    {
+        string(name);
+        scalar(enabled);
+    }
+    scalar(mutable_mesh);
+    scalar(legacy_backend);
+    scalar(physical_transport);
+    scalar(turbulence_enabled);
+    scalar(boiling_enabled);
+    scalar(precursor_enabled);
+    scalar(scalar_void_explicit);
+    scalar(material_updater);
+    scalar(dynamic_temperature_sources);
     return encoded.str();
 }
 
@@ -125,7 +362,8 @@ namespace
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
     TimeStepperOptions time_options, LinearSolverOptions linear_options)
-    : BoussinesqSolver(std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh))),
+    : BoussinesqSolver(SP<const MeshHandle<Pack>>(
+          std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh)))),
           std::move(boundary_conditions), time_options, linear_options,
           BoussinesqModelOptions::legacy_defaults(time_options), false, PhysicalModelTag{})
 {
@@ -145,9 +383,19 @@ BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, Bounda
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
     TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options)
-    : BoussinesqSolver(std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh))),
+    : BoussinesqSolver(SP<const MeshHandle<Pack>>(
+          std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh)))),
           std::move(boundary_conditions), time_options, linear_options, std::move(model_options), true,
           PhysicalModelTag{})
+{
+}
+
+/** Construct a legacy-property solver while retaining mutable native ownership. */
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options)
+    : BoussinesqSolver(std::move(mesh), std::move(boundary_conditions), time_options, linear_options,
+          BoussinesqModelOptions::legacy_defaults(time_options), false, PhysicalModelTag{})
 {
 }
 
@@ -169,6 +417,15 @@ BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, Bounda
 {
 }
 
+/** Construct physical Boussinesq transport while retaining mutable native ownership. */
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options)
+    : BoussinesqSolver(std::move(mesh), std::move(boundary_conditions), time_options, linear_options,
+          std::move(model_options), true, PhysicalModelTag{})
+{
+}
+
 /**
  * @brief Construct a mesh-handle solver with explicit physical model options.
  *
@@ -186,6 +443,17 @@ BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, Bounda
     : BoussinesqSolver(std::move(mesh), std::move(boundary_conditions), time_options, linear_options,
           std::move(model_options), true, PhysicalModelTag{})
 {
+}
+
+/** Retain the mutable view after common const-observer construction. */
+template<TpetraTypePack Pack>
+BoussinesqSolver<Pack>::BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+    TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options,
+    bool physical_model_enabled, PhysicalModelTag tag)
+    : BoussinesqSolver(SP<const MeshHandle<Pack>>(mesh), std::move(boundary_conditions), time_options, linear_options,
+          std::move(model_options), physical_model_enabled, tag)
+{
+    this->retain_mutable_mesh_handle(std::move(mesh));
 }
 
 /**
@@ -1101,7 +1369,7 @@ auto BoussinesqSolver<Pack>::find_precursor_model() const noexcept -> const prec
     return d_precursor_model.get();
 }
 
-/** @brief Configure optional fixed-grid liquid-level accounting. */
+/** @brief Configure optional fixed-grid or solver-integrated planar free-surface coupling. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_free_surface(const FreeSurfaceOptions& options) -> free_surface_model_type*
 {
@@ -1139,6 +1407,45 @@ auto BoussinesqSolver<Pack>::configure_free_surface(const FreeSurfaceOptions& op
             "state before configuring or advancing the free surface.");
     }
     validate_free_surface_configuration(options);
+    if (options.enabled && options.mode == FreeSurfaceMode::PlanarALE)
+    {
+        PlanarALEMeshMotionOptions motion_options;
+        motion_options.axis = options.gravity_axis;
+        motion_options.deformation_start_elevation =
+            options.ale.deformation_start_elevation;
+        motion_options.maximum_level_change = options.ale.maximum_level_change;
+        motion_options.quality_limits = options.ale.quality_limits;
+        motion_options.gcl_absolute_tolerance =
+            options.ale.gcl_absolute_tolerance;
+        motion_options.gcl_relative_tolerance =
+            options.ale.gcl_relative_tolerance;
+        const auto volume_map = make_vessel_volume_map(options);
+        if (d_ale_motion)
+        {
+            if (!d_ale_boundary || d_ale_boundary->axis() != options.gravity_axis ||
+                d_ale_boundary->name() != options.ale.top_boundary)
+            {
+                throw std::invalid_argument(
+                    "Remove the active planarALE model before changing its motion axis or top boundary.");
+            }
+            ale_boundary_type geometry_preflight(d_mesh,
+                options.ale.top_boundary, options.gravity_axis, *volume_map,
+                options.coupling.volume_absolute_tolerance,
+                options.coupling.volume_relative_tolerance);
+        }
+        else
+        {
+            // Constructor/destructor acquire and release the motion lease
+            // without changing geometry; the boundary check proves current
+            // patch planarity, area, and vessel/mesh-volume consistency.
+            ale_motion_type motion_preflight(
+                this->mutable_mesh_handle(), std::move(motion_options));
+            ale_boundary_type geometry_preflight(d_mesh,
+                options.ale.top_boundary, options.gravity_axis, *volume_map,
+                options.coupling.volume_absolute_tolerance,
+                options.coupling.volume_relative_tolerance);
+        }
+    }
     if (!options.enabled)
     {
         remove_free_surface_model();
@@ -1172,6 +1479,7 @@ auto BoussinesqSolver<Pack>::configure_free_surface(const FreeSurfaceOptions& op
     try
     {
         initialize_free_surface_if_needed();
+        initialize_planar_ale_if_needed();
     }
     catch (...)
     {
@@ -1181,7 +1489,7 @@ auto BoussinesqSolver<Pack>::configure_free_surface(const FreeSurfaceOptions& op
     return d_free_surface_model.get();
 }
 
-/** @brief Configure fixed-grid liquid-level accounting from a Database. */
+/** @brief Configure planar free-surface coupling from a Database. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::configure_free_surface(const Database& database) -> free_surface_model_type*
 {
@@ -1215,6 +1523,7 @@ auto BoussinesqSolver<Pack>::configure_free_surface(const Database& database) ->
 template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_free_surface_model()
 {
     const auto removed = static_cast<bool>(d_free_surface_model) || static_cast<bool>(d_liquid_mass_inventory);
+    const bool removed_planar_ale = static_cast<bool>(d_ale_motion);
     if (removed && d_boiling_source_model)
     {
         const auto local_steam_mass = d_boiling_source_model->global_submerged_steam_mass();
@@ -1245,6 +1554,24 @@ template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_free_surface_m
                 "free-surface owner or reconstruct the solver from a state with zero submerged steam.");
         }
     }
+    if (removed_planar_ale)
+    {
+        boussinesq_velocity_boundary_cache() = FVM::cache_velocity_boundary_conditions<Pack>(
+            d_mesh, d_problem.boundary_conditions());
+    }
+    clear_volume_continuity_target();
+    clear_ale_pressure_boundary();
+    d_ale_temperature_density = nullptr;
+    d_active_ale.reset();
+    d_ale_boundary.reset();
+    d_volume_continuity_model.reset();
+    d_mesh_relative_face_flux.reset();
+    d_bubble_slip_volume_flux.reset();
+    d_mesh_volume_rate.reset();
+    d_continuity_residual.reset();
+    d_ale_old_density.reset();
+    d_ale_old_heat_capacity.reset();
+    d_ale_motion.reset();
     d_free_surface_model.reset();
     d_liquid_mass_inventory.reset();
     d_clear_level.reset();
@@ -1254,6 +1581,8 @@ template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::remove_free_surface_m
     d_free_surface_options = {};
     d_pool_occupancy_volume_error = {};
     d_free_surface_history.clear();
+    d_planar_ale_diagnostics = {};
+    d_ale_target_generation = 0;
     return removed;
 }
 
@@ -1373,6 +1702,17 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::pool_occupancy_volume
     return d_pool_occupancy_volume_error;
 }
 
+/** @brief Return the accepted carrier flux relative to the moving mesh. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::mesh_relative_face_fluxes() const -> const face_flux_field_type&
+{
+    if (!d_mesh_relative_face_flux)
+    {
+        throw std::logic_error("BoussinesqSolver has no configured planar-ALE relative-flux field.");
+    }
+    return *d_mesh_relative_face_flux;
+}
+
 /** @brief Return immutable accepted free-surface history. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::free_surface_history() const noexcept -> const std::vector<FreeSurfaceHistoryRecord>&
@@ -1393,6 +1733,7 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
     {
         throw std::runtime_error("Could not create free-surface history CSV file '" + filename + "'.");
     }
+    const bool include_planar_ale = d_free_surface_options.mode == FreeSurfaceMode::PlanarALE;
     output << "time_s,time_step_s,liquid_mass_kg,cumulative_evaporated_mass_kg,"
               "cumulative_condensed_mass_kg,dryout_mass_deficit_kg,liquid_mass_residual_kg,"
               "liquid_mass_residual_normalized,liquid_step_mass_residual_kg,"
@@ -1410,7 +1751,22 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
               "boiling_accepted_mass_kg,boiling_rejected_mass_kg,boiling_condensed_mass_kg,"
               "boiling_submerged_steam_mass_kg,boiling_submerged_steam_volume_m3,"
               "boiling_condensation_latent_energy_release_j,boiling_mass_residual_kg,"
-              "boiling_void_residual_m3,boiling_latent_energy_residual_j\n";
+              "boiling_void_residual_m3,boiling_latent_energy_residual_j";
+    if (include_planar_ale)
+    {
+        output << ",ale_old_geometry_epoch,ale_new_geometry_epoch,ale_old_mesh_volume_m3,"
+                  "ale_new_mesh_volume_m3,ale_mesh_pool_mismatch_m3,ale_gcl_max_m3_per_s,"
+                  "ale_gcl_max_normalized,ale_outer_correctors,ale_level_residual_m,"
+                  "ale_pressure_residual_pa,ale_material_state_residual,"
+                  "ale_gas_state_residual,ale_material_source_m3_per_s,"
+                  "ale_carrier_transport_m3_per_s,ale_bubble_slip_divergence_m3_per_s,"
+                  "ale_bubble_escape_m3_per_s,ale_source_pool_closure_m3_per_s,"
+                  "ale_continuity_l2_m3_per_s,ale_continuity_max_m3_per_s,"
+                  "ale_continuity_normalized,ale_liquid_mass_residual_kg,"
+                  "ale_gas_inventory_residual_mol,ale_energy_residual_j,"
+                  "ale_energy_residual_normalized,ale_rejected_transactions";
+    }
+    output << '\n';
     output << std::setprecision(std::numeric_limits<scalar_type>::max_digits10);
     for (const auto& record : d_free_surface_history)
     {
@@ -1443,7 +1799,26 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
                << boiling.condensed_liquid_mass << ',' << boiling.submerged_steam_mass << ','
                << boiling.submerged_steam_volume << ',' << boiling.condensation_latent_energy_release << ','
                << boiling.mass_balance_residual << ',' << boiling.void_balance_residual << ','
-               << boiling.latent_energy_balance_residual << '\n';
+               << boiling.latent_energy_balance_residual;
+        if (include_planar_ale)
+        {
+            const auto ale = record.planar_ale.value_or(PlanarALEStepDiagnostics{});
+            output << ',' << ale.old_geometry_epoch << ',' << ale.new_geometry_epoch << ','
+                   << ale.old_mesh_volume << ',' << ale.new_mesh_volume << ',' << ale.mesh_vessel_mismatch << ','
+                   << ale.maximum_gcl_residual << ',' << ale.maximum_normalized_gcl_residual << ','
+                   << ale.outer_correctors << ',' << ale.level_residual << ',' << ale.pressure_residual << ','
+                   << ale.material_state_residual << ',' << ale.gas_state_residual << ','
+                   << ale.volume_source.global_material_source << ','
+                   << ale.volume_source.global_carrier_transport << ','
+                   << ale.volume_source.global_bubble_slip_divergence << ','
+                   << ale.volume_source.bubble_escape_volume_rate << ','
+                   << ale.volume_source.source_pool_closure_residual << ',' << ale.continuity.l2 << ','
+                   << ale.continuity.maximum << ',' << ale.continuity.normalized_l2 << ','
+                   << ale.liquid_mass_residual << ',' << ale.gas_inventory_residual << ','
+                   << ale.energy_residual << ',' << ale.normalized_energy_residual << ','
+                   << ale.rejected_transactions;
+        }
+        output << '\n';
     }
     if (!output)
     {
@@ -1640,6 +2015,10 @@ void BoussinesqSolver<Pack>::validate_free_surface_configuration(const FreeSurfa
     {
         return;
     }
+    if (options.mode == FreeSurfaceMode::PlanarALE)
+    {
+        validate_planar_ale_support(options);
+    }
     if (d_radiolytic_gas_model && d_radiolytic_gas_model->mode() == RadiolyticGasMode::IdealGasSource)
     {
         throw std::invalid_argument("The planar free-surface budget cannot use idealGasSource "
@@ -1677,6 +2056,467 @@ void BoussinesqSolver<Pack>::validate_free_surface_configuration(const FreeSurfa
     {
         throw std::invalid_argument("The planar free-surface budget rejects nonzero scalar void "
                                     "that is not owned by a conservative submerged-gas inventory.");
+    }
+}
+
+/** @brief Require every rank-global ALE runtime choice to match exactly. */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::validate_planar_ale_runtime_parity() const
+{
+    const auto* feedback_options = d_material_feedback_model
+        ? &d_material_feedback_model->options()
+        : nullptr;
+    const auto* gas_options = d_radiolytic_gas_model
+        ? &d_radiolytic_gas_model->options()
+        : nullptr;
+    std::vector<std::pair<std::string, bool>> temperature_sources;
+    temperature_sources.reserve(stored_temperature_sources().entries().size());
+    for (const auto& [name, source] : stored_temperature_sources().entries())
+    {
+        temperature_sources.emplace_back(name, source->enabled());
+    }
+    const auto local_encoding = encode_planar_ale_runtime_options(
+        d_problem.time_options(), d_problem.linear_options(),
+        this->pressure_linear_solver_options(), d_model_options,
+        feedback_options, gas_options, d_problem.boundary_conditions(),
+        temperature_sources,
+        this->has_mutable_mesh_handle(), uses_legacy_backend(),
+        physical_transport_enabled(), stored_turbulence_model().enabled(),
+        d_boiling_source_model && d_boiling_source_model->enabled(),
+        d_precursor_model && d_precursor_model->enabled(),
+        d_scalar_void_fraction_explicitly_configured,
+        stored_material_properties().has_updater(),
+        stored_temperature_sources().has_dynamic_updates());
+
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    const auto rank = communicator->getRank();
+    long long root_size = rank == 0
+        ? static_cast<long long>(local_encoding.size())
+        : 0LL;
+    Teuchos::broadcast(*communicator, 0, 1, &root_size);
+    if (root_size < 0 || root_size > std::numeric_limits<int>::max())
+    {
+        throw std::invalid_argument(
+            "planarALE runtime-option encoding is too large for MPI broadcast.");
+    }
+    std::string root_encoding(static_cast<size_t>(root_size), '\0');
+    if (rank == 0)
+    {
+        root_encoding = local_encoding;
+    }
+    if (!root_encoding.empty())
+    {
+        Teuchos::broadcast(*communicator, 0, static_cast<int>(root_encoding.size()), root_encoding.data());
+    }
+    const int local_mismatch = local_encoding == root_encoding ? 0 : 1;
+    int any_mismatch = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_mismatch, &any_mismatch);
+    if (any_mismatch != 0)
+    {
+        throw std::invalid_argument(
+            "planarALE time, linear, material, gas, boundary, and active-model options must match on every rank.");
+    }
+}
+
+/** @brief Fail closed unless every active equation belongs to the tested ALE matrix. */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::validate_planar_ale_support(const FreeSurfaceOptions& options) const
+{
+    validate_planar_ale_runtime_parity();
+    if (!this->has_mutable_mesh_handle() || uses_legacy_backend())
+    {
+        throw std::invalid_argument(
+            std::string(planar_ale_unavailable_diagnostic) + " A const-only or legacy solver mesh cannot be moved.");
+    }
+    if (!physical_transport_enabled())
+    {
+        throw std::invalid_argument("planarALE requires dimensional physical Boussinesq temperature transport.");
+    }
+    if (options.vessel.mode != VesselVolumeMapMode::ConstantArea ||
+        options.liquid_mass.mode != LiquidVolumeMode::CellMassInventory ||
+        options.range_policy != FreeSurfaceRangePolicy::Error ||
+        options.liquid_mass.depletion_policy != FreeSurfaceRangePolicy::Error ||
+        options.headspace.mode != HeadspaceMode::Vented ||
+        options.headspace.temperature_mode != HeadspaceTemperatureMode::Fixed)
+    {
+        throw std::invalid_argument(
+            "planarALE initially requires constantArea, cellMassInventory, fixed-temperature vented headspace, "
+            "and error range/depletion policies.");
+    }
+    if (stored_turbulence_model().enabled())
+    {
+        throw std::invalid_argument("planarALE does not yet support RANS transports, wall distance, or wall laws.");
+    }
+    if ((d_boiling_source_model && d_boiling_source_model->enabled()) ||
+        (d_precursor_model && d_precursor_model->enabled()))
+    {
+        throw std::invalid_argument(
+            "planarALE initially rejects boiling/steam and delayed-neutron precursor transport.");
+    }
+    if (d_scalar_void_fraction_explicitly_configured &&
+        (!d_radiolytic_gas_model || !d_radiolytic_gas_model->supplies_void_fraction()))
+    {
+        throw std::invalid_argument(
+            "planarALE rejects scalar-void-only evolution; a conservative gas owner is required.");
+    }
+    if (!d_material_feedback_model ||
+        d_material_feedback_model->options().density_mode != DensityFeedbackMode::BoussinesqTemperatureOnly ||
+        d_material_feedback_model->options().thermal_expansion == scalar_type{})
+    {
+        throw std::invalid_argument("planarALE requires pure-liquid BoussinesqTemperatureOnly density feedback with "
+                                    "nonzero thermal expansion.");
+    }
+    const auto gravity = d_problem.time_options().gravity_vector();
+    const auto axis = static_cast<size_t>(options.gravity_axis);
+    const std::array<scalar_type, 3> gravity_components{
+        static_cast<scalar_type>(gravity.x), static_cast<scalar_type>(gravity.y), static_cast<scalar_type>(gravity.z)};
+    bool transverse_gravity = false;
+    for (size_t component = 0; component < gravity_components.size(); ++component)
+    {
+        transverse_gravity =
+            transverse_gravity || (component != axis && gravity_components[component] != scalar_type{});
+    }
+    if (transverse_gravity || gravity_components[axis] > scalar_type{})
+    {
+        throw std::invalid_argument("planarALE gravity must be zero or point inward along the selected moving-top "
+                                    "axis, with no transverse component.");
+    }
+    if (stored_material_properties().has_updater() || stored_temperature_sources().has_dynamic_updates())
+    {
+        throw std::invalid_argument(
+            "planarALE rejects dynamic user material/source callbacks because they are not rollback-safe.");
+    }
+
+    // A spatially anchored fission profile would retain stale cell values after
+    // the mesh moves.  Until that source owns an epoch-aware refresh contract,
+    // every ALE heat/radiolysis use must be geometry-invariant.
+    if (d_fission_power_source)
+    {
+        scalar_type local_minimum_fission = std::numeric_limits<scalar_type>::infinity();
+        scalar_type local_maximum_fission = -std::numeric_limits<scalar_type>::infinity();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto value = d_fission_power_source->field().value(static_cast<local_ordinal_type>(owned));
+            local_minimum_fission = std::min(local_minimum_fission, value);
+            local_maximum_fission = std::max(local_maximum_fission, value);
+        }
+        scalar_type global_minimum_fission{};
+        scalar_type global_maximum_fission{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_minimum_fission,
+            &global_minimum_fission);
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_maximum_fission,
+            &global_maximum_fission);
+        if (global_minimum_fission != global_maximum_fission)
+        {
+            throw std::invalid_argument("planarALE currently requires a uniform geometry-invariant fission-power "
+                                        "field; Gaussian and other spatial profiles are not epoch-aware.");
+        }
+    }
+
+    if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled())
+    {
+        if (!d_fission_power_source)
+        {
+            throw std::invalid_argument(
+                "planarALE Sheng radiolysis requires an authoritative fission-power source before setup.");
+        }
+        if (options.ale.maximum_correctors < 2)
+        {
+            throw std::invalid_argument(
+                "planarALE Sheng radiolysis requires at least two outer correctors to couple gas state and geometry.");
+        }
+        const auto& gas = d_radiolytic_gas_model->options();
+        if (gas.mode != RadiolyticGasMode::Sheng2024TwoPopulation ||
+            gas.dissolved_transport != RadiolyticTransportMode::Advective ||
+            gas.bubble_transport != BubbleTransportMode::General ||
+            (gas.pressure_mode != RadiolyticPressureMode::Constant &&
+                gas.pressure_mode != RadiolyticPressureMode::Reconstructed) ||
+            gas.free_surface_patches != std::vector<std::string>{options.ale.top_boundary})
+        {
+            throw std::invalid_argument(
+                "planarALE radiolysis requires Sheng2024TwoPopulation, advective dissolved H2, general bubble "
+                "transport, constant/reconstructed pressure, and exactly the configured moving-top escape patch.");
+        }
+    }
+
+    const auto& boundaries = d_problem.boundary_conditions();
+    const auto pressure = boundaries.pressure.find(options.ale.top_boundary);
+    if (pressure == boundaries.pressure.end() || pressure->second.type != BoundaryConditionType::Dirichlet ||
+        pressure->second.value != scalar_type{})
+    {
+        throw std::invalid_argument(
+            "planarALE moving top requires a zero-gauge Dirichlet physical-pressure boundary.");
+    }
+    const auto velocity_boundary = boundaries.velocity.find(options.ale.top_boundary);
+    if (velocity_boundary == boundaries.velocity.end() ||
+        (velocity_boundary->second.type != BoundaryConditionType::Slip &&
+            velocity_boundary->second.type != BoundaryConditionType::Dirichlet) ||
+        (velocity_boundary->second.type == BoundaryConditionType::Dirichlet &&
+            (velocity_boundary->second.value.x != scalar_type{} ||
+                velocity_boundary->second.value.y != scalar_type{} ||
+                velocity_boundary->second.value.z != scalar_type{})))
+    {
+        throw std::invalid_argument(
+            "planarALE moving top requires a configured slip or Dirichlet liquid-velocity boundary.");
+    }
+    int local_open_nonmoving_boundary = 0;
+    for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+    {
+        (void)batch;
+        const auto name = d_mesh->boundary_batch_name(batch_id);
+        if (name == options.ale.top_boundary)
+        {
+            continue;
+        }
+        const auto velocity = boundaries.velocity.find(name);
+        const auto pressure_condition = boundaries.pressure.find(name);
+        const bool closed_velocity = velocity != boundaries.velocity.end() &&
+            (velocity->second.type == BoundaryConditionType::NoSlip ||
+                velocity->second.type == BoundaryConditionType::Slip ||
+                (velocity->second.type == BoundaryConditionType::Dirichlet &&
+                    velocity->second.value.x == scalar_type{} &&
+                    velocity->second.value.y == scalar_type{} &&
+                    velocity->second.value.z == scalar_type{}));
+        const bool neutral_pressure = pressure_condition == boundaries.pressure.end() ||
+            (pressure_condition->second.type == BoundaryConditionType::Neumann &&
+                pressure_condition->second.value == scalar_type{});
+        if (!closed_velocity || !neutral_pressure)
+        {
+            local_open_nonmoving_boundary = 1;
+        }
+    }
+    int any_open_nonmoving_boundary = 0;
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),
+        Teuchos::REDUCE_MAX, 1, &local_open_nonmoving_boundary,
+        &any_open_nonmoving_boundary);
+    if (any_open_nonmoving_boundary != 0)
+    {
+        throw std::invalid_argument(
+            "planarALE initially rejects physical liquid inlets/outlets; every nonmoving boundary must be "
+            "closed with homogeneous Neumann pressure.");
+    }
+    for (const auto& [name, condition] : boundaries.temperature)
+    {
+        (void)name;
+        if (condition.type != BoundaryConditionType::Neumann || condition.value != scalar_type{})
+        {
+            throw std::invalid_argument(
+                "planarALE initially supports adiabatic temperature boundaries only; use volumetric heating.");
+        }
+    }
+}
+
+/** @brief Lazily create the sole motion controller after accepted state exists. */
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::initialize_planar_ale_if_needed()
+{
+    if (!d_free_surface_model || d_free_surface_options.mode != FreeSurfaceMode::PlanarALE || d_ale_motion)
+    {
+        return;
+    }
+    if (!d_free_surface_model->initialized() || !d_liquid_mass_inventory || !d_liquid_mass_inventory->initialized())
+    {
+        return;
+    }
+    validate_planar_ale_support(d_free_surface_options);
+
+    PlanarALEMeshMotionOptions motion_options;
+    motion_options.axis = d_free_surface_options.gravity_axis;
+    motion_options.deformation_start_elevation = d_free_surface_options.ale.deformation_start_elevation;
+    motion_options.maximum_level_change = d_free_surface_options.ale.maximum_level_change;
+    motion_options.quality_limits = d_free_surface_options.ale.quality_limits;
+    motion_options.gcl_absolute_tolerance = d_free_surface_options.ale.gcl_absolute_tolerance;
+    motion_options.gcl_relative_tolerance = d_free_surface_options.ale.gcl_relative_tolerance;
+
+    auto motion = std::make_unique<ale_motion_type>(this->mutable_mesh_handle(), std::move(motion_options));
+    auto boundary = std::make_unique<ale_boundary_type>(d_mesh, d_free_surface_options.ale.top_boundary,
+        d_free_surface_options.gravity_axis, d_free_surface_model->volumeMap(),
+        d_free_surface_options.coupling.volume_absolute_tolerance,
+        d_free_surface_options.coupling.volume_relative_tolerance);
+    const auto surface = d_free_surface_model->diagnostics();
+    const auto level_scale = std::max({scalar_type{1}, std::abs(surface.pool_level),
+        std::abs(boundary->diagnostics().surface_elevation)});
+    const auto level_tolerance = static_cast<scalar_type>(d_free_surface_options.ale.level_absolute_tolerance) +
+                                 static_cast<scalar_type>(d_free_surface_options.ale.level_relative_tolerance) *
+                                     level_scale;
+    if (std::abs(surface.pool_level - boundary->diagnostics().surface_elevation) > level_tolerance)
+    {
+        throw std::invalid_argument(
+            "planarALE initial pool level must coincide with the selected mesh-top elevation.");
+    }
+    const auto volume_scale = std::max({scalar_type{1}, std::abs(surface.pool_volume),
+        std::abs(boundary->diagnostics().global_mesh_volume)});
+    const auto volume_tolerance = static_cast<scalar_type>(d_free_surface_options.coupling.volume_absolute_tolerance) +
+                                  static_cast<scalar_type>(d_free_surface_options.coupling.volume_relative_tolerance) *
+                                      volume_scale;
+    if (std::abs(surface.pool_volume - boundary->diagnostics().global_mesh_volume) > volume_tolerance)
+    {
+        throw std::invalid_argument(
+            "planarALE initial liquid-plus-bubble pool volume must equal the moving fluid-mesh volume.");
+    }
+
+    d_ale_boundary = std::move(boundary);
+    d_ale_motion = std::move(motion);
+    d_volume_continuity_model = std::make_unique<volume_continuity_model_type>(d_mesh,
+        d_free_surface_options.coupling.volume_absolute_tolerance,
+        d_free_surface_options.coupling.volume_relative_tolerance);
+    d_mesh_relative_face_flux = std::make_unique<face_flux_field_type>(d_mesh, "meshRelativeFaceFlux");
+    d_bubble_slip_volume_flux = std::make_unique<face_flux_field_type>(d_mesh, "bubbleSlipVolumeFlux");
+    d_mesh_volume_rate = std::make_unique<field_type>(d_mesh, "meshVolumeRate");
+    d_continuity_residual = std::make_unique<field_type>(d_mesh, "continuityResidual");
+    d_ale_old_density = std::make_unique<field_type>(d_mesh, "aleAcceptedOldDensity");
+    d_ale_old_heat_capacity = std::make_unique<field_type>(d_mesh, "aleAcceptedOldHeatCapacity");
+    d_planar_ale_diagnostics.initialized = true;
+    d_planar_ale_diagnostics.old_geometry_epoch = d_mesh->geometry_epoch();
+    d_planar_ale_diagnostics.new_geometry_epoch = d_mesh->geometry_epoch();
+    d_planar_ale_diagnostics.old_mesh_volume = d_ale_boundary->diagnostics().global_mesh_volume;
+    d_planar_ale_diagnostics.new_mesh_volume = d_ale_boundary->diagnostics().global_mesh_volume;
+}
+
+/** @brief Enforce top kinematics and derive a distinct carrier-relative flux. */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::form_mesh_relative_flux(face_flux_field_type& absolute_flux)
+{
+    if (!d_active_ale || !d_ale_boundary || !d_mesh_relative_face_flux)
+    {
+        throw std::logic_error("planarALE relative flux requires one active geometry trial.");
+    }
+    // Pressure and coupled solvers also own this exact override. Reapplying it
+    // here makes the transport boundary invariant explicit at every consumer.
+    d_ale_boundary->enforce_kinematic_flux(*d_active_ale, absolute_flux);
+    FVM::mesh_relative_face_fluxes(absolute_flux, *d_active_ale, *d_mesh_relative_face_flux);
+}
+
+/** @brief Build extensive liquid-plus-raw-bubble material volume per local cell. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::material_volumes(const field_type& liquid_mass_density,
+    const field_type& pure_liquid_density_field, std::span<const real_t> cell_volumes) const
+    -> std::vector<scalar_type>
+{
+    if (cell_volumes.size() != d_mesh->num_local_cells())
+    {
+        throw std::invalid_argument("planarALE material-volume assembly requires mesh-local cell-volume order.");
+    }
+    std::vector<scalar_type> result(cell_volumes.size());
+    const field_type* raw_bubble = d_radiolytic_gas_model && d_radiolytic_gas_model->enabled()
+        ? &d_radiolytic_gas_model->raw_bubble_volume_fraction()
+        : nullptr;
+    int local_invalid = 0;
+    for (size_t local = 0; local < result.size(); ++local)
+    {
+        const auto cell = static_cast<local_ordinal_type>(local);
+        const bool owned = local < d_mesh->num_owned_cells();
+        const auto density = owned ? pure_liquid_density_field.value(cell)
+                                   : pure_liquid_density_field.local_value(cell);
+        const auto mass_density = owned ? liquid_mass_density.value(cell)
+                                        : liquid_mass_density.local_value(cell);
+        const auto volume = static_cast<scalar_type>(cell_volumes[local]);
+        const auto bubble_fraction = raw_bubble
+            ? (owned ? raw_bubble->value(cell) : raw_bubble->local_value(cell))
+            : scalar_type{};
+        result[local] = volume * (mass_density / density + bubble_fraction);
+        local_invalid = local_invalid || !std::isfinite(density) || density <= scalar_type{} ||
+                        !std::isfinite(mass_density) || mass_density < scalar_type{} ||
+                        !std::isfinite(bubble_fraction) || bubble_fraction < scalar_type{} ||
+                        !std::isfinite(result[local]) || result[local] < scalar_type{};
+    }
+    int any_invalid = 0;
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        1, &local_invalid, &any_invalid);
+    if (any_invalid != 0)
+    {
+        throw std::runtime_error("planarALE material-volume state is non-finite or physically invalid.");
+    }
+    return result;
+}
+
+/** @brief Volume-weighted mean of the dynamic/gauge pressure field. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::volume_weighted_mean_pressure() const -> scalar_type
+{
+    scalar_type local_pressure_volume{};
+    scalar_type local_volume{};
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
+        local_pressure_volume += pressure().value(cell) * volume;
+        local_volume += volume;
+    }
+    std::array<scalar_type, 2> local{local_pressure_volume, local_volume};
+    std::array<scalar_type, 2> global{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+        static_cast<int>(local.size()), local.data(), global.data());
+    return global[1] > scalar_type{} ? global[0] / global[1] : scalar_type{};
+}
+
+/** @brief Integrate carrier-density*cp*T on supplied owned-cell geometry. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::total_sensible_energy(const field_type& density,
+    const field_type& heat_capacity, std::span<const real_t> cell_volumes) const -> scalar_type
+{
+    if (cell_volumes.size() != d_mesh->num_local_cells())
+    {
+        throw std::invalid_argument("planarALE energy accounting requires mesh-local cell-volume order.");
+    }
+    scalar_type local_energy{};
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        local_energy += static_cast<scalar_type>(cell_volumes[owned]) * density.value(cell) *
+                        heat_capacity.value(cell) * temperature().value(cell);
+    }
+    scalar_type global_energy{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+        1, &local_energy, &global_energy);
+    return global_energy;
+}
+
+/** @brief Prescribe the exact swept-volume rate on the dynamic-pressure top. */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::configure_ale_pressure_boundary(std::uint64_t generation)
+{
+    if (!d_active_ale || !d_ale_boundary)
+    {
+        throw std::logic_error("planarALE pressure boundary requires an active motion trial.");
+    }
+    native_pressure_projection().set_fixed_boundary_flux_provider(
+        {d_ale_boundary->name()},
+        [this](int, size_t, local_ordinal_type face_lid)
+        {
+            if (!d_active_ale || !d_ale_boundary || !d_ale_boundary->contains(face_lid))
+            {
+                throw std::logic_error("planarALE fixed-flux provider was used outside its active moving patch.");
+            }
+            return static_cast<scalar_type>(d_active_ale->face_mesh_fluxes()[static_cast<size_t>(face_lid)]);
+        },
+        generation);
+    boussinesq_coupled_pressure_velocity_solver().set_fixed_boundary_flux_provider(
+        {d_ale_boundary->name()},
+        [this](int, size_t, local_ordinal_type face_lid)
+        {
+            if (!d_active_ale || !d_ale_boundary || !d_ale_boundary->contains(face_lid))
+            {
+                throw std::logic_error("planarALE coupled fixed-flux provider was used outside its active patch.");
+            }
+            return static_cast<scalar_type>(d_active_ale->face_mesh_fluxes()[static_cast<size_t>(face_lid)]);
+        },
+        generation);
+}
+
+/** @brief Restore ordinary physical-pressure boundary behavior. */
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::clear_ale_pressure_boundary() noexcept
+{
+    if (uses_legacy_backend())
+    {
+        return;
+    }
+    try
+    {
+        native_pressure_projection().clear_fixed_boundary_flux_provider();
+        boussinesq_coupled_pressure_velocity_solver().clear_fixed_boundary_flux_provider();
+    }
+    catch (...)
+    {
     }
 }
 
@@ -1778,7 +2618,14 @@ auto BoussinesqSolver<Pack>::make_free_surface_update(
                 throw std::logic_error("Planar free-surface bubble closure requires constant or "
                                        "reconstructed radiolytic pressure.");
             }
-            return static_cast<real_t>(d_radiolytic_gas_model->evaluate_submerged_bubble_volume(pressure));
+            auto pressure_offset = static_cast<scalar_type>(pressure);
+            if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
+                pressure_mode == RadiolyticPressureMode::Reconstructed)
+            {
+                pressure_offset += volume_weighted_mean_pressure();
+            }
+            return static_cast<real_t>(
+                d_radiolytic_gas_model->evaluate_submerged_bubble_volume(pressure_offset));
         }
         if (d_boiling_source_model && d_boiling_source_model->enabled())
         {
@@ -1799,6 +2646,11 @@ auto BoussinesqSolver<Pack>::make_free_surface_update(
         update.gas.other_sink_moles["H2"] = d_radiolytic_gas_model->cumulative_dissolved_hydrogen_outflow();
         update.minimum_valid_absolute_pressure =
             static_cast<real_t>(d_radiolytic_gas_model->minimum_valid_absolute_pressure_offset());
+        if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
+            d_radiolytic_gas_model->options().pressure_mode == RadiolyticPressureMode::Reconstructed)
+        {
+            update.minimum_valid_absolute_pressure -= static_cast<real_t>(volume_weighted_mean_pressure());
+        }
         if (!initializing)
         {
             const auto cumulative_escape =
@@ -1888,9 +2740,19 @@ void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
             if (pressure_mode == RadiolyticPressureMode::Constant ||
                 pressure_mode == RadiolyticPressureMode::Reconstructed)
             {
-                d_radiolytic_gas_model->set_absolute_pressure_offset(d_free_surface_model->headspacePressure());
+                auto offset = static_cast<scalar_type>(d_free_surface_model->headspacePressure());
+                if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
+                    pressure_mode == RadiolyticPressureMode::Reconstructed)
+                {
+                    offset += volume_weighted_mean_pressure();
+                }
+                d_radiolytic_gas_model->set_absolute_pressure_offset(offset);
             }
         }
+        // Lazy primary-field initialization must complete the same ALE
+        // geometry/support preflight as configure_free_surface().  Do this
+        // before publishing fields or accepted history.
+        initialize_planar_ale_if_needed();
         publish_free_surface_fields();
         record_free_surface_history();
     }
@@ -2036,6 +2898,10 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::record_free_surface_h
     {
         record.boiling = d_boiling_source_model->last_phase_change_diagnostics();
     }
+    if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE && d_planar_ale_diagnostics.initialized)
+    {
+        record.planar_ale = d_planar_ale_diagnostics;
+    }
     d_free_surface_history.push_back(std::move(record));
 }
 
@@ -2141,6 +3007,32 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature_equation(
     return d_problem.template object<temperature_equation_type>("temperature_equation");
 }
 
+/** Refresh laminar Boussinesq transport and shared pressure/output geometry. */
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::refresh_geometry_dependent_state()
+{
+    boussinesq_momentum_equation().refresh_geometry();
+    temperature_equation().refresh_geometry();
+    if (uses_legacy_backend())
+    {
+        boussinesq_pressure_face_flux_workspace().refresh_geometry();
+        boussinesq_coupled_pressure_velocity_solver().clear_cache();
+    }
+    this->refresh_pressure_velocity_geometry_state();
+    if (d_radiolytic_gas_model)
+    {
+        d_radiolytic_gas_model->refresh_geometry();
+    }
+    if (d_scalar_void_fraction_model)
+    {
+        d_scalar_void_fraction_model->refresh_geometry();
+    }
+    if (d_liquid_mass_inventory)
+    {
+        d_liquid_mass_inventory->refresh_geometry();
+    }
+}
+
 /** @brief Return the canonical handle-backed Boussinesq momentum equation. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::boussinesq_momentum_equation() -> boussinesq_momentum_equation_type&
@@ -2200,6 +3092,12 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::momentum_equation() -
  */
 template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
+    const face_flux_field_type* momentum_flux = &old_face_fluxes();
+    if (d_active_ale)
+    {
+        form_mesh_relative_flux(old_face_fluxes());
+        momentum_flux = d_mesh_relative_face_flux.get();
+    }
     FVM::cell_gradient(pressure(), d_problem.boundary_conditions().pressure, predictor_pressure_gradient(),
         boussinesq_pressure_face_flux_workspace().gradient_cache(), d_problem.time_options().pressure_gradient_scheme);
     const auto inverse_reference_density = scalar_type{1} / pressure_reference_density();
@@ -2228,15 +3126,16 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::advance_momentum() ->
 
     if (physical_transport_enabled())
     {
-        return boussinesq_momentum_equation().advance_velocity_physical(velocity(), old_face_fluxes(), temperature(),
+        return boussinesq_momentum_equation().advance_velocity_physical(velocity(), *momentum_flux, temperature(),
             boussinesq_velocity_boundary_cache(), d_problem.time_options(), stored_material_properties(),
             d_model_options.reference_density, d_model_options.density_feedback_enabled, velocity(), pressure_source,
             d_problem.linear_options(), turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,
-            turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr);
+            turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr,
+            d_active_ale ? &*d_active_ale : nullptr);
     }
-    return boussinesq_momentum_equation().advance_velocity(velocity(), old_face_fluxes(), temperature(),
+    return boussinesq_momentum_equation().advance_velocity(velocity(), *momentum_flux, temperature(),
         boussinesq_velocity_boundary_cache(), d_problem.time_options(), velocity(), pressure_source,
-        d_problem.linear_options());
+        d_problem.linear_options(), d_active_ale ? &*d_active_ale : nullptr);
 }
 
 /**
@@ -2259,6 +3158,23 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::pressure_reference_de
 template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::assemble_coupled_system() -> coupled_system_type
 {
     const auto* turbulence = find_turbulence_model();
+    if (d_active_ale)
+    {
+        form_mesh_relative_flux(old_face_fluxes());
+        if (const auto* target = volume_continuity_target())
+        {
+            return boussinesq_coupled_pressure_velocity_solver().assemble(boussinesq_momentum_equation(), velocity(),
+                pressure(), temperature(), *d_mesh_relative_face_flux, boussinesq_velocity_boundary_cache(),
+                d_problem.boundary_conditions(), d_problem.time_options(), *target,
+                physical_transport_enabled() ? &stored_material_properties() : nullptr,
+                d_model_options.reference_density, d_model_options.density_feedback_enabled,
+                turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,
+                turbulence != nullptr ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
+                turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr,
+                &*d_active_ale);
+        }
+        throw std::logic_error("planarALE coupled assembly requires an active volume-continuity target.");
+    }
     return boussinesq_coupled_pressure_velocity_solver().assemble(boussinesq_momentum_equation(), velocity(),
         pressure(), temperature(), old_face_fluxes(), boussinesq_velocity_boundary_cache(),
         d_problem.boundary_conditions(), d_problem.time_options(),
@@ -2544,12 +3460,16 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_temperature_t
             }
             return total;
         };
-        temperature_statistics = temperature_equation().advance_physical(temperature(), projected_face_fluxes(),
+        const auto& transport_flux = d_active_ale ? *d_mesh_relative_face_flux : projected_face_fluxes();
+        temperature_statistics = temperature_equation().advance_physical(temperature(), transport_flux,
             time_step, stored_material_properties(), temperature(), total_power_density,
             d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options(),
             turbulence != nullptr ? &turbulence->effective_thermal_conductivity() : nullptr,
             turbulence != nullptr ? turbulence->effective_thermal_conductivity_boundary_cache() : nullptr,
-            d_problem.time_options().coefficient_interpolation);
+            d_problem.time_options().coefficient_interpolation, d_active_ale ? &*d_active_ale : nullptr,
+            d_active_ale && d_liquid_mass_inventory ? &d_liquid_mass_inventory->cellMassInventory() : nullptr,
+            d_active_ale ? d_ale_old_heat_capacity.get() : nullptr,
+            d_active_ale ? d_ale_temperature_density : nullptr);
     }
     else
     {
@@ -2603,6 +3523,712 @@ void BoussinesqSolver<Pack>::advance_post_temperature_models(scalar_type time_st
     }
 }
 
+/** @brief Execute one rollback-safe solver-integrated planar-ALE step. */
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
+{
+    d_ale_temperature_density = nullptr;
+    if (d_step_index == 0)
+    {
+        temperature().sync_ghosts();
+    }
+    if (d_physical_model_enabled)
+    {
+        refresh_physical_models();
+    }
+    initialize_free_surface_if_needed(true, d_physical_model_enabled);
+    initialize_planar_ale_if_needed();
+    if (!d_ale_motion || !d_ale_boundary || !d_volume_continuity_model || !d_mesh_relative_face_flux ||
+        !d_bubble_slip_volume_flux || !d_mesh_volume_rate || !d_continuity_residual || !d_ale_old_density ||
+        !d_ale_old_heat_capacity)
+    {
+        throw std::logic_error("planarALE did not initialize its geometry, flux, and volume-source owners.");
+    }
+
+    // Everything below this line is either restored from these snapshots or
+    // committed together with the one active geometry trial.
+    FieldStateSnapshot pressure_snapshot(pressure());
+    FieldStateSnapshot pressure_correction_snapshot(this->pressure_correction());
+    FieldStateSnapshot velocity_snapshot(velocity());
+    FieldStateSnapshot predictor_gradient_snapshot(predictor_pressure_gradient());
+    FieldStateSnapshot predictor_velocity_snapshot(this->predictor_velocity());
+    FieldStateSnapshot old_flux_snapshot(old_face_fluxes());
+    FieldStateSnapshot projected_flux_snapshot(projected_face_fluxes());
+    FieldStateSnapshot relative_flux_snapshot(*d_mesh_relative_face_flux);
+    FieldStateSnapshot bubble_slip_flux_snapshot(*d_bubble_slip_volume_flux);
+    FieldStateSnapshot mesh_volume_rate_snapshot(*d_mesh_volume_rate);
+    FieldStateSnapshot temperature_snapshot(temperature());
+    FieldStateSnapshot clear_level_snapshot(*d_clear_level);
+    FieldStateSnapshot pool_level_snapshot(*d_pool_level);
+    FieldStateSnapshot headspace_pressure_snapshot(*d_headspace_pressure);
+    FieldStateSnapshot occupancy_snapshot(*d_pool_occupancy);
+    FieldStateSnapshot continuity_residual_snapshot(*d_continuity_residual);
+    const auto material_snapshot = stored_material_properties().snapshot();
+    std::optional<typename material_feedback_model_type::StateSnapshot> material_feedback_snapshot;
+    if (d_material_feedback_model)
+    {
+        material_feedback_snapshot.emplace(d_material_feedback_model->snapshot());
+    }
+    const auto liquid_snapshot = d_liquid_mass_inventory->snapshot();
+    const auto free_surface_snapshot = d_free_surface_model->snapshot();
+    const auto volume_model_snapshot = d_volume_continuity_model->snapshot();
+    std::optional<typename radiolytic_gas_model_type::StateSnapshot> radiolytic_snapshot;
+    if (d_radiolytic_gas_model)
+    {
+        radiolytic_snapshot.emplace(d_radiolytic_gas_model->snapshot());
+    }
+    std::optional<typename scalar_void_fraction_model_type::StateSnapshot> void_snapshot;
+    if (d_scalar_void_fraction_model)
+    {
+        void_snapshot.emplace(d_scalar_void_fraction_model->snapshot());
+    }
+    const auto accepted_statistics = d_last_step_statistics;
+    const auto accepted_residuals = pressure_velocity_residuals();
+    const auto accepted_volume_residuals = this->last_volume_continuity_residuals();
+    const auto accepted_time = d_time;
+    const auto accepted_step = d_step_index;
+    const auto accepted_history_size = d_free_surface_history.size();
+    const auto accepted_ale_diagnostics = d_planar_ale_diagnostics;
+    const auto accepted_occupancy_volume_error = d_pool_occupancy_volume_error;
+
+    std::vector<real_t> accepted_cell_volumes(d_mesh->num_local_cells());
+    for (size_t local = 0; local < accepted_cell_volumes.size(); ++local)
+    {
+        accepted_cell_volumes[local] = d_mesh->cell_volume(static_cast<local_ordinal_type>(local));
+    }
+    scalar_type local_accepted_mesh_volume{};
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        local_accepted_mesh_volume += static_cast<scalar_type>(accepted_cell_volumes[owned]);
+    }
+    scalar_type accepted_mesh_volume{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+        1, &local_accepted_mesh_volume, &accepted_mesh_volume);
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        d_ale_old_density->set_owned_value(cell, stored_material_properties().density.value(cell));
+        d_ale_old_heat_capacity->set_owned_value(cell,
+            stored_material_properties().specific_heat_capacity.value(cell));
+    }
+    d_ale_old_density->sync_ghosts();
+    d_ale_old_heat_capacity->sync_ghosts();
+    const auto old_material_volume = material_volumes(d_liquid_mass_inventory->cellMassInventory(),
+        d_liquid_mass_inventory->pureLiquidDensity(), accepted_cell_volumes);
+    const auto old_energy = total_sensible_energy(d_liquid_mass_inventory->cellMassInventory(),
+        *d_ale_old_heat_capacity, accepted_cell_volumes);
+    const auto accepted_surface = d_free_surface_model->diagnostics();
+    const auto time_step = static_cast<scalar_type>(d_problem.time_options().time_step);
+
+    auto restore_accepted = [&]
+    {
+        clear_volume_continuity_target();
+        clear_ale_pressure_boundary();
+        d_ale_temperature_density = nullptr;
+        d_active_ale.reset();
+        if (d_ale_motion->has_active_trial())
+        {
+            d_ale_motion->rollback_trial();
+        }
+        refresh_geometry_dependent_state();
+        d_ale_boundary->refresh(d_free_surface_model->volumeMap());
+        pressure_snapshot.restore(pressure());
+        pressure_correction_snapshot.restore(this->pressure_correction());
+        velocity_snapshot.restore(velocity());
+        predictor_gradient_snapshot.restore(predictor_pressure_gradient());
+        predictor_velocity_snapshot.restore(this->predictor_velocity());
+        old_flux_snapshot.restore(old_face_fluxes());
+        projected_flux_snapshot.restore(projected_face_fluxes());
+        relative_flux_snapshot.restore(*d_mesh_relative_face_flux);
+        bubble_slip_flux_snapshot.restore(*d_bubble_slip_volume_flux);
+        mesh_volume_rate_snapshot.restore(*d_mesh_volume_rate);
+        temperature_snapshot.restore(temperature());
+        clear_level_snapshot.restore(*d_clear_level);
+        pool_level_snapshot.restore(*d_pool_level);
+        headspace_pressure_snapshot.restore(*d_headspace_pressure);
+        occupancy_snapshot.restore(*d_pool_occupancy);
+        continuity_residual_snapshot.restore(*d_continuity_residual);
+        stored_material_properties().restore(material_snapshot);
+        if (material_feedback_snapshot)
+        {
+            d_material_feedback_model->restore(*material_feedback_snapshot);
+        }
+        d_liquid_mass_inventory->restore(liquid_snapshot);
+        d_free_surface_model->restore(free_surface_snapshot);
+        d_volume_continuity_model->restore(volume_model_snapshot);
+        if (radiolytic_snapshot)
+        {
+            d_radiolytic_gas_model->restore(*radiolytic_snapshot);
+        }
+        if (void_snapshot)
+        {
+            d_scalar_void_fraction_model->restore(*void_snapshot);
+        }
+        d_last_step_statistics = accepted_statistics;
+        pressure_velocity_residuals() = accepted_residuals;
+        this->d_last_volume_continuity_residuals = accepted_volume_residuals;
+        d_time = accepted_time;
+        d_step_index = accepted_step;
+        d_free_surface_history.resize(accepted_history_size);
+        d_planar_ale_diagnostics = accepted_ale_diagnostics;
+        d_pool_occupancy_volume_error = accepted_occupancy_volume_error;
+    };
+
+    std::vector<scalar_type> target_guess(d_mesh->num_owned_cells(), scalar_type{});
+    std::vector<scalar_type> density_guess(d_mesh->num_owned_cells());
+    std::vector<scalar_type> heat_capacity_guess(d_mesh->num_owned_cells());
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        density_guess[owned] = d_ale_old_density->value(cell);
+        heat_capacity_guess[owned] = d_ale_old_heat_capacity->value(cell);
+    }
+    auto candidate_level = static_cast<scalar_type>(accepted_surface.pool_level);
+    if (d_volume_continuity_model->generation() != 0)
+    {
+        for (size_t owned = 0; owned < target_guess.size(); ++owned)
+        {
+            target_guess[owned] = d_volume_continuity_model->continuity_target_field().value(
+                static_cast<local_ordinal_type>(owned));
+        }
+        candidate_level += time_step * static_cast<scalar_type>(accepted_surface.pool_level_rate);
+    }
+
+    scalar_type last_level_residual{};
+    scalar_type last_target_change{};
+    scalar_type last_continuity_maximum{};
+    scalar_type last_level_tolerance{};
+    scalar_type last_target_tolerance{};
+    scalar_type last_pool_volume_mismatch{};
+    scalar_type last_pool_volume_tolerance{};
+    scalar_type last_material_state_residual{};
+    scalar_type last_gas_state_residual{};
+    constexpr scalar_type state_relative_tolerance{1.0e-10};
+    std::vector<scalar_type> previous_gas_state;
+    std::vector<scalar_type> level_residual_history;
+    std::vector<scalar_type> target_change_history;
+    std::vector<scalar_type> continuity_maximum_history;
+    std::vector<scalar_type> material_state_residual_history;
+    std::vector<scalar_type> gas_state_residual_history;
+    try
+    {
+        for (int corrector = 1; corrector <= d_free_surface_options.ale.maximum_correctors; ++corrector)
+        {
+            d_ale_motion->begin_trial(candidate_level, time_step);
+            d_active_ale.emplace(FVM::make_ale_control_volume_state(*d_mesh, *d_ale_motion));
+            refresh_geometry_dependent_state();
+            // Picard data from the preceding outer trial supplies the
+            // new-time rho/cp coefficients. Accepted-old coefficients remain
+            // in d_ale_old_* for the conservative transient RHS.
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                stored_material_properties().density.set_owned_value(cell, density_guess[owned]);
+                stored_material_properties().specific_heat_capacity.set_owned_value(
+                    cell, heat_capacity_guess[owned]);
+            }
+            stored_material_properties().density.sync_ghosts();
+            stored_material_properties().specific_heat_capacity.sync_ghosts();
+            d_ale_boundary->refresh(d_free_surface_model->volumeMap());
+            d_ale_boundary->apply_kinematic_velocity(*d_active_ale, boussinesq_velocity_boundary_cache());
+
+            if (d_ale_target_generation == std::numeric_limits<std::uint64_t>::max())
+            {
+                throw std::overflow_error("planarALE continuity-target generation exhausted.");
+            }
+            const auto solve_generation = ++d_ale_target_generation;
+            const continuity_target_type solve_target(d_mesh, target_guess, solve_generation);
+            set_volume_continuity_target(solve_target);
+            configure_ale_pressure_boundary(solve_generation);
+            solve_pressure_velocity_coupling();
+            scalar_type local_solve_target_scale{};
+            for (const auto value : target_guess)
+            {
+                local_solve_target_scale = std::max(local_solve_target_scale, std::abs(value));
+            }
+            scalar_type solve_target_scale{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                1, &local_solve_target_scale, &solve_target_scale);
+            const auto strict_pressure_tolerance =
+                static_cast<scalar_type>(d_free_surface_options.coupling.volume_absolute_tolerance) / time_step +
+                static_cast<scalar_type>(d_free_surface_options.coupling.volume_relative_tolerance) *
+                    std::max(scalar_type{1}, solve_target_scale);
+            refine_volume_continuity(
+                d_free_surface_options.ale.maximum_correctors, strict_pressure_tolerance);
+            form_mesh_relative_flux(projected_face_fluxes());
+
+            // Temperature stores sensible energy in the transported liquid,
+            // not in the bubble-displaced mixture volume.  Build the
+            // conservative trial liquid-mass density on the candidate mesh
+            // before assembling rho*cp*T at the new time level.
+            const auto temperature_mass_preview = d_liquid_mass_inventory->previewCellwiseAdvance(time_step,
+                *d_mesh_relative_face_flux, nullptr, nullptr, d_problem.linear_options(), &*d_active_ale);
+            d_ale_temperature_density =
+                &d_liquid_mass_inventory->trialCellMassInventory(temperature_mass_preview);
+            if (temperature_mass_preview.transportStatistics())
+            {
+                d_last_step_statistics.add(*temperature_mass_preview.transportStatistics());
+            }
+            try
+            {
+                advance_temperature_transport(time_step);
+            }
+            catch (...)
+            {
+                d_ale_temperature_density = nullptr;
+                throw;
+            }
+            d_ale_temperature_density = nullptr;
+            if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled())
+            {
+                const auto pressure_mode = d_radiolytic_gas_model->options().pressure_mode;
+                auto offset = static_cast<scalar_type>(d_free_surface_model->headspacePressure());
+                if (pressure_mode == RadiolyticPressureMode::Reconstructed)
+                {
+                    // The radiolytic reconstruction subtracts the gauge mean;
+                    // this offset therefore makes p_abs=p_h on the p_gauge=0 top.
+                    offset += volume_weighted_mean_pressure();
+                }
+                d_radiolytic_gas_model->set_absolute_pressure_offset(offset);
+                d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
+                    *d_mesh_relative_face_flux, stored_material_properties(),
+                    d_fission_power_source ? &d_fission_power_source->field() : nullptr, &*d_active_ale,
+                    d_free_surface_options.gravity_axis);
+                update_void_fraction_models(time_step);
+            }
+
+            refresh_material_feedback(d_time + time_step);
+            std::vector<scalar_type> next_density_guess(d_mesh->num_owned_cells());
+            std::vector<scalar_type> next_heat_capacity_guess(d_mesh->num_owned_cells());
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                next_density_guess[owned] = stored_material_properties().density.value(cell);
+                next_heat_capacity_guess[owned] =
+                    stored_material_properties().specific_heat_capacity.value(cell);
+            }
+            scalar_type local_material_state_residual{};
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto density_scale = std::max({scalar_type{1},
+                    std::abs(density_guess[owned]),
+                    std::abs(next_density_guess[owned])});
+                const auto heat_capacity_scale = std::max({scalar_type{1},
+                    std::abs(heat_capacity_guess[owned]),
+                    std::abs(next_heat_capacity_guess[owned])});
+                local_material_state_residual = std::max(
+                    local_material_state_residual,
+                    std::max(
+                        std::abs(next_density_guess[owned] - density_guess[owned]) /
+                            density_scale,
+                        std::abs(next_heat_capacity_guess[owned] -
+                            heat_capacity_guess[owned]) /
+                            heat_capacity_scale));
+            }
+            scalar_type material_state_residual{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),
+                Teuchos::REDUCE_MAX, 1, &local_material_state_residual,
+                &material_state_residual);
+
+            std::vector<scalar_type> current_gas_state;
+            scalar_type local_gas_state_residual{};
+            if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled())
+            {
+                const std::array<const field_type*, 5> gas_fields{
+                    &d_radiolytic_gas_model->dissolved_hydrogen_inventory(),
+                    &d_radiolytic_gas_model->micro_number_density(),
+                    &d_radiolytic_gas_model->micro_moles(),
+                    &d_radiolytic_gas_model->large_number_density(),
+                    &d_radiolytic_gas_model->large_moles()};
+                current_gas_state.reserve(
+                    gas_fields.size() * d_mesh->num_owned_cells());
+                for (const auto* field : gas_fields)
+                {
+                    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                    {
+                        current_gas_state.push_back(field->value(
+                            static_cast<local_ordinal_type>(owned)));
+                    }
+                }
+                if (previous_gas_state.size() != current_gas_state.size())
+                {
+                    local_gas_state_residual = scalar_type{1};
+                }
+                else
+                {
+                    for (size_t entry = 0; entry < current_gas_state.size(); ++entry)
+                    {
+                        const auto scale = std::max({scalar_type{1},
+                            std::abs(previous_gas_state[entry]),
+                            std::abs(current_gas_state[entry])});
+                        local_gas_state_residual = std::max(
+                            local_gas_state_residual,
+                            std::abs(current_gas_state[entry] -
+                                previous_gas_state[entry]) /
+                                scale);
+                    }
+                }
+            }
+            scalar_type gas_state_residual{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),
+                Teuchos::REDUCE_MAX, 1, &local_gas_state_residual,
+                &gas_state_residual);
+            d_liquid_mass_inventory->updatePureLiquidDensity(
+                [this](local_ordinal_type cell) { return pure_liquid_density(cell); });
+            const auto liquid_preview = d_liquid_mass_inventory->previewCellwiseAdvance(time_step,
+                *d_mesh_relative_face_flux, nullptr, nullptr, d_problem.linear_options(), &*d_active_ale);
+            FreeSurfaceAccountingPreview accounting;
+            accounting.liquid = liquid_preview.diagnostics();
+
+            scalar_type gas_inventory_residual{};
+            if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled())
+            {
+                const auto& gas_statistics =
+                    d_radiolytic_gas_model->last_statistics();
+                gas_inventory_residual = gas_statistics.inventory_error;
+                const auto gas_scale = std::abs(gas_statistics.hydrogen_before) +
+                    std::abs(gas_statistics.hydrogen_produced) +
+                    std::abs(gas_statistics.hydrogen_escaped) +
+                    std::abs(gas_statistics.hydrogen_after);
+                const auto gas_tolerance = static_cast<scalar_type>(
+                    d_free_surface_options.coupling.gas_absolute_tolerance) +
+                    static_cast<scalar_type>(
+                        d_free_surface_options.coupling.gas_relative_tolerance) *
+                        gas_scale;
+                if (std::abs(gas_inventory_residual) > gas_tolerance)
+                {
+                    std::ostringstream message;
+                    message << std::scientific
+                            << std::setprecision(
+                                   std::numeric_limits<scalar_type>::max_digits10)
+                            << "planarALE radiolytic H2 step-inventory closure exceeded its physical tolerance: residual="
+                            << gas_inventory_residual << " mol, tolerance="
+                            << gas_tolerance << " mol.";
+                    throw std::runtime_error(message.str());
+                }
+            }
+            const auto surface_preview = d_free_surface_model->previewUpdate(
+                make_free_surface_update(d_time + time_step, false, &accounting));
+
+            const auto& trial_mass = d_liquid_mass_inventory->trialCellMassInventory(liquid_preview);
+            if (d_radiolytic_gas_model && d_radiolytic_gas_model->enabled())
+            {
+                const auto& transported_slip =
+                    d_radiolytic_gas_model->transported_bubble_slip_volume_flux();
+                for (const auto face_lid : d_bubble_slip_volume_flux->owned_face_ids())
+                {
+                    d_bubble_slip_volume_flux->set_owned_value(
+                        face_lid, transported_slip.value(face_lid));
+                }
+                d_bubble_slip_volume_flux->sync_ghosts();
+            }
+            else
+            {
+                d_bubble_slip_volume_flux->put_scalar(scalar_type{});
+                d_bubble_slip_volume_flux->sync_ghosts();
+            }
+
+            scalar_type local_escape_volume_rate{};
+            for (const auto face_lid : d_bubble_slip_volume_flux->owned_face_ids())
+            {
+                if (d_ale_boundary->contains(face_lid))
+                {
+                    local_escape_volume_rate += std::max(
+                        d_bubble_slip_volume_flux->value(face_lid), scalar_type{});
+                }
+            }
+            scalar_type escape_volume_rate{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                1, &local_escape_volume_rate, &escape_volume_rate);
+
+            const auto new_material_volume = material_volumes(trial_mass,
+                d_liquid_mass_inventory->pureLiquidDensity(), d_active_ale->new_cell_volumes());
+            face_flux_field_type carrier_material_volume_flux(
+                d_mesh, 0.0, "carrierMaterialVolumeFlux");
+            const auto* transported_bubble_carrier =
+                d_radiolytic_gas_model && d_radiolytic_gas_model->enabled()
+                ? &d_radiolytic_gas_model->transported_bubble_carrier_volume_flux()
+                : nullptr;
+            for (const auto face_lid : carrier_material_volume_flux.owned_face_ids())
+            {
+                const auto carrier_flux =
+                    d_mesh_relative_face_flux->value(face_lid);
+                const auto owner = d_mesh->owner_cell(face_lid);
+                auto upwind = owner;
+                if (carrier_flux < scalar_type{} &&
+                    d_mesh->is_interior_face(face_lid))
+                {
+                    upwind = d_mesh->opposite_or_periodic_neighbor_cell(
+                        face_lid, owner);
+                }
+                const auto liquid_fraction =
+                    trial_mass.local_value(upwind) /
+                    d_liquid_mass_inventory->pureLiquidDensity().local_value(upwind);
+                const auto bubble_carrier_flux =
+                    transported_bubble_carrier == nullptr
+                    ? scalar_type{}
+                    : transported_bubble_carrier->value(face_lid);
+                carrier_material_volume_flux.set_owned_value(face_lid,
+                    carrier_flux * liquid_fraction + bubble_carrier_flux);
+            }
+            carrier_material_volume_flux.sync_ghosts();
+            if (d_ale_target_generation == std::numeric_limits<std::uint64_t>::max())
+            {
+                throw std::overflow_error("planarALE continuity-target generation exhausted.");
+            }
+            const auto ledger_generation = ++d_ale_target_generation;
+            const typename volume_continuity_model_type::Inputs volume_inputs{.ale = *d_active_ale,
+                .old_material_volume = old_material_volume,
+                .new_material_volume = new_material_volume,
+                .carrier_relative_flux = *d_mesh_relative_face_flux,
+                .carrier_material_volume_flux = &carrier_material_volume_flux,
+                .bubble_slip_volume_flux = d_bubble_slip_volume_flux.get(),
+                .old_pool_volume = static_cast<scalar_type>(accepted_surface.pool_volume),
+                .new_pool_volume = static_cast<scalar_type>(surface_preview.diagnostics().pool_volume),
+                .bubble_escape_volume_rate = escape_volume_rate,
+                .other_outflow_volume_rate = scalar_type{},
+                .previous_target = target_guess};
+            const auto volume_trial = d_volume_continuity_model->preview(volume_inputs, ledger_generation);
+
+            const auto new_energy = total_sensible_energy(trial_mass,
+                stored_material_properties().specific_heat_capacity, d_active_ale->new_cell_volumes());
+            scalar_type local_added_energy{};
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                local_added_energy += static_cast<scalar_type>(d_active_ale->new_cell_volumes()[owned]) * time_step *
+                                      stored_temperature_sources().total_power_density(cell);
+            }
+            scalar_type added_energy{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                1, &local_added_energy, &added_energy);
+            const auto energy_residual = new_energy - old_energy - added_energy;
+            const auto energy_scale = std::max({scalar_type{1}, std::abs(new_energy), std::abs(old_energy),
+                std::abs(added_energy)});
+            const auto energy_tolerance = scalar_type{4096} * std::numeric_limits<scalar_type>::epsilon() *
+                                              energy_scale +
+                                          scalar_type{1.0e-9} * energy_scale;
+            if (std::abs(energy_residual) > energy_tolerance)
+            {
+                throw std::runtime_error("planarALE sensible-energy closure exceeded its physical tolerance: residual=" +
+                                         std::to_string(energy_residual) + " J, tolerance=" +
+                                         std::to_string(energy_tolerance) + " J.");
+            }
+
+            const auto level_residual = static_cast<scalar_type>(surface_preview.diagnostics().pool_level) -
+                                        candidate_level;
+            last_level_residual = level_residual;
+            const auto level_scale = std::max({scalar_type{1}, std::abs(candidate_level),
+                std::abs(static_cast<scalar_type>(surface_preview.diagnostics().pool_level))});
+            const auto level_tolerance = static_cast<scalar_type>(d_free_surface_options.ale.level_absolute_tolerance) +
+                                         static_cast<scalar_type>(d_free_surface_options.ale.level_relative_tolerance) *
+                                             level_scale;
+            scalar_type local_target_scale{};
+            for (size_t owned = 0; owned < target_guess.size(); ++owned)
+            {
+                local_target_scale = std::max(local_target_scale,
+                    std::max(std::abs(target_guess[owned]),
+                        std::abs(volume_trial.target().integrated_rate(static_cast<local_ordinal_type>(owned)))));
+            }
+            scalar_type target_scale{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                1, &local_target_scale, &target_scale);
+            const auto target_tolerance = static_cast<scalar_type>(d_free_surface_options.coupling.volume_absolute_tolerance) /
+                                              time_step +
+                                          static_cast<scalar_type>(d_free_surface_options.coupling.volume_relative_tolerance) *
+                                              std::max(scalar_type{1}, target_scale);
+            last_level_tolerance = level_tolerance;
+            last_target_tolerance = target_tolerance;
+            scalar_type local_final_l2_squared{};
+            scalar_type local_final_normalization_squared{};
+            scalar_type local_final_maximum{};
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto balance = FVM::cell_flux_balance<Pack>(*d_mesh, projected_face_fluxes(), cell);
+                const auto target = volume_trial.target().integrated_rate(cell);
+                const auto residual = balance - target;
+                d_continuity_residual->set_owned_value(cell, residual);
+                local_final_l2_squared += residual * residual;
+                local_final_normalization_squared += std::max(balance * balance, target * target);
+                local_final_maximum = std::max(local_final_maximum, std::abs(residual));
+            }
+            d_continuity_residual->sync_ghosts();
+            const std::array<scalar_type, 2> local_continuity_squared{
+                local_final_l2_squared, local_final_normalization_squared};
+            std::array<scalar_type, 2> global_continuity_squared{};
+            scalar_type global_final_maximum{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                static_cast<int>(local_continuity_squared.size()), local_continuity_squared.data(),
+                global_continuity_squared.data());
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                1, &local_final_maximum, &global_final_maximum);
+            const auto final_l2 = std::sqrt(global_continuity_squared[0]);
+            const auto final_normalization = std::sqrt(global_continuity_squared[1]);
+            const continuity_residual_type final_continuity{final_l2, global_final_maximum,
+                final_normalization > scalar_type{} ? final_l2 / final_normalization : final_l2,
+                final_normalization};
+            const auto continuity_tolerance = target_tolerance;
+            const auto pool_volume_mismatch =
+                d_ale_boundary->diagnostics().global_mesh_volume -
+                static_cast<scalar_type>(surface_preview.diagnostics().pool_volume);
+            const auto pool_volume_scale = std::max({scalar_type{1},
+                std::abs(d_ale_boundary->diagnostics().global_mesh_volume),
+                std::abs(static_cast<scalar_type>(
+                    surface_preview.diagnostics().pool_volume))});
+            const auto pool_volume_tolerance =
+                static_cast<scalar_type>(
+                    d_free_surface_options.coupling.volume_absolute_tolerance) +
+                static_cast<scalar_type>(
+                    d_free_surface_options.coupling.volume_relative_tolerance) *
+                    pool_volume_scale;
+            last_target_change = volume_trial.diagnostics().maximum_target_change;
+            last_continuity_maximum = final_continuity.maximum;
+            last_pool_volume_mismatch = pool_volume_mismatch;
+            last_pool_volume_tolerance = pool_volume_tolerance;
+            last_material_state_residual = material_state_residual;
+            last_gas_state_residual = gas_state_residual;
+            level_residual_history.push_back(level_residual);
+            target_change_history.push_back(last_target_change);
+            continuity_maximum_history.push_back(last_continuity_maximum);
+            material_state_residual_history.push_back(material_state_residual);
+            gas_state_residual_history.push_back(gas_state_residual);
+            const bool converged = std::abs(level_residual) <= level_tolerance &&
+                                   volume_trial.diagnostics().maximum_target_change <= target_tolerance &&
+                                   final_continuity.maximum <= continuity_tolerance &&
+                                   std::abs(pool_volume_mismatch) <= pool_volume_tolerance &&
+                                   material_state_residual <= state_relative_tolerance &&
+                                   gas_state_residual <= state_relative_tolerance;
+
+            if (converged)
+            {
+                const auto motion_diagnostics = d_ale_motion->diagnostics();
+                for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell = static_cast<local_ordinal_type>(owned);
+                    d_mesh_volume_rate->set_owned_value(cell,
+                        static_cast<scalar_type>((d_active_ale->new_cell_volumes()[owned] -
+                                                    d_active_ale->old_cell_volumes()[owned]) /
+                                                time_step));
+                }
+                d_mesh_volume_rate->sync_ghosts();
+                d_free_surface_model->commitUpdate(surface_preview);
+                d_liquid_mass_inventory->commitPhaseChange(liquid_preview);
+                if (liquid_preview.transportStatistics())
+                {
+                    d_last_step_statistics.add(*liquid_preview.transportStatistics());
+                }
+                d_volume_continuity_model->commit(volume_trial);
+                this->d_last_volume_continuity_residuals = final_continuity;
+                pressure_velocity_residuals().continuity = final_continuity.l2;
+
+                PlanarALEStepDiagnostics accepted_diagnostics;
+                accepted_diagnostics.initialized = true;
+                accepted_diagnostics.old_geometry_epoch = motion_diagnostics.old_geometry_epoch;
+                accepted_diagnostics.new_geometry_epoch = motion_diagnostics.new_geometry_epoch;
+                accepted_diagnostics.old_mesh_volume = accepted_mesh_volume;
+                accepted_diagnostics.new_mesh_volume = d_ale_boundary->diagnostics().global_mesh_volume;
+                accepted_diagnostics.mesh_vessel_mismatch = pool_volume_mismatch;
+                accepted_diagnostics.maximum_gcl_residual = motion_diagnostics.maximum_absolute_gcl_residual;
+                accepted_diagnostics.maximum_normalized_gcl_residual =
+                    motion_diagnostics.maximum_normalized_gcl_residual;
+                accepted_diagnostics.mesh_quality = motion_diagnostics.mesh_quality;
+                accepted_diagnostics.outer_correctors = corrector;
+                accepted_diagnostics.level_residual = level_residual;
+                accepted_diagnostics.pressure_residual = static_cast<scalar_type>(
+                    surface_preview.headspacePressure() - d_free_surface_model->headspacePressure());
+                accepted_diagnostics.material_state_residual = material_state_residual;
+                accepted_diagnostics.gas_state_residual = gas_state_residual;
+                accepted_diagnostics.energy_residual = energy_residual;
+                accepted_diagnostics.normalized_energy_residual = energy_residual / energy_scale;
+                accepted_diagnostics.liquid_mass_residual = liquid_preview.diagnostics().step_mass_balance_residual;
+                accepted_diagnostics.gas_inventory_residual = gas_inventory_residual;
+                accepted_diagnostics.volume_source = volume_trial.diagnostics();
+                accepted_diagnostics.continuity = final_continuity;
+                accepted_diagnostics.level_residual_history = std::move(level_residual_history);
+                accepted_diagnostics.target_change_history = std::move(target_change_history);
+                accepted_diagnostics.continuity_maximum_history = std::move(continuity_maximum_history);
+                accepted_diagnostics.material_state_residual_history =
+                    std::move(material_state_residual_history);
+                accepted_diagnostics.gas_state_residual_history =
+                    std::move(gas_state_residual_history);
+                accepted_diagnostics.rejected_transactions = accepted_ale_diagnostics.rejected_transactions;
+                d_planar_ale_diagnostics = std::move(accepted_diagnostics);
+
+                publish_free_surface_fields();
+                record_free_surface_history();
+                // Leave the geometry trial active until every other
+                // potentially throwing accepted-state publication has
+                // completed.  A failure above or in finish_step() can then
+                // still roll geometry, fields, ledgers, time, and history
+                // back together.
+                finish_step();
+                d_ale_motion->accept_trial();
+                d_ale_temperature_density = nullptr;
+                d_active_ale.reset();
+                clear_volume_continuity_target();
+                clear_ale_pressure_boundary();
+                return;
+            }
+
+            std::vector<scalar_type> next_target(target_guess.size());
+            const auto relaxation = static_cast<scalar_type>(d_free_surface_options.ale.relaxation);
+            for (size_t owned = 0; owned < next_target.size(); ++owned)
+            {
+                next_target[owned] = target_guess[owned] + relaxation *
+                    (volume_trial.target().integrated_rate(static_cast<local_ordinal_type>(owned)) -
+                        target_guess[owned]);
+            }
+            const auto next_level = candidate_level + relaxation * level_residual;
+            restore_accepted();
+            target_guess = std::move(next_target);
+            density_guess = std::move(next_density_guess);
+            heat_capacity_guess = std::move(next_heat_capacity_guess);
+            previous_gas_state = std::move(current_gas_state);
+            candidate_level = next_level;
+        }
+        std::ostringstream message;
+        message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                << "planarALE outer level/continuity corrector did not converge in "
+                << d_free_surface_options.ale.maximum_correctors << " iterations: level residual="
+                << last_level_residual << " m (tolerance=" << last_level_tolerance << "), target change="
+                << last_target_change << " m^3/s (tolerance=" << last_target_tolerance
+                << "), continuity maximum=" << last_continuity_maximum
+                << " m^3/s, mesh/pool-volume mismatch="
+                << last_pool_volume_mismatch << " m^3 (tolerance="
+                << last_pool_volume_tolerance
+                << " m^3), material-state residual="
+                << last_material_state_residual << " (tolerance="
+                << state_relative_tolerance << "), gas-state residual="
+                << last_gas_state_residual << " (tolerance="
+                << state_relative_tolerance << ").";
+        throw std::runtime_error(message.str());
+    }
+    catch (...)
+    {
+        const auto failure = std::current_exception();
+        std::string reason = "unknown planarALE transaction failure";
+        try
+        {
+            if (failure)
+            {
+                std::rethrow_exception(failure);
+            }
+        }
+        catch (const std::exception& error)
+        {
+            reason = error.what();
+        }
+        catch (...)
+        {
+        }
+        restore_accepted();
+        d_planar_ale_diagnostics.rejected_transactions =
+            accepted_ale_diagnostics.rejected_transactions + 1;
+        d_planar_ale_diagnostics.last_rejection_reason = std::move(reason);
+        std::rethrow_exception(failure);
+    }
+}
+
 /**
  * @brief Advance the solution by one time step.
  *
@@ -2618,6 +4244,27 @@ void BoussinesqSolver<Pack>::advance_post_temperature_models(scalar_type time_st
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
 {
     validate_step_coupling();
+    if (d_free_surface_model && d_free_surface_options.mode == FreeSurfaceMode::PlanarALE)
+    {
+        // begin_step() intentionally clears per-step numerical statistics.
+        // Preserve the last accepted report outside the ALE transaction so a
+        // rejected later step restores it rather than publishing a cleared
+        // or partially accumulated trial report.
+        const auto accepted_statistics = d_last_step_statistics;
+        const auto accepted_volume_residuals = this->d_last_volume_continuity_residuals;
+        begin_step();
+        try
+        {
+            step_planar_ale();
+        }
+        catch (...)
+        {
+            d_last_step_statistics = accepted_statistics;
+            this->d_last_volume_continuity_residuals = accepted_volume_residuals;
+            throw;
+        }
+        return;
+    }
     begin_step();
     const bool free_surface_active = d_free_surface_model != nullptr;
     try
@@ -2781,6 +4428,18 @@ auto BoussinesqSolver<Pack>::solution_writer(const SolutionOutputOptions& output
         writer.add_scalar_cell_data("poolLevel", collect_scalar_field(pool_level()));
         writer.add_scalar_cell_data("headspacePressure", collect_scalar_field(headspace_pressure()));
         writer.add_scalar_cell_data("poolOccupancy", collect_scalar_field(pool_occupancy()));
+        if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE && d_volume_continuity_model &&
+            d_mesh_volume_rate && d_continuity_residual)
+        {
+            writer.add_scalar_cell_data("meshVolumeRate", collect_scalar_field(*d_mesh_volume_rate));
+            writer.add_scalar_cell_data(
+                "volumeSourceRate", collect_scalar_field(d_volume_continuity_model->material_source_field()));
+            writer.add_scalar_cell_data(
+                "bubbleSlipVolumeRate", collect_scalar_field(d_volume_continuity_model->slip_contribution_field()));
+            writer.add_scalar_cell_data(
+                "continuityTarget", collect_scalar_field(d_volume_continuity_model->continuity_target_field()));
+            writer.add_scalar_cell_data("continuityResidual", collect_scalar_field(*d_continuity_residual));
+        }
     }
     return writer;
 }

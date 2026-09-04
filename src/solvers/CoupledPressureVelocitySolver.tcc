@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <stdexcept>
 
 namespace SimpleFluid
@@ -613,7 +614,8 @@ template<TpetraTypePack Pack, class MeshType>
 CoupledPressureVelocitySolver<Pack, MeshType>::CoupledPressureVelocitySolver(SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "CoupledPressureVelocitySolver")),
       d_coupled_map(detail::make_coupled_map<Pack>(*d_mesh)),
-      d_boundary_locations(FVM::detail::boundary_face_locations(*d_mesh))
+      d_boundary_locations(FVM::detail::boundary_face_locations(*d_mesh)),
+      d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
 {
     d_cache_statistics.coupled_map_builds = 1;
 }
@@ -647,6 +649,221 @@ CoupledPressureVelocitySolver<Pack, MeshType>::cache_statistics() const noexcept
 
 template<TpetraTypePack Pack, class MeshType> void CoupledPressureVelocitySolver<Pack, MeshType>::clear_cache()
 {
+    invalidate_cache();
+    d_boundary_locations = FVM::detail::boundary_face_locations(*d_mesh);
+    d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+}
+
+/** @brief Configure exact fluxes on selected pressure-Dirichlet faces. */
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::set_fixed_boundary_flux_provider(
+    std::vector<std::string> boundary_names, fixed_boundary_flux_provider_type provider, std::uint64_t generation)
+{
+    if (!provider || boundary_names.empty())
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver fixed boundary fluxes require "
+                                    "a provider and at least one boundary name.");
+    }
+    std::sort(boundary_names.begin(), boundary_names.end());
+    if (std::adjacent_find(boundary_names.begin(), boundary_names.end()) != boundary_names.end())
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver fixed boundary flux names must "
+                                    "be unique.");
+    }
+    d_fixed_boundary_flux_names = std::move(boundary_names);
+    d_fixed_boundary_flux_provider = std::move(provider);
+    d_fixed_boundary_flux_generation = generation;
+    ++d_fixed_boundary_flux_revision;
+    clear_cache();
+}
+
+/** @brief Restore ordinary pressure-outlet flux treatment. */
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::clear_fixed_boundary_flux_provider()
+{
+    if (d_fixed_boundary_flux_names.empty() && !d_fixed_boundary_flux_provider)
+    {
+        return;
+    }
+    d_fixed_boundary_flux_names.clear();
+    d_fixed_boundary_flux_provider = {};
+    d_fixed_boundary_flux_generation = 0;
+    ++d_fixed_boundary_flux_revision;
+    clear_cache();
+}
+
+/** @brief Collectively validate and evaluate configured boundary fluxes. */
+template<TpetraTypePack Pack, class MeshType>
+auto CoupledPressureVelocitySolver<Pack, MeshType>::evaluate_fixed_boundary_fluxes(
+    const BoundaryConditionMap* pressure_boundaries) const -> std::vector<std::optional<scalar_type>>
+{
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    const int local_count = static_cast<int>(d_fixed_boundary_flux_names.size());
+    int minimum_count = 0;
+    int maximum_count = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_count, &minimum_count);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_count, &maximum_count);
+
+    auto hash_names = [](const std::vector<std::string>& names)
+    {
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (const auto& name : names)
+        {
+            for (const unsigned char character : name)
+            {
+                hash ^= character;
+                hash *= 1099511628211ULL;
+            }
+            hash ^= 0xffU;
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    };
+    const auto local_hash = static_cast<unsigned long long>(hash_names(d_fixed_boundary_flux_names));
+    const auto local_generation = static_cast<unsigned long long>(d_fixed_boundary_flux_generation);
+    const auto local_revision = static_cast<unsigned long long>(d_fixed_boundary_flux_revision);
+    unsigned long long minimum_hash = 0;
+    unsigned long long maximum_hash = 0;
+    unsigned long long minimum_generation = 0;
+    unsigned long long maximum_generation = 0;
+    unsigned long long minimum_revision = 0;
+    unsigned long long maximum_revision = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_hash, &minimum_hash);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_hash, &maximum_hash);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_generation, &minimum_generation);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_generation, &maximum_generation);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 1, &local_revision, &minimum_revision);
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_revision, &maximum_revision);
+    const int local_provider_error =
+        static_cast<bool>(d_fixed_boundary_flux_provider) == !d_fixed_boundary_flux_names.empty() ? 0 : 1;
+    int any_provider_error = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_provider_error, &any_provider_error);
+    if (minimum_count != maximum_count || minimum_hash != maximum_hash || minimum_generation != maximum_generation ||
+        minimum_revision != maximum_revision || any_provider_error != 0)
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver fixed boundary flux names, "
+                                    "provider state, generation, and revision must match on every "
+                                    "mesh rank.");
+    }
+
+    for (const auto& name : d_fixed_boundary_flux_names)
+    {
+        int local_faces = 0;
+        for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+        {
+            if (d_mesh->boundary_batch_name(batch_id) != name)
+            {
+                continue;
+            }
+            for (const auto face_lid : batch.face_lids)
+            {
+                local_faces += d_mesh->is_owned_face(face_lid) ? 1 : 0;
+            }
+        }
+        int local_condition_error = 0;
+        if (pressure_boundaries != nullptr)
+        {
+            const auto condition = pressure_boundaries->find(name);
+            local_condition_error =
+                condition == pressure_boundaries->end() || condition->second.type != BoundaryConditionType::Dirichlet;
+        }
+        int global_faces = 0;
+        int any_condition_error = 0;
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_faces, &global_faces);
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_condition_error, &any_condition_error);
+        if (global_faces == 0 || any_condition_error != 0)
+        {
+            throw std::invalid_argument("CoupledPressureVelocitySolver fixed-flux boundary '" + name +
+                                        "' must exist globally and use physical Dirichlet "
+                                        "pressure.");
+        }
+    }
+
+    std::vector<std::optional<scalar_type>> values(d_mesh->num_faces());
+    std::exception_ptr local_error;
+    try
+    {
+        for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+        {
+            const auto& name = d_mesh->boundary_batch_name(batch_id);
+            if (!std::binary_search(d_fixed_boundary_flux_names.begin(), d_fixed_boundary_flux_names.end(), name))
+            {
+                continue;
+            }
+            for (size_t in_batch = 0; in_batch < batch.face_lids.size(); ++in_batch)
+            {
+                const auto face_lid = batch.face_lids[in_batch];
+                if (!d_mesh->is_owned_face(face_lid))
+                {
+                    continue;
+                }
+                const auto value = d_fixed_boundary_flux_provider(batch_id, in_batch, face_lid);
+                if (!std::isfinite(value))
+                {
+                    throw std::invalid_argument("Fixed boundary volume flux must be finite [m^3/s].");
+                }
+                values.at(static_cast<size_t>(face_lid)) = value;
+            }
+        }
+    }
+    catch (...)
+    {
+        local_error = std::current_exception();
+    }
+    const int local_failed = local_error ? 1 : 0;
+    int any_failed = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_failed, &any_failed);
+    if (any_failed != 0)
+    {
+        if (local_error)
+        {
+            std::rethrow_exception(local_error);
+        }
+        throw std::runtime_error("Fixed boundary volume-flux provider failed on another mesh rank.");
+    }
+    return values;
+}
+
+/** @brief Enforce exact configured values on a reconstructed face field. */
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::apply_fixed_boundary_fluxes(face_flux_field_type& fluxes) const
+{
+    EquationValidation::require_mesh_match(*d_mesh, fluxes, "CoupledPressureVelocitySolver");
+    if (d_fixed_boundary_flux_names.empty())
+    {
+        return;
+    }
+    const auto values = evaluate_fixed_boundary_fluxes(nullptr);
+    for (size_t face = 0; face < values.size(); ++face)
+    {
+        if (values[face])
+        {
+            fluxes.set_value(static_cast<local_ordinal_type>(face), *values[face]);
+        }
+    }
+    if constexpr (requires { fluxes.sync_ghosts(); })
+    {
+        fluxes.sync_ghosts();
+    }
+}
+
+/** @brief Build a reconstruction cache with narrowly relaxed fixed faces. */
+template<TpetraTypePack Pack, class MeshType>
+auto CoupledPressureVelocitySolver<Pack, MeshType>::pressure_flux_boundary_cache(
+    const velocity_boundary_cache_type& boundary_cache) const -> velocity_boundary_cache_type
+{
+    auto result = boundary_cache;
+    for (const auto& name : d_fixed_boundary_flux_names)
+    {
+        result.type_by_name[name] = BoundaryConditionType::Neumann;
+    }
+    return result;
+}
+
+/** @brief Discard every operator-dependent cached object. */
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
+{
     d_cached_system = {};
     d_static_geometry = {};
     d_schur_workspace.clear();
@@ -657,6 +874,20 @@ template<TpetraTypePack Pack, class MeshType> void CoupledPressureVelocitySolver
     d_belos_solver = Teuchos::null;
     d_last_belos_matrix = nullptr;
     d_solution = Teuchos::null;
+}
+
+/** @brief Detect geometry motion even when the owning solver missed refresh. */
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_geometry_if_needed() const
+{
+    const auto current_epoch = mesh_geometry_epoch(*d_mesh);
+    if (current_epoch == d_geometry_epoch)
+    {
+        return;
+    }
+    invalidate_cache();
+    d_boundary_locations = FVM::detail::boundary_face_locations(*d_mesh);
+    d_geometry_epoch = current_epoch;
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -675,10 +906,25 @@ typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
     const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, const continuity_target_type& continuity_target,
+    scalar_type reference_density, const FVM::ALEControlVolumeState* ale) const
+{
+    return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, nullptr, nullptr, nullptr, continuity_target, ale);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
     const velocity_field_type* turbulent_kinetic_energy_gradient,
     const boundary_cache_type* boundary_dynamic_viscosity) const
 {
+    const continuity_target_type zero_target(d_mesh);
+    // Historical entry points retain their permissive all-Neumann gauge
+    // behavior. Solver-facing target overloads enforce physical compatibility.
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
     if (dynamic_viscosity_override != nullptr)
@@ -722,8 +968,64 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         momentum = momentum_equation.assemble_system(
             velocity, face_fluxes, velocity_boundary_cache, time_options, correction_field);
     }
-    return assemble_coupled_system(
-        momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions, time_options, reference_density);
+    return assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, zero_target, false);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
+    const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
+    const continuity_target_type& continuity_target, const FVM::ALEControlVolumeState* ale) const
+{
+    EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
+    EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
+    if (dynamic_viscosity_override != nullptr)
+    {
+        EquationValidation::require_mesh_match(*d_mesh, *dynamic_viscosity_override, "CoupledPressureVelocitySolver");
+    }
+    if (turbulent_kinetic_energy_gradient != nullptr)
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, *turbulent_kinetic_energy_gradient, "CoupledPressureVelocitySolver");
+    }
+    if (boundary_dynamic_viscosity != nullptr && dynamic_viscosity_override == nullptr)
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver requires a dynamic-viscosity "
+                                    "field when boundary viscosity data is supplied.");
+    }
+
+    const auto* correction_field =
+        time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
+    auto turbulence_source = [&](local_ordinal_type cell_lid)
+    {
+        return turbulent_kinetic_energy_gradient == nullptr
+                   ? typename velocity_field_type::vec_type{}
+                   : turbulent_kinetic_energy_gradient->value(cell_lid) * scalar_type{-2.0 / 3.0};
+    };
+
+    typename momentum_equation_type::system_type momentum;
+    if (dynamic_viscosity_override != nullptr)
+    {
+        momentum = momentum_equation.assemble_physical_system(velocity, face_fluxes, velocity_boundary_cache,
+            time_options, *dynamic_viscosity_override, reference_density, turbulence_source, correction_field,
+            boundary_dynamic_viscosity, ale);
+    }
+    else if (turbulent_kinetic_energy_gradient != nullptr)
+    {
+        momentum = momentum_equation.assemble_system(
+            velocity, face_fluxes, velocity_boundary_cache, time_options, turbulence_source, correction_field, ale);
+    }
+    else
+    {
+        momentum = momentum_equation.assemble_system(
+            velocity, face_fluxes, velocity_boundary_cache, time_options, correction_field, ale);
+    }
+    return assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, continuity_target, true);
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -736,6 +1038,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
     const boundary_cache_type* boundary_dynamic_viscosity) const
 {
+    const continuity_target_type zero_target(d_mesh);
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, temperature, "CoupledPressureVelocitySolver");
@@ -776,8 +1079,63 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
             velocity, face_fluxes, temperature, velocity_boundary_cache, time_options, correction_field);
     }
 
-    return assemble_coupled_system(
-        momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions, time_options, reference_density);
+    return assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, zero_target, false);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+    const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+    const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+    const continuity_target_type& continuity_target, const material_property_fields_type* material,
+    scalar_type reference_density, bool density_feedback_enabled, const field_type* dynamic_viscosity_override,
+    const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
+    const FVM::ALEControlVolumeState* ale) const
+{
+    EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
+    EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
+    EquationValidation::require_mesh_match(*d_mesh, temperature, "CoupledPressureVelocitySolver");
+    if (dynamic_viscosity_override != nullptr && material == nullptr)
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver requires material fields when a "
+                                    "dynamic-viscosity override is supplied.");
+    }
+    if (turbulent_kinetic_energy_gradient != nullptr)
+    {
+        EquationValidation::require_mesh_match(
+            *d_mesh, *turbulent_kinetic_energy_gradient, "CoupledPressureVelocitySolver");
+    }
+
+    const auto* correction_field =
+        time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
+    auto turbulence_source = [&](local_ordinal_type cell_lid) -> typename velocity_field_type::vec_type
+    {
+        return turbulent_kinetic_energy_gradient == nullptr
+                   ? typename velocity_field_type::vec_type{}
+                   : turbulent_kinetic_energy_gradient->value(cell_lid) * scalar_type{-2.0 / 3.0};
+    };
+    typename BoussinesqMomentumEquation<Pack>::system_type momentum;
+    if (material != nullptr)
+    {
+        momentum = momentum_equation.assemble_physical_system(velocity, face_fluxes, temperature,
+            velocity_boundary_cache, time_options, *material, reference_density, density_feedback_enabled,
+            turbulence_source, correction_field, dynamic_viscosity_override, boundary_dynamic_viscosity, ale);
+    }
+    else if (turbulent_kinetic_energy_gradient != nullptr)
+    {
+        momentum = momentum_equation.assemble_system(velocity, face_fluxes, temperature, velocity_boundary_cache,
+            time_options, turbulence_source, correction_field, ale);
+    }
+    else
+    {
+        momentum = momentum_equation.assemble_system(
+            velocity, face_fluxes, temperature, velocity_boundary_cache, time_options, correction_field, ale);
+    }
+
+    return assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, continuity_target, true);
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -838,15 +1196,24 @@ typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const momentum_system_type& momentum,
     const velocity_field_type& velocity, const field_type& pressure,
     const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
-    const TimeStepperOptions& time_options, scalar_type reference_density) const
+    const TimeStepperOptions& time_options, scalar_type reference_density,
+    const continuity_target_type& continuity_target, bool enforce_global_compatibility) const
 {
+    refresh_geometry_if_needed();
+    continuity_target.validate(*d_mesh, "CoupledPressureVelocitySolver continuity target");
     if (!std::isfinite(reference_density) || reference_density <= scalar_type{})
     {
         throw std::invalid_argument("CoupledPressureVelocitySolver requires a finite positive "
                                     "reference density.");
     }
+    if (!std::isfinite(time_options.time_step) || time_options.time_step <= scalar_type{})
+    {
+        throw std::invalid_argument("CoupledPressureVelocitySolver requires a finite positive time step.");
+    }
+    const auto fixed_boundary_fluxes = evaluate_fixed_boundary_fluxes(&boundary_conditions.pressure);
+    const auto pressure_velocity_boundary_cache = pressure_flux_boundary_cache(velocity_boundary_cache);
     FVM::detail::validate_pressure_velocity_boundary_compatibility(
-        velocity_boundary_cache, boundary_conditions.pressure);
+        pressure_velocity_boundary_cache, boundary_conditions.pressure);
 
     const auto pressure_signature = pressure_graph_signature(boundary_conditions.pressure);
     const auto reuse_assembly_graph = can_reuse_assembly_graph(momentum, pressure_signature);
@@ -944,7 +1311,12 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     int local_has_dirichlet_pressure = 0;
     for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
     {
-        const auto condition_iter = boundary_conditions.pressure.find(d_mesh->boundary_batch_name(batch_id));
+        const auto& batch_name = d_mesh->boundary_batch_name(batch_id);
+        if (std::binary_search(d_fixed_boundary_flux_names.begin(), d_fixed_boundary_flux_names.end(), batch_name))
+        {
+            continue;
+        }
+        const auto condition_iter = boundary_conditions.pressure.find(batch_name);
         if (condition_iter == boundary_conditions.pressure.end() ||
             condition_iter->second.type != BoundaryConditionType::Dirichlet)
         {
@@ -972,11 +1344,14 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             : std::optional<global_ordinal_type>{d_mesh->owned_cell_map()->getMinAllGlobalIndex()};
 
     std::vector<scalar_type> continuity_rhs_values(d_mesh->num_owned_cells(), scalar_type{});
+    scalar_type local_prescribed_boundary_flux{};
+    scalar_type local_continuity_target{};
 
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto cell_gid = d_mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        local_continuity_target += continuity_target.integrated_rate(cell_lid);
 
         std::array<std::unordered_map<local_ordinal_type, scalar_type>, 3> gradient_rows;
         std::array<std::unordered_map<local_ordinal_type, scalar_type>, 3> divergence_rows;
@@ -992,14 +1367,33 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             if (d_mesh->is_interior_face(face_lid))
             {
                 const auto other = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto interpolation_weights = [&]() -> std::pair<scalar_type, scalar_type>
+                {
+                    // Preserve the established arithmetic interpolation for
+                    // legacy zero-target/fixed-grid assembly. Explicit
+                    // generalized targets use the same distance weights as
+                    // the final Rhie--Chow face reconstruction.
+                    if (!enforce_global_compatibility)
+                    {
+                        return {scalar_type{0.5}, scalar_type{0.5}};
+                    }
+                    if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+                    {
+                        return FVM::detail::interior_face_linear_weights(*d_mesh, face_lid, cell_lid, other);
+                    }
+                    else
+                    {
+                        return FVM::detail::stored_interior_face_linear_weights(*d_mesh, face_lid, cell_lid, other);
+                    }
+                }();
+                const auto cell_weight = interpolation_weights.first;
+                const auto other_weight = interpolation_weights.second;
                 for (size_t component = 0; component < 3; ++component)
                 {
-                    detail::add_entry(
-                        gradient_rows[component], cell_lid, scalar_type{0.5} * area_components[component]);
-                    detail::add_entry(gradient_rows[component], other, scalar_type{0.5} * area_components[component]);
-                    detail::add_entry(
-                        divergence_rows[component], cell_lid, scalar_type{0.5} * area_components[component]);
-                    detail::add_entry(divergence_rows[component], other, scalar_type{0.5} * area_components[component]);
+                    detail::add_entry(gradient_rows[component], cell_lid, cell_weight * area_components[component]);
+                    detail::add_entry(gradient_rows[component], other, other_weight * area_components[component]);
+                    detail::add_entry(divergence_rows[component], cell_lid, cell_weight * area_components[component]);
+                    detail::add_entry(divergence_rows[component], other, other_weight * area_components[component]);
                 }
 
                 const auto center_delta = d_mesh->cell_center_vector(face_lid, cell_lid);
@@ -1028,19 +1422,31 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
 
             if (pressure_condition.type == BoundaryConditionType::Dirichlet)
             {
-                // Pressure outlets use the same boundary flux as the
-                // Rhie-Chow reconstruction:
-                // u_P.A + dt*k*q_P + dt*grad(q)_P.A - dt*k*q_D.
+                // The physical Dirichlet pressure still contributes to the
+                // momentum pressure gradient on a fixed-flux face.
                 for (size_t component = 0; component < 3; ++component)
                 {
                     momentum_boundary_rhs[component] -= normalized_pressure_value * area_components[component];
-                    detail::add_entry(divergence_rows[component], cell_lid, area_components[component]);
                 }
-
-                const auto boundary_coefficient =
-                    FVM::detail::boundary_diffusion_coefficient(*d_mesh, face_lid, cell_lid, scalar_type{1});
-                detail::add_entry(stabilization_row, cell_lid, time_options.time_step * boundary_coefficient);
-                continuity_rhs += time_options.time_step * boundary_coefficient * normalized_pressure_value;
+                const auto fixed_flux = fixed_boundary_fluxes.at(static_cast<size_t>(face_lid));
+                if (fixed_flux)
+                {
+                    continuity_rhs -= *fixed_flux;
+                    local_prescribed_boundary_flux += *fixed_flux;
+                }
+                else
+                {
+                    // Adjustable pressure outlets use the Rhie--Chow flux:
+                    // u_P.A + dt*k*q_P + dt*grad(q)_P.A - dt*k*q_D.
+                    for (size_t component = 0; component < 3; ++component)
+                    {
+                        detail::add_entry(divergence_rows[component], cell_lid, area_components[component]);
+                    }
+                    const auto boundary_coefficient =
+                        FVM::detail::boundary_diffusion_coefficient(*d_mesh, face_lid, cell_lid, scalar_type{1});
+                    detail::add_entry(stabilization_row, cell_lid, time_options.time_step * boundary_coefficient);
+                    continuity_rhs += time_options.time_step * boundary_coefficient * normalized_pressure_value;
+                }
             }
             else
             {
@@ -1072,10 +1478,12 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 {
                     prescribed = velocity_boundary_cache.value.at(location.batch_id)[location.in_batch_id];
                 }
-                continuity_rhs -= prescribed.dot(area);
+                const auto boundary_flux = prescribed.dot(area);
+                continuity_rhs -= boundary_flux;
+                local_prescribed_boundary_flux += boundary_flux;
             }
         }
-        continuity_rhs_values[owned] = continuity_rhs;
+        continuity_rhs_values[owned] = continuity_rhs + continuity_target.integrated_rate(cell_lid);
 
         for (size_t component = 0; component < 3; ++component)
         {
@@ -1140,6 +1548,23 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             detail::add_coupled_global_values<Pack>(prepared_coupled, coupled_row, columns(), values());
             coupled_rhs->replaceGlobalValue(
                 coupled_row, momentum_rhs(cell_lid, component) + momentum_boundary_rhs[component]);
+        }
+    }
+
+    if (enforce_global_compatibility && pressure_gauge_gid)
+    {
+        const std::array<scalar_type, 3> local_values{local_prescribed_boundary_flux, local_continuity_target,
+            std::abs(local_prescribed_boundary_flux) + std::abs(local_continuity_target)};
+        std::array<scalar_type, 3> global_values{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+            static_cast<int>(local_values.size()), local_values.data(), global_values.data());
+        const auto residual = global_values[0] - global_values[1];
+        const auto tolerance = scalar_type{1.0e-12} + scalar_type{1.0e-10} * global_values[2];
+        if (std::abs(residual) > tolerance)
+        {
+            throw std::invalid_argument("CoupledPressureVelocitySolver all-Neumann velocity fluxes "
+                                        "are globally incompatible with the integrated continuity "
+                                        "target.");
         }
     }
 
@@ -1253,7 +1678,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
 
     system_type assembled{d_coupled_map, coupled_overlap_map, coupled_matrix, coupled_rhs, momentum.matrix,
         std::move(gradient), std::move(divergence), std::move(pressure_stabilization), std::move(schur),
-        reference_density};
+        reference_density, pressure_gauge_gid, d_geometry_epoch, continuity_target.generation(),
+        d_fixed_boundary_flux_revision};
     d_cached_momentum_graph = momentum.matrix->getCrsGraph().getRawPtr();
     d_cached_pressure_graph_signature = pressure_signature;
     d_cached_system = assembled;
@@ -1269,6 +1695,16 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
     {
         throw std::invalid_argument("Coupled pressure-velocity system requires a finite positive "
                                     "reference density.");
+    }
+    if (system.geometry_epoch != mesh_geometry_epoch(*d_mesh))
+    {
+        throw std::invalid_argument("Coupled pressure-velocity system is stale for the current "
+                                    "mesh geometry epoch.");
+    }
+    if (system.fixed_boundary_flux_revision != d_fixed_boundary_flux_revision)
+    {
+        throw std::invalid_argument("Coupled pressure-velocity system is stale for the current "
+                                    "fixed-boundary-flux configuration.");
     }
 
     if (d_solution.is_null() || !d_solution->getMap()->isSameAs(*system.map) ||
@@ -1343,6 +1779,52 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
     d_cache_statistics.preconditioner_scratch_allocations +=
         d_preconditioner->scratch_allocations() - scratch_allocations_before;
 
+    vector_type algebraic_lhs(system.map, true);
+    system.matrix->apply(*solution, algebraic_lhs);
+    vector_type algebraic_residual(system.map, true);
+    algebraic_residual.update(scalar_type{1}, algebraic_lhs, scalar_type{});
+    algebraic_residual.update(scalar_type{-1}, *system.rhs, scalar_type{1});
+    const auto lhs_view = algebraic_lhs.getLocalViewHost(Tpetra::Access::ReadOnly);
+    const auto rhs_view = system.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
+    const auto residual_view = algebraic_residual.getLocalViewHost(Tpetra::Access::ReadOnly);
+    scalar_type local_continuity_norm_squared{};
+    scalar_type local_continuity_scale_squared{};
+    scalar_type local_continuity_maximum{};
+    scalar_type local_continuity_sum{};
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto cell_gid = d_mesh->owned_cell_map()->getGlobalElement(cell_lid);
+        if (system.pressure_gauge_gid && cell_gid == *system.pressure_gauge_gid)
+        {
+            continue;
+        }
+        const auto row = 4 * owned + 3;
+        const auto residual = residual_view(row, 0);
+        local_continuity_norm_squared += residual * residual;
+        local_continuity_scale_squared +=
+            std::max(lhs_view(row, 0) * lhs_view(row, 0), rhs_view(row, 0) * rhs_view(row, 0));
+        local_continuity_maximum = std::max(local_continuity_maximum, std::abs(residual));
+        local_continuity_sum += residual;
+    }
+    const std::array<scalar_type, 3> local_continuity_values{
+        local_continuity_norm_squared, local_continuity_scale_squared, local_continuity_sum};
+    std::array<scalar_type, 3> global_continuity_values{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+        static_cast<int>(local_continuity_values.size()), local_continuity_values.data(),
+        global_continuity_values.data());
+    scalar_type global_continuity_maximum{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_continuity_maximum,
+        &global_continuity_maximum);
+    if (system.pressure_gauge_gid)
+    {
+        // The omitted all-Neumann continuity row is the negative sum of the
+        // retained rows once global target/boundary compatibility is enforced.
+        const auto inferred_gauge_residual = -global_continuity_values[2];
+        global_continuity_values[0] += inferred_gauge_residual * inferred_gauge_residual;
+        global_continuity_maximum = std::max(global_continuity_maximum, std::abs(inferred_gauge_residual));
+    }
+
     const auto solution_view = solution->getLocalViewHost(Tpetra::Access::ReadOnly);
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -1355,7 +1837,13 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
     d_mesh->sync_periodic_boundaries(pressure);
     d_belos_solver->setProblem(Teuchos::null);
 
-    return {converged, iterations, achieved_tolerance};
+    using std::sqrt;
+    const auto continuity_l2 = sqrt(global_continuity_values[0]);
+    const auto continuity_normalization = sqrt(global_continuity_values[1]);
+    return {converged, iterations, achieved_tolerance,
+        {continuity_l2, global_continuity_maximum,
+            continuity_normalization > scalar_type{} ? continuity_l2 / continuity_normalization : scalar_type{},
+            continuity_normalization}};
 }
 
 } // namespace SimpleFluid

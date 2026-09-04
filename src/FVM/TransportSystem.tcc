@@ -1001,6 +1001,13 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
     const auto coefficient_interpolation = request.coefficient_interpolation;
 
     const auto& mesh = old_values.mesh();
+    const auto mapped_extension_state = detail::reduce_transport_validation_state(
+        mesh, std::array<int, 2>{request.old_storage_weight == nullptr ? 0 : 1, request.ale == nullptr ? 0 : 1});
+    if (mapped_extension_state[0] != 0 || mapped_extension_state[1] != 0)
+    {
+        throw std::invalid_argument(
+            "legacy weighted_scalar_transport_system does not support mapped accepted-old storage or ALE state.");
+    }
     const auto older_field_state =
         older_values == nullptr
             ? 0

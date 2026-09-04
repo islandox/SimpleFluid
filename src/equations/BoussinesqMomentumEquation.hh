@@ -56,8 +56,20 @@ public:
     LinearSolveSummary advance_velocity(const velocity_field_type& old_velocity,
         const face_flux_field_type& face_fluxes, const field_type& temperature,
         const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
+        velocity_field_type& velocity, const LinearSolverOptions& linear_options,
+        const FVM::ALEControlVolumeState* ale) const;
+
+    LinearSolveSummary advance_velocity(const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes, const field_type& temperature,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
         velocity_field_type& velocity, const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {}) const;
+
+    LinearSolveSummary advance_velocity(const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes, const field_type& temperature,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
+        velocity_field_type& velocity, const source_type& right_hand_source,
+        const LinearSolverOptions& linear_options, const FVM::ALEControlVolumeState* ale) const;
 
     system_type assemble_system(const velocity_field_type& old_velocity, const face_flux_field_type& face_fluxes,
         const field_type& temperature, const velocity_boundary_cache_type& velocity_boundary_cache,
@@ -65,8 +77,19 @@ public:
 
     system_type assemble_system(const velocity_field_type& old_velocity, const face_flux_field_type& face_fluxes,
         const field_type& temperature, const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options, const velocity_field_type* correction_field,
+        const FVM::ALEControlVolumeState* ale) const;
+
+    system_type assemble_system(const velocity_field_type& old_velocity, const face_flux_field_type& face_fluxes,
+        const field_type& temperature, const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options, const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
+
+    system_type assemble_system(const velocity_field_type& old_velocity, const face_flux_field_type& face_fluxes,
+        const field_type& temperature, const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options, const source_type& right_hand_source,
+        const velocity_field_type* correction_field,
+        const FVM::ALEControlVolumeState* ale) const;
 
     /**
      * @brief Advance with physical viscosity and material-density buoyancy
@@ -80,6 +103,15 @@ public:
         const LinearSolverOptions& linear_options = {}, const field_type* dynamic_viscosity_override = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
+    LinearSolveSummary advance_velocity_physical(const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes, const field_type& temperature,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
+        const material_type& material, scalar_type reference_density, bool density_feedback_enabled,
+        velocity_field_type& velocity, const source_type& right_hand_source,
+        const LinearSolverOptions& linear_options, const field_type* dynamic_viscosity_override,
+        const boundary_cache_type* boundary_dynamic_viscosity,
+        const FVM::ALEControlVolumeState* ale) const;
+
     /**
      * @brief Assemble with physical viscosity and material-density buoyancy
      *        when density feedback is enabled.
@@ -91,6 +123,15 @@ public:
         const source_type& right_hand_source, const velocity_field_type* correction_field = nullptr,
         const field_type* dynamic_viscosity_override = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
+
+    system_type assemble_physical_system(const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes, const field_type& temperature,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
+        const material_type& material, scalar_type reference_density, bool density_feedback_enabled,
+        const source_type& right_hand_source, const velocity_field_type* correction_field,
+        const field_type* dynamic_viscosity_override,
+        const boundary_cache_type* boundary_dynamic_viscosity,
+        const FVM::ALEControlVolumeState* ale) const;
 
 private:
     SIMPLEFLUID_EQUATIONS_LOCAL

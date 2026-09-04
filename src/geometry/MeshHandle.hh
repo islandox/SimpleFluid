@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/mesh/LocalGlobalIndexer.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -324,6 +325,25 @@ public:
     }
 
     const variant_type& variant() const noexcept { return d_mesh; }
+
+    /**
+     * @brief Identity of the concrete geometry shared by this handle.
+     *
+     * Separately constructed alias handles around the same native mesh report
+     * the same identity.  This lets fixed-topology motion and ALE consumers
+     * reject a copied or otherwise unrelated geometry even when its topology
+     * happens to be equivalent.
+     */
+    [[nodiscard]] const void* geometry_identity() const noexcept
+    {
+        return std::visit(
+            [](const auto& mesh) noexcept -> const void*
+            {
+                return mesh.get();
+            },
+            d_mesh);
+    }
+
     /**
      * @brief Return the local/global indexer.
      *
@@ -644,7 +664,7 @@ public:
 
 private:
     template<class Pointer>
-    static Pointer require_mesh(Pointer mesh)
+    SIMPLEFLUID_LOCAL static Pointer require_mesh(Pointer mesh)
     {
         if (!mesh)
         {
@@ -654,7 +674,7 @@ private:
         return mesh;
     }
 
-    static local_ordinal_type checked_local(size_t value)
+    SIMPLEFLUID_LOCAL static local_ordinal_type checked_local(size_t value)
     {
         if (value > static_cast<size_t>(
                 std::numeric_limits<local_ordinal_type>::max()))
@@ -665,7 +685,7 @@ private:
         return static_cast<local_ordinal_type>(value);
     }
 
-    static std::vector<global_ordinal_type> checked_global_ids(
+    SIMPLEFLUID_LOCAL static std::vector<global_ordinal_type> checked_global_ids(
         std::vector<size_t> ids)
     {
         std::vector<global_ordinal_type> result;
@@ -688,33 +708,33 @@ private:
         return result;
     }
 
-    std::string local_output_filename(
+    SIMPLEFLUID_LOCAL std::string local_output_filename(
         const std::string& filename) const;
 
-    void add_geometry_cell_data(VTUWriter& writer) const;
+    SIMPLEFLUID_LOCAL void add_geometry_cell_data(VTUWriter& writer) const;
 
     template<class MeshType>
-    VTUWriter::VectorData collect_vtu_points(
+    SIMPLEFLUID_LOCAL VTUWriter::VectorData collect_vtu_points(
         const MeshType& mesh) const;
 
-    void write_vtu(
+    SIMPLEFLUID_LOCAL void write_vtu(
         const std::string& filename,
         VTUWriter::TopologyHandle topology) const;
 
-    VTUWriter::TopologyHandle legacy_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle legacy_vtu_topology(
         const STKAdapter& mesh) const;
 
     template<class MeshType>
-    VTUWriter::TopologyHandle orthogonal_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle orthogonal_vtu_topology(
         const MeshType& mesh) const;
 
-    VTUWriter::TopologyHandle semi_structured_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle semi_structured_vtu_topology(
         const SemiStructured& mesh) const;
 
-    VTUWriter::TopologyHandle unstructured_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle unstructured_vtu_topology(
         const Unstructured& mesh) const;
 
-    global_ordinal_type geometry_cell_lid(
+    SIMPLEFLUID_LOCAL global_ordinal_type geometry_cell_lid(
         local_ordinal_type local_id) const
     {
         check_cell(local_id);
@@ -730,7 +750,7 @@ private:
         return d_indexer.cell_global_id(local_id);
     }
 
-    global_ordinal_type geometry_face_lid(
+    SIMPLEFLUID_LOCAL global_ordinal_type geometry_face_lid(
         local_ordinal_type local_id) const
     {
         check_face(local_id);
@@ -750,24 +770,24 @@ private:
     }
 
     template<class Function>
-    decltype(auto) visit_geometry_cell(
+    SIMPLEFLUID_LOCAL decltype(auto) visit_geometry_cell(
         local_ordinal_type cell_lid,
         Function&& function) const;
 
     template<class Function>
-    decltype(auto) visit_geometry_face(
+    SIMPLEFLUID_LOCAL decltype(auto) visit_geometry_face(
         local_ordinal_type face_lid,
         Function&& function) const;
 
-    local_ordinal_type adjacent_cell(local_ordinal_type face_lid,
-                                     bool owner) const;
+    SIMPLEFLUID_LOCAL local_ordinal_type adjacent_cell(
+        local_ordinal_type face_lid, bool owner) const;
 
     /**
      * @brief Convert an orthogonal (i,j,k) cell ID to the field local ordinal.
      * @throws std::invalid_argument if the mesh does not use
      *         OrthogonalIndexer::CellID.
      */
-    local_ordinal_type cell_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type cell_local_id(
         Meshes::OrthogonalIndexer::CellID id) const
     {
         return geometry_to_local_cell(
@@ -780,7 +800,7 @@ private:
      * @throws std::invalid_argument if the mesh does not use
      *         OrthogonalIndexer::FaceID.
      */
-    local_ordinal_type face_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type face_local_id(
         Meshes::OrthogonalIndexer::FaceID id) const
     {
         return geometry_to_local_face(
@@ -793,7 +813,7 @@ private:
      * @throws std::invalid_argument if the mesh does not use
      *         SemiStructuredIndexer::CellID.
      */
-    local_ordinal_type cell_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type cell_local_id(
         Meshes::SemiStructuredIndexer::CellID id) const
     {
         return geometry_to_local_cell(
@@ -806,7 +826,7 @@ private:
      * @throws std::invalid_argument if the mesh does not use
      *         SemiStructuredIndexer::FaceID.
      */
-    local_ordinal_type face_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type face_local_id(
         Meshes::SemiStructuredIndexer::FaceID id) const
     {
         return geometry_to_local_face(
@@ -814,40 +834,40 @@ private:
     }
 
     template<class MeshType>
-    void initialize_orthogonal(SP<const MeshType> mesh,
-                               DistributionOptions options);
+    SIMPLEFLUID_LOCAL void initialize_orthogonal(
+        SP<const MeshType> mesh, DistributionOptions options);
 
-    void initialize_semi_structured(SemiStructuredPtr mesh);
+    SIMPLEFLUID_LOCAL void initialize_semi_structured(SemiStructuredPtr mesh);
 
-    void initialize_unstructured(UnstructuredPtr mesh);
+    SIMPLEFLUID_LOCAL void initialize_unstructured(UnstructuredPtr mesh);
 
-    void initialize_unstructured(
+    SIMPLEFLUID_LOCAL void initialize_unstructured(
         UnstructuredPtr mesh,
         const unstructured_indexer_type& indexer,
         Teuchos::RCP<const typename Pack::comm_type> comm);
 
-    void initialize_stk(STKAdapterPtr adapter);
+    SIMPLEFLUID_LOCAL void initialize_stk(STKAdapterPtr adapter);
 
     template<class MeshType>
-    void initialize_serial(const MeshType& mesh);
+    SIMPLEFLUID_LOCAL void initialize_serial(const MeshType& mesh);
 
-    void initialize_cells(std::vector<size_t> owned,
-                          std::vector<size_t> ghost);
+    SIMPLEFLUID_LOCAL void initialize_cells(
+        std::vector<size_t> owned, std::vector<size_t> ghost);
 
-    void initialize_faces(std::vector<size_t> owned,
-                          std::vector<size_t> overlap);
+    SIMPLEFLUID_LOCAL void initialize_faces(
+        std::vector<size_t> owned, std::vector<size_t> overlap);
 
-    void initialize_indexer(indexer_type indexer);
+    SIMPLEFLUID_LOCAL void initialize_indexer(indexer_type indexer);
 
-    void initialize_cell_faces();
+    SIMPLEFLUID_LOCAL void initialize_cell_faces();
 
-    void materialize_legacy_indexer() const;
+    SIMPLEFLUID_LOCAL void materialize_legacy_indexer() const;
 
     template<class MeshType>
-    void initialize_boundary_batches(const MeshType& mesh);
+    SIMPLEFLUID_LOCAL void initialize_boundary_batches(const MeshType& mesh);
 
     template<class CommPtr, class Range>
-    Teuchos::RCP<const map_type> make_map(
+    SIMPLEFLUID_LOCAL Teuchos::RCP<const map_type> make_map(
         const CommPtr& comm,
         const Range& ids) const
     {
@@ -868,7 +888,7 @@ private:
     }
 
     template<class CommPtr>
-    void create_maps(const CommPtr& comm)
+    SIMPLEFLUID_LOCAL void create_maps(const CommPtr& comm)
     {
         std::vector<global_ordinal_type> boundary_faces;
         for (const auto& [batch_id, batch] : d_boundary_batches)
@@ -895,12 +915,12 @@ private:
         d_boundary_face_map = make_map(comm, boundary_faces);
     }
 
-    void check_cell(local_ordinal_type cell_lid) const
+    SIMPLEFLUID_LOCAL void check_cell(local_ordinal_type cell_lid) const
     {
         CHECK_BOUNDS(cell_lid, 0, num_local_cells());
     }
 
-    void check_face(local_ordinal_type face_lid) const
+    SIMPLEFLUID_LOCAL void check_face(local_ordinal_type face_lid) const
     {
         CHECK_BOUNDS(face_lid, 0, num_faces());
     }
@@ -911,7 +931,7 @@ private:
      * @throws std::invalid_argument if the mesh type does not accept the ID.
      */
     template<class CellID>
-    size_t visit_indexed_cell(CellID id) const
+    SIMPLEFLUID_LOCAL size_t visit_indexed_cell(CellID id) const
     {
         return visit(
             [&](const auto& mesh) -> size_t
@@ -935,7 +955,7 @@ private:
      * @throws std::invalid_argument if the mesh type does not accept the ID.
      */
     template<class FaceID>
-    size_t visit_indexed_face(FaceID id) const
+    SIMPLEFLUID_LOCAL size_t visit_indexed_face(FaceID id) const
     {
         return visit(
             [&](const auto& mesh) -> size_t
@@ -958,7 +978,7 @@ private:
      * @returns The local ordinal, or invalid_local_id() if not locally
      *          available.
      */
-    local_ordinal_type geometry_to_local_cell(
+    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_cell(
         size_t geometry_lid) const noexcept
     {
         if (!d_cell_local_lids_by_geometry.empty())
@@ -987,7 +1007,7 @@ private:
      * @returns The local ordinal, or invalid_local_id() if not locally
      *          available.
      */
-    local_ordinal_type geometry_to_local_face(
+    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_face(
         size_t geometry_lid) const noexcept
     {
         if (is_stk())
