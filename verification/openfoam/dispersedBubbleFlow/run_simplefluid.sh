@@ -12,4 +12,5 @@ output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 export_build_env "$repo_dir"
 simplefluid_build_target dispersed_bubble_verification
 executable=$(simplefluid_executable dispersed_bubble_verification)
-"$executable" --mode "$mode" --output "$output_dir" --parameters "$case_dir/reference.properties"
+"$executable" --mode "$mode" --output "$output_dir" --parameters "$case_dir/reference.properties" \
+    --water-properties "$case_dir/../reference_water.properties"
