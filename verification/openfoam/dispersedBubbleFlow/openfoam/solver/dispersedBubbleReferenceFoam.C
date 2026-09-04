@@ -20,9 +20,15 @@ int main(int argc, char *argv[])
     const scalar height = parameter("height"), width = parameter("width");
     const scalar dt = parameter("dt"), speed = parameter("carrier_velocity") + parameter("slip_velocity");
     const scalar radius = parameter("nucleation_radius");
+    // Isothermal IF97 reference liquid. Carrier flow and slip are prescribed,
+    // so viscosity/conductivity are recorded but no momentum/energy is solved.
+    const scalar temperature = parameter("temperature_K"), absolutePressure = parameter("absolute_pressure_Pa");
+    const scalar rho = parameter("density_kg_m3"), cp = parameter("specific_heat_capacity_J_kg_K");
+    const scalar mu = parameter("dynamic_viscosity_Pa_s"), conductivity = parameter("thermal_conductivity_W_m_K");
+    const scalar sigma = parameter("surface_tension_N_m");
     const scalar bubbleVolume = 4.0 * constant::mathematical::pi / 3.0 * pow3(radius);
-    const scalar molesPerBubble = bubbleVolume * (parameter("pressure") + 2 * parameter("surface_tension") / radius)
-        / (parameter("gas_constant") * parameter("temperature"));
+    const scalar molesPerBubble = bubbleVolume * (absolutePressure + 2 * sigma / radius)
+        / (parameter("gas_constant") * temperature);
     const scalar source = mode == "steady" ? parameter("power_density") * parameter("yield_mol_per_j")
         * parameter("release_efficiency") : 0.0;
     const scalar initial = parameter(mode + "_initial_moles");
@@ -49,7 +55,11 @@ int main(int argc, char *argv[])
     if (outlet < 0) FatalErrorInFunction << "Missing outlet" << exit(FatalError);
     std::ofstream profiles((runTime.path()/"profiles.csv").c_str());
     std::ofstream history((runTime.path()/"history.csv").c_str());
-    profiles << std::setprecision(17) << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,hydrogen_balance_mol,number_balance_relative\n";
+    profiles << std::setprecision(17)
+        << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,temperature_K,absolute_pressure_Pa,density_kg_m3,"
+           "specific_heat_capacity_J_kg_K,dynamic_viscosity_Pa_s,thermal_conductivity_W_m_K,"
+           "kinematic_viscosity_m2_s,thermal_diffusivity_m2_s,surface_tension_N_m,"
+           "hydrogen_balance_mol,number_balance_relative\n";
     history << std::setprecision(17) << "time_s,inventory_mol,produced_mol,escaped_mol,outlet_mol_s,hydrogen_balance_mol,maximum_change_mol_m3\n";
     scalar escaped = 0, escapedNumber = 0, produced = 0, lastEscape = 0, maximumChange = 0;
     label steadyConsecutiveSteps = 0;
@@ -68,6 +78,9 @@ int main(int argc, char *argv[])
             const label sample = label(std::llround(z/dz - 0.5));
             profiles << time << ',' << sample << ',' << z << ',' << microMoles[cell] << ','
                      << microNumber[cell] << ',' << microNumber[cell]*bubbleVolume << ','
+                     << temperature << ',' << absolutePressure << ',' << rho << ',' << cp << ','
+                     << mu << ',' << conductivity << ',' << mu/rho << ',' << conductivity/(rho*cp) << ','
+                     << sigma << ','
                      << balance << ',' << numberBalance << '\n';
         }
         history << time << ',' << inventory << ',' << produced << ',' << escaped << ','

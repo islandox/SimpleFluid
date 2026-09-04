@@ -189,6 +189,7 @@ The CMake targets make the same boundary explicit:
 | `SimpleFluid::FVM` | Finite-volume reconstruction and assembly operators |
 | `SimpleFluid::Equations` | Momentum, pressure, temperature, turbulence, and source models |
 | `SimpleFluid::Solvers` | Time stepping and pressure-velocity/physics orchestration |
+| `SimpleFluid::IF97` | Optional SI water/steam properties; no solver or MPI dependency |
 | `SimpleFluid::SimpleFluid` | Umbrella interface for downstream applications |
 
 Keep dependencies pointing down this table. If a low-level layer needs a
@@ -272,6 +273,7 @@ Useful configuration switches are:
 | `SIMPLEFLUID_MAX_TEST_PROCS` | `0` | Limit generated MPI tests; CI commonly uses `2` |
 | `SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT` | `30` | Bound Google Test discovery time in seconds |
 | `SIMPLEFLUID_BUILD_DOCS` | `OFF` | Require Doxygen and enable the `docs` target |
+| `SIMPLEFLUID_ENABLE_IF97` | `OFF` | Build the optional water material library; [usage and limits](docs/modeling/if97_water.md) |
 
 The project uses one shared precompiled header. Add only stable, frequently
 included third-party or standard-library headers to

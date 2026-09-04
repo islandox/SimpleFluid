@@ -340,6 +340,9 @@ transport and constrained planar-ALE models are documented in
 [`verification/openfoam/README.md`](verification/openfoam/README.md).
 They include independent OpenFOAM finite-volume reference applications,
 physical-time and sample-coverage checks, and conservation acceptance gates.
+Both case families require `SIMPLEFLUID_ENABLE_IF97=ON` and share IF97
+liquid-water reference properties with OpenFOAM; ALE retains the supported
+linear Boussinesq density approximation.
 
 ## Examples
 
@@ -358,8 +361,8 @@ Pre-built example executables:
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 | `planar_free_surface_verification` | Five analytic fixed-grid volume-budget cases with CSV diagnostics |
 | `planar_ale_verification` | Four solver-integrated planar-ALE conservation cases: heating, gas generation, complete H2 escape, and rollback |
-| `dispersed_bubble_verification` | Steady source/escape balance and transient dispersed-bubble transport with matched OpenFOAM references |
-| `planar_ale_comparison` | Transient thermal expansion and source-off steady equilibrium with matched OpenFOAM moving-mesh references |
+| `dispersed_bubble_verification` | IF97 reference-water steady source/escape balance and transient bubble transport with matched OpenFOAM references |
+| `planar_ale_comparison` | IF97 reference-water linearized thermal expansion and source-off steady equilibrium with matched OpenFOAM moving-mesh references |
 
 Examples use `Database` configuration, documented environment controls, or a
 combination of both. Their CTest smoke settings intentionally reduce mesh size
@@ -400,6 +403,13 @@ cmake --build build/manual --config Release
 The checked-in GCC and LLVM presets place their build trees under `build/gcc`
 and `build/llvm`, respectively. A manually configured tree uses whichever path
 was passed to `-B`.
+
+The optional water material library is enabled with
+`-DSIMPLEFLUID_ENABLE_IF97=ON` (default `OFF`). It provides SI water/steam
+properties, saturation data, and a liquid material-field adapter through
+`SimpleFluid::IF97`. CMake fetches a pinned CoolProp IF97 release if no local
+header is supplied. See [IF97 water properties](docs/modeling/if97_water.md)
+for offline configuration, usage, and solver integration boundaries.
 
 ### Run Tests
 

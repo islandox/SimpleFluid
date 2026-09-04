@@ -330,6 +330,11 @@ add_library(SimpleFluid INTERFACE)
 add_library(SimpleFluid::SimpleFluid ALIAS SimpleFluid)
 target_link_libraries(SimpleFluid INTERFACE SimpleFluidSolvers)
 
+if(SIMPLEFLUID_ENABLE_IF97)
+    add_subdirectory(materials)
+    target_link_libraries(SimpleFluid INTERFACE SimpleFluidIF97)
+endif()
+
 # Reuse a visibility-compatible PCH for every object embedded in the DSO.
 target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidSharedPch)
@@ -386,6 +391,9 @@ if(BUILD_TESTING)
     add_subdirectory(equations/unitTests)
     add_subdirectory(solvers/unitTests)
     add_subdirectory(io/unitTests)
+    if(SIMPLEFLUID_ENABLE_IF97)
+        add_subdirectory(materials/unitTests)
+    endif()
 endif()
 
 if(SIMPLEFLUID_BUILD_BENCHMARKS)
@@ -412,11 +420,18 @@ simplefluid_exclude_from_pgo_sources(
     examples/planar_ale_verification.cc)
 
 foreach(VERIFICATION_TARGET IN ITEMS dispersed_bubble_verification planar_ale_comparison)
-  add_executable(${VERIFICATION_TARGET} examples/${VERIFICATION_TARGET}.cc)
-  target_link_libraries(${VERIFICATION_TARGET} PRIVATE SimpleFluid)
-  simplefluid_exe_reuse_precompiled_header(${VERIFICATION_TARGET})
-  simplefluid_exclude_from_pgo_sources(examples/${VERIFICATION_TARGET}.cc)
-  if(BUILD_TESTING)
+  if(SIMPLEFLUID_ENABLE_IF97)
+    add_executable(${VERIFICATION_TARGET} examples/${VERIFICATION_TARGET}.cc)
+    target_link_libraries(${VERIFICATION_TARGET} PRIVATE SimpleFluid SimpleFluid::IF97)
+    simplefluid_exe_reuse_precompiled_header(${VERIFICATION_TARGET})
+    simplefluid_exclude_from_pgo_sources(examples/${VERIFICATION_TARGET}.cc)
+  else()
+    # Select a separate source instead of changing compile definitions on a
+    # target that reuses the shared executable PCH. Default builds retain a
+    # useful launcher diagnostic without linking or discovering IF97.
+    add_executable(${VERIFICATION_TARGET} examples/if97_verification_unavailable.cc)
+  endif()
+  if(BUILD_TESTING AND SIMPLEFLUID_ENABLE_IF97)
     foreach(VERIFICATION_MODE IN ITEMS steady transient)
       add_test(
         NAME ${VERIFICATION_TARGET}_${VERIFICATION_MODE}

@@ -1,6 +1,7 @@
 /** Solver-integrated uniform thermal expansion, compared with OpenFOAM FV. */
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "IF97ReferenceWater.hh"
 
 #include <Tpetra_Core.hpp>
 
@@ -18,12 +19,11 @@ namespace
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Solver = SimpleFluid::BoussinesqSolver<Pack>;
-constexpr double dt = 0.01;
-constexpr double rho0 = 10.0;
-constexpr double cp = 2.0;
-constexpr double beta = 1.0e-3;
-constexpr double T0 = 300.0;
-constexpr double power = 1000.0;
+constexpr double dt = 1.0;
+constexpr double power = 4.0e5;
+// Water sensible energy is about 1.25 GJ. This bounds accumulated subtraction
+// roundoff while resolving the accepted-volume heating correction (~2 kJ).
+constexpr double energy_tolerance = 5.0e-5;
 constexpr int heated_steps = 20;
 constexpr int quiet_steps = 5;
 
@@ -35,12 +35,20 @@ void check(double value, double tolerance, const char* what)
     }
 }
 
-int run(const std::string& mode, const std::filesystem::path& output)
+int run(const std::string& mode, const std::filesystem::path& output,
+    const std::filesystem::path& water_reference)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
     {
         throw std::runtime_error("The OpenFOAM comparison fixture is serial; run without mpiexec.");
     }
+    const auto reference = SimpleFluid::Verification::load_if97_reference_water(water_reference);
+    const auto& water = reference.liquid;
+    const double T0 = water.temperature;
+    const double absolute_pressure = water.absolute_pressure;
+    const double rho0 = water.density;
+    const double cp = water.specific_heat_capacity;
+    const double beta = reference.thermal_expansion;
     SimpleFluid::ArrReal z;
     for (int i = 0; i <= 8; ++i)
     {
@@ -61,9 +69,9 @@ int run(const std::string& mode, const std::filesystem::path& output)
     SimpleFluid::TimeStepperOptions time;
     time.time_step = dt;
     time.steps = 1;
-    time.thermal_diffusivity = 0.0;
-    time.kinematic_viscosity = 0.0;
-    time.thermal_expansion = 0.0;
+    time.thermal_diffusivity = water.thermal_diffusivity();
+    time.kinematic_viscosity = water.kinematic_viscosity();
+    time.thermal_expansion = beta;
     time.gravity_x = time.gravity_y = time.gravity_z = 0.0;
     time.reference_temperature = T0;
     time.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::PISO;
@@ -75,8 +83,8 @@ int run(const std::string& mode, const std::filesystem::path& output)
     SimpleFluid::BoussinesqModelOptions model;
     model.reference_density = model.density = rho0;
     model.specific_heat_capacity = cp;
-    model.dynamic_viscosity = 1.0e-2;
-    model.thermal_conductivity = 0.0;
+    model.dynamic_viscosity = water.dynamic_viscosity;
+    model.thermal_conductivity = water.thermal_conductivity;
     Solver solver(mesh, bc, time, linear, model);
     SimpleFluid::MaterialFeedbackOptions material;
     material.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
@@ -84,7 +92,9 @@ int run(const std::string& mode, const std::filesystem::path& output)
     material.gas_density = 1.0;
     material.reference_temperature = T0;
     material.thermal_expansion = beta;
-    material.reference_dynamic_viscosity = 1.0e-2;
+    // ALE supports this built-in reference-water linearization. A nonlinear
+    // IF97 callback would violate its material/energy rollback contract.
+    material.reference_dynamic_viscosity = water.dynamic_viscosity;
     material.min_density = 1.0;
     solver.configure_material_feedback(material);
     auto& source = solver.add_temperature_source("uniform_heat", power);
@@ -103,7 +113,7 @@ int run(const std::string& mode, const std::filesystem::path& output)
     surface.liquid_mass.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
     surface.liquid_mass.depletion_policy = SimpleFluid::FreeSurfaceRangePolicy::Error;
     surface.headspace.mode = SimpleFluid::HeadspaceMode::Vented;
-    surface.headspace.ambient_pressure = surface.headspace.initial_pressure = 101325.0;
+    surface.headspace.ambient_pressure = surface.headspace.initial_pressure = absolute_pressure;
     surface.headspace.initial_temperature = T0;
     surface.ale.top_boundary = "zmax";
     surface.ale.maximum_correctors = 30;
@@ -121,7 +131,8 @@ int run(const std::string& mode, const std::filesystem::path& output)
     csv << std::setprecision(17)
         << "time_s,sample,temperature_K,level_m,volume_m3,liquid_mass_kg,energy_J,cumulative_heat_J,"
            "mass_residual_kg,energy_balance_residual_J,gcl_residual_m3_per_s,"
-           "analytic_temperature_error_K,analytic_level_error_m\n";
+           "analytic_temperature_error_K,analytic_level_error_m,density_kg_m3,cp_J_kg_K,mu_Pa_s,k_W_m_K,"
+           "nu_m2_s,thermal_diffusivity_m2_s,thermal_expansion_1_K,absolute_pressure_Pa\n";
     double cumulative_heat = 0.0;
     double exact_temperature = T0;
     double previous_temperature = T0;
@@ -142,19 +153,32 @@ int run(const std::string& mode, const std::filesystem::path& output)
         }
         double volume = 0.0;
         double energy = 0.0;
+        double integrated_density = 0.0;
+        double integrated_cp = 0.0;
+        double integrated_mu = 0.0;
+        double integrated_k = 0.0;
         const auto& mass_density = solver.liquid_mass_inventory().cellMassInventory();
+        const auto& fields = solver.material_properties();
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell = static_cast<Pack::local_ordinal_type>(owned);
             const double cell_volume = mesh->cell_volume(cell);
             volume += cell_volume;
             energy += mass_density.value(cell) * cell_volume * cp * solver.temperature().value(cell);
+            integrated_density += cell_volume * fields.density.value(cell);
+            integrated_cp += cell_volume * fields.specific_heat_capacity.value(cell);
+            integrated_mu += cell_volume * fields.dynamic_viscosity.value(cell);
+            integrated_k += cell_volume * fields.thermal_conductivity.value(cell);
             check(solver.temperature().value(cell) - exact_temperature, 2.0e-7, "Cell temperature analytic error");
         }
         const double mass = solver.liquid_mass_inventory().totalMass();
         const double temperature = energy / (mass * cp);
         const double level = solver.free_surface_diagnostics().pool_level;
         const double exact_level = 1.0 / (1.0 - beta * (exact_temperature - T0));
+        const double density = integrated_density / volume;
+        const double actual_cp = integrated_cp / volume;
+        const double mu = integrated_mu / volume;
+        const double k = integrated_k / volume;
         if (step > 0)
         {
             cumulative_heat += q * volume * dt;
@@ -169,7 +193,7 @@ int run(const std::string& mode, const std::filesystem::path& output)
         const double energy_residual = energy - rho0 * cp * T0 - cumulative_heat;
         const double gcl = step ? solver.planar_ale_diagnostics().maximum_gcl_residual : 0.0;
         check(mass_residual, 2.0e-10, "Liquid mass conservation");
-        check(energy_residual, 5.0e-6, "Liquid energy conservation");
+        check(energy_residual, energy_tolerance, "Liquid energy conservation");
         check(gcl, 2.0e-11, "Mesh GCL");
         check(level - exact_level, 5.0e-10, "Level analytic error");
         check(volume - level, 2.0e-11, "Mesh volume and pool level closure");
@@ -182,7 +206,9 @@ int run(const std::string& mode, const std::filesystem::path& output)
         check(solver.time() - step * dt, 1.0e-13, "Accepted physical time");
         csv << solver.time() << ",global," << temperature << ',' << level << ',' << volume << ',' << mass << ','
             << energy << ',' << cumulative_heat << ',' << mass_residual << ',' << energy_residual << ',' << gcl << ','
-            << temperature - exact_temperature << ',' << level - exact_level << '\n';
+            << temperature - exact_temperature << ',' << level - exact_level << ',' << density << ',' << actual_cp
+            << ',' << mu << ',' << k << ',' << mu / density << ',' << k / (density * actual_cp) << ',' << beta << ','
+            << absolute_pressure << '\n';
         previous_temperature = temperature;
         previous_level = level;
     }
@@ -203,6 +229,7 @@ int main(int argc, char** argv)
     {
         std::string mode = "transient";
         std::filesystem::path output = "planar_ale_comparison";
+        std::filesystem::path water_reference = "verification/openfoam/reference_water.properties";
         for (int i = 1; i < argc; ++i)
         {
             const std::string argument = argv[i];
@@ -210,12 +237,15 @@ int main(int argc, char** argv)
                 mode = argv[++i];
             else if (argument == "--output" && i + 1 < argc)
                 output = argv[++i];
+            else if (argument == "--water-properties" && i + 1 < argc)
+                water_reference = argv[++i];
             else
-                throw std::invalid_argument("Usage: planar_ale_comparison --mode steady|transient --output DIR");
+                throw std::invalid_argument("Usage: planar_ale_comparison --mode steady|transient --output DIR "
+                                            "--water-properties FILE");
         }
         if (mode != "steady" && mode != "transient")
             throw std::invalid_argument("--mode must be steady or transient");
-        return run(mode, output);
+        return run(mode, output, water_reference);
     }
     catch (const std::exception& error)
     {

@@ -4,6 +4,10 @@ import argparse
 import math
 from pathlib import Path
 import shutil
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from reference_water import read_reference_water
 
 
 def main():
@@ -23,6 +27,10 @@ def main():
         if not math.isfinite(value):
             raise ValueError(f"Non-finite parameter: {raw}")
         values[tokens[0]] = value
+    water = read_reference_water(directory.parent / "reference_water.properties")
+    if values.keys() & water.keys():
+        raise ValueError("Problem parameters must not override the shared IF97 reference state")
+    values.update(water)
     if args.output.exists() and any(args.output.iterdir()):
         raise ValueError(f"Output case must be empty: {args.output}")
     shutil.copytree(directory / "openfoam/template", args.output, dirs_exist_ok=True)
