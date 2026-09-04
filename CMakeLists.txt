@@ -20,6 +20,8 @@ option(SIMPLEFLUID_BUILD_BENCHMARKS
        "Build performance and solver-regression benchmarks" ON)
 option(SIMPLEFLUID_BUILD_DOCS
        "Enable the Doxygen API-documentation target" OFF)
+option(SIMPLEFLUID_ENABLE_IF97
+       "Build the optional IAPWS-IF97 water material library" OFF)
 option(SIMPLEFLUID_ENABLE_LTO
        "Enable link-time optimization in Release and RelWithDebInfo" ON)
 include(CTest)

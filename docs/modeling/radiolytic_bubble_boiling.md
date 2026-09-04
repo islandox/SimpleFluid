@@ -163,6 +163,10 @@ conversion and dissolution to isolate the shared transport equations.
 The checks cover matched cell profiles, inventories, and source/escape
 conservation. They do not validate gas momentum, interphase forces, turbulence,
 or the full radiolytic kinetics model.
+Both cases require the optional IF97 library and use liquid-water reference
+properties and surface tension at 300 K and 101325 Pa absolute. OpenFOAM
+uses the same material snapshot. The gas remains radiolytic hydrogen; water
+vapor density is not substituted for its ideal-gas/capillary bubble model.
 
 ## Limitations
 

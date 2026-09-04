@@ -20,6 +20,9 @@ mkdir -p "$output"
 output=$(CDPATH= cd -- "$output" && pwd)
 cp -R "$case_dir/template/." "$output/"
 mkdir -p "$output/constant" "$output/solver" "$output/bin"
+python3 "$case_dir/../reference_water.py" \
+    --properties "$case_dir/../reference_water.properties" \
+    --openfoam-dictionary "$output/constant/referenceWater"
 cp -R "$case_dir/solver/." "$output/solver/"
 # Keep compilation, executable, and case output under the selected run directory.
 export FOAM_USER_APPBIN="$output/bin"

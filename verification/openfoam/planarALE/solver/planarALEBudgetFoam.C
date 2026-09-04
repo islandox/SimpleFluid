@@ -17,13 +17,30 @@ int main(int argc, char* argv[])
     {
         FatalErrorInFunction << "Use serial execution and -mode steady|transient" << exit(FatalError);
     }
-    const scalar rho0 = 10.0, cp = 2.0, beta = 1e-3, T0 = 300.0, dt = 0.01;
+    const IOdictionary water
+    (
+        IOobject("referenceWater", runTime.constant(), mesh, IOobject::MUST_READ, IOobject::NO_WRITE)
+    );
+    const scalar rho0 = readScalar(water.lookup("density_kg_m3"));
+    const scalar cp = readScalar(water.lookup("specific_heat_capacity_J_kg_K"));
+    const scalar beta = readScalar(water.lookup("thermal_expansion_1_K"));
+    const scalar T0 = readScalar(water.lookup("temperature_K"));
+    const scalar conductivity = readScalar(water.lookup("thermal_conductivity_W_m_K"));
+    const scalar viscosity = readScalar(water.lookup("dynamic_viscosity_Pa_s"));
+    const scalar absolutePressure = readScalar(water.lookup("absolute_pressure_Pa"));
+    const scalar dt = 1.0, heating = 4.0e5;
     const label heatedSteps = 20, quietSteps = 5;
     const label steps = heatedSteps + (mode == "steady" ? quietSteps : 0);
     runTime.setDeltaT(dt);
     const pointField referencePoints(mesh.points());
     const scalarField cellMass(rho0 * mesh.V().field());
     volScalarField T(IOobject("T", runTime.timeName(), mesh, IOobject::MUST_READ, IOobject::AUTO_WRITE), mesh);
+    T = dimensionedScalar("T0", dimTemperature, T0);
+    T.correctBoundaryConditions();
+    const dimensionedScalar thermalConductivity
+    (
+        "thermalConductivity", dimEnergy/dimTime/dimLength/dimTemperature, conductivity
+    );
     volScalarField rhoCp
     (
         IOobject("rhoCp", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::AUTO_WRITE), mesh,
@@ -41,7 +58,8 @@ int main(int argc, char* argv[])
     csv << std::setprecision(17)
         << "time_s,sample,temperature_K,level_m,volume_m3,liquid_mass_kg,energy_J,cumulative_heat_J,"
            "mass_residual_kg,energy_balance_residual_J,gcl_residual_m3_per_s,"
-           "analytic_temperature_error_K,analytic_level_error_m\n";
+           "analytic_temperature_error_K,analytic_level_error_m,density_kg_m3,cp_J_kg_K,mu_Pa_s,k_W_m_K,"
+           "nu_m2_s,thermal_diffusivity_m2_s,thermal_expansion_1_K,absolute_pressure_Pa\n";
     scalar level = 1, exactT = T0, cumulativeHeat = 0, previousT = T0, previousLevel = 1;
     label quietCount = 0;
     auto check = [](scalar residual, scalar tolerance, const char* name)
@@ -54,7 +72,7 @@ int main(int argc, char* argv[])
     };
     for (label step = 0; step <= steps; ++step)
     {
-        const scalar q = step <= heatedSteps ? 1000.0 : 0.0;
+        const scalar q = step <= heatedSteps ? heating : 0.0;
         if (step)
         {
             ++runTime;
@@ -76,6 +94,7 @@ int main(int argc, char* argv[])
                 fvScalarMatrix energyEquation
                 (
                     fvm::ddt(rhoCp, T) + fvm::div(relativeHeatCapacityFlux, T)
+                  - fvm::laplacian(thermalConductivity, T)
                  == dimensionedScalar("q", dimEnergy/dimVolume/dimTime, q)
                 );
                 energyEquation.solve();
@@ -119,10 +138,11 @@ int main(int argc, char* argv[])
         }
         const scalar temperature = energy/(mass*cp);
         const scalar exactLevel = 1/(1-beta*(exactT-T0));
+        const scalar density = rho0*(1-beta*(temperature-T0));
         const scalar massResidual = mass-rho0;
         const scalar energyResidual = energy-rho0*cp*T0-cumulativeHeat;
         check(massResidual, 2e-10, "Liquid mass conservation");
-        check(energyResidual, 5e-6, "Liquid energy conservation");
+        check(energyResidual, 5e-5, "Liquid energy conservation");
         check(gcl, 2e-11, "Mesh GCL");
         check(level-exactLevel, 5e-10, "Level analytic error");
         check(volume-level, 2e-11, "Mesh volume and level closure");
@@ -135,7 +155,9 @@ int main(int argc, char* argv[])
         check(runTime.value()-step*dt, 1e-13, "Accepted physical time");
         csv << runTime.value() << ",global," << temperature << ',' << level << ',' << volume << ',' << mass << ','
             << energy << ',' << cumulativeHeat << ',' << massResidual << ',' << energyResidual << ',' << gcl
-            << ',' << temperature-exactT << ',' << level-exactLevel << '\n';
+            << ',' << temperature-exactT << ',' << level-exactLevel << ',' << density << ',' << cp << ','
+            << viscosity << ',' << conductivity << ',' << viscosity/density << ',' << conductivity/(density*cp)
+            << ',' << beta << ',' << absolutePressure << '\n';
         previousT = temperature;
         previousLevel = level;
     }

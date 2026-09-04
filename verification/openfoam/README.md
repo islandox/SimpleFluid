@@ -20,12 +20,32 @@ models and would require a different comparison contract. Agreement here is
 numerical verification of the stated limits, not experimental validation of
 turbulent bubbly flow or general free-surface dynamics.
 
+Both case families use liquid-water reference properties from the optional
+[`SimpleFluid::IF97` library](../../docs/modeling/if97_water.md), evaluated at
+300 K and 101325 Pa **absolute**. The shared
+[`reference_water.properties`](reference_water.properties) records the same
+SI material inputs for OpenFOAM. SimpleFluid queries the enabled library and
+checks that snapshot before advancing. Bubble surface tension also comes from
+IF97; radiolytic hydrogen remains a noncondensable gas. The ALE case uses
+IF97-derived constant reference coefficients and built-in linear Boussinesq
+density feedback, not a nonlinear IF97 material callback.
+
+The shared state has density `996.5580761 kg/m³`, heat capacity
+`4181.097327 J/(kg K)`, dynamic viscosity `8.537422562e-4 Pa s`, conductivity
+`0.6095012841 W/(m K)`, and expansion coefficient `2.743751849e-4 K⁻¹`.
+Both implementations derive `nu = mu/rho` and `alpha = k/(rho cp)` from
+the applied coefficients. Full-precision values and backend provenance are
+kept in the snapshot. Its repeatable generator is
+[`export_reference_water.cc`](export_reference_water.cc), linked only to
+the IF97 material library; it exports no flow or temperature solution.
+
 Load an OpenCFD OpenFOAM environment with `wmake`, `blockMesh`, and `checkMesh`
 available, then run from the repository root:
 
 ```sh
 # Example installation; use the path for your OpenFOAM installation.
 . /opt/OpenFOAM/OpenFOAM-v2606/etc/bashrc
+cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON
 
 verification/openfoam/dispersedBubbleFlow/run_comparison.sh steady
 verification/openfoam/dispersedBubbleFlow/run_comparison.sh transient
@@ -39,6 +59,9 @@ default is GCC RelWithDebInfo; select Debug with
 configured custom build tree. These small comparison cases run in serial.
 An optional second argument selects the output directory; consult each case
 README for the generated files and reference-application build details.
+`SIMPLEFLUID_ENABLE_IF97` remains OFF by default. In that configuration the
+two water-case executables exit with an explicit enable-IF97 diagnostic,
+and their solver CTests are not registered. No synthetic fluid is substituted.
 
 The shared [`compare_verification.py`](compare_verification.py) requires
 explicit expected times, sample identifiers, quantity tolerances, and
@@ -50,7 +73,7 @@ history instead of selecting each solver's latest available output.
 The focused SimpleFluid and comparator tests do not require OpenFOAM:
 
 ```sh
-cmake --preset GCC-ninja-multi
+cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON
 cmake --build --preset GCC-Debug --target dispersed_bubble_verification planar_ale_comparison
 ctest --test-dir build/gcc -C Debug --output-on-failure \
   -R '^(dispersed_bubble_verification_(steady|transient)|planar_ale_comparison_(steady|transient)|openfoam_verification_comparator)$'

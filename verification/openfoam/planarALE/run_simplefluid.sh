@@ -9,4 +9,5 @@ case "$mode" in steady|transient) ;; *) echo 'Mode must be steady or transient' 
 export_build_env "$repo_dir"
 simplefluid_build_target planar_ale_comparison "${SIMPLEFLUID_BUILD_JOBS:-4}"
 executable=$(simplefluid_executable planar_ale_comparison)
-"$executable" --mode "$mode" --output "$output"
+"$executable" --mode "$mode" --output "$output" \
+    --water-properties "$case_dir/../reference_water.properties"

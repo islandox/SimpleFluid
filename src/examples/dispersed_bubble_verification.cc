@@ -4,6 +4,7 @@
 #include "equations/RadiolyticGasModel.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "IF97ReferenceWater.hh"
 
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -57,6 +58,7 @@ int run(int argc, char** argv)
 {
     std::string mode = "transient", output = "dispersed_bubble_output";
     std::string parameters = "verification/openfoam/dispersedBubbleFlow/reference.properties";
+    std::string water_parameters = "verification/openfoam/reference_water.properties";
     for (int i = 1; i < argc; ++i)
     {
         const std::string option = argv[i];
@@ -68,12 +70,16 @@ int run(int argc, char** argv)
             output = value;
         else if (option == "--parameters")
             parameters = value;
+        else if (option == "--water-properties")
+            water_parameters = value;
         else
             throw std::runtime_error("Unknown argument " + option);
     }
     require(mode == "steady" || mode == "transient", "Mode must be steady or transient");
     require(Tpetra::getDefaultComm()->getSize() == 1, "This matched Cartesian verification is serial");
     const auto values = read_parameters(parameters);
+    const auto water = SimpleFluid::Verification::load_if97_reference_water(water_parameters);
+    const auto& liquid = water.liquid;
     const auto p = [&](const std::string& key) { return values.at(key); };
     const int cells = static_cast<int>(p("cells"));
     const double height = p("height"), width = p("width"), dt = p("dt");
@@ -92,7 +98,7 @@ int run(int argc, char** argv)
     auto geometry =
         std::make_shared<Mesh::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, width}, {0.0, width}, z}});
     auto mesh = std::make_shared<Mesh>(std::move(geometry));
-    Field temperature(mesh, p("temperature"), "T"), pressure(mesh, 0.0, "p");
+    Field temperature(mesh, liquid.temperature, "T"), pressure(mesh, 0.0, "p");
     Field power(mesh, mode == "steady" ? p("power_density") : 0.0, "qdot");
     Velocity velocity(mesh, Mesh::Vec3{0.0, 0.0, p("carrier_velocity")}, "U");
     Flux flux(mesh, 0.0, "phi");
@@ -100,11 +106,13 @@ int run(int argc, char** argv)
         flux.set_owned_value(face, p("carrier_velocity") * mesh->face_area_vector(face).z);
     flux.sync_ghosts();
     SimpleFluid::TimeStepperOptions time_options;
+    time_options.kinematic_viscosity = liquid.kinematic_viscosity();
+    time_options.thermal_diffusivity = liquid.thermal_diffusivity();
     SimpleFluid::BoussinesqModelOptions material_options;
-    material_options.reference_density = material_options.density = 1000.0;
-    material_options.specific_heat_capacity = 4200.0;
-    material_options.dynamic_viscosity = 1e-3;
-    material_options.thermal_conductivity = 0.6;
+    material_options.reference_density = material_options.density = liquid.density;
+    material_options.specific_heat_capacity = liquid.specific_heat_capacity;
+    material_options.dynamic_viscosity = liquid.dynamic_viscosity;
+    material_options.thermal_conductivity = liquid.thermal_conductivity;
     SimpleFluid::MaterialPropertyFields<Pack, Mesh> material(mesh, material_options, time_options);
 
     SimpleFluid::RadiolyticGasOptions options;
@@ -113,10 +121,11 @@ int run(int argc, char** argv)
     options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
     options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     options.constant_slip_velocity = p("slip_velocity");
-    options.reference_pressure = p("pressure");
+    options.reference_pressure = liquid.absolute_pressure;
     options.atmospheric_pressure = p("atmospheric_pressure");
     options.gas_constant = p("gas_constant");
-    options.surface_tension = p("surface_tension");
+    options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::Constant;
+    options.surface_tension = water.surface_tension;
     options.henry_coefficient = 1e-5;
     options.hydrogen_diffusivity = 1e-8;
     options.hydrogen_yield_mol_per_j = p("yield_mol_per_j");
@@ -132,12 +141,13 @@ int run(int argc, char** argv)
     options.max_radius = 1e-3;
     options.free_surface_patches = {"zmax"};
     const double radius = p("nucleation_radius");
-    const double nucleation = SimpleFluid::RadiolyticGasPhysics::sheng2024_nucleation_radius(p("temperature"),
-        p("uranium_concentration"), p("yield_molecules_per_100_ev"), p("pressure"), p("atmospheric_pressure"));
+    const double nucleation = SimpleFluid::RadiolyticGasPhysics::sheng2024_nucleation_radius(liquid.temperature,
+        p("uranium_concentration"), p("yield_molecules_per_100_ev"), liquid.absolute_pressure, p("atmospheric_pressure"));
     require(std::abs(nucleation / radius - 1.0) < 1e-12, "Reference nucleation radius disagrees with configured state");
     const double bubble_volume = 4.0 * std::numbers::pi / 3.0 * radius * radius * radius;
     const double moles_per_bubble =
-        bubble_volume * (p("pressure") + 2 * p("surface_tension") / radius) / (p("gas_constant") * p("temperature"));
+        bubble_volume * (liquid.absolute_pressure + 2 * water.surface_tension / radius) /
+        (p("gas_constant") * liquid.temperature);
     const double initial = p(mode + "_initial_moles");
     const double source = mode == "steady" ? p("power_density") * p("yield_mol_per_j") * p("release_efficiency") : 0.0;
     options.initial_micro_moles = initial;
@@ -154,8 +164,10 @@ int run(int argc, char** argv)
     std::ofstream history(std::filesystem::path(output) / "history.csv");
     require(profiles.good() && history.good(), "Cannot create verification CSV files");
     profiles << std::setprecision(17)
-             << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,hydrogen_balance_mol,number_balance_"
-                "relative\n";
+             << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,temperature_K,absolute_pressure_Pa,density_kg_m3,"
+                "specific_heat_capacity_J_kg_K,dynamic_viscosity_Pa_s,thermal_conductivity_W_m_K,"
+                "kinematic_viscosity_m2_s,thermal_diffusivity_m2_s,surface_tension_N_m,"
+                "hydrogen_balance_mol,number_balance_relative\n";
     history
         << std::setprecision(17)
         << "time_s,inventory_mol,produced_mol,escaped_mol,outlet_mol_s,hydrogen_balance_mol,maximum_change_mol_m3\n";
@@ -171,8 +183,13 @@ int run(int argc, char** argv)
         require(std::abs(balance) < 2e-13 && std::abs(number_balance) < 2e-8, "Global bubble conservation gate failed");
         for (int i = 0; i < cells; ++i)
         {
+            const double rho = material.density.value(i), cp = material.specific_heat_capacity.value(i);
+            const double mu = material.dynamic_viscosity.value(i), k = material.thermal_conductivity.value(i);
             profiles << time << ',' << i << ',' << (i + 0.5) * dz << ',' << gas.micro_moles().value(i) << ','
-                     << gas.micro_number_density().value(i) << ',' << gas.alpha_g().value(i) << ',' << balance << ','
+                     << gas.micro_number_density().value(i) << ',' << gas.alpha_g().value(i) << ','
+                     << temperature.value(i) << ',' << gas.absolute_pressure().value(i) << ',' << rho << ','
+                     << cp << ',' << mu << ',' << k << ',' << mu / rho << ',' << k / (rho * cp) << ','
+                     << options.surface_tension << ',' << balance << ','
                      << number_balance << '\n';
         }
         history << time << ',' << inventory << ',' << produced << ',' << escaped << ',' << last_escape / dt << ','

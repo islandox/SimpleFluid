@@ -975,6 +975,12 @@ thermal-expansion problem using moving-mesh finite volumes. The comparison
 checks matched physical times, temperature, geometry, mass, energy, and
 conservation residuals. Its scope is the uniform expansion limit; it does not
 extend the supported physics matrix or validate general free-surface momentum.
+The water cases require the optional IF97 library for the reference density,
+heat capacity, viscosity, conductivity, and thermal expansion at 300 K and
+101325 Pa absolute. They retain constant reference coefficients and the
+built-in linear thermal density law. The energy contract remains `M cp T`;
+neither nonlinear IF97 enthalpy transport nor a dynamic ALE material callback
+is enabled by this verification update.
 
 ## Fixed-Grid Limitations
 

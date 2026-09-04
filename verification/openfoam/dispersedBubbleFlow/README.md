@@ -8,9 +8,10 @@ gas/liquid momentum equations or validate the general Euler–Euler regime,
 drag correlations, polydispersity, coalescence, or boiling. Consequently,
 stock `twoPhaseEulerFoam` is not a matched reference for these cases.
 
-Run either complete comparison from any working directory:
+Configure IF97 and run either complete comparison from the repository root:
 
 ```sh
+cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON
 verification/openfoam/dispersedBubbleFlow/run_comparison.sh steady
 verification/openfoam/dispersedBubbleFlow/run_comparison.sh transient
 # Optional second argument chooses the output root; each comparison gets a fresh run directory.
@@ -25,7 +26,11 @@ the configured SimpleFluid toolchain, and OpenFOAM development tools. The
 reference is tested with OpenCFD OpenFOAM v2606; set `OPENFOAM_BASHRC` if its
 `etc/bashrc` is elsewhere. OpenFOAM binaries and intermediate build files
 remain inside the unique run directory. No download or stored reference
-result is required.
+result is required for OpenFOAM. The SimpleFluid executable requires an
+IF97-enabled build and exits with a configuration message when IF97 is off.
+Its optional dependency setup is documented in
+[`docs/modeling/if97_water.md`](../../../docs/modeling/if97_water.md).
+There is no synthetic-fluid fallback.
 
 `run_simplefluid.sh [mode] [output-directory]` and
 `run_openfoam.sh [mode] [output-directory]` run one side. The latter requires
@@ -35,10 +40,25 @@ directory. Neither standalone run establishes cross-solver agreement.
 ## Shared problem and numerical method
 
 [`reference.properties`](reference.properties) supplies both solvers' SI
-inputs. A 1 m tall column of area 1 m² has 40 uniform cells, a 0.1 m/s
+problem inputs; [`../reference_water.properties`](../reference_water.properties)
+supplies the common IF97 liquid-water reference state. SimpleFluid queries
+the linked library at runtime and verifies that the stored values still
+match; OpenFOAM reads that independently stored material snapshot, without
+reading a SimpleFluid solution. Both use constant pure-liquid density,
+heat capacity, dynamic viscosity, thermal conductivity, and the IF97
+surface-tension correlation at 300 K and 101325 Pa **absolute** pressure.
+The kinematic values follow `nu = mu/rho` and `alpha = k/(rho cp)` on both
+sides. SimpleFluid installs these values in its actual material fields;
+the comparison includes those fields and the derived kinematic values.
+
+A 1 m tall column of area 1 m² has 40 uniform cells, a 0.1 m/s
 upward carrier velocity, and 0.4 m/s upward slip. Temperature is 300 K,
-pressure 100000 Pa, and surface tension 0.07 N/m. Carrier motion is
-prescribed; hydrodynamic pressure and velocity are not being compared.
+and surface tension is approximately 0.071686 N/m. Carrier motion and
+temperature are prescribed; no momentum or energy equation is solved, so
+the material-column comparison verifies configuration, not drag or thermal
+transport. The physical surface tension and absolute pressure enter the
+gas moment/radius relation. Hydrogen remains a noncondensable ideal gas;
+saturated steam density is never used for the bubbles.
 SimpleFluid currently prevents bubble inflow at every boundary; only
 `zmax` allows outgoing bubbles. The OpenFOAM boundary flux is identically
 zero elsewhere. Thus the bottom supplies bubble-free carrier fluid.
@@ -63,6 +83,9 @@ start at zero, and there is exactly one local kinetics substep. These
 choices suppress interpopulation and dissolved-gas mass transfer while
 retaining the actual production/transport path. No fields are overwritten
 with an expected solution after an advance.
+The existing constant hydrogen diffusivity and Henry coefficient remain
+inactive auxiliary gas-model inputs in this suppressed-transfer limit;
+IF97 does not supply hydrogen transport or solubility properties.
 
 `q = release_efficiency × yield_mol_per_j × power_density`. All generated
 hydrogen enters the microbubble moment, and the source number increment is
@@ -73,7 +96,7 @@ n_b = (4 pi r_nuc³ / 3) (p + 2 sigma/r_nuc) / (R T)
 alpha_g = N (4 pi r_nuc³ / 3)
 ```
 
-The reference radius `r_nuc = 6.646002774709118e-8 m` was independently
+The reference radius `r_nuc = 6.6359547089482127e-8 m` was independently
 evaluated from the Sheng/Winter nucleation correlation at the shared
 temperature, concentration, yield, and pressure. SimpleFluid recomputes
 and checks this value to `1e-12` relative tolerance before running. Both
@@ -81,6 +104,10 @@ initial moments use the same `n_b`; their ratio remains constant under
 transport and production. OpenFOAM derives its own molar/number source
 and void from the shared physical parameters, without reading any
 SimpleFluid result. Its dimensioned fields represent mol/m³ and 1/m³.
+The retained uranium-concentration and yield parameters define the
+prescribed Sheng/Winter source for this numerical verification. IF97
+supplies a pure-water carrier reference; this is not a physical material
+model for uranyl-nitrate solution and does not validate radiolysis yields.
 
 ## Steady production and escape
 
@@ -117,7 +144,8 @@ between 40% and 60% of the initial inventory, bracketing the exact 50%.
 Both solvers write `profiles.csv` for all 40 cells at every declared
 physical output time and a global `history.csv` with inventory,
 production, escaped moles, outlet molar rate, and convergence information.
-Profiles include `c`, `N`, `alpha_g`, and independently computed hydrogen
+Profiles include `c`, `N`, `alpha_g`, water state/material coefficients,
+and independently computed hydrogen
 and number conservation residuals. Hydrogen conservation means
 `inventory + cumulative_escape - initial_inventory - cumulative_production`.
 
@@ -129,8 +157,11 @@ It compares molar concentration, number density, and void point by point
 with relative tolerance `2e-7`. The concentration absolute tolerance is
 `2e-13 mol/m³`; the corresponding number and void tolerances are obtained
 by dividing by `n_b` and multiplying by bubble volume, respectively
-(`183867.7493 m⁻³` and `2.260870692e-16`). This gives all three equivalent
+(`180186.1649 m⁻³` and `2.205567182e-16`). This gives all three equivalent
 moments the same physical tolerance near the empty side of the front.
+Water state/material columns use `2e-9` relative tolerance (temperature
+and absolute pressure use exact equality). These check the installed
+reference material independently of the gas-moment tolerances.
 It independently requires each solver's global hydrogen residual to be
 below `2e-13 mol` and number residual below `2e-8` relative. Solver exit
 status also enforces analytic, conservation, boundedness, and steady or
