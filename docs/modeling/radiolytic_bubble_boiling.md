@@ -152,6 +152,18 @@ The scaffold deliberately owns neither solver and defines no file/network
 protocol. A production external-neutronics adapter, convergence policy, and
 coupled physical validation remain future work.
 
+## OpenFOAM Transport Verification
+
+The paired [`dispersedBubbleFlow` verification cases](../../verification/openfoam/dispersedBubbleFlow/README.md)
+compare production microbubble transport with an independent OpenFOAM
+finite-volume reference. The steady case balances uniform bubble production
+with top escape; the transient case tracks clearance of an initial bubble
+inventory. Both use a prescribed constant rise speed and suppress population
+conversion and dissolution to isolate the shared transport equations.
+The checks cover matched cell profiles, inventories, and source/escape
+conservation. They do not validate gas momentum, interphase forces, turbulence,
+or the full radiolytic kinetics model.
+
 ## Limitations
 
 - No separate gas momentum equation is solved.

@@ -967,6 +967,15 @@ boundary ownership, transactional restoration, and conservation for the
 constrained matrix; they do not validate physical surface trajectories,
 circulation, or radiolytic-bubble experiments.
 
+The paired [`planarALE` OpenFOAM verification cases](../../verification/openfoam/planarALE/README.md)
+add a transient uniform-heating expansion and a source-off steady equilibrium.
+`planar_ale_comparison` runs the production SimpleFluid ALE solver; the
+OpenFOAM reference independently solves the corresponding reduced uniform
+thermal-expansion problem using moving-mesh finite volumes. The comparison
+checks matched physical times, temperature, geometry, mass, energy, and
+conservation residuals. Its scope is the uniform expansion limit; it does not
+extend the supported physics matrix or validate general free-surface momentum.
+
 ## Fixed-Grid Limitations
 
 Milestone A leaves the computational geometry and all transport volumes

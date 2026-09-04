@@ -335,6 +335,11 @@ with bundled OpenFOAM profile data. See
 `verification/openfoam/pitzDaily/README.md` for the pitzDaily workflow. The
 matched Gaussian tank workflow and its interpretation are documented in
 `verification/openfoam/fissileSolutionTank/README.md`.
+Matched steady and transient checks for the supported dispersed-bubble
+transport and constrained planar-ALE models are documented in
+[`verification/openfoam/README.md`](verification/openfoam/README.md).
+They include independent OpenFOAM finite-volume reference applications,
+physical-time and sample-coverage checks, and conservation acceptance gates.
 
 ## Examples
 
@@ -353,6 +358,8 @@ Pre-built example executables:
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 | `planar_free_surface_verification` | Five analytic fixed-grid volume-budget cases with CSV diagnostics |
 | `planar_ale_verification` | Four solver-integrated planar-ALE conservation cases: heating, gas generation, complete H2 escape, and rollback |
+| `dispersed_bubble_verification` | Steady source/escape balance and transient dispersed-bubble transport with matched OpenFOAM references |
+| `planar_ale_comparison` | Transient thermal expansion and source-off steady equilibrium with matched OpenFOAM moving-mesh references |
 
 Examples use `Database` configuration, documented environment controls, or a
 combination of both. Their CTest smoke settings intentionally reduce mesh size

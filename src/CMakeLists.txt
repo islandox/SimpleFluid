@@ -411,6 +411,25 @@ simplefluid_exe_reuse_precompiled_header(planar_ale_verification)
 simplefluid_exclude_from_pgo_sources(
     examples/planar_ale_verification.cc)
 
+foreach(VERIFICATION_TARGET IN ITEMS dispersed_bubble_verification planar_ale_comparison)
+  add_executable(${VERIFICATION_TARGET} examples/${VERIFICATION_TARGET}.cc)
+  target_link_libraries(${VERIFICATION_TARGET} PRIVATE SimpleFluid)
+  simplefluid_exe_reuse_precompiled_header(${VERIFICATION_TARGET})
+  simplefluid_exclude_from_pgo_sources(examples/${VERIFICATION_TARGET}.cc)
+  if(BUILD_TESTING)
+    foreach(VERIFICATION_MODE IN ITEMS steady transient)
+      add_test(
+        NAME ${VERIFICATION_TARGET}_${VERIFICATION_MODE}
+        COMMAND ${VERIFICATION_TARGET} --mode ${VERIFICATION_MODE}
+          --output "${CMAKE_CURRENT_BINARY_DIR}/verification/${VERIFICATION_TARGET}/${VERIFICATION_MODE}")
+      set_tests_properties(${VERIFICATION_TARGET}_${VERIFICATION_MODE} PROPERTIES
+        LABELS "verification;conservation"
+        TIMEOUT 120
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    endforeach()
+  endif()
+endforeach()
+
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(natural_convection_box)
@@ -469,9 +488,16 @@ if(BUILD_TESTING)
     set_tests_properties(pitz_daily_profile_comparator_fixture PROPERTIES
       LABELS "verification;integration"
       TIMEOUT 30)
+    add_test(
+      NAME openfoam_verification_comparator
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/test_compare_verification.py")
+    set_tests_properties(openfoam_verification_comparator PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
   else()
     message(WARNING
-      "Python 3 was not found; the pitzDaily profile-comparator fixture test is disabled")
+      "Python 3 was not found; the OpenFOAM comparator fixture tests are disabled")
   endif()
 endif()
 

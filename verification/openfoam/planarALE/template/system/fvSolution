@@ -1,0 +1,16 @@
+FoamFile
+{
+    format ascii;
+    class dictionary;
+    object fvSolution;
+}
+solvers
+{
+    T
+    {
+        solver smoothSolver;
+        smoother symGaussSeidel;
+        tolerance 1e-13;
+        relTol 0;
+    }
+}
