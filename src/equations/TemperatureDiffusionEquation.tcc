@@ -22,15 +22,12 @@ namespace SimpleFluid
  * @param boundary_conditions Boundary-condition set for temperature.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack>
-TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
-    SP<const mesh_type> mesh,
-    const BoundaryConditionSet& boundary_conditions)
-    : d_mesh(EquationValidation::require_non_null_mesh(
-          std::move(mesh), "TemperatureDiffusionEquation")),
-      d_transport_geometry_cache(*d_mesh),
-      d_candidate_temperature(
-          d_mesh, "temperature_candidate", false),
+template<TpetraTypePack Pack, class MeshType>
+TemperatureDiffusionEquation<Pack, MeshType>::TemperatureDiffusionEquation(
+    SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions)
+    : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "TemperatureDiffusionEquation")),
+      d_transport_geometry_cache(*d_mesh), d_candidate_temperature(d_mesh, "temperature_candidate", false),
+      d_face_boundary_temperature{{}, d_mesh},
       d_boundary_condition(std::make_shared<BoundaryConditionMap>(boundary_conditions.temperature))
 {
     refresh_boundary_cache();
@@ -45,17 +42,14 @@ TemperatureDiffusionEquation<Pack>::TemperatureDiffusionEquation(
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack>
-void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
+template<TpetraTypePack Pack, class MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::refresh_boundary_cache()
 {
     d_face_boundary_temperature.value.clear();
     for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
     {
-        const auto iter =
-            d_boundary_condition->find(
-                d_mesh->boundary_batch_name(batch_id));
-        if (iter == d_boundary_condition->end()
-            || iter->second.type != BoundaryConditionType::Dirichlet)
+        const auto iter = d_boundary_condition->find(d_mesh->boundary_batch_name(batch_id));
+        if (iter == d_boundary_condition->end() || iter->second.type != BoundaryConditionType::Dirichlet)
         {
             continue;
         }
@@ -67,8 +61,8 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
                 continue;
             }
 
-            d_face_boundary_temperature.value[batch_id] = Arr<
-                typename Pack::scalar_type>(boundary_batch.face_lids.size(), iter->second.value);
+            d_face_boundary_temperature.value[batch_id] =
+                Arr<typename Pack::scalar_type>(boundary_batch.face_lids.size(), iter->second.value);
         }
     }
 }
@@ -82,21 +76,13 @@ void TemperatureDiffusionEquation<Pack>::refresh_boundary_cache()
  * @param thermal_diffusivity Thermal diffusivity coefficient.
  * @param[out] temperature Updated temperature field on return.
  */
-template<TpetraTypePack Pack>
-void TemperatureDiffusionEquation<Pack>::advance_explicit(
-    const std::vector<scalar_type>& old_temperature,
-    scalar_type time_step,
-    scalar_type thermal_diffusivity,
-    field_type& temperature) const
+template<TpetraTypePack Pack, class MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::vector<scalar_type>& old_temperature,
+    scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature) const
 {
-    auto zero_source =
-        [](local_ordinal_type) -> scalar_type
-    {
-        return scalar_type{};
-    };
+    auto zero_source = [](local_ordinal_type) -> scalar_type { return scalar_type{}; };
 
-    advance_explicit(old_temperature, time_step, thermal_diffusivity,
-                     temperature, zero_source);
+    advance_explicit(old_temperature, time_step, thermal_diffusivity, temperature, zero_source);
 }
 
 /**
@@ -117,22 +103,15 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
  *         negative diffusivity.
  * @throws std::runtime_error if a Robin boundary condition is encountered.
  */
-template<TpetraTypePack Pack>
-void TemperatureDiffusionEquation<Pack>::advance_explicit(
-    const std::vector<scalar_type>& old_temperature,
-    scalar_type time_step,
-    scalar_type thermal_diffusivity,
-    field_type& temperature,
+template<TpetraTypePack Pack, class MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::vector<scalar_type>& old_temperature,
+    scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature,
     const source_type& right_hand_source) const
 {
-    EquationValidation::require_mesh_match(*d_mesh, temperature,
-                                           "TemperatureDiffusionEquation");
-    EquationValidation::require_non_negative(time_step, "time step",
-                                             "TemperatureDiffusionEquation");
-    EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
-                                             "TemperatureDiffusionEquation");
-    EquationValidation::assert_sufficient_cache_size(old_temperature.size(),
-                                                     d_mesh->num_local_cells());
+    EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(time_step, "time step", "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity", "TemperatureDiffusionEquation");
+    EquationValidation::assert_sufficient_cache_size(old_temperature.size(), d_mesh->num_local_cells());
 
     for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
     {
@@ -148,26 +127,19 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
 
             if (d_mesh->is_interior_face(face_lid))
             {
-                const auto other =
-                    d_mesh->opposite_or_periodic_neighbor_cell(face_lid,
-                                                               cell_lid);
+                const auto other = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
                 const auto distance = d_mesh->face_cell_center_distance(face_lid);
                 if (distance > 0.0)
                 {
                     laplacian +=
-                        (old_temperature[static_cast<size_t>(other)] - temp_p)
-                      * d_mesh->face_area(face_lid)
-                      / distance;
+                        (old_temperature[static_cast<size_t>(other)] - temp_p) * d_mesh->face_area(face_lid) / distance;
                 }
             }
         }
 
         laplacian /= d_mesh->cell_volume(cell_lid);
-        temperature.set_owned_value(cell_lid,
-                                    temp_p
-                                  + time_step
-                                  * (thermal_diffusivity * laplacian
-                                     + right_hand_source(cell_lid)));
+        temperature.set_owned_value(
+            cell_lid, temp_p + time_step * (thermal_diffusivity * laplacian + right_hand_source(cell_lid)));
     }
 
     // Apply Dirichlet boundary contributions on top of the interior-face
@@ -175,7 +147,8 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
     for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
     {
         auto boundary_name = d_mesh->boundary_batch_name(batch_id);
-        if (!d_boundary_condition->contains(boundary_name)) continue;
+        if (!d_boundary_condition->contains(boundary_name))
+            continue;
 
         auto BC = d_boundary_condition->at(d_mesh->boundary_batch_name(batch_id));
         if (BC.type == BoundaryConditionType::Dirichlet)
@@ -193,13 +166,10 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
                     if (distance_to_face > 0.0)
                     {
                         const auto boundary_contrib =
-                            (boundary_temperature - temp_p)
-                          * d_mesh->face_area(boundary_face_lid)
-                          / distance_to_face;
+                            (boundary_temperature - temp_p) * d_mesh->face_area(boundary_face_lid) / distance_to_face;
 
-                        temperature.sum_into_value(owner,
-                            time_step * thermal_diffusivity
-                                    * boundary_contrib / d_mesh->cell_volume(owner));
+                        temperature.sum_into_value(
+                            owner, time_step * thermal_diffusivity * boundary_contrib / d_mesh->cell_volume(owner));
                     }
                 }
             }
@@ -215,12 +185,9 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
 
                 const auto owner = d_mesh->owner_cell(boundary_face_lid);
                 const auto boundary_contribution =
-                    static_cast<scalar_type>(BC.value)
-                  * d_mesh->face_area(boundary_face_lid);
+                    static_cast<scalar_type>(BC.value) * d_mesh->face_area(boundary_face_lid);
                 temperature.sum_into_value(
-                    owner,
-                    time_step * thermal_diffusivity
-                  * boundary_contribution / d_mesh->cell_volume(owner));
+                    owner, time_step * thermal_diffusivity * boundary_contribution / d_mesh->cell_volume(owner));
             }
         }
         else if (BC.type == BoundaryConditionType::NoSlip)
@@ -229,7 +196,8 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
         }
         else if (BC.type == BoundaryConditionType::Robin)
         {
-            throw std::runtime_error("Robin boundary conditions are not yet implemented in TemperatureDiffusionEquation.");
+            throw std::runtime_error(
+                "Robin boundary conditions are not yet implemented in TemperatureDiffusionEquation.");
         }
     }
 
@@ -248,26 +216,15 @@ void TemperatureDiffusionEquation<Pack>::advance_explicit(
  * @param[out] temperature Updated temperature field on return.
  * @param linear_options Linear solver configuration.
  */
-template<TpetraTypePack Pack>
-auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
-    const field_type& old_temperature,
-    const FaceField<Pack>& face_fluxes,
-    scalar_type time_step,
-    scalar_type thermal_diffusivity,
-    field_type& temperature,
-    const LinearSolverOptions& linear_options) const
-    -> LinearSolveStatistics
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
+    field_type& temperature, const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
 {
-    auto zero_source =
-        [](local_ordinal_type) -> scalar_type
-    {
-        return scalar_type{};
-    };
+    auto zero_source = [](local_ordinal_type) -> scalar_type { return scalar_type{}; };
 
     return advance_semi_implicit(
-        old_temperature, face_fluxes, time_step,
-        thermal_diffusivity, temperature, zero_source,
-        linear_options);
+        old_temperature, face_fluxes, time_step, thermal_diffusivity, temperature, zero_source, linear_options);
 }
 
 /**
@@ -291,40 +248,60 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
  *         negative diffusivity.
  * @throws std::runtime_error if the linear transport solve does not converge.
  */
-template<TpetraTypePack Pack>
-auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
-    const field_type& old_temperature,
-    const FaceField<Pack>& face_fluxes,
-    scalar_type time_step,
-    scalar_type thermal_diffusivity,
-    field_type& temperature,
-    const source_type& right_hand_source,
-    const LinearSolverOptions& linear_options) const
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
+    field_type& temperature, const source_type& right_hand_source, const LinearSolverOptions& linear_options) const
     -> LinearSolveStatistics
 {
-    EquationValidation::require_mesh_match(*d_mesh, old_temperature,
-                                           "TemperatureDiffusionEquation");
-    EquationValidation::require_mesh_match(*d_mesh, temperature,
-                                           "TemperatureDiffusionEquation");
-    EquationValidation::require_non_negative(time_step, "time step",
-                                             "TemperatureDiffusionEquation");
-    EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity",
-                                             "TemperatureDiffusionEquation");
+    return advance_semi_implicit_impl(old_temperature, face_fluxes, time_step, thermal_diffusivity, temperature,
+        right_hand_source, std::nullopt, linear_options);
+}
 
-    const auto old_temperature_values =
-        old_temperature.local_read_view();
-    auto boundary_condition =
-        [&](int batch_id, size_t)
+/** @brief Advance zero-source transport with selected non-orthogonal diffusion. */
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
+    field_type& temperature, FVM::NonOrthogonalTreatment treatment, const LinearSolverOptions& linear_options) const
+    -> LinearSolveStatistics
+{
+    auto zero_source = [](local_ordinal_type) -> scalar_type { return scalar_type{}; };
+    return advance_semi_implicit(old_temperature, face_fluxes, time_step, thermal_diffusivity, temperature, zero_source,
+        treatment, linear_options);
+}
+
+/** @brief Advance sourced transport with selected non-orthogonal diffusion. */
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
+    field_type& temperature, const source_type& right_hand_source, FVM::NonOrthogonalTreatment treatment,
+    const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
+{
+    return advance_semi_implicit_impl(old_temperature, face_fluxes, time_step, thermal_diffusivity, temperature,
+        right_hand_source, treatment, linear_options);
+}
+
+/** @brief Shared orthogonal and non-orthogonal transport implementation. */
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
+    field_type& temperature, const source_type& right_hand_source, std::optional<FVM::NonOrthogonalTreatment> treatment,
+    const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
+{
+    EquationValidation::require_mesh_match(*d_mesh, old_temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(time_step, "time step", "TemperatureDiffusionEquation");
+    EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity", "TemperatureDiffusionEquation");
+
+    const auto old_temperature_values = old_temperature.local_read_view();
+    auto boundary_condition = [&](int batch_id, size_t)
     {
         const auto name = d_mesh->boundary_batch_name(batch_id);
         const auto iter = d_boundary_condition->find(name);
-        return iter == d_boundary_condition->end()
-             ? BoundaryCondition{}
-             : iter->second;
+        return iter == d_boundary_condition->end() ? BoundaryCondition{} : iter->second;
     };
 
-    auto boundary_value =
-        [&](int batch_id, size_t in_batch_id) -> typename Pack::scalar_type
+    auto boundary_value = [&](int batch_id, size_t in_batch_id) -> typename Pack::scalar_type
     {
         const auto cache_it = d_face_boundary_temperature.value.find(batch_id);
         if (cache_it != d_face_boundary_temperature.value.end())
@@ -332,32 +309,43 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
             return cache_it->second[in_batch_id];
         }
 
-        const auto face_lid =
-            d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        const auto face_lid = d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto owner = d_mesh->owner_cell(face_lid);
         return old_temperature_values(owner, 0);
     };
 
+    const auto requires_non_orthogonal_graph = treatment && *treatment != FVM::NonOrthogonalTreatment::Explicit;
+    if (requires_non_orthogonal_graph && !d_cached_transport_graph_supports_non_orthogonal_correction)
+    {
+        d_cached_transport_matrix = Teuchos::null;
+    }
     auto system = [&]()
     {
         try
         {
-            return FVM::transport_system<Pack>(
-                old_temperature, face_fluxes, time_step,
-                thermal_diffusivity, boundary_condition, boundary_value,
-                right_hand_source, d_cached_transport_matrix);
+            if (treatment)
+            {
+                const auto* correction_field =
+                    *treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &old_temperature;
+                return FVM::non_orthogonal_transport_system<Pack>(old_temperature, face_fluxes, time_step,
+                    thermal_diffusivity, boundary_condition, boundary_value, right_hand_source, *treatment,
+                    correction_field, d_cached_transport_matrix, &d_transport_geometry_cache);
+            }
+            return FVM::transport_system<Pack>(old_temperature, face_fluxes, time_step, thermal_diffusivity,
+                boundary_condition, boundary_value, right_hand_source, d_cached_transport_matrix);
         }
         catch (...)
         {
             // Failed reuse leaves the matrix in resume-fill mode.
             d_cached_transport_matrix = Teuchos::null;
+            d_cached_transport_graph_supports_non_orthogonal_correction = false;
             throw;
         }
     }();
-
-    if (d_cached_transport_matrix.is_null())
+    d_cached_transport_matrix = system.matrix;
+    if (requires_non_orthogonal_graph && thermal_diffusivity > scalar_type{})
     {
-        d_cached_transport_matrix = system.matrix;
+        d_cached_transport_graph_supports_non_orthogonal_correction = true;
     }
 
     if (system.rhs->norm2() == scalar_type{})
@@ -369,21 +357,14 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
 
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     auto& candidate_temperature = d_candidate_temperature;
-    candidate_temperature.owned_data().update(
-        scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
+    candidate_temperature.owned_data().update(scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
     const auto statistics =
-        d_linear_solver.solve_with_statistics(
-            matrix, *system.rhs,
-            candidate_temperature.owned_data(), linear_options);
+        d_linear_solver.solve_with_statistics(matrix, *system.rhs, candidate_temperature.owned_data(), linear_options);
     if (!statistics.converged)
     {
-        throw std::runtime_error(
-            "TemperatureDiffusionEquation transport solve did not converge.");
+        throw std::runtime_error("TemperatureDiffusionEquation transport solve did not converge.");
     }
-    temperature.owned_data().update(
-        scalar_type{1},
-        candidate_temperature.owned_data(),
-        scalar_type{0});
+    temperature.owned_data().update(scalar_type{1}, candidate_temperature.owned_data(), scalar_type{0});
     d_mesh->sync_periodic_boundaries(temperature);
     return statistics;
 }
@@ -405,89 +386,61 @@ auto TemperatureDiffusionEquation<Pack>::advance_semi_implicit(
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if the linear solve fails or is non-finite.
  */
-template<TpetraTypePack Pack>
-auto TemperatureDiffusionEquation<Pack>::advance_physical(
-    const field_type& old_temperature,
-    const FaceField<Pack>& face_fluxes,
-    scalar_type time_step,
-    const MaterialPropertyFields<Pack>& material,
-    field_type& temperature,
-    const source_type& power_density,
-    FVM::NonOrthogonalTreatment treatment,
-    const LinearSolverOptions& linear_options,
-    const field_type* thermal_conductivity_override,
-    const FVM::BoundaryCache<Pack>* boundary_thermal_conductivity,
-    FVM::FaceCoefficientInterpolation coefficient_interpolation) const
-    -> LinearSolveStatistics
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_type& old_temperature,
+    const face_flux_field_type& face_fluxes, scalar_type time_step, const material_type& material,
+    field_type& temperature, const source_type& power_density, FVM::NonOrthogonalTreatment treatment,
+    const LinearSolverOptions& linear_options, const field_type* thermal_conductivity_override,
+    const boundary_cache_type* boundary_thermal_conductivity,
+    FVM::FaceCoefficientInterpolation coefficient_interpolation) const -> LinearSolveStatistics
 {
-    EquationValidation::require_mesh_match(
-        *d_mesh, old_temperature, "TemperatureDiffusionEquation");
-    EquationValidation::require_mesh_match(
-        *d_mesh, temperature, "TemperatureDiffusionEquation");
-    EquationValidation::require_mesh_match(
-        *d_mesh, material.density, "TemperatureDiffusionEquation");
-    EquationValidation::require_mesh_match(
-        *d_mesh, material.specific_heat_capacity,
-        "TemperatureDiffusionEquation");
-    EquationValidation::require_mesh_match(
-        *d_mesh, material.thermal_conductivity,
-        "TemperatureDiffusionEquation");
-    const auto& thermal_conductivity = thermal_conductivity_override == nullptr
-        ? material.thermal_conductivity
-        : *thermal_conductivity_override;
-    const auto conductivity_values =
-        thermal_conductivity.local_read_view();
+    EquationValidation::require_mesh_match(*d_mesh, old_temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, material.density, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, material.specific_heat_capacity, "TemperatureDiffusionEquation");
+    EquationValidation::require_mesh_match(*d_mesh, material.thermal_conductivity, "TemperatureDiffusionEquation");
+    const auto& thermal_conductivity =
+        thermal_conductivity_override == nullptr ? material.thermal_conductivity : *thermal_conductivity_override;
+    const auto conductivity_values = thermal_conductivity.local_read_view();
     if (thermal_conductivity_override != nullptr)
     {
-        EquationValidation::require_mesh_match(
-            *d_mesh, thermal_conductivity,
-            "TemperatureDiffusionEquation");
+        EquationValidation::require_mesh_match(*d_mesh, thermal_conductivity, "TemperatureDiffusionEquation");
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             const auto value = conductivity_values(cell_lid, 0);
             if (!std::isfinite(value) || value < scalar_type{})
             {
-                throw std::invalid_argument(
-                    "TemperatureDiffusionEquation thermal-conductivity "
-                    "override must contain finite non-negative values.");
+                throw std::invalid_argument("TemperatureDiffusionEquation thermal-conductivity "
+                                            "override must contain finite non-negative values.");
             }
         }
     }
     if (time_step <= scalar_type{})
     {
-        throw std::invalid_argument(
-            "TemperatureDiffusionEquation requires a positive time step.");
+        throw std::invalid_argument("TemperatureDiffusionEquation requires a positive time step.");
     }
     if (!power_density)
     {
-        throw std::invalid_argument(
-            "TemperatureDiffusionEquation requires a power-density provider.");
+        throw std::invalid_argument("TemperatureDiffusionEquation requires a power-density provider.");
     }
 
-    const auto old_temperature_values =
-        old_temperature.local_read_view();
-    auto boundary_condition =
-        [&](int batch_id, size_t)
+    const auto old_temperature_values = old_temperature.local_read_view();
+    auto boundary_condition = [&](int batch_id, size_t)
     {
         const auto name = d_mesh->boundary_batch_name(batch_id);
         const auto iter = d_boundary_condition->find(name);
-        return iter == d_boundary_condition->end()
-             ? BoundaryCondition{}
-             : iter->second;
+        return iter == d_boundary_condition->end() ? BoundaryCondition{} : iter->second;
     };
-    auto boundary_value =
-        [&](int batch_id, size_t in_batch_id) -> scalar_type
+    auto boundary_value = [&](int batch_id, size_t in_batch_id) -> scalar_type
     {
-        const auto iter =
-            d_face_boundary_temperature.value.find(batch_id);
+        const auto iter = d_face_boundary_temperature.value.find(batch_id);
         if (iter != d_face_boundary_temperature.value.end())
         {
             return iter->second[in_batch_id];
         }
 
-        const auto face_lid =
-            d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+        const auto face_lid = d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
         const auto owner = d_mesh->owner_cell(face_lid);
         return old_temperature_values(owner, 0);
     };
@@ -496,17 +449,11 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(local);
-        all_conductivities_positive = all_conductivities_positive
-            && conductivity_values(cell_lid, 0) > scalar_type{};
+        all_conductivities_positive = all_conductivities_positive && conductivity_values(cell_lid, 0) > scalar_type{};
     }
-    const auto* correction_field =
-        treatment == FVM::NonOrthogonalTreatment::Implicit
-      ? nullptr
-      : &old_temperature;
-    const auto requires_non_orthogonal_graph =
-        treatment != FVM::NonOrthogonalTreatment::Explicit;
-    if (requires_non_orthogonal_graph
-        && !d_cached_physical_graph_supports_non_orthogonal_correction)
+    const auto* correction_field = treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &old_temperature;
+    const auto requires_non_orthogonal_graph = treatment != FVM::NonOrthogonalTreatment::Explicit;
+    if (requires_non_orthogonal_graph && !d_cached_physical_graph_supports_non_orthogonal_correction)
     {
         d_cached_physical_transport_matrix = Teuchos::null;
     }
@@ -514,28 +461,15 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     {
         try
         {
-            return FVM::physical_temperature_transport_system<Pack>(
-                old_temperature,
-                face_fluxes,
-                time_step,
-                material.density,
-                material.specific_heat_capacity,
-                thermal_conductivity,
-                boundary_condition,
-                boundary_value,
-                power_density,
-                treatment,
-                correction_field,
-                d_cached_physical_transport_matrix,
-                boundary_thermal_conductivity,
-                &d_transport_geometry_cache,
-                coefficient_interpolation);
+            return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
+                material.density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
+                boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
+                boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation);
         }
         catch (...)
         {
             d_cached_physical_transport_matrix = Teuchos::null;
-            d_cached_physical_graph_supports_non_orthogonal_correction =
-                false;
+            d_cached_physical_graph_supports_non_orthogonal_correction = false;
             throw;
         }
     }();
@@ -546,25 +480,15 @@ auto TemperatureDiffusionEquation<Pack>::advance_physical(
     }
 
     auto& candidate_temperature = d_candidate_temperature;
-    candidate_temperature.owned_data().update(
-        scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
-    Teuchos::RCP<const typename Pack::matrix_type> matrix =
-        system.matrix;
+    candidate_temperature.owned_data().update(scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
+    Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto statistics =
-        d_linear_solver.solve_with_statistics(
-            matrix,
-            *system.rhs,
-            candidate_temperature.owned_data(),
-            linear_options);
+        d_linear_solver.solve_with_statistics(matrix, *system.rhs, candidate_temperature.owned_data(), linear_options);
     if (!statistics.converged)
     {
-        throw std::runtime_error(
-            "TemperatureDiffusionEquation physical transport solve did not converge.");
+        throw std::runtime_error("TemperatureDiffusionEquation physical transport solve did not converge.");
     }
-    temperature.owned_data().update(
-        scalar_type{1},
-        candidate_temperature.owned_data(),
-        scalar_type{0});
+    temperature.owned_data().update(scalar_type{1}, candidate_temperature.owned_data(), scalar_type{0});
     d_mesh->sync_periodic_boundaries(temperature);
     return statistics;
 }

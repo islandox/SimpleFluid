@@ -59,11 +59,13 @@ verification/openfoam/fissileSolutionTank/openfoam/Allrun 12
 verification/openfoam/fissileSolutionTank/run_simplefluid.sh 12
 ```
 
-The SimpleFluid launcher uses `GCC-RelWithDebInfo` by default. The usual
-`SIMPLEFLUID_COMPILER`, `SIMPLEFLUID_BUILD_CONFIG`, and
-`SIMPLEFLUID_BUILD_DIR` overrides are supported. Mesh and time overrides are
-accepted by `run_simplefluid.sh`, but `run_comparison.sh` rejects them because
-they would no longer match the checked-in OpenFOAM case.
+The SimpleFluid launcher uses `GCC-RelWithDebInfo` and
+`build/gcc/bin/RelWithDebInfo` by default. Set `SIMPLEFLUID_COMPILER=LLVM` to
+use the corresponding LLVM preset and `build/llvm/bin/RelWithDebInfo`.
+`SIMPLEFLUID_BUILD_CONFIG` and `SIMPLEFLUID_BUILD_DIR` overrides are also
+supported. Mesh and time overrides are accepted by `run_simplefluid.sh`, but
+`run_comparison.sh` rejects them because they would no longer match the
+checked-in OpenFOAM case.
 
 The programmatic cylinder generator constructs the global geometry only on
 rank 0. After conversion to compact legacy arrays it releases the STK source,

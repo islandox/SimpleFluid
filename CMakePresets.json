@@ -5,6 +5,7 @@
             "name": "GCC-ninja-multi",
             "displayName": "GCC with pre-built Trilinos and OpenMPI",
             "description": "Local multi-config build using the shared Trilinos and OpenMPI settings",
+            "generator": "Ninja Multi-Config",
             "binaryDir": "${sourceDir}/build/gcc",
             "cacheVariables": {
                 "CMAKE_CXX_STANDARD": "23",
@@ -19,12 +20,12 @@
             "name": "LLVM-ninja-multi",
             "displayName": "LLVM with pre-built Trilinos and OpenMPI",
             "description": "Multi config build with Trilinos (Tpetra, STK, Kokkos, Teuchos) and OpenMPI",
-            "generator": "Ninja Multi-Config",
             "binaryDir": "${sourceDir}/build/llvm",
             "inherits": "GCC-ninja-multi",
             "cacheVariables": {
                 "Trilinos_DIR": "$env{HOME}/local/mathlibs/trilinos17.2-openmpi5-libcxx/lib/cmake/Trilinos",
                 "GTest_ROOT": "$env{HOME}/local/toolchains/gtest-clang-libc++",
+                "GTest_DIR": "$env{HOME}/local/toolchains/gtest-clang-libc++/lib/cmake/GTest",
                 "CMAKE_CXX_COMPILER": "clang++",
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_FLAGS": "-stdlib=libc++"

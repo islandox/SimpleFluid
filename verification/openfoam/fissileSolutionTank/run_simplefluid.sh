@@ -18,6 +18,7 @@ repo_dir=$(CDPATH= cd -- "$case_dir/../../.." && pwd)
 . "$repo_dir/verification/environments.sh"
 export_build_env "$repo_dir"
 simplefluid_build_target fissile_solution_tank_sst
+executable="$(simplefluid_executable fissile_solution_tank_sst)"
 
 output_dir=${SIMPLEFLUID_TANK_OUTPUT_DIR:-"$case_dir/profiles"}
 case "$output_dir" in
@@ -32,8 +33,8 @@ cd "$output_dir"
 export SIMPLEFLUID_TANK_OUTPUT_PREFIX="$output_dir/simplefluid_cells"
 
 if [ "$np" -eq 1 ]; then
-    "$SIMPLEFLUID_BIN_DIR/fissile_solution_tank_sst"
+    "$executable"
 else
     mpiexec --use-hwthread-cpus -n "$np" \
-        "$SIMPLEFLUID_BIN_DIR/fissile_solution_tank_sst"
+        "$executable"
 fi

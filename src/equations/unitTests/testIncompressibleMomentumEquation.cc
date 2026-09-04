@@ -275,7 +275,7 @@ TEST(IncompressibleMomentumEquationTest,
             velocity, zero_fluxes, boundary_cache, options,
             dynamic_viscosity, 1.0, velocity, zero_acceleration,
             linear_options),
-        std::runtime_error);
+        SimpleFluid::RetryableMomentumNonconvergence);
 
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {

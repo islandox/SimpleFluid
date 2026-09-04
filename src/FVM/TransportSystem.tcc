@@ -14,16 +14,116 @@
 
 #include <Teuchos_CommHelpers.hpp>
 
+#include <array>
 #include <cmath>
+#include <exception>
+#include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace SimpleFluid::FVM
 {
 namespace detail
 {
+
+template<class MeshType, size_t StateCount>
+std::array<int, StateCount> reduce_transport_validation_state(
+    const MeshType& mesh,
+    const std::array<int, StateCount>& local_state)
+{
+    auto global_state = local_state;
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    if (communicator->getSize() > 1)
+    {
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_MAX,
+            static_cast<int>(StateCount),
+            local_state.data(),
+            global_state.data());
+    }
+    return global_state;
+}
+
+template<TpetraTypePack Pack> struct TransportMatrixRow
+{
+    std::vector<typename Pack::local_ordinal_type> columns;
+    std::vector<typename Pack::scalar_type> values;
+};
+
+template<TpetraTypePack Pack>
+TransportMatrixRow<Pack> capture_transport_row(
+    const FlatMatrixRow<typename Pack::local_ordinal_type,
+        typename Pack::scalar_type>& row_values)
+{
+    TransportMatrixRow<Pack> row;
+    row.columns.assign(
+        row_values.column_data(),
+        row_values.column_data() + row_values.size());
+    row.values.assign(
+        row_values.value_data(),
+        row_values.value_data() + row_values.size());
+    return row;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void validate_transport_matrix_graph(
+    const MeshType& mesh,
+    const Teuchos::RCP<typename Pack::matrix_type>& cached_matrix,
+    const std::vector<TransportMatrixRow<Pack>>& rows)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using matrix_type = typename Pack::matrix_type;
+
+    int incompatible_graph = 0;
+    if (!cached_matrix.is_null())
+    {
+        try
+        {
+            for (size_t row = 0;
+                 row < rows.size() && incompatible_graph == 0;
+                 ++row)
+            {
+                typename matrix_type::local_inds_host_view_type
+                    cached_columns;
+                typename matrix_type::values_host_view_type cached_values;
+                cached_matrix->getLocalRowView(
+                    static_cast<local_ordinal_type>(row),
+                    cached_columns,
+                    cached_values);
+                for (const auto required_column : rows[row].columns)
+                {
+                    bool found = false;
+                    for (size_t entry = 0;
+                         entry < cached_columns.extent(0);
+                         ++entry)
+                    {
+                        found = found
+                            || cached_columns[entry] == required_column;
+                    }
+                    incompatible_graph = incompatible_graph || !found;
+                }
+            }
+        }
+        catch (const std::exception&)
+        {
+            incompatible_graph = 1;
+        }
+    }
+
+    const auto graph_state = reduce_transport_validation_state(
+        mesh, std::array<int, 1>{incompatible_graph});
+    if (graph_state[0] != 0)
+    {
+        throw std::invalid_argument(
+            "transport_system cached matrix graph is incompatible with "
+            "the operator.");
+    }
+}
 
 template<TpetraTypePack Pack, class Field>
 NonOrthogonalTransportWeights<typename Pack::scalar_type> validate_non_orthogonal_transport_selection(
@@ -139,62 +239,6 @@ void add_transport_values(const PreparedTransportMatrix<Pack>& prepared, typenam
 }
 
 } // namespace detail
-
-template<class MeshType>
-TransportGeometryCache<MeshType>::TransportGeometryCache(const MeshType& mesh)
-    : d_mesh(&mesh), d_interior_stencils(detail::least_squares_gradient_stencils(mesh)),
-      d_boundary_locations(detail::boundary_face_locations(mesh)),
-      d_boundary_geometry(detail::boundary_aware_gradient_geometry(mesh, d_boundary_locations))
-{
-}
-
-template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(const MeshType& mesh) const
-{
-    if (&mesh != d_mesh)
-    {
-        throw std::invalid_argument("transport geometry cache belongs to another mesh.");
-    }
-}
-
-template<class MeshType>
-const typename TransportGeometryCache<MeshType>::interior_stencils_type&
-TransportGeometryCache<MeshType>::interior_stencils() const noexcept
-{
-    return d_interior_stencils;
-}
-
-template<class MeshType>
-const typename TransportGeometryCache<MeshType>::boundary_locations_type&
-TransportGeometryCache<MeshType>::boundary_locations() const noexcept
-{
-    return d_boundary_locations;
-}
-
-template<class MeshType>
-const typename TransportGeometryCache<MeshType>::boundary_geometry_type&
-TransportGeometryCache<MeshType>::boundary_geometry() const noexcept
-{
-    return d_boundary_geometry;
-}
-
-template<class MeshType>
-std::vector<detail::AffineLeastSquaresGradientStencil<MeshType>>
-TransportGeometryCache<MeshType>::scalar_affine_stencils(
-    std::function<BoundaryCondition(int, size_t)> boundary_condition,
-    std::function<typename MeshType::scalar_type(int, size_t)> boundary_value) const
-{
-    return detail::materialize_scalar_affine_gradient_stencils<MeshType>(
-        d_boundary_geometry, std::move(boundary_condition), std::move(boundary_value));
-}
-
-template<class MeshType>
-std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshType>>
-TransportGeometryCache<MeshType>::vector_affine_stencils(
-    std::function<typename MeshType::Vec3(int, size_t)> boundary_value) const
-{
-    return detail::materialize_vector_affine_gradient_stencils<MeshType>(
-        d_boundary_geometry, std::move(boundary_value));
-}
 
 template<TpetraTypePack Pack>
 TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const FaceField<Pack>& face_fluxes,
@@ -392,6 +436,62 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
 
     return transport_system<Pack>(
         old_values, face_fluxes, time_step, diffusivity, boundary_value, zero_source, cached_matrix);
+}
+
+template<TpetraTypePack Pack>
+TransportSystem<Pack> non_orthogonal_transport_system(const CellField<Pack>& old_values,
+    const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
+    const CellField<Pack>* correction_field, Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache)
+{
+    using scalar_type = typename Pack::scalar_type;
+
+    const auto& mesh = old_values.mesh();
+    int invalid_geometry_cache = 0;
+    if (geometry_cache != nullptr)
+    {
+        try
+        {
+            geometry_cache->require_mesh(mesh);
+        }
+        catch (const std::invalid_argument&)
+        {
+            invalid_geometry_cache = 1;
+        }
+    }
+    const int local_validation_state[4]{&face_fluxes.mesh() != &mesh ? 1 : 0,
+        !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
+        !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0, invalid_geometry_cache};
+    int validation_state[4]{};
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 4, local_validation_state,
+        validation_state);
+    if (validation_state[0] != 0)
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires face fluxes on the old-value mesh.");
+    }
+    if (validation_state[1] != 0)
+    {
+        throw std::invalid_argument("non_orthogonal_transport_system requires a finite positive time step.");
+    }
+    if (validation_state[2] != 0)
+    {
+        throw std::invalid_argument("non_orthogonal_transport_system requires finite non-negative diffusivity.");
+    }
+    if (validation_state[3] != 0)
+    {
+        throw std::invalid_argument("non_orthogonal_transport_system received a geometry cache on the wrong mesh.");
+    }
+
+    CellField<Pack> storage_weight(old_values.mesh_ptr(), scalar_type{1}, "constant_storage_weight");
+    CellField<Pack> advection_weight(old_values.mesh_ptr(), scalar_type{1}, "constant_advection_weight");
+    CellField<Pack> diffusivity_field(old_values.mesh_ptr(), diffusivity, "constant_diffusivity");
+    return weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
+        advection_weight, diffusivity_field, std::move(boundary_condition), std::move(boundary_value),
+        std::move(right_hand_source), treatment, correction_field, std::move(cached_matrix), {}, {}, nullptr,
+        geometry_cache, FaceCoefficientInterpolation::Harmonic);
 }
 
 template<TpetraTypePack Pack>
@@ -819,61 +919,508 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
     const BoundaryCache<Pack>* boundary_diffusivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
+    return weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation});
+}
+
+template<TpetraTypePack Pack>
+TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& old_values,
+    const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step, const CellField<Pack>& storage_weight,
+    const CellField<Pack>& advection_weight, const CellField<Pack>& diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> source, ScalarTransportDiscretization discretization,
+    NonOrthogonalTreatment treatment, const CellField<Pack>* older_values, const CellField<Pack>* correction_field,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
+    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
+    const BoundaryCache<Pack>* boundary_diffusivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
+    FaceCoefficientInterpolation coefficient_interpolation)
+{
+    return weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .discretization = discretization,
+        .older_values = older_values,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation});
+}
+
+template<TpetraTypePack Pack>
+TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRequest<Pack> request)
+{
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
+    const auto& old_values = request.old_values;
+    const auto& face_fluxes = request.face_fluxes;
+    const auto time_step = request.time_step;
+    const auto& storage_weight = request.storage_weight;
+    const auto& advection_weight = request.advection_weight;
+    const auto& diffusivity = request.diffusivity;
+    auto boundary_condition = std::move(request.boundary_condition);
+    auto boundary_value = std::move(request.boundary_value);
+    auto source = std::move(request.source);
+    const auto treatment = request.treatment;
+    const auto discretization = request.discretization;
+    const auto* older_values = request.older_values;
+    const auto* correction_field = request.correction_field;
+    auto cached_matrix = std::move(request.cached_matrix);
+    auto implicit_sink = std::move(request.implicit_sink);
+    auto fixed_cell_value = std::move(request.fixed_cell_value);
+    const auto* boundary_diffusivity = request.boundary_diffusivity;
+    const auto* geometry_cache = request.geometry_cache;
+    const auto coefficient_interpolation = request.coefficient_interpolation;
+
     const auto& mesh = old_values.mesh();
+    const auto older_field_state =
+        older_values == nullptr
+            ? 0
+            : &older_values->mesh() == &mesh ? 1 : 2;
+    detail::validate_scalar_transport_discretization(
+        mesh,
+        discretization,
+        older_field_state,
+        "weighted_scalar_transport_system");
+    const auto transient_coefficients =
+        detail::scalar_transient_coefficients<scalar_type>(
+            discretization.time);
     const auto non_orthogonal_weights = detail::validate_non_orthogonal_transport_selection<Pack>(
         mesh, treatment, correction_field, "weighted_scalar_transport_system");
-    if (&face_fluxes.mesh() != &mesh || &storage_weight.mesh() != &mesh || &advection_weight.mesh() != &mesh ||
-        &diffusivity.mesh() != &mesh)
-    {
-        throw std::invalid_argument("weighted_scalar_transport_system requires all fields on "
-                                    "the transported-field mesh.");
-    }
-    if (time_step <= scalar_type{})
-    {
-        throw std::invalid_argument("weighted_scalar_transport_system requires a positive "
-                                    "time step.");
-    }
-    validate_boundary_coefficient_cache(mesh, boundary_diffusivity, "weighted_scalar_transport_system");
-    auto boundary_face_diffusivity = [&](int batch_id, size_t in_batch_id, scalar_type owner_cell_value)
-    { return boundary_coefficient<Pack>(boundary_diffusivity, batch_id, in_batch_id, owner_cell_value); };
 
-    std::vector<std::optional<scalar_type>> fixed_cell_values(mesh.num_owned_cells());
-    if (fixed_cell_value)
+    const int incompatible_fields =
+        &face_fluxes.mesh() != &mesh
+             || &storage_weight.mesh() != &mesh
+             || &advection_weight.mesh() != &mesh
+             || &diffusivity.mesh() != &mesh
+            ? 1
+            : 0;
+    int invalid_boundary_cache = 0;
+    try
+    {
+        validate_boundary_coefficient_cache(
+            mesh,
+            boundary_diffusivity,
+            "weighted_scalar_transport_system");
+    }
+    catch (...)
+    {
+        invalid_boundary_cache = 1;
+    }
+    int invalid_geometry_cache = 0;
+    if (geometry_cache != nullptr)
+    {
+        try
+        {
+            geometry_cache->require_mesh(mesh);
+        }
+        catch (...)
+        {
+            invalid_geometry_cache = 1;
+        }
+    }
+    int invalid_coefficients = 0;
+    if (incompatible_fields == 0)
+    {
+        try
+        {
+            for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+            {
+                const auto cell_lid =
+                    static_cast<local_ordinal_type>(owned);
+                const auto storage = storage_weight.local_value(cell_lid);
+                const auto advection = advection_weight.local_value(cell_lid);
+                const auto diffusion = diffusivity.local_value(cell_lid);
+                invalid_coefficients = invalid_coefficients
+                    || !std::isfinite(storage)
+                    || !std::isfinite(advection)
+                    || !std::isfinite(diffusion)
+                    || storage <= scalar_type{}
+                    || advection < scalar_type{}
+                    || diffusion < scalar_type{};
+            }
+        }
+        catch (...)
+        {
+            invalid_coefficients = 1;
+        }
+    }
+    int interpolation_state = 2;
+    switch (coefficient_interpolation)
+    {
+        case FaceCoefficientInterpolation::Harmonic:
+            interpolation_state = 0;
+            break;
+        case FaceCoefficientInterpolation::Linear:
+            interpolation_state = 1;
+            break;
+    }
+    const int matrix_cache_state = cached_matrix.is_null() ? 0 : 1;
+    const auto matrix_cache_categories =
+        detail::reduce_transport_validation_state(
+            mesh,
+            std::array<int, 2>{
+                matrix_cache_state,
+                -matrix_cache_state});
+    if (-matrix_cache_categories[1] != matrix_cache_categories[0])
+    {
+        throw std::invalid_argument(
+            "transport_system requires every rank to use the same "
+            "cached-matrix category.");
+    }
+    int invalid_matrix_cache_structure = 0;
+    if (!cached_matrix.is_null())
+    {
+        try
+        {
+            const auto row_map = cached_matrix->getRowMap();
+            const auto column_map = cached_matrix->getColMap();
+            const auto domain_map = cached_matrix->getDomainMap();
+            invalid_matrix_cache_structure =
+                !cached_matrix->isFillComplete()
+                || row_map.is_null()
+                || column_map.is_null()
+                || domain_map.is_null();
+        }
+        catch (...)
+        {
+            invalid_matrix_cache_structure = 1;
+        }
+    }
+    const auto matrix_structure_state =
+        detail::reduce_transport_validation_state(
+            mesh,
+            std::array<int, 1>{invalid_matrix_cache_structure});
+    if (matrix_structure_state[0] != 0)
+    {
+        throw std::invalid_argument(
+            "transport_system cached matrix is incompatible with the mesh.");
+    }
+    int invalid_matrix_cache_maps = 0;
+    if (!cached_matrix.is_null())
+    {
+        const auto row_map = cached_matrix->getRowMap();
+        const auto column_map = cached_matrix->getColMap();
+        const auto domain_map = cached_matrix->getDomainMap();
+        const int incompatible_row_map =
+            !row_map->isSameAs(*mesh.owned_cell_map()) ? 1 : 0;
+        const int incompatible_column_map =
+            !column_map->isSameAs(*mesh.overlap_cell_map()) ? 1 : 0;
+        const int incompatible_domain_map =
+            !domain_map->isSameAs(*mesh.owned_cell_map()) ? 1 : 0;
+        invalid_matrix_cache_maps = incompatible_row_map
+            || incompatible_column_map
+            || incompatible_domain_map;
+    }
+
+    const auto validation_state =
+        detail::reduce_transport_validation_state(
+            mesh,
+            std::array<int, 9>{
+                incompatible_fields,
+                !std::isfinite(time_step) || time_step <= scalar_type{}
+                    ? 1
+                    : 0,
+                invalid_boundary_cache,
+                invalid_geometry_cache,
+                invalid_coefficients,
+                interpolation_state,
+                -interpolation_state,
+                source ? 0 : 1,
+                invalid_matrix_cache_maps});
+    if (validation_state[0] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system requires all fields on "
+            "the transported-field mesh.");
+    }
+    if (validation_state[1] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system requires a positive "
+            "time step.");
+    }
+    if (!detail::scalar_transport_value_agrees(mesh, time_step))
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system requires every rank to use "
+            "the same time step.");
+    }
+    if (validation_state[2] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system received an invalid "
+            "boundary-coefficient cache.");
+    }
+    if (validation_state[3] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system received a geometry cache "
+            "on the wrong mesh.");
+    }
+    if (validation_state[4] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite positive storage "
+            "and finite non-negative advection and diffusion coefficients.");
+    }
+    if (validation_state[5] == 2
+        || -validation_state[6] != validation_state[5])
+    {
+        throw std::invalid_argument(
+            "weighted_scalar_transport_system requires every rank to use "
+            "the same valid face-coefficient interpolation.");
+    }
+    if (validation_state[7] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires a source provider.");
+    }
+    if (validation_state[8] != 0)
+    {
+        throw std::invalid_argument(
+            "transport_system cached matrix is incompatible with the mesh.");
+    }
+
+    std::vector<scalar_type> sink_values(
+        mesh.num_owned_cells(), scalar_type{});
+    std::vector<std::optional<scalar_type>> fixed_cell_values(
+        mesh.num_owned_cells());
+    std::vector<scalar_type> source_values(
+        mesh.num_owned_cells(), scalar_type{});
+    int invalid_sink = 0;
+    int invalid_fixed_value = 0;
+    int invalid_source = 0;
+    std::exception_ptr local_callback_error;
+    try
     {
         for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            auto value = fixed_cell_value(cell_lid);
-            if (value.has_value() && !std::isfinite(*value))
-            {
-                throw std::invalid_argument("weighted scalar transport requires finite fixed-cell "
-                                            "values.");
-            }
-            fixed_cell_values[owned] = value;
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto fixed = fixed_cell_value
+                ? fixed_cell_value(cell_lid)
+                : std::optional<scalar_type>{};
+            invalid_fixed_value = invalid_fixed_value
+                || (fixed.has_value() && !std::isfinite(*fixed));
+            fixed_cell_values[owned] = fixed;
+        }
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid =
+                static_cast<local_ordinal_type>(owned);
+            const auto sink = implicit_sink
+                ? implicit_sink(cell_lid)
+                : scalar_type{};
+            const auto source_value = source(cell_lid);
+            invalid_sink = invalid_sink
+                || !std::isfinite(sink)
+                || sink < scalar_type{};
+            invalid_source = invalid_source
+                || !std::isfinite(source_value);
+            sink_values[owned] = sink;
+            source_values[owned] = source_value;
         }
     }
+    catch (...)
+    {
+        local_callback_error = std::current_exception();
+    }
+    const auto callback_validation =
+        detail::reduce_transport_validation_state(
+            mesh,
+            std::array<int, 4>{
+                local_callback_error ? 1 : 0,
+                invalid_sink,
+                invalid_fixed_value,
+                invalid_source});
+    if (callback_validation[0] != 0)
+    {
+        if (local_callback_error)
+        {
+            std::rethrow_exception(local_callback_error);
+        }
+        throw std::runtime_error(
+            "weighted scalar transport callback failed on another rank.");
+    }
+    if (callback_validation[1] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires a finite, non-negative "
+            "implicit sink.");
+    }
+    if (callback_validation[2] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite fixed-cell values.");
+    }
+    if (callback_validation[3] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite source values.");
+    }
+
+    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::boundary_locations_type local_boundary_locations;
+    if (geometry_cache == nullptr)
+    {
+        local_boundary_locations = detail::boundary_face_locations(mesh);
+    }
+    const auto& boundary_locations =
+        geometry_cache == nullptr ? local_boundary_locations : geometry_cache->boundary_locations();
+
+    std::vector<BoundaryCondition> boundary_conditions(
+        boundary_locations.size());
+    std::vector<scalar_type> boundary_values(
+        boundary_locations.size(), scalar_type{});
+    const auto physical_boundary_faces =
+        detail::physical_boundary_face_mask(mesh);
+    std::map<std::pair<int, size_t>, size_t> boundary_indices;
+    int unsupported_boundary_condition = 0;
+    int invalid_boundary_condition_value = 0;
+    int invalid_boundary_value = 0;
+    std::exception_ptr local_boundary_callback_error;
+    try
+    {
+        for (size_t face = 0; face < boundary_locations.size(); ++face)
+        {
+            const auto& location = boundary_locations[face];
+            if (!location.active || !physical_boundary_faces[face])
+            {
+                continue;
+            }
+            boundary_indices.emplace(
+                std::pair{location.batch_id, location.in_batch_id}, face);
+            const auto condition =
+                boundary_condition(location.batch_id, location.in_batch_id);
+            const auto value =
+                boundary_value(location.batch_id, location.in_batch_id);
+            unsupported_boundary_condition = unsupported_boundary_condition
+                || (condition.type != BoundaryConditionType::Dirichlet
+                    && condition.type != BoundaryConditionType::Neumann);
+            invalid_boundary_condition_value =
+                invalid_boundary_condition_value
+                || !std::isfinite(condition.value);
+            invalid_boundary_value = invalid_boundary_value
+                || !std::isfinite(value);
+            boundary_conditions[face] = condition;
+            boundary_values[face] = value;
+        }
+    }
+    catch (...)
+    {
+        local_boundary_callback_error = std::current_exception();
+    }
+    const auto boundary_callback_validation =
+        detail::reduce_transport_validation_state(
+            mesh,
+            std::array<int, 4>{
+                local_boundary_callback_error ? 1 : 0,
+                unsupported_boundary_condition,
+                invalid_boundary_condition_value,
+                invalid_boundary_value});
+    if (boundary_callback_validation[0] != 0)
+    {
+        if (local_boundary_callback_error)
+        {
+            std::rethrow_exception(local_boundary_callback_error);
+        }
+        throw std::runtime_error(
+            "weighted scalar transport boundary callback failed on another rank.");
+    }
+    if (boundary_callback_validation[1] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport supports only Dirichlet and Neumann boundaries.");
+    }
+    if (boundary_callback_validation[2] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite boundary-condition values.");
+    }
+    if (boundary_callback_validation[3] != 0)
+    {
+        throw std::invalid_argument(
+            "weighted scalar transport requires finite boundary values.");
+    }
+
+    const auto boundary_index =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        const auto iter = boundary_indices.find(
+            std::pair{batch_id, in_batch_id});
+        if (iter == boundary_indices.end())
+        {
+            throw std::logic_error(
+                "weighted scalar transport requested an unknown boundary face.");
+        }
+        return iter->second;
+    };
+    const auto cached_boundary_condition =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_conditions[boundary_index(batch_id, in_batch_id)];
+    };
+    const auto cached_boundary_value =
+        [&](int batch_id, size_t in_batch_id)
+    {
+        return boundary_values[boundary_index(batch_id, in_batch_id)];
+    };
+
+    auto boundary_face_diffusivity =
+        [&](int batch_id,
+            size_t in_batch_id,
+            scalar_type owner_cell_value)
+    {
+        return boundary_coefficient<Pack>(
+            boundary_diffusivity,
+            batch_id,
+            in_batch_id,
+            owner_cell_value);
+    };
 
     const auto implicit_weight = non_orthogonal_weights.implicit;
     const auto explicit_weight = non_orthogonal_weights.explicit_;
 
-    using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
-    typename geometry_cache_type::boundary_locations_type local_boundary_locations;
     std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>> gradient_stencils;
     if (geometry_cache == nullptr)
     {
-        gradient_stencils = detail::scalar_affine_gradient_stencils(mesh, boundary_condition, boundary_value);
-        local_boundary_locations = detail::boundary_face_locations(mesh);
+        gradient_stencils = detail::scalar_affine_gradient_stencils(
+            mesh, cached_boundary_condition, cached_boundary_value);
     }
     else
     {
-        geometry_cache->require_mesh(mesh);
-        gradient_stencils = geometry_cache->scalar_affine_stencils(boundary_condition, boundary_value);
+        gradient_stencils = geometry_cache->scalar_affine_stencils(
+            cached_boundary_condition, cached_boundary_value);
     }
-    const auto& boundary_locations =
-        geometry_cache == nullptr ? local_boundary_locations : geometry_cache->boundary_locations();
 
     std::unique_ptr<VectorCellField<Pack>> partition_gradients;
     if (implicit_weight > scalar_type{})
@@ -885,12 +1432,30 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
         partition_gradients->sync_ghosts();
     }
 
-    const auto prepared = detail::prepare_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32);
-    const auto& matrix = prepared.matrix;
+    std::unique_ptr<VectorCellField<Pack>> convection_gradients;
+    if (discretization.convection
+        == ScalarConvectionScheme::BoundedLinearUpwind)
+    {
+        convection_gradients = std::make_unique<VectorCellField<Pack>>(
+            old_values.mesh_ptr(),
+            "bounded_linear_upwind_gradient");
+        detail::evaluate_scalar_affine_gradients(
+            old_values, gradient_stencils, *convection_gradients);
+        convection_gradients->sync_ghosts();
+    }
+
     auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
 
     detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(mesh.num_local_cells(), 64);
+    std::vector<detail::TransportMatrixRow<Pack>> rows;
+    rows.reserve(mesh.num_owned_cells());
     const auto old_value_data = old_values.owned_read_view();
+    using old_value_view_type = decltype(old_value_data);
+    std::optional<old_value_view_type> older_value_data;
+    if (older_values != nullptr)
+    {
+        older_value_data.emplace(older_values->owned_read_view());
+    }
     const auto face_flux_data = face_fluxes.owned_read_view();
     const auto storage_data = storage_weight.local_read_view();
     const auto advection_data = advection_weight.local_read_view();
@@ -909,22 +1474,24 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
         const auto cell_storage = storage_data(cell_lid, 0);
         const auto cell_advection = advection_data(cell_lid, 0);
         const auto transient = cell_storage * volume / time_step;
-        const auto sink = implicit_sink ? implicit_sink(cell_lid) : scalar_type{};
-        if (!std::isfinite(cell_storage) || !std::isfinite(cell_advection) || cell_storage <= scalar_type{} ||
-            cell_advection < scalar_type{})
-        {
-            throw std::invalid_argument("weighted scalar transport requires positive storage "
-                                        "and non-negative advection weights.");
-        }
-        if (!std::isfinite(sink) || sink < scalar_type{})
-        {
-            throw std::invalid_argument("weighted scalar transport requires a finite, "
-                                        "non-negative implicit sink.");
-        }
+        const auto sink = sink_values[owned];
 
         row_values.clear();
-        detail::add_matrix_entry(row_values, cell_lid, transient + volume * sink);
-        rhs->replaceLocalValue(cell_lid, transient * old_value_data(cell_lid, 0) + volume * source(cell_lid));
+        detail::add_matrix_entry(
+            row_values,
+            cell_lid,
+            transient_coefficients.diagonal * transient
+                + volume * sink);
+        rhs->replaceLocalValue(
+            cell_lid,
+            transient
+                    * (transient_coefficients.previous
+                           * old_value_data(cell_lid, 0)
+                       + transient_coefficients.older
+                           * (older_value_data
+                                  ? (*older_value_data)(cell_lid, 0)
+                                  : scalar_type{}))
+                + volume * source_values[owned]);
 
         auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
                                               scalar_type face_diffusivity,
@@ -966,7 +1533,39 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             {
                 const auto location = boundary_locations[static_cast<size_t>(face_lid)];
                 rhs->sumIntoLocalValue(
-                    cell_lid, -out_flux * cell_advection * boundary_value(location.batch_id, location.in_batch_id));
+                    cell_lid,
+                    -out_flux * cell_advection
+                        * cached_boundary_value(
+                            location.batch_id, location.in_batch_id));
+            }
+
+            if (mesh.is_interior_face(face_lid)
+                && convection_gradients != nullptr)
+            {
+                const auto other =
+                    mesh.opposite_or_periodic_neighbor_cell(
+                        face_lid, cell_lid);
+                const auto upwind = out_flux >= scalar_type{}
+                    ? cell_lid
+                    : other;
+                const auto downwind = out_flux >= scalar_type{}
+                    ? other
+                    : cell_lid;
+                const auto upwind_value = old_values.local_value(upwind);
+                const auto face_value =
+                    detail::bounded_linear_upwind_face_value(
+                        upwind_value,
+                        old_values.local_value(downwind),
+                        convection_gradients->local_value(upwind),
+                        detail::cell_to_face_displacement(
+                            mesh, face_lid, upwind));
+                rhs->sumIntoLocalValue(
+                    cell_lid,
+                    detail::deferred_convection_rhs_correction(
+                        out_flux,
+                        advection_data(upwind, 0),
+                        upwind_value,
+                        face_value));
             }
 
             if (mesh.is_interior_face(face_lid))
@@ -1010,7 +1609,8 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
                 continue;
             }
             const auto location = boundary_locations[static_cast<size_t>(face_lid)];
-            const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+            const auto condition = cached_boundary_condition(
+                location.batch_id, location.in_batch_id);
             const auto face_diffusivity =
                 boundary_face_diffusivity(location.batch_id, location.in_batch_id, diffusivity_data(cell_lid, 0));
             if (condition.type == BoundaryConditionType::Dirichlet)
@@ -1021,7 +1621,10 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
                 {
                     detail::add_matrix_entry(row_values, cell_lid, coefficient);
                     rhs->sumIntoLocalValue(
-                        cell_lid, coefficient * boundary_value(location.batch_id, location.in_batch_id));
+                        cell_lid,
+                        coefficient
+                            * cached_boundary_value(
+                                location.batch_id, location.in_batch_id));
                 }
                 const auto tangential_area =
                     detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
@@ -1031,11 +1634,6 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             else if (condition.type == BoundaryConditionType::Neumann)
             {
                 rhs->sumIntoLocalValue(cell_lid, face_diffusivity * condition.value * mesh.face_area(face_lid));
-            }
-            else if (condition.type == BoundaryConditionType::Robin)
-            {
-                throw std::runtime_error(
-                    "Robin boundary conditions are not yet implemented in weighted_scalar_transport_system.");
             }
         }
 
@@ -1050,13 +1648,14 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
             rhs->replaceLocalValue(cell_lid, *fixed_cell_values[owned]);
         }
 
-        detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
+        rows.push_back(detail::capture_transport_row<Pack>(row_values));
     }
 
     if (correction_field != nullptr && explicit_weight > scalar_type{})
     {
-        add_variable_explicit_non_orthogonal_correction<Pack>(*correction_field, diffusivity, boundary_condition,
-            boundary_value, *rhs, explicit_weight, boundary_face_diffusivity, &gradient_stencils,
+        add_variable_explicit_non_orthogonal_correction<Pack>(*correction_field, diffusivity,
+            cached_boundary_condition, cached_boundary_value, *rhs, explicit_weight, boundary_face_diffusivity,
+            &gradient_stencils,
             coefficient_interpolation);
     }
     // An explicit correction is an RHS update, so restore constrained values
@@ -1067,6 +1666,25 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
         {
             rhs->replaceLocalValue(static_cast<local_ordinal_type>(owned), *fixed_cell_values[owned]);
         }
+    }
+
+    detail::validate_transport_matrix_graph<Pack>(
+        mesh, cached_matrix, rows);
+
+    const auto prepared = detail::prepare_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 32);
+    const auto& matrix = prepared.matrix;
+    for (size_t row = 0; row < rows.size(); ++row)
+    {
+        const auto row_size =
+            SimpleFluid::detail::checked_size_to_ordinal<Teuchos::Ordinal>(
+                rows[row].columns.size(),
+                "transport row entry count");
+        detail::add_transport_values<Pack>(
+            prepared,
+            static_cast<local_ordinal_type>(row),
+            Teuchos::arrayView(rows[row].columns.data(), row_size),
+            Teuchos::arrayView(rows[row].values.data(), row_size));
     }
 
     matrix->fillComplete();

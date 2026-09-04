@@ -85,7 +85,8 @@ MeshHandle<Pack>::MeshHandle(
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_unstructured(
-        std::get<UnstructuredPtr>(d_mesh), indexer);
+        std::get<UnstructuredPtr>(d_mesh), indexer,
+        Tpetra::getDefaultComm());
 }
 
 /**
@@ -302,11 +303,13 @@ void MeshHandle<Pack>::initialize_unstructured(
  *
  * @param mesh Previously partitioned unstructured mesh.
  * @param indexer Mapping from mesh-local IDs to original global IDs.
+ * @param comm Communicator that owns the partition.
  */
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_unstructured(
     UnstructuredPtr mesh,
-    const unstructured_indexer_type& indexer)
+    const unstructured_indexer_type& indexer,
+    Teuchos::RCP<const typename Pack::comm_type> comm)
 {
     if (mesh->num_cells() != indexer.num_local_cells()
         || mesh->num_owned_cells() != indexer.num_owned_cells()
@@ -349,7 +352,7 @@ void MeshHandle<Pack>::initialize_unstructured(
         global_ids(indexer.node_global_ids())));
     initialize_cell_faces();
     initialize_boundary_batches(*mesh);
-    create_maps(Tpetra::getDefaultComm());
+    create_maps(comm ? std::move(comm) : Tpetra::getDefaultComm());
 }
 
 /**
@@ -695,15 +698,46 @@ void MeshHandle<Pack>::export_vtu(const std::string& filename) const
             }
             else if constexpr (std::is_same_v<mesh_type, SemiStructured>)
             {
-                export_semi_structured_vtu(mesh, filename);
+                write_vtu(filename, semi_structured_vtu_topology(mesh));
             }
             else if constexpr (std::is_same_v<mesh_type, Unstructured>)
             {
-                export_unstructured_vtu(mesh, filename);
+                write_vtu(filename, unstructured_vtu_topology(mesh));
             }
             else
             {
-                export_orthogonal_vtu(mesh, filename);
+                write_vtu(filename, orthogonal_vtu_topology(mesh));
+            }
+        });
+}
+
+/**
+ * @brief Build reusable VTU topology for the owned cells.
+ *
+ * @return Immutable topology in the same owned-cell order used by fields.
+ */
+template<TpetraTypePack Pack>
+VTUWriter::TopologyHandle MeshHandle<Pack>::vtu_topology() const
+{
+    return visit(
+        [&](const auto& mesh) -> VTUWriter::TopologyHandle
+        {
+            using mesh_type = std::decay_t<decltype(mesh)>;
+            if constexpr (std::is_same_v<mesh_type, STKAdapter>)
+            {
+                return legacy_vtu_topology(mesh);
+            }
+            else if constexpr (std::is_same_v<mesh_type, SemiStructured>)
+            {
+                return semi_structured_vtu_topology(mesh);
+            }
+            else if constexpr (std::is_same_v<mesh_type, Unstructured>)
+            {
+                return unstructured_vtu_topology(mesh);
+            }
+            else
+            {
+                return orthogonal_vtu_topology(mesh);
             }
         });
 }
@@ -792,19 +826,58 @@ VTUWriter::VectorData MeshHandle<Pack>::collect_vtu_points(
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::write_vtu(
     const std::string& filename,
-    VTUWriter::VectorData points,
-    VTUWriter::Int64Data connectivity,
-    VTUWriter::Int64Data offsets,
-    VTUWriter::UInt8Data cell_types) const
+    VTUWriter::TopologyHandle topology) const
 {
-    VTUWriter writer;
-    writer.set_points(std::move(points));
-    writer.set_cells(
+    VTUWriter writer(std::move(topology));
+    add_geometry_cell_data(writer);
+    writer.write(local_output_filename(filename));
+}
+
+/**
+ * @brief Build topology for the exact legacy mesh wrapped by this handle.
+ */
+template<TpetraTypePack Pack>
+VTUWriter::TopologyHandle MeshHandle<Pack>::legacy_vtu_topology(
+    const STKAdapter& mesh) const
+{
+    std::unordered_map<global_ordinal_type, global_index_t> node_lids;
+    VTUWriter::VectorData points;
+    VTUWriter::Int64Data connectivity;
+    VTUWriter::Int64Data offsets;
+    VTUWriter::UInt8Data cell_types;
+    offsets.reserve(num_owned_cells());
+    cell_types.reserve(num_owned_cells());
+
+    const auto& legacy = mesh.mesh();
+    auto append_node =
+        [&](global_ordinal_type node_gid) -> global_index_t
+    {
+        const auto [position, inserted] = node_lids.emplace(
+            node_gid, static_cast<global_index_t>(points.size()));
+        if (inserted)
+        {
+            points.push_back(legacy.node_coord(node_gid));
+        }
+        return position->second;
+    };
+
+    for (size_t lid = 0; lid < num_owned_cells(); ++lid)
+    {
+        const auto& cell = legacy.cell(checked_local(lid));
+        for (const auto node_gid : cell.node_gids)
+        {
+            connectivity.push_back(append_node(node_gid));
+        }
+        offsets.push_back(static_cast<global_index_t>(connectivity.size()));
+        cell_types.push_back(static_cast<std::uint8_t>(
+            MeshUtils::vtu_cell_type_code(cell.type)));
+    }
+
+    return VTUWriter::make_topology(
+        std::move(points),
         std::move(connectivity),
         std::move(offsets),
         std::move(cell_types));
-    add_geometry_cell_data(writer);
-    writer.write(local_output_filename(filename));
 }
 
 /**
@@ -816,9 +889,8 @@ void MeshHandle<Pack>::write_vtu(
  */
 template<TpetraTypePack Pack>
 template<class MeshType>
-void MeshHandle<Pack>::export_orthogonal_vtu(
-    const MeshType& mesh,
-    const std::string& filename) const
+VTUWriter::TopologyHandle MeshHandle<Pack>::orthogonal_vtu_topology(
+    const MeshType& mesh) const
 {
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
@@ -858,8 +930,7 @@ void MeshHandle<Pack>::export_orthogonal_vtu(
         cell_types.push_back(12); // VTK_HEXAHEDRON
     }
 
-    write_vtu(
-        filename,
+    return VTUWriter::make_topology(
         collect_vtu_points(mesh),
         std::move(connectivity),
         std::move(offsets),
@@ -876,9 +947,8 @@ void MeshHandle<Pack>::export_orthogonal_vtu(
  * @param filename Requested output filename.
  */
 template<TpetraTypePack Pack>
-void MeshHandle<Pack>::export_semi_structured_vtu(
-    const SemiStructured& mesh,
-    const std::string& filename) const
+VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
+    const SemiStructured& mesh) const
 {
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
@@ -920,8 +990,7 @@ void MeshHandle<Pack>::export_semi_structured_vtu(
         }
     }
 
-    write_vtu(
-        filename,
+    return VTUWriter::make_topology(
         collect_vtu_points(mesh),
         std::move(connectivity),
         std::move(offsets),
@@ -935,9 +1004,8 @@ void MeshHandle<Pack>::export_semi_structured_vtu(
  * @param filename Requested output filename.
  */
 template<TpetraTypePack Pack>
-void MeshHandle<Pack>::export_unstructured_vtu(
-    const Unstructured& mesh,
-    const std::string& filename) const
+VTUWriter::TopologyHandle MeshHandle<Pack>::unstructured_vtu_topology(
+    const Unstructured& mesh) const
 {
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
@@ -960,8 +1028,7 @@ void MeshHandle<Pack>::export_unstructured_vtu(
             MeshUtils::vtu_cell_type_code(mesh.cell_type(cell))));
     }
 
-    write_vtu(
-        filename,
+    return VTUWriter::make_topology(
         collect_vtu_points(mesh),
         std::move(connectivity),
         std::move(offsets),

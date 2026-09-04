@@ -23,9 +23,11 @@ using ScalarField = CellField<Pack>;
 using VectorField = VectorCellField<Pack>;
 using FluxField = FaceField<Pack>;
 using GeometryCache = TransportGeometryCache<Mesh<Pack>>;
+using MappedGeometryCache = TransportGeometryCache<MeshHandle<Pack>>;
 } // namespace
 
 template class TransportGeometryCache<Mesh<Pack>>;
+template class TransportGeometryCache<MeshHandle<Pack>>;
 
 template TransportSystem<Pack> transport_system<Pack>(const ScalarField&, const FluxField&, Scalar, Scalar,
     ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>,
@@ -39,6 +41,10 @@ template TransportSystem<Pack> transport_system<Pack>(const ScalarField&, const 
 
 template TransportSystem<Pack> transport_system<Pack>(
     const ScalarField&, const FluxField&, Scalar, Scalar, ScalarBoundaryValueProvider<Pack>, Teuchos::RCP<Matrix>);
+
+template TransportSystem<Pack> non_orthogonal_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
+    Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>,
+    NonOrthogonalTreatment, const ScalarField*, Teuchos::RCP<Matrix>, const GeometryCache*);
 
 template VectorTransportSystem<Pack> transport_system<Pack>(const VectorField&, const FluxField&, Scalar, Scalar,
     VectorBoundaryConditionProvider<Pack>, VectorBoundaryValueProvider<Pack>, VectorCellValueProvider<Pack>,
@@ -54,11 +60,20 @@ template VectorTransportSystem<Pack> non_orthogonal_transport_system<Pack>(const
     Scalar, VectorBoundaryValueProvider<Pack>, VectorCellValueProvider<Pack>, NonOrthogonalTreatment,
     const VectorField*, Teuchos::RCP<Matrix>, BoundaryFaceSelector, const GeometryCache*);
 
+template TransportSystem<Pack> weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>);
+
 template TransportSystem<Pack> weighted_scalar_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
     const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
     ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,
     Teuchos::RCP<Matrix>, std::function<Scalar(LocalOrdinal)>, std::function<std::optional<Scalar>(LocalOrdinal)>,
     const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation);
+
+template TransportSystem<Pack> weighted_scalar_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
+    const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
+    ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, ScalarTransportDiscretization,
+    NonOrthogonalTreatment, const ScalarField*, const ScalarField*, Teuchos::RCP<Matrix>,
+    std::function<Scalar(LocalOrdinal)>, std::function<std::optional<Scalar>(LocalOrdinal)>, const BoundaryCache<Pack>*,
+    const GeometryCache*, FaceCoefficientInterpolation);
 
 template TransportSystem<Pack> physical_temperature_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
     const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,

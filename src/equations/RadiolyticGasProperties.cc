@@ -11,6 +11,8 @@
 
 #include "equations/RadiolyticGasProperties.hh"
 
+#include "dataclass/DatabaseOptionReader.hh"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -35,34 +37,6 @@ std::string normalized(std::string value)
             return static_cast<char>(std::tolower(character));
         });
     return value;
-}
-
-/**
- * @brief Read an optional database value while normalizing type errors.
- * @tparam T Requested database value type.
- * @param database Source database.
- * @param key Option key.
- * @param fallback Value used when @p key is absent.
- * @return Parsed value or @p fallback.
- * @throws std::invalid_argument if the stored value has the wrong type.
- */
-template<class T>
-T value_or(
-    const Database& database,
-    const std::string& key,
-    T fallback)
-{
-    if (!database.contains(key))
-        return fallback;
-    try
-    {
-        return database.get<T>(key);
-    }
-    catch (const std::out_of_range&)
-    {
-        throw std::invalid_argument(
-            "Radiolytic gas option '" + key + "' has the wrong type.");
-    }
 }
 
 /**
@@ -265,41 +239,42 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
     const Database& database)
 {
     RadiolyticGasOptions options;
+    const detail::DatabaseOptionReader reader(
+        database, "Radiolytic gas model");
     const auto enabled =
-        value_or<bool>(database, "enable_radiolysis", false);
-    if (database.contains("radiolytic_bubble_model"))
+        reader.value_or<bool>("enable_radiolysis", false);
+    if (reader.contains("radiolytic_bubble_model"))
     {
-        options.mode = parse_mode(value_or<std::string>(
-            database, "radiolytic_bubble_model", "disabled"));
+        options.mode = parse_mode(reader.required<std::string>(
+            "radiolytic_bubble_model"));
     }
     else if (enabled)
     {
         options.mode = RadiolyticGasMode::IdealGasSource;
     }
 
-    options.pressure_mode = parse_pressure_mode(value_or<std::string>(
-        database, "radiolytic_pressure_mode", "constant"));
+    options.pressure_mode = parse_pressure_mode(reader.value_or<std::string>(
+        "radiolytic_pressure_mode", "constant"));
     options.dissolved_transport =
-        parse_dissolved_transport(value_or<std::string>(
-            database,
+        parse_dissolved_transport(reader.value_or<std::string>(
             "dissolved_hydrogen_transport_mode",
             "noAdvection"));
     options.bubble_transport = parse_bubble_transport(
-        value_or<std::string>(
-            database, "bubble_transport_mode", "general"));
-    options.heaviside_mode = parse_heaviside(value_or<std::string>(
-        database, "radiolytic_heaviside_mode", "exact"));
+        reader.value_or<std::string>(
+            "bubble_transport_mode", "general"));
+    options.heaviside_mode = parse_heaviside(reader.value_or<std::string>(
+        "radiolytic_heaviside_mode", "exact"));
     options.rise_velocity_mode =
-        parse_rise_velocity(value_or<std::string>(
-            database, "bubble_rise_velocity_model", "zeroSlip"));
+        parse_rise_velocity(reader.value_or<std::string>(
+            "bubble_rise_velocity_model", "zeroSlip"));
     options.surface_tension_mode =
-        parse_surface_tension(value_or<std::string>(
-            database, "surface_tension_model", "constant"));
-    options.diffusivity_mode = parse_diffusivity(value_or<std::string>(
-        database, "hydrogen_diffusivity_model", "constant"));
+        parse_surface_tension(reader.value_or<std::string>(
+            "surface_tension_model", "constant"));
+    options.diffusivity_mode = parse_diffusivity(reader.value_or<std::string>(
+        "hydrogen_diffusivity_model", "constant"));
 
 #define SIMPLEFLUID_RADIOLYTIC_REAL(member, key) \
-    options.member = value_or<real_t>(database, key, options.member)
+    options.member = reader.value_or<real_t>(key, options.member)
     SIMPLEFLUID_RADIOLYTIC_REAL(
         hydrogen_yield_mol_per_j, "hydrogen_yield_mol_per_j");
     SIMPLEFLUID_RADIOLYTIC_REAL(
@@ -373,25 +348,26 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
 #undef SIMPLEFLUID_RADIOLYTIC_REAL
 
     options.max_subcycles =
-        value_or<int>(database, "max_radiolytic_subcycles",
-                      options.max_subcycles);
+        reader.value_or<int>(
+            "max_radiolytic_subcycles", options.max_subcycles);
     options.max_radius_iterations =
-        value_or<int>(database, "max_radius_iterations",
-                      options.max_radius_iterations);
+        reader.value_or<int>(
+            "max_radius_iterations", options.max_radius_iterations);
     options.max_rise_velocity_iterations =
-        value_or<int>(database, "max_rise_velocity_iterations",
-                      options.max_rise_velocity_iterations);
+        reader.value_or<int>(
+            "max_rise_velocity_iterations",
+            options.max_rise_velocity_iterations);
     options.pressure_history_times =
-        value_or<ArrReal>(
-            database, "pressure_history_times",
+        reader.value_or<ArrReal>(
+            "pressure_history_times",
             options.pressure_history_times);
     options.pressure_history_values =
-        value_or<ArrReal>(
-            database, "pressure_history_values",
+        reader.value_or<ArrReal>(
+            "pressure_history_values",
             options.pressure_history_values);
     options.free_surface_patches =
-        value_or<ArrString>(
-            database, "radiolytic_free_surface_patches",
+        reader.value_or<ArrString>(
+            "radiolytic_free_surface_patches",
             options.free_surface_patches);
 
     validate_radiolytic_gas_options(options);

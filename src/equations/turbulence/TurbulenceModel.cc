@@ -12,6 +12,8 @@
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "equations/turbulence/TurbulenceModel.tcc"
 
+#include "dataclass/DatabaseOptionReader.hh"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -322,97 +324,91 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
 TurbulenceModelOptions turbulence_model_options_from_database(const Database& database)
 {
     TurbulenceModelOptions options;
+    const detail::DatabaseOptionReader reader(database, "Turbulence model");
     options.model = parse_turbulence_model_type(
-        detail::database_value_or<std::string>(database, "turbulence_model", "laminar"));
-    options.initial_turbulent_kinetic_energy = detail::database_value_or<real_t>(
-        database, "initial_turbulent_kinetic_energy", options.initial_turbulent_kinetic_energy);
-    options.initial_dissipation_rate = detail::database_value_or<real_t>(
-        database, "initial_dissipation_rate", options.initial_dissipation_rate);
-    options.initial_specific_dissipation_rate = detail::database_value_or<real_t>(
-        database, "initial_specific_dissipation_rate", options.initial_specific_dissipation_rate);
-    options.min_turbulent_kinetic_energy = detail::database_value_or<real_t>(
-        database, "min_turbulent_kinetic_energy", options.min_turbulent_kinetic_energy);
-    options.min_dissipation_rate = detail::database_value_or<real_t>(
-        database, "min_dissipation_rate", options.min_dissipation_rate);
-    options.min_specific_dissipation_rate = detail::database_value_or<real_t>(
-        database, "min_specific_dissipation_rate", options.min_specific_dissipation_rate);
-    options.turbulent_prandtl_number = detail::database_value_or<real_t>(
-        database, "turbulent_prandtl_number", options.turbulent_prandtl_number);
-    if (database.contains("wall_distance"))
+        reader.value_or<std::string>("turbulence_model", "laminar"));
+    options.initial_turbulent_kinetic_energy = reader.value_or<real_t>(
+        "initial_turbulent_kinetic_energy", options.initial_turbulent_kinetic_energy);
+    options.initial_dissipation_rate = reader.value_or<real_t>(
+        "initial_dissipation_rate", options.initial_dissipation_rate);
+    options.initial_specific_dissipation_rate = reader.value_or<real_t>(
+        "initial_specific_dissipation_rate", options.initial_specific_dissipation_rate);
+    options.min_turbulent_kinetic_energy = reader.value_or<real_t>(
+        "min_turbulent_kinetic_energy", options.min_turbulent_kinetic_energy);
+    options.min_dissipation_rate = reader.value_or<real_t>(
+        "min_dissipation_rate", options.min_dissipation_rate);
+    options.min_specific_dissipation_rate = reader.value_or<real_t>(
+        "min_specific_dissipation_rate", options.min_specific_dissipation_rate);
+    options.turbulent_prandtl_number = reader.value_or<real_t>(
+        "turbulent_prandtl_number", options.turbulent_prandtl_number);
+    if (reader.contains("wall_distance"))
     {
-        options.initial_wall_distance = database.get<real_t>("wall_distance");
+        options.initial_wall_distance = reader.required<real_t>("wall_distance");
     }
-    if (database.contains("wall_distance_boundaries"))
+    if (reader.contains("wall_distance_boundaries"))
     {
         options.wall_distance_boundaries =
-            database.get<ArrString>("wall_distance_boundaries");
+            reader.required<ArrString>("wall_distance_boundaries");
     }
     options.wall_distance_equation.non_orthogonal_treatment =
         FVM::non_orthogonal_treatment_from_string(
-            detail::database_value_or<std::string>(
-                database,
+            reader.value_or<std::string>(
                 "wall_distance_non_orthogonal_treatment",
                 std::string{FVM::to_string(
                     options.wall_distance_equation
                         .non_orthogonal_treatment)}));
     options.wall_distance_equation.non_orthogonal_correctors =
-        detail::database_value_or<int>(
-            database,
+        reader.value_or<int>(
             "wall_distance_non_orthogonal_correctors",
             options.wall_distance_equation.non_orthogonal_correctors);
     options.wall_distance_equation.linear_solver.max_iterations =
-        detail::database_value_or<int>(
-            database,
+        reader.value_or<int>(
             "wall_distance_linear_solver_max_iterations",
             options.wall_distance_equation.linear_solver.max_iterations);
     options.wall_distance_equation.linear_solver.tolerance =
-        detail::database_value_or<real_t>(
-            database,
+        reader.value_or<real_t>(
             "wall_distance_linear_solver_tolerance",
             options.wall_distance_equation.linear_solver.tolerance);
     options.wall_distance_equation.linear_solver.verbosity =
-        detail::database_value_or<int>(
-            database,
+        reader.value_or<int>(
             "wall_distance_linear_solver_verbosity",
             options.wall_distance_equation.linear_solver.verbosity);
     options.wall_distance_equation.linear_solver.backend =
         parse_linear_solver_backend(
-            detail::database_value_or<std::string>(
-                database,
+            reader.value_or<std::string>(
                 "wall_distance_linear_solver_backend",
                 std::string{to_string(
                     options.wall_distance_equation.linear_solver
                         .backend)}));
     options.wall_distance_equation.linear_solver.preconditioner =
         parse_linear_preconditioner(
-            detail::database_value_or<std::string>(
-                database,
+            reader.value_or<std::string>(
                 "wall_distance_linear_solver_preconditioner",
                 std::string{to_string(
                     options.wall_distance_equation.linear_solver
                         .preconditioner)}));
     options.wall_distance_equation.linear_solver.reuse_preconditioner =
-        detail::database_value_or<bool>(
-            database,
+        reader.value_or<bool>(
             "wall_distance_linear_solver_reuse_preconditioner",
             options.wall_distance_equation.linear_solver
                 .reuse_preconditioner);
     options.buoyancy_model = parse_turbulence_buoyancy_model(
-        detail::database_value_or<std::string>(
-            database, "turbulence_buoyancy_model", "none"));
-    options.buoyancy_coefficient = detail::database_value_or<real_t>(
-        database, "turbulence_buoyancy_coefficient",
+        reader.value_or<std::string>(
+            "turbulence_buoyancy_model", "none"));
+    options.buoyancy_coefficient = reader.value_or<real_t>(
+        "turbulence_buoyancy_coefficient",
         options.buoyancy_coefficient);
     options.wall_treatment = parse_turbulence_wall_treatment_type(
-        detail::database_value_or<std::string>(database, "wall_treatment", "none"));
-    if (database.contains("wall_boundaries"))
+        reader.value_or<std::string>("wall_treatment", "none"));
+    if (reader.contains("wall_boundaries"))
     {
-        options.wall_options.boundary_names = database.get<ArrString>("wall_boundaries");
+        options.wall_options.boundary_names =
+            reader.required<ArrString>("wall_boundaries");
     }
-    if (database.contains("wall_roughness_model"))
+    if (reader.contains("wall_roughness_model"))
     {
         const auto configured_models =
-            database.get<ArrString>("wall_roughness_model");
+            reader.required<ArrString>("wall_roughness_model");
         options.wall_options.roughness_models.reserve(configured_models.size());
         for (const auto& model : configured_models)
         {
@@ -420,43 +416,46 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
                 parse_turbulence_wall_roughness_model(model));
         }
     }
-    if (database.contains("wall_roughness_heights"))
+    if (reader.contains("wall_roughness_heights"))
     {
         options.wall_options.roughness_heights =
-            database.get<ArrReal>("wall_roughness_heights");
+            reader.required<ArrReal>("wall_roughness_heights");
     }
-    if (database.contains("wall_roughness_constants"))
+    if (reader.contains("wall_roughness_constants"))
     {
         options.wall_options.roughness_constants =
-            database.get<ArrReal>("wall_roughness_constants");
+            reader.required<ArrReal>("wall_roughness_constants");
     }
-    options.wall_options.c_mu = detail::database_value_or<real_t>(
-        database, "wall_c_mu", options.wall_options.c_mu);
-    options.wall_options.kappa = detail::database_value_or<real_t>(
-        database, "wall_kappa", options.wall_options.kappa);
-    options.wall_options.log_layer_e = detail::database_value_or<real_t>(
-        database, "wall_e", options.wall_options.log_layer_e);
+    options.wall_options.c_mu = reader.value_or<real_t>(
+        "wall_c_mu", options.wall_options.c_mu);
+    options.wall_options.kappa = reader.value_or<real_t>(
+        "wall_kappa", options.wall_options.kappa);
+    options.wall_options.log_layer_e = reader.value_or<real_t>(
+        "wall_e", options.wall_options.log_layer_e);
     options.wall_options.thermal_wall_law = parse_turbulence_thermal_wall_law(
-        detail::database_value_or<std::string>(
-            database, "wall_thermal_law",
+        reader.value_or<std::string>(
+            "wall_thermal_law",
             std::string{to_string(options.wall_options.thermal_wall_law)}));
-    if (database.contains("wall_thermal_turbulent_prandtl_number"))
+    if (reader.contains("wall_thermal_turbulent_prandtl_number"))
     {
         options.wall_options.thermal_turbulent_prandtl_number =
-            database.get<real_t>("wall_thermal_turbulent_prandtl_number");
+            reader.required<real_t>(
+                "wall_thermal_turbulent_prandtl_number");
     }
     options.wall_options.epsilon_low_re_correction =
-        detail::database_value_or<bool>(
-            database, "wall_epsilon_low_re_correction",
+        reader.value_or<bool>(
+            "wall_epsilon_low_re_correction",
             options.wall_options.epsilon_low_re_correction);
-    options.wall_options.sst_beta_1 = detail::database_value_or<real_t>(
-        database, "wall_beta_1", options.wall_options.sst_beta_1);
-    options.wall_options.sst_omega_wall_coefficient = detail::database_value_or<real_t>(
-        database, "wall_sst_omega_face_coefficient",
+    options.wall_options.sst_beta_1 = reader.value_or<real_t>(
+        "wall_beta_1", options.wall_options.sst_beta_1);
+    options.wall_options.sst_omega_wall_coefficient = reader.value_or<real_t>(
+        "wall_sst_omega_face_coefficient",
         options.wall_options.sst_omega_wall_coefficient);
     validate_turbulence_model_options(options);
     return options;
 }
 
 template class TurbulenceModel<DefaultTpetraTypes>;
+template class TurbulenceModel<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid

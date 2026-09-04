@@ -44,52 +44,52 @@ target_compile_definitions(simplefluid_benchmark PRIVATE
 )
 simplefluid_require_complete_pgo(simplefluid_benchmark)
 
-add_subdirectory(unitTests)
-
-add_test(
-    NAME benchmark_debug_regression
-    COMMAND simplefluid_benchmark
-        --preset debug-small
-        --warmups 1
-        --repetitions 3
-        --baseline "${CMAKE_CURRENT_SOURCE_DIR}/baselines/debug-small-serial.csv"
-        --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_debug_regression_$<CONFIG>.csv"
-)
-set_tests_properties(benchmark_debug_regression PROPERTIES
-    LABELS "benchmark;performance"
-    TIMEOUT 300
-    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-)
-
-if(MPIEXEC_EXECUTABLE)
-    set(_benchmark_mpi_preflags ${MPIEXEC_PREFLAGS})
-    execute_process(
-        COMMAND "${MPIEXEC_EXECUTABLE}" --version
-        OUTPUT_VARIABLE _benchmark_mpi_version
-        ERROR_VARIABLE _benchmark_mpi_version
-    )
-    if(_benchmark_mpi_version MATCHES "Open MPI")
-        list(APPEND _benchmark_mpi_preflags
-            -x OMPI_MCA_pml=ob1
-            -x OMPI_MCA_btl=self,sm
-        )
-    endif()
+if(BUILD_TESTING)
+    add_subdirectory(unitTests)
 
     add_test(
+        NAME benchmark_debug_regression
+        COMMAND simplefluid_benchmark
+            --preset debug-small
+            --warmups 1
+            --repetitions 3
+            --baseline "${CMAKE_CURRENT_SOURCE_DIR}/baselines/debug-small-serial.csv"
+            --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_debug_regression_$<CONFIG>.csv"
+    )
+    set_tests_properties(benchmark_debug_regression PROPERTIES
+        LABELS "benchmark;performance"
+        TIMEOUT 300
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+    )
+
+    set(_benchmark_mpi_preflags)
+    if(MPIEXEC_EXECUTABLE)
+        execute_process(
+            COMMAND "${MPIEXEC_EXECUTABLE}" --version
+            OUTPUT_VARIABLE _benchmark_mpi_version
+            ERROR_VARIABLE _benchmark_mpi_version
+        )
+        if(_benchmark_mpi_version MATCHES "Open MPI")
+            list(APPEND _benchmark_mpi_preflags
+                -x OMPI_MCA_pml=ob1
+                -x OMPI_MCA_btl=self,sm
+            )
+        endif()
+    endif()
+
+    simplefluid_add_mpi_test(
         NAME benchmark_mpi_regression_2procs
-        COMMAND "${MPIEXEC_EXECUTABLE}" ${_benchmark_mpi_preflags}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:simplefluid_benchmark>"
+        TARGET simplefluid_benchmark
+        PROCS 2
+        PREFLAGS ${_benchmark_mpi_preflags}
+        ARGS
             --preset debug-small
             --case lid_driven_cavity
             --warmups 1
             --repetitions 3
             --baseline "${CMAKE_CURRENT_SOURCE_DIR}/baselines/debug-small-mpi-2.csv"
             --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark_mpi_regression_$<CONFIG>.csv"
-    )
-    set_tests_properties(benchmark_mpi_regression_2procs PROPERTIES
         LABELS "benchmark;performance;mpi"
-        PROCESSORS 2
         TIMEOUT 300
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )

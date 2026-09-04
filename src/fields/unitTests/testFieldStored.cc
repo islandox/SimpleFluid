@@ -78,6 +78,39 @@ TEST(FieldStoredTest, StoresScalarAndVectorCellValues)
     EXPECT_DOUBLE_EQ(vector.component_value(1, 2), 3.0);
     EXPECT_THROW(vector.component_value(1, 3), std::out_of_range);
     EXPECT_EQ(scalar.num_owned_entries(), mesh->num_owned_cells());
+    EXPECT_EQ(scalar.num_owned_cells(), mesh->num_owned_cells());
+    EXPECT_EQ(scalar.num_local_cells(), mesh->num_local_cells());
+    EXPECT_TRUE(scalar.is_owned_cell(0));
+    EXPECT_TRUE(scalar.is_local_cell(1));
+
+    scalar.put_scalar(3.0);
+    scalar.sum_into_value(0, 0.5);
+    vector.set_owned_component_value(1, 2, 8.0);
+    EXPECT_DOUBLE_EQ(vector.local_component_value(1, 2), 3.0);
+    vector.sync_ghosts();
+    EXPECT_DOUBLE_EQ(vector.local_component_value(1, 2), 8.0);
+    EXPECT_DOUBLE_EQ(scalar.value(0), 3.5);
+
+    {
+        auto values = scalar.owned_write_view();
+        values(0, 0) = 9.0;
+    }
+    scalar.sync_ghosts();
+    {
+        const auto& const_scalar = scalar;
+        const auto owned = const_scalar.owned_read_view();
+        const auto local = const_scalar.local_read_view();
+        EXPECT_DOUBLE_EQ(owned(0, 0), 9.0);
+        EXPECT_DOUBLE_EQ(local(0, 0), 9.0);
+    }
+    {
+        auto local = scalar.local_write_view();
+        local(1, 0) = -2.0;
+    }
+    EXPECT_DOUBLE_EQ(scalar.local_value(1), -2.0);
+    EXPECT_DOUBLE_EQ(scalar.value(1), 3.0);
+    scalar.sync_ghosts();
+    EXPECT_DOUBLE_EQ(scalar.local_value(1), 3.0);
 }
 
 /** @brief Exercises face and boundary-face location-specific map selection. */
@@ -100,6 +133,22 @@ TEST(FieldStoredTest, SupportsFaceAndBoundaryFaceLocations)
     EXPECT_DOUBLE_EQ(faces.value(0), 1.0);
     EXPECT_DOUBLE_EQ(boundary.value(boundary_face), 7.0);
     EXPECT_TRUE(boundary.is_owned(boundary_face));
+    EXPECT_TRUE(boundary.is_owned_boundary_face(boundary_face));
+    EXPECT_EQ(
+        boundary.num_owned_boundary_faces(),
+        mesh->boundary_face_map()->getLocalNumElements());
+    EXPECT_EQ(faces.num_owned_faces(), mesh->num_owned_faces());
+    EXPECT_EQ(faces.num_local_faces(), mesh->num_faces());
+    ASSERT_EQ(faces.owned_face_ids().size(), mesh->num_owned_faces());
+    for (size_t row = 0; row < faces.owned_face_ids().size(); ++row)
+    {
+        const auto face_lid = faces.owned_face_ids()[row];
+        EXPECT_EQ(face_lid, static_cast<Pack::local_ordinal_type>(row));
+        EXPECT_EQ(faces.owned_row(face_lid),
+                  static_cast<Pack::local_ordinal_type>(row));
+        EXPECT_TRUE(faces.is_owned_face(face_lid));
+        EXPECT_TRUE(faces.is_local_face(face_lid));
+    }
 }
 
 /** @brief Confirms runtime STK-backed fields preserve mesh global IDs. */
@@ -158,8 +207,15 @@ TEST(FieldStoredTest, ProblemRejectsDuplicateNamesAndWrongTypes)
 {
     auto mesh = make_handle();
     SimpleFluid::Problem<Pack> problem(mesh);
-    problem.add_field(
+    auto& field = problem.add_field(
         SimpleFluid::ScalarCellFieldDescriptor<Pack>("temperature"));
+
+    ASSERT_TRUE(problem.fields().contains("temperature"));
+    const auto& registered =
+        std::get<SimpleFluid::SP<SimpleFluid::ScalarCellFieldStored<Pack>>>(
+            problem.fields().at("temperature"));
+    EXPECT_EQ(registered.get(), &field);
+    EXPECT_EQ(registered->mesh_ptr(), problem.mesh_ptr());
 
     EXPECT_THROW(
         problem.add_field(

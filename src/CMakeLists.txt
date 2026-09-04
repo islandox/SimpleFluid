@@ -174,6 +174,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     solvers/BoussinesqSolver.cc
     solvers/CoupledPressureVelocitySolver.cc
     solvers/FluidSolver.cc
+    solvers/IncompressibleIsothermalSolver.cc
     solvers/SteadyStateSearch.cc
 )
 
@@ -258,7 +259,8 @@ if(UNIX)
 endif()
 
 # Keep the export map enforceable as the static Trilinos dependency set evolves.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+if(BUILD_TESTING
+   AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Clang-built Trilinos emits substantially more weak Kokkos template
     # definitions in Debug than GCC-built archives.  Both sets are part of
@@ -351,33 +353,35 @@ function(simplefluid_exe_reuse_precompiled_header target_name)
         ${target_name} REUSE_FROM SimpleFluidExecutablePch)
 endfunction()
 
-function(simplefluid_configure_test_executable target_name)
-    simplefluid_exe_reuse_precompiled_header(${target_name})
+if(BUILD_TESTING)
+    function(simplefluid_configure_test_executable target_name)
+        simplefluid_exe_reuse_precompiled_header(${target_name})
 
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
-       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-       AND SIMPLEFLUID_ENABLE_LTO
-       AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
-        set_target_properties(${target_name} PROPERTIES
-            INTERPROCEDURAL_OPTIMIZATION FALSE
-            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
-            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
-        target_compile_options(${target_name} PRIVATE
-            "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-fno-lto>")
-        target_link_options(${target_name} PRIVATE
-            "$<$<CONFIG:Release,RelWithDebInfo>:-fno-lto>"
-            "$<$<CONFIG:Release,RelWithDebInfo>:-fno-use-linker-plugin>")
-    endif()
-endfunction()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+           AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+           AND SIMPLEFLUID_ENABLE_LTO
+           AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+            set_target_properties(${target_name} PROPERTIES
+                INTERPROCEDURAL_OPTIMIZATION FALSE
+                INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+                INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+            target_compile_options(${target_name} PRIVATE
+                "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-fno-lto>")
+            target_link_options(${target_name} PRIVATE
+                "$<$<CONFIG:Release,RelWithDebInfo>:-fno-lto>"
+                "$<$<CONFIG:Release,RelWithDebInfo>:-fno-use-linker-plugin>")
+        endif()
+    endfunction()
 
-add_subdirectory(dataclass/unitTests)
-add_subdirectory(geometry/unitTests)
-add_subdirectory(parallel/unitTests)
-add_subdirectory(fields/unitTests)
-add_subdirectory(FVM/unitTests)
-add_subdirectory(equations/unitTests)
-add_subdirectory(solvers/unitTests)
-add_subdirectory(io/unitTests)
+    add_subdirectory(dataclass/unitTests)
+    add_subdirectory(geometry/unitTests)
+    add_subdirectory(parallel/unitTests)
+    add_subdirectory(fields/unitTests)
+    add_subdirectory(FVM/unitTests)
+    add_subdirectory(equations/unitTests)
+    add_subdirectory(solvers/unitTests)
+    add_subdirectory(io/unitTests)
+endif()
 
 if(SIMPLEFLUID_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
@@ -428,6 +432,22 @@ add_executable(pitz_daily examples/pitz_daily.cc)
 target_link_libraries(pitz_daily PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(pitz_daily)
 
+if(BUILD_TESTING)
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(
+      NAME pitz_daily_profile_comparator_fixture
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_compare_profiles.py")
+    set_tests_properties(pitz_daily_profile_comparator_fixture PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+  else()
+    message(WARNING
+      "Python 3 was not found; the pitzDaily profile-comparator fixture test is disabled")
+  endif()
+endif()
+
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
 target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(fissile_solution_tank_demo)
@@ -447,7 +467,7 @@ simplefluid_exe_reuse_precompiled_header(constant_power_cylinder_vessel)
 # Any production executable requested from a USE tree must have been present in
 # the training run. The presets build Shiri only; building another application
 # later therefore fails loudly until its workload is added to training.
-foreach(EXAMPLE_TARGET IN ITEMS
+set(SIMPLEFLUID_EXAMPLE_TARGETS
     natural_convection_box
     natural_convection_cylinder
     natural_convection_sphere
@@ -457,21 +477,37 @@ foreach(EXAMPLE_TARGET IN ITEMS
     fissile_solution_tank_demo
     fissile_solution_tank_sst
     constant_power_cylinder_vessel)
+foreach(EXAMPLE_TARGET IN LISTS SIMPLEFLUID_EXAMPLE_TARGETS)
   simplefluid_require_complete_pgo(${EXAMPLE_TARGET})
-  add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
-  set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
-      LABELS integration
-      WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
 
-set_tests_properties(natural_convection_shiri_smoke PROPERTIES
-    ENVIRONMENT
-        "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
+if(BUILD_TESTING)
+  foreach(EXAMPLE_TARGET IN LISTS SIMPLEFLUID_EXAMPLE_TARGETS)
+    add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
+    set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
+        LABELS integration
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endforeach()
 
-set_tests_properties(fissile_solution_tank_sst_smoke PROPERTIES
-    ENVIRONMENT
-        "SIMPLEFLUID_TANK_RZ_SPACING=0.05;SIMPLEFLUID_TANK_CIRCUMFERENTIAL_SPACING=0.1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_COUNT=1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_FIRST_HEIGHT=0.01;SIMPLEFLUID_TANK_STEPS=1;SIMPLEFLUID_TANK_DT=0.001")
+  set_tests_properties(natural_convection_shiri_smoke PROPERTIES
+      ENVIRONMENT
+          "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
 
-set_tests_properties(pitz_daily_smoke PROPERTIES
-    ENVIRONMENT
-        "SIMPLEFLUID_PITZ_MESH_DIVISOR=40;SIMPLEFLUID_PITZ_STEPS=1;SIMPLEFLUID_PITZ_DT=1e-6")
+  set_tests_properties(fissile_solution_tank_sst_smoke PROPERTIES
+      ENVIRONMENT
+          "SIMPLEFLUID_TANK_RZ_SPACING=0.05;SIMPLEFLUID_TANK_CIRCUMFERENTIAL_SPACING=0.1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_COUNT=1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_FIRST_HEIGHT=0.01;SIMPLEFLUID_TANK_STEPS=1;SIMPLEFLUID_TANK_DT=0.001")
+
+  set_tests_properties(pitz_daily_smoke PROPERTIES
+      ENVIRONMENT
+          "SIMPLEFLUID_PITZ_MESH_DIVISOR=40;SIMPLEFLUID_PITZ_STEPS=1;SIMPLEFLUID_PITZ_DT=1e-6")
+
+  add_test(
+      NAME pitz_daily_steady_smoke
+      COMMAND ${CMAKE_COMMAND}
+          "-DSIMPLEFLUID_PITZ_DAILY_EXECUTABLE=$<TARGET_FILE:pitz_daily>"
+          "-DSIMPLEFLUID_PITZ_WORKING_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/pitz_daily_steady_smoke"
+          -P "${PROJECT_SOURCE_DIR}/cmake/RunPitzDailySteadySmoke.cmake")
+  set_tests_properties(pitz_daily_steady_smoke PROPERTIES
+      LABELS integration
+      TIMEOUT 60)
+endif()

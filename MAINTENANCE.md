@@ -21,6 +21,22 @@ The code requires C++23 and a Trilinos build containing Kokkos, Teuchos,
 Tpetra, STK, Belos, Ifpack2, MueLu, and Zoltan2. MPI and Google Test are used
 for distributed execution and testing.
 
+The solver has two deliberate backend paths. Supported mapped meshes execute
+natively through `MeshHandle` and `FieldStored`; callers that provide the
+legacy `Mesh` use synchronized compatibility fields. Preserve that boundary
+instead of converting a supplied native mesh into a legacy mesh.
+
+Within the native path, Cartesian and cylindrical meshes construct their
+distributed slab views directly. An `UnstructuredMesh` must first be
+partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
+multi-rank communicator. `SemiStructuredXY_Z` is serial-only; its
+`MeshHandle` constructor deliberately rejects multi-rank use until an owned,
+overlap, and ghost-indexing design is implemented for that topology.
+Focused native regressions cover unstructured geometry, operators,
+`FluidSolver`, and `BoussinesqSolver` directly in serial and across partition
+faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
+partitioned-unstructured coverage.
+
 ## Repository map and dependency direction
 
 Production code is layered from low-level data types toward applications:
@@ -56,38 +72,56 @@ The CMake targets make the same boundary explicit:
 Keep dependencies pointing down this table. If a low-level layer needs a
 solver type, the abstraction is probably in the wrong layer.
 
+`SimpleFluid::Equations` remains a logical link target, but compiled equation
+and solver specializations share the `SimpleFluidSolvers` DSO. On ELF builds,
+`cmake/SimpleFluidLinux.map` and `cmake/CheckSimpleFluidElfExports.cmake`
+enforce the public API and the narrowly reviewed Trilinos/Kokkos runtime
+bridges. Changes to explicit instantiations, visibility, or the shared PCH must
+retain that audit.
+
 Important entry points for a manual review are:
 
 - `src/geometry/mesh/MeshBase.hh` for the CRTP mesh contract.
 - `src/geometry/MeshHandle.hh` for runtime mesh type erasure.
 - `src/fields/FieldStored.hh` for mesh-aware distributed field storage.
+- `src/fields/MeshFieldTraits.hh` for native-versus-legacy field selection.
 - `src/FVM/Operators.hh` and `src/FVM/TransportSystem.hh` for the public FVM
   operator surface.
+- `src/FVM/details` for mapped-mesh implementations and reusable geometry,
+  boundary, gradient, and flux caches.
 - `src/equations/Equation.hh` and `src/problems/Problem.hh` for the framework
   ownership model.
 - `src/solvers/FluidSolver.hh` for incompressible flow orchestration.
 - `src/solvers/BoussinesqSolver.hh` for thermal and multiphysics integration.
 
 Template declarations and definitions are intentionally split among `.hh`,
-`.tcc`, and `.ipp` files in several modules. Review all included implementation
-fragments before changing a template interface.
+`.tcc`, `.ipp`, and `FVM/details` files in several modules. Public FVM headers
+should remain thin forwarding surfaces where a mapped implementation already
+exists. Review all included implementation fragments before changing a
+template interface.
 
 ## Configure and build
 
-The local preset points at the maintainer's Trilinos installation. Override
-`Trilinos_DIR` when using another installation:
+The checked-in presets point at the maintainer's matching GCC/libstdc++ and
+LLVM/libc++ Trilinos installations. Override `Trilinos_DIR` and, for LLVM, the
+matching Google Test location when using another installation:
 
 ```bash
-cmake --preset Local
-cmake --build --preset Debug
+cmake --preset GCC-ninja-multi
+cmake --build --preset GCC-Debug
+ctest --preset GCC-Debug
 ```
+
+The GCC and LLVM presets use `build/gcc` and `build/llvm`. Keep the selected C++
+standard library consistent across SimpleFluid, Trilinos, Google Test, and the
+final link.
 
 An explicit configuration is useful on a new machine or in CI:
 
 ```bash
-cmake -S . -B build -G "Ninja Multi-Config" \
+cmake -S . -B build/manual -G "Ninja Multi-Config" \
   -DTrilinos_DIR=/path/to/trilinos/lib/cmake/Trilinos
-cmake --build build --config Debug --parallel 4
+cmake --build build/manual --config Debug --parallel 4
 ```
 
 Useful configuration switches are:
@@ -96,6 +130,7 @@ Useful configuration switches are:
 | --- | --- | --- |
 | `SIMPLEFLUID_BUILD_BENCHMARKS` | `ON` | Build benchmark and performance-regression targets |
 | `SIMPLEFLUID_ENABLE_COVERAGE` | `OFF` | Add GCC/Clang coverage instrumentation |
+| `SIMPLEFLUID_ENABLE_LTO` | `ON` | Enable IPO in Release and RelWithDebInfo |
 | `SIMPLEFLUID_MAX_TEST_PROCS` | `0` | Limit generated MPI tests; CI commonly uses `2` |
 | `SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT` | `30` | Bound Google Test discovery time in seconds |
 | `SIMPLEFLUID_BUILD_DOCS` | `OFF` | Require Doxygen and enable the `docs` target |
@@ -117,6 +152,14 @@ behavioral changes separable during review.
   the existing mesh/map boundaries instead of relying on coincident values.
 - Make ownership explicit in names and comments: owned storage is authoritative;
   overlap storage may require `sync_ghosts()` before a stencil read.
+- Keep fields, caches, equations, and solvers bound to the same mesh object;
+  reject mismatches instead of relying on equivalent-looking topology.
+- Select native and legacy field families through `MeshFieldTraits` rather
+  than adding another parallel equation implementation.
+- Keep mapped FVM implementation bodies under `src/FVM/details` and preserve
+  the stable public forwarding surface under `src/FVM`.
+- Validate rank-local inputs collectively before a rank can throw while peers
+  enter assembly or a Trilinos collective.
 - State physical units in option, source, and output-field documentation.
 - Parse `Database` options with defaults and validate them before allocating
   distributed state.
@@ -127,27 +170,28 @@ behavioral changes separable during review.
 
 ## Test strategy
 
-Run CTest from the repository root so the multi-configuration build type is
-unambiguous:
+Use the GCC test preset for the normal local gate:
 
 ```bash
-ctest --test-dir build -C Debug --output-on-failure -j4
+ctest --preset GCC-Debug --parallel 4
 ```
 
 For faster feedback, build and run a single test executable or use CTest name
 and label filters:
 
 ```bash
-cmake --build build --config Debug --target testFields
-ctest --test-dir build -C Debug -R 'CellField' --output-on-failure
-ctest --test-dir build -C Debug -L mpi --output-on-failure
-ctest --test-dir build -C Debug -L integration --output-on-failure
-ctest --test-dir build -C Debug -L benchmark --output-on-failure
+cmake --build --preset GCC-Debug --target testFields
+ctest --test-dir build/gcc -C Debug -R 'CellField' --output-on-failure
+ctest --test-dir build/gcc -C Debug -L mpi --output-on-failure
+ctest --test-dir build/gcc -C Debug -L integration --output-on-failure
+ctest --test-dir build/gcc -C Debug -L benchmark --output-on-failure
 ```
 
-Use `ctest --test-dir build -C Debug -N` to inspect the tests registered in the
-current build tree. New `test*.cc` files are discovered through CMake globs in
-several directories, so adding a file can trigger or require reconfiguration.
+Use `ctest --preset GCC-Debug -N` to inspect the tests registered in the GCC
+tree. There is no checked-in LLVM test preset; use
+`ctest --test-dir build/llvm -C Debug --output-on-failure` after an LLVM build.
+New `test*.cc` files are discovered through CMake globs in several directories,
+so adding a file can trigger or require reconfiguration.
 
 Serial success is not sufficient for code that touches ownership, ghost
 values, global reductions, boundary partitioning, or collective validation.
@@ -156,11 +200,19 @@ relevant to the change. An MPI launcher failure before a test body starts can
 be an environment/interface problem; reproduce it in a normal shell before
 classifying it as a solver regression.
 
+Changes to a shared operator, equation, or solver should exercise both the
+native `MeshHandle`/`FieldStored` path and the legacy `Mesh` compatibility path
+when both are applicable. Include Cartesian, cylindrical, semi-structured, or
+partitioned coverage according to the claimed mesh support; do not infer
+cross-backend parity from one smoke test.
+
 ### Numerical change checklist
 
 For discretization, solver, or physics work, verify the applicable invariants:
 
 - owned and overlap maps use the same global-ID convention as the mesh;
+- fields and reusable caches retain the exact mesh identity expected by the
+  assembly path;
 - ghost data is synchronized before stencil reads;
 - boundary faces are assembled once and with the intended owner convention;
 - source terms have documented units and are integrated with cell volume when
@@ -180,21 +232,41 @@ tests alone.
 ### Add a mesh implementation
 
 1. Implement the `MeshBase` contract and its index types.
-2. Add owned/local/global indexing and boundary batches explicitly.
-3. If runtime selection is required, extend `MeshHandle` and its visitors.
-4. Add geometry, connectivity, ownership, and multi-rank tests.
-5. Register compiled sources in `SimpleFluidMesh`.
+2. Add owned/local/global cell and face indexing, boundary batches, and the
+   maps required by `FieldStored` explicitly.
+3. Use `PartitionedMesh` for a compatible distributed unstructured geometry;
+   if a new direct runtime alternative is required, extend `MeshHandle` and
+   its visitors.
+4. Add geometry, connectivity, ownership, stored-field, operator, and
+   multi-rank tests.
+5. Register compiled sources in `SimpleFluidMesh` and explicit template
+   instantiations where required.
 
 Preserve mesh object identity when refining or grading an existing mesh; fields
 and solver components may retain shared pointers to it.
 
 ### Add an FVM operator or equation
 
-Reuse the shared operator helpers and boundary caches before adding another
-assembly path. Keep mesh traversal and coefficient construction in FVM, the
-physical residual/source definition in equations, and time-step orchestration
-in solvers. Test the algebra on a minimal mesh, then add an analytical or
-conservation case.
+Reuse the shared operator helpers and boundary/geometry caches before adding
+another assembly path. Put mapped implementations under `src/FVM/details` and
+forward through the public header; use `MeshFieldTraits` when an equation must
+support both stored and legacy fields. Keep mesh traversal and coefficient
+construction in FVM, the physical residual/source definition in equations,
+and time-step orchestration in solvers. Test the algebra on a minimal mesh,
+then add an analytical or conservation case and the relevant native/legacy
+parity test.
+
+Legacy/native mapped weighted-scalar transport and native mapped
+physical-temperature transport preserve Backward Euler and first-order upwind
+as the default public behavior. The opt-in `ScalarTransportDiscretization`
+path supports constant-step BDF2, which requires an older field on the same
+mesh, and bounded linear-upwind convection, which retains the implicit upwind
+matrix and applies a conservative limited deferred correction. Keep new scalar
+policies in the shared legacy/mapped implementation seam, retain
+default-overload compatibility, validate policy and optional-field selections
+collectively, and add weighted-scalar parity tests across legacy `CellField`
+and native `FieldStored` paths. A higher-order policy for scalar transport does
+not by itself extend vector or momentum transport.
 
 ### Add coupled physics
 
@@ -202,7 +274,9 @@ conservation case.
 find, and remove APIs. Extend those seams so optional models remain lazily
 allocated and disabled cases retain existing behavior. Publish diagnostics
 through existing output-field maps when possible instead of adding one getter
-per field.
+per field. Template mesh-dependent models on their mesh type, select storage
+through `MeshFieldTraits`, and retain explicit native and legacy
+specializations at the shared-library boundary.
 
 ### Add an executable
 
@@ -217,16 +291,24 @@ Use `RelWithDebInfo` for profiling; the project preserves frame pointers in
 that configuration:
 
 ```bash
-cmake --build --preset RelWithDebInfo --target simplefluid_benchmark
-build/bin/RelWithDebInfo/simplefluid_benchmark \
+cmake --build --preset GCC-RelWithDebInfo --target simplefluid_benchmark
+build/gcc/bin/RelWithDebInfo/simplefluid_benchmark \
   --preset release-profile \
-  --output build/benchmarks/release-profile.csv
+  --output build/gcc/benchmarks/release-profile.csv
 ```
 
 Record the command, mesh size, MPI size, solver configuration, compiler/build
 mode, wall time, iteration counts, and numerical residuals. Treat profiler
 instruction counts as a lead. Accept an optimization only after normal timing
 and numerical-equivalence checks.
+
+Release and RelWithDebInfo enable LTO by default. Compiler-specific PGO presets
+designate `natural_convection_shiri` as the training workload. A generate
+preset builds the instrumented target; run it to collect profiles and use the
+LLVM merge preset where applicable before configuring the matching use preset.
+Keep compiler, configuration, source fingerprint, and workload provenance
+matched. A PGO-use build that lacks complete current profiles should fail
+rather than silently optimize only part of a production target.
 
 ## Documentation policy
 
@@ -251,14 +333,14 @@ Update comments in the same change as an interface or invariant.
 Generate the API reference with Doxygen installed:
 
 ```bash
-cmake -S . -B build -DSIMPLEFLUID_BUILD_DOCS=ON \
-  -DTrilinos_DIR=/path/to/trilinos/lib/cmake/Trilinos
-cmake --build build --target docs
+cmake --preset GCC-ninja-multi -DSIMPLEFLUID_BUILD_DOCS=ON
+cmake --build --preset GCC-Debug --target docs
 ```
 
-The HTML entry point is `build/docs/doxygen/html/index.html`. Review warnings
-for malformed commands, stale parameter tags, and unresolved links. Missing
-documentation alone is not a reason to narrate an otherwise obvious API.
+The HTML entry point is `build/gcc/docs/doxygen/html/index.html`; warnings are
+written to `build/gcc/docs/doxygen/warnings.log`. Review them for malformed
+commands, stale parameter tags, and unresolved links. Missing documentation
+alone is not a reason to narrate an otherwise obvious API.
 The documentation target filters GitHub-style inline and display math into
 Doxygen formulas; keep Markdown math in GitHub-compatible syntax.
 
@@ -276,6 +358,9 @@ Then confirm:
 - the diff contains no unrelated cleanup or generated build products;
 - every new source is registered in the correct CMake target;
 - focused Debug tests and required MPI/integration tests pass;
+- native and legacy backend behavior is covered where a shared path changed;
+- `simplefluid_elf_export_boundary` passes after shared-library, template
+  instantiation, visibility, or toolchain changes;
 - numerical and performance comparisons are attached when applicable;
 - public comments and this guide remain consistent with the code;
 - `README.md` and `TODO.md` claims are updated only after verification.
