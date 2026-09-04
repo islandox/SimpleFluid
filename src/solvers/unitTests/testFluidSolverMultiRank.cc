@@ -35,6 +35,7 @@ using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
+using StoredFaceFieldType = SimpleFluid::ScalarFaceFieldStored<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -45,7 +46,8 @@ testing::Environment* const kokkos_environment =
 class ExposedFluidSolver : public SimpleFluid::FluidSolver<Pack>
 {
 public:
-    using SimpleFluid::FluidSolver<Pack>::FluidSolver;
+    using base_type = SimpleFluid::FluidSolver<Pack>;
+    using base_type::FluidSolver;
 
     Pack::scalar_type update_norm(
         const VelocityFieldType& before,
@@ -74,8 +76,67 @@ public:
                 ++interface_faces;
             }
         }
+        flux.sync_ghosts();
         return interface_faces;
     }
+};
+
+/** @brief Native hook that intentionally writes owned storage only. */
+class OwnedOnlyMomentumHookFluidSolver
+    : public SimpleFluid::FluidSolver<Pack>
+{
+public:
+    using SimpleFluid::FluidSolver<Pack>::FluidSolver;
+
+    bool checked_overlap_after_hook() const noexcept
+    {
+        return d_checked_overlap_after_hook;
+    }
+
+    bool overlap_was_synchronized() const noexcept
+    {
+        return d_overlap_was_synchronized;
+    }
+
+protected:
+    SimpleFluid::LinearSolveSummary advance_momentum() override
+    {
+        for (size_t owned = 0;
+             owned < d_mesh->num_owned_cells();
+             ++owned)
+        {
+            velocity().set_owned_value(
+                static_cast<Pack::local_ordinal_type>(owned),
+                {2.0, 0.0, 0.0});
+        }
+        d_hook_completed = true;
+        return {};
+    }
+
+    Pack::scalar_type pressure_reference_density() const noexcept override
+    {
+        if (d_hook_completed && !d_checked_overlap_after_hook)
+        {
+            d_checked_overlap_after_hook = true;
+            for (size_t local = d_mesh->num_owned_cells();
+                 local < d_mesh->num_local_cells(); ++local)
+            {
+                const auto value = velocity().local_value(
+                    static_cast<Pack::local_ordinal_type>(local));
+                d_overlap_was_synchronized =
+                    d_overlap_was_synchronized
+                 && std::abs(value.x - 2.0) <= 1.0e-12
+                 && std::abs(value.y) <= 1.0e-12
+                 && std::abs(value.z) <= 1.0e-12;
+            }
+        }
+        return 1.0;
+    }
+
+private:
+    bool d_hook_completed = false;
+    mutable bool d_checked_overlap_after_hook = false;
+    mutable bool d_overlap_was_synchronized = true;
 };
 
 /**
@@ -85,7 +146,8 @@ public:
  * @param local_value Local contribution.
  * @return Global sum across ranks.
  */
-double global_sum(const MeshType& mesh, double local_value)
+template<class Mesh>
+double global_sum(const Mesh& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(
@@ -109,6 +171,34 @@ SimpleFluid::SP<MeshType> distributed_line_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+}
+
+/** @brief Build a natively partitioned Cartesian runtime handle. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+native_distributed_line_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 0.125, 0.25, 0.375, 0.5,
+                 0.625, 0.75, 0.875, 1.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(cartesian);
+}
+
+/** @brief Build a graded natively partitioned Cartesian runtime handle. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+native_graded_distributed_line_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 1.0, 2.0, 3.0, 4.0,
+                 4.1, 4.2, 4.3, 4.4},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(cartesian);
 }
 
 /** @brief Build a line mesh with smaller cells after the rank interface. */
@@ -216,6 +306,107 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
         std::max(1.0e-14, expected * 1.0e-12));
 }
 
+/** @brief Advance a distributed native handle without a legacy mesh. */
+TEST(FluidSolverMultiRankTest, NativeMeshHandleAdvancesOneStep)
+{
+    auto mesh = native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    ASSERT_FALSE(mesh->legacy_mesh());
+    ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.steps = 1;
+    time_options.kinematic_viscosity = 0.0;
+    ExposedFluidSolver solver(mesh, {}, time_options);
+    solver.run();
+
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_EQ(solver.pressure().mesh_ptr(), mesh);
+    EXPECT_EQ(solver.velocity().mesh_ptr(), mesh);
+    EXPECT_TRUE(std::isfinite(
+        solver.last_pressure_velocity_residuals().continuity));
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        EXPECT_TRUE(std::isfinite(solver.pressure().value(cell_lid)));
+        const auto velocity = solver.velocity().value(cell_lid);
+        EXPECT_TRUE(std::isfinite(velocity.x));
+        EXPECT_TRUE(std::isfinite(velocity.y));
+        EXPECT_TRUE(std::isfinite(velocity.z));
+    }
+}
+
+/** @brief Advance native distributed fields through the monolithic solve. */
+TEST(FluidSolverMultiRankTest, NativeMeshHandleRunsCoupledKrylov)
+{
+    auto mesh = native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    ASSERT_FALSE(mesh->legacy_mesh());
+    ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.kinematic_viscosity = 1.0e-2;
+    time_options.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::CoupledKrylov;
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.max_iterations = 200;
+    linear_options.tolerance = 1.0e-10;
+
+    ExposedFluidSolver solver(mesh, {}, time_options, linear_options);
+    solver.step();
+
+    EXPECT_TRUE(solver.last_step_statistics().converged);
+    EXPECT_TRUE(std::isfinite(solver.last_pressure_velocity_residuals().continuity));
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        EXPECT_TRUE(std::isfinite(solver.pressure().value(cell_lid)));
+        const auto value = solver.velocity().value(cell_lid);
+        EXPECT_TRUE(std::isfinite(value.x));
+        EXPECT_TRUE(std::isfinite(value.y));
+        EXPECT_TRUE(std::isfinite(value.z));
+    }
+}
+
+/** @brief Solver synchronizes owned-only native hook updates before projection. */
+TEST(FluidSolverMultiRankTest, NativeMomentumHookSynchronizesBeforePressureProjection)
+{
+    auto mesh = native_distributed_line_mesh();
+    if (mesh->owned_cell_map()->getComm()->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+    ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 1.0e-2;
+    time_options.kinematic_viscosity = 0.0;
+    OwnedOnlyMomentumHookFluidSolver solver(mesh, {}, time_options);
+    solver.step();
+
+    EXPECT_TRUE(solver.checked_overlap_after_hook());
+    EXPECT_TRUE(solver.overlap_was_synchronized());
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto value = solver.velocity().value(
+            static_cast<Pack::local_ordinal_type>(owned));
+        EXPECT_TRUE(std::isfinite(value.x));
+        EXPECT_TRUE(std::isfinite(value.y));
+        EXPECT_TRUE(std::isfinite(value.z));
+    }
+}
+
 /**
  * @brief Verify Courant accumulation reaches the cell across a rank interface.
  */
@@ -248,6 +439,37 @@ TEST(FluidSolverMultiRankTest,
     // The face owner has unit volume. The neighboring cell on the other rank
     // has volume 0.1 and therefore controls the global maximum:
     // 0.5 * 0.25 * 2.0 / 0.1 = 2.5.
+    EXPECT_NEAR(
+        solver.maximum_courant_number(), 2.5, 1.0e-12);
+}
+
+/** @brief Verify native face ghosts contribute to adjacent owned cells. */
+TEST(FluidSolverMultiRankTest,
+     NativeMaximumCourantNumberIncludesPartitionInterfaceFlux)
+{
+    auto mesh = native_graded_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.25;
+    ExposedFluidSolver solver(mesh, {}, time_options);
+    const int local_interface_faces =
+        solver.set_partition_interface_flux(2.0);
+    int global_interface_faces = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_interface_faces,
+        &global_interface_faces);
+    ASSERT_EQ(global_interface_faces, 1);
+
+    // The interface owner has unit volume. Its remote neighbor has volume
+    // 0.1, so the ghosted face flux gives the global maximum 2.5.
     EXPECT_NEAR(
         solver.maximum_courant_number(), 2.5, 1.0e-12);
 }
@@ -634,10 +856,12 @@ TEST(FluidSolverMultiRankTest, CoupledContinuityResidualIsGlobal)
     solver.step();
     ASSERT_TRUE(solver.last_step_statistics().converged);
 
+    const auto solver_mesh = solver.velocity().mesh_ptr();
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
-            mesh, boundary_conditions);
-    FaceFieldType face_fluxes(mesh, "independent_coupled_flux");
+            solver_mesh, boundary_conditions);
+    StoredFaceFieldType face_fluxes(
+        solver_mesh, "independent_coupled_flux");
     SimpleFluid::FVM::pressure_weighted_face_fluxes(
         solver.velocity(),
         solver.pressure(),
@@ -647,18 +871,20 @@ TEST(FluidSolverMultiRankTest, CoupledContinuityResidualIsGlobal)
         face_fluxes);
 
     double local_squared_norm = 0.0;
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    for (size_t owned = 0;
+         owned < solver_mesh->num_owned_cells();
+         ++owned)
     {
         const auto cell_lid =
             static_cast<Pack::local_ordinal_type>(owned);
         const auto balance =
             SimpleFluid::FVM::cell_flux_balance<Pack>(
-                *mesh, face_fluxes, cell_lid);
+                *solver_mesh, face_fluxes, cell_lid);
         local_squared_norm += balance * balance;
     }
 
     const auto global_squared_norm =
-        global_sum(*mesh, local_squared_norm);
+        global_sum(*solver_mesh, local_squared_norm);
     ASSERT_GT(global_squared_norm, 1.0e-24)
         << "The fixture must exercise a nonzero continuity norm.";
     const auto expected = std::sqrt(global_squared_norm);

@@ -12,7 +12,7 @@
 #pragma once
 
 #include "FVM/EquationOperators.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/AssembledEquation.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/FieldStored.hh"
@@ -351,8 +351,6 @@ private:
                                  rhs_type& rhs) const
     {
         const auto& mesh = d_unknown->mesh();
-        const auto* diffusion = find_diffusion();
-        const auto* convection = find_convection();
         for (const auto& [batch_id, batch] : mesh.boundary_batches())
         {
             const auto type = d_boundary_type(batch_id);
@@ -370,74 +368,81 @@ private:
                 std::array<scalar_type, value_traits::components>
                     additions{};
 
-                if (diffusion != nullptr)
+                for (const auto& term : d_lhs)
                 {
-                    if (type == BoundaryConditionType::Dirichlet
-                        || type == BoundaryConditionType::NoSlip)
+                    if (const auto* diffusion =
+                            std::get_if<FVM::DiffusionOperator<Pack>>(
+                                &term))
                     {
-                        const auto coefficient =
-                            FVM::detail::
-                                boundary_diffusion_coefficient(
-                                    mesh, face_lid, owner,
-                                    diffusion->diffusivity);
-                        local_ordinal_type column = owner;
-                        matrix.sumIntoLocalValues(
-                            owner,
-                            Teuchos::arrayView(&column, 1),
-                            Teuchos::arrayView(&coefficient, 1));
-                        for (size_t component = 0;
-                             component < value_traits::components;
-                             ++component)
+                        if (type == BoundaryConditionType::Dirichlet
+                            || type == BoundaryConditionType::NoSlip)
                         {
-                            additions[component] +=
-                                coefficient
-                              * d_boundary_value(
-                                    batch_id, in_batch, component);
+                            const auto coefficient =
+                                FVM::detail::
+                                    boundary_diffusion_coefficient(
+                                        mesh, face_lid, owner,
+                                        diffusion->diffusivity);
+                            local_ordinal_type column = owner;
+                            matrix.sumIntoLocalValues(
+                                owner,
+                                Teuchos::arrayView(&column, 1),
+                                Teuchos::arrayView(&coefficient, 1));
+                            for (size_t component = 0;
+                                 component < value_traits::components;
+                                 ++component)
+                            {
+                                additions[component] +=
+                                    coefficient
+                                  * d_boundary_value(
+                                        batch_id, in_batch, component);
+                            }
+                        }
+                        else if (type == BoundaryConditionType::Neumann)
+                        {
+                            for (size_t component = 0;
+                                 component < value_traits::components;
+                                 ++component)
+                            {
+                                additions[component] +=
+                                    diffusion->diffusivity
+                                  * d_boundary_value(
+                                        batch_id, in_batch, component)
+                                  * mesh.face_area(face_lid);
+                            }
+                        }
+                        else if (type == BoundaryConditionType::Robin)
+                        {
+                            throw std::runtime_error(
+                                "Generic Equation does not implement Robin "
+                                "boundary conditions.");
                         }
                     }
-                    else if (type == BoundaryConditionType::Neumann)
+                    else if (const auto* convection =
+                                 std::get_if<
+                                     FVM::ConvectionOperator<Pack>>(
+                                         &term))
                     {
-                        for (size_t component = 0;
-                             component < value_traits::components;
-                             ++component)
+                        const auto outward_flux =
+                            convection->face_flux(face_lid);
+                        if (outward_flux >= scalar_type{})
                         {
-                            additions[component] +=
-                                diffusion->diffusivity
-                              * d_boundary_value(
-                                    batch_id, in_batch, component)
-                              * mesh.face_area(face_lid);
+                            local_ordinal_type column = owner;
+                            matrix.sumIntoLocalValues(
+                                owner,
+                                Teuchos::arrayView(&column, 1),
+                                Teuchos::arrayView(&outward_flux, 1));
                         }
-                    }
-                    else if (type == BoundaryConditionType::Robin)
-                    {
-                        throw std::runtime_error(
-                            "Generic Equation does not implement Robin "
-                            "boundary conditions.");
-                    }
-                }
-
-                if (convection != nullptr)
-                {
-                    const auto outward_flux =
-                        convection->face_flux(face_lid);
-                    if (outward_flux >= scalar_type{})
-                    {
-                        local_ordinal_type column = owner;
-                        matrix.sumIntoLocalValues(
-                            owner,
-                            Teuchos::arrayView(&column, 1),
-                            Teuchos::arrayView(&outward_flux, 1));
-                    }
-                    else
-                    {
-                        for (size_t component = 0;
-                             component < value_traits::components;
-                             ++component)
+                        else
                         {
-                            additions[component] -=
-                                outward_flux
-                              * d_boundary_value(
-                                    batch_id, in_batch, component);
+                            for (size_t component = 0;
+                                 component < value_traits::components;
+                                 ++component)
+                            {
+                                additions[component] -=
+                                    outward_flux
+                                  * d_boundary_value(
+                                        batch_id, in_batch, component);
+                            }
                         }
                     }
                 }
@@ -445,32 +450,6 @@ private:
                 sum_rhs(rhs, owner, additions);
             }
         }
-    }
-
-    const FVM::DiffusionOperator<Pack>* find_diffusion() const
-    {
-        for (const auto& term : d_lhs)
-        {
-            if (const auto* value =
-                    std::get_if<FVM::DiffusionOperator<Pack>>(&term))
-            {
-                return value;
-            }
-        }
-        return nullptr;
-    }
-
-    const FVM::ConvectionOperator<Pack>* find_convection() const
-    {
-        for (const auto& term : d_lhs)
-        {
-            if (const auto* value =
-                    std::get_if<FVM::ConvectionOperator<Pack>>(&term))
-            {
-                return value;
-            }
-        }
-        return nullptr;
     }
 
     static void replace_rhs(

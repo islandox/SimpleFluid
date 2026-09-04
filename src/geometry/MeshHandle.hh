@@ -65,14 +65,18 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
 /**
  * @brief Runtime-polymorphic distributed view of supported mesh families.
  *
- * MeshHandle normalizes structured, semi-structured, and legacy STK meshes
- * into one FVM-facing API. It builds owned/overlap maps and translates compact
- * local IDs to each concrete mesh's geometry IDs.
+ * MeshHandle normalizes structured, semi-structured, unstructured, and legacy
+ * STK meshes into one FVM-facing API. Cartesian and cylindrical meshes are
+ * distributed automatically. Unstructured meshes require explicit
+ * partitioning before multi-rank construction, while SemiStructuredXY_Z is
+ * currently serial-only and rejects construction on a multi-rank communicator.
+ * The handle builds owned/overlap maps and translates compact local IDs to each
+ * concrete mesh's geometry IDs.
  *
  * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class MeshHandle
+class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
 public:
     using scalar_type = typename Pack::scalar_type;
@@ -134,7 +138,10 @@ public:
     explicit MeshHandle(CylindricalPtr mesh,
                         DistributionOptions options = {});
 
-    /** @brief Build a handle for a semi-structured mesh. */
+    /**
+     * @brief Build a serial-only handle for a semi-structured mesh.
+     * @throws std::runtime_error On a communicator containing multiple ranks.
+     */
     explicit MeshHandle(SemiStructuredPtr mesh);
 
     /** @brief Build a serial unstructured mesh handle. */
@@ -168,7 +175,8 @@ public:
         d_mesh = UnstructuredPtr(partitioned->mesh_ptr());
         initialize_unstructured(
             std::get<UnstructuredPtr>(d_mesh),
-            partitioned->indexer());
+            partitioned->indexer(),
+            partitioned->owned_cell_map()->getComm());
     }
 
     /** @brief Build a handle around a legacy STK adapter. */
@@ -420,6 +428,14 @@ public:
      */
     void export_vtu(const std::string& filename) const;
 
+    /**
+     * @brief Build reusable VTU topology for the owned cells.
+     *
+     * The returned topology is independent of field values and can therefore
+     * be cached by transient solvers across output steps.
+     */
+    VTUWriter::TopologyHandle vtu_topology() const;
+
 private:
     template<class Pointer>
     static Pointer require_mesh(Pointer mesh)
@@ -477,23 +493,20 @@ private:
 
     void write_vtu(
         const std::string& filename,
-        VTUWriter::VectorData points,
-        VTUWriter::Int64Data connectivity,
-        VTUWriter::Int64Data offsets,
-        VTUWriter::UInt8Data cell_types) const;
+        VTUWriter::TopologyHandle topology) const;
+
+    VTUWriter::TopologyHandle legacy_vtu_topology(
+        const STKAdapter& mesh) const;
 
     template<class MeshType>
-    void export_orthogonal_vtu(
-        const MeshType& mesh,
-        const std::string& filename) const;
+    VTUWriter::TopologyHandle orthogonal_vtu_topology(
+        const MeshType& mesh) const;
 
-    void export_semi_structured_vtu(
-        const SemiStructured& mesh,
-        const std::string& filename) const;
+    VTUWriter::TopologyHandle semi_structured_vtu_topology(
+        const SemiStructured& mesh) const;
 
-    void export_unstructured_vtu(
-        const Unstructured& mesh,
-        const std::string& filename) const;
+    VTUWriter::TopologyHandle unstructured_vtu_topology(
+        const Unstructured& mesh) const;
 
     global_ordinal_type geometry_cell_lid(
         local_ordinal_type local_id) const
@@ -600,7 +613,8 @@ private:
 
     void initialize_unstructured(
         UnstructuredPtr mesh,
-        const unstructured_indexer_type& indexer);
+        const unstructured_indexer_type& indexer,
+        Teuchos::RCP<const typename Pack::comm_type> comm);
 
     void initialize_stk(STKAdapterPtr adapter);
 

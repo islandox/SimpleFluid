@@ -32,9 +32,9 @@ namespace SimpleFluid
  * @return The validated mesh pointer.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack>
-SP<const typename RadiolyticGasModel<Pack>::mesh_type>
-RadiolyticGasModel<Pack>::require_mesh(SP<const mesh_type> mesh)
+template<TpetraTypePack Pack, class MeshType>
+SP<const typename RadiolyticGasModel<Pack, MeshType>::mesh_type>
+RadiolyticGasModel<Pack, MeshType>::require_mesh(SP<const mesh_type> mesh)
 {
     if (!mesh)
     {
@@ -51,8 +51,8 @@ RadiolyticGasModel<Pack>::require_mesh(SP<const mesh_type> mesh)
  * @param options Validated runtime physics options.
  * @throws std::invalid_argument if the mesh or options are invalid.
  */
-template<TpetraTypePack Pack>
-RadiolyticGasModel<Pack>::RadiolyticGasModel(
+template<TpetraTypePack Pack, class MeshType>
+RadiolyticGasModel<Pack, MeshType>::RadiolyticGasModel(
     SP<const mesh_type> mesh,
     RadiolyticGasOptions options)
     : d_mesh(require_mesh(std::move(mesh))),
@@ -114,8 +114,8 @@ RadiolyticGasModel<Pack>::RadiolyticGasModel(
  * @param options Replacement runtime physics options.
  * @throws std::invalid_argument if @p options is inconsistent.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::configure(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::configure(
     const RadiolyticGasOptions& options)
 {
     validate_radiolytic_gas_options(options);
@@ -140,8 +140,8 @@ void RadiolyticGasModel<Pack>::configure(
  * @brief Register stable output names for all model-owned fields.
  * @tparam Pack Tpetra type pack used by the model.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::register_output_fields()
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::register_output_fields()
 {
     d_output_fields = {
         {"alpha_g", &d_alpha_g},
@@ -182,8 +182,8 @@ void RadiolyticGasModel<Pack>::register_output_fields()
  * @brief Reset primary, history, diagnostic, and cumulative model fields.
  * @tparam Pack Tpetra type pack used by the model.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::initialize_fields()
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::initialize_fields()
 {
     d_history_initialized = false;
     d_initial_state_initialized = false;
@@ -245,8 +245,8 @@ void RadiolyticGasModel<Pack>::initialize_fields()
  * @throws std::invalid_argument if time or input meshes are invalid.
  * @throws std::runtime_error if a derived property cannot be reconstructed.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::initialize_state(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::initialize_state(
     scalar_type time,
     const field_type& temperature,
     const field_type& gauge_pressure,
@@ -325,8 +325,8 @@ void RadiolyticGasModel<Pack>::initialize_state(
  * @param local_value Rank-local contribution.
  * @return Communicator-wide sum.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::global_sum(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::global_sum(
     scalar_type local_value) const -> scalar_type
 {
     scalar_type global_value{};
@@ -346,8 +346,8 @@ auto RadiolyticGasModel<Pack>::global_sum(
  * @param local_value Rank-local diagnostic.
  * @return Communicator-wide maximum.
  */
-template<TpetraTypePack Pack>
-int RadiolyticGasModel<Pack>::global_max(int local_value) const
+template<TpetraTypePack Pack, class MeshType>
+int RadiolyticGasModel<Pack, MeshType>::global_max(int local_value) const
 {
     int global_value{};
     const auto communicator = d_mesh->owned_cell_map()->getComm();
@@ -364,8 +364,8 @@ int RadiolyticGasModel<Pack>::global_max(int local_value) const
  * @brief Reduce local event counters into rank-consistent statistics.
  * @tparam Pack Tpetra type pack used by the model.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::reduce_event_statistics()
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::reduce_event_statistics()
 {
     const int local_counts[]{
         d_last_statistics.clipped_cells,
@@ -392,8 +392,8 @@ void RadiolyticGasModel<Pack>::reduce_event_statistics()
  * @param field Cell field to integrate.
  * @return Global volume integral.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::global_integral(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::global_integral(
     const field_type& field) const -> scalar_type
 {
     scalar_type local_integral{};
@@ -412,8 +412,8 @@ auto RadiolyticGasModel<Pack>::global_integral(
  * @tparam Pack Tpetra type pack used by the model.
  * @return Global hydrogen inventory in moles.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::total_hydrogen_inventory() const
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::total_hydrogen_inventory() const
     -> scalar_type
 {
     return global_integral(d_dissolved_hydrogen_inventory)
@@ -427,8 +427,8 @@ auto RadiolyticGasModel<Pack>::total_hydrogen_inventory() const
  * @param time Physical time at which to sample the history.
  * @return Clamped, linearly interpolated absolute pressure.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::prescribed_pressure(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::prescribed_pressure(
     scalar_type time) const -> scalar_type
 {
     const auto& times = d_options.pressure_history_times;
@@ -457,8 +457,8 @@ auto RadiolyticGasModel<Pack>::prescribed_pressure(
  * @param time Current physical time.
  * @param gauge_pressure Cell gauge pressure in Pa.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::reconstruct_absolute_pressure(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::reconstruct_absolute_pressure(
     scalar_type time,
     const field_type& gauge_pressure)
 {
@@ -525,8 +525,8 @@ void RadiolyticGasModel<Pack>::reconstruct_absolute_pressure(
  * @param alpha_max Upper bound for gas void fraction.
  * @throws std::invalid_argument if required fields or values are invalid.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::update_ideal_gas_source(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::update_ideal_gas_source(
     scalar_type time_step,
     const field_type& temperature,
     const field_type* fission_power_density,
@@ -587,8 +587,8 @@ void RadiolyticGasModel<Pack>::update_ideal_gas_source(
  * @throws std::invalid_argument if correlation inputs are invalid.
  * @throws std::runtime_error if the Celata iteration does not converge.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::rise_velocity(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::rise_velocity(
     scalar_type radius,
     scalar_type liquid_density,
     scalar_type dynamic_viscosity,
@@ -637,8 +637,8 @@ auto RadiolyticGasModel<Pack>::rise_velocity(
  * @throws std::invalid_argument if a field or transport input is invalid.
  * @throws std::runtime_error if the transport solve does not converge.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::transport_scalar(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     field_type& field,
     scalar_type time_step,
     const face_flux_field_type& liquid_face_flux,
@@ -661,7 +661,8 @@ void RadiolyticGasModel<Pack>::transport_scalar(
     {
         if (!d_mesh->is_boundary_face(face_lid))
             return false;
-        const auto& name = d_mesh->boundary_name(face_lid);
+        const auto& name = d_mesh->boundary_batch_name(
+            d_mesh->boundary_id(face_lid));
         return std::ranges::find(
                    d_options.free_surface_patches, name)
             != d_options.free_surface_patches.end();
@@ -701,6 +702,10 @@ void RadiolyticGasModel<Pack>::transport_scalar(
                 : scalar_type{};
         }
         transport_flux.set_value(face_lid, flux);
+    }
+    if constexpr (requires { transport_flux.sync_ghosts(); })
+    {
+        transport_flux.sync_ghosts();
     }
 
     field_type old_values(d_mesh, "radiolytic_transport_old");
@@ -748,22 +753,19 @@ void RadiolyticGasModel<Pack>::transport_scalar(
     auto source =
         [](local_ordinal_type) -> scalar_type { return 0.0; };
     auto system = FVM::weighted_scalar_transport_system<Pack>(
-        old_values,
-        transport_flux,
-        time_step,
-        storage_weight,
-        advection_weight,
-        diffusion_weight,
-        boundary_condition,
-        boundary_value,
-        source,
-        FVM::NonOrthogonalTreatment::Hybrid,
-        &old_values,
-        Teuchos::null,
-        {},
-        {},
-        nullptr,
-        &d_transport_geometry_cache);
+        FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
+            .old_values = old_values,
+            .face_fluxes = transport_flux,
+            .time_step = time_step,
+            .storage_weight = storage_weight,
+            .advection_weight = advection_weight,
+            .diffusivity = diffusion_weight,
+            .boundary_condition = boundary_condition,
+            .boundary_value = boundary_value,
+            .source = source,
+            .treatment = FVM::NonOrthogonalTreatment::Hybrid,
+            .correction_field = &old_values,
+            .geometry_cache = &d_transport_geometry_cache});
 
     field_type solution(d_mesh, "radiolytic_transport_solution");
     const auto solve_statistics =
@@ -832,8 +834,8 @@ void RadiolyticGasModel<Pack>::transport_scalar(
  * @throws std::invalid_argument if property or transport inputs are invalid.
  * @throws std::runtime_error if a radius, rise, or transport solve fails.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::transport_populations(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::transport_populations(
     scalar_type time_step,
     const field_type& temperature,
     const velocity_field_type& velocity,
@@ -910,6 +912,10 @@ void RadiolyticGasModel<Pack>::transport_populations(
                 face_lid,
                 axial_velocity
               * d_mesh->face_area_vector(face_lid).z);
+        }
+        if constexpr (requires { axial_bubble_flux.sync_ghosts(); })
+        {
+            axial_bubble_flux.sync_ghosts();
         }
         bubble_liquid_flux = &axial_bubble_flux;
     }
@@ -1028,8 +1034,8 @@ void RadiolyticGasModel<Pack>::transport_populations(
  * @throws std::invalid_argument if a correlation input is invalid.
  * @throws std::runtime_error if the nucleation radius leaves configured bounds.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::cell_properties(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::cell_properties(
     local_ordinal_type cell_lid,
     const field_type& temperature,
     const velocity_field_type&,
@@ -1085,8 +1091,8 @@ auto RadiolyticGasModel<Pack>::cell_properties(
  * @param liquid_fraction Local liquid volume fraction.
  * @return Dissolved concentration, or zero without liquid volume.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::concentration(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::concentration(
     const CellKineticsState& state,
     scalar_type liquid_fraction) const -> scalar_type
 {
@@ -1101,8 +1107,8 @@ auto RadiolyticGasModel<Pack>::concentration(
  * @param cell_lid Local cell identifier.
  * @param state Updated conserved inventories and populations.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::assign_cell_state(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::assign_cell_state(
     local_ordinal_type cell_lid,
     const CellKineticsState& state)
 {
@@ -1136,8 +1142,8 @@ void RadiolyticGasModel<Pack>::assign_cell_state(
  * @throws std::invalid_argument if a correlation input is invalid.
  * @throws std::runtime_error if the selected rise-velocity solve fails.
  */
-template<TpetraTypePack Pack>
-auto RadiolyticGasModel<Pack>::integrate_cell_kinetics(
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
     local_ordinal_type cell_lid,
     scalar_type time_step,
     scalar_type power_density,
@@ -1337,8 +1343,8 @@ auto RadiolyticGasModel<Pack>::integrate_cell_kinetics(
  * @throws std::invalid_argument if a correlation input is invalid.
  * @throws std::runtime_error if a derived-property solve fails.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::reconstruct_derived_fields(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(
     const field_type& temperature,
     const velocity_field_type& velocity,
     const material_type& material)
@@ -1476,8 +1482,8 @@ void RadiolyticGasModel<Pack>::reconstruct_derived_fields(
  * @throws std::invalid_argument if required fields or values are invalid.
  * @throws std::runtime_error if a transport or property solve fails.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::advance_two_population(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
     scalar_type time_step,
     const field_type& temperature,
     const velocity_field_type& velocity,
@@ -1553,8 +1559,8 @@ void RadiolyticGasModel<Pack>::advance_two_population(
  * @param material Material-property fields.
  * @throws std::invalid_argument if the selected property correlation is invalid.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::update_inertial_pressure(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::update_inertial_pressure(
     scalar_type time_step,
     const field_type& temperature,
     const face_flux_field_type& liquid_face_flux,
@@ -1672,8 +1678,8 @@ void RadiolyticGasModel<Pack>::update_inertial_pressure(
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if a transport or property solve fails.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::advance(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::advance(
     scalar_type time,
     scalar_type time_step,
     const field_type& temperature,
@@ -1718,8 +1724,8 @@ void RadiolyticGasModel<Pack>::advance(
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if a transport or property solve fails.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::advance(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::advance(
     scalar_type time,
     scalar_type time_step,
     const field_type& temperature,
@@ -1806,8 +1812,8 @@ void RadiolyticGasModel<Pack>::advance(
  * @throws std::logic_error unless ideal-gas source mode is active.
  * @throws std::invalid_argument if the field, bound, or values are invalid.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::synchronize_void_fraction(
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::synchronize_void_fraction(
     const field_type& alpha_g,
     scalar_type alpha_max)
 {
@@ -1852,8 +1858,8 @@ void RadiolyticGasModel<Pack>::synchronize_void_fraction(
  * @brief Synchronize overlap storage for every model-owned cell field.
  * @tparam Pack Tpetra type pack used by the model.
  */
-template<TpetraTypePack Pack>
-void RadiolyticGasModel<Pack>::sync_all_fields()
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::sync_all_fields()
 {
     field_type* fields[] = {
         &d_alpha_g,

@@ -31,10 +31,11 @@ verification/openfoam/naturalConvection/run_simplefluid.sh 6
 
 The SimpleFluid launcher sources `verification/environments.sh` and builds the
 `GCC-RelWithDebInfo` preset by default, using
-`build-gcc/bin/RelWithDebInfo`. Set `SIMPLEFLUID_COMPILER=LLVM` to select the
-corresponding LLVM preset, or set `SIMPLEFLUID_BUILD_CONFIG=Debug` only when a
-debug comparison is needed. A custom, already-configured build tree can be
-selected with `SIMPLEFLUID_BUILD_DIR`.
+`build/gcc/bin/RelWithDebInfo`. Set `SIMPLEFLUID_COMPILER=LLVM` to select the
+corresponding LLVM preset and `build/llvm/bin/RelWithDebInfo`, or set
+`SIMPLEFLUID_BUILD_CONFIG=Debug` only when a debug comparison is needed. A
+custom, already-configured build tree can be selected with
+`SIMPLEFLUID_BUILD_DIR`.
 
 Both cases start from the same quiescent 290 K field and the tutorial's
 `k=0.00375 m2/s2`, `epsilon=0.00075 m2/s3` turbulence state. They advance

@@ -52,80 +52,111 @@ target_link_libraries(
   GTest::gtest_main)
 simplefluid_configure_test_executable(testFeedbackMapMultiRank)
 
-if(MPIEXEC_EXECUTABLE
-   AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
-        OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
-  add_test(
+simplefluid_add_mpi_test(
     NAME RadiolyticGasModel_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testRadiolyticGasModelMultiRank>")
-  set_tests_properties(RadiolyticGasModel_2procs PROPERTIES
+    TARGET testRadiolyticGasModelMultiRank
+    PROCS 2
     LABELS "mpi;radiolysis"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME FluidSolver_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testFluidSolverMultiRank>")
-  set_tests_properties(FluidSolver_2procs PROPERTIES
+    TARGET testFluidSolverMultiRank
+    PROCS 2
     LABELS "mpi;pressure_velocity"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME CoupledKrylovDirichletContinuity_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testBoussinesqSolver>"
-            "--gtest_filter=BoussinesqSolverTest.CoupledKrylovDirichletContinuityMatchesBoundaryFaceFlux")
-  set_tests_properties(CoupledKrylovDirichletContinuity_2procs PROPERTIES
+    TARGET testBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqSolverTest.CoupledKrylovDirichletContinuityMatchesBoundaryFaceFlux"
     LABELS "mpi;pressure_velocity"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
+    NAME NativePhysicalBoussinesq_2procs
+    TARGET testBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqSolverTest.NativePhysicalModelsRunCoupledKrylovOnDistributedCartesianMesh"
+    LABELS "mpi;boussinesq;physical_models;pressure_velocity"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME NativeUnstructuredPhysicalBoussinesq_2procs
+    TARGET testBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqSolverTest.NativePhysicalModelsRunCoupledKrylovOnPartitionedUnstructuredMesh"
+    LABELS "mpi;boussinesq;physical_models;pressure_velocity;unstructured"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME NativeUnstructuredCoupledFlow_2procs
+    TARGET testBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqSolverTest.NativePartitionedUnstructuredCoupledKrylovAdvancesForcedFlow"
+    LABELS "mpi;boussinesq;physical_models;pressure_velocity;unstructured"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME TurbulentBoussinesq_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testTurbulentBoussinesqSolver>"
-            "--gtest_filter=TurbulentBoussinesqSolverTest.AdvancesTurbulenceThroughSegregatedAndCoupledPressureVelocitySolves:TurbulentBoussinesqSolverTest.PassesDirectBuoyancyContextThroughSegregatedAndCoupledSolvers")
-  set_tests_properties(TurbulentBoussinesq_2procs PROPERTIES
+    TARGET testTurbulentBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.AdvancesTurbulenceThroughSegregatedAndCoupledPressureVelocitySolves:TurbulentBoussinesqSolverTest.PassesDirectBuoyancyContextThroughSegregatedAndCoupledSolvers"
     LABELS "mpi;turbulence;pressure_velocity"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
+    NAME IncompressibleIsothermalSolver_2procs
+    TARGET testIncompressibleIsothermalSolver
+    PROCS 2
+    ARGS "--gtest_filter=IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonThroughPisoAndCoupledKrylov:IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonOnNativeMeshHandle"
+    LABELS "mpi;turbulence;pressure_velocity;isothermal"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME CombinedTurbulentRadiolysis_2procs
+    TARGET testTurbulentBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CouplesShearedRansShengTransportFissionAndDensityFeedbackOnTwoRanks"
+    LABELS "mpi;turbulence;radiolysis;physical_models;pressure_velocity;acceptance"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME PrecursorNonOrthogonalConservation_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testPhase13PlusModels>"
-            "--gtest_filter=DelayedNeutronPrecursorModelTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection")
-  set_tests_properties(PrecursorNonOrthogonalConservation_2procs PROPERTIES
+    TARGET testPhase13PlusModels
+    PROCS 2
+    ARGS "--gtest_filter=DelayedNeutronPrecursorModelTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection"
     LABELS "mpi;precursors"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
+    NAME PrecursorAdvectionConservation_2procs
+    TARGET testPhase13PlusModels
+    PROCS 2
+    ARGS "--gtest_filter=DelayedNeutronPrecursorModelTest.LiquidAdvectionConservesDistributedInventory:DelayedNeutronPrecursorModelTest.CollectivelyRejectsRankDivergentAdvanceSelection"
+    LABELS "mpi;precursors;transport"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME PrecursorCollectiveConfiguration_2procs
+    TARGET testPhase13PlusModels
+    PROCS 2
+    ARGS "--gtest_filter=DelayedNeutronPrecursorModelTest.CollectivelyRejectsRankDivergentConfigurationAndPower:DelayedNeutronPrecursorModelTest.SolverRejectsRankDivergentPrecursorPresenceBeforeStep"
+    LABELS "mpi;precursors;validation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME ScalarVoidDiffusionConservation_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testPhase13PlusModels>"
-            "--gtest_filter=ScalarVoidFractionModelTest.DiffusionSmoothsAndConservesGlobalVoid")
-  set_tests_properties(ScalarVoidDiffusionConservation_2procs PROPERTIES
+    TARGET testPhase13PlusModels
+    PROCS 2
+    ARGS "--gtest_filter=ScalarVoidFractionModelTest.DiffusionSmoothsAndConservesGlobalVoid"
     LABELS "mpi;void_fraction"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME FeedbackMap_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testFeedbackMapMultiRank>")
-  set_tests_properties(FeedbackMap_2procs PROPERTIES
+    TARGET testFeedbackMapMultiRank
+    PROCS 2
     LABELS "mpi;feedback_mapping"
-    PROCESSORS 2
     TIMEOUT 120)
-endif()

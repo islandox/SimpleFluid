@@ -14,7 +14,8 @@
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/FieldStoredNonOrthogonalDiffusion.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -341,5 +342,45 @@ template<TpetraTypePack Pack>
 bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
     NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {});
+
+/**
+ * @brief Assemble steady non-orthogonal diffusion on a mapped mesh.
+ *
+ * The solution/correction field retains FieldStored ownership on the
+ * original orthogonal, semi-structured, or runtime mesh interface.
+ */
+template<TpetraTypePack Pack, class MeshType>
+DiffusionSystem<Pack> non_orthogonal_diffusion_system(const MeshType& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
+    NonOrthogonalTreatment treatment, const ScalarCellFieldStored<Pack, MeshType>* correction_field = nullptr)
+{
+    return detail::stored_non_orthogonal_diffusion_system<Pack>(
+        mesh, diffusivity, std::move(boundary_condition), std::move(right_hand_source), treatment, correction_field);
+}
+
+/**
+ * @brief Solve steady non-orthogonal diffusion on a mapped FieldStored mesh.
+ */
+template<TpetraTypePack Pack, class MeshType>
+bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
+    ScalarCellFieldStored<Pack, MeshType>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
+    const LinearSolverOptions& linear_options = {})
+{
+    return detail::solve_stored_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition),
+        std::move(right_hand_source), solution, treatment, nNonOrthogonalCorrectors, linear_options);
+}
+
+/** @brief Solve zero-source mapped steady non-orthogonal diffusion. */
+template<TpetraTypePack Pack, class MeshType>
+bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellFieldStored<Pack, MeshType>& solution,
+    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {})
+{
+    auto zero_source = [](typename Pack::local_ordinal_type) -> typename Pack::scalar_type
+    { return typename Pack::scalar_type{}; };
+    return solve_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition),
+        ScalarCellValueProvider<Pack>{zero_source}, solution, treatment, nNonOrthogonalCorrectors, linear_options);
+}
 
 } // namespace SimpleFluid::FVM

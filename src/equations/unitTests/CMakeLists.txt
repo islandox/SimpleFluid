@@ -59,66 +59,44 @@ target_link_libraries(
   GTest::gtest_main)
 simplefluid_configure_test_executable(testTurbulenceModelMultiRank)
 
-if(MPIEXEC_EXECUTABLE
-   AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
-        OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
-  add_test(
+simplefluid_add_mpi_test(
     NAME BoussinesqModel_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testBoussinesqModelMultiRank>")
-  set_tests_properties(BoussinesqModel_2procs PROPERTIES
+    TARGET testBoussinesqModelMultiRank
+    PROCS 2
     LABELS "mpi;boussinesq"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME FissionPowerSource_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testFissionPowerSourceMultiRank>")
-  set_tests_properties(FissionPowerSource_2procs PROPERTIES
+    TARGET testFissionPowerSourceMultiRank
+    PROCS 2
     LABELS "mpi"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME PressureProjection_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testPressureProjectionMultiRank>")
-  set_tests_properties(PressureProjection_2procs PROPERTIES
+    TARGET testPressureProjectionMultiRank
+    PROCS 2
     LABELS "mpi;pressure_projection"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME TurbulenceModel_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testTurbulenceModelMultiRank>")
-  set_tests_properties(TurbulenceModel_2procs PROPERTIES
+    TARGET testTurbulenceModelMultiRank
+    PROCS 2
     LABELS "mpi;turbulence"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME WallDistanceEquation_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testWallDistanceEquation>")
-  set_tests_properties(WallDistanceEquation_2procs PROPERTIES
+    TARGET testWallDistanceEquation
+    PROCS 2
     LABELS "mpi;turbulence;wall_distance"
-    PROCESSORS 2
     TIMEOUT 120)
 
-  add_test(
+simplefluid_add_mpi_test(
     NAME TurbulenceBuoyancy_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testTurbulenceBuoyancy>")
-  set_tests_properties(TurbulenceBuoyancy_2procs PROPERTIES
+    TARGET testTurbulenceBuoyancy
+    PROCS 2
     LABELS "mpi;turbulence;buoyancy"
-    PROCESSORS 2
     TIMEOUT 120)
-endif()

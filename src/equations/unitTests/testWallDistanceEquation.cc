@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "equations/turbulence/WallDistanceEquation.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
@@ -20,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace
 {
@@ -80,6 +82,50 @@ double solve_maximum_error(size_t cell_count,
         }
     }
     return global_maximum(*mesh, local_error);
+}
+
+/** @brief Native MeshHandle wall distance uses FieldStored end to end. */
+TEST(WallDistanceEquationTest, SolvesOnNativeMeshHandle)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeField =
+        SimpleFluid::MeshFieldTraits<Pack, NativeMesh>::scalar_cell_type;
+    using NativeEquation =
+        SimpleFluid::PoissonWallDistanceEquation<Pack, NativeMesh>;
+
+    SimpleFluid::ArrReal x_coordinates;
+    for (size_t point = 0; point <= 8; ++point)
+    {
+        x_coordinates.push_back(static_cast<double>(point) / 8.0);
+    }
+    auto cartesian = std::make_shared<
+        SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            std::move(x_coordinates),
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+    auto mesh = std::make_shared<NativeMesh>(cartesian);
+    ASSERT_FALSE(mesh->legacy_mesh());
+
+    NativeField distance(mesh, -7.0, "wall_distance");
+    NativeEquation equation(mesh);
+    SimpleFluid::WallDistanceEquationOptions options;
+    options.linear_solver.tolerance = 1.0e-12;
+    options.linear_solver.max_iterations = 500;
+    equation.solve({"xmin"}, distance, options);
+
+    double maximum_error = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        const auto value = distance.value(cell_lid);
+        EXPECT_TRUE(std::isfinite(value));
+        EXPECT_GT(value, 0.0);
+        maximum_error = std::max(
+            maximum_error,
+            std::abs(value - mesh->cell_centroid(cell_lid).x));
+    }
+    EXPECT_LT(maximum_error, 0.1);
 }
 
 /** @brief A one-wall Poisson reconstruction converges to geometric distance. */

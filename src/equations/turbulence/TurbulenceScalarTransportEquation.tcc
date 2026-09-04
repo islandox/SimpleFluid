@@ -9,7 +9,7 @@
  *
  */
 
-#include "TurbulenceCollectiveValidation.hh"
+#include "equations/CollectiveValidation.hh"
 #include "TurbulenceScalarTransportEquation.hh"
 
 #include <cmath>
@@ -27,8 +27,8 @@ namespace SimpleFluid
  * @param boundary_conditions Configured scalar boundary conditions.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template <TpetraTypePack Pack>
-TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
+template <TpetraTypePack Pack, class MeshType>
+TurbulenceScalarTransportEquation<Pack, MeshType>::TurbulenceScalarTransportEquation(
     SP<const mesh_type> mesh, BoundaryConditionMap boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh),
                                                        "TurbulenceScalarTransportEquation")),
@@ -57,8 +57,8 @@ TurbulenceScalarTransportEquation<Pack>::TurbulenceScalarTransportEquation(
  * @throws std::invalid_argument if any transport input is invalid.
  * @throws std::runtime_error if the solve fails or produces non-finite data.
  */
-template <TpetraTypePack Pack>
-auto TurbulenceScalarTransportEquation<Pack>::advance(
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
     const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
     const field_type& effective_diffusivity, field_type& state,
     const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
@@ -87,7 +87,7 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
     const auto diffusivity_values =
         effective_diffusivity.local_read_view();
     const auto face_flux_values = face_fluxes.owned_read_view();
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Turbulence scalar transport input validation",
         [&]
         {
@@ -360,16 +360,27 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
         try
         {
             return FVM::weighted_scalar_transport_system<Pack>(
-                old_state, face_fluxes, time_step, d_unit_weight,
-                d_unit_weight, effective_diffusivity, boundary_condition,
-                boundary_value, source, treatment, correction_field,
-                d_cached_transport_matrix, std::move(sink),
-                std::move(fixed_cell_value),
-                boundary_overrides != nullptr
-                    ? boundary_overrides->boundary_diffusivity
-                    : nullptr,
-                &d_transport_geometry_cache,
-                coefficient_interpolation);
+                FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
+                    .old_values = old_state,
+                    .face_fluxes = face_fluxes,
+                    .time_step = time_step,
+                    .storage_weight = d_unit_weight,
+                    .advection_weight = d_unit_weight,
+                    .diffusivity = effective_diffusivity,
+                    .boundary_condition = boundary_condition,
+                    .boundary_value = boundary_value,
+                    .source = source,
+                    .treatment = treatment,
+                    .correction_field = correction_field,
+                    .cached_matrix = d_cached_transport_matrix,
+                    .implicit_sink = std::move(sink),
+                    .fixed_cell_value = std::move(fixed_cell_value),
+                    .boundary_diffusivity =
+                        boundary_overrides != nullptr
+                            ? boundary_overrides->boundary_diffusivity
+                            : nullptr,
+                    .geometry_cache = &d_transport_geometry_cache,
+                    .coefficient_interpolation = coefficient_interpolation});
         }
         catch (...)
         {
@@ -392,7 +403,7 @@ auto TurbulenceScalarTransportEquation<Pack>::advance(
         matrix, *system.rhs, candidate.owned_data(), linear_options);
     {
         auto candidate_values = candidate.owned_write_view();
-        turbulence_detail::collective_local_validation(
+        collective_detail::collective_local_validation(
             *d_mesh, "Turbulence scalar transport candidate validation",
             [&]
             {

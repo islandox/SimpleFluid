@@ -17,6 +17,8 @@
 #include "equations/MaterialFeedbackModel.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 #include "dataclass/Database.hh"
+#include "geometry/MeshHandle.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
@@ -30,6 +32,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -49,6 +52,33 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
+}
+
+/** @brief Build a native one-cell Cartesian handle without a legacy mesh. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+make_native_single_cell_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::move(cartesian));
+}
+
+/** @brief Build an eight-cell native line that partitions across MPI ranks. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+make_native_distributed_line_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 0.125, 0.25, 0.375, 0.5,
+                 0.625, 0.75, 0.875, 1.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::move(cartesian));
 }
 
 /**
@@ -892,6 +922,8 @@ TEST(Phase13PlusCouplingTest,
 
         radiolysis.configure(make_sheng_test_options());
         EXPECT_THROW(solver.step(), std::logic_error);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+        EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
@@ -945,6 +977,8 @@ TEST(Phase13PlusCouplingTest,
         void_model->configure(collapse_options);
 
         EXPECT_THROW(solver.step(), std::logic_error);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+        EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
@@ -1007,15 +1041,109 @@ TEST(DelayedNeutronPrecursorModelTest, SourceAndDecayAreAnalytic)
     options.source_terms = {4.0};
     model.configure(options);
     model.advance(0.5, alpha_l, nullptr);
+    const auto expected_source_solution =
+        4.0 / 2.0 * (1.0 - std::exp(-1.0));
     EXPECT_NEAR(
         model.concentration(0).value(0),
-        4.0 / 2.0 * (1.0 - std::exp(-1.0)),
+        expected_source_solution,
         1.0e-12);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.inventory_before, 0.0, 1.0e-14);
+    EXPECT_NEAR(diagnostics.source_added, 2.0 * volume, 1.0e-12);
+    EXPECT_NEAR(
+        diagnostics.decay_removed,
+        (2.0 - expected_source_solution) * volume,
+        1.0e-12);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        expected_source_solution * volume,
+        1.0e-12);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
 
     options.decay_constants = {1.0e-18};
     model.configure(options);
     model.advance(0.5, alpha_l, nullptr);
     EXPECT_NEAR(model.concentration(0).value(0), 2.0, 1.0e-12);
+}
+
+/** @brief Keep the source response finite as positive decay approaches zero. */
+TEST(DelayedNeutronPrecursorModelTest, TinyDecayConstantPreservesFiniteSourceLimit)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0e-320};
+    options.source_terms = {4.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(0.5, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_TRUE(std::isfinite(concentration));
+    EXPECT_NEAR(concentration, 2.0, 1.0e-12);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 2.0 * volume, 1.0e-12);
+    EXPECT_NEAR(diagnostics.decay_removed, 0.0, 1.0e-14);
+    EXPECT_TRUE(std::isfinite(diagnostics.balance_error));
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
+}
+
+/** @brief Avoid cancellation when decay is much faster than the time step. */
+TEST(DelayedNeutronPrecursorModelTest, LargeDecayStepUsesDirectExponentialResponse)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0};
+    options.source_terms = {1.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(1.0e16, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_TRUE(std::isfinite(concentration));
+    EXPECT_NEAR(concentration, 1.0, 1.0e-14);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(diagnostics.decay_removed, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        concentration * volume,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-14);
+}
+
+/** @brief Keep balance closure when a large inventory decays to a survivor. */
+TEST(DelayedNeutronPrecursorModelTest,
+     LargeInitialInventoryKeepsStableBalanceDiagnostic)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0};
+    options.initial_concentrations = {1.0e16};
+    options.source_terms = {1.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(1.0e16, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_NEAR(concentration, 1.0, 1.0e-14);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(diagnostics.decay_removed, 2.0e16 * volume, 8.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        concentration * volume,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-14);
 }
 
 /** @brief Verify precursor inventory survives a changing liquid fraction. */
@@ -1137,6 +1265,318 @@ TEST(DelayedNeutronPrecursorModelTest,
               * model.concentration(0).value(cell_lid),
             1.0e-12);
     }
+}
+
+/** @brief Verify liquid flux advects precursors and reports a closed balance. */
+TEST(DelayedNeutronPrecursorModelTest,
+     LiquidAdvectionConservesDistributedInventory)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel =
+        SimpleFluid::DelayedNeutronPrecursorModel<Pack, NativeMesh>;
+    using NativeField = typename NativeModel::field_type;
+    using NativeFaceField = typename NativeModel::face_flux_field_type;
+
+    auto mesh = make_native_distributed_line_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.power_yields = {1.0};
+    NativeModel model(mesh, options);
+    NativeField alpha_l(mesh, 0.7, "alpha_l");
+    NativeField fission_power(mesh, "qdot_fission");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<NativeMesh::local_ordinal_type>(owned);
+        const auto x = mesh->cell_centroid(cell_lid).x;
+        fission_power.set_owned_value(cell_lid, 2.0 - x);
+    }
+    fission_power.sync_ghosts();
+    model.advance(0.1, alpha_l, &fission_power);
+
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    NativeFaceField liquid_flux(mesh, 0.0, "liquid_face_flux");
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<NativeMesh::local_ordinal_type>(face);
+        if (!mesh->is_owned_face(face_lid)
+            || !mesh->is_interior_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        const auto neighbor = mesh->neighbor_cell(face_lid);
+        const auto crosses_partition =
+            !mesh->is_owned_cell(owner) || !mesh->is_owned_cell(neighbor);
+        if (communicator->getSize() > 1 && !crosses_partition)
+        {
+            continue;
+        }
+        const auto outward_area =
+            mesh->face_area_vector_outward(face_lid, owner);
+        liquid_flux.set_owned_value(face_lid, 0.05 * outward_area.x);
+    }
+    liquid_flux.sync_ghosts();
+
+    std::vector<double> concentration_before(mesh->num_owned_cells());
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<NativeMesh::local_ordinal_type>(owned);
+        concentration_before[owned] = model.concentration(0).value(cell_lid);
+    }
+    int local_nonzero_partition_fluxes = 0;
+    for (const auto face_lid : liquid_flux.owned_face_ids())
+    {
+        if (!mesh->is_interior_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        const auto neighbor = mesh->neighbor_cell(face_lid);
+        if ((!mesh->is_owned_cell(owner) || !mesh->is_owned_cell(neighbor))
+            && std::abs(liquid_flux.value(face_lid)) > 1.0e-14)
+        {
+            ++local_nonzero_partition_fluxes;
+        }
+    }
+    if (communicator->getSize() > 1)
+    {
+        int global_nonzero_partition_fluxes = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_nonzero_partition_fluxes,
+            &global_nonzero_partition_fluxes);
+        ASSERT_GT(global_nonzero_partition_fluxes, 0);
+    }
+
+    constexpr double time_step = 0.05;
+    model.advance(time_step, alpha_l, nullptr, &liquid_flux);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+
+    double local_profile_change = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<NativeMesh::local_ordinal_type>(owned);
+        local_profile_change +=
+            std::abs(model.concentration(0).value(cell_lid)
+                     - concentration_before[owned])
+          * mesh->cell_volume(cell_lid);
+    }
+    double global_profile_change = 0.0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_profile_change,
+        &global_profile_change);
+
+    EXPECT_GT(diagnostics.inventory_before, 0.0);
+    EXPECT_GT(global_profile_change, 1.0e-12);
+    EXPECT_DOUBLE_EQ(diagnostics.source_added, 0.0);
+    EXPECT_DOUBLE_EQ(diagnostics.decay_removed, 0.0);
+    EXPECT_DOUBLE_EQ(diagnostics.boundary_outflow, 0.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        diagnostics.inventory_before,
+        std::max(1.0e-12,
+                 std::abs(diagnostics.inventory_before) * 1.0e-10));
+    EXPECT_NEAR(
+        diagnostics.balance_error,
+        0.0,
+        std::max(1.0e-12,
+                 std::abs(diagnostics.inventory_before) * 1.0e-10));
+}
+
+/** @brief Verify rank-local input differences fail collectively before transport. */
+TEST(DelayedNeutronPrecursorModelTest,
+     CollectivelyRejectsRankDivergentAdvanceSelection)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel =
+        SimpleFluid::DelayedNeutronPrecursorModel<Pack, NativeMesh>;
+    using NativeField = typename NativeModel::field_type;
+    using NativeFaceField = typename NativeModel::face_flux_field_type;
+
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() < 2)
+    {
+        GTEST_SKIP() << "Rank-divergent validation requires at least two ranks.";
+    }
+
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    NativeModel model(mesh, options);
+    NativeField alpha_l(mesh, 0.7, "alpha_l");
+    NativeFaceField liquid_flux(mesh, 0.0, "liquid_face_flux");
+    const auto* selected_flux =
+        communicator->getRank() == 0 ? &liquid_flux : nullptr;
+    EXPECT_THROW(
+        model.advance(0.05, alpha_l, nullptr, selected_flux),
+        std::invalid_argument);
+
+    NativeModel invalid_field_model(mesh, options);
+    if (communicator->getRank() == 0)
+    {
+        alpha_l.set_owned_value(0, -0.1);
+    }
+    EXPECT_THROW(
+        invalid_field_model.advance(0.05, alpha_l, nullptr),
+        std::invalid_argument);
+
+    NativeModel inconsistent_timestep_model(mesh, options);
+    alpha_l.put_scalar(0.7);
+    const auto rank_dependent_time_step =
+        communicator->getRank() == 0 ? 0.05 : 0.1;
+    EXPECT_THROW(
+        inconsistent_timestep_model.advance(
+            rank_dependent_time_step, alpha_l, nullptr),
+        std::invalid_argument);
+
+}
+
+/** @brief Reject rank-divergent configuration and invalid power before syncs. */
+TEST(DelayedNeutronPrecursorModelTest,
+     CollectivelyRejectsRankDivergentConfigurationAndPower)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel =
+        SimpleFluid::DelayedNeutronPrecursorModel<Pack, NativeMesh>;
+    using NativeField = typename NativeModel::field_type;
+
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::DelayedNeutronPrecursorOptions divergent_groups;
+    divergent_groups.group_count =
+        communicator->getRank() == 0 ? 0 : 1;
+    EXPECT_THROW(
+        (NativeModel(mesh, divergent_groups)),
+        std::invalid_argument);
+
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {1.0};
+    NativeModel model(mesh, options);
+
+    EXPECT_THROW(model.configure(divergent_groups), std::invalid_argument);
+    EXPECT_TRUE(model.enabled());
+    EXPECT_EQ(model.group_count(), 1u);
+
+    auto divergent_initial = options;
+    divergent_initial.initial_concentrations = {
+        communicator->getRank() == 0 ? 1.0 : 2.0};
+    EXPECT_THROW(
+        model.configure(divergent_initial),
+        std::invalid_argument);
+
+    auto divergent_options = options;
+    divergent_options.source_terms = {
+        communicator->getRank() == 0 ? 1.0 : 2.0};
+    EXPECT_THROW(
+        model.configure(divergent_options),
+        std::invalid_argument);
+
+    auto rank_local_invalid_options = options;
+    rank_local_invalid_options.source_terms = {
+        communicator->getRank() == 0 ? -1.0 : 1.0};
+    EXPECT_THROW(
+        model.configure(rank_local_invalid_options),
+        std::invalid_argument);
+
+    NativeField alpha_l(mesh, 0.7, "alpha_l");
+    NativeField fission_power(mesh, 1.0, "qdot_fission");
+    if (communicator->getRank() == 0)
+    {
+        EXPECT_GT(mesh->num_owned_cells(), 0u);
+        if (mesh->num_owned_cells() > 0)
+        {
+            fission_power.set_owned_value(0, -1.0);
+        }
+    }
+    fission_power.sync_ghosts();
+    EXPECT_THROW(
+        model.advance(0.05, alpha_l, &fission_power),
+        std::invalid_argument);
+}
+
+/** @brief Reject asymmetric solver precursor state before entering a step. */
+TEST(DelayedNeutronPrecursorModelTest,
+     SolverRejectsRankDivergentPrecursorPresenceBeforeStep)
+{
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.05;
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {});
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {1.0};
+    solver.configure_precursors(options);
+    if (communicator->getRank() == 0)
+    {
+        EXPECT_TRUE(solver.remove_precursor_model());
+    }
+
+    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_EQ(solver.step_index(), 0);
+}
+
+/** @brief Verify an implicit outlet loss is included in the diagnostics. */
+TEST(DelayedNeutronPrecursorModelTest, BoundaryOutflowClosesInventoryBalance)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {4.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 0.75, "alpha_l");
+    SimpleFluid::FaceField<Pack> liquid_flux(
+        mesh, 0.0, "liquid_face_flux");
+
+    MeshType::local_ordinal_type outlet = -1;
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        static_cast<void>(batch_id);
+        if (!batch.face_lids.empty())
+        {
+            outlet = batch.face_lids.front();
+            break;
+        }
+    }
+    ASSERT_GE(outlet, 0);
+    liquid_flux.set_value(outlet, 0.25);
+
+    constexpr double time_step = 0.2;
+    model.advance(time_step, alpha_l, nullptr, &liquid_flux);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto expected_concentration =
+        4.0 / (1.0 + time_step * 0.25 / mesh->cell_volume(0));
+
+    EXPECT_NEAR(model.concentration(0).value(0),
+                expected_concentration, 1.0e-12);
+    EXPECT_GT(diagnostics.boundary_outflow, 0.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after + diagnostics.boundary_outflow,
+        diagnostics.inventory_before,
+        1.0e-12);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
 }
 
 /** @brief Verify precursor diffusion includes explicit non-orthogonal correction. */
@@ -1455,6 +1895,70 @@ TEST(Phase13PlusDatabaseTest, ParsesFlatKeysAndDefaults)
         (SimpleFluid::ArrReal{0.1, 0.2}));
 }
 
+/** @brief Verify each Phase 13 parser identifies an ill-typed option and owner. */
+TEST(Phase13PlusDatabaseTest, ReportsWrongTypedOptionContext)
+{
+    auto expect_context =
+        [](auto&& parse, const std::string& context, const std::string& key)
+    {
+        try
+        {
+            parse();
+            FAIL() << "Expected a typed model option failure.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            const std::string message(error.what());
+            EXPECT_NE(message.find(context), std::string::npos);
+            EXPECT_NE(message.find(key), std::string::npos);
+            EXPECT_NE(message.find("wrong type"), std::string::npos);
+        }
+    };
+
+    SimpleFluid::Database boiling;
+    boiling.set("enable_bulk_boiling", std::string{"yes"});
+    expect_context(
+        [&] { SimpleFluid::boiling_source_options_from_database(boiling); },
+        "Boiling source model",
+        "enable_bulk_boiling");
+
+    SimpleFluid::Database scalar_void;
+    scalar_void.set("alpha_min", std::string{"zero"});
+    expect_context(
+        [&]
+        {
+            SimpleFluid::scalar_void_fraction_options_from_database(
+                scalar_void);
+        },
+        "Scalar void-fraction model",
+        "alpha_min");
+
+    SimpleFluid::Database feedback;
+    feedback.set("density_feedback_model", SimpleFluid::real_t{1.0});
+    SimpleFluid::TimeStepperOptions time_options;
+    const auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
+    expect_context(
+        [&]
+        {
+            SimpleFluid::material_feedback_options_from_database(
+                feedback, model_options, time_options);
+        },
+        "Material feedback model",
+        "density_feedback_model");
+
+    SimpleFluid::Database precursor;
+    precursor.set("precursor_group_count", SimpleFluid::real_t{2.0});
+    expect_context(
+        [&]
+        {
+            SimpleFluid::delayed_neutron_precursor_options_from_database(
+                precursor);
+        },
+        "Delayed-neutron precursor model",
+        "precursor_group_count");
+}
+
 /** @brief Verify feedback mapping preserves a constant field average. */
 TEST(FeedbackMapTest, PreservesConstantFieldAverage)
 {
@@ -1496,6 +2000,73 @@ TEST(FeedbackMapTest, PreservesVolumeIntegralForCoarsenedField)
     ASSERT_EQ(averages.size(), 1u);
     EXPECT_NEAR(
         averages[0] * mapped_volume, source_integral, 1.0e-14);
+}
+
+/** @brief Advance the complete optional physical stack on a native handle. */
+TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesExtendedPhysicalStack)
+{
+    const auto mesh = make_native_single_cell_mesh();
+    auto time_options = make_energy_test_time_options(0.1);
+    auto model_options = make_energy_test_model_options();
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {}, model_options);
+    solver.initialize_heated_box(383.0, 383.0);
+
+    SimpleFluid::FissionPowerSourceOptions fission;
+    fission.profile = SimpleFluid::FissionPowerProfile::Constant;
+    fission.power_density = 100.0;
+    solver.configure_fission_power_source(fission);
+
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.9;
+    void_options.initial_alpha = 0.1;
+    auto& void_model =
+        solver.configure_scalar_void_fraction(void_options);
+
+    SimpleFluid::RadiolyticGasOptions radiolysis;
+    radiolysis.mode = SimpleFluid::RadiolyticGasMode::IdealGasSource;
+    radiolysis.hydrogen_yield_mol_per_j = 1.0e-7;
+    radiolysis.max_source_alpha_rate = 1.0;
+    auto& radiolytic_model =
+        solver.configure_radiolytic_gas(radiolysis);
+
+    SimpleFluid::BoilingSourceOptions boiling;
+    boiling.enable_bulk_boiling = true;
+    boiling.saturation_temperature = 373.0;
+    boiling.boiling_time_scale = 1.0;
+    boiling.latent_heat = 1000.0;
+    boiling.gas_density = 1.0;
+    auto& boiling_model = solver.configure_boiling_source(boiling);
+
+    SimpleFluid::MaterialFeedbackOptions feedback;
+    feedback.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
+    feedback.reference_density = 2.0;
+    feedback.liquid_density = 2.0;
+    feedback.gas_density = 1.0;
+    feedback.reference_dynamic_viscosity = 0.0;
+    feedback.min_viscosity = 0.0;
+    auto& feedback_model = solver.configure_material_feedback(feedback);
+
+    SimpleFluid::DelayedNeutronPrecursorOptions precursors;
+    precursors.group_count = 1;
+    precursors.decay_constants = {0.1};
+    precursors.initial_concentrations = {1.0};
+    precursors.power_yields = {1.0e-3};
+    auto& precursor_model = solver.configure_precursors(precursors);
+
+    solver.step();
+
+    EXPECT_FALSE(mesh->legacy_mesh());
+    EXPECT_EQ(solver.temperature().mesh_ptr(), mesh);
+    EXPECT_EQ(solver.material_properties().density.mesh_ptr(), mesh);
+    EXPECT_EQ(void_model.alpha_g().mesh_ptr(), mesh);
+    EXPECT_EQ(radiolytic_model.source_alpha_rad().mesh_ptr(), mesh);
+    EXPECT_EQ(boiling_model.source_alpha_boil().mesh_ptr(), mesh);
+    EXPECT_EQ(feedback_model.density_feedback().mesh_ptr(), mesh);
+    EXPECT_EQ(precursor_model.concentration(0).mesh_ptr(), mesh);
+    EXPECT_TRUE(std::isfinite(solver.temperature().value(0)));
+    EXPECT_TRUE(std::isfinite(void_model.alpha_g().value(0)));
+    EXPECT_TRUE(std::isfinite(precursor_model.concentration(0).value(0)));
 }
 
 /** @brief Verify configured multiphysics fields are published to VTU output. */

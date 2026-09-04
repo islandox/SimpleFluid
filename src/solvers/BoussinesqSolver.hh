@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "FVM/TransportSystem.hh"
 #include "equations/BoilingSourceModel.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
 #include "equations/DelayedNeutronPrecursorModel.hh"
@@ -22,6 +23,7 @@
 #include "solvers/FluidSolver.hh"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -36,71 +38,87 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for vector storage and communication.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class SIMPLEFLUID_SOLVERS_EXPORT BoussinesqSolver
-    : public FluidSolver<Pack>
+class SIMPLEFLUID_SOLVERS_EXPORT BoussinesqSolver : public FluidSolver<Pack>
 {
 public:
     using base_type = FluidSolver<Pack>;
-    using typename base_type::mesh_type;
-    using typename base_type::field_type;
-    using typename base_type::velocity_field_type;
-    using typename base_type::face_flux_field_type;
-    using typename base_type::scalar_type;
-    using typename base_type::local_ordinal_type;
-    using typename base_type::global_ordinal_type;
-    using typename base_type::vec_type;
-    using typename base_type::residual_type;
-    using typename base_type::step_statistics_type;
     using typename base_type::coupled_system_type;
-    using cell_type = typename mesh_type::CellType;
+    using typename base_type::face_flux_field_type;
+    using typename base_type::field_type;
+    using typename base_type::global_ordinal_type;
+    using typename base_type::legacy_face_flux_field_type;
+    using typename base_type::legacy_field_type;
+    using typename base_type::legacy_mesh_type;
+    using typename base_type::legacy_velocity_field_type;
+    using typename base_type::local_ordinal_type;
+    using typename base_type::mesh_type;
+    using typename base_type::momentum_equation_type;
+    using typename base_type::residual_type;
+    using typename base_type::scalar_type;
+    using typename base_type::step_statistics_type;
+    using typename base_type::vec_type;
+    using typename base_type::velocity_field_type;
+    using canonical_velocity_boundary_cache_type = typename base_type::velocity_boundary_cache_type;
+    using canonical_face_flux_workspace_type = typename base_type::native_face_flux_workspace_type;
+    using canonical_coupled_solver_type = typename base_type::native_coupled_solver_type;
+    using material_type = MaterialPropertyFields<Pack, mesh_type>;
+    using temperature_source_registry_type = TemperatureSourceRegistry<Pack, mesh_type>;
+    using volumetric_source_type = VolumetricScalarSource<Pack, mesh_type>;
+    using update_context_type = BoussinesqUpdateContext<Pack, mesh_type>;
+    using temperature_equation_type = TemperatureDiffusionEquation<Pack, mesh_type>;
+    using boussinesq_momentum_equation_type = BoussinesqMomentumEquation<Pack, mesh_type>;
+    using turbulence_model_type = TurbulenceModel<Pack, mesh_type>;
+    using turbulence_buoyancy_context_type = TurbulenceBuoyancyContext<Pack, mesh_type>;
+    using fission_power_source_type = FissionPowerSource<Pack, mesh_type>;
+    using radiolytic_gas_model_type = RadiolyticGasModel<Pack, mesh_type>;
+    using boiling_source_model_type = BoilingSourceModel<Pack, mesh_type>;
+    using scalar_void_fraction_model_type = ScalarVoidFractionModel<Pack, mesh_type>;
+    using material_feedback_model_type = MaterialFeedbackModel<Pack, mesh_type>;
+    using precursor_model_type = DelayedNeutronPrecursorModel<Pack, mesh_type>;
+    // Retain the historical legacy cell alias for downstream code that uses
+    // it for STK-only model helpers.
+    using cell_type = typename legacy_mesh_type::CellType;
     using base_type::pressure;
     using base_type::velocity;
 
-    BoussinesqSolver(SP<const mesh_type> mesh,
-                     BoundaryConditionSet boundary_conditions,
-                     TimeStepperOptions time_options = {},
-                     LinearSolverOptions linear_options = {});
+    BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
 
-    BoussinesqSolver(SP<const mesh_type> mesh,
-                     BoundaryConditionSet boundary_conditions,
-                     TimeStepperOptions time_options,
-                     LinearSolverOptions linear_options,
-                     BoussinesqModelOptions model_options);
+    BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options);
 
-    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
-                     BoundaryConditionSet boundary_conditions,
-                     TimeStepperOptions time_options = {},
-                     LinearSolverOptions linear_options = {});
+    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
 
-    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
-                     BoundaryConditionSet boundary_conditions,
-                     TimeStepperOptions time_options,
-                     LinearSolverOptions linear_options,
-                     BoussinesqModelOptions model_options);
+    /**
+     * @brief Construct with explicit physical models on a runtime handle.
+     *
+     * Physical material fields, heat sources, turbulence, and optional models
+     * retain their native MeshHandle/FieldStored representation when @p mesh
+     * does not wrap a legacy mesh.
+     */
+    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options);
 
     /**
      * @brief Initialize a linear temperature profile and uniform pressure.
      * @p initial_pressure is physical gauge pressure in Pa.
      */
-    void initialize_linear_temperature(const vec_type& direction,
-                                       scalar_type hot_at_min,
-                                       scalar_type cold_at_max,
-                                       scalar_type initial_pressure = 0.0);
+    void initialize_linear_temperature(
+        const vec_type& direction, scalar_type hot_at_min, scalar_type cold_at_max, scalar_type initial_pressure = 0.0);
 
     /**
      * @brief Initialize the standard side-heated-box state.
      * @p initial_pressure is physical gauge pressure in Pa.
      */
-    void initialize_heated_box(scalar_type hot_temperature,
-                               scalar_type cold_temperature,
-                               scalar_type initial_pressure = 0.0);
+    void initialize_heated_box(
+        scalar_type hot_temperature, scalar_type cold_temperature, scalar_type initial_pressure = 0.0);
 
     /**
      * @param initial_pressure Physical gauge pressure in Pa.
      */
-    void initialize_bottom_hot_top_cold(scalar_type hot_temperature,
-                                        scalar_type cold_temperature,
-                                        scalar_type initial_pressure = 0.0);
+    void initialize_bottom_hot_top_cold(
+        scalar_type hot_temperature, scalar_type cold_temperature, scalar_type initial_pressure = 0.0);
 
     using base_type::step;
     void step() override;
@@ -108,48 +126,42 @@ public:
     const field_type& temperature() const noexcept;
     field_type& temperature() noexcept;
 
-    MaterialPropertyFields<Pack>& material_properties() noexcept;
-    const MaterialPropertyFields<Pack>& material_properties() const noexcept;
+    material_type& material_properties();
+    const material_type& material_properties() const;
 
     /** Configure a Problem-owned two-equation turbulence model. */
-    TurbulenceModel<Pack>& configure_turbulence(
-        const TurbulenceModelOptions& options);
+    turbulence_model_type& configure_turbulence(const TurbulenceModelOptions& options);
     /** Configure turbulence from flat database keys. */
-    TurbulenceModel<Pack>& configure_turbulence(const Database& database);
+    turbulence_model_type& configure_turbulence(const Database& database);
     /**
      * Disable the active turbulence model and restore laminar transport.
      * @note Invoke consistently on every mesh rank.
      */
     bool remove_turbulence_model() noexcept;
     /** Return the active turbulence model, or nullptr in laminar mode. */
-    TurbulenceModel<Pack>* find_turbulence_model() noexcept;
+    turbulence_model_type* find_turbulence_model() noexcept;
     /** Return the active turbulence model, or nullptr in laminar mode. */
-    const TurbulenceModel<Pack>* find_turbulence_model() const noexcept;
+    const turbulence_model_type* find_turbulence_model() const noexcept;
 
     /**
      * @param name Must be unique and non-reserved.
      * @param initial_power_density Volumetric power density in W/m^3.
      */
-    VolumetricScalarSource<Pack>& add_temperature_source(
-        std::string name,
-        scalar_type initial_power_density = {});
+    volumetric_source_type& add_temperature_source(std::string name, scalar_type initial_power_density = {});
     bool remove_temperature_source(const std::string& name);
-    VolumetricScalarSource<Pack>* find_temperature_source(
-        const std::string& name) noexcept;
-    const VolumetricScalarSource<Pack>* find_temperature_source(
-        const std::string& name) const noexcept;
-    TemperatureSourceRegistry<Pack>& temperature_sources() noexcept;
-    const TemperatureSourceRegistry<Pack>& temperature_sources() const noexcept;
+    volumetric_source_type* find_temperature_source(const std::string& name) noexcept;
+    const volumetric_source_type* find_temperature_source(const std::string& name) const noexcept;
+    temperature_source_registry_type& temperature_sources();
+    const temperature_source_registry_type& temperature_sources() const;
 
     /**
      * @brief Create the reserved qdot_fission source if needed.
      */
-    FissionPowerSource<Pack>& add_fission_power_source();
+    fission_power_source_type& add_fission_power_source();
     /**
      * @brief Configure the reserved fission power-density source.
      */
-    void configure_fission_power_source(
-        const FissionPowerSourceOptions& options);
+    void configure_fission_power_source(const FissionPowerSourceOptions& options);
     /**
      * @brief Remove the reserved fission power source, if present.
      */
@@ -157,22 +169,20 @@ public:
     /**
      * @brief Return the mutable fission source, or nullptr when absent.
      */
-    FissionPowerSource<Pack>* find_fission_power_source() noexcept;
+    fission_power_source_type* find_fission_power_source() noexcept;
     /**
      * @brief Return the fission source, or nullptr when absent.
      */
-    const FissionPowerSource<Pack>* find_fission_power_source() const noexcept;
+    const fission_power_source_type* find_fission_power_source() const noexcept;
 
     /**
      * @brief Configure the optional radiolytic gas model from explicit options.
      */
-    RadiolyticGasModel<Pack>& configure_radiolytic_gas(
-        const RadiolyticGasOptions& options);
+    radiolytic_gas_model_type& configure_radiolytic_gas(const RadiolyticGasOptions& options);
     /**
      * @brief Configure the optional radiolytic gas model from database keys.
      */
-    RadiolyticGasModel<Pack>& configure_radiolytic_gas(
-        const Database& database);
+    radiolytic_gas_model_type& configure_radiolytic_gas(const Database& database);
     /**
      * @brief Remove the optional radiolytic gas model, if present.
      */
@@ -180,23 +190,20 @@ public:
     /**
      * @brief Return the mutable radiolytic gas model, or nullptr when absent.
      */
-    RadiolyticGasModel<Pack>* find_radiolytic_gas_model() noexcept;
+    radiolytic_gas_model_type* find_radiolytic_gas_model() noexcept;
     /**
      * @brief Return the radiolytic gas model, or nullptr when absent.
      */
-    const RadiolyticGasModel<Pack>*
-    find_radiolytic_gas_model() const noexcept;
+    const radiolytic_gas_model_type* find_radiolytic_gas_model() const noexcept;
 
     /**
      * @brief Configure the optional boiling source from explicit options.
      */
-    BoilingSourceModel<Pack>& configure_boiling_source(
-        const BoilingSourceOptions& options);
+    boiling_source_model_type& configure_boiling_source(const BoilingSourceOptions& options);
     /**
      * @brief Configure the optional boiling source from database keys.
      */
-    BoilingSourceModel<Pack>& configure_boiling_source(
-        const Database& database);
+    boiling_source_model_type& configure_boiling_source(const Database& database);
     /**
      * @brief Remove the optional boiling source model, if present.
      */
@@ -204,44 +211,37 @@ public:
     /**
      * @brief Return the mutable boiling source model, or nullptr when absent.
      */
-    BoilingSourceModel<Pack>* find_boiling_source_model() noexcept;
+    boiling_source_model_type* find_boiling_source_model() noexcept;
     /**
      * @brief Return the boiling source model, or nullptr when absent.
      */
-    const BoilingSourceModel<Pack>*
-    find_boiling_source_model() const noexcept;
+    const boiling_source_model_type* find_boiling_source_model() const noexcept;
 
     /**
      * @brief Configure the scalar void-fraction model from explicit options.
      */
-    ScalarVoidFractionModel<Pack>& configure_scalar_void_fraction(
-        const ScalarVoidFractionOptions& options);
+    scalar_void_fraction_model_type& configure_scalar_void_fraction(const ScalarVoidFractionOptions& options);
     /**
      * @brief Configure the scalar void-fraction model from database keys.
      */
-    ScalarVoidFractionModel<Pack>& configure_scalar_void_fraction(
-        const Database& database);
+    scalar_void_fraction_model_type& configure_scalar_void_fraction(const Database& database);
     /**
      * @brief Return the mutable scalar void-fraction model, or nullptr.
      */
-    ScalarVoidFractionModel<Pack>* find_scalar_void_fraction_model()
-        noexcept;
+    scalar_void_fraction_model_type* find_scalar_void_fraction_model() noexcept;
     /**
      * @brief Return the scalar void-fraction model, or nullptr when absent.
      */
-    const ScalarVoidFractionModel<Pack>*
-    find_scalar_void_fraction_model() const noexcept;
+    const scalar_void_fraction_model_type* find_scalar_void_fraction_model() const noexcept;
 
     /**
      * @brief Configure material-property feedback from explicit options.
      */
-    MaterialFeedbackModel<Pack>& configure_material_feedback(
-        const MaterialFeedbackOptions& options);
+    material_feedback_model_type& configure_material_feedback(const MaterialFeedbackOptions& options);
     /**
      * @brief Configure material-property feedback from database keys.
      */
-    MaterialFeedbackModel<Pack>& configure_material_feedback(
-        const Database& database);
+    material_feedback_model_type& configure_material_feedback(const Database& database);
     /**
      * @brief Remove the optional material-feedback model, if present.
      */
@@ -249,103 +249,125 @@ public:
     /**
      * @brief Return the mutable material-feedback model, or nullptr.
      */
-    MaterialFeedbackModel<Pack>* find_material_feedback_model() noexcept;
+    material_feedback_model_type* find_material_feedback_model() noexcept;
     /**
      * @brief Return the material-feedback model, or nullptr when absent.
      */
-    const MaterialFeedbackModel<Pack>*
-    find_material_feedback_model() const noexcept;
+    const material_feedback_model_type* find_material_feedback_model() const noexcept;
 
     /**
      * @brief Configure delayed-neutron precursor groups from explicit options.
+     * @note Invoke collectively on every mesh rank.
      */
-    DelayedNeutronPrecursorModel<Pack>& configure_precursors(
-        const DelayedNeutronPrecursorOptions& options);
+    precursor_model_type& configure_precursors(const DelayedNeutronPrecursorOptions& options);
     /**
      * @brief Configure delayed-neutron precursor groups from database keys.
+     * @note Invoke collectively on every mesh rank.
      */
-    DelayedNeutronPrecursorModel<Pack>& configure_precursors(
-        const Database& database);
+    precursor_model_type& configure_precursors(const Database& database);
     /**
      * @brief Remove the optional precursor model, if present.
+     * @note Invoke consistently on every mesh rank. A later step rejects a
+     *       rank-divergent precursor state collectively.
      */
     bool remove_precursor_model() noexcept;
     /**
      * @brief Return the mutable precursor model, or nullptr when absent.
      */
-    DelayedNeutronPrecursorModel<Pack>* find_precursor_model() noexcept;
+    precursor_model_type* find_precursor_model() noexcept;
     /**
      * @brief Return the precursor model, or nullptr when absent.
      */
-    const DelayedNeutronPrecursorModel<Pack>*
-    find_precursor_model() const noexcept;
+    const precursor_model_type* find_precursor_model() const noexcept;
 
-    void set_material_updater(
-        typename MaterialPropertyFields<Pack>::updater_type updater);
+    void set_material_updater(typename material_type::updater_type updater);
     void clear_material_updater() noexcept;
 
     void write_solution_vtu(const std::string& filename) const;
-    void write_solution_vtu(
-        const std::string& filename,
-        const SolutionOutputOptions& output_options) const;
+    void write_solution_vtu(const std::string& filename, const SolutionOutputOptions& output_options) const;
     void write_parallel_solution_vtu(
-        const std::string& filename,
-        const SolutionOutputOptions& output_options = {}) const;
+        const std::string& filename, const SolutionOutputOptions& output_options = {}) const;
 
 private:
     using base_type::begin_step;
     using base_type::collect_scalar_field;
     using base_type::coupled_pressure_velocity_solver;
     using base_type::d_last_step_statistics;
+    using base_type::d_legacy_mesh;
     using base_type::d_mesh;
     using base_type::d_problem;
     using base_type::d_step_index;
     using base_type::d_time;
     using base_type::finish_step;
     using base_type::fluid_solution_writer;
+    using base_type::legacy_old_face_fluxes;
+    using base_type::legacy_predictor_pressure_gradient;
+    using base_type::legacy_pressure;
+    using base_type::legacy_pressure_face_flux_workspace;
+    using base_type::legacy_projected_face_fluxes;
+    using base_type::legacy_velocity;
+    using base_type::native_coupled_pressure_velocity_solver;
+    using base_type::native_momentum_equation;
+    using base_type::native_pressure_face_flux_workspace;
+    using base_type::native_velocity_boundary_cache;
     using base_type::old_face_fluxes;
     using base_type::predictor_pressure_gradient;
+    using base_type::pressure_face_flux_workspace;
     using base_type::pressure_velocity_residuals;
     using base_type::projected_face_fluxes;
     using base_type::require_mesh;
     using base_type::solve_pressure_velocity_coupling;
+    using base_type::sync_primary_fields_from_legacy;
+    using base_type::sync_primary_fields_to_legacy;
+    using base_type::uses_legacy_backend;
     using base_type::velocity_boundary_cache;
 
     /** @brief Tag selecting the physical-model constructor implementation. */
-    struct PhysicalModelTag {};
+    struct PhysicalModelTag
+    {
+    };
 
     SIMPLEFLUID_SOLVERS_LOCAL
-    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh,
-                     BoundaryConditionSet boundary_conditions,
-                     TimeStepperOptions time_options,
-                     LinearSolverOptions linear_options,
-                     BoussinesqModelOptions model_options,
-                     bool physical_model_enabled,
-                     PhysicalModelTag);
+    BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options,
+        bool physical_model_enabled, PhysicalModelTag);
 
     SIMPLEFLUID_SOLVERS_LOCAL
-    TemperatureDiffusionEquation<Pack>& temperature_equation();
+    temperature_equation_type& temperature_equation();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    boussinesq_momentum_equation_type& boussinesq_momentum_equation();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    canonical_velocity_boundary_cache_type& boussinesq_velocity_boundary_cache();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    canonical_face_flux_workspace_type& boussinesq_pressure_face_flux_workspace();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    canonical_coupled_solver_type& boussinesq_coupled_pressure_velocity_solver();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    legacy_field_type& legacy_temperature();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    const legacy_field_type& legacy_temperature() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void sync_temperature_to_legacy();
     BoussinesqMomentumEquation<Pack>& momentum_equation() override;
     LinearSolveSummary advance_momentum() override;
     coupled_system_type assemble_coupled_system() override;
     scalar_type pressure_reference_density() const noexcept override;
     SIMPLEFLUID_SOLVERS_LOCAL
-    MaterialPropertyFields<Pack>& stored_material_properties();
+    material_type& stored_material_properties();
     SIMPLEFLUID_SOLVERS_LOCAL
-    const MaterialPropertyFields<Pack>& stored_material_properties() const;
+    const material_type& stored_material_properties() const;
     SIMPLEFLUID_SOLVERS_LOCAL
-    TurbulenceModel<Pack>& stored_turbulence_model();
+    turbulence_model_type& stored_turbulence_model();
     SIMPLEFLUID_SOLVERS_LOCAL
-    const TurbulenceModel<Pack>& stored_turbulence_model() const;
+    const turbulence_model_type& stored_turbulence_model() const;
     SIMPLEFLUID_SOLVERS_LOCAL
     bool physical_transport_enabled() const noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL
-    VTUWriter solution_writer(
-        const SolutionOutputOptions& output_options) const;
+    VTUWriter solution_writer(const SolutionOutputOptions& output_options) const;
     SIMPLEFLUID_SOLVERS_LOCAL
-    TemperatureSourceRegistry<Pack>& stored_temperature_sources();
+    temperature_source_registry_type& stored_temperature_sources();
     SIMPLEFLUID_SOLVERS_LOCAL
-    const TemperatureSourceRegistry<Pack>& stored_temperature_sources() const;
+    const temperature_source_registry_type& stored_temperature_sources() const;
     SIMPLEFLUID_SOLVERS_LOCAL
     void refresh_physical_models();
     SIMPLEFLUID_SOLVERS_LOCAL
@@ -360,20 +382,28 @@ private:
     const field_type* active_alpha_l_field() const noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL
     void ensure_scalar_void_fraction_model();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_step_coupling() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_turbulence(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    bool advance_pre_temperature_models(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_temperature_transport(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_post_temperature_models(
+        scalar_type time_step, bool sheng_after_temperature);
 
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
     bool d_primary_fields_initialized = false;
-    std::unique_ptr<FissionPowerSource<Pack>> d_fission_power_source;
-    std::unique_ptr<RadiolyticGasModel<Pack>> d_radiolytic_gas_model;
-    std::unique_ptr<BoilingSourceModel<Pack>> d_boiling_source_model;
-    std::unique_ptr<ScalarVoidFractionModel<Pack>>
-        d_scalar_void_fraction_model;
+    std::unique_ptr<fission_power_source_type> d_fission_power_source;
+    std::unique_ptr<radiolytic_gas_model_type> d_radiolytic_gas_model;
+    std::unique_ptr<boiling_source_model_type> d_boiling_source_model;
+    std::unique_ptr<scalar_void_fraction_model_type> d_scalar_void_fraction_model;
     bool d_scalar_void_fraction_explicitly_configured = false;
-    std::unique_ptr<MaterialFeedbackModel<Pack>>
-        d_material_feedback_model;
-    std::unique_ptr<DelayedNeutronPrecursorModel<Pack>>
-        d_precursor_model;
+    std::unique_ptr<material_feedback_model_type> d_material_feedback_model;
+    std::unique_ptr<precursor_model_type> d_precursor_model;
 };
 
 extern template class BoussinesqSolver<DefaultTpetraTypes>;

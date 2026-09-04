@@ -14,8 +14,8 @@
 #include "FVM/CellOperators.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "equations/EquationValidation.hh"
-#include "equations/turbulence/TurbulenceCollectiveValidation.hh"
-#include "fields/VectorCellField.hh"
+#include "equations/CollectiveValidation.hh"
+#include "fields/MeshFieldTraits.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -38,11 +38,11 @@ namespace wall_distance_detail
  * Length and character reductions avoid relying on implementation-specific
  * string hashes and ensure every rank executes the same boundary branches.
  */
-template <TpetraTypePack Pack>
-void require_uniform_wall_names(const Mesh<Pack>& mesh,
+template <class MeshType>
+void require_uniform_wall_names(const MeshType& mesh,
                                 const ArrString& names)
 {
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         mesh, static_cast<int>(names.size()),
         "Poisson wall-distance boundary count");
     const auto communicator = mesh.owned_cell_map()->getComm();
@@ -50,7 +50,7 @@ void require_uniform_wall_names(const Mesh<Pack>& mesh,
     {
         const auto& name = names[name_id];
         const auto local_length = static_cast<int>(name.size());
-        turbulence_detail::require_uniform_integral(
+        collective_detail::require_uniform_value(
             mesh, local_length,
             "Poisson wall-distance boundary-name length");
         for (const char character : name)
@@ -84,11 +84,10 @@ void require_uniform_wall_names(const Mesh<Pack>& mesh,
  * Treating an unexpected backend failure as fatal preserves the solve()
  * contract: no exception can expose a partially replaced output field.
  */
-template <TpetraTypePack Pack>
-void publish_synced_candidate(
-    CellField<Pack>& output, const CellField<Pack>& candidate) noexcept
+template <class FieldType>
+void publish_synced_candidate(FieldType& output, const FieldType& candidate) noexcept
 {
-    using scalar_type = typename Pack::scalar_type;
+    using scalar_type = typename FieldType::scalar_type;
     output.owned_data().update(
         scalar_type{1}, candidate.owned_data(), scalar_type{0});
     output.overlap_data().update(
@@ -102,8 +101,8 @@ void publish_synced_candidate(
  * @tparam Pack Tpetra type pack used by the equation.
  * @param mesh Computational mesh.
  */
-template <TpetraTypePack Pack>
-PoissonWallDistanceEquation<Pack>::PoissonWallDistanceEquation(
+template <TpetraTypePack Pack, class MeshType>
+PoissonWallDistanceEquation<Pack, MeshType>::PoissonWallDistanceEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
           std::move(mesh), "PoissonWallDistanceEquation"))
@@ -114,8 +113,8 @@ PoissonWallDistanceEquation<Pack>::PoissonWallDistanceEquation(
  * @brief Validate, solve, reconstruct, and atomically publish wall distance.
  * @tparam Pack Tpetra type pack used by the equation.
  */
-template <TpetraTypePack Pack>
-void PoissonWallDistanceEquation<Pack>::solve(
+template <TpetraTypePack Pack, class MeshType>
+void PoissonWallDistanceEquation<Pack, MeshType>::solve(
     const ArrString& wall_boundary_names,
     field_type& wall_distance,
     const WallDistanceEquationOptions& options) const
@@ -123,7 +122,7 @@ void PoissonWallDistanceEquation<Pack>::solve(
     constexpr const char* class_name = "PoissonWallDistanceEquation";
     ArrString selected_names = wall_boundary_names;
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance input validation",
         [&]
         {
@@ -179,26 +178,26 @@ void PoissonWallDistanceEquation<Pack>::solve(
 
     wall_distance_detail::require_uniform_wall_names(
         *d_mesh, selected_names);
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh,
         static_cast<int>(options.non_orthogonal_treatment),
         "Poisson wall-distance non-orthogonal treatment");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.non_orthogonal_correctors,
         "Poisson wall-distance non-orthogonal correctors");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.max_iterations,
         "Poisson wall-distance maximum iterations");
-    turbulence_detail::require_uniform_real(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.tolerance,
         "Poisson wall-distance linear tolerance");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.verbosity,
         "Poisson wall-distance linear verbosity");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(options.linear_solver.preconditioner),
         "Poisson wall-distance preconditioner");
-    turbulence_detail::require_uniform_integral(
+    collective_detail::require_uniform_value(
         *d_mesh, options.linear_solver.reuse_preconditioner ? 1 : 0,
         "Poisson wall-distance preconditioner reuse");
 
@@ -264,7 +263,7 @@ void PoissonWallDistanceEquation<Pack>::solve(
             potential, options.non_orthogonal_treatment,
             options.non_orthogonal_correctors, options.linear_solver);
 
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance potential validation",
         [&]
         {
@@ -288,14 +287,14 @@ void PoissonWallDistanceEquation<Pack>::solve(
             }
         });
 
-    VectorCellField<Pack> potential_gradient(
-        d_mesh, "wall_distance_potential_gradient");
+    typename MeshFieldTraits<Pack, mesh_type>::vector_cell_type
+        potential_gradient(d_mesh, "wall_distance_potential_gradient");
     const auto boundary_value =
         [&](int batch_id, size_t in_batch_id) -> scalar_type
     {
         return boundary_condition(batch_id, in_batch_id).value;
     };
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance gradient reconstruction",
         [&]
         {
@@ -305,7 +304,7 @@ void PoissonWallDistanceEquation<Pack>::solve(
         });
 
     field_type candidate(d_mesh, "wall_distance_candidate");
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Poisson wall-distance reconstruction validation",
         [&]
         {
@@ -339,7 +338,7 @@ void PoissonWallDistanceEquation<Pack>::solve(
         });
 
     candidate.sync_ghosts();
-    turbulence_detail::collective_local_validation(
+    collective_detail::collective_local_validation(
         *d_mesh, "Synchronized Poisson wall-distance validation",
         [&]
         {

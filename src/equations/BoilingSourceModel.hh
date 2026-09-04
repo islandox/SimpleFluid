@@ -10,7 +10,11 @@
  */
 #pragma once
 
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
+#include "equations/BoussinesqModel.hh"
 #include "equations/ScalarVoidFractionModel.hh"
+#include "fields/MeshFieldTraits.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -103,34 +107,32 @@ inline BoilingSourceOptions boiling_source_options_from_database(
     const Database& database)
 {
     BoilingSourceOptions options;
-    options.enable_bulk_boiling = detail::database_value_or<bool>(
-        database, "enable_bulk_boiling", options.enable_bulk_boiling);
-    options.enable_wall_boiling = detail::database_value_or<bool>(
-        database, "enable_wall_boiling", options.enable_wall_boiling);
-    options.saturation_temperature = detail::database_value_or<real_t>(
-        database,
+    const detail::DatabaseOptionReader reader(
+        database, "Boiling source model");
+    options.enable_bulk_boiling = reader.value_or<bool>(
+        "enable_bulk_boiling", options.enable_bulk_boiling);
+    options.enable_wall_boiling = reader.value_or<bool>(
+        "enable_wall_boiling", options.enable_wall_boiling);
+    options.saturation_temperature = reader.value_or<real_t>(
         "saturation_temperature",
         options.saturation_temperature);
     options.boiling_activation_delta_t =
-        detail::database_value_or<real_t>(
-            database,
+        reader.value_or<real_t>(
             "boiling_activation_delta_t",
             options.boiling_activation_delta_t);
-    options.boiling_time_scale = detail::database_value_or<real_t>(
-        database, "boiling_time_scale", options.boiling_time_scale);
-    options.latent_heat = detail::database_value_or<real_t>(
-        database, "latent_heat", options.latent_heat);
-    options.gas_density = detail::database_value_or<real_t>(
-        database, "gas_density", options.gas_density);
+    options.boiling_time_scale = reader.value_or<real_t>(
+        "boiling_time_scale", options.boiling_time_scale);
+    options.latent_heat = reader.value_or<real_t>(
+        "latent_heat", options.latent_heat);
+    options.gas_density = reader.value_or<real_t>(
+        "gas_density", options.gas_density);
     options.wall_evaporation_fraction =
-        detail::database_value_or<real_t>(
-            database,
+        reader.value_or<real_t>(
             "wall_evaporation_fraction",
             options.wall_evaporation_fraction);
-    options.wall_heat_flux = detail::database_value_or<real_t>(
-        database, "wall_heat_flux", options.wall_heat_flux);
-    options.wall_boiling_patches = detail::database_value_or<ArrString>(
-        database,
+    options.wall_heat_flux = reader.value_or<real_t>(
+        "wall_heat_flux", options.wall_heat_flux);
+    options.wall_boiling_patches = reader.value_or<ArrString>(
         "wall_boiling_patches",
         options.wall_boiling_patches);
     validate_boiling_source_options(options);
@@ -142,16 +144,18 @@ inline BoilingSourceOptions boiling_source_options_from_database(
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class BoilingSourceModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using material_type = MaterialPropertyFields<Pack>;
-    using void_model_type = ScalarVoidFractionModel<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using material_type = MaterialPropertyFields<Pack, mesh_type>;
+    using void_model_type = ScalarVoidFractionModel<Pack, mesh_type>;
 
     /**
      * @brief Construct a boiling model on a mesh with optional configuration.

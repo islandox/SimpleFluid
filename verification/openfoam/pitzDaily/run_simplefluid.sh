@@ -19,6 +19,7 @@ output_dir=${SIMPLEFLUID_PITZ_OUTPUT_DIR:-"$case_dir/profiles"}
 simplefluid_build_target pitz_daily "$np"
 executable="$(simplefluid_executable pitz_daily)"
 mkdir -p "$output_dir"
+output_dir=$(CDPATH= cd -- "$output_dir" && pwd)
 rm -f "$output_dir"/simplefluid_cells_rank*.csv \
       "$output_dir"/pitz_daily*.vtu \
       "$output_dir"/pitz_daily*.pvtu
