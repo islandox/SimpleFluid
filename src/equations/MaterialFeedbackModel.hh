@@ -15,11 +15,14 @@
 #include "equations/BoussinesqModel.hh"
 #include "fields/MeshFieldTraits.hh"
 
+#include <Teuchos_CommHelpers.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -195,6 +198,16 @@ public:
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using context_type = BoussinesqUpdateContext<Pack, mesh_type>;
 
+    /** Opaque accepted-state copy of the published feedback mirrors. */
+    class StateSnapshot
+    {
+    private:
+        friend class MaterialFeedbackModel;
+        const MaterialFeedbackModel* d_owner = nullptr;
+        std::vector<scalar_type> d_density;
+        std::vector<scalar_type> d_viscosity;
+    };
+
     /**
      * @brief Construct a material-feedback model on a mesh.
      */
@@ -308,6 +321,45 @@ public:
         return d_output_fields;
     }
 
+    /** Capture feedback-owned output fields for a solver transaction. */
+    [[nodiscard]] StateSnapshot snapshot() const
+    {
+        StateSnapshot result;
+        result.d_owner = this;
+        result.d_density.resize(d_mesh->num_owned_cells());
+        result.d_viscosity.resize(d_mesh->num_owned_cells());
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            result.d_density[owned] = d_density_feedback.value(cell_lid);
+            result.d_viscosity[owned] = d_viscosity_feedback.value(cell_lid);
+        }
+        return result;
+    }
+
+    /** Restore feedback-owned mirrors and synchronize their overlap values. */
+    void restore(const StateSnapshot& snapshot)
+    {
+        const int local_invalid = snapshot.d_owner != this ||
+                                  snapshot.d_density.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_viscosity.size() != d_mesh->num_owned_cells();
+        int any_invalid = 0;
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::invalid_argument("MaterialFeedbackModel snapshot is foreign or incompatible.");
+        }
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            d_density_feedback.set_owned_value(cell_lid, snapshot.d_density[owned]);
+            d_viscosity_feedback.set_owned_value(cell_lid, snapshot.d_viscosity[owned]);
+        }
+        d_density_feedback.sync_ghosts();
+        d_viscosity_feedback.sync_ghosts();
+    }
+
     /**
      * @brief Apply feedback to the solver material-property fields.
      */
@@ -328,22 +380,27 @@ public:
                 "MaterialFeedbackModel received alpha_g on the wrong mesh.");
         }
 
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto alpha =
-                alpha_g == nullptr ? scalar_type{} : alpha_g->value(cell_lid);
-            const auto density =
-                std::max(density_value(context, cell_lid, alpha),
-                         d_options.min_density);
-            const auto viscosity =
-                std::max(viscosity_value(), d_options.min_viscosity);
-            d_density_feedback.set_owned_value(cell_lid, density);
-            d_viscosity_feedback.set_owned_value(cell_lid, viscosity);
-            material.density.set_owned_value(cell_lid, density);
-            material.dynamic_viscosity.set_owned_value(cell_lid, viscosity);
-        }
+        collective_detail::collective_local_validation(
+            *d_mesh, "Material feedback evaluation", [&]
+            {
+                for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto alpha = alpha_g == nullptr
+                        ? scalar_type{}
+                        : alpha_g->value(cell_lid);
+                    const auto density = std::max(
+                        density_value(context, cell_lid, alpha),
+                        d_options.min_density);
+                    const auto viscosity = std::max(
+                        viscosity_value(), d_options.min_viscosity);
+                    d_density_feedback.set_owned_value(cell_lid, density);
+                    d_viscosity_feedback.set_owned_value(cell_lid, viscosity);
+                    material.density.set_owned_value(cell_lid, density);
+                    material.dynamic_viscosity.set_owned_value(cell_lid, viscosity);
+                }
+            });
         d_density_feedback.sync_ghosts();
         d_viscosity_feedback.sync_ghosts();
         material.validate_and_sync();

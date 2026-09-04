@@ -56,15 +56,16 @@ quantitative bubbly-flow validation remain open.
 | Two-population radiolytic-bubble model | 🚧 |
 | Weakly coupled RANS plus radiolytic bubble populations | 🚧 |
 | Fixed-grid planar volume budget and weak Boussinesq integration | 🚧 |
-| Standalone structured planar geometry-motion/GCL substrate | 🚧 |
-| Solver-integrated planar ALE, generalized continuity, and conservative pool mapping | ⬜ |
+| Structured planar geometry-motion/GCL substrate | ✅ |
+| Constrained solver-integrated planar ALE and generalized continuity | 🚧 |
+| Conservative pool occupancy and cross-mesh mapping | ⬜ |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
 | In-memory TH/neutronics feedback and coupling scaffold | 🚧 |
 
 ## Governing Equations
 
-The code solves the incompressible Navier–Stokes equations with the Boussinesq
-approximation for buoyancy-driven flows:
+The default and fixed-grid paths solve the incompressible Navier–Stokes
+equations with the Boussinesq approximation for buoyancy-driven flows:
 
 $$
 \frac{\partial \mathbf{u}}{\partial t} + \nabla\cdot(\mathbf{u}\mathbf{u})
@@ -78,6 +79,13 @@ $$
 $$
 \frac{\partial T}{\partial t} + \nabla\cdot(\mathbf{u}T) = \alpha\nabla^2 T
 $$
+
+The constrained planar-ALE path instead advances conservative old/new-volume
+storage with the mesh-relative flux
+$\phi_{rel}=\phi_{abs}-\phi_m$ and enforces the integrated low-Mach target
+$\sum_f\phi_{abs,f}=Q_{V,c}$. Its supported model matrix and discrete
+equations are documented in
+[`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md).
 
 For a solid region, the velocity term is absent and the conservative thermal
 equation is
@@ -313,7 +321,8 @@ short-running physical smoke cases:
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
 | Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
 | Fixed-grid planar volume budget | Analytic/component, global/cellwise inventory, Boussinesq integration, and two-rank conservation checks; no moving-surface claim |
-| Planar geometry/GCL substrate | Structured/extruded motion, transactions, epoch/cache staleness, quality, and serial/two-rank GCL/shared-face checks; no ALE transport or free-surface solve |
+| Planar geometry/GCL substrate | Structured/extruded motion, transactions, epoch/cache staleness, quality, and serial/two-rank GCL/shared-face checks |
+| Constrained planar ALE | Old/new-volume transport, mesh-relative flux, generalized continuity, moving-boundary, rollback, and conservation component/integration checks; no quantitative pool-dynamics validation |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
 and MPI coverage plus a permanent combined serial and exact-two-rank
@@ -343,6 +352,7 @@ Pre-built example executables:
 | `fissile_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
 | `planar_free_surface_verification` | Five analytic fixed-grid volume-budget cases with CSV diagnostics |
+| `planar_ale_verification` | Four solver-integrated planar-ALE conservation cases: heating, gas generation, complete H2 escape, and rollback |
 
 Examples use `Database` configuration, documented environment controls, or a
 combination of both. Their CTest smoke settings intentionally reduce mesh size
@@ -655,7 +665,7 @@ boiling disabled by default; the constant-power cylinder variant enables
 radiolytic gas plus bulk and wall boiling so the generated VTU contains the
 coupled gas-source and latent-heat fields.
 
-## Planar Free-Surface Volume Budget
+## Planar Free-Surface Volume Budget and ALE
 
 The optional fixed-grid Milestone-A component layer computes separate pure-liquid and
 submerged-bubble volumes, `clearLevel` and `poolLevel`, and either a vented
@@ -686,26 +696,46 @@ writes opt-in `rhoLiquid`, `clearLevel`, `poolLevel`, `headspacePressure`, and
 occupancy field is a cell-centre visualization approximation
 with an explicitly reported volume error.
 
-This coupling does not move the mesh, relocate the escape boundary, change
-incompressible continuity, or provide conservative pool mapping. `MeshHandle`
-can now retain mutable concrete geometry without weakening its existing
-const-observer path. A standalone B0 substrate now provides transactional
-fixed-topology Cartesian X/Y/Z and cylindrical axial motion in serial/MPI,
-plus semi-structured axial motion in serial. It also provides shared geometry
-epochs, old/new volumes, swept mesh flux, per-cell GCL checks, quality rollback,
-and explicit refresh for the core gradient/transport/Rhie--Chow caches. It is
-not connected to a solver. Planar ALE remains rejected because
-mesh-relative old/new-volume transport, generalized continuity, moving-surface
-conditions, complete cache refresh, and atomic multiphysics acceptance are
-still missing. See
+The fixed-grid mode does not move the mesh, relocate the escape boundary, or
+change incompressible continuity. The separate `planarALE` mode is enabled for
+a deliberately narrow matrix: a mutable native structured/extruded mesh,
+constant-area vessel, Backward Euler, laminar dimensional Boussinesq
+temperature transport, thermal-only pure-liquid density feedback,
+`cellMassInventory`, vented headspace, and either no radiolysis or the Sheng
+two-population model with uniform geometry-invariant fission power, advective
+dissolved H2, general bubble transport, and exactly the moving-top escape patch.
+Cartesian X/Y/Z and cylindrical
+axial-Z motion are supported in serial/MPI; semi-structured axial-Z motion is
+serial only.
+
+The ALE path retains absolute projected fluid flux for pressure/diagnostics and
+uses a distinct mesh-relative flux for transport. It assembles conservative
+old/new-volume Backward-Euler storage. Temperature conserves
+$V_c m_{l,c}^*c_{p,c}T_c$ using the accepted/trial cellwise liquid-mass
+density, not pure-liquid or void-reduced mixture density over the
+bubble-displaced pool volume. The solver applies one integrated cellwise
+volume target to every pressure-velocity algorithm and enforces the moving top
+as a full velocity Dirichlet condition: mesh-normal velocity with zero
+tangential velocity, not free slip. It refreshes geometry-epoch-dependent
+numeric state and accepts or rolls back geometry, fields, model ledgers, time,
+and history as one logical step. Accepted ALE diagnostics retain the
+per-outer-corrector level, target-change, continuity, material-state, and
+gas-state residual histories.
+This is a constrained flat-surface model with conservation-focused test
+coverage, not physical validation of free-surface dynamics.
+
+Closed headspace, tabulated vessels, RANS, boiling/steam, precursors, scalar-
+void-only transport, solids, dynamic user callbacks, legacy/const-only and
+general unstructured meshes, non-Backward-Euler time integration, nonadiabatic
+temperature boundaries, and nonzero physical liquid boundary flux fail closed.
+Neither mode provides conservative pool occupancy or cross-mesh mapping. See
 [`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md)
-for equations, all flat configuration keys/defaults/SI units, diagnostics,
-verification scope, and the Milestone-B/C blockers. Vented boiling mass
-accounting is supported, but closed-headspace boiling and steam transport/
-escape remain deferred until saturation depends on absolute pressure and steam
-has a conservative escape path. Removing or replacing the free-surface model is
-rejected while boiling still owns nonzero submerged steam; the inventory is
-never silently discarded.
+for equations, all `free_surface_*` keys/defaults/SI units, the exact support
+and rejection matrix, diagnostics, verification scope, and remaining mapping
+work. Fixed-grid vented boiling mass accounting remains available, but ALE
+boiling and steam transport/escape are deferred. Removing or replacing the
+fixed-grid free-surface model is rejected while boiling still owns nonzero
+submerged steam; the inventory is never silently discarded.
 
 ## Dependencies
 

@@ -403,6 +403,14 @@ simplefluid_exe_reuse_precompiled_header(planar_free_surface_verification)
 simplefluid_exclude_from_pgo_sources(
     examples/planar_free_surface_verification.cc)
 
+add_executable(
+    planar_ale_verification
+    examples/planar_ale_verification.cc)
+target_link_libraries(planar_ale_verification PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(planar_ale_verification)
+simplefluid_exclude_from_pgo_sources(
+    examples/planar_ale_verification.cc)
+
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(natural_convection_box)
@@ -488,6 +496,7 @@ simplefluid_exe_reuse_precompiled_header(constant_power_cylinder_vessel)
 # later therefore fails loudly until its workload is added to training.
 set(SIMPLEFLUID_EXAMPLE_TARGETS
     planar_free_surface_verification
+    planar_ale_verification
     natural_convection_box
     natural_convection_cylinder
     natural_convection_sphere
@@ -522,6 +531,21 @@ if(BUILD_TESTING)
     set_tests_properties(planar_free_surface_${SUBCASE} PROPERTIES
         LABELS verification
         TIMEOUT 10
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endforeach()
+
+  set(SIMPLEFLUID_PLANAR_ALE_VERIFICATION_SUBCASES
+      aleUniformHeating
+      aleGasGeneration
+      aleCompleteEscape
+      aleFailureRollback)
+  foreach(SUBCASE IN LISTS SIMPLEFLUID_PLANAR_ALE_VERIFICATION_SUBCASES)
+    add_test(
+        NAME planar_ale_${SUBCASE}
+        COMMAND planar_ale_verification ${SUBCASE})
+    set_tests_properties(planar_ale_${SUBCASE} PROPERTIES
+        LABELS "verification;ale;conservation"
+        TIMEOUT 30
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
   endforeach()
 

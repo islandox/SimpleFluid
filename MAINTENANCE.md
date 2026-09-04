@@ -40,10 +40,14 @@ partitioned-unstructured coverage.
 ### Liquid-mass inventory transactions
 
 `LiquidMassInventory` defaults to the global `globalConstantMass` approximation.
-The opt-in `cellMassInventory` mode owns `liquidMassInventory` in kg/m3 of fixed
-reference volume and advances it with the accepted projected single-continuum
-face-volume flux through `previewCellwiseAdvance()`. This is not a separate
-phase-weighted liquid flux. Keep that trial state private until
+On a fixed grid, the opt-in `cellMassInventory` mode owns
+`liquidMassInventory` in kg/m3 of fixed reference volume and advances it with
+the accepted projected single-continuum face-volume flux through
+`previewCellwiseAdvance()`. Under `planarALE`, the same named field is a
+current-control-volume mass density: its conserved product uses accepted-old
+and trial-new volumes and every advective term uses the trial
+absolute-minus-mesh relative flux. This is not a separate phase-weighted
+liquid flux. Keep that trial state private until
 `commitPhaseChange()` follows a successful planar closure; do not publish or
 consume the trial field directly. Refreshing `rhoLiquid` invalidates every
 older global or cellwise preview because its derived volume is stale. Cellwise
@@ -62,22 +66,89 @@ transfer/disposition policy first.
 
 ### Geometry epochs and motion transactions
 
-`PlanarALEMeshMotion` is a geometry/GCL substrate, not an enabled ALE solver.
-It supports fixed-topology Cartesian X/Y/Z and cylindrical axial motion in
-serial/MPI plus serial `SemiStructuredXY_Z` axial motion. Use its
-`begin_trial()` and exactly one of `accept_trial()` or `rollback_trial()`;
-never update structured edge arrays directly after fields or caches exist.
-The exclusive controller lease and geometry epoch belong to the shared
-concrete mesh, so every alias `MeshHandle` observes the same revision.
+`PlanarALEMeshMotion` is the sole geometry mutator for the constrained
+solver-integrated `planarALE` path. It supports fixed-topology Cartesian X/Y/Z
+and cylindrical axial motion in serial/MPI plus serial `SemiStructuredXY_Z`
+axial motion. Use its `begin_trial()` and exactly one of `accept_trial()` or
+`rollback_trial()`; never update structured edge arrays directly after fields
+or caches exist. The exclusive controller lease and geometry epoch belong to
+the shared concrete mesh, so every alias `MeshHandle` observes the same
+revision. The solver's mutable constructor is an opt-in ownership seam for the
+same native handle; it does not authorize arbitrary geometry mutation or
+weaken const access for equations and fields.
 
-`CellGradientCache`, `TransportGeometryCache`, and Rhie--Chow face-flux
-workspaces reject access after an epoch change until explicitly refreshed.
-Preserve that fail-stale behavior when adding geometry-dependent caches. A
-topology-stable graph may survive motion, but numeric coefficients and any
-preconditioner built from them may not. Solver integration must refresh every
-remaining geometry consumer atomically before `planarALE` can be enabled.
-Raw mutation through `MeshHandle::visit_mutable()` does not publish an epoch
-and is therefore unsupported after field/cache construction.
+The geometry epoch is the authoritative numeric-cache revision. After a trial
+changes coordinates, refresh or invalidate all of these before assembly or
+output:
+
+- cell-gradient and transport-geometry caches;
+- Rhie--Chow face-flux geometry and boundary workspaces;
+- momentum and temperature transport coefficients and their reusable linear
+  solver/preconditioner state;
+- pressure-projection matrices, boundary data, predictor state, and linear
+  solver/preconditioner state;
+- coupled pressure--velocity numeric blocks, Schur products, and block
+  preconditioner state;
+- model-owned transport geometry used by the liquid inventory, radiolytic gas,
+  or another enabled extensive equation; and
+- geometry-derived output state, including VTU point coordinates.
+
+Topology-stable graphs, maps, entity IDs, and boundary membership may survive
+motion; geometry-dependent numeric values may not. A surviving cache must
+capture the concrete geometry identity and epoch, reject stale access, and
+provide an explicit refresh/invalidation path. Raw mutation through
+`MeshHandle::visit_mutable()` does not publish an epoch and is unsupported
+after field/cache construction.
+
+Treat one ALE step as an accepted-state transaction:
+
+1. Snapshot every mutable field, model ledger, diagnostic/history cursor, and
+   time state that the trial can touch.
+2. Start one geometry trial and keep its accepted-old volumes, trial-new
+   volumes, exact owner-oriented mesh flux, identity, and epochs alive through
+   all assemblies.
+3. Refresh all geometry consumers, derive a separate mesh-relative flux, and
+   rerun each nonlinear corrector from the same accepted snapshot. Preview
+   liquid, gas, level/headspace, and volume-source changes; do not publish them.
+   `free_surface_ale_maximum_correctors` independently caps the outer Picard
+   trials and the strict pressure-only continuity refinements within each
+   trial.
+4. Accept only after mesh quality, GCL, outer level/source plus material/gas
+   state convergence, actual mesh/pool equality, generalized continuity,
+   liquid/gas inventory, energy, and volume closure gates pass collectively.
+5. Commit geometry, fields, ledgers, diagnostics, time, and one history record
+   exactly once. On any exception, roll back the active geometry trial, restore
+   all snapshots, refresh the accepted-epoch caches, and leave no output or
+   history record for the rejected attempt.
+
+For ALE temperature transport, the extensive sensible energy is
+$V_c m_{l,c}^*c_{p,c}T_c$. Use accepted-old and trial-new
+`liquidMassInventory` densities in the corresponding old/new control volumes.
+Do not substitute `rhoLiquid` or void-reduced mixture density over the
+bubble-displaced pool volume; `rhoLiquid` converts liquid mass to material
+volume and has a different ownership role.
+
+The volume-source ledger removes the exact implicit material face transport:
+trial-new liquid mass divided by pure density uses the carrier upwind, while
+each post-transport/pre-kinetics bubble fraction uses the combined
+carrier-plus-slip upwind from its population equation. Do not reconstruct this
+term from accepted-old aggregate occupancy or from post-kinetics bubbles.
+
+`PlanarALEBoundary` replaces the moving patch's trial velocity cache with the
+full Dirichlet vector $(\phi_{m,f}/A_f)\mathbf n_f$. Both tangential components
+are zero, even when the configured setup marker is `Slip`; the active ALE
+boundary is not free-slip. Accepted `PlanarALEStepDiagnostics` retain the
+per-outer level, target, continuity, material-state, and gas-state histories, and
+each accepted free-surface history record copies that diagnostic snapshot.
+Rejected trials do not publish a new history record.
+
+When extending ALE support to another equation or model, require all of the
+following before relaxing its setup rejection: conservative old/new-volume
+storage, mesh-relative convection, explicit boundary/outflow ownership,
+geometry-cache refresh, complete snapshot/restore coverage, one contribution
+to the shared `VolumeContinuityTarget` when it changes material volume, and
+serial/MPI conservation plus forced-rejection tests. A fixed-volume operator
+followed by an inventory or level correction is not an ALE implementation.
 
 ## Repository map and dependency direction
 
@@ -126,7 +197,13 @@ Important entry points for a manual review are:
 - `src/geometry/mesh/MeshBase.hh` for the CRTP mesh contract.
 - `src/geometry/MeshHandle.hh` for runtime mesh type erasure.
 - `src/geometry/MeshMotionModel.hh` and `src/geometry/PlanarALEMeshMotion.hh`
-  for the standalone fixed-topology motion transaction and GCL substrate.
+  for the fixed-topology motion transaction and GCL authority.
+- `src/FVM/ALEControlVolumeState.hh` for the validated non-owning old/new
+  control-volume and owner-oriented mesh-flux contract.
+- `src/equations/VolumeContinuityTarget.hh`,
+  `src/solvers/VolumeContinuityModel.hh`, and
+  `src/solvers/PlanarALEBoundary.hh` for the generalized continuity,
+  conservative material-volume ledger, and moving-top boundary contracts.
 - `src/geometry/MeshReorderingFactory.hh` for collective selected-first local
   cell ordering and its owned/ghost range certificate.
 - `src/geometry/SolidSubdomain.hh` for compact selected-cell mesh views and
@@ -403,6 +480,12 @@ commands, stale parameter tags, and unresolved links. Missing documentation
 alone is not a reason to narrate an otherwise obvious API.
 The documentation target filters GitHub-style inline and display math into
 Doxygen formulas; keep Markdown math in GitHub-compatible syntax.
+
+The ELF export-boundary test checks symbol presence and visibility; it is not
+a class-layout ABI checker. Public solver/equation templates and by-value
+option/result structs expose their layout, and the shared library currently
+has no versioned ABI promise. Rebuild downstream consumers whenever one of
+those layouts changes, even when all legacy symbol names remain available.
 
 ## Review and handoff checklist
 

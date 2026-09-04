@@ -11,8 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include "FVM/FaceFlux.hh"
 #include "equations/RadiolyticGasModel.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
@@ -42,6 +44,15 @@ using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
 using RadiolyticModelType = SimpleFluid::RadiolyticGasModel<Pack>;
+using ALEMeshType = SimpleFluid::MeshHandle<Pack>;
+using ALEFieldType = SimpleFluid::ScalarCellFieldStored<Pack, ALEMeshType>;
+using ALEVelocityFieldType =
+    SimpleFluid::VectorCellFieldStored<Pack, ALEMeshType>;
+using ALEFaceFieldType =
+    SimpleFluid::ScalarFaceFieldStored<Pack, ALEMeshType>;
+using ALERadiolyticModelType =
+    SimpleFluid::RadiolyticGasModel<Pack, ALEMeshType>;
+using ALEMotionType = SimpleFluid::PlanarALEMeshMotion<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -59,6 +70,15 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
         SimpleFluid::test::make_single_hex_database());
 }
 
+/** @brief Build a mutable unit-area, one-cell Cartesian column. */
+SimpleFluid::SP<ALEMeshType> make_ale_single_cell_column()
+{
+    auto geometry = std::make_shared<ALEMeshType::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    return std::make_shared<ALEMeshType>(std::move(geometry));
+}
+
 /**
  * @brief Create water-like material fields for the radiolysis tests.
  *
@@ -67,6 +87,20 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
  */
 SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
     const SimpleFluid::SP<MeshType>& mesh)
+{
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions options;
+    options.reference_density = 1000.0;
+    options.density = 1000.0;
+    options.specific_heat_capacity = 4200.0;
+    options.dynamic_viscosity = 1.0e-3;
+    options.thermal_conductivity = 0.6;
+    return {mesh, options, time_options};
+}
+
+/** @brief Create water-like material fields on a mutable mesh handle. */
+SimpleFluid::MaterialPropertyFields<Pack, ALEMeshType>
+make_ale_water_properties(const SimpleFluid::SP<ALEMeshType>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -115,6 +149,32 @@ SimpleFluid::RadiolyticGasOptions sheng_options()
     return options;
 }
 
+/** @brief Two-population setup isolating ALE-relative bubble escape. */
+SimpleFluid::RadiolyticGasOptions ale_escape_options()
+{
+    auto options = sheng_options();
+    options.pressure_mode =
+        SimpleFluid::RadiolyticPressureMode::Constant;
+    options.dissolved_transport =
+        SimpleFluid::RadiolyticTransportMode::Advective;
+    options.bubble_transport =
+        SimpleFluid::BubbleTransportMode::General;
+    options.rise_velocity_mode =
+        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = 0.4;
+    options.free_surface_patches = {"zmax"};
+    options.hydrogen_diffusivity = 1.0e-8;
+    options.microbubble_lifetime = 1.0e100;
+    options.large_bubble_dissolution_time = 1.0e100;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    options.initial_dissolved_hydrogen = 0.2;
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 2.0e-6;
+    options.initial_large_number_density = 2.0e8;
+    options.initial_large_moles = 6.0e-7;
+    return options;
+}
+
 /**
  * @brief Sum a scalar diagnostic across the mesh communicator.
  *
@@ -122,7 +182,8 @@ SimpleFluid::RadiolyticGasOptions sheng_options()
  * @param local_value Local rank contribution.
  * @return Global sum across ranks.
  */
-double global_sum(const MeshType& mesh, double local_value)
+template<class TestMesh>
+double global_sum(const TestMesh& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(
@@ -141,6 +202,21 @@ double global_sum(const MeshType& mesh, double local_value)
  * @return Global volume integral.
  */
 double global_integral(const FieldType& field)
+{
+    double local_integral = 0.0;
+    const auto& mesh = field.mesh();
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        local_integral +=
+            field.value(cell_lid) * mesh.cell_volume(cell_lid);
+    }
+    return global_sum(mesh, local_integral);
+}
+
+/** @brief Integrate a mesh-handle scalar field over current cell volumes. */
+double global_ale_integral(const ALEFieldType& field)
 {
     double local_integral = 0.0;
     const auto& mesh = field.mesh();
@@ -624,6 +700,34 @@ TEST(RadiolyticGasModelTest, TwoPopulationStepConservesHydrogen)
     EXPECT_DOUBLE_EQ(model.last_statistics().cumulative_hydrogen_produced, 0.0);
 }
 
+TEST(RadiolyticGasModelTest, SnapshotRestoresEveryInventoryAndCumulativeLedger)
+{
+    auto mesh = make_single_cell_mesh();
+    auto options = sheng_options();
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 1.0e5, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+    const auto accepted = model.snapshot();
+    const auto initial_inventory = model.global_submerged_hydrogen_moles();
+
+    constexpr double time_step = 1.0e-6;
+    model.advance(time_step, time_step, temperature, pressure, velocity, flux, material, &power);
+    ASSERT_GT(model.cumulative_hydrogen_produced(), 0.0);
+    ASSERT_GT(model.global_submerged_hydrogen_moles(), initial_inventory);
+
+    model.restore(accepted);
+    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), 0.0);
+    EXPECT_DOUBLE_EQ(model.cumulative_dissolved_hydrogen_outflow(), 0.0);
+    EXPECT_DOUBLE_EQ(model.cumulative_submerged_bubble_hydrogen_escaped(), 0.0);
+    EXPECT_DOUBLE_EQ(model.global_submerged_hydrogen_moles(), initial_inventory);
+    EXPECT_TRUE(model.initial_state_initialized());
+}
+
 /** @brief Sheng transport runs directly on MeshHandle/FieldStored storage. */
 TEST(RadiolyticGasModelTest, NativeTwoPopulationStepConservesHydrogen)
 {
@@ -897,6 +1001,93 @@ TEST(RadiolyticGasModelTest,
     EXPECT_NEAR(model.absolute_pressure().value(1), 1.01e5, 1.0e-10);
 }
 
+/**
+ * @brief The pressure-offset owner accounts for the gauge mean at the top.
+ *
+ * Reconstructed pressure removes the volume-weighted gauge mean.  Therefore
+ * a zero-gauge free surface has the prescribed headspace pressure only when
+ * the externally owned offset is `p_headspace + mean(p_gauge)`.
+ */
+TEST(RadiolyticGasModelTest,
+     ReconstructedOffsetIncludingGaugeMeanMatchesZeroGaugeTopPressure)
+{
+    auto geometry = std::make_shared<ALEMeshType::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0}, {0.0, 1.0}, {0.0, 0.25, 1.0}}});
+    auto mesh = std::make_shared<ALEMeshType>(std::move(geometry));
+    ASSERT_EQ(mesh->num_owned_cells(), 2U);
+
+    auto options = ideal_options();
+    options.pressure_mode =
+        SimpleFluid::RadiolyticPressureMode::Reconstructed;
+    ALERadiolyticModelType model(mesh, options);
+    ALEFieldType temperature(mesh, 300.0, "temperature");
+    ALEFieldType gauge_pressure(mesh, 0.0, "pressure");
+    ALEFieldType power(mesh, 0.0, "qdot_fission");
+    ALEFieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
+    ALEVelocityFieldType velocity(
+        mesh, ALEMeshType::Vec3{}, "velocity");
+    ALEFaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_ale_water_properties(mesh);
+
+    Pack::local_ordinal_type top_cell = 0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        if (mesh->cell_centroid(cell_lid).z
+            > mesh->cell_centroid(top_cell).z)
+        {
+            top_cell = cell_lid;
+        }
+    }
+    const auto bottom_cell =
+        top_cell == Pack::local_ordinal_type{0}
+            ? Pack::local_ordinal_type{1}
+            : Pack::local_ordinal_type{0};
+    gauge_pressure.set_owned_value(bottom_cell, 4000.0);
+    gauge_pressure.set_owned_value(top_cell, 0.0);
+    gauge_pressure.sync_ghosts();
+
+    double pressure_volume = 0.0;
+    double volume = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        const auto cell_volume = mesh->cell_volume(cell_lid);
+        pressure_volume +=
+            gauge_pressure.value(cell_lid) * cell_volume;
+        volume += cell_volume;
+    }
+    const auto gauge_mean = pressure_volume / volume;
+    ASSERT_DOUBLE_EQ(gauge_mean, 1000.0);
+
+    constexpr double headspace_pressure = 125000.0;
+    model.set_absolute_pressure_offset(
+        headspace_pressure + gauge_mean);
+    model.advance(
+        0.1,
+        0.1,
+        temperature,
+        gauge_pressure,
+        velocity,
+        flux,
+        material,
+        &power,
+        authoritative_alpha,
+        options.alpha_max);
+
+    EXPECT_NEAR(
+        model.absolute_pressure().value(top_cell),
+        headspace_pressure,
+        1.0e-10);
+    EXPECT_NEAR(
+        model.absolute_pressure().value(bottom_cell),
+        headspace_pressure + 4000.0,
+        1.0e-10);
+}
+
 /** @brief Coupled pressure offsets preserve reconstructed gauge variations. */
 TEST(RadiolyticGasModelTest, AbsolutePressureOffsetSetterShiftsPublishedPressure)
 {
@@ -1020,6 +1211,258 @@ TEST(RadiolyticGasModelTest, ReconstructedOffsetRefreshesTwoPopulationDiagnostic
         EXPECT_DOUBLE_EQ(model_field(model, "alpha_g_excess").value(cell_lid), std::max(raw - bounded, 0.0));
     }
     EXPECT_NEAR(model.last_statistics().void_volume, global_integral(model.alpha_g()), 1.0e-15);
+}
+
+/**
+ * @brief ALE-relative top escape is exact and rollback-safe for either motion.
+ */
+TEST(RadiolyticGasModelTest,
+     MovingTopRelativeEscapeIsExactForStationaryExpansionAndContraction)
+{
+    struct Observation
+    {
+        double micro_moles = 0.0;
+        double large_moles = 0.0;
+        double raw_bubble_volume = 0.0;
+        ALERadiolyticModelType::statistics_type statistics;
+    };
+
+    constexpr double time_step = 0.25;
+    constexpr std::array<double, 3> target_elevations{
+        1.0, 1.2, 0.8};
+    for (const auto target_elevation : target_elevations)
+    {
+        SCOPED_TRACE(
+            "target_elevation=" + std::to_string(target_elevation));
+        auto mesh = make_ale_single_cell_column();
+        const auto options = ale_escape_options();
+        ALERadiolyticModelType model(mesh, options);
+        ALEFieldType temperature(mesh, 300.0, "temperature");
+        ALEFieldType pressure(mesh, 0.0, "pressure");
+        ALEFieldType power(mesh, 0.0, "qdot_fission");
+        ALEVelocityFieldType velocity(
+            mesh, ALEMeshType::Vec3{}, "velocity");
+        auto material = make_ale_water_properties(mesh);
+        model.initialize_state(
+            0.0, temperature, pressure, velocity, material);
+
+        ASSERT_EQ(mesh->num_owned_cells(), 1U);
+        std::vector<Pack::local_ordinal_type> top_faces;
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        {
+            if (mesh->boundary_batch_name(batch_id) == "zmax")
+            {
+                top_faces = batch.face_lids;
+                break;
+            }
+        }
+        ASSERT_EQ(top_faces.size(), 1U);
+        const auto top_face = top_faces.front();
+        ASSERT_TRUE(mesh->is_owned_face(top_face));
+        const auto top_area = mesh->face_area(top_face);
+        ASSERT_DOUBLE_EQ(top_area, 1.0);
+
+        const auto initial_micro_moles =
+            model.global_microbubble_hydrogen_moles();
+        const auto initial_large_moles =
+            model.global_large_bubble_hydrogen_moles();
+        const auto initial_dissolved_moles =
+            model.global_dissolved_hydrogen_moles();
+        const auto initial_raw_bubble_volume =
+            model.global_submerged_bubble_volume();
+        ASSERT_GT(initial_micro_moles, 0.0);
+        ASSERT_GT(initial_large_moles, 0.0);
+        ASSERT_GT(initial_dissolved_moles, 0.0);
+        ASSERT_GT(initial_raw_bubble_volume, 0.0);
+        {
+            auto dissolved_free_options = options;
+            dissolved_free_options.initial_dissolved_hydrogen = 0.0;
+            ALERadiolyticModelType dissolved_free_model(
+                mesh, dissolved_free_options);
+            dissolved_free_model.initialize_state(
+                0.0, temperature, pressure, velocity, material);
+            EXPECT_DOUBLE_EQ(
+                dissolved_free_model.global_dissolved_hydrogen_moles(),
+                0.0);
+            EXPECT_DOUBLE_EQ(
+                dissolved_free_model.global_submerged_bubble_volume(),
+                initial_raw_bubble_volume);
+        }
+        const auto accepted = model.snapshot();
+        ALEMotionType motion(mesh);
+
+        const auto volume_factor =
+            target_elevation
+            / (target_elevation
+               + time_step * options.constant_slip_velocity * top_area);
+        const auto expected_micro_moles =
+            initial_micro_moles * volume_factor;
+        const auto expected_large_moles =
+            initial_large_moles * volume_factor;
+        const auto expected_micro_escape =
+            initial_micro_moles - expected_micro_moles;
+        const auto expected_large_escape =
+            initial_large_moles - expected_large_moles;
+        const auto expected_bubble_escape =
+            expected_micro_escape + expected_large_escape;
+        auto run_trial = [&]() -> Observation
+        {
+            motion.begin_trial(target_elevation, time_step);
+            const auto ale =
+                SimpleFluid::FVM::make_ale_control_volume_state(
+                    *mesh, motion);
+            EXPECT_DOUBLE_EQ(ale.old_cell_volumes()[0], 1.0);
+            EXPECT_DOUBLE_EQ(
+                ale.new_cell_volumes()[0], target_elevation);
+
+            ALEFaceFieldType absolute_flux(
+                mesh, 0.0, "absolute_liquid_flux");
+            for (const auto face_lid : absolute_flux.owned_face_ids())
+            {
+                absolute_flux.set_owned_value(
+                    face_lid,
+                    ale.face_mesh_fluxes()[static_cast<size_t>(face_lid)]);
+            }
+            absolute_flux.sync_ghosts();
+            ALEFaceFieldType relative_flux(
+                mesh, 0.0, "relative_liquid_flux");
+            SimpleFluid::FVM::mesh_relative_face_fluxes(
+                absolute_flux, ale, relative_flux);
+            EXPECT_DOUBLE_EQ(relative_flux.value(top_face), 0.0);
+
+            ALEFaceFieldType slip_volume_flux(
+                mesh, 0.0, "bubble_slip_volume_flux");
+            model.bubble_slip_volume_flux(
+                temperature,
+                material,
+                SimpleFluid::Dimension::Z,
+                slip_volume_flux);
+            const auto owner = mesh->owner_cell(top_face);
+            const auto expected_slip_volume_flux =
+                options.constant_slip_velocity * top_area
+                * (model.raw_microbubble_volume_fraction().value(owner)
+                   + model.raw_large_bubble_volume_fraction().value(owner));
+            EXPECT_NEAR(
+                slip_volume_flux.value(top_face),
+                expected_slip_volume_flux,
+                std::max(1.0e-20,
+                    std::abs(expected_slip_volume_flux) * 1.0e-13));
+
+            model.refresh_geometry();
+            model.advance(
+                time_step,
+                time_step,
+                temperature,
+                pressure,
+                velocity,
+                relative_flux,
+                material,
+                &power,
+                &ale,
+                SimpleFluid::Dimension::Z);
+
+            const auto& statistics = model.last_statistics();
+            const auto expected_transport_slip_volume_flux =
+                options.constant_slip_velocity * top_area *
+                model.transported_raw_bubble_volume_fraction().value(owner);
+            EXPECT_NEAR(
+                model.transported_bubble_slip_volume_flux().value(top_face),
+                expected_transport_slip_volume_flux,
+                std::max(1.0e-20,
+                    std::abs(expected_transport_slip_volume_flux) * 1.0e-12));
+            EXPECT_DOUBLE_EQ(
+                model.transported_bubble_carrier_volume_flux().value(top_face),
+                0.0);
+            EXPECT_NEAR(
+                model.global_microbubble_hydrogen_moles(),
+                expected_micro_moles,
+                2.0e-18);
+            EXPECT_NEAR(
+                statistics.microbubble_hydrogen_escaped,
+                expected_micro_escape,
+                2.0e-18);
+            EXPECT_NEAR(
+                statistics.large_bubble_hydrogen_escaped,
+                expected_large_escape,
+                2.0e-18);
+            EXPECT_NEAR(
+                statistics.submerged_bubble_hydrogen_escaped,
+                expected_bubble_escape,
+                3.0e-18);
+            EXPECT_NEAR(
+                statistics.dissolved_hydrogen_outflow, 0.0, 5.0e-17);
+            EXPECT_NEAR(
+                statistics.cumulative_submerged_bubble_hydrogen_escaped,
+                expected_bubble_escape,
+                3.0e-18);
+            EXPECT_NEAR(
+                model.cumulative_submerged_bubble_hydrogen_escaped(),
+                expected_bubble_escape,
+                3.0e-18);
+            EXPECT_NEAR(
+                statistics.cumulative_hydrogen_escaped,
+                statistics.cumulative_dissolved_hydrogen_outflow
+                    + statistics.cumulative_submerged_bubble_hydrogen_escaped,
+                1.0e-20);
+            EXPECT_NEAR(statistics.inventory_error, 0.0, 5.0e-14);
+
+            const auto& escape_rate =
+                *model.output_fields().at("H2_escape_molar_rate");
+            EXPECT_NEAR(
+                time_step * global_ale_integral(escape_rate),
+                expected_bubble_escape,
+                3.0e-18);
+            EXPECT_NEAR(
+                model.global_submerged_bubble_volume(),
+                global_ale_integral(
+                    model.raw_microbubble_volume_fraction())
+                    + global_ale_integral(
+                        model.raw_large_bubble_volume_fraction()),
+                1.0e-20);
+
+            return {
+                model.global_microbubble_hydrogen_moles(),
+                model.global_large_bubble_hydrogen_moles(),
+                model.global_submerged_bubble_volume(),
+                statistics};
+        };
+
+        const auto first = run_trial();
+        model.restore(accepted);
+        motion.rollback_trial();
+        model.refresh_geometry();
+        EXPECT_DOUBLE_EQ(
+            model.global_microbubble_hydrogen_moles(),
+            initial_micro_moles);
+        EXPECT_DOUBLE_EQ(
+            model.global_large_bubble_hydrogen_moles(),
+            initial_large_moles);
+        EXPECT_DOUBLE_EQ(
+            model.global_dissolved_hydrogen_moles(),
+            initial_dissolved_moles);
+        EXPECT_DOUBLE_EQ(
+            model.global_submerged_bubble_volume(),
+            initial_raw_bubble_volume);
+        EXPECT_DOUBLE_EQ(
+            model.cumulative_submerged_bubble_hydrogen_escaped(), 0.0);
+
+        const auto repeated = run_trial();
+        EXPECT_NEAR(repeated.micro_moles, first.micro_moles, 2.0e-18);
+        EXPECT_NEAR(repeated.large_moles, first.large_moles, 2.0e-18);
+        EXPECT_NEAR(
+            repeated.raw_bubble_volume,
+            first.raw_bubble_volume,
+            std::max(1.0e-20,
+                std::abs(first.raw_bubble_volume) * 2.0e-8));
+        EXPECT_NEAR(
+            repeated.statistics.cumulative_submerged_bubble_hydrogen_escaped,
+            expected_bubble_escape,
+            3.0e-18);
+
+        model.restore(accepted);
+        motion.rollback_trial();
+        model.refresh_geometry();
+    }
 }
 
 /**

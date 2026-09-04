@@ -13,6 +13,7 @@
 
 #include "FVM/Operators.hh"
 #include "geometry/MeshFactory.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -236,6 +237,16 @@ public:
     {
         return SimpleFluid::FluidSolver<Pack>::projected_face_fluxes();
     }
+
+    auto mutable_runtime_mesh_handle() const
+    {
+        return mutable_mesh_handle();
+    }
+
+    void refresh_geometry_after_motion()
+    {
+        refresh_geometry_dependent_state();
+    }
 };
 
 /**
@@ -340,6 +351,35 @@ TEST(BoussinesqSolverTest, ReusesExactLegacyMeshWithoutConversion)
     EXPECT_EQ(handle->legacy_mesh(), legacy);
     EXPECT_EQ(solver.pressure().mesh_ptr(), handle);
     EXPECT_EQ(solver.velocity().mesh_ptr(), handle);
+}
+
+/** @brief Mutable Boussinesq construction retains one exact native handle. */
+TEST(BoussinesqSolverTest, MutableNativeConstructionPreservesFieldIdentityAndConstOverload)
+{
+    using Cartesian = Handle::Cartesian;
+    auto geometry = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
+    auto handle = std::make_shared<Handle>(geometry);
+
+    InspectableBoussinesqSolver mutable_solver(handle, {});
+    EXPECT_TRUE(mutable_solver.has_mutable_mesh_handle());
+    EXPECT_EQ(mutable_solver.mutable_runtime_mesh_handle(), handle);
+    EXPECT_EQ(mutable_solver.temperature().mesh_ptr().get(), handle.get());
+    EXPECT_EQ(mutable_solver.pressure().mesh_ptr().get(), handle.get());
+    EXPECT_EQ(mutable_solver.velocity().mesh_ptr().get(), handle.get());
+
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(handle);
+    motion.begin_trial(3.0, 1.0);
+    EXPECT_NO_THROW(mutable_solver.refresh_geometry_after_motion());
+    motion.rollback_trial();
+    EXPECT_NO_THROW(mutable_solver.refresh_geometry_after_motion());
+
+    SimpleFluid::SP<const Handle> const_view = handle;
+    InspectableBoussinesqSolver const_solver(const_view, {});
+    EXPECT_FALSE(const_solver.has_mutable_mesh_handle());
+    EXPECT_FALSE(const_solver.mutable_runtime_mesh_handle());
+    EXPECT_EQ(const_solver.temperature().mesh_ptr(), const_view);
 }
 
 /**

@@ -11,6 +11,7 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
+#include "equations/CollectiveValidation.hh"
 #include "equations/RadiolyticGasProperties.hh"
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -18,8 +19,10 @@
 #include "solvers/BelosLinearSolver.hh"
 
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -75,6 +78,27 @@ public:
     using face_flux_field_type = typename field_traits::scalar_face_type;
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using statistics_type = RadiolyticGasStepStatistics<scalar_type>;
+
+    /** Opaque complete model snapshot for an ALE outer-step transaction. */
+    class StateSnapshot
+    {
+    private:
+        friend class RadiolyticGasModel;
+        const RadiolyticGasModel* d_owner = nullptr;
+        std::vector<std::vector<scalar_type>> d_fields;
+        std::vector<local_ordinal_type> d_transport_slip_face_ids;
+        std::vector<scalar_type> d_transport_slip_face_values;
+        std::vector<scalar_type> d_transport_carrier_face_values;
+        statistics_type d_statistics;
+        bool d_history_initialized = false;
+        bool d_initial_state_initialized = false;
+        scalar_type d_absolute_pressure_offset = {};
+        scalar_type d_cumulative_hydrogen_produced = {};
+        scalar_type d_cumulative_dissolved_hydrogen_outflow = {};
+        scalar_type d_cumulative_submerged_bubble_hydrogen_escaped = {};
+        scalar_type d_cumulative_hydrogen_escaped = {};
+        scalar_type d_cumulative_escaped_bubble_count = {};
+    };
 
     /**
      * @brief Construct a radiolysis model on a mesh.
@@ -157,7 +181,9 @@ public:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* fission_power_density);
+        const field_type* fission_power_density,
+        const FVM::ALEControlVolumeState* ale = nullptr,
+        Dimension slip_axis = Dimension::Z);
 
     /**
      * @brief Advance using the solver's authoritative scalar void state.
@@ -176,7 +202,9 @@ public:
         const material_type& material,
         const field_type* fission_power_density,
         const field_type& alpha_g,
-        scalar_type alpha_max);
+        scalar_type alpha_max,
+        const FVM::ALEControlVolumeState* ale = nullptr,
+        Dimension slip_axis = Dimension::Z);
 
     /**
      * @brief Synchronize ideal-mode diagnostics with canonical scalar void.
@@ -253,6 +281,38 @@ public:
     {
         return d_large_moles;
     }
+
+    /** EOS-derived unbounded gas-volume fraction used by conservative closure. */
+    const field_type& raw_bubble_volume_fraction() const noexcept { return d_alpha_g_raw; }
+    /** EOS-derived microbubble contribution before representational bounds. */
+    const field_type& raw_microbubble_volume_fraction() const noexcept { return d_alpha_g_micro; }
+    /** EOS-derived large-bubble contribution before representational bounds. */
+    const field_type& raw_large_bubble_volume_fraction() const noexcept { return d_alpha_g_large; }
+    /** Raw bubble fraction after transport and before this step's local kinetics. */
+    const field_type& transported_raw_bubble_volume_fraction() const noexcept
+    {
+        return d_transport_alpha_g_raw;
+    }
+    /** Slip-volume flux actually paired with the transported bubble state. */
+    const face_flux_field_type& transported_bubble_slip_volume_flux() const noexcept
+    {
+        return d_transport_bubble_slip_volume_flux;
+    }
+    /** Carrier part of the same implicit bubble transport face flux. */
+    const face_flux_field_type& transported_bubble_carrier_volume_flux() const noexcept
+    {
+        return d_transport_bubble_carrier_volume_flux;
+    }
+
+    [[nodiscard]] StateSnapshot snapshot() const;
+    void restore(const StateSnapshot& snapshot);
+    /** Refresh reconstruction geometry and discard retained numeric transport state. */
+    void refresh_geometry();
+
+    /** Build the owner-oriented raw bubble-volume slip flux [m^3/s]. */
+    void bubble_slip_volume_flux(const field_type& temperature,
+        const material_type& material, Dimension slip_axis,
+        face_flux_field_type& output) const;
 
     /** @brief Global dissolved H2 inventory in moles. */
     scalar_type global_dissolved_hydrogen_moles() const;
@@ -381,13 +441,17 @@ private:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* fission_power_density);
+        const field_type* fission_power_density,
+        const FVM::ALEControlVolumeState* ale,
+        Dimension slip_axis);
     void transport_populations(
         scalar_type time_step,
         const field_type& temperature,
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
-        const material_type& material);
+        const material_type& material,
+        const FVM::ALEControlVolumeState* ale,
+        Dimension slip_axis);
     void transport_scalar(
         field_type& field,
         scalar_type time_step,
@@ -396,7 +460,9 @@ private:
         scalar_type diffusivity,
         bool diffuse,
         bool liquid_weighted,
-        field_type& escape_rate);
+        field_type& escape_rate,
+        const FVM::ALEControlVolumeState* ale,
+        Dimension slip_axis);
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
     CellKineticsState integrate_cell_kinetics(
@@ -413,7 +479,8 @@ private:
         const material_type& material);
     void sync_all_fields();
     /** @brief Compute a globally reduced volume integral. */
-    scalar_type global_integral(const field_type& field) const;
+    scalar_type global_integral(const field_type& field,
+        std::span<const real_t> cell_volumes = {}) const;
     /** @brief Sum a rank-local scalar and replicate it on every rank. */
     scalar_type global_sum(scalar_type local_value) const;
     /** @brief Compute and replicate the communicator-wide scalar minimum. */
@@ -421,7 +488,8 @@ private:
     /** @brief Compute and replicate the communicator-wide integer maximum. */
     int global_max(int local_value) const;
     void reduce_event_statistics();
-    scalar_type total_hydrogen_inventory() const;
+    scalar_type total_hydrogen_inventory(
+        std::span<const real_t> cell_volumes = {}) const;
     scalar_type rise_velocity(
         scalar_type radius,
         scalar_type liquid_density,
@@ -433,6 +501,8 @@ private:
     void assign_cell_state(
         local_ordinal_type cell_lid,
         const CellKineticsState& state);
+    std::vector<field_type*> mutable_state_fields();
+    std::vector<const field_type*> state_fields() const;
 
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
@@ -463,6 +533,7 @@ private:
     field_type d_alpha_g_micro;
     field_type d_alpha_g_large;
     field_type d_alpha_g_raw;
+    field_type d_transport_alpha_g_raw;
     field_type d_alpha_g_excess;
     field_type d_characteristic_radius;
 
@@ -474,6 +545,8 @@ private:
     field_type d_escape_molar_rate;
     field_type d_escape_number_rate;
     field_type d_inventory_error;
+    face_flux_field_type d_transport_bubble_slip_volume_flux;
+    face_flux_field_type d_transport_bubble_carrier_volume_flux;
 
     bool d_history_initialized = false;
     bool d_initial_state_initialized = false;
