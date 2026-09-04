@@ -677,6 +677,33 @@ TEST(BelosLinearSolverTest,
     EXPECT_EQ(preconditioner_setup_count(solver), 3U);
 }
 
+/** @brief Explicit reset invalidates same-operator numeric solver state. */
+TEST(BelosLinearSolverTest, ResetForcesSameOperatorPreconditionerRebuild)
+{
+    const auto invalid_global_size =
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(
+        invalid_global_size, 8, 0, Tpetra::getDefaultComm()));
+    auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+    auto op = Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+
+    Pack::vector_type rhs(map, true);
+    Pack::vector_type solution(map, true);
+    rhs.putScalar(3.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
+    options.reuse_preconditioner = true;
+
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+
+    solver.reset();
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve(op, rhs, solution, options));
+    EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+}
+
 /** @brief Verify MueLu rejects operators that are not Tpetra CRS matrices. */
 TEST(BelosLinearSolverTest, RejectsMueLuForNonCrsOperators)
 {

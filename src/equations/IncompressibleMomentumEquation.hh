@@ -19,6 +19,7 @@
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
+#include "FVM/ALEControlVolumeState.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -68,6 +69,15 @@ public:
     const mesh_type& mesh() const noexcept { return *d_mesh; }
     SP<const mesh_type> mesh_ptr() const noexcept { return d_mesh; }
 
+    /**
+     * @brief Refresh numeric geometry and discard operator-dependent solve state.
+     *
+     * Fixed-topology matrix graphs remain eligible for later reconstruction,
+     * but no matrix values or preconditioner prepared for an older geometry
+     * epoch survive this call.
+     */
+    void refresh_geometry();
+
     LinearSolveSummary advance_velocity(
         const velocity_field_type& old_velocity,
         const face_flux_field_type& face_fluxes,
@@ -82,9 +92,28 @@ public:
         const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
         velocity_field_type& velocity,
+        const LinearSolverOptions& linear_options,
+        const FVM::ALEControlVolumeState* ale) const;
+
+    LinearSolveSummary advance_velocity(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        velocity_field_type& velocity,
         const source_type& right_hand_source,
         const LinearSolverOptions& linear_options = {}) const;
 
+    LinearSolveSummary advance_velocity(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        velocity_field_type& velocity,
+        const source_type& right_hand_source,
+        const LinearSolverOptions& linear_options,
+        const FVM::ALEControlVolumeState* ale) const;
+
     system_type assemble_system(
         const velocity_field_type& old_velocity,
         const face_flux_field_type& face_fluxes,
@@ -97,8 +126,25 @@ public:
         const face_flux_field_type& face_fluxes,
         const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
+        const velocity_field_type* correction_field,
+        const FVM::ALEControlVolumeState* ale) const;
+
+    system_type assemble_system(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
         const source_type& right_hand_source,
         const velocity_field_type* correction_field = nullptr) const;
+
+    system_type assemble_system(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const source_type& right_hand_source,
+        const velocity_field_type* correction_field,
+        const FVM::ALEControlVolumeState* ale) const;
 
     /** @brief Advance using dynamic viscosity divided by reference density. */
     LinearSolveSummary advance_velocity_physical(
@@ -113,6 +159,19 @@ public:
         const LinearSolverOptions& linear_options = {},
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
+    LinearSolveSummary advance_velocity_physical(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const field_type& dynamic_viscosity,
+        scalar_type reference_density,
+        velocity_field_type& velocity,
+        const source_type& acceleration_source,
+        const LinearSolverOptions& linear_options,
+        const boundary_cache_type* boundary_dynamic_viscosity,
+        const FVM::ALEControlVolumeState* ale) const;
+
     /** @brief Assemble using dynamic viscosity divided by reference density. */
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
@@ -125,6 +184,18 @@ public:
         const velocity_field_type* correction_field = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
+    system_type assemble_physical_system(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const field_type& dynamic_viscosity,
+        scalar_type reference_density,
+        const source_type& acceleration_source,
+        const velocity_field_type* correction_field,
+        const boundary_cache_type* boundary_dynamic_viscosity,
+        const FVM::ALEControlVolumeState* ale) const;
+
 private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_transport_inputs(
@@ -132,7 +203,8 @@ private:
         const face_flux_field_type& face_fluxes,
         const velocity_boundary_cache_type& velocity_boundary_cache,
         const TimeStepperOptions& options,
-        const velocity_field_type* correction_field) const;
+        const velocity_field_type* correction_field,
+        const FVM::ALEControlVolumeState* ale) const;
 
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;

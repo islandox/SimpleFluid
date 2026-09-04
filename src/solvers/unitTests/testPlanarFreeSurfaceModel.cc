@@ -167,20 +167,59 @@ TEST(FreeSurfaceOptionsTest, DefaultIsDisabledAndFactoryReturnsNull)
     EXPECT_EQ(SimpleFluid::make_planar_free_surface_model(options), nullptr);
 }
 
-TEST(FreeSurfaceOptionsTest, PlanarAleUsesStableUnavailableSolverDiagnostic)
+TEST(FreeSurfaceOptionsTest, DisabledPlanarAleSelectionAllocatesNoModel)
 {
     SimpleFluid::Database database;
     database.set("free_surface_model", std::string("planarALE"));
-    try
-    {
-        static_cast<void>(SimpleFluid::free_surface_options_from_database(database));
-        FAIL() << "Expected unsupported planarALE configuration to fail.";
-    }
-    catch (const std::invalid_argument& error)
-    {
-        EXPECT_EQ(std::string(error.what()), SimpleFluid::planar_ale_unavailable_diagnostic);
-        EXPECT_EQ(SimpleFluid::planar_ale_unavailable_diagnostic, SimpleFluid::planar_ale_immutable_mesh_diagnostic);
-    }
+    const auto options = SimpleFluid::free_surface_options_from_database(database);
+    EXPECT_FALSE(options.enabled);
+    EXPECT_EQ(options.mode, SimpleFluid::FreeSurfaceMode::PlanarALE);
+    EXPECT_EQ(SimpleFluid::make_planar_free_surface_model(options), nullptr);
+}
+
+TEST(FreeSurfaceOptionsTest, ParsesAndValidatesPlanarAleControls)
+{
+    SimpleFluid::Database database;
+    database.set("free_surface_enabled", true);
+    database.set("free_surface_model", std::string("planarALE"));
+    database.set("free_surface_vessel_model", std::string("constantArea"));
+    database.set("free_surface_bottom_elevation", 0.0);
+    database.set("free_surface_top_elevation", 2.0);
+    database.set("free_surface_cross_section_area", 1.0);
+    database.set("free_surface_initial_liquid_volume", 1.0);
+    database.set("free_surface_liquid_volume_model", std::string("cellMassInventory"));
+    database.set("free_surface_ale_top_boundary", std::string("zmax"));
+    database.set("free_surface_ale_deformation_start_elevation", 0.25);
+    database.set("free_surface_ale_maximum_level_change", 0.2);
+    database.set("free_surface_ale_gcl_absolute_tolerance", 2.0e-12);
+    database.set("free_surface_ale_gcl_relative_tolerance", 3.0e-10);
+    database.set("free_surface_ale_maximum_correctors", 9);
+    database.set("free_surface_ale_level_absolute_tolerance", 4.0e-10);
+    database.set("free_surface_ale_level_relative_tolerance", 5.0e-10);
+    database.set("free_surface_ale_relaxation", 0.4);
+
+    const auto options = SimpleFluid::free_surface_options_from_database(database);
+    EXPECT_EQ(options.ale.top_boundary, "zmax");
+    ASSERT_TRUE(options.ale.deformation_start_elevation);
+    ASSERT_TRUE(options.ale.maximum_level_change);
+    EXPECT_DOUBLE_EQ(*options.ale.deformation_start_elevation, 0.25);
+    EXPECT_DOUBLE_EQ(*options.ale.maximum_level_change, 0.2);
+    EXPECT_DOUBLE_EQ(options.ale.gcl_absolute_tolerance, 2.0e-12);
+    EXPECT_DOUBLE_EQ(options.ale.gcl_relative_tolerance, 3.0e-10);
+    EXPECT_EQ(options.ale.maximum_correctors, 9);
+    EXPECT_DOUBLE_EQ(options.ale.level_absolute_tolerance, 4.0e-10);
+    EXPECT_DOUBLE_EQ(options.ale.level_relative_tolerance, 5.0e-10);
+    EXPECT_DOUBLE_EQ(options.ale.relaxation, 0.4);
+    EXPECT_NE(SimpleFluid::make_planar_free_surface_model(options), nullptr);
+
+    auto invalid = options;
+    invalid.vessel.mode = SimpleFluid::VesselVolumeMapMode::Tabulated;
+    invalid.vessel.height_table = {0.0, 2.0};
+    invalid.vessel.volume_table = {0.0, 2.0};
+    EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
+    invalid = options;
+    invalid.ale.relaxation = 0.0;
+    EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
 }
 
 TEST(FreeSurfaceOptionsTest, ParsesFlatKeysAndInitialClearLevel)
@@ -379,6 +418,98 @@ TEST(PlanarFreeSurfaceModelTest, VentedUpdateTracksLevelsEscapeAndGasClosure)
     EXPECT_DOUBLE_EQ(diagnostics.gas_closure_residual, 0.0);
     EXPECT_TRUE(diagnostics.validity_warning);
     EXPECT_DOUBLE_EQ(model.headspacePressure(), 101325.0);
+}
+
+TEST(PlanarFreeSurfaceModelTest, PreviewKeepsHeadspaceAndEscapeUncommittedUntilAccepted)
+{
+    auto map = std::make_shared<SimpleFluid::ConstantAreaVesselVolumeMap>(0.0, 2.0, 1.0);
+    auto headspace = std::make_unique<SimpleFluid::VentedHeadspaceModel>(vented_options(2.0));
+    SimpleFluid::PlanarFreeSurfaceModel model(map, std::move(headspace));
+    auto initial = constant_update(1.0, 0.1);
+    initial.gas.submerged_moles = {{"H2", 0.2}};
+    model.initialize(initial);
+
+    auto next = constant_update(1.0, 0.05);
+    next.gas.submerged_moles = {{"H2", 0.15}};
+    next.gas.escaped_moles_this_step = {{"H2", 0.05}};
+    const auto preview = model.previewUpdate(next);
+    EXPECT_DOUBLE_EQ(preview.diagnostics().pool_volume, 1.05);
+    EXPECT_TRUE(model.headspace().ventedMoles().empty());
+    EXPECT_TRUE(model.committedEscapedMoles().empty());
+    EXPECT_DOUBLE_EQ(model.diagnostics().pool_volume, 1.1);
+
+    model.commitUpdate(preview);
+    EXPECT_DOUBLE_EQ(model.headspace().ventedMoles().at("H2"), 0.05);
+    EXPECT_DOUBLE_EQ(model.committedEscapedMoles().at("H2"), 0.05);
+    EXPECT_THROW(model.commitUpdate(preview), std::logic_error);
+}
+
+TEST(PlanarFreeSurfaceModelTest, SnapshotRollbackRestoresAcceptedLedgersAndInvalidatesEveryPreview)
+{
+    auto map = std::make_shared<SimpleFluid::ConstantAreaVesselVolumeMap>(0.0, 2.0, 1.0);
+    auto headspace = std::make_unique<SimpleFluid::VentedHeadspaceModel>(vented_options(2.0));
+    SimpleFluid::PlanarFreeSurfaceModel model(map, std::move(headspace));
+    auto initial = constant_update(1.0, 0.1);
+    initial.gas.submerged_moles = {{"H2", 0.2}};
+    model.initialize(initial);
+    const auto accepted = model.snapshot();
+
+    auto changed = constant_update(0.9, 0.05);
+    changed.time = 0.5;
+    changed.time_step = 0.5;
+    changed.gas.submerged_moles = {{"H2", 0.15}};
+    changed.gas.escaped_moles_this_step = {{"H2", 0.05}};
+    const auto before_rollback = model.previewUpdate(changed);
+    model.commitUpdate(before_rollback);
+    EXPECT_DOUBLE_EQ(model.diagnostics().pool_volume, 0.95);
+    EXPECT_DOUBLE_EQ(model.headspace().ventedMoles().at("H2"), 0.05);
+
+    auto rejected = constant_update(0.8, 0.05);
+    rejected.time = 1.0;
+    rejected.time_step = 0.5;
+    rejected.gas.submerged_moles = {{"H2", 0.15}};
+    const auto during_rollback = model.previewUpdate(rejected);
+    model.restore(accepted);
+
+    const auto restored = model.diagnostics();
+    EXPECT_DOUBLE_EQ(restored.liquid_volume, 1.0);
+    EXPECT_DOUBLE_EQ(restored.submerged_bubble_volume, 0.1);
+    EXPECT_DOUBLE_EQ(restored.pool_volume, 1.1);
+    EXPECT_DOUBLE_EQ(restored.old_pool_level, 1.1);
+    EXPECT_DOUBLE_EQ(restored.pool_level, 1.1);
+    EXPECT_DOUBLE_EQ(restored.time, 0.0);
+    EXPECT_TRUE(model.headspace().ventedMoles().empty());
+    EXPECT_TRUE(model.committedEscapedMoles().empty());
+    EXPECT_THROW(model.commitUpdate(before_rollback), std::logic_error);
+    EXPECT_THROW(model.commitUpdate(during_rollback), std::logic_error);
+
+    const auto retry = model.previewUpdate(changed);
+    EXPECT_NO_THROW(model.commitUpdate(retry));
+    EXPECT_DOUBLE_EQ(model.committedEscapedMoles().at("H2"), 0.05);
+
+    auto other_headspace = std::make_unique<SimpleFluid::VentedHeadspaceModel>(vented_options(2.0));
+    SimpleFluid::PlanarFreeSurfaceModel other(map, std::move(other_headspace));
+    EXPECT_THROW(other.restore(accepted), std::invalid_argument);
+}
+
+TEST(PlanarFreeSurfaceModelTest, SnapshotCanRestoreUninitializedStateWithoutRevivingTokensAfterReinitialize)
+{
+    auto map = std::make_shared<SimpleFluid::ConstantAreaVesselVolumeMap>(0.0, 2.0, 1.0);
+    auto headspace = std::make_unique<SimpleFluid::VentedHeadspaceModel>(vented_options(2.0));
+    SimpleFluid::PlanarFreeSurfaceModel model(map, std::move(headspace));
+    const auto uninitialized = model.snapshot();
+
+    model.initialize(constant_update(1.0, 0.0));
+    const auto stale = model.previewUpdate(constant_update(0.9, 0.0));
+    model.restore(uninitialized);
+    EXPECT_FALSE(model.initialized());
+    EXPECT_THROW(model.commitUpdate(stale), std::logic_error);
+    EXPECT_THROW(static_cast<void>(model.diagnostics()), std::logic_error);
+
+    model.initialize(constant_update(1.0, 0.0));
+    EXPECT_THROW(model.commitUpdate(stale), std::logic_error);
+    const auto current = model.previewUpdate(constant_update(0.9, 0.0));
+    EXPECT_NO_THROW(model.commitUpdate(current));
 }
 
 TEST(PlanarFreeSurfaceModelTest, ClampPolicyReportsOverflowWithoutHidingResidual)
@@ -604,6 +735,31 @@ TEST(LiquidMassInventoryTest, DensityChangeInvalidatesGlobalPhaseChangePreview)
     EXPECT_DOUBLE_EQ(inventory.liquidVolume(), 1.8);
 }
 
+TEST(LiquidMassInventoryTest, SnapshotRestoresDensityInventoryDiagnosticsAndGeneration)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::LiquidMassInventory<Pack> inventory(mesh);
+    inventory.initialize(1.0, [](Pack::local_ordinal_type) { return 1000.0; });
+    const auto accepted = inventory.snapshot();
+
+    inventory.updatePureLiquidDensity([](Pack::local_ordinal_type) { return 500.0; });
+    const auto changed = inventory.previewPhaseChange(100.0);
+    inventory.commitPhaseChange(changed);
+    ASSERT_NE(inventory.totalMass(), 1000.0);
+    ASSERT_NE(inventory.liquidVolume(), 1.0);
+    const auto rejected = inventory.previewPhaseChange(50.0);
+
+    inventory.restore(accepted);
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 1000.0);
+    EXPECT_DOUBLE_EQ(inventory.liquidVolume(), 1.0);
+    EXPECT_DOUBLE_EQ(inventory.rhoLiquid().value(0), 1000.0);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), 1000.0);
+    EXPECT_THROW(inventory.commitPhaseChange(rejected), std::logic_error);
+    const auto retry = inventory.previewPhaseChange(100.0);
+    EXPECT_NO_THROW(inventory.commitPhaseChange(retry));
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 900.0);
+}
+
 TEST(LiquidMassInventoryTest, NonuniformDensityUsesFixedMassWeights)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
@@ -688,6 +844,49 @@ TEST(LiquidMassInventoryTest, CellwisePhaseChangeIsTransactionalAndSpatiallyReso
     EXPECT_THROW(inventory.commitPhaseChange(preview), std::logic_error);
 }
 
+TEST(LiquidMassInventoryTest, LiveCellwisePreviewExposesTrialFieldAndRollbackInvalidatesIt)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory inventory(mesh, options);
+    inventory.initialize(1.0, [](Pack::local_ordinal_type) { return 1000.0; });
+    const auto accepted = inventory.snapshot();
+
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    Inventory::field_type evaporation(mesh, 10.0, "evaporationMassRate");
+    const auto rejected = inventory.previewCellwiseAdvance(0.1, flux, &evaporation);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), 1000.0);
+    EXPECT_NEAR(inventory.trialCellMassInventory(rejected).value(0), 999.0, 1.0e-10);
+
+    inventory.restore(accepted);
+    EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(0), 1000.0);
+    EXPECT_THROW(static_cast<void>(inventory.trialCellMassInventory(rejected)), std::logic_error);
+    EXPECT_THROW(inventory.commitPhaseChange(rejected), std::logic_error);
+
+    const auto current = inventory.previewCellwiseAdvance(0.1, flux, &evaporation);
+    EXPECT_NEAR(inventory.trialCellMassInventory(current).value(0), 999.0, 1.0e-10);
+
+    Inventory other(mesh, options);
+    other.initialize(1.0, [](Pack::local_ordinal_type) { return 1000.0; });
+    EXPECT_THROW(static_cast<void>(other.trialCellMassInventory(current)), std::logic_error);
+
+    inventory.commitPhaseChange(current);
+    EXPECT_THROW(static_cast<void>(inventory.trialCellMassInventory(current)), std::logic_error);
+    EXPECT_NEAR(inventory.cellMassInventory().value(0), 999.0, 1.0e-10);
+}
+
+TEST(LiquidMassInventoryTest, TrialFieldAccessorRejectsGlobalInventoryPreview)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    Inventory inventory(mesh);
+    inventory.initialize(1.0, [](Pack::local_ordinal_type) { return 1000.0; });
+    const auto global_preview = inventory.previewPhaseChange(1.0);
+    EXPECT_THROW(static_cast<void>(inventory.trialCellMassInventory(global_preview)), std::logic_error);
+}
+
 TEST(LiquidMassInventoryTest, CellwiseInternalAdvectionRedistributesButConservesMass)
 {
     using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
@@ -762,6 +961,8 @@ TEST(LiquidMassInventoryTest, NewCellwisePreviewInvalidatesOlderTrialToken)
 
     const auto first = inventory.previewCellwiseAdvance(0.1, flux);
     const auto second = inventory.previewCellwiseAdvance(0.1, flux);
+    EXPECT_THROW(static_cast<void>(inventory.trialCellMassInventory(first)), std::logic_error);
+    EXPECT_NO_THROW(static_cast<void>(inventory.trialCellMassInventory(second)));
     EXPECT_THROW(inventory.commitPhaseChange(first), std::logic_error);
     EXPECT_NO_THROW(inventory.commitPhaseChange(second));
 }

@@ -196,12 +196,16 @@ TEST(PlanarALEMeshMotionTest, SharedGeometryPublishesOneEpochAndAllowsOneControl
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
     auto first_handle = std::make_shared<Handle>(geometry);
     auto alias_handle = std::make_shared<Handle>(geometry);
+    EXPECT_EQ(first_handle->geometry_identity(), geometry.get());
+    EXPECT_EQ(alias_handle->geometry_identity(), geometry.get());
 
     {
         Motion motion(first_handle);
         EXPECT_THROW({ Motion duplicate(alias_handle); }, std::invalid_argument);
         auto independent_geometry = std::make_shared<Cartesian>(*geometry);
         auto independent_handle = std::make_shared<Handle>(independent_geometry);
+        EXPECT_NE(independent_handle->geometry_identity(),
+                  first_handle->geometry_identity());
         EXPECT_NO_THROW({ Motion independent(independent_handle); });
         motion.begin_trial(3.0, 1.0);
         EXPECT_EQ(first_handle->geometry_epoch(), 1U);

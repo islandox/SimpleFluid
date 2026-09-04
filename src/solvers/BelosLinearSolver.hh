@@ -257,6 +257,30 @@ public:
             typename Pack::global_ordinal_type,
             typename Pack::node_type>;
 
+    /**
+     * @brief Release all operator-dependent Krylov and preconditioner state.
+     *
+     * Maps may remain compatible after fixed-topology mesh motion while the
+     * matrix numeric values are no longer compatible.  Callers use this hook
+     * when such an external invalidation cannot be inferred from operator
+     * identity alone.  The cumulative preconditioner setup count is retained.
+     */
+    void reset()
+    {
+        if (!d_problem.is_null())
+        {
+            d_problem->setRightPrec(Teuchos::null);
+        }
+        d_problem = Teuchos::null;
+        d_parameters = Teuchos::null;
+        d_solver = Teuchos::null;
+        d_backend.reset();
+        d_residual_workspace = Teuchos::null;
+        d_preconditioner = Teuchos::null;
+        d_preconditioner_operator = Teuchos::null;
+        d_preconditioner_kind.reset();
+    }
+
     bool solve(
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs,

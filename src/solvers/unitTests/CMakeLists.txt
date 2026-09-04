@@ -19,6 +19,11 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "verification\\;integration"
     )
+  elseif(TEST_NAME STREQUAL "testBoussinesqPlanarALE")
+    simplefluid_discover_tests(
+      ${TEST_NAME}
+      PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
+    )
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
@@ -75,6 +80,22 @@ simplefluid_add_mpi_test(
     TARGET testFluidSolverMultiRank
     PROCS 2
     LABELS "mpi;pressure_velocity"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME FluidSolverGeometryRefresh_2procs
+    TARGET testFluidSolver
+    PROCS 2
+    ARGS "--gtest_filter=FluidSolverTest.CentralGeometryRefreshRestoresCoreCachesAndVtuPoints"
+    LABELS "mpi;ale;geometry_epoch;pressure_velocity"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME BoussinesqMutableGeometryRefresh_2procs
+    TARGET testBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=BoussinesqSolverTest.MutableNativeConstructionPreservesFieldIdentityAndConstOverload"
+    LABELS "mpi;ale;geometry_epoch;boussinesq"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
@@ -201,4 +222,27 @@ simplefluid_add_mpi_test(
     PROCS 2
     ARGS "--gtest_filter=BoussinesqFreeSurfaceTest.CellMassInventoryStepIsPartitionIndependent:BoussinesqFreeSurfaceTest.CollectivelyRejectsRemovalWhileBoilingOwnsSubmergedSteam:BoussinesqFreeSurfaceTest.CollectivelyRejectsRankDivergentExistingStateDuringConfiguration:BoussinesqFreeSurfaceTest.CollectivelyRejectsRankDivergentPresenceBeforeStep:BoussinesqFreeSurfaceTest.CollectivelyRejectsPositiveRankDivergentTimestepBeforeStep"
     LABELS "mpi;free_surface;boussinesq;validation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME BoussinesqPlanarALE_2procs
+    TARGET testBoussinesqPlanarALE
+    PROCS 2
+    LABELS "mpi;ale;free_surface;boussinesq;conservation;transaction"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME PlanarALEBoundaryValidation_2procs
+    TARGET testPlanarALEBoundary
+    PROCS 2
+    ARGS "--gtest_filter=PlanarALEBoundaryTest.CollectivelyRejectsRankDivergentControlsAndForeignFields"
+    LABELS "mpi;ale;free_surface;validation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME VolumeContinuityModelValidation_2procs
+    TARGET testPlanarALEBoundary
+    PROCS 2
+    ARGS "--gtest_filter=VolumeContinuityModelTest.CollectivelyRejectsRankDivergentGlobalAndOptionalInputs"
+    LABELS "mpi;ale;continuity;validation"
     TIMEOUT 120)

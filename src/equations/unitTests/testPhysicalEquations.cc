@@ -89,6 +89,28 @@ struct PressureProjectionEquationTestAccess
             velocity_boundary_cache,
             velocity);
     }
+
+    static auto project_reusing_cached_predictor(
+        PressureProjectionEquation<Pack>& equation,
+        CellField<Pack>& pressure,
+        CellField<Pack>& pressure_correction,
+        typename Pack::scalar_type time_step,
+        typename Pack::scalar_type reference_density,
+        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        VectorCellField<Pack>& velocity,
+        const typename PressureProjectionEquation<Pack>::
+            continuity_target_type& continuity_target)
+        -> typename PressureProjectionEquation<Pack>::ProjectionResult
+    {
+        return equation.project_reusing_cached_predictor(
+            pressure,
+            pressure_correction,
+            time_step,
+            reference_density,
+            velocity_boundary_cache,
+            velocity,
+            continuity_target);
+    }
 };
 
 } // namespace SimpleFluid::detail
@@ -1074,6 +1096,203 @@ TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
 
     EXPECT_NEAR(pressure.value(0), 0.0, 1.0e-12);
     EXPECT_NEAR(pressure.value(1), reference_density, 1.0e-8);
+}
+
+/** @brief Verifies integrated targets drive and report volume continuity. */
+TEST(PhysicalEquationsTest,
+     PressureProjectionSatisfiesIntegratedVolumeContinuityTarget)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(2, 1, 1, 0.5));
+    FieldType pressure(mesh, "pressure");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["xmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(
+        mesh, options, bcs.pressure);
+    const std::vector<Pack::scalar_type> target_values{0.075, 0.125};
+    const SimpleFluid::VolumeContinuityTarget<Pack> target(
+        mesh, target_values, 41);
+
+    const auto result = equation.project(
+        pressure, 0.2, 997.0, cache, velocity, target);
+
+    ASSERT_TRUE(result.linear_solve.converged);
+    Pack::scalar_type expected_norm_squared{};
+    Pack::scalar_type expected_maximum{};
+    Pack::scalar_type expected_scale_squared{};
+    const auto& fluxes = equation.corrected_face_fluxes();
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<MeshType::local_ordinal_type>(owned);
+        const auto balance =
+            SimpleFluid::FVM::cell_flux_balance<Pack>(
+                *mesh, fluxes, cell_lid);
+        const auto residual = balance - target_values[owned];
+        expected_norm_squared += residual * residual;
+        expected_maximum =
+            std::max(expected_maximum, std::abs(residual));
+        expected_scale_squared += std::max(
+            balance * balance,
+            target_values[owned] * target_values[owned]);
+        EXPECT_NEAR(residual, 0.0, 1.0e-10);
+    }
+    const auto expected_l2 = std::sqrt(expected_norm_squared);
+    const auto expected_scale = std::sqrt(expected_scale_squared);
+    EXPECT_NEAR(result.continuity, expected_l2, 1.0e-13);
+    EXPECT_NEAR(result.continuity_residuals.l2, expected_l2, 1.0e-13);
+    EXPECT_NEAR(
+        result.continuity_residuals.maximum, expected_maximum, 1.0e-13);
+    EXPECT_NEAR(
+        result.continuity_residuals.normalization,
+        expected_scale,
+        1.0e-13);
+    EXPECT_NEAR(
+        result.continuity_residuals.normalized_l2,
+        expected_l2 / expected_scale,
+        1.0e-13);
+}
+
+/** @brief Verifies closed boundaries reject a non-conservative target. */
+TEST(PhysicalEquationsTest,
+     PressureProjectionRejectsGloballyIncompatibleVolumeTarget)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType pressure(mesh, "pressure");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+    const SimpleFluid::BoundaryConditionSet bcs;
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh);
+    const SimpleFluid::VolumeContinuityTarget<Pack> target(
+        mesh, std::vector<Pack::scalar_type>{0.25}, 3);
+
+    EXPECT_THROW(equation.project(pressure, 0.1, 1.0, cache, velocity, target), std::invalid_argument);
+}
+
+/** @brief Preserve permissive compatibility behavior of legacy zero-target APIs. */
+TEST(PhysicalEquationsTest, LegacyZeroTargetPressureProjectionAllowsGlobalBoundaryImbalance)
+{
+    auto mesh = make_single_hex_mesh();
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.velocity["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, SimpleFluid::vec3{1.0, 0.0, 0.0}};
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, bcs);
+
+    {
+        FieldType pressure(mesh, "pressure");
+        VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+        SimpleFluid::PressureProjectionEquation<Pack> equation(mesh);
+        const auto result = equation.project(pressure, 0.1, 1.0, cache, velocity);
+        EXPECT_GT(result.continuity_residuals.maximum, 0.0);
+    }
+
+    {
+        FieldType pressure(mesh, "pressure");
+        FieldType pressure_correction(mesh, "pressure_correction");
+        VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+        SimpleFluid::PressureProjectionEquation<Pack> equation(mesh);
+        const auto first = equation.project(pressure, pressure_correction, 0.1, 1.0, cache, velocity);
+        EXPECT_GT(first.continuity_residuals.maximum, 0.0);
+        const auto reused =
+            SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::project_reusing_cached_predictor(
+                equation, pressure, pressure_correction, 0.1, 1.0, cache, velocity);
+        EXPECT_GT(reused.continuity_residuals.maximum, 0.0);
+    }
+}
+
+/** @brief Verifies adjacent PISO reuse is keyed by target generation. */
+TEST(PhysicalEquationsTest, PressureProjectionPredictorReuseRequiresSameTargetGeneration)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 1, 1, 0.5));
+    FieldType pressure(mesh, "pressure");
+    FieldType pressure_correction(mesh, "pressure_correction");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+    const SimpleFluid::BoundaryConditionSet bcs;
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh, options);
+    const std::vector<Pack::scalar_type> values{0.05, -0.05};
+    const SimpleFluid::VolumeContinuityTarget<Pack> target(mesh, values, 11);
+
+    equation.project(pressure, pressure_correction, 0.1, 1000.0, cache, velocity, target);
+    EXPECT_NO_THROW(SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::project_reusing_cached_predictor(
+        equation, pressure, pressure_correction, 0.1, 1000.0, cache, velocity, target));
+    EXPECT_EQ(
+        SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::predictor_flux_reuse_count(equation), 1U);
+
+    const SimpleFluid::VolumeContinuityTarget<Pack> next_target(mesh, values, 12);
+    EXPECT_THROW(SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::project_reusing_cached_predictor(
+                     equation, pressure, pressure_correction, 0.1, 1000.0, cache, velocity, next_target),
+        std::logic_error);
+}
+
+/** @brief Verifies a fixed moving-boundary flux survives projection exactly. */
+TEST(PhysicalEquationsTest, PressureProjectionPreservesRegisteredFixedBoundaryFlux)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType pressure(mesh, "pressure");
+    VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["zmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    bcs.velocity["zmax"] = {
+        SimpleFluid::BoundaryConditionType::Dirichlet,
+        SimpleFluid::vec3{0.0, 0.0, 9.0}};
+    const auto cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, bcs);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(
+        mesh, options, bcs.pressure);
+    constexpr Pack::scalar_type fixed_flux = 0.25;
+    equation.set_fixed_boundary_flux_provider(
+        {"zmax"},
+        [](int, size_t, MeshType::local_ordinal_type)
+        {
+            return Pack::scalar_type{0.25};
+        },
+        7);
+    const SimpleFluid::VolumeContinuityTarget<Pack> target(
+        mesh, std::vector<Pack::scalar_type>{fixed_flux}, 7);
+
+    const auto result = equation.project(
+        pressure, 0.1, 1000.0, cache, velocity, target);
+
+    bool found_top = false;
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        if (mesh->boundary_batch_name(batch_id) != "zmax")
+        {
+            continue;
+        }
+        for (const auto face_lid : batch.face_lids)
+        {
+            if (mesh->is_owned_face(face_lid))
+            {
+                EXPECT_DOUBLE_EQ(
+                    equation.corrected_face_fluxes().value(face_lid),
+                    fixed_flux);
+                found_top = true;
+            }
+        }
+    }
+    EXPECT_TRUE(found_top);
+    EXPECT_NEAR(result.continuity, 0.0, 1.0e-12);
+    EXPECT_NEAR(result.continuity_residuals.maximum, 0.0, 1.0e-12);
 }
 
 /** @brief Verifies that a pressure Dirichlet boundary replaces the gauge constraint. */

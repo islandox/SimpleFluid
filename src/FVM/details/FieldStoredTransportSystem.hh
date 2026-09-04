@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
@@ -832,20 +833,23 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
 }
 
 /** Shared mapped weighted-scalar assembly kernel. */
-template<TpetraTypePack Pack, class MeshType, class StorageValue, class AdvectionValue, class DiffusivityValue,
-    class BoundaryCondition, class BoundaryValue, class Source, class BoundaryCache, class GeometryCache>
+template<TpetraTypePack Pack, class MeshType, class StorageValue, class OldStorageValue, class AdvectionValue,
+    class DiffusivityValue, class BoundaryCondition, class BoundaryValue, class Source, class BoundaryCache,
+    class GeometryCache>
 TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     const ScalarCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    typename Pack::scalar_type time_step, StorageValue storage_value, AdvectionValue advection_value,
-    DiffusivityValue diffusivity_value, BoundaryCondition boundary_condition, BoundaryValue boundary_value,
-    Source source, NonOrthogonalTreatment treatment, const ScalarCellFieldStored<Pack, MeshType>* correction_field,
+    typename Pack::scalar_type time_step, StorageValue storage_value, OldStorageValue old_storage_value,
+    bool has_distinct_old_storage, AdvectionValue advection_value, DiffusivityValue diffusivity_value,
+    BoundaryCondition boundary_condition, BoundaryValue boundary_value, Source source,
+    NonOrthogonalTreatment treatment, const ScalarCellFieldStored<Pack, MeshType>* correction_field,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
     std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
     const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
     ScalarTransportDiscretization discretization,
-    const ScalarCellFieldStored<Pack, MeshType>* older_values)
+    const ScalarCellFieldStored<Pack, MeshType>* older_values,
+    const ALEControlVolumeState* ale)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -857,6 +861,38 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
     validate_scalar_transport_discretization(
         mesh, discretization, older_field_state, context);
+    const std::array<int, 4> local_optional_state{
+        has_distinct_old_storage ? 1 : 0,
+        has_distinct_old_storage ? -1 : 0,
+        ale == nullptr ? 0 : 1,
+        ale == nullptr ? 0 : -1};
+    const auto optional_state =
+        reduce_stored_validation_state<Pack>(mesh, local_optional_state);
+    if (optional_state[0] != -optional_state[1])
+    {
+        throw std::invalid_argument(std::string(context)
+            + " requires every rank to select the same accepted-old storage category.");
+    }
+    if (optional_state[2] != -optional_state[3])
+    {
+        throw std::invalid_argument(std::string(context)
+            + " requires every rank to select the same ALE state category.");
+    }
+    if (ale != nullptr)
+    {
+        ale->validate(mesh, static_cast<real_t>(time_step));
+        if (discretization.time != ScalarTimeScheme::BackwardEuler)
+        {
+            throw std::invalid_argument(std::string(context)
+                + " supports ALE only with Backward Euler time discretization.");
+        }
+    }
+    if (has_distinct_old_storage
+        && discretization.time != ScalarTimeScheme::BackwardEuler)
+    {
+        throw std::invalid_argument(std::string(context)
+            + " supports distinct accepted-old storage only with Backward Euler.");
+    }
     const auto transient_coefficients =
         scalar_transient_coefficients<scalar_type>(discretization.time);
     const auto weights = validate_stored_non_orthogonal_selection<Pack>(mesh, treatment, correction_field, context);
@@ -890,10 +926,12 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         {
             const auto cell_lid = static_cast<local_ordinal_type>(local);
             const auto storage = storage_value(cell_lid);
+            const auto old_storage = old_storage_value(cell_lid);
             const auto advection = advection_value(cell_lid);
             const auto diffusivity = diffusivity_value(cell_lid);
             invalid_coefficients = invalid_coefficients || !std::isfinite(storage) || !std::isfinite(advection) ||
-                                   !std::isfinite(diffusivity) || storage <= scalar_type{} ||
+                                   !std::isfinite(diffusivity) || !std::isfinite(old_storage)
+                                   || storage <= scalar_type{} || old_storage <= scalar_type{} ||
                                    advection < scalar_type{} || diffusivity < scalar_type{};
         }
     }
@@ -1175,7 +1213,13 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell_lid));
         const auto cell_storage = storage_value(cell_lid);
         const auto cell_advection = advection_value(cell_lid);
-        const auto transient = cell_storage * volume / time_step;
+        const auto new_volume = ale == nullptr
+            ? volume
+            : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+        const auto old_volume = ale == nullptr
+            ? volume
+            : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+        const auto transient = cell_storage * new_volume / time_step;
         const auto sink = sink_values[owned];
 
         row_values.clear();
@@ -1183,16 +1227,25 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             row_values,
             cell_lid,
             transient_coefficients.diagonal * transient
-                + volume * sink);
-        auto rhs_value = transient
-                           * (transient_coefficients.previous
-                                  * old_values.local_value(cell_lid)
-                              + transient_coefficients.older
-                                  * (older_values == nullptr
-                                         ? scalar_type{}
-                                         : older_values->local_value(
-                                               cell_lid)))
-                       + volume * source_values[owned];
+                + new_volume * sink);
+        auto rhs_value = [&]
+        {
+            if (!has_distinct_old_storage && ale == nullptr)
+            {
+                return transient
+                         * (transient_coefficients.previous
+                                * old_values.local_value(cell_lid)
+                            + transient_coefficients.older
+                                * (older_values == nullptr
+                                       ? scalar_type{}
+                                       : older_values->local_value(cell_lid)))
+                     + volume * source_values[owned];
+            }
+            const auto accepted_storage = old_storage_value(cell_lid);
+            return accepted_storage * old_volume / time_step
+                     * old_values.local_value(cell_lid)
+                 + new_volume * source_values[owned];
+        }();
 
         auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
                                               scalar_type face_diffusivity,
@@ -1388,22 +1441,34 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
     const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation,
     ScalarTransportDiscretization discretization,
-    const ScalarCellFieldStored<Pack, MeshType>* older_values)
+    const ScalarCellFieldStored<Pack, MeshType>* older_values,
+    const ScalarCellFieldStored<Pack, MeshType>* old_storage_weight,
+    const ALEControlVolumeState* ale)
 {
     const auto incompatible_fields = old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
                                              old_values.mesh_ptr().get() != storage_weight.mesh_ptr().get() ||
                                              old_values.mesh_ptr().get() != advection_weight.mesh_ptr().get() ||
-                                             old_values.mesh_ptr().get() != diffusivity.mesh_ptr().get()
+                                             old_values.mesh_ptr().get() != diffusivity.mesh_ptr().get() ||
+                                             (old_storage_weight != nullptr
+                                                 && old_values.mesh_ptr().get()
+                                                     != old_storage_weight->mesh_ptr().get())
                                          ? 1
                                          : 0;
     auto storage = [&](typename Pack::local_ordinal_type cell_lid) { return storage_weight.local_value(cell_lid); };
+    auto old_storage = [&](typename Pack::local_ordinal_type cell_lid)
+    {
+        return old_storage_weight == nullptr
+            ? storage_weight.local_value(cell_lid)
+            : old_storage_weight->local_value(cell_lid);
+    };
     auto advection = [&](typename Pack::local_ordinal_type cell_lid) { return advection_weight.local_value(cell_lid); };
     auto diffusion = [&](typename Pack::local_ordinal_type cell_lid) { return diffusivity.local_value(cell_lid); };
-    return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, storage, advection,
-        diffusion, std::move(boundary_condition), std::move(boundary_value), std::move(source), treatment,
+    return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, storage, old_storage,
+        old_storage_weight != nullptr, advection, diffusion, std::move(boundary_condition),
+        std::move(boundary_value), std::move(source), treatment,
         correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
         boundary_diffusivity, geometry_cache, coefficient_interpolation, incompatible_fields,
-        "weighted_scalar_transport_system", discretization, older_values);
+        "weighted_scalar_transport_system", discretization, older_values, ale);
 }
 
 /** Assemble mapped conservative physical temperature transport. */
@@ -1420,24 +1485,56 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, const BoundaryCache* boundary_thermal_conductivity,
     const GeometryCache* geometry_cache, FaceCoefficientInterpolation coefficient_interpolation,
     ScalarTransportDiscretization discretization,
-    const ScalarCellFieldStored<Pack, MeshType>* older_temperature)
+    const ScalarCellFieldStored<Pack, MeshType>* older_temperature,
+    const ScalarCellFieldStored<Pack, MeshType>* old_density,
+    const ScalarCellFieldStored<Pack, MeshType>* old_specific_heat_capacity,
+    const ALEControlVolumeState* ale)
 {
+    const std::array<int, 4> local_old_property_state{
+        old_density == nullptr ? 0 : 1,
+        old_density == nullptr ? 0 : -1,
+        old_specific_heat_capacity == nullptr ? 0 : 1,
+        old_specific_heat_capacity == nullptr ? 0 : -1};
+    const auto old_property_state = reduce_stored_validation_state<Pack>(
+        old_temperature.mesh(), local_old_property_state);
+    if (old_property_state[0] != -old_property_state[1]
+        || old_property_state[2] != -old_property_state[3])
+    {
+        throw std::invalid_argument(
+            "physical_temperature_transport_system requires every rank to select the same accepted-old property fields.");
+    }
     const auto incompatible_fields =
         old_temperature.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
                 old_temperature.mesh_ptr().get() != density.mesh_ptr().get() ||
                 old_temperature.mesh_ptr().get() != specific_heat_capacity.mesh_ptr().get() ||
-                old_temperature.mesh_ptr().get() != thermal_conductivity.mesh_ptr().get()
+                old_temperature.mesh_ptr().get() != thermal_conductivity.mesh_ptr().get() ||
+                (old_density != nullptr
+                    && old_temperature.mesh_ptr().get() != old_density->mesh_ptr().get()) ||
+                (old_specific_heat_capacity != nullptr
+                    && old_temperature.mesh_ptr().get()
+                        != old_specific_heat_capacity->mesh_ptr().get())
             ? 1
             : 0;
     auto capacity = [&](typename Pack::local_ordinal_type cell_lid)
     { return density.local_value(cell_lid) * specific_heat_capacity.local_value(cell_lid); };
     auto conductivity = [&](typename Pack::local_ordinal_type cell_lid)
     { return thermal_conductivity.local_value(cell_lid); };
+    const auto* accepted_density = old_density == nullptr ? &density : old_density;
+    const auto* accepted_specific_heat_capacity =
+        old_specific_heat_capacity == nullptr
+        ? &specific_heat_capacity
+        : old_specific_heat_capacity;
+    auto old_capacity = [&](typename Pack::local_ordinal_type cell_lid)
+    {
+        return accepted_density->local_value(cell_lid)
+            * accepted_specific_heat_capacity->local_value(cell_lid);
+    };
     return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, capacity,
-        capacity, conductivity, std::move(boundary_condition), std::move(boundary_value), std::move(power_density),
+        old_capacity, old_density != nullptr || old_specific_heat_capacity != nullptr, capacity, conductivity,
+        std::move(boundary_condition), std::move(boundary_value), std::move(power_density),
         treatment, correction_field, std::move(cached_matrix), {}, {}, boundary_thermal_conductivity, geometry_cache,
         coefficient_interpolation, incompatible_fields, "physical_temperature_transport_system", discretization,
-        older_temperature);
+        older_temperature, ale);
 }
 
 template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>
@@ -1512,13 +1609,26 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
     typename Pack::scalar_type diffusivity, BoundaryValue boundary_value, Source source,
     NonOrthogonalTreatment treatment, const VectorCellFieldStored<Pack, MeshType>* correction_field,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, BoundaryDiffusion boundary_diffusion,
-    const GeometryCache* geometry_cache)
+    const GeometryCache* geometry_cache, const ALEControlVolumeState* ale)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t components = 3;
 
     const auto& mesh = old_values.mesh();
+    const std::array<int, 2> local_ale_state{
+        ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
+    const auto ale_state =
+        reduce_stored_validation_state<Pack>(mesh, local_ale_state);
+    if (ale_state[0] != -ale_state[1])
+    {
+        throw std::invalid_argument(
+            "non_orthogonal_transport_system requires every rank to select the same ALE state category.");
+    }
+    if (ale != nullptr)
+    {
+        ale->validate(mesh, static_cast<real_t>(time_step));
+    }
     const auto weights = validate_stored_non_orthogonal_selection<Pack>(
         mesh, treatment, correction_field, "non_orthogonal_transport_system");
     int invalid_geometry_cache = 0;
@@ -1580,7 +1690,14 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell_lid));
-        const auto transient = volume / time_step;
+        const auto new_volume = ale == nullptr
+            ? volume
+            : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+        const auto old_volume = ale == nullptr
+            ? volume
+            : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+        const auto transient = new_volume / time_step;
+        const auto old_transient = old_volume / time_step;
         const auto old_value = old_values.local_value(cell_lid);
         const auto source_value = source(cell_lid);
         row_values.clear();
@@ -1588,7 +1705,9 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
         for (size_t component = 0; component < components; ++component)
         {
             rhs->replaceLocalValue(cell_lid, component,
-                transient * old_value.component(component) + volume * source_value.component(component));
+                (ale == nullptr ? transient : old_transient)
+                        * old_value.component(component)
+                    + new_volume * source_value.component(component));
         }
 
         auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
@@ -1885,13 +2004,27 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     NonOrthogonalTreatment treatment, const VectorCellFieldStored<Pack, MeshType>* correction_field,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, BoundaryDiffusion boundary_diffusion,
     const BoundaryCache* boundary_dynamic_viscosity, const GeometryCache* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation)
+    FaceCoefficientInterpolation coefficient_interpolation,
+    const ALEControlVolumeState* ale)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t components = 3;
 
     const auto& mesh = old_velocity.mesh();
+    const std::array<int, 2> local_ale_state{
+        ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
+    const auto ale_state =
+        reduce_stored_validation_state<Pack>(mesh, local_ale_state);
+    if (ale_state[0] != -ale_state[1])
+    {
+        throw std::invalid_argument(
+            "physical_momentum_transport_system requires every rank to select the same ALE state category.");
+    }
+    if (ale != nullptr)
+    {
+        ale->validate(mesh, static_cast<real_t>(time_step));
+    }
     const auto weights = validate_stored_non_orthogonal_selection<Pack>(
         mesh, treatment, correction_field, "physical_momentum_transport_system");
 
@@ -2005,7 +2138,14 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell_lid));
-        const auto transient = volume / time_step;
+        const auto new_volume = ale == nullptr
+            ? volume
+            : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+        const auto old_volume = ale == nullptr
+            ? volume
+            : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+        const auto transient = new_volume / time_step;
+        const auto old_transient = old_volume / time_step;
         const auto old_value = old_velocity.local_value(cell_lid);
         const auto source_value = source(cell_lid);
         row_values.clear();
@@ -2013,7 +2153,9 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
         for (size_t component = 0; component < components; ++component)
         {
             rhs->replaceLocalValue(cell_lid, component,
-                transient * old_value.component(component) + volume * source_value.component(component));
+                (ale == nullptr ? transient : old_transient)
+                        * old_value.component(component)
+                    + new_volume * source_value.component(component));
         }
 
         auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,

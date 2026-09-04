@@ -15,6 +15,7 @@
 #include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationForward.hh"
+#include "equations/VolumeContinuityTarget.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -30,6 +31,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <type_traits>
@@ -46,6 +48,8 @@ struct TimeStepperOptions;
 
 namespace FVM
 {
+struct ALEControlVolumeState;
+
 template<TpetraTypePack Pack> struct VectorTransportSystem;
 
 template<TpetraTypePack Pack> struct VelocityBoundaryCache;
@@ -69,6 +73,7 @@ template<TpetraTypePack Pack> struct CoupledPressureVelocitySystem
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
     using vector_type = typename Pack::vector_type;
+    using global_ordinal_type = typename Pack::global_ordinal_type;
 
     Teuchos::RCP<const map_type> map;
     Teuchos::RCP<const map_type> overlap_map;
@@ -80,6 +85,10 @@ template<TpetraTypePack Pack> struct CoupledPressureVelocitySystem
     Teuchos::RCP<matrix_type> pressure_stabilization;
     Teuchos::RCP<matrix_type> schur;
     scalar_type reference_density = scalar_type{1};
+    std::optional<global_ordinal_type> pressure_gauge_gid;
+    std::uint64_t geometry_epoch = 0;
+    std::uint64_t continuity_target_generation = 0;
+    std::uint64_t fixed_boundary_flux_revision = 0;
 };
 
 /**
@@ -92,6 +101,7 @@ template<class Scalar> struct CoupledPressureVelocityResult
     bool converged = false;
     int iterations = 0;
     Scalar achieved_tolerance = {};
+    VolumeContinuityResiduals<Scalar> continuity;
 };
 
 /**
@@ -140,8 +150,7 @@ namespace detail
  * @param value Contribution to add.
  */
 template<class Column, class Scalar>
-SIMPLEFLUID_SOLVERS_LOCAL
-void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar value);
+SIMPLEFLUID_SOLVERS_LOCAL void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar value);
 
 /**
  * @brief Build the four-unknown-per-cell map for a coupled system.
@@ -164,16 +173,15 @@ template<TpetraTypePack Pack> struct PreparedCoupledMatrix
  * @brief Allocate a matrix or reset a compatible cached graph.
  */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_SOLVERS_LOCAL
-PreparedCoupledMatrix<Pack> prepare_coupled_matrix(const Teuchos::RCP<const typename Pack::map_type>& row_map,
+SIMPLEFLUID_SOLVERS_LOCAL PreparedCoupledMatrix<Pack> prepare_coupled_matrix(
+    const Teuchos::RCP<const typename Pack::map_type>& row_map,
     const Teuchos::RCP<const typename Pack::map_type>& column_map,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row);
 
 /** @brief Insert into a fresh local graph or sum into a reused one. */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_SOLVERS_LOCAL
-void add_coupled_local_values(const PreparedCoupledMatrix<Pack>& prepared, typename Pack::local_ordinal_type row,
-    const Teuchos::ArrayView<const typename Pack::local_ordinal_type>& columns,
+SIMPLEFLUID_SOLVERS_LOCAL void add_coupled_local_values(const PreparedCoupledMatrix<Pack>& prepared,
+    typename Pack::local_ordinal_type row, const Teuchos::ArrayView<const typename Pack::local_ordinal_type>& columns,
     const Teuchos::ArrayView<const typename Pack::scalar_type>& values);
 
 /** @brief Insert into a fresh global graph or sum into a reused one. */
@@ -222,9 +230,8 @@ SIMPLEFLUID_SOLVERS_LOCAL auto pressure_gradient_stencils(
  * @return Scaled gradient matrix with refreshed numeric values.
  */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_SOLVERS_LOCAL
-Teuchos::RCP<typename Pack::matrix_type> scaled_gradient_matrix(const typename Pack::matrix_type& gradient,
-    const typename Pack::vector_type& inverse_diagonal,
+SIMPLEFLUID_SOLVERS_LOCAL Teuchos::RCP<typename Pack::matrix_type> scaled_gradient_matrix(
+    const typename Pack::matrix_type& gradient, const typename Pack::vector_type& inverse_diagonal,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null);
 
 /** @brief Persistent scratch matrices for Schur numeric updates. */
@@ -254,9 +261,8 @@ template<TpetraTypePack Pack> struct CoupledSchurWorkspace
  * @throws std::runtime_error if the momentum diagonal is singular.
  */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_SOLVERS_LOCAL
-Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(const typename Pack::matrix_type& momentum,
-    const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& gradient,
+SIMPLEFLUID_SOLVERS_LOCAL Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(
+    const typename Pack::matrix_type& momentum, const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& gradient,
     const std::array<Teuchos::RCP<typename Pack::matrix_type>, 3>& divergence,
     const typename Pack::matrix_type& pressure_stabilization,
     std::optional<typename Pack::global_ordinal_type> pressure_gauge_gid,
@@ -311,6 +317,8 @@ public:
     using momentum_system_type = FVM::VectorTransportSystem<Pack>;
     using system_type = CoupledPressureVelocitySystem<Pack>;
     using result_type = CoupledPressureVelocityResult<scalar_type>;
+    using continuity_target_type = VolumeContinuityTarget<Pack, mesh_type>;
+    using fixed_boundary_flux_provider_type = std::function<scalar_type(int, size_t, local_ordinal_type)>;
     using preconditioner_type = detail::CoupledSchurPreconditioner<Pack>;
     using problem_type = Belos::LinearProblem<scalar_type, multi_vector_type, operator_type>;
     using solver_type = Belos::BlockGmresSolMgr<scalar_type, multi_vector_type, operator_type>;
@@ -338,6 +346,29 @@ public:
     void clear_cache();
 
     /**
+     * Prescribe exact owner-oriented volume fluxes [m^3/s] on named
+     * physical-pressure Dirichlet boundaries.
+     *
+     * Selected faces are removed from the adjustable pressure-outlet part of
+     * the continuity operator and their exact flux enters its affine RHS.
+     */
+    void set_fixed_boundary_flux_provider(
+        std::vector<std::string> boundary_names, fixed_boundary_flux_provider_type provider, std::uint64_t generation);
+
+    /** Restore ordinary pressure-outlet treatment on all boundaries. */
+    void clear_fixed_boundary_flux_provider();
+
+    /** Overwrite selected owned faces after the caller reconstructs fluxes. */
+    void apply_fixed_boundary_fluxes(face_flux_field_type& fluxes) const;
+
+    /**
+     * Return a cache suitable for Rhie--Chow reconstruction before applying
+     * the exact fixed fluxes. Only registered faces are presented as
+     * velocity-Neumann to the pressure/velocity compatibility check.
+     */
+    velocity_boundary_cache_type pressure_flux_boundary_cache(const velocity_boundary_cache_type& boundary_cache) const;
+
+    /**
      * @brief Assemble an isothermal incompressible coupled system.
      * @param pressure Current physical pressure in Pa.
      * @param reference_density Positive density used to normalize pressure.
@@ -346,6 +377,13 @@ public:
         const field_type& pressure, const face_flux_field_type& face_fluxes,
         const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
         const TimeStepperOptions& time_options, scalar_type reference_density = scalar_type{1}) const;
+
+    /** Assemble with an integrated per-cell continuity target [m^3/s]. */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, const continuity_target_type& continuity_target,
+        scalar_type reference_density = scalar_type{1}, const FVM::ALEControlVolumeState* ale = nullptr) const;
 
     /**
      * @brief Assemble isothermal momentum with variable effective viscosity
@@ -362,6 +400,15 @@ public:
         const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
         const boundary_cache_type* boundary_dynamic_viscosity) const;
 
+    /** Variable-viscosity assembly with an integrated continuity target. */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, scalar_type reference_density,
+        const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+        const boundary_cache_type* boundary_dynamic_viscosity, const continuity_target_type& continuity_target,
+        const FVM::ALEControlVolumeState* ale = nullptr) const;
+
     /**
      * @brief Assemble a thermally buoyant coupled system.
      * @param pressure Current physical pressure in Pa.
@@ -376,6 +423,18 @@ public:
         bool density_feedback_enabled = false, const field_type* dynamic_viscosity_override = nullptr,
         const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
+
+    /** Thermally buoyant assembly with an integrated continuity target. */
+    system_type assemble(const boussinesq_momentum_equation_type& momentum_equation,
+        const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+        const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+        const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+        const continuity_target_type& continuity_target, const material_property_fields_type* material = nullptr,
+        scalar_type reference_density = scalar_type{1}, bool density_feedback_enabled = false,
+        const field_type* dynamic_viscosity_override = nullptr,
+        const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr,
+        const boundary_cache_type* boundary_dynamic_viscosity = nullptr,
+        const FVM::ALEControlVolumeState* ale = nullptr) const;
 
 private:
     using pressure_graph_signature_type = std::vector<std::pair<std::string, BoundaryConditionType>>;
@@ -406,7 +465,18 @@ private:
     system_type assemble_coupled_system(const momentum_system_type& momentum, const velocity_field_type& velocity,
         const field_type& pressure, const velocity_boundary_cache_type& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
-        scalar_type reference_density) const;
+        scalar_type reference_density, const continuity_target_type& continuity_target,
+        bool enforce_global_compatibility) const;
+
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void invalidate_cache() const;
+
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void refresh_geometry_if_needed() const;
+
+    SIMPLEFLUID_SOLVERS_LOCAL
+    std::vector<std::optional<scalar_type>> evaluate_fixed_boundary_fluxes(
+        const BoundaryConditionMap* pressure_boundaries) const;
 
 public:
     /**
@@ -424,7 +494,8 @@ private:
     SP<const mesh_type> d_mesh;
     CoupledRebuildPolicy d_rebuild_policy = CoupledRebuildPolicy::OnOperatorGraphChange;
     Teuchos::RCP<const typename Pack::map_type> d_coupled_map;
-    std::vector<FVM::detail::BoundaryFaceLocation<mesh_type>> d_boundary_locations;
+    mutable std::vector<FVM::detail::BoundaryFaceLocation<mesh_type>> d_boundary_locations;
+    mutable std::uint64_t d_geometry_epoch = 0;
     mutable CoupledPressureVelocityCacheStatistics d_cache_statistics;
     mutable system_type d_cached_system;
     mutable StaticGeometryCache d_static_geometry;
@@ -436,6 +507,10 @@ private:
     mutable Teuchos::RCP<solver_type> d_belos_solver;
     mutable const matrix_type* d_last_belos_matrix = nullptr;
     mutable Teuchos::RCP<vector_type> d_solution;
+    std::vector<std::string> d_fixed_boundary_flux_names;
+    fixed_boundary_flux_provider_type d_fixed_boundary_flux_provider;
+    std::uint64_t d_fixed_boundary_flux_generation = 0;
+    std::uint64_t d_fixed_boundary_flux_revision = 0;
 };
 
 /**
