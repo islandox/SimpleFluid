@@ -430,6 +430,8 @@ public:
 protected:
     /** Refresh Boussinesq momentum/temperature plus shared solver geometry. */
     void refresh_geometry_dependent_state() override;
+    /** Use accepted mesh-relative transport flux while planar ALE is active. */
+    const face_flux_field_type& courant_transport_face_fluxes() const override;
 
 private:
     using base_type::begin_step;

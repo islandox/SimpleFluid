@@ -45,9 +45,21 @@ public:
         return SimpleFluid::FluidSolver<Pack>::native_velocity_boundary_cache().type_by_name.at(name);
     }
 
+    const canonical_velocity_boundary_cache_type& cached_velocity_boundary_cache()
+    {
+        return SimpleFluid::FluidSolver<Pack>::native_velocity_boundary_cache();
+    }
+
+    auto& mutable_pressure_corrected_face_fluxes()
+    {
+        return SimpleFluid::FluidSolver<Pack>::projected_face_fluxes();
+    }
+
     auto solution_topology() const { return SimpleFluid::FluidSolver<Pack>::fluid_solution_writer().topology_handle(); }
 };
 using ScalarField = SimpleFluid::ScalarCellFieldStored<Pack>;
+using FaceFlux = SimpleFluid::ScalarFaceFieldStored<Pack>;
+using FaceVelocity = SimpleFluid::VectorFaceFieldStored<Pack>;
 using Source = SimpleFluid::VolumetricScalarSource<Pack, Handle>;
 using Coupling = SimpleFluid::PressureVelocityCoupling;
 
@@ -316,6 +328,26 @@ void expect_zero_relative_top_flux(const ConfiguredCase& state)
     EXPECT_NEAR(global_maximum, 0.0, 1.0e-14);
 }
 
+double independent_maximum_courant_number(const ConfiguredCase& state, const FaceFlux& flux)
+{
+    double local_maximum = 0.0;
+    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        double absolute_flux_sum = 0.0;
+        for (const auto face_lid : state.mesh->faces(cell))
+        {
+            absolute_flux_sum += std::abs(flux.local_value(face_lid));
+        }
+        local_maximum = std::max(
+            local_maximum, 0.5 * state.solver->time_step() * absolute_flux_sum / state.mesh->cell_volume(cell));
+    }
+    double global_maximum = 0.0;
+    Teuchos::reduceAll(
+        *state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_maximum, &global_maximum);
+    return global_maximum;
+}
+
 void record_ale_residuals(const Solver::PlanarALEStepDiagnostics& diagnostics)
 {
     testing::Test::RecordProperty("gcl_max_m3_per_s", diagnostics.maximum_gcl_residual);
@@ -570,6 +602,81 @@ TEST_P(BoussinesqPlanarALECouplingTest, AppliesOneNonzeroThermalVolumeTargetInEv
     expect_zero_relative_top_flux(state);
 }
 
+TEST_P(BoussinesqPlanarALECouplingTest, PreservesTangentialFlowAtMovingSlipTop)
+{
+    auto state = make_case(GetParam(), 1.0e-4, 8);
+    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+    {
+        state.solver->velocity().set_owned_value(
+            static_cast<Pack::local_ordinal_type>(owned), SimpleFluid::vec3<double>{0.2, -0.1, 0.0});
+    }
+    state.solver->velocity().sync_ghosts();
+    const auto old_top = top_elevation(*state.mesh);
+
+    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_GT(top_elevation(*state.mesh), old_top);
+    ASSERT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Slip);
+
+    FaceVelocity face_velocity(state.mesh, "accepted_moving_slip_face_velocity");
+    SimpleFluid::FVM::face_velocities(
+        state.solver->velocity(), state.solver->cached_velocity_boundary_cache(), face_velocity);
+    double local_maximum_tangential_speed = 0.0;
+    int local_faces = 0;
+    for (const auto& [batch_id, batch] : state.mesh->boundary_batches())
+    {
+        if (state.mesh->boundary_batch_name(batch_id) != "zmax")
+        {
+            continue;
+        }
+        for (const auto face_lid : batch.face_lids)
+        {
+            if (!face_velocity.is_owned_face(face_lid))
+            {
+                continue;
+            }
+            ++local_faces;
+            const auto owner = state.mesh->owner_cell(face_lid);
+            const auto normal = state.mesh->face_normal_outward(face_lid, owner);
+            const auto owner_velocity = state.solver->velocity().local_value(owner);
+            const auto expected = owner_velocity - normal * owner_velocity.dot(normal);
+            const auto actual = face_velocity.value(face_lid);
+            EXPECT_NEAR(actual.x, expected.x, 1.0e-14);
+            EXPECT_NEAR(actual.y, expected.y, 1.0e-14);
+            EXPECT_NEAR(actual.z, expected.z, 1.0e-14);
+            EXPECT_NEAR(actual.dot(normal), 0.0, 1.0e-14);
+            local_maximum_tangential_speed = std::max(local_maximum_tangential_speed, actual.norm());
+        }
+    }
+    double global_maximum_tangential_speed = 0.0;
+    int global_faces = 0;
+    Teuchos::reduceAll(*state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1,
+        &local_maximum_tangential_speed, &global_maximum_tangential_speed);
+    Teuchos::reduceAll(*state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_faces, &global_faces);
+    EXPECT_GT(global_faces, 0);
+    EXPECT_GT(global_maximum_tangential_speed, 0.1);
+    expect_zero_relative_top_flux(state);
+}
+
+TEST_P(BoussinesqPlanarALECouplingTest, CourantUsesMeshRelativeTransportFluxWithZeroRelativeTopFlux)
+{
+    auto state = make_case(GetParam(), 0.1, 8);
+    const auto old_top = top_elevation(*state.mesh);
+    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_GT(top_elevation(*state.mesh), old_top);
+    expect_zero_relative_top_flux(state);
+
+    const auto relative_courant = independent_maximum_courant_number(state, state.solver->mesh_relative_face_fluxes());
+    const auto absolute_courant =
+        independent_maximum_courant_number(state, state.solver->pressure_corrected_face_fluxes());
+    ASSERT_GT(absolute_courant, 1.0e-9);
+    EXPECT_LT(relative_courant, 1.0e-11);
+    EXPECT_LT(relative_courant, absolute_courant * 1.0e-3);
+    EXPECT_NEAR(state.solver->maximum_courant_number(), relative_courant, 1.0e-15);
+
+    const auto& base_solver = static_cast<const SimpleFluid::FluidSolver<Pack>&>(*state.solver);
+    EXPECT_NEAR(base_solver.maximum_courant_number(), relative_courant, 1.0e-15);
+}
+
 INSTANTIATE_TEST_SUITE_P(PlanarALECouplingModes, BoussinesqPlanarALECouplingTest,
     testing::Values(Coupling::SIMPLE, Coupling::PISO, Coupling::PIMPLE, Coupling::CoupledKrylov), coupling_name);
 
@@ -639,6 +746,39 @@ TEST(BoussinesqPlanarALETest, UniformHeatingMovesTopAndClosesConservativeBalance
     expect_zero_relative_top_flux(state);
 }
 
+TEST(BoussinesqPlanarALETest, ConfiguringAlePreservesAcceptedStationaryCourantFlux)
+{
+    auto mesh = make_column();
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.tolerance = 1.0e-13;
+    linear_options.max_iterations = 500;
+    auto solver = std::make_unique<Solver>(
+        mesh, planar_boundaries(), time_options(Coupling::PISO), linear_options, physical_options());
+    solver->configure_material_feedback(material_feedback_options());
+    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+
+    auto& accepted_absolute_flux = solver->mutable_pressure_corrected_face_fluxes();
+    for (const auto face_lid : accepted_absolute_flux.owned_face_ids())
+    {
+        accepted_absolute_flux.set_owned_value(face_lid, 0.01 * (1.0 + static_cast<double>(face_lid)));
+    }
+    accepted_absolute_flux.sync_ghosts();
+    const auto fixed_grid_courant = solver->maximum_courant_number();
+    ASSERT_GT(fixed_grid_courant, 0.0);
+
+    ASSERT_NE(solver->configure_free_surface(free_surface_options(4)), nullptr);
+    ASSERT_TRUE(solver->planar_ale_enabled());
+    const auto& accepted_relative_flux = solver->mesh_relative_face_fluxes();
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
+        EXPECT_DOUBLE_EQ(accepted_relative_flux.local_value(face_lid), accepted_absolute_flux.local_value(face_lid));
+    }
+    EXPECT_DOUBLE_EQ(solver->maximum_courant_number(), fixed_grid_courant);
+    const auto& base_solver = static_cast<const SimpleFluid::FluidSolver<Pack>&>(*solver);
+    EXPECT_DOUBLE_EQ(base_solver.maximum_courant_number(), fixed_grid_courant);
+}
+
 TEST(BoussinesqPlanarALETest, HeatingThenCoolingContractsAndRecoversTheAcceptedState)
 {
     constexpr double power_density = 1.0e-3;
@@ -676,13 +816,13 @@ TEST(BoussinesqPlanarALETest, HeatingThenCoolingContractsAndRecoversTheAcceptedS
     expect_zero_relative_top_flux(state);
 }
 
-TEST(BoussinesqPlanarALETest, RemovingAleRestoresTheConfiguredVelocityBoundaryCache)
+TEST(BoussinesqPlanarALETest, KeepsConfiguredSlipBoundaryDuringAndAfterAle)
 {
     auto state = make_case(Coupling::PISO, 1.0, 6);
     const auto old_top = top_elevation(*state.mesh);
     ASSERT_NO_THROW(state.solver->step());
     ASSERT_GT(top_elevation(*state.mesh), old_top);
-    EXPECT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Dirichlet);
+    EXPECT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Slip);
 
     ASSERT_TRUE(state.solver->remove_free_surface_model());
     EXPECT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Slip);

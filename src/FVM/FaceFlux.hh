@@ -850,8 +850,8 @@ void face_fluxes(
  * Both input and output use mesh-owner orientation and units of m^3/s. Owned
  * values are authoritative; the completed relative flux is synchronized to
  * overlap faces before returning. Input and output must be distinct so an
- * absolute flux retained by pressure correction and diagnostics is never
- * overwritten in place.
+ * absolute flux retained by pressure correction and continuity diagnostics is
+ * never overwritten in place.
  */
 template<TpetraTypePack Pack, class MeshType>
 void mesh_relative_face_fluxes(

@@ -394,9 +394,20 @@ $$
 $$
 
 The absolute field is never overwritten with relative values. Pressure,
-kinematic-boundary enforcement, and existing diagnostics continue to consume
-$\phi_{abs}$; momentum, temperature, liquid inventory, and enabled H2
-transports consume $\phi_{rel}$. The non-owning `ALEControlVolumeState` carries
+kinematic-boundary enforcement, and continuity diagnostics consume
+$\phi_{abs}$; momentum, temperature, liquid inventory, enabled H2 transports,
+and the ALE Courant diagnostic consume $\phi_{rel}$. Specifically,
+
+$$
+Co_c=\frac{\Delta t}{2V_c}\sum_{f\in c}|\phi_{transport,f}|,
+\qquad
+\phi_{transport}=\begin{cases}
+\phi_{abs},&\text{fixed mesh},\\
+\phi_{rel},&\text{planar ALE}.
+\end{cases}
+$$
+
+The non-owning `ALEControlVolumeState` carries
 accepted-old and active-trial-new volumes in mesh-local cell order, mesh fluxes
 in mesh-local face order, timestep, concrete geometry identity, and old/new
 epochs. It is valid only while the originating motion trial is active and
@@ -516,14 +527,14 @@ $$
 \phi_{abs,f}=\phi_{m,f},\qquad \phi_{rel,f}=0,
 $$
 
-with the boundary velocity set as a full Dirichlet vector
-$\mathbf u_f=(\phi_{m,f}/A_f)\mathbf n_f$. Its two tangential components are
-zero; the active ALE top is not a free-slip boundary. A configured `Slip` or
-zero-velocity `Dirichlet` marker is accepted at setup, but the trial cache uses
-this moving Dirichlet value. Bubble slip may still carry H2 outward relative to
-that moving face. The zero-gauge physical-pressure condition supplies the flat
-dynamic boundary; pressure correction treats the prescribed flux as Neumann
-so it cannot undo the kinematic condition.
+The trial velocity cache marks this patch as `Slip`, so its face value retains
+the owner-cell tangential velocity and contributes no wall-normal diffusive
+constraint. A configured `Slip` or zero-velocity `Dirichlet` marker is accepted
+at setup for compatibility, but the active trial cache uses `Slip`. The exact
+mesh-normal absolute flux is owned separately by the fixed-flux pressure
+boundary, so tangential freedom cannot undo the kinematic condition. Bubble
+slip may still carry H2 outward relative to that moving face. The zero-gauge
+physical-pressure condition supplies the flat dynamic boundary.
 
 One accepted ALE step proceeds as a single logical transaction:
 
@@ -689,8 +700,8 @@ and constant-area vessel map must already agree within the configured closure
 tolerances. Configuration alone does not create or trim a liquid domain. The
 physical boundary set supplies zero-gauge Dirichlet pressure and either a
 `Slip` or zero-velocity `Dirichlet` marker on the named top; during each ALE
-trial that velocity marker is replaced by the full moving Dirichlet vector
-with zero tangential components.
+trial that velocity marker is replaced by `Slip`, while the pressure solver's
+fixed-flux boundary supplies the exact mesh-normal volume flux.
 
 ### Enabled and rejected ALE combinations
 
@@ -875,8 +886,9 @@ fixed-boundary flux ownership, coupled/segregated residual agreement, and
 generation/epoch cache invalidation. Moving-boundary and material-volume tests
 check planar/area/vessel validation,
 $\phi_{abs}=\phi_m$, zero carrier-relative top flux, thermal expansion, bubble
-slip/escape subtraction, zero tangential moving-top velocity, and strict
-pool/source closure. Solver-level tests retain the disabled-path baseline and
+slip/escape subtraction, moving-top tangential-flow preservation,
+mesh-relative Courant evaluation, and strict pool/source closure. Solver-level
+tests retain the disabled-path baseline and
 exercise collective setup rejection, accepted residual histories, and
 accepted/rejected ALE transaction behavior on the supported serial/MPI paths.
 

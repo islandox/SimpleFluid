@@ -22,12 +22,14 @@ using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Motion = SimpleFluid::PlanarALEMeshMotion<Pack>;
 using Flux = SimpleFluid::ScalarFaceFieldStored<Pack>;
+using Velocity = SimpleFluid::VectorCellFieldStored<Pack>;
+using FaceVelocity = SimpleFluid::VectorFaceFieldStored<Pack>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 } // namespace
 
-TEST(PlanarALEBoundaryTest, ValidatesGeometryAndEnforcesZeroRelativeTopFlux)
+TEST(PlanarALEBoundaryTest, ValidatesGeometryPreservesTangentialSlipAndEnforcesZeroRelativeTopFlux)
 {
     auto geometry = std::make_shared<Mesh::Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
@@ -47,30 +49,69 @@ TEST(PlanarALEBoundaryTest, ValidatesGeometryAndEnforcesZeroRelativeTopFlux)
     auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
         std::shared_ptr<const Mesh>(mesh), SimpleFluid::BoundaryConditionSet{});
     boundary.apply_kinematic_velocity(ale, cache);
-    EXPECT_EQ(cache.type.at(boundary.batch_id()), SimpleFluid::BoundaryConditionType::Dirichlet);
-    const auto& boundary_values = cache.value.at(boundary.batch_id());
-    ASSERT_EQ(boundary_values.size(), mesh->boundary_face_batch(boundary.batch_id()).face_lids.size());
-    for (size_t in_batch = 0; in_batch < boundary_values.size(); ++in_batch)
+    EXPECT_EQ(cache.type_by_name.at("zmax"), SimpleFluid::BoundaryConditionType::Slip);
+
+    Velocity velocity(mesh, SimpleFluid::vec3<double>{2.0, -3.0, 7.0}, "tangential_velocity");
+    velocity.sync_ghosts();
+    FaceVelocity face_velocity(mesh, "slip_face_velocity");
+    SimpleFluid::FVM::face_velocities(velocity, cache, face_velocity);
+
+    int local_owned_top_faces = 0;
+    if (boundary.batch_id() >= 0)
     {
-        const auto face_lid = mesh->boundary_face_batch(boundary.batch_id()).face_lids[in_batch];
-        const auto expected = mesh->face_normal(face_lid) *
-                              (ale.face_mesh_fluxes()[static_cast<size_t>(face_lid)] / mesh->face_area(face_lid));
-        EXPECT_DOUBLE_EQ(boundary_values[in_batch].x, expected.x);
-        EXPECT_DOUBLE_EQ(boundary_values[in_batch].y, expected.y);
-        EXPECT_DOUBLE_EQ(boundary_values[in_batch].z, expected.z);
-        EXPECT_DOUBLE_EQ(boundary_values[in_batch].x, 0.0);
-        EXPECT_DOUBLE_EQ(boundary_values[in_batch].y, 0.0);
+        EXPECT_EQ(cache.type.at(boundary.batch_id()), SimpleFluid::BoundaryConditionType::Slip);
+        const auto& boundary_values = cache.value.at(boundary.batch_id());
+        ASSERT_EQ(boundary_values.size(), mesh->boundary_face_batch(boundary.batch_id()).face_lids.size());
+        for (size_t in_batch = 0; in_batch < boundary_values.size(); ++in_batch)
+        {
+            const auto face_lid = mesh->boundary_face_batch(boundary.batch_id()).face_lids[in_batch];
+            const auto expected_mesh_velocity =
+                mesh->face_normal(face_lid) *
+                (ale.face_mesh_fluxes()[static_cast<size_t>(face_lid)] / mesh->face_area(face_lid));
+            EXPECT_DOUBLE_EQ(boundary_values[in_batch].x, expected_mesh_velocity.x);
+            EXPECT_DOUBLE_EQ(boundary_values[in_batch].y, expected_mesh_velocity.y);
+            EXPECT_DOUBLE_EQ(boundary_values[in_batch].z, expected_mesh_velocity.z);
+            if (!face_velocity.is_owned_face(face_lid))
+            {
+                continue;
+            }
+            ++local_owned_top_faces;
+            const auto owner = mesh->owner_cell(face_lid);
+            const auto normal = mesh->face_normal_outward(face_lid, owner);
+            const auto owner_velocity = velocity.local_value(owner);
+            const auto expected_slip_velocity = owner_velocity - normal * owner_velocity.dot(normal);
+            const auto actual = face_velocity.value(face_lid);
+            EXPECT_DOUBLE_EQ(actual.x, expected_slip_velocity.x);
+            EXPECT_DOUBLE_EQ(actual.y, expected_slip_velocity.y);
+            EXPECT_DOUBLE_EQ(actual.z, expected_slip_velocity.z);
+            EXPECT_DOUBLE_EQ(actual.x, 2.0);
+            EXPECT_DOUBLE_EQ(actual.y, -3.0);
+            EXPECT_DOUBLE_EQ(actual.dot(normal), 0.0);
+        }
     }
+    int global_owned_top_faces = 0;
+    Teuchos::reduceAll(
+        *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_owned_top_faces, &global_owned_top_faces);
+    EXPECT_GT(global_owned_top_faces, 0);
 
     Flux absolute(mesh, 0.0, "absolute");
     Flux relative(mesh, 0.0, "relative");
     boundary.enforce_kinematic_flux(ale, absolute);
     SimpleFluid::FVM::mesh_relative_face_fluxes(absolute, ale, relative);
-    for (const auto face_lid : mesh->boundary_face_batch(boundary.batch_id()).face_lids)
+    int local_owned_flux_faces = 0;
+    if (boundary.batch_id() >= 0)
     {
-        EXPECT_DOUBLE_EQ(absolute.local_value(face_lid), motion.face_mesh_fluxes()[static_cast<size_t>(face_lid)]);
-        EXPECT_DOUBLE_EQ(relative.local_value(face_lid), 0.0);
+        for (const auto face_lid : mesh->boundary_face_batch(boundary.batch_id()).face_lids)
+        {
+            EXPECT_DOUBLE_EQ(absolute.local_value(face_lid), motion.face_mesh_fluxes()[static_cast<size_t>(face_lid)]);
+            EXPECT_DOUBLE_EQ(relative.local_value(face_lid), 0.0);
+            local_owned_flux_faces += absolute.is_owned_face(face_lid) ? 1 : 0;
+        }
     }
+    int global_owned_flux_faces = 0;
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_owned_flux_faces,
+        &global_owned_flux_faces);
+    EXPECT_GT(global_owned_flux_faces, 0);
     motion.rollback_trial();
 }
 

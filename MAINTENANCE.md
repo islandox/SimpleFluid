@@ -134,13 +134,22 @@ each post-transport/pre-kinetics bubble fraction uses the combined
 carrier-plus-slip upwind from its population equation. Do not reconstruct this
 term from accepted-old aggregate occupancy or from post-kinetics bubbles.
 
-`PlanarALEBoundary` replaces the moving patch's trial velocity cache with the
-full Dirichlet vector $(\phi_{m,f}/A_f)\mathbf n_f$. Both tangential components
-are zero, even when the configured setup marker is `Slip`; the active ALE
-boundary is not free-slip. Accepted `PlanarALEStepDiagnostics` retain the
+`PlanarALEBoundary` marks the moving patch's trial velocity cache as `Slip`, so
+face reconstruction retains the owner-cell tangential velocity while momentum
+diffusion adds no boundary constraint. The fixed-flux pressure boundary
+independently enforces
+$\phi_{abs,f}=\phi_{m,f}$, leaving zero normal carrier flux relative to the
+mesh. Accepted `PlanarALEStepDiagnostics` retain the
 per-outer level, target, continuity, material-state, and gas-state histories, and
 each accepted free-surface history record copies that diagnostic snapshot.
 Rejected trials do not publish a new history record.
+
+`FluidSolver::maximum_courant_number()` uses the accepted transport flux:
+absolute projected flux on a fixed mesh and mesh-relative flux for planar ALE.
+ALE initialization copies the accepted stationary projected flux into the
+relative field before this selector changes.
+Do not count swept mesh volume as transported fluid when adding another ALE
+time-step or stability diagnostic.
 
 When extending ALE support to another equation or model, require all of the
 following before relaxing its setup rejection: conservative old/new-volume
