@@ -948,6 +948,11 @@ source, and repeats stable implicit high-slip steps until the remaining bubble
 moles are no more than `1e-18 mol + 1e-10` times the initial bubble inventory.
 It checks each population decrement, cumulative and vent transfer, and the
 accepted pool/raw-bubble-volume drop independently.
+Per-step level monotonicity allows roundoff of eight machine epsilons times
+the initial level, since the last bubble-volume decrements are smaller than
+the level's floating-point resolution. Raw bubble volume must still decrease
+on every step, and both an individual and the net level drop must exceed that
+roundoff allowance.
 
 General level, volume, and species checks use an absolute-plus-relative
 tolerance of `5e-12`. The closed-pressure check uses `5e-7 Pa + 2e-12`
