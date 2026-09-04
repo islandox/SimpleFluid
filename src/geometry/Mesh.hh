@@ -88,7 +88,7 @@ constexpr ID invalid_id() noexcept
  * @tparam Pack Tpetra type pack used for map and vector types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class Mesh
+class SIMPLEFLUID_PUBLIC_TYPE Mesh
 {
     /** @brief Grants MeshPartitioner access to internal mesh arrays for parallel redistribution. */
     template<TpetraTypePack>

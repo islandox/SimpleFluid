@@ -241,9 +241,26 @@ TEST(TurbulenceModelOptionsTest, RejectsInvalidPositiveDatabaseValues)
 /** @brief Verifies rejection of incorrectly typed database values. */
 TEST(TurbulenceModelOptionsTest, RejectsWrongDatabaseTypes)
 {
+    auto expect_contextual_type_error =
+        [](const SimpleFluid::Database& database, const std::string& key)
+    {
+        try
+        {
+            SimpleFluid::turbulence_model_options_from_database(database);
+            FAIL() << "Expected a typed turbulence option failure.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            const std::string message(error.what());
+            EXPECT_NE(message.find("Turbulence model"), std::string::npos);
+            EXPECT_NE(message.find(key), std::string::npos);
+            EXPECT_NE(message.find("wrong type"), std::string::npos);
+        }
+    };
+
     SimpleFluid::Database wrong_model_type;
     wrong_model_type.set("turbulence_model", SimpleFluid::real_t{1.0});
-    EXPECT_ANY_THROW(SimpleFluid::turbulence_model_options_from_database(wrong_model_type));
+    expect_contextual_type_error(wrong_model_type, "turbulence_model");
 
     constexpr std::array scalar_keys{"initial_turbulent_kinetic_energy",
                                      "initial_dissipation_rate",
@@ -258,7 +275,7 @@ TEST(TurbulenceModelOptionsTest, RejectsWrongDatabaseTypes)
         SCOPED_TRACE(key);
         SimpleFluid::Database database;
         database.set(key, std::string{"not-a-number"});
-        EXPECT_ANY_THROW(SimpleFluid::turbulence_model_options_from_database(database));
+        expect_contextual_type_error(database, key);
     }
 }
 

@@ -61,8 +61,14 @@ BoundaryLayerMeshFactory::BoundaryLayerMeshFactory(
     Arr<BoundaryLayerSpec> layer_specs)
     : d_layer_specs(std::move(layer_specs))
 {
+    validate_specs(d_layer_specs);
+}
+
+void BoundaryLayerMeshFactory::validate_specs(
+    const Arr<BoundaryLayerSpec>& layer_specs)
+{
     std::unordered_set<std::string> unique_names;
-    for (const auto& spec : d_layer_specs)
+    for (const auto& spec : layer_specs)
     {
         if (spec.boundary_name.empty())
         {
@@ -100,7 +106,7 @@ BoundaryLayerMeshFactory::BoundaryLayerMeshFactory(
 
 BoundaryLayerMeshFactory::BoundaryLayerMeshFactory(
     SP<const Database> database)
-    : BoundaryLayerMeshFactory(read_specs(database))
+    : d_layer_specs(read_specs(database))
 {
 }
 
@@ -170,6 +176,7 @@ BoundaryLayerMeshFactory::read_specs(const SP<const Database>& database)
             names[spec], static_cast<size_t>(counts[spec]),
             first_heights[spec], growth_ratios[spec]});
     }
+    validate_specs(specs);
     return specs;
 }
 

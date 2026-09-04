@@ -55,8 +55,9 @@ public:
      * @return Samples ordered by their axial coordinate.
      * @throws std::invalid_argument If @p axis is invalid or the mesh is not serial.
      */
+    template<class VelocityField>
     static std::vector<Sample> sample_nearest_line(
-        const field_type& velocity,
+        const VelocityField& velocity,
         size_t axis,
         const vec_type& line_point)
     {
@@ -218,9 +219,10 @@ public:
      * @param axis Coordinate axis parallel to the requested line.
      * @param line_point Point locating the requested line transversely.
      */
+    template<class VelocityField>
     static void write_nearest_line(
         const std::filesystem::path& path,
-        const field_type& velocity,
+        const VelocityField& velocity,
         size_t axis,
         const vec_type& line_point)
     {

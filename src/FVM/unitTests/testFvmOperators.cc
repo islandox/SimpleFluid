@@ -16,6 +16,7 @@
 #include "fields/VectorCellField.hh"
 #include "FVM/Operators.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
+#include "geometry/MeshHandle.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -88,10 +90,44 @@ TEST(FvmOperatorDetailsTest, FlatMatrixRowUsesDirectColumnSlots)
     EXPECT_THROW(row.add(8, 1.0), std::out_of_range);
 }
 
+/** @brief Partition wrappers already expose packed local ordinals. */
+TEST(FvmOperatorDetailsTest,
+     PartitionedMeshOrdinalsAreNotRemappedAsNativeIds)
+{
+    struct PartitionedOrdinalProbe
+    {
+        using partitioned_mesh_base_tag = void;
+        using local_ordinal_type = int;
+
+        int cell_local_id(std::uint64_t) const { return -7; }
+        int face_local_id(std::uint64_t) const { return -9; }
+    };
+
+    const PartitionedOrdinalProbe mesh;
+    EXPECT_EQ(
+        SimpleFluid::FVM::detail::packed_cell_local_id(mesh, 3), 3);
+    EXPECT_EQ(
+        SimpleFluid::FVM::detail::packed_face_local_id(mesh, 5), 5U);
+}
+
 SimpleFluid::SP<MeshType> make_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
+}
+
+/** @brief Build a natively partitioned Cartesian line mesh. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+make_native_distributed_line_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 0.125, 0.25, 0.375, 0.5,
+                 0.625, 0.75, 0.875, 1.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(cartesian);
 }
 
 std::vector<Pack::scalar_type> local_values(const FieldType& field)
@@ -2049,6 +2085,81 @@ TEST(FvmOperatorsTest, BuildsUpwindAndPressurePoissonMatrices)
               mesh->owned_cell_map()->getGlobalNumElements());
 }
 
+/** @brief Mapped upwind rows consume synchronized partition-face fluxes. */
+TEST(FvmOperatorsTest,
+     MappedUpwindConvectionUsesPartitionFaceGhostFlux)
+{
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(
+        SimpleFluid::ScalarFaceFieldDescriptor<Pack>("face_flux"),
+        mesh,
+        0.0);
+    int local_owned_interfaces = 0;
+    for (const auto face_lid : fluxes.owned_face_ids())
+    {
+        const auto neighbor = mesh->neighbor_cell(face_lid);
+        if (neighbor >= 0 && !mesh->is_owned_cell(neighbor))
+        {
+            fluxes.set_value(face_lid, 2.0);
+            ++local_owned_interfaces;
+        }
+    }
+    fluxes.sync_ghosts();
+
+    const auto matrix =
+        SimpleFluid::FVM::upwind_convection_matrix(*mesh, fluxes);
+    int local_remote_owner_rows = 0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<Pack::local_ordinal_type>(owned);
+        for (const auto face_lid : mesh->faces(cell_lid))
+        {
+            if (!mesh->is_interior_face(face_lid))
+            {
+                continue;
+            }
+            const auto owner_lid = mesh->owner_cell(face_lid);
+            if (mesh->is_owned_cell(owner_lid))
+            {
+                continue;
+            }
+            const auto other_lid =
+                mesh->opposite_or_periodic_neighbor_cell(
+                    face_lid, cell_lid);
+            EXPECT_NEAR(
+                local_matrix_entry(
+                    *matrix, cell_lid, other_lid),
+                -2.0,
+                1.0e-12);
+            ++local_remote_owner_rows;
+        }
+    }
+
+    int global_owned_interfaces = 0;
+    int global_remote_owner_rows = 0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_owned_interfaces,
+        &global_owned_interfaces);
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_remote_owner_rows,
+        &global_remote_owner_rows);
+    EXPECT_EQ(global_owned_interfaces, 1);
+    EXPECT_EQ(global_remote_owner_rows, 1);
+}
+
 /**
  * @brief Verifies the scalar transport RHS includes the volume-scaled source term.
  */
@@ -2090,6 +2201,30 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
             volume / time_step * old_values.value(lid) + volume * source(lid);
         EXPECT_NEAR(rhs_data[lid], expected, 1.0e-12);
     }
+}
+
+/** @brief Legacy scalar non-orthogonal transport validates constant coefficients. */
+TEST(FvmOperatorsTest, ScalarNonOrthogonalTransportValidatesConstantCoefficients)
+{
+    auto mesh = make_mesh();
+    FieldType old_values(mesh, 1.0, "old_values");
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
+    auto boundary_condition = [](int, size_t) -> SimpleFluid::BoundaryCondition
+    { return {SimpleFluid::BoundaryConditionType::Neumann, 0.0}; };
+    auto boundary_value = [](int, size_t) -> Pack::scalar_type { return 1.0; };
+    auto zero_source = [](MeshType::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
+    auto assemble = [&](Pack::scalar_type time_step, Pack::scalar_type diffusivity)
+    {
+        return SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(old_values, zero_fluxes, time_step,
+            diffusivity, boundary_condition, boundary_value, zero_source,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, &old_values);
+    };
+
+    EXPECT_NO_THROW((void) assemble(0.5, 0.1));
+    EXPECT_THROW((void) assemble(0.0, 0.1), std::invalid_argument);
+    EXPECT_THROW((void) assemble(std::numeric_limits<double>::quiet_NaN(), 0.1), std::invalid_argument);
+    EXPECT_THROW((void) assemble(0.5, -0.1), std::invalid_argument);
+    EXPECT_THROW((void) assemble(0.5, std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
 }
 
 /**

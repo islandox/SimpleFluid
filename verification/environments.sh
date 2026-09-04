@@ -89,20 +89,63 @@ simplefluid_prepend_path()
     export "$variable_name=$new_value"
 }
 
+simplefluid_cache_value()
+{
+    local cmake_cache="$1"
+    local variable_name="$2"
+    local line
+
+    [ -f "$cmake_cache" ] || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            "$variable_name":*=*)
+                printf '%s\n' "${line#*=}"
+                return 0
+                ;;
+        esac
+    done < "$cmake_cache"
+    return 1
+}
+
 # Print configured CMake build directories below a repository root.
 detect_build_dirs()
 {
     local root_dir="${1:-.}"
+    local physical_root
+    local cmake_cache
+    local directory
+    local source_directory
 
-    find "$root_dir" -maxdepth 2 -type f -name CMakeCache.txt \
-        -printf '%h\n' 2>/dev/null \
-        | while IFS= read -r directory; do
-            case "$(basename "$directory")" in
-                build|build-*|_build|cmake-build-*|out|dist)
-                    printf '%s\n' "$directory"
-                    ;;
-            esac
-        done
+    physical_root="$(cd "$root_dir" 2>/dev/null && pwd -P)" || return
+
+    # Keep the search bounded to the supported top-level build layouts. In
+    # particular, do not descend into CMakeFiles or dependency build trees,
+    # which can contain their own CMakeCache.txt files.
+    for cmake_cache in \
+        "$root_dir"/build/CMakeCache.txt \
+        "$root_dir"/build-*/CMakeCache.txt \
+        "$root_dir"/_build/CMakeCache.txt \
+        "$root_dir"/cmake-build-*/CMakeCache.txt \
+        "$root_dir"/out/CMakeCache.txt \
+        "$root_dir"/dist/CMakeCache.txt \
+        "$root_dir"/build/*/CMakeCache.txt; do
+        [ -f "$cmake_cache" ] || continue
+        directory="${cmake_cache%/CMakeCache.txt}"
+        case "$directory" in
+            "$root_dir"/build/CMakeFiles|"$root_dir"/build/_deps)
+                continue
+                ;;
+        esac
+
+        source_directory="$(
+            simplefluid_cache_value "$cmake_cache" CMAKE_HOME_DIRECTORY
+        )" || continue
+        source_directory="$(
+            cd "$source_directory" 2>/dev/null && pwd -P
+        )" || continue
+        [ "$source_directory" = "$physical_root" ] || continue
+        printf '%s\n' "$directory"
+    done
 }
 
 # Select the most recently configured build tree. Verification launchers use
@@ -112,23 +155,26 @@ select_latest_build_dir()
 {
     local root_dir="${1:-.}"
     local directory
-    local cache_time
-    local latest_record
+    local cmake_cache
+    local latest_directory=""
+    local latest_cache=""
 
-    latest_record="$(
-        detect_build_dirs "$root_dir" \
-            | while IFS= read -r directory; do
-                cache_time="$(
-                    stat -c '%Y' "$directory/CMakeCache.txt" 2>/dev/null
-                )" || continue
-                printf '%s %s\n' "$cache_time" "$directory"
-            done \
-            | sort -nr \
-            | sed -n '1p'
-    )"
+    detect_build_dirs "$root_dir" | (
+        while IFS= read -r directory; do
+            cmake_cache="$directory/CMakeCache.txt"
+            [ -f "$cmake_cache" ] || continue
+            if [ -z "$latest_cache" ] || [ -n "$(
+                find "$cmake_cache" -newer "$latest_cache" -print \
+                    2>/dev/null
+            )" ]; then
+                latest_directory="$directory"
+                latest_cache="$cmake_cache"
+            fi
+        done
 
-    [ -n "$latest_record" ] || return 1
-    printf '%s\n' "${latest_record#* }"
+        [ -n "$latest_directory" ] || exit 1
+        printf '%s\n' "$latest_directory"
+    )
 }
 
 simplefluid_export_cache_paths()
@@ -177,6 +223,7 @@ export_build_env()
     local configured_build_dir="${SIMPLEFLUID_BUILD_DIR:-}"
     local build_dir
     local build_suffix
+    local configuration_types=""
     local site_packages=""
 
     root_dir="$(cd "$root_dir" && pwd)" || {
@@ -204,7 +251,7 @@ export_build_env()
         build_dir="${configured_build_dir%/}"
         SIMPLEFLUID_BUILD_MODE="directory"
     else
-        build_dir="$root_dir/build-$build_suffix"
+        build_dir="$root_dir/build/$build_suffix"
         SIMPLEFLUID_BUILD_MODE="preset"
     fi
 
@@ -214,8 +261,23 @@ export_build_env()
     SIMPLEFLUID_CONFIGURE_PRESET="${SIMPLEFLUID_CONFIGURE_PRESET:-${compiler}-ninja-multi}"
     SIMPLEFLUID_BUILD_PRESET="${SIMPLEFLUID_BUILD_PRESET:-${compiler}-${build_config}}"
     SIMPLEFLUID_BUILD_DIR="$build_dir"
-    SIMPLEFLUID_BIN_DIR="$build_dir/bin/$build_config"
-    SIMPLEFLUID_LIB_DIR="$build_dir/lib/$build_config"
+    if [ -f "$build_dir/CMakeCache.txt" ]; then
+        configuration_types="$(
+            simplefluid_cache_value \
+                "$build_dir/CMakeCache.txt" CMAKE_CONFIGURATION_TYPES
+        )" || configuration_types=""
+    elif [ "$SIMPLEFLUID_BUILD_MODE" = "preset" ]; then
+        # The repository presets use a multi-configuration generator. Retain
+        # their expected layout before the build tree has been configured.
+        configuration_types="$build_config"
+    fi
+    if [ -n "$configuration_types" ]; then
+        SIMPLEFLUID_BIN_DIR="$build_dir/bin/$build_config"
+        SIMPLEFLUID_LIB_DIR="$build_dir/lib/$build_config"
+    else
+        SIMPLEFLUID_BIN_DIR="$build_dir/bin"
+        SIMPLEFLUID_LIB_DIR="$build_dir/lib"
+    fi
 
     export SIMPLEFLUID_REPO_DIR
     export SIMPLEFLUID_COMPILER

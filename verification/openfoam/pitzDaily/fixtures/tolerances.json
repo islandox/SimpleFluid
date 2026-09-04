@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "qualification": {
+    "status": "qualified",
+    "scope": "comparator_fixture",
+    "reason": "Synthetic errors are analytically prescribed; limits are rounded upward with approximately 10 percent headroom.",
+    "source_files_sha256": {
+      "openfoam/postProcessing/profiles/2000/x050_U.xy": "ae0d1f48246429d6d34f4fd34319b9f84b1c4a3c9e972bbc6916d303c1463d3e",
+      "openfoam/postProcessing/profiles/2000/x100_U.xy": "7a8513acb0cd9459117b890c93ad6369839a71b343631559b1534fafa17eb1c3",
+      "openfoam/postProcessing/profiles/2000/x200_U.xy": "d62532b3b7273f79a6559e970b93bfe6f7d7cd05757e21db97487e5175755628",
+      "simplefluid_cells_rank0.csv": "0b221f127f26193b4e115c7be9aa08cc5a7679fc10ca46e7425a7213c748fc58"
+    }
+  },
+  "stations": {
+    "x050": {
+      "x_m": 0.05,
+      "max_station_offset_m": 0.0011,
+      "minimum_samples": 3,
+      "minimum_reference_span_fraction": 0.5,
+      "components": {
+        "ux": {
+          "observed_l2_m_per_s": 0.09018499505645796,
+          "observed_linf_m_per_s": 0.12,
+          "max_l2_m_per_s": 0.1,
+          "max_linf_m_per_s": 0.13
+        },
+        "uy": {
+          "observed_l2_m_per_s": 0.03109126351029605,
+          "observed_linf_m_per_s": 0.04,
+          "max_l2_m_per_s": 0.035,
+          "max_linf_m_per_s": 0.045
+        }
+      }
+    },
+    "x100": {
+      "x_m": 0.1,
+      "max_station_offset_m": 0.0011,
+      "minimum_samples": 3,
+      "minimum_reference_span_fraction": 0.5,
+      "components": {
+        "ux": {
+          "observed_l2_m_per_s": 0.09660917830792959,
+          "observed_linf_m_per_s": 0.12,
+          "max_l2_m_per_s": 0.11,
+          "max_linf_m_per_s": 0.13
+        },
+        "uy": {
+          "observed_l2_m_per_s": 0.03109126351029605,
+          "observed_linf_m_per_s": 0.04,
+          "max_l2_m_per_s": 0.035,
+          "max_linf_m_per_s": 0.045
+        }
+      }
+    },
+    "x200": {
+      "x_m": 0.2,
+      "max_station_offset_m": 0.0011,
+      "minimum_samples": 3,
+      "minimum_reference_span_fraction": 0.5,
+      "components": {
+        "ux": {
+          "observed_l2_m_per_s": 0.10801234497346433,
+          "observed_linf_m_per_s": 0.15,
+          "max_l2_m_per_s": 0.12,
+          "max_linf_m_per_s": 0.17
+        },
+        "uy": {
+          "observed_l2_m_per_s": 0.015545631755148025,
+          "observed_linf_m_per_s": 0.02,
+          "max_l2_m_per_s": 0.018,
+          "max_linf_m_per_s": 0.022
+        }
+      }
+    }
+  }
+}

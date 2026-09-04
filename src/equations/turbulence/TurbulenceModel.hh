@@ -21,10 +21,8 @@
 #include "equations/turbulence/TurbulenceEquations.hh"
 #include "equations/turbulence/TurbulenceScalarTransportEquation.hh"
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
-#include "fields/CellField.hh"
-#include "fields/FaceField.hh"
-#include "fields/VectorCellField.hh"
-#include "geometry/Mesh.hh"
+#include "fields/MeshFieldTraits.hh"
+#include "geometry/MeshHandle.hh"
 #include "geometry/WallYPlusStatistics.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -33,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace SimpleFluid
 {
@@ -162,13 +161,17 @@ turbulence_model_options_from_database(const Database& database);
  * @f$C_3=\tanh((|U_\perp|+\mathrm{SMALL})/|U_\parallel|)@f$; this is
  * intentionally distinct from the opposite convention in OpenFOAM's
  * compressible `buoyantKEpsilon` closure.
+ * @tparam Pack Tpetra type pack used for scalar storage.
+ * @tparam MeshType Mesh and associated field-storage backend.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes>
+template <TpetraTypePack Pack = DefaultTpetraTypes,
+          class MeshType = Mesh<Pack>>
 struct TurbulenceBuoyancyContext
 {
     using scalar_type = typename Pack::scalar_type;
+    using field_type = typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type;
 
-    const CellField<Pack>* temperature = nullptr;
+    const field_type* temperature = nullptr;
     const BoundaryConditionMap* temperature_boundary_conditions = nullptr;
     vec3<scalar_type> gravity{};
     scalar_type thermal_expansion{};
@@ -189,18 +192,27 @@ struct TurbulenceBuoyancyContext
  * The isotropic Reynolds stress is supplied explicitly as
  * @f$-2/3\,\nabla k@f$, so the solver pressure remains mechanical pressure.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
+ * @tparam MeshType Mesh and associated field-storage backend.
  */
-template <TpetraTypePack Pack = DefaultTpetraTypes>
+template <TpetraTypePack Pack = DefaultTpetraTypes,
+          class MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModel
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
-    using face_flux_field_type = FaceField<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using velocity_field_type = typename field_traits::vector_cell_type;
+    using tensor_field_type = typename field_traits::tensor_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using material_type = MaterialPropertyFields<Pack>;
+    using material_type = MaterialPropertyFields<Pack, mesh_type>;
+    using velocity_boundary_cache_type = std::conditional_t<
+        std::is_same_v<mesh_type, Mesh<Pack>>,
+        FVM::VelocityBoundaryCache<Pack>,
+        FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
 
     TurbulenceModel(SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions);
     ~TurbulenceModel();
@@ -243,11 +255,11 @@ public:
      */
     LinearSolveSummary advance(const velocity_field_type& velocity,
                                const face_flux_field_type& projected_face_fluxes,
-                               const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+                               const velocity_boundary_cache_type& velocity_boundary_cache,
                                scalar_type time_step, const material_type& material,
                                scalar_type reference_density, FVM::NonOrthogonalTreatment treatment,
                                const LinearSolverOptions& linear_options = {},
-                               const TurbulenceBuoyancyContext<Pack>*
+                               const TurbulenceBuoyancyContext<Pack, mesh_type>*
                                    buoyancy_context = nullptr);
 
     /** Rebuild mu_eff and lambda_eff from current molecular and turbulent fields. */
@@ -302,11 +314,11 @@ public:
     const field_type* wall_distance() const noexcept;
 
     /** Sparse face viscosities supplied by an active wall treatment. */
-    const FVM::BoundaryCache<Pack>*
+    const boundary_cache_type*
     effective_dynamic_viscosity_boundary_cache() const noexcept;
 
     /** Sparse face conductivities supplied by an active wall treatment. */
-    const FVM::BoundaryCache<Pack>*
+    const boundary_cache_type*
     effective_thermal_conductivity_boundary_cache() const noexcept;
 
     /** Cell diagnostic containing the maximum incident-wall y+ when active. */
@@ -339,7 +351,7 @@ private:
 
     SP<const mesh_type> d_mesh;
     VectorBoundaryConditionMap d_velocity_boundary_conditions;
-    FVM::VelocityBoundaryCache<Pack> d_wall_velocity_boundary_cache;
+    velocity_boundary_cache_type d_wall_velocity_boundary_cache;
     TurbulenceBoundaryConditionSet d_boundary_conditions;
     TurbulenceModelOptions d_options;
     std::unique_ptr<State> d_state;
@@ -348,5 +360,7 @@ private:
 };
 
 extern template class TurbulenceModel<DefaultTpetraTypes>;
+extern template class TurbulenceModel<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid

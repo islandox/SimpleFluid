@@ -24,6 +24,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -65,9 +66,10 @@ Value read_little_endian(const std::string& content, size_t offset)
 struct TwoTriangles
 {
     VTUWriter writer;
-    std::string filename = "test_vtu_two_tris.vtu";
+    std::string filename;
 
-    TwoTriangles()
+    explicit TwoTriangles(std::string output_filename)
+        : filename(std::move(output_filename))
     {
         writer.set_points({
             {0.0, 0.0, 0.0},   // node 0
@@ -140,28 +142,28 @@ TEST(VTUWriter, CellDataAddition)
 {
     // Scalar
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_cell_data_addition.vtu");
         tt.writer.add_scalar_cell_data("temperature", {300.0, 350.0});
         tt.writer.write(tt.filename);
         EXPECT_TRUE(std::filesystem::exists(tt.filename));
     }
     // Vector
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_cell_data_addition.vtu");
         tt.writer.add_vector_cell_data("velocity", {{1, 0, 0}, {0, 1, 0}});
         tt.writer.write(tt.filename);
         EXPECT_TRUE(std::filesystem::exists(tt.filename));
     }
     // Int
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_cell_data_addition.vtu");
         tt.writer.add_int_cell_data("cell_id", {42, 99});
         tt.writer.write(tt.filename);
         EXPECT_TRUE(std::filesystem::exists(tt.filename));
     }
     // Int64
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_cell_data_addition.vtu");
         tt.writer.add_int64_cell_data("global_id",
             {static_cast<global_index_t>(1000), static_cast<global_index_t>(2000)});
         tt.writer.write(tt.filename);
@@ -169,7 +171,7 @@ TEST(VTUWriter, CellDataAddition)
     }
     // Multiple arrays
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_cell_data_addition.vtu");
         tt.writer.add_scalar_cell_data("T", {300.0, 350.0});
         tt.writer.add_vector_cell_data("U", {{1, 0, 0}, {0, 1, 0}});
         tt.writer.add_int_cell_data("id", {1, 2});
@@ -231,7 +233,7 @@ TEST(VTUWriter, CellDataSchemaKeyDescribesParallelMetadata)
  */
 TEST(VTUWriter, OutputStructure)
 {
-    TwoTriangles tt;
+    TwoTriangles tt("test_vtu_output_structure.vtu");
     tt.writer.write(tt.filename);
     const auto content = read_file(tt.filename);
 
@@ -254,7 +256,7 @@ TEST(VTUWriter, OutputCellDataContent)
 {
     // Scalar data
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_output_cell_data.vtu");
         tt.writer.add_scalar_cell_data("temperature", {300.0, 350.0});
         tt.writer.write(tt.filename);
         const auto content = read_file(tt.filename);
@@ -263,7 +265,7 @@ TEST(VTUWriter, OutputCellDataContent)
     }
     // Vector data (3 components)
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_output_cell_data.vtu");
         tt.writer.add_vector_cell_data("velocity", {{1, 0, 0}, {0, 1, 0}});
         tt.writer.write(tt.filename);
         const auto content = read_file(tt.filename);
@@ -271,7 +273,7 @@ TEST(VTUWriter, OutputCellDataContent)
     }
     // Int32
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_output_cell_data.vtu");
         tt.writer.add_int_cell_data("cell_id", {42, 99});
         tt.writer.write(tt.filename);
         const auto content = read_file(tt.filename);
@@ -279,7 +281,7 @@ TEST(VTUWriter, OutputCellDataContent)
     }
     // Int64
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_output_cell_data.vtu");
         tt.writer.add_int64_cell_data("gid", {1000, 2000});
         tt.writer.write(tt.filename);
         const auto content = read_file(tt.filename);
@@ -290,7 +292,7 @@ TEST(VTUWriter, OutputCellDataContent)
 /** @brief Verifies appended binary metadata, offsets, and payload lengths. */
 TEST(VTUWriter, AppendedBinaryOutput)
 {
-    TwoTriangles tt;
+    TwoTriangles tt("test_vtu_appended_binary.vtu");
     tt.writer.add_scalar_cell_data("temperature", {300.0, 350.0});
     tt.writer.write(
         tt.filename, VTUWriter::Encoding::AppendedBinary);
@@ -337,7 +339,7 @@ TEST(VTUWriter, AppendedBinaryOutput)
 /** @brief Verifies PVTU schemas and collision-free piece references. */
 TEST(VTUWriter, ParallelIndexOutput)
 {
-    TwoTriangles tt;
+    TwoTriangles tt("test_vtu_two_tris.vtu");
     tt.writer.add_scalar_cell_data("temperature", {300.0, 350.0});
     tt.writer.add_vector_cell_data(
         "velocity", {{1, 0, 0}, {0, 1, 0}});
@@ -418,7 +420,7 @@ TEST(VTUWriter, ValidationErrors)
     }
     // Cell data size mismatch
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_validation_errors.vtu");
         tt.writer.add_scalar_cell_data("T", {300.0});
         EXPECT_THROW(tt.writer.write(tt.filename), std::runtime_error);
     }
@@ -442,7 +444,7 @@ TEST(VTUWriter, ValidationErrors)
     }
     // Unwritable path
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_validation_errors.vtu");
         EXPECT_THROW(tt.writer.write("/nonexistent_dir_xyz/test.vtu"),
                      std::runtime_error);
     }
@@ -487,7 +489,7 @@ TEST(VTUWriter, EdgeCases)
     }
     // Empty CellData section
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_edge_cases.vtu");
         tt.writer.write(tt.filename);
         const auto content = read_file(tt.filename);
         auto pos = content.find("<CellData>");
@@ -499,7 +501,7 @@ TEST(VTUWriter, EdgeCases)
     }
     // XML special character escaping
     {
-        TwoTriangles tt;
+        TwoTriangles tt("test_vtu_edge_cases.vtu");
         tt.writer.add_scalar_cell_data("temp & pressure", {300.0, 350.0});
         tt.writer.write(tt.filename);
         const auto content = read_file(tt.filename);

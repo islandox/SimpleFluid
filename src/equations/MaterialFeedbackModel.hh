@@ -10,7 +10,10 @@
  */
 #pragma once
 
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
 #include "equations/BoussinesqModel.hh"
+#include "fields/MeshFieldTraits.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -148,10 +151,12 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
     const TimeStepperOptions& time_options)
 {
     MaterialFeedbackOptions options;
+    const detail::DatabaseOptionReader reader(
+        database, "Material feedback model");
     options.reference_density = model_options.reference_density;
     options.liquid_density = model_options.density;
-    options.gas_density = detail::database_value_or<real_t>(
-        database, "gas_density", options.gas_density);
+    options.gas_density = reader.value_or<real_t>(
+        "gas_density", options.gas_density);
     options.reference_temperature = time_options.reference_temperature;
     options.thermal_expansion = time_options.thermal_expansion;
     options.reference_dynamic_viscosity =
@@ -159,15 +164,15 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
             model_options.reference_density
           * time_options.kinematic_viscosity);
     options.density_mode = parse_density_feedback_mode(
-        detail::database_value_or<std::string>(
-            database, "density_feedback_model", "constant"));
+        reader.value_or<std::string>(
+            "density_feedback_model", "constant"));
     options.viscosity_mode = parse_viscosity_feedback_mode(
-        detail::database_value_or<std::string>(
-            database, "viscosity_feedback_model", "constant"));
-    options.min_density = detail::database_value_or<real_t>(
-        database, "min_density", options.min_density);
-    options.min_viscosity = detail::database_value_or<real_t>(
-        database, "min_viscosity", options.min_viscosity);
+        reader.value_or<std::string>(
+            "viscosity_feedback_model", "constant"));
+    options.min_density = reader.value_or<real_t>(
+        "min_density", options.min_density);
+    options.min_viscosity = reader.value_or<real_t>(
+        "min_viscosity", options.min_viscosity);
     validate_material_feedback_options(options);
     return options;
 }
@@ -177,16 +182,18 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class MaterialFeedbackModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using material_type = MaterialPropertyFields<Pack>;
-    using context_type = BoussinesqUpdateContext<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using material_type = MaterialPropertyFields<Pack, mesh_type>;
+    using context_type = BoussinesqUpdateContext<Pack, mesh_type>;
 
     /**
      * @brief Construct a material-feedback model on a mesh.

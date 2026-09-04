@@ -12,13 +12,17 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshHandle.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
+
+#include <Teuchos_DefaultMpiComm.hpp>
 
 #include <algorithm>
 #include <filesystem>
 #include <numbers>
 #include <span>
+#include <vector>
 
 namespace
 {
@@ -29,6 +33,8 @@ using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+using PartitionedUnstructured =
+    SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
@@ -105,6 +111,12 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
             handle->overlap_face_map()->getLocalNumElements(),
             handle->num_faces());
         EXPECT_FALSE(handle->boundary_batches().empty());
+        const auto topology = handle->vtu_topology();
+        ASSERT_TRUE(topology);
+        EXPECT_EQ(
+            topology->cell_offsets.size(),
+            handle->num_owned_cells());
+        EXPECT_FALSE(topology->points.empty());
     }
 
     EXPECT_EQ(
@@ -121,6 +133,72 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
             unstructured_handle.indexer().cell_local_id(global_id),
             local_id);
     }
+}
+
+/** @brief Semi-structured handles enforce their documented serial contract. */
+TEST(MeshHandleTest, SemiStructuredConstructionIsSerialOnly)
+{
+    const auto mesh = std::make_shared<SemiStructured>(
+        SimpleFluid::Arr<SemiStructured::Vec3>{
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0}},
+        SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}},
+        SimpleFluid::ArrReal{0.0, 1.0});
+    const auto communicator = Tpetra::getDefaultComm();
+
+    if (communicator->getSize() == 1)
+    {
+        EXPECT_NO_THROW(static_cast<void>(Handle(mesh)));
+    }
+    else
+    {
+        EXPECT_THROW(
+            static_cast<void>(Handle(mesh)),
+            std::runtime_error);
+    }
+}
+
+/** @brief Existing partitions retain their non-default communicator. */
+TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
+{
+    const auto world = Tpetra::getDefaultComm();
+    if (world->getSize() < 2)
+    {
+        GTEST_SKIP() << "Requires at least two MPI ranks.";
+    }
+
+    const auto self = Teuchos::rcp(
+        new Teuchos::MpiComm<int>(MPI_COMM_SELF));
+    const auto mesh = SimpleFluid::test::make_unstructured_hex_line(1);
+    using Indexer = Handle::unstructured_indexer_type;
+    std::vector<Indexer::cell_id_t> owned_cells;
+    std::vector<Indexer::face_id_t> owned_faces;
+    std::vector<Indexer::node_id_t> nodes;
+    for (size_t cell = 0; cell < mesh->num_cells(); ++cell)
+    {
+        owned_cells.push_back(mesh->cell_id(cell));
+    }
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        owned_faces.push_back(mesh->face_id(face));
+    }
+    for (size_t node = 0; node < mesh->num_nodes(); ++node)
+    {
+        nodes.push_back(mesh->node_id(node));
+    }
+
+    const auto partitioned = std::make_shared<PartitionedUnstructured>(
+        mesh,
+        Indexer(std::move(owned_cells), {}, std::move(owned_faces), {},
+            std::move(nodes)),
+        self);
+    const Handle handle(partitioned);
+
+    EXPECT_EQ(handle.owned_cell_map()->getComm()->getSize(), 1);
+    EXPECT_EQ(handle.overlap_cell_map()->getComm()->getSize(), 1);
+    EXPECT_EQ(handle.owned_face_map()->getComm()->getSize(), 1);
+    EXPECT_EQ(handle.overlap_face_map()->getComm()->getSize(), 1);
 }
 
 /**
@@ -147,6 +225,10 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
               legacy->owned_face_map()->getGlobalElement(0));
     EXPECT_EQ(handle.num_owned_cells(), legacy->num_owned_cells());
     EXPECT_EQ(handle.cell_centroid(0), legacy->cell_centroid(0));
+    const auto topology = handle.vtu_topology();
+    ASSERT_TRUE(topology);
+    EXPECT_EQ(topology->cell_offsets.size(), handle.num_owned_cells());
+    EXPECT_FALSE(topology->points.empty());
     const auto handle_faces = handle.faces(0);
     const auto& legacy_faces = legacy->faces(0);
     EXPECT_EQ(handle_faces.size(), legacy_faces.size());

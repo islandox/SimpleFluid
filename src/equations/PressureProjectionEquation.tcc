@@ -30,8 +30,8 @@ namespace SimpleFluid
  * @throws std::invalid_argument if @p mesh is null.
  * @throws std::runtime_error if the mesh has no owned-cell map.
  */
-template<TpetraTypePack Pack>
-PressureProjectionEquation<Pack>::PressureProjectionEquation(
+template<TpetraTypePack Pack, class MeshType>
+PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(
     SP<const mesh_type> mesh,
     LinearSolverOptions linear_options,
     BoundaryConditionMap pressure_boundary_conditions,
@@ -56,6 +56,23 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
     }
 }
 
+/** @brief Replace the pressure linear-solver policy. */
+template<TpetraTypePack Pack, class MeshType>
+void PressureProjectionEquation<Pack, MeshType>::
+set_linear_solver_options(LinearSolverOptions options)
+{
+    d_linear_options = std::move(options);
+}
+
+/** @brief Return the pressure linear-solver policy. */
+template<TpetraTypePack Pack, class MeshType>
+const LinearSolverOptions&
+PressureProjectionEquation<Pack, MeshType>::
+linear_solver_options() const noexcept
+{
+    return d_linear_options;
+}
+
 /**
  * @brief Require and return the mesh owned-cell map.
  *
@@ -64,8 +81,8 @@ PressureProjectionEquation<Pack>::PressureProjectionEquation(
  * @return The mesh's owned-cell map.
  * @throws std::runtime_error if the mesh has no owned-cell map.
  */
-template<TpetraTypePack Pack>
-auto PressureProjectionEquation<Pack>::require_owned_cell_map(
+template<TpetraTypePack Pack, class MeshType>
+auto PressureProjectionEquation<Pack, MeshType>::require_owned_cell_map(
     const SP<const mesh_type>& mesh) -> Teuchos::RCP<const map_type>
 {
     auto map = mesh->owned_cell_map();
@@ -91,8 +108,8 @@ auto PressureProjectionEquation<Pack>::require_owned_cell_map(
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack>
-void PressureProjectionEquation<Pack>::rebuild_matrix() const
+template<TpetraTypePack Pack, class MeshType>
+void PressureProjectionEquation<Pack, MeshType>::rebuild_matrix() const
 {
     const auto owned_map = require_owned_cell_map(d_mesh);
     int local_has_dirichlet = 0;
@@ -157,8 +174,8 @@ void PressureProjectionEquation<Pack>::rebuild_matrix() const
  * @param[out] pressure Pressure field to initialise.
  * @throws std::invalid_argument if the pressure field mesh does not match.
  */
-template<TpetraTypePack Pack>
-void PressureProjectionEquation<Pack>::solve(field_type& pressure)
+template<TpetraTypePack Pack, class MeshType>
+void PressureProjectionEquation<Pack, MeshType>::solve(field_type& pressure)
 {
     EquationValidation::require_mesh_match(*d_mesh, pressure,
                                            "PressureProjectionEquation");
@@ -178,12 +195,12 @@ void PressureProjectionEquation<Pack>::solve(field_type& pressure)
  * @param[in,out] velocity Velocity field corrected by the pressure
  *        gradient on output.
  */
-template<TpetraTypePack Pack>
-auto PressureProjectionEquation<Pack>::project(
+template<TpetraTypePack Pack, class MeshType>
+auto PressureProjectionEquation<Pack, MeshType>::project(
     field_type& pressure,
     scalar_type time_step,
     scalar_type reference_density,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity) -> ProjectionResult
 {
     auto zero_source =
@@ -213,13 +230,13 @@ auto PressureProjectionEquation<Pack>::project(
  * @param[in,out] velocity Velocity field corrected by the pressure update.
  * @return Projection statistics and the norm of the physical correction.
  */
-template<TpetraTypePack Pack>
-auto PressureProjectionEquation<Pack>::project(
+template<TpetraTypePack Pack, class MeshType>
+auto PressureProjectionEquation<Pack, MeshType>::project(
     field_type& pressure,
     field_type& pressure_correction,
     scalar_type time_step,
     scalar_type reference_density,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity) -> ProjectionResult
 {
     auto zero_source =
@@ -247,13 +264,13 @@ auto PressureProjectionEquation<Pack>::project(
  * calls. The preceding final Rhie--Chow reconstruction is therefore exactly
  * the next predictor flux, including its cached pressure gradient.
  */
-template<TpetraTypePack Pack>
-auto PressureProjectionEquation<Pack>::project_reusing_cached_predictor(
+template<TpetraTypePack Pack, class MeshType>
+auto PressureProjectionEquation<Pack, MeshType>::project_reusing_cached_predictor(
     field_type& pressure,
     field_type& pressure_correction,
     scalar_type time_step,
     scalar_type reference_density,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity) -> ProjectionResult
 {
     auto zero_source =
@@ -290,12 +307,12 @@ auto PressureProjectionEquation<Pack>::project_reusing_cached_predictor(
  * @throws std::invalid_argument on mesh mismatch or non-positive time
  *         step.
  */
-template<TpetraTypePack Pack>
-auto PressureProjectionEquation<Pack>::project(
+template<TpetraTypePack Pack, class MeshType>
+auto PressureProjectionEquation<Pack, MeshType>::project(
     field_type& pressure,
     scalar_type time_step,
     scalar_type reference_density,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity,
     const source_type& right_hand_source) -> ProjectionResult
 {
@@ -330,12 +347,12 @@ auto PressureProjectionEquation<Pack>::project(
  *        immediately preceding accumulated-pressure projection.
  * @return Projection statistics.
  */
-template<TpetraTypePack Pack>
-auto PressureProjectionEquation<Pack>::project_impl(
+template<TpetraTypePack Pack, class MeshType>
+auto PressureProjectionEquation<Pack, MeshType>::project_impl(
     field_type& pressure_correction,
     scalar_type time_step,
     scalar_type reference_density,
-    const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity,
     const source_type& right_hand_source,
     field_type* accumulated_pressure,
@@ -475,8 +492,6 @@ auto PressureProjectionEquation<Pack>::project_impl(
     {
         const auto correction_values =
             pressure_correction.owned_read_view();
-        const auto& volumes =
-            d_mesh->host_views().cell_geometry.volume;
         for (size_t owned = 0;
              owned < d_mesh->num_owned_cells();
              ++owned)
@@ -486,7 +501,9 @@ auto PressureProjectionEquation<Pack>::project_impl(
             const auto correction =
                 correction_values(cell_lid, 0);
             pressure_norm_squared +=
-                correction * correction * volumes[owned];
+                correction * correction
+              * static_cast<scalar_type>(
+                    d_mesh->cell_volume(cell_lid));
         }
     }
 

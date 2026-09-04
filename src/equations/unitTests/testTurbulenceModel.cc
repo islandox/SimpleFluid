@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "equations/turbulence/TurbulenceModel.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -101,6 +102,64 @@ ModelOptions make_model_options(ModelType type)
         options.initial_wall_distance = 0.25;
     }
     return options;
+}
+
+/** @brief Native FieldStored turbulence advances without a legacy mesh. */
+TEST(TurbulenceModelTest, AdvancesStandardKEpsilonOnNativeMeshHandle)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeTraits = SimpleFluid::MeshFieldTraits<Pack, NativeMesh>;
+    using NativeMaterial = SimpleFluid::MaterialPropertyFields<Pack, NativeMesh>;
+    using NativeModel = SimpleFluid::TurbulenceModel<Pack, NativeMesh>;
+
+    auto cartesian = std::make_shared<
+        SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 0.5, 1.0},
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+    SimpleFluid::SP<const NativeMesh> mesh =
+        std::make_shared<NativeMesh>(cartesian);
+    ASSERT_FALSE(mesh->legacy_mesh());
+
+    SimpleFluid::BoundaryConditionSet boundary_conditions;
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions material_options;
+    material_options.reference_density = reference_density;
+    material_options.density = density;
+    material_options.specific_heat_capacity = heat_capacity;
+    material_options.dynamic_viscosity = molecular_viscosity;
+    material_options.thermal_conductivity = molecular_conductivity;
+    NativeMaterial material(mesh, material_options, time_options);
+
+    NativeModel model(mesh, boundary_conditions);
+    model.configure(
+        make_model_options(ModelType::StandardKEpsilon), material,
+        reference_density);
+
+    typename NativeTraits::vector_cell_type velocity(mesh, "velocity");
+    typename NativeTraits::scalar_face_type face_fluxes(
+        mesh, 0.0, "projected_face_fluxes");
+    const auto velocity_boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    const auto summary = model.advance(
+        velocity, face_fluxes, velocity_boundary_cache, 0.1, material,
+        reference_density,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+
+    EXPECT_TRUE(summary.converged);
+    EXPECT_EQ(summary.solves, 2);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        EXPECT_TRUE(std::isfinite(
+            model.turbulent_kinetic_energy().value(cell_lid)));
+        EXPECT_GT(model.turbulent_kinetic_energy().value(cell_lid), 0.0);
+        EXPECT_TRUE(std::isfinite(
+            model.turbulent_kinematic_viscosity().value(cell_lid)));
+    }
 }
 
 /** @brief Verifies null-mesh rejection before boundary-cache construction. */

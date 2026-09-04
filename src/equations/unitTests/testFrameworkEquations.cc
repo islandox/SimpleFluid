@@ -19,7 +19,8 @@
 #include "problems/Problem.hh"
 #include "utils/testing_environment.hh"
 
-#include <algorithm>
+#include <array>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -81,13 +82,59 @@ std::vector<std::pair<int, double>> row_values(
     Pack::matrix_type::local_inds_host_view_type columns;
     Pack::matrix_type::values_host_view_type values;
     matrix.getLocalRowView(row, columns, values);
-    std::vector<std::pair<int, double>> result;
+    std::map<int, double> accumulated;
     for (size_t entry = 0; entry < columns.extent(0); ++entry)
     {
-        result.emplace_back(columns[entry], values[entry]);
+        accumulated[columns[entry]] += values[entry];
     }
-    std::ranges::sort(result);
-    return result;
+    return {accumulated.begin(), accumulated.end()};
+}
+
+template<class Assembled>
+void expect_systems_equal(const Assembled& actual,
+                          const Assembled& expected)
+{
+    ASSERT_EQ(actual.matrix()->getLocalNumRows(),
+              expected.matrix()->getLocalNumRows());
+    for (int row = 0;
+         row < static_cast<int>(actual.matrix()->getLocalNumRows());
+         ++row)
+    {
+        const auto actual_row = row_values(*actual.matrix(), row);
+        const auto expected_row = row_values(*expected.matrix(), row);
+        ASSERT_EQ(actual_row.size(), expected_row.size());
+        for (size_t entry = 0; entry < actual_row.size(); ++entry)
+        {
+            EXPECT_EQ(actual_row[entry].first, expected_row[entry].first);
+            EXPECT_NEAR(actual_row[entry].second,
+                        expected_row[entry].second, 1.0e-14);
+        }
+    }
+
+    ASSERT_EQ(actual.rhs().getLocalLength(),
+              expected.rhs().getLocalLength());
+    const auto actual_rhs = actual.rhs().getData();
+    const auto expected_rhs = expected.rhs().getData();
+    for (size_t row = 0; row < actual_rhs.size(); ++row)
+    {
+        EXPECT_NEAR(actual_rhs[row], expected_rhs[row], 1.0e-14);
+    }
+}
+
+void set_nonzero_boundary_providers(ScalarEquation& equation)
+{
+    equation.set_boundary_providers(
+        [](int batch_id)
+        {
+            return batch_id < 2
+                 ? SimpleFluid::BoundaryConditionType::Dirichlet
+                 : SimpleFluid::BoundaryConditionType::Neumann;
+        },
+        [](int batch_id, size_t in_batch, size_t)
+        {
+            return 0.25 * static_cast<double>(batch_id + 1)
+                 + 0.1 * static_cast<double>(in_batch + 1);
+        });
 }
 
 } // namespace
@@ -158,6 +205,59 @@ TEST(FrameworkEquationTest, MatchesExistingDiffusionAssembly)
     }
     EXPECT_EQ(generic.rhs().getData()[0],
               existing.rhs->getData()[0]);
+}
+
+/** @brief Verifies every additive diffusion term reaches boundary assembly. */
+TEST(FrameworkEquationTest, AccumulatesMultipleDiffusionTermsAtBoundaries)
+{
+    auto mesh = make_cartesian_handle();
+    auto split_field = std::make_shared<ScalarStored>(
+        SimpleFluid::ScalarCellFieldDescriptor<Pack>("split_diffusion"),
+        mesh);
+    auto combined_field = std::make_shared<ScalarStored>(
+        SimpleFluid::ScalarCellFieldDescriptor<Pack>("combined_diffusion"),
+        mesh);
+
+    ScalarEquation split(split_field);
+    split.add_lhs(SimpleFluid::FVM::DiffusionOperator<Pack>{0.75});
+    split.add_lhs(SimpleFluid::FVM::DiffusionOperator<Pack>{1.25});
+    set_nonzero_boundary_providers(split);
+
+    ScalarEquation combined(combined_field);
+    combined.add_lhs(SimpleFluid::FVM::DiffusionOperator<Pack>{2.0});
+    set_nonzero_boundary_providers(combined);
+
+    expect_systems_equal(split.assemble(), combined.assemble());
+}
+
+/** @brief Verifies every additive convection term reaches boundary assembly. */
+TEST(FrameworkEquationTest, AccumulatesMultipleConvectionTermsAtBoundaries)
+{
+    auto mesh = make_cartesian_handle();
+    for (const auto sign : std::array{-1.0, 1.0})
+    {
+        auto split_field = std::make_shared<ScalarStored>(
+            SimpleFluid::ScalarCellFieldDescriptor<Pack>("split_convection"),
+            mesh);
+        auto combined_field = std::make_shared<ScalarStored>(
+            SimpleFluid::ScalarCellFieldDescriptor<Pack>(
+                "combined_convection"),
+            mesh);
+
+        ScalarEquation split(split_field);
+        split.add_lhs(SimpleFluid::FVM::ConvectionOperator<Pack>{
+            [sign](int) { return sign * 0.5; }});
+        split.add_lhs(SimpleFluid::FVM::ConvectionOperator<Pack>{
+            [sign](int) { return sign * 1.5; }});
+        set_nonzero_boundary_providers(split);
+
+        ScalarEquation combined(combined_field);
+        combined.add_lhs(SimpleFluid::FVM::ConvectionOperator<Pack>{
+            [sign](int) { return sign * 2.0; }});
+        set_nonzero_boundary_providers(combined);
+
+        expect_systems_equal(split.assemble(), combined.assemble());
+    }
 }
 
 /** @brief Verifies solution of a transient vector equation. */

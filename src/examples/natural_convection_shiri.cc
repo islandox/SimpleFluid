@@ -10,6 +10,7 @@
  */
 
 #include "dataclass/Database.hh"
+#include "equations/MomentumSolveException.hh"
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/SolverProgress.hh"
@@ -122,22 +123,6 @@ bool environment_boolean(const char* name, bool fallback)
     throw std::invalid_argument(
         std::string(name)
         + " must be one of 0/1, false/true, no/yes, or off/on.");
-}
-
-/**
- * @brief Identify a failed momentum predictor that is safe to retry.
- *
- * The momentum equation solves into a candidate and publishes velocity only
- * after convergence. A rejected predictor therefore leaves every accepted
- * primary and turbulence field unchanged.
- */
-bool retryable_steady_state_failure(const std::runtime_error& error)
-{
-    const std::string_view message{error.what()};
-    return message.find("IncompressibleMomentumEquation")
-               != std::string_view::npos
-        && message.find("did not converge")
-               != std::string_view::npos;
 }
 
 /**
@@ -303,7 +288,7 @@ template<class Pack>
 void write_profile_cells(
     const SimpleFluid::MeshHandle<Pack>& mesh,
     const SimpleFluid::BoussinesqSolver<Pack>& solver,
-    const SimpleFluid::TurbulenceModel<Pack>& turbulence,
+    const typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence,
     int rank)
 {
     const char* configured_prefix = std::getenv("SIMPLEFLUID_SHIRI_OUTPUT_PREFIX");
@@ -483,7 +468,7 @@ void restore_profile_cells(
     const SimpleFluid::MeshHandle<Pack>& geometry_mesh,
     const std::string& prefix,
     SimpleFluid::BoussinesqSolver<Pack>& solver,
-    SimpleFluid::TurbulenceModel<Pack>& turbulence,
+    typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence,
     double reference_density,
     int rank,
     int rank_count)
@@ -492,8 +477,10 @@ void restore_profile_cells(
         typename Pack::local_ordinal_type;
     using global_ordinal_type =
         typename Pack::global_ordinal_type;
-    using vector_type =
-        typename SimpleFluid::VectorCellField<Pack>::vec_type;
+    using solver_type = SimpleFluid::BoussinesqSolver<Pack>;
+    using turbulence_type = typename solver_type::turbulence_model_type;
+    using turbulence_field_type = typename turbulence_type::field_type;
+    using vector_type = typename solver_type::vec_type;
 
     if (prefix.empty())
     {
@@ -504,12 +491,9 @@ void restore_profile_cells(
         throw std::invalid_argument("Shiri restart rank count must be positive.");
 
     const auto mesh = solver.temperature().mesh_ptr();
-    SimpleFluid::CellField<Pack> restart_k(
-        mesh, "restart_k");
-    SimpleFluid::CellField<Pack> restart_epsilon(
-        mesh, "restart_epsilon");
-    SimpleFluid::CellField<Pack> restart_nu_t(
-        mesh, "restart_nu_t");
+    turbulence_field_type restart_k(mesh, "restart_k");
+    turbulence_field_type restart_epsilon(mesh, "restart_epsilon");
+    turbulence_field_type restart_nu_t(mesh, "restart_nu_t");
     std::unordered_map<global_ordinal_type, local_ordinal_type>
         local_by_global;
     local_by_global.reserve(mesh->num_owned_cells());
@@ -802,7 +786,7 @@ void restore_profile_cells(
 template<class Pack>
 void project_axisymmetric_shiri_state(
     SimpleFluid::BoussinesqSolver<Pack>& solver,
-    SimpleFluid::TurbulenceModel<Pack>& turbulence,
+    typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence,
     int radial_cells,
     int theta_cells,
     int axial_cells,
@@ -811,8 +795,10 @@ void project_axisymmetric_shiri_state(
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type =
         typename Pack::local_ordinal_type;
-    using vector_type =
-        typename SimpleFluid::VectorCellField<Pack>::vec_type;
+    using solver_type = SimpleFluid::BoussinesqSolver<Pack>;
+    using turbulence_type = typename solver_type::turbulence_model_type;
+    using turbulence_field_type = typename turbulence_type::field_type;
+    using vector_type = typename solver_type::vec_type;
 
     constexpr size_t count_component = 0;
     constexpr size_t temperature_component = 1;
@@ -864,7 +850,8 @@ void project_axisymmetric_shiri_state(
     {
         const auto cell_lid =
             static_cast<local_ordinal_type>(owned);
-        const auto gid = mesh->cell_global_id(cell_lid);
+        const auto gid =
+            mesh->cell_geometry_global_id(cell_lid);
         if (gid < 1
             || !std::in_range<size_t>(gid)
             || static_cast<size_t>(gid) > expected_cells)
@@ -943,12 +930,10 @@ void project_axisymmetric_shiri_state(
         }
     }
 
-    SimpleFluid::CellField<Pack> projected_k(
-        mesh, "axisymmetric_k");
-    SimpleFluid::CellField<Pack> projected_secondary(
+    turbulence_field_type projected_k(mesh, "axisymmetric_k");
+    turbulence_field_type projected_secondary(
         mesh, "axisymmetric_secondary");
-    SimpleFluid::CellField<Pack> projected_nut(
-        mesh, "axisymmetric_nu_t");
+    turbulence_field_type projected_nut(mesh, "axisymmetric_nu_t");
     for (size_t owned = 0;
          owned < mesh->num_owned_cells(); ++owned)
     {
@@ -956,7 +941,7 @@ void project_axisymmetric_shiri_state(
             static_cast<local_ordinal_type>(owned);
         const auto ordinal =
             static_cast<size_t>(
-                mesh->cell_global_id(cell_lid))
+                mesh->cell_geometry_global_id(cell_lid))
           - 1;
         const auto radial =
             ordinal % static_cast<size_t>(radial_cells);
@@ -1357,11 +1342,8 @@ int main(int argc, char** argv)
                     solver.step();
                     accepted = true;
                 }
-                catch (const std::runtime_error& error)
+                catch (const SimpleFluid::RetryableMomentumNonconvergence& error)
                 {
-                    if (!retryable_steady_state_failure(error))
-                        throw;
-
                     ++rejected_steady_steps;
                     const auto reduced_time_step =
                         controller.rejected_time_step(

@@ -16,10 +16,16 @@
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 #include "FVM/CellOperators.hh"
+#include "FVM/details/FieldStoredFaceFlux.hh"
+#include "FVM/details/FieldStoredPressureWeightedFaceFlux.hh"
+#include "FVM/details/FieldStoredVelocityBoundaryCache.hh"
 
+#include <algorithm>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -52,6 +58,27 @@ struct VelocityBoundaryCache
     /// Configured velocity types replicated by name on every rank.
     std::unordered_map<std::string, BoundaryConditionType> type_by_name;
     SP<const Mesh<Pack>> mesh;
+};
+
+/**
+ * @brief Boundary cache for mesh-aware stored velocity fields.
+ * @tparam Pack Tpetra type pack used by the fields.
+ * @tparam MeshType Runtime or statically dispatched mapped mesh.
+ */
+template<TpetraTypePack Pack, class MeshType>
+struct FieldStoredVelocityBoundaryCache
+{
+    using vec_type = vec3<typename Pack::scalar_type>;
+
+    explicit FieldStoredVelocityBoundaryCache(SP<const MeshType> mesh)
+        : mesh(std::move(mesh))
+    {
+    }
+
+    std::unordered_map<int, Arr<vec_type>> value;
+    std::unordered_map<int, BoundaryConditionType> type;
+    std::unordered_map<std::string, BoundaryConditionType> type_by_name;
+    SP<const MeshType> mesh;
 };
 
 /**
@@ -141,6 +168,86 @@ private:
 };
 
 /**
+ * @brief Reusable Rhie-Chow scratch storage for mesh-aware stored fields.
+ *
+ * The workspace retains a stored pressure-gradient field, boundary-face
+ * locations, and mesh-only gradient geometry. It is tied to one exact mesh
+ * instance and is not safe for concurrent evaluations.
+ *
+ * @tparam Pack Tpetra type pack used by the stored fields.
+ * @tparam MeshType Runtime or statically dispatched mapped mesh.
+ */
+template<TpetraTypePack Pack, class MeshType = MeshHandle<Pack>>
+class FieldStoredPressureWeightedFaceFluxWorkspace
+{
+public:
+    using mesh_type = MeshType;
+    using boundary_location_type =
+        detail::BoundaryFaceLocation<mesh_type>;
+
+    explicit FieldStoredPressureWeightedFaceFluxWorkspace(
+        SP<const mesh_type> mesh)
+        : d_mesh(require_mesh(std::move(mesh))),
+          d_pressure_gradient(
+              VectorCellFieldDescriptor<Pack>(
+                  "rhie_chow_pressure_gradient_workspace"),
+              d_mesh,
+              false),
+          d_gradient_cache(d_mesh)
+    {
+    }
+
+    FieldStoredPressureWeightedFaceFluxWorkspace(
+        const FieldStoredPressureWeightedFaceFluxWorkspace&) = delete;
+    FieldStoredPressureWeightedFaceFluxWorkspace& operator=(
+        const FieldStoredPressureWeightedFaceFluxWorkspace&) = delete;
+    FieldStoredPressureWeightedFaceFluxWorkspace(
+        FieldStoredPressureWeightedFaceFluxWorkspace&&) = default;
+    FieldStoredPressureWeightedFaceFluxWorkspace& operator=(
+        FieldStoredPressureWeightedFaceFluxWorkspace&&) = default;
+
+    const SP<const mesh_type>& mesh_ptr() const noexcept { return d_mesh; }
+
+    VectorCellFieldStored<Pack, mesh_type>& pressure_gradient() noexcept
+    {
+        return d_pressure_gradient;
+    }
+
+    const VectorCellFieldStored<Pack, mesh_type>&
+    pressure_gradient() const noexcept
+    {
+        return d_pressure_gradient;
+    }
+
+    const std::vector<boundary_location_type>&
+    boundary_locations() const noexcept
+    {
+        return d_gradient_cache.boundary_locations();
+    }
+
+    const CellGradientCache<Pack, mesh_type>& gradient_cache() const noexcept
+    {
+        return d_gradient_cache;
+    }
+
+private:
+    static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
+    {
+        if (!mesh)
+        {
+            throw std::invalid_argument(
+                "FieldStoredPressureWeightedFaceFluxWorkspace requires a "
+                "non-null mesh.");
+        }
+        return mesh;
+    }
+
+    SP<const mesh_type> d_mesh;
+    VectorCellFieldStored<Pack, mesh_type> d_pressure_gradient;
+    CellGradientCache<Pack, mesh_type> d_gradient_cache;
+};
+
+/**
  * @brief Build a velocity-boundary cache from a shared mesh pointer and a
  *        set of boundary conditions.
  *
@@ -209,6 +316,21 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
     }
 
     return cache;
+}
+
+/** @brief Build a boundary cache for a mesh-aware stored velocity field. */
+template<TpetraTypePack Pack, class MeshType>
+    requires (!std::same_as<
+        std::remove_cv_t<MeshType>, Mesh<Pack>>)
+FieldStoredVelocityBoundaryCache<Pack, MeshType>
+cache_velocity_boundary_conditions(
+    SP<const MeshType> mesh,
+    const BoundaryConditionSet& boundary_conditions)
+{
+    using cache_type =
+        FieldStoredVelocityBoundaryCache<Pack, MeshType>;
+    return detail::cache_field_stored_velocity_boundary_conditions_impl<
+        Pack, MeshType, cache_type>(std::move(mesh), boundary_conditions);
 }
 
 namespace detail
@@ -658,56 +780,67 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
         velocity, &boundary_cache, fluxes);
 }
 
+/**
+ * @brief Interpolate a mesh-aware stored cell velocity onto stored faces.
+ *
+ * The mesh may be a runtime `MeshHandle` over an orthogonal or
+ * semi-structured geometry, or a statically typed partitioned mesh.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void face_velocities(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    VectorFaceFieldStored<Pack, MeshType>& face_velocity)
+{
+    using cache_type = FieldStoredVelocityBoundaryCache<Pack, MeshType>;
+    detail::assemble_stored_face_velocities<
+        Pack, MeshType, cache_type>(
+            velocity, nullptr, face_velocity);
+}
+
+/** @brief Interpolate stored velocities using cached boundary values. */
+template<TpetraTypePack Pack, class MeshType>
+void face_velocities(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    VectorFaceFieldStored<Pack, MeshType>& face_velocity)
+{
+    detail::assemble_stored_face_velocities(
+        velocity, &boundary_cache, face_velocity);
+}
+
+/** @brief Project a stored face velocity onto owner-oriented face areas. */
+template<TpetraTypePack Pack, class MeshType>
+void normal_face_fluxes(
+    const VectorFaceFieldStored<Pack, MeshType>& face_velocity,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    detail::stored_normal_face_fluxes(face_velocity, fluxes);
+}
+
+/** @brief Assemble stored normal face fluxes without boundary treatment. */
+template<TpetraTypePack Pack, class MeshType>
+void face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    using cache_type = FieldStoredVelocityBoundaryCache<Pack, MeshType>;
+    detail::assemble_stored_normal_face_fluxes<
+        Pack, MeshType, cache_type>(velocity, nullptr, fluxes);
+}
+
+/** @brief Assemble stored normal face fluxes with cached boundary values. */
+template<TpetraTypePack Pack, class MeshType>
+void face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    detail::assemble_stored_normal_face_fluxes(
+        velocity, &boundary_cache, fluxes);
+}
+
 namespace detail
 {
-
-/**
- * @brief Validate the open-boundary contract used for pressure outlets.
- *
- * Dirichlet pressure extrapolates owner-cell velocity to the boundary face.
- * It therefore requires a Neumann velocity condition; a prescribed velocity
- * would otherwise be silently discarded by the pressure-flux reconstruction.
- *
- * @throws std::invalid_argument if a pressure condition is unsupported or a
- *         Dirichlet pressure boundary has a non-Neumann velocity condition.
- */
-template<TpetraTypePack Pack>
-void validate_pressure_velocity_boundary_compatibility(
-    const VelocityBoundaryCache<Pack>& velocity_boundary_cache,
-    const BoundaryConditionMap& pressure_boundary_conditions)
-{
-    // Both maps come directly from the globally configured boundary data, so
-    // every rank makes the same decision before a caller enters collectives.
-    for (const auto& [name, pressure_condition] :
-         pressure_boundary_conditions)
-    {
-        if (pressure_condition.type != BoundaryConditionType::Dirichlet
-            && pressure_condition.type != BoundaryConditionType::Neumann)
-        {
-            throw std::invalid_argument(
-                "pressure_weighted_face_fluxes supports only Dirichlet "
-                "and Neumann pressure boundary conditions.");
-        }
-        if (pressure_condition.type != BoundaryConditionType::Dirichlet)
-        {
-            continue;
-        }
-
-        const auto velocity_iter =
-            velocity_boundary_cache.type_by_name.find(name);
-        const auto velocity_type =
-            velocity_iter == velocity_boundary_cache.type_by_name.end()
-          ? BoundaryConditionType::Neumann
-          : velocity_iter->second;
-        if (velocity_type != BoundaryConditionType::Neumann)
-        {
-            throw std::invalid_argument(
-                "Dirichlet pressure boundary '" + name
-                + "' requires a Neumann velocity boundary so owner-cell "
-                  "velocity can be extrapolated to the open face.");
-        }
-    }
-}
 
 /**
  * @brief Compute Rhie-Chow pressure-weighted face fluxes.
@@ -1077,6 +1210,129 @@ void pressure_weighted_face_fluxes(
         velocity, pressure, pressure_coefficient,
         boundary_cache, pressure_boundary_conditions,
         workspace, fluxes);
+}
+
+/**
+ * @brief Compute stored-field Rhie-Chow fluxes with reusable scratch storage.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void pressure_weighted_face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const ScalarCellFieldStored<Pack, MeshType>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes,
+    CellGradientScheme gradient_scheme =
+        CellGradientScheme::LeastSquares)
+{
+    detail::pressure_weighted_stored_face_fluxes_impl(
+        velocity,
+        pressure,
+        pressure_coefficient,
+        boundary_cache,
+        nullptr,
+        workspace,
+        static_cast<VectorCellFieldStored<Pack, MeshType>*>(nullptr),
+        fluxes,
+        gradient_scheme);
+}
+
+/** @brief Compute stored-field Rhie-Chow fluxes with one-shot scratch. */
+template<TpetraTypePack Pack, class MeshType>
+void pressure_weighted_face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const ScalarCellFieldStored<Pack, MeshType>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType> workspace(
+        velocity.mesh_ptr());
+    pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        pressure_coefficient,
+        boundary_cache,
+        workspace,
+        fluxes);
+}
+
+/**
+ * @brief Compute stored-field Rhie-Chow fluxes with pressure boundaries.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void pressure_weighted_face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const ScalarCellFieldStored<Pack, MeshType>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions,
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes,
+    CellGradientScheme gradient_scheme =
+        CellGradientScheme::LeastSquares)
+{
+    detail::pressure_weighted_stored_face_fluxes_impl(
+        velocity,
+        pressure,
+        pressure_coefficient,
+        boundary_cache,
+        &pressure_boundary_conditions,
+        workspace,
+        static_cast<VectorCellFieldStored<Pack, MeshType>*>(nullptr),
+        fluxes,
+        gradient_scheme);
+}
+
+/**
+ * @brief Compute stored-field Rhie-Chow fluxes from a precomputed gradient.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void pressure_weighted_face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const ScalarCellFieldStored<Pack, MeshType>& pressure,
+    VectorCellFieldStored<Pack, MeshType>& pressure_gradient,
+    typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions,
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    detail::pressure_weighted_stored_face_fluxes_impl(
+        velocity,
+        pressure,
+        pressure_coefficient,
+        boundary_cache,
+        &pressure_boundary_conditions,
+        workspace,
+        &pressure_gradient,
+        fluxes);
+}
+
+/**
+ * @brief Compute stored-field Rhie-Chow fluxes with boundaries and one-shot
+ *        scratch storage.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void pressure_weighted_face_fluxes(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const ScalarCellFieldStored<Pack, MeshType>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions,
+    ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType> workspace(
+        velocity.mesh_ptr());
+    pressure_weighted_face_fluxes(
+        velocity,
+        pressure,
+        pressure_coefficient,
+        boundary_cache,
+        pressure_boundary_conditions,
+        workspace,
+        fluxes);
 }
 
 } // namespace SimpleFluid::FVM

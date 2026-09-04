@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "FVM/OperatorDetails.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"

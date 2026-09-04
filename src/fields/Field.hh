@@ -14,6 +14,7 @@
 #include "dataclass/TpetraTypes.hh"
 #include "dataclass/vec3.hh"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <stdexcept>
@@ -93,6 +94,11 @@ using ScalarCellFieldDescriptor =
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 using VectorCellFieldDescriptor =
     Field<vec3<typename Pack::scalar_type>, CellLocation>;
+
+/** @brief Row-major 3x3 tensor descriptor stored at cell centers. */
+template<TpetraTypePack Pack = DefaultTpetraTypes>
+using TensorCellFieldDescriptor =
+    Field<std::array<vec3<typename Pack::scalar_type>, 3>, CellLocation>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 using ScalarFaceFieldDescriptor =

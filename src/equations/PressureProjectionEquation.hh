@@ -14,6 +14,7 @@
 #include "equations/EquationValidation.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/Operators.hh"
@@ -22,9 +23,11 @@
 #include <Teuchos_RCP.hpp>
 
 #include <cstddef>
+#include <concepts>
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace SimpleFluid
@@ -66,17 +69,25 @@ inline LinearSolverOptions pressure_projection_linear_solver_options()
  *
  * @tparam Pack Tpetra type pack used for matrix/vector storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes>
+template<TpetraTypePack Pack = DefaultTpetraTypes,
+         class MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT PressureProjectionEquation
 {
 public:
-    using mesh_type = Mesh<Pack>;
-    using field_type = CellField<Pack>;
-    using velocity_field_type = VectorCellField<Pack>;
-    using face_flux_field_type = FaceField<Pack>;
-    using face_velocity_field_type = VectorFaceField<Pack>;
-    using face_flux_workspace_type =
-        FVM::PressureWeightedFaceFluxWorkspace<Pack>;
+    using mesh_type = MeshType;
+    using field_traits = MeshFieldTraits<Pack, mesh_type>;
+    using field_type = typename field_traits::scalar_cell_type;
+    using velocity_field_type = typename field_traits::vector_cell_type;
+    using face_flux_field_type = typename field_traits::scalar_face_type;
+    using face_velocity_field_type = typename field_traits::vector_face_type;
+    using velocity_boundary_cache_type = std::conditional_t<
+        std::same_as<mesh_type, Mesh<Pack>>,
+        FVM::VelocityBoundaryCache<Pack>,
+        FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using face_flux_workspace_type = std::conditional_t<
+        std::same_as<mesh_type, Mesh<Pack>>,
+        FVM::PressureWeightedFaceFluxWorkspace<Pack>,
+        FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, mesh_type>>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -97,15 +108,9 @@ public:
         FVM::CellGradientScheme gradient_scheme =
             FVM::CellGradientScheme::LeastSquares);
 
-    void set_linear_solver_options(LinearSolverOptions options)
-    {
-        d_linear_options = options;
-    }
+    void set_linear_solver_options(LinearSolverOptions options);
 
-    const LinearSolverOptions& linear_solver_options() const noexcept
-    {
-        return d_linear_options;
-    }
+    const LinearSolverOptions& linear_solver_options() const noexcept;
 
     void rebuild_matrix() const;
 
@@ -115,7 +120,7 @@ public:
         field_type& pressure,
         scalar_type time_step,
         scalar_type reference_density,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         velocity_field_type& velocity);
 
     /**
@@ -139,14 +144,14 @@ public:
         field_type& pressure_correction,
         scalar_type time_step,
         scalar_type reference_density,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         velocity_field_type& velocity);
 
     ProjectionResult project(
         field_type& pressure,
         scalar_type time_step,
         scalar_type reference_density,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         velocity_field_type& velocity,
         const source_type& right_hand_source);
 
@@ -181,7 +186,7 @@ private:
         field_type& pressure_correction,
         scalar_type time_step,
         scalar_type reference_density,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         velocity_field_type& velocity);
 
     SIMPLEFLUID_EQUATIONS_LOCAL
@@ -189,7 +194,7 @@ private:
         field_type& pressure_correction,
         scalar_type time_step,
         scalar_type reference_density,
-        const FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
         velocity_field_type& velocity,
         const source_type& right_hand_source,
         field_type* accumulated_pressure,
@@ -213,6 +218,9 @@ private:
     BelosLinearSolver<Pack> d_linear_solver;
 };
 
-extern template class PressureProjectionEquation<DefaultTpetraTypes>;
+extern template class PressureProjectionEquation<
+    DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
+extern template class PressureProjectionEquation<
+    DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
