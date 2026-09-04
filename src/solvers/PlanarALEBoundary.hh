@@ -84,7 +84,11 @@ public:
     /** Revalidate current trial geometry against the same vessel map. */
     void refresh(const VesselVolumeMap& volume_map) { validate(volume_map); }
 
-    /** Populate the boundary cache with the exact mesh normal velocity. */
+    /**
+     * Mark the moving patch as slip and retain its mesh-normal velocity.
+     * Tangential face velocity remains owner-extrapolated; the exact normal
+     * kinematic condition is imposed independently by enforce_kinematic_flux().
+     */
     void apply_kinematic_velocity(const FVM::ALEControlVolumeState& ale, velocity_boundary_cache_type& cache) const
     {
         ale.validate(*d_mesh);
@@ -107,14 +111,14 @@ public:
         {
             throw std::runtime_error("PlanarALEBoundary moving face has non-finite or non-positive area.");
         }
-        cache.type_by_name[d_boundary_name] = BoundaryConditionType::Dirichlet;
+        cache.type_by_name[d_boundary_name] = BoundaryConditionType::Slip;
         if (d_batch_id < 0)
         {
             return;
         }
         auto& values = cache.value[d_batch_id];
         values.resize(d_face_lids.size());
-        cache.type[d_batch_id] = BoundaryConditionType::Dirichlet;
+        cache.type[d_batch_id] = BoundaryConditionType::Slip;
         const auto mesh_fluxes = ale.face_mesh_fluxes();
         for (size_t in_batch = 0; in_batch < d_face_lids.size(); ++in_batch)
         {

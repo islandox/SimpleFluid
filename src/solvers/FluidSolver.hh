@@ -130,11 +130,12 @@ public:
      */
     void set_time_step(scalar_type time_step);
     /**
-     * @brief Return the maximum cell Courant number of the accepted face flux.
+     * @brief Return the maximum cell Courant number of the accepted transport flux.
      *
      * The definition is
-     * @f$Co_c=\Delta t\sum_{f\in c}|\phi_f|/(2V_c)@f$ and is reduced across
-     * the mesh communicator.
+     * @f$Co_c=\Delta t\sum_{f\in c}|\phi_{transport,f}|/(2V_c)@f$ and is
+     * reduced across the mesh communicator. Fixed meshes use the absolute
+     * projected flux; an ALE solver may select its mesh-relative flux.
      */
     scalar_type maximum_courant_number() const;
 
@@ -243,6 +244,9 @@ protected:
 
     /** Refresh pressure/flux/coupled/output state shared by derived solvers. */
     void refresh_pressure_velocity_geometry_state();
+
+    /** Accepted face flux whose magnitude governs transported-state Courant number. */
+    virtual const face_flux_field_type& courant_transport_face_fluxes() const;
 
     /** Install one immutable integrated target for the next coupling solve. */
     void set_volume_continuity_target(const continuity_target_type& target);

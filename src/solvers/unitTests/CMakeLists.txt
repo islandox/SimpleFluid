@@ -235,7 +235,7 @@ simplefluid_add_mpi_test(
     NAME PlanarALEBoundaryValidation_2procs
     TARGET testPlanarALEBoundary
     PROCS 2
-    ARGS "--gtest_filter=PlanarALEBoundaryTest.CollectivelyRejectsRankDivergentControlsAndForeignFields"
+    ARGS "--gtest_filter=PlanarALEBoundaryTest.ValidatesGeometryPreservesTangentialSlipAndEnforcesZeroRelativeTopFlux:PlanarALEBoundaryTest.CollectivelyRejectsRankDivergentControlsAndForeignFields"
     LABELS "mpi;ale;free_surface;validation"
     TIMEOUT 120)
 

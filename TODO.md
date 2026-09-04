@@ -1392,8 +1392,9 @@ void-reduced mixture density does not own sensible-energy storage.
       common target-residual definition, bounded pressure-only refinement, and
       accepted per-outer-corrector residual histories.
 - [x] Implement the moving-surface kinematic/dynamic and exact bubble-escape
-      boundary contracts, including a full moving-top velocity Dirichlet value
-      with zero tangential components rather than free slip.
+      boundary contracts, including a moving-top slip condition that preserves
+      tangential liquid flow while fixed-flux pressure ownership enforces the
+      exact mesh-normal kinematics.
 - [x] Add geometry-substrate serial/MPI GCL, expand-contract, shared-face, controller-alias,
       stale-cache, and mesh-quality rollback tests.
 - [x] Add constant-field, nonzero-divergence, and conservative ALE liquid/gas/
