@@ -438,6 +438,11 @@ VerificationResult run_complete_escape()
         throw std::runtime_error("ALE complete-escape verification lacks its model owners");
     }
     const auto initial_surface = state.solver->free_surface_diagnostics();
+    // Late escape steps remove bubble volumes below the resolution of the
+    // O(1 m) pool level. Allow a few rounding errors in the liquid-volume sum
+    // and volume-to-level conversion, while still requiring a resolved drop.
+    const auto level_roundoff_tolerance =
+        8.0 * std::numeric_limits<scalar_type>::epsilon() * std::abs(initial_surface.pool_level);
     const auto initial_raw_bubble_volume = gas->global_submerged_bubble_volume();
     const auto initial_liquid_volume = initial_surface.liquid_volume;
     const auto initial_micro = gas->global_microbubble_hydrogen_moles();
@@ -501,17 +506,18 @@ VerificationResult run_complete_escape()
             1.0e-12, 1.0e-12);
         require_near("ALE escape pool displacement", before_surface.pool_volume - after_surface.pool_volume,
             before_raw_bubble_volume - after_raw_bubble_volume, 2.0e-12, 1.0e-10);
-        observed_resolved_level_drop =
-            observed_resolved_level_drop || after_surface.pool_level < before_surface.pool_level;
+        const auto level_drop = before_surface.pool_level - after_surface.pool_level;
+        observed_resolved_level_drop = observed_resolved_level_drop || level_drop > level_roundoff_tolerance;
         if (!(after_raw_bubble_volume < before_raw_bubble_volume) ||
-            after_surface.pool_level > before_surface.pool_level)
+            !std::isfinite(level_drop) || level_drop < -level_roundoff_tolerance)
         {
             std::ostringstream message;
             message << std::scientific << std::setprecision(17)
                     << "ALE complete-escape step did not reduce raw bubble volume or increased the pool level: step="
                     << completed_steps << ", bubble_before=" << before_raw_bubble_volume
                     << ", bubble_after=" << after_raw_bubble_volume << ", level_before=" << before_surface.pool_level
-                    << ", level_after=" << after_surface.pool_level;
+                    << ", level_after=" << after_surface.pool_level
+                    << ", level_roundoff_tolerance=" << level_roundoff_tolerance;
             throw std::runtime_error(message.str());
         }
         accumulated_micro_escape += statistics.microbubble_hydrogen_escaped;
@@ -521,8 +527,9 @@ VerificationResult run_complete_escape()
     const auto final_micro = gas->global_microbubble_hydrogen_moles();
     const auto final_large = gas->global_large_bubble_hydrogen_moles();
     const auto final_total = final_micro + final_large;
+    const auto final_level_drop = initial_surface.pool_level - state.solver->free_surface_diagnostics().pool_level;
     if (!(completed_steps > 1) || final_total > completion_tolerance || !observed_resolved_level_drop ||
-        !(state.solver->free_surface_diagnostics().pool_level < initial_surface.pool_level))
+        !(final_level_drop > level_roundoff_tolerance))
     {
         std::ostringstream message;
         message << std::scientific << std::setprecision(17)
