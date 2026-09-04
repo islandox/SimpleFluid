@@ -1519,16 +1519,14 @@ void FluidSolver<Pack>::set_time_step(
  * @brief Compute the communicator-wide maximum accepted cell Courant number.
  *
  * @tparam Pack Tpetra type pack.
- * @return Maximum cell Courant number for the current time step and projected
- *         face flux.
+ * @return Maximum cell Courant number for the current time step and selected
+ *         transport face flux.
  */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::maximum_courant_number() const
     -> scalar_type
 {
-    const auto& flux =
-        d_problem.template object<face_flux_field_type>(
-            "projected_face_flux");
+    const auto& flux = courant_transport_face_fluxes();
     scalar_type local_maximum{};
     const auto current_time_step = time_step();
     for (size_t owned = 0;
@@ -1559,6 +1557,13 @@ auto FluidSolver<Pack>::maximum_courant_number() const
         &local_maximum,
         &global_maximum);
     return global_maximum;
+}
+
+/** @brief Select absolute projected flux for the fixed-grid Courant diagnostic. */
+template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::courant_transport_face_fluxes() const -> const face_flux_field_type&
+{
+    return pressure_corrected_face_fluxes();
 }
 
 /**

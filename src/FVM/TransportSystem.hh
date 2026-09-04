@@ -334,8 +334,8 @@ TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStore
  *
  * When @c request.ale is non-null, @c request.face_fluxes must contain the
  * synchronized owner-oriented relative flux produced by
- * mesh_relative_face_fluxes(); the absolute pressure/diagnostic flux remains
- * a separate field.
+ * mesh_relative_face_fluxes(); the absolute pressure/continuity flux remains a
+ * separate field.
  */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> weighted_scalar_transport_system(

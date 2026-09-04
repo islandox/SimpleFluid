@@ -708,17 +708,19 @@ Cartesian X/Y/Z and cylindrical
 axial-Z motion are supported in serial/MPI; semi-structured axial-Z motion is
 serial only.
 
-The ALE path retains absolute projected fluid flux for pressure/diagnostics and
-uses a distinct mesh-relative flux for transport. It assembles conservative
-old/new-volume Backward-Euler storage. Temperature conserves
+The ALE path retains absolute projected fluid flux for pressure and continuity
+diagnostics, and uses a distinct mesh-relative flux for transport and its
+Courant diagnostic. It assembles conservative old/new-volume Backward-Euler
+storage. Temperature conserves
 $V_c m_{l,c}^*c_{p,c}T_c$ using the accepted/trial cellwise liquid-mass
 density, not pure-liquid or void-reduced mixture density over the
 bubble-displaced pool volume. The solver applies one integrated cellwise
-volume target to every pressure-velocity algorithm and enforces the moving top
-as a full velocity Dirichlet condition: mesh-normal velocity with zero
-tangential velocity, not free slip. It refreshes geometry-epoch-dependent
-numeric state and accepts or rolls back geometry, fields, model ledgers, time,
-and history as one logical step. Accepted ALE diagnostics retain the
+volume target to every pressure-velocity algorithm and treats the moving top
+as slip: tangential liquid motion is preserved while the exact mesh-normal
+absolute flux is imposed by pressure/continuity boundary ownership. It
+refreshes geometry-epoch-dependent numeric state and accepts or rolls back
+geometry, fields, model ledgers, time, and history as one logical step.
+Accepted ALE diagnostics retain the
 per-outer-corrector level, target-change, continuity, material-state, and
 gas-state residual histories.
 This is a constrained flat-surface model with conservation-focused test

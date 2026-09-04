@@ -428,7 +428,11 @@ simplefluid_require_exact_api(
 simplefluid_require_exact_api(
     "^SimpleFluid::FluidSolver<.*>[ ]*::clear_volume_continuity_target[(][)]$" 1)
 simplefluid_require_exact_api(
+    "^SimpleFluid::FluidSolver<.*>[ ]*::courant_transport_face_fluxes[(][)] const$" 1)
+simplefluid_require_exact_api(
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::refresh_geometry_dependent_state[(][)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::courant_transport_face_fluxes[(][)] const$" 1)
 
 # Anchor the out-of-line planar-motion lifecycle and solver observer. Inline
 # getters remain consumer-instantiable and are not stable per-configuration

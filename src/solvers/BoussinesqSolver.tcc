@@ -1713,6 +1713,17 @@ auto BoussinesqSolver<Pack>::mesh_relative_face_fluxes() const -> const face_flu
     return *d_mesh_relative_face_flux;
 }
 
+/** @brief Select the accepted ALE-relative flux for the Courant diagnostic. */
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::courant_transport_face_fluxes() const -> const face_flux_field_type&
+{
+    if (planar_ale_enabled() && d_mesh_relative_face_flux)
+    {
+        return *d_mesh_relative_face_flux;
+    }
+    return base_type::courant_transport_face_fluxes();
+}
+
 /** @brief Return immutable accepted free-surface history. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::free_surface_history() const noexcept -> const std::vector<FreeSurfaceHistoryRecord>&
@@ -2360,6 +2371,14 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::initialize_planar_ale
         d_free_surface_options.coupling.volume_absolute_tolerance,
         d_free_surface_options.coupling.volume_relative_tolerance);
     d_mesh_relative_face_flux = std::make_unique<face_flux_field_type>(d_mesh, "meshRelativeFaceFlux");
+    // Before the first motion trial the accepted mesh is stationary, so its
+    // relative transport flux is the already accepted absolute flux. Preserve
+    // that state when ALE is configured after earlier fixed-grid work.
+    for (const auto face_lid : d_mesh_relative_face_flux->owned_face_ids())
+    {
+        d_mesh_relative_face_flux->set_owned_value(face_lid, projected_face_fluxes().value(face_lid));
+    }
+    d_mesh_relative_face_flux->sync_ghosts();
     d_bubble_slip_volume_flux = std::make_unique<face_flux_field_type>(d_mesh, "bubbleSlipVolumeFlux");
     d_mesh_volume_rate = std::make_unique<field_type>(d_mesh, "meshVolumeRate");
     d_continuity_residual = std::make_unique<field_type>(d_mesh, "continuityResidual");
