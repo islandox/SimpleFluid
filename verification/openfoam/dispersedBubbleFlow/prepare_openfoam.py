@@ -8,12 +8,14 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from reference_water import read_reference_water
+from structured_mesh import write_openfoam
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("steady", "transient"), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--mesh", type=Path, default=Path(__file__).with_name("mesh.dat"))
     args = parser.parse_args()
     directory = Path(__file__).resolve().parent
     values = {}
@@ -56,24 +58,7 @@ timePrecision 12;
 runTimeModifiable false;
 """
     (args.output / "system/controlDict").write_text(control)
-    w, h, cells = values["width"], values["height"], values["cells"]
-    if int(cells) != cells or cells < 2:
-        raise ValueError("cells must be an integer >= 2")
-    block = header("blockMeshDict") + f"""
-scale 1;
-vertices ((0 0 0) ({w} 0 0) ({w} {w} 0) (0 {w} 0)
-          (0 0 {h}) ({w} 0 {h}) ({w} {w} {h}) (0 {w} {h}));
-blocks (hex (0 1 2 3 4 5 6 7) (1 1 {int(cells)}) simpleGrading (1 1 1));
-edges ();
-boundary
-(
-    zmin {{ type wall; faces ((0 3 2 1)); }}
-    zmax {{ type patch; faces ((4 5 6 7)); }}
-    walls {{ type wall; faces ((0 1 5 4) (1 2 6 5) (2 3 7 6) (3 0 4 7)); }}
-);
-mergePatchPairs ();
-"""
-    (args.output / "system/blockMeshDict").write_text(block)
+    write_openfoam(args.mesh,args.output)
 
 
 if __name__ == "__main__":

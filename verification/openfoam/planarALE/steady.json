@@ -136,5 +136,76 @@
     "energy_closure": "sum(Mcell * cp_reference * T_K); constant IF97 reference cp, mu and k",
     "volumetric_heating_W_m3": 400000.0,
     "time_step_s": 1.0
+  },
+  "spatial_output": {
+    "cell_samples": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11"
+    ],
+    "width_m": 1.0,
+    "velocity_reference": "affine mesh kinematics; momentum comparison is diagnostic"
+  },
+  "mesh_edges_m": {
+    "x": [
+      0.0,
+      1.0
+    ],
+    "y": [
+      0.0,
+      1.0
+    ],
+    "z": [
+      0.0,
+      0.04040730564085986,
+      0.09293680297397769,
+      0.16122514950703085,
+      0.25,
+      0.375,
+      0.5,
+      0.625,
+      0.75,
+      0.8387748504929691,
+      0.9070631970260223,
+      0.9595926943591401,
+      1.0
+    ]
+  },
+  "mesh_statistics": {
+    "cells": 12,
+    "volume_m3": 1.0,
+    "x": {
+      "cells": 1,
+      "first_cell_m": 1.0,
+      "last_cell_m": 1.0,
+      "minimum_cell_m": 1.0,
+      "maximum_cell_m": 1.0,
+      "max_adjacent_ratio": 1
+    },
+    "y": {
+      "cells": 1,
+      "first_cell_m": 1.0,
+      "last_cell_m": 1.0,
+      "minimum_cell_m": 1.0,
+      "maximum_cell_m": 1.0,
+      "max_adjacent_ratio": 1
+    },
+    "z": {
+      "cells": 12,
+      "first_cell_m": 0.04040730564085986,
+      "last_cell_m": 0.040407305640859925,
+      "minimum_cell_m": 0.04040730564085986,
+      "maximum_cell_m": 0.125,
+      "max_adjacent_ratio": 1.4080564406008202
+    }
   }
 }

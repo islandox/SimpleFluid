@@ -400,6 +400,10 @@ if(SIMPLEFLUID_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
 
+add_executable(verification_boundary_layer_mesh examples/verification_boundary_layer_mesh.cc)
+target_link_libraries(verification_boundary_layer_mesh PRIVATE SimpleFluid::Mesh)
+simplefluid_exclude_from_pgo_sources(examples/verification_boundary_layer_mesh.cc)
+
 add_executable(
     planar_free_surface_verification
     examples/planar_free_surface_verification.cc)
@@ -444,6 +448,29 @@ foreach(VERIFICATION_TARGET IN ITEMS dispersed_bubble_verification planar_ale_co
     endforeach()
   endif()
 endforeach()
+
+if(SIMPLEFLUID_ENABLE_IF97)
+  add_executable(bottom_heated_bubbly_convection examples/bottom_heated_bubbly_convection.cc)
+  target_link_libraries(bottom_heated_bubbly_convection PRIVATE SimpleFluid SimpleFluid::IF97)
+  simplefluid_exe_reuse_precompiled_header(bottom_heated_bubbly_convection)
+  simplefluid_exclude_from_pgo_sources(examples/bottom_heated_bubbly_convection.cc)
+  if(BUILD_TESTING)
+    add_test(NAME bottom_convection_zero_source
+      COMMAND bottom_heated_bubbly_convection --steps 10 --source-scale 0
+        --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_zero_source")
+    set_tests_properties(bottom_convection_zero_source PROPERTIES
+      LABELS "verification;conservation" TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    add_test(NAME bottom_convection_graded_transport
+      COMMAND bottom_heated_bubbly_convection --steps 5
+        --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_graded_transport")
+    set_tests_properties(bottom_convection_graded_transport PROPERTIES
+      LABELS "verification;conservation" TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+  endif()
+else()
+  add_executable(bottom_heated_bubbly_convection examples/if97_verification_unavailable.cc)
+endif()
 
 add_executable(natural_convection_box examples/natural_convection_box.cc)
 target_link_libraries(natural_convection_box PRIVATE SimpleFluid)
@@ -510,6 +537,16 @@ if(BUILD_TESTING)
     set_tests_properties(openfoam_verification_comparator PROPERTIES
       LABELS "verification;integration"
       TIMEOUT 30)
+    add_test(
+      NAME openfoam_water_field_figures
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/test_plot_water_fields.py")
+    set_tests_properties(openfoam_water_field_figures PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+    add_test(NAME openfoam_boundary_layer_mesh
+      COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/test_structured_mesh.py")
+    set_tests_properties(openfoam_boundary_layer_mesh PROPERTIES LABELS "verification;geometry" TIMEOUT 30)
   else()
     message(WARNING
       "Python 3 was not found; the OpenFOAM comparator fixture tests are disabled")

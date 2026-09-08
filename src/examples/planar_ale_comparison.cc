@@ -1,7 +1,8 @@
 /** Solver-integrated uniform thermal expansion, compared with OpenFOAM FV. */
+#include "IF97ReferenceWater.hh"
+#include "VerificationMesh.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
-#include "IF97ReferenceWater.hh"
 
 #include <Tpetra_Core.hpp>
 
@@ -35,8 +36,8 @@ void check(double value, double tolerance, const char* what)
     }
 }
 
-int run(const std::string& mode, const std::filesystem::path& output,
-    const std::filesystem::path& water_reference)
+int run(const std::string& mode, const std::filesystem::path& output, const std::filesystem::path& water_reference,
+    const std::filesystem::path& mesh_file)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
     {
@@ -49,13 +50,11 @@ int run(const std::string& mode, const std::filesystem::path& output,
     const double rho0 = water.density;
     const double cp = water.specific_heat_capacity;
     const double beta = reference.thermal_expansion;
-    SimpleFluid::ArrReal z;
-    for (int i = 0; i <= 8; ++i)
-    {
-        z.push_back(i / 8.0);
-    }
-    auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
-        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, z}});
+    const auto grid = SimpleFluid::Verification::read_verification_mesh(mesh_file);
+    if (grid.x.size() != 2 || grid.y.size() != 2 || std::abs(grid.x.back() - 1) > 1e-12 ||
+        std::abs(grid.y.back() - 1) > 1e-12 || std::abs(grid.z.back() - 1) > 1e-12)
+        throw std::runtime_error("ALE fixture requires a unit-area, unit-height reference column");
+    auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(grid.coordinates());
     auto mesh = std::make_shared<Mesh>(std::move(geometry));
     SimpleFluid::BoundaryConditionSet bc;
     for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
@@ -127,6 +126,10 @@ int run(const std::string& mode, const std::filesystem::path& output,
 
     std::filesystem::create_directories(output);
     std::ofstream csv(output / "history.csv");
+    std::ofstream spatial(output / "fields.csv");
+    spatial.exceptions(std::ios::badbit | std::ios::failbit);
+    spatial << std::setprecision(17)
+            << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
     csv.exceptions(std::ios::badbit | std::ios::failbit);
     csv << std::setprecision(17)
         << "time_s,sample,temperature_K,level_m,volume_m3,liquid_mass_kg,energy_J,cumulative_heat_J,"
@@ -169,6 +172,13 @@ int run(const std::string& mode, const std::filesystem::path& output,
             integrated_cp += cell_volume * fields.specific_heat_capacity.value(cell);
             integrated_mu += cell_volume * fields.dynamic_viscosity.value(cell);
             integrated_k += cell_volume * fields.thermal_conductivity.value(cell);
+            const double z = mesh->cell_centroid(cell).z;
+            const auto velocity = solver.velocity().value(cell);
+            // This fixture contains liquid only. Export the solved cell velocity,
+            // not a velocity reconstructed from the imposed affine mesh motion.
+            spatial << solver.time() << ',' << owned << ',' << z - 0.5 * cell_volume << ',' << z + 0.5 * cell_volume
+                    << ',' << solver.temperature().value(cell) << ',' << fields.density.value(cell) << ",0,"
+                    << velocity.x << ',' << velocity.y << ',' << velocity.z << '\n';
             check(solver.temperature().value(cell) - exact_temperature, 2.0e-7, "Cell temperature analytic error");
         }
         const double mass = solver.liquid_mass_inventory().totalMass();
@@ -230,6 +240,7 @@ int main(int argc, char** argv)
         std::string mode = "transient";
         std::filesystem::path output = "planar_ale_comparison";
         std::filesystem::path water_reference = "verification/openfoam/reference_water.properties";
+        std::filesystem::path mesh_file = "verification/openfoam/planarALE/mesh.dat";
         for (int i = 1; i < argc; ++i)
         {
             const std::string argument = argv[i];
@@ -239,13 +250,15 @@ int main(int argc, char** argv)
                 output = argv[++i];
             else if (argument == "--water-properties" && i + 1 < argc)
                 water_reference = argv[++i];
+            else if (argument == "--mesh-file" && i + 1 < argc)
+                mesh_file = argv[++i];
             else
                 throw std::invalid_argument("Usage: planar_ale_comparison --mode steady|transient --output DIR "
                                             "--water-properties FILE");
         }
         if (mode != "steady" && mode != "transient")
             throw std::invalid_argument("--mode must be steady or transient");
-        return run(mode, output, water_reference);
+        return run(mode, output, water_reference, mesh_file);
     }
     catch (const std::exception& error)
     {

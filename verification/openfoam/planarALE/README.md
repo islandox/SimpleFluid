@@ -23,6 +23,10 @@ conductivity, and expansion coefficient remain at the reference state. It does
 not enable nonlinear IF97 material callbacks in ALE. Sensible energy remains
 `sum(Mcell * cp_reference * T_K)`, as required by the current conservative
 solver contract; it is not IF97 specific enthalpy.
+The [shared boundary-layer mesh](../BOUNDARY_LAYER_MESHES.md) grades the z
+ends before solver construction. OpenFOAM's mesh is generated from the same
+explicit coordinates, and cell IDs are found by position rather than a
+uniform-grid index formula.
 
 This comparison covers thermal expansion, old/new-volume energy storage,
 geometry, GCL, and liquid mass conservation. The OpenFOAM reference does not
@@ -36,7 +40,7 @@ this fixture's scope. See [the model support matrix](../../../docs/modeling/plan
 | Input | Both implementations |
 | --- | --- |
 | Initial liquid domain | Cartesian `[0,1] × [0,1] × [0,1]` m |
-| Mesh | `1 × 1 × 8` uniform hexahedral cells; bottom fixed; affine axial expansion |
+| Mesh | `1 × 1 × 12` graded hexahedra; four layers at each z end; bottom fixed; affine axial expansion |
 | Vessel | Area `A = 1 m²`, bottom `0 m`, total height `2 m` |
 | Initial state | `T₀ = 300 K`, `p₀ = 101325 Pa` absolute; IF97 pure-liquid `ρ₀ ≈ 996.558 kg/m³`, `M = ρ₀ × 1 m³` |
 | Liquid density law | `ρₗ(T) = ρ₀[1 − β(T − T₀)]`; IF97 reference `β ≈ 2.744 × 10⁻⁴ K⁻¹` |
@@ -142,6 +146,15 @@ verification/openfoam/planarALE/run_openfoam.sh transient /tmp/ale-of
 ```
 
 ## Outputs and acceptance
+
+The solvers also write `fields.csv` with individual cell bounds, temperature,
+liquid density, zero gas fraction, and velocity. The launcher creates a
+`figures/index.html` gallery with final x–z distributions, absolute/relative
+errors, and full time–height histories. SimpleFluid exports its solved cell
+velocity; OpenFOAM exports the affine kinematic reference. These velocity
+figures are diagnostic, not a momentum acceptance test. See
+[figure definitions](../WATER_FIELD_FIGURES.md) for formats and undefined
+relative errors at zero reference.
 
 Both histories have one `sample=global` record at every declared time. They
 write the solver owner's accepted physical time and check it against the

@@ -333,4 +333,20 @@ TEST(ReactingGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
         std::invalid_argument);
 }
 
+TEST(ReactingGasPropertiesTest, TransportToleranceIsOptionalValidatedAndParsed)
+{
+    EXPECT_DOUBLE_EQ(SimpleFluid::ReactingGasOptions{}.transport_solver_tolerance,1e-10);
+    SimpleFluid::Database database;
+    database.set("enable_reaction_source",true);
+    database.set("hydrogen_yield_mol_per_j",SimpleFluid::real_t{2e-7});
+    database.set("max_source_alpha_rate",SimpleFluid::real_t{1});
+    database.set("reacting_transport_solver_tolerance",SimpleFluid::real_t{1e-14});
+    EXPECT_DOUBLE_EQ(SimpleFluid::reacting_gas_options_from_database(database).transport_solver_tolerance,1e-14);
+    for(double value:{0.0,-1.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+    {
+        database.set("reacting_transport_solver_tolerance",value);
+        EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database),std::invalid_argument);
+    }
+}
+
 } // namespace

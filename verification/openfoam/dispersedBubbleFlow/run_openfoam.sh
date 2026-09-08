@@ -18,8 +18,9 @@ set -eu
 command -v wmake >/dev/null
 command -v blockMesh >/dev/null
 command -v checkMesh >/dev/null
-python3 "$case_dir/prepare_openfoam.py" --mode "$mode" --output "$output_dir"
+python3 "$case_dir/prepare_openfoam.py" --mode "$mode" --output "$output_dir" --mesh "${SIMPLEFLUID_VERIFICATION_MESH:-$case_dir/mesh.dat}"
 cp -R "$case_dir/openfoam/solver" "$output_dir/reference-solver"
+cp "$case_dir/../StructuredCaseMesh.H" "$output_dir/reference-solver/"
 mkdir "$output_dir/bin"
 export FOAM_USER_APPBIN="$output_dir/bin"
 (cd "$output_dir/reference-solver" && wmake) > "$output_dir/log.wmake" 2>&1

@@ -340,6 +340,8 @@ ReactingGasOptions reacting_gas_options_from_database(
     SIMPLEFLUID_REACTING_REAL(
         local_ode_tolerance, "local_ode_tolerance");
     SIMPLEFLUID_REACTING_REAL(
+        transport_solver_tolerance, "reacting_transport_solver_tolerance");
+    SIMPLEFLUID_REACTING_REAL(
         liquid_compressibility, "liquid_compressibility");
     SIMPLEFLUID_REACTING_REAL(
         liquid_thermal_expansion, "liquid_thermal_expansion");
@@ -396,6 +398,8 @@ void validate_reacting_gas_options(
     }
     if (options.mode == ReactingGasMode::Disabled)
         return;
+
+    require_positive(options.transport_solver_tolerance, "reacting transport solver tolerance");
 
     require_positive(
         options.hydrogen_yield_mol_per_j,

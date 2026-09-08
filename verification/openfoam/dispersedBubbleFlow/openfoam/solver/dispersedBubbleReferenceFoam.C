@@ -2,6 +2,7 @@
 // Production is applied after implicit Euler/upwind transport, matching the
 // documented operator splitting in the SimpleFluid model.
 #include "fvCFD.H"
+#include "StructuredCaseMesh.H"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -12,6 +13,7 @@ int main(int argc, char *argv[])
     #include "setRootCase.H"
     #include "createTime.H"
     #include "createMesh.H"
+    const StructuredCaseMesh grid(mesh);
     if (Pstream::parRun()) FatalErrorInFunction << "Serial reference only" << exit(FatalError);
     IOdictionary properties(IOobject("verificationProperties", runTime.constant(), mesh,
         IOobject::MUST_READ, IOobject::NO_WRITE));
@@ -32,8 +34,8 @@ int main(int argc, char *argv[])
     const scalar source = mode == "steady" ? parameter("power_density") * parameter("yield_mol_per_j")
         * parameter("release_efficiency") : 0.0;
     const scalar initial = parameter(mode + "_initial_moles");
-    const label cells = label(parameter("cells"));
-    const scalar dz = height / cells, volume = height * sqr(width);
+    const label cells = grid.nz();
+    const scalar volume = height * sqr(width);
     const scalar end = parameter(mode + "_end_time");
     const label steps = label(std::llround(end / dt));
     const label writeSteps = label(std::llround(parameter(mode + "_write_interval") / dt));
@@ -55,6 +57,10 @@ int main(int argc, char *argv[])
     if (outlet < 0) FatalErrorInFunction << "Missing outlet" << exit(FatalError);
     std::ofstream profiles((runTime.path()/"profiles.csv").c_str());
     std::ofstream history((runTime.path()/"history.csv").c_str());
+    std::ofstream fields((runTime.path()/"fields.csv").c_str());
+    fields.exceptions(std::ios::badbit | std::ios::failbit);
+    fields << std::setprecision(17)
+        << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
     profiles << std::setprecision(17)
         << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,temperature_K,absolute_pressure_Pa,density_kg_m3,"
            "specific_heat_capacity_J_kg_K,dynamic_viscosity_Pa_s,thermal_conductivity_W_m_K,"
@@ -75,7 +81,10 @@ int main(int argc, char *argv[])
         forAll(microMoles, cell)
         {
             const scalar z = mesh.C()[cell].z();
-            const label sample = label(std::llround(z/dz - 0.5));
+            const label sample=grid.interval(grid.z,z);
+            fields << time << ',' << sample << ',' << grid.z[sample] << ',' << grid.z[sample+1] << ','
+                   << temperature << ',' << rho << ',' << microNumber[cell]*bubbleVolume
+                   << ",0,0," << parameter("carrier_velocity") << '\n';
             profiles << time << ',' << sample << ',' << z << ',' << microMoles[cell] << ','
                      << microNumber[cell] << ',' << microNumber[cell]*bubbleVolume << ','
                      << temperature << ',' << absolutePressure << ',' << rho << ',' << cp << ','
@@ -118,6 +127,7 @@ int main(int argc, char *argv[])
         forAll(microMoles, cell)
         {
             const scalar exact = source*mesh.C()[cell].z()/speed;
+            const scalar dz=mesh.V()[cell]/sqr(width);
             const scalar truncation = source*(0.5*dz/speed+dt);
             if (mag(microMoles[cell]-exact) > truncation*1.01+1e-12)
                 FatalErrorInFunction << "Steady continuum profile failed" << exit(FatalError);
@@ -128,7 +138,9 @@ int main(int argc, char *argv[])
         scalar l1 = 0;
         forAll(microMoles, cell)
         {
-            const scalar upper = mesh.C()[cell].z()+0.5*dz;
+            const label sample=grid.interval(grid.z,mesh.C()[cell].z());
+            const scalar dz=grid.z[sample+1]-grid.z[sample];
+            const scalar upper=grid.z[sample+1];
             const scalar exact = initial*std::clamp((upper-speed*end)/dz, scalar(0), scalar(1));
             l1 += mag(microMoles[cell]-exact)*dz/(initial*height);
         }
