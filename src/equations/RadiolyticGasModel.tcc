@@ -451,6 +451,7 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
         throw std::invalid_argument("Radiolytic integral volume span must use mesh-local cell order.");
     }
     scalar_type local_integral{};
+    const auto values = field.owned_read_view();
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
@@ -458,7 +459,7 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
         const auto volume = cell_volumes.empty()
                                 ? static_cast<scalar_type>(d_mesh->cell_volume(cell_lid))
                                 : static_cast<scalar_type>(cell_volumes[owned]);
-        local_integral += field.value(cell_lid) * volume;
+        local_integral += values(owned, 0) * volume;
     }
     return global_sum(local_integral);
 }
@@ -1202,38 +1203,37 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
 
     face_flux_field_type transport_flux(
         d_mesh, 0.0, "radiolytic_transport_flux");
-    for (size_t face = 0; face < d_mesh->num_faces(); ++face)
     {
-        const auto face_lid =
-            static_cast<local_ordinal_type>(face);
-        if (!transport_flux.is_owned_face(face_lid))
-            continue;
-        auto flux = liquid_face_flux.is_owned_face(face_lid)
-            ? liquid_face_flux.value(face_lid)
-            : scalar_type{};
-        if (slip_velocity)
+        const auto liquid_flux_values = liquid_face_flux.owned_read_view();
+        const auto slip_values = slip_velocity ? slip_velocity->local_read_view()
+                                              : decltype(field.local_read_view()){};
+        const auto flux_values = transport_flux.owned_write_view();
+        for (const auto face_lid : transport_flux.owned_face_ids())
         {
-            const auto owner = d_mesh->owner_cell(face_lid);
-            auto face_slip = slip_velocity->local_value(owner);
-            if (!d_mesh->is_boundary_face(face_lid))
-            {
-                const auto neighbor =
-                    d_mesh->opposite_or_periodic_neighbor_cell(
-                        face_lid, owner);
-                face_slip = 0.5
-                    * (face_slip
-                       + slip_velocity->local_value(neighbor));
-            }
-            flux += face_slip * d_mesh->face_area_vector(face_lid).component(
-                                    static_cast<size_t>(slip_component));
-        }
-        if (d_mesh->is_boundary_face(face_lid))
-        {
-            flux = is_free_surface(face_lid)
-                ? std::max(flux, scalar_type{})
+            auto flux = liquid_face_flux.is_owned_face(face_lid)
+                ? liquid_flux_values(liquid_face_flux.owned_row(face_lid), 0)
                 : scalar_type{};
+            if (slip_velocity)
+            {
+                const auto owner = d_mesh->owner_cell(face_lid);
+                auto face_slip = slip_values(owner, 0);
+                if (!d_mesh->is_boundary_face(face_lid))
+                {
+                    const auto neighbor =
+                        d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
+                    face_slip = 0.5 * (face_slip + slip_values(neighbor, 0));
+                }
+                flux += face_slip * d_mesh->face_area_vector(face_lid).component(
+                                        static_cast<size_t>(slip_component));
+            }
+            if (d_mesh->is_boundary_face(face_lid))
+            {
+                flux = is_free_surface(face_lid)
+                    ? std::max(flux, scalar_type{})
+                    : scalar_type{};
+            }
+            flux_values(transport_flux.owned_row(face_lid), 0) = flux;
         }
-        transport_flux.set_value(face_lid, flux);
     }
     if constexpr (requires { transport_flux.sync_ghosts(); })
     {
@@ -1243,35 +1243,26 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     field_type old_values(d_mesh, "radiolytic_transport_old");
     field_type storage_weight(
         d_mesh, 1.0, "radiolytic_storage_weight");
-    field_type advection_weight(
-        d_mesh, 1.0, "radiolytic_advection_weight");
     field_type diffusion_weight(
         d_mesh, 0.0, "radiolytic_diffusion_weight");
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        const auto liquid_fraction =
-            std::max(d_alpha_l.value(cell_lid), 1.0e-15);
-        old_values.set_owned_value(
-            cell_lid,
-            liquid_weighted
-                ? field.value(cell_lid) / liquid_fraction
-                : field.value(cell_lid));
-        if (liquid_weighted)
+        const auto liquid_values = d_alpha_l.owned_read_view();
+        const auto field_values = field.owned_read_view();
+        const auto old = old_values.owned_write_view();
+        const auto storage = storage_weight.owned_write_view();
+        const auto diffusion = diffusion_weight.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            storage_weight.set_owned_value(
-                cell_lid, liquid_fraction);
-            advection_weight.set_owned_value(
-                cell_lid, liquid_fraction);
+            const auto liquid_fraction = std::max(liquid_values(owned, 0), 1.0e-15);
+            old(owned, 0) = liquid_weighted ? field_values(owned, 0) / liquid_fraction
+                                          : field_values(owned, 0);
+            if (liquid_weighted)
+                storage(owned, 0) = liquid_fraction;
+            diffusion(owned, 0) = diffuse ? liquid_fraction * diffusivity : 0.0;
         }
-        diffusion_weight.set_owned_value(
-            cell_lid,
-            diffuse ? liquid_fraction * diffusivity : 0.0);
     }
     old_values.sync_ghosts();
     storage_weight.sync_ghosts();
-    advection_weight.sync_ghosts();
     diffusion_weight.sync_ghosts();
 
     auto boundary_condition =
@@ -1290,7 +1281,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
             .face_fluxes = transport_flux,
             .time_step = time_step,
             .storage_weight = storage_weight,
-            .advection_weight = advection_weight,
+            // Storage and advection use the same frozen liquid fraction.
+            .advection_weight = storage_weight,
             .diffusivity = diffusion_weight,
             .boundary_condition = boundary_condition,
             .boundary_value = boundary_value,
@@ -1315,48 +1307,51 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
             "Radiolytic weighted transport solve did not converge.");
     }
 
-    for (size_t owned = 0;
-         owned < d_mesh->num_owned_cells();
-         ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        auto transported = solution.value(cell_lid);
-        if (liquid_weighted)
-            transported *= storage_weight.value(cell_lid);
-        if (!std::isfinite(transported) || transported < 0.0)
+        const auto solution_values = solution.owned_read_view();
+        const auto storage = storage_weight.owned_read_view();
+        const auto field_values = field.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            ++d_last_statistics.clipped_cells;
-            transported = 0.0;
+            auto transported = solution_values(owned, 0);
+            if (liquid_weighted)
+                transported *= storage(owned, 0);
+            if (!std::isfinite(transported) || transported < 0.0)
+            {
+                ++d_last_statistics.clipped_cells;
+                transported = 0.0;
+            }
+            field_values(owned, 0) = transported;
         }
-        field.set_owned_value(cell_lid, transported);
     }
     field.sync_ghosts();
 
-    for (size_t face = 0; face < d_mesh->num_faces(); ++face)
+    const auto flux_values = transport_flux.owned_read_view();
+    const auto field_values = field.owned_read_view();
+    const auto storage_values = storage_weight.owned_read_view();
+    const auto advection_values = storage_weight.local_read_view();
+    const auto escape_values = escape_rate.owned_write_view();
+    for (const auto face_lid : transport_flux.owned_face_ids())
     {
-        const auto face_lid =
-            static_cast<local_ordinal_type>(face);
-        if (!transport_flux.is_owned_face(face_lid)
-            || !is_free_surface(face_lid))
+        if (!is_free_surface(face_lid))
         {
             continue;
         }
         const auto flux =
-            std::max(transport_flux.value(face_lid), scalar_type{});
+            std::max(flux_values(transport_flux.owned_row(face_lid), 0), scalar_type{});
         const auto owner = d_mesh->owner_cell(face_lid);
         const auto primary_value = liquid_weighted
-            ? field.value(owner) / storage_weight.value(owner)
-            : field.value(owner);
+            ? field_values(owner, 0) / storage_values(owner, 0)
+            : field_values(owner, 0);
         const auto boundary_rate =
             flux
-          * advection_weight.local_value(owner)
+          * advection_values(owner, 0)
           * primary_value;
         const auto volume = ale == nullptr
                                 ? static_cast<scalar_type>(d_mesh->cell_volume(owner))
                                 : static_cast<scalar_type>(
                                       ale->new_cell_volumes()[static_cast<size_t>(owner)]);
-        escape_rate.sum_into_value(owner, boundary_rate / volume);
+        escape_values(owner, 0) += boundary_rate / volume;
     }
 }
 

@@ -63,8 +63,8 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
     ScalarFaceFieldStored<Pack, MeshType>& fluxes,
     CellGradientScheme gradient_scheme = CellGradientScheme::LeastSquares)
 {
-    using local_ordinal_type = typename Pack::local_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
+    using vec_type = typename VectorCellFieldStored<Pack, MeshType>::value_type;
 
     if (pressure.mesh_ptr().get() != velocity.mesh_ptr().get() || fluxes.mesh_ptr().get() != velocity.mesh_ptr().get())
     {
@@ -121,78 +121,87 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
 
     const auto& mesh = velocity.mesh();
     const auto& boundary_locations = workspace.boundary_locations();
-    for (size_t face = 0; face < mesh.num_faces(); ++face)
+    const auto num_owned_cells = velocity.num_owned_cells();
     {
-        const auto face_lid = static_cast<local_ordinal_type>(face);
-        if (!fluxes.is_owned(face_lid))
+        // Release host views before importing the final owned fluxes below.
+        const auto velocity_values = velocity.local_read_view();
+        const auto pressure_values = pressure.local_read_view();
+        const auto gradient_values = pressure_gradient.local_read_view();
+        auto flux_values = fluxes.owned_write_view();
+        for (const auto face_lid : fluxes.owned_face_ids())
         {
-            continue;
-        }
+            const auto face = static_cast<size_t>(face_lid);
 
-        const auto face_id = query_face_id(mesh, face_lid);
-        const auto owner_id = mesh.owner_cell(face_id);
-        const auto owner_lid = packed_cell_local_id(mesh, owner_id);
-        if (!velocity.is_owned(owner_lid))
-        {
-            continue;
-        }
-
-        const auto area_vector = mesh.face_area_vector_outward(face_id, owner_id);
-        if (!mesh.is_interior_face(face_id))
-        {
-            if (pressure_boundary_conditions == nullptr || !mesh.is_boundary_face(face_id) ||
-                face >= boundary_locations.size())
+            const auto face_id = query_face_id(mesh, face_lid);
+            const auto owner_id = mesh.owner_cell(face_id);
+            const auto owner_lid = packed_cell_local_id(mesh, owner_id);
+            if (static_cast<size_t>(owner_lid) >= num_owned_cells)
             {
                 continue;
             }
-            const auto location = boundary_locations[face];
-            if (!location.active)
+
+            const auto area_vector = mesh.face_area_vector_outward(face_id, owner_id);
+            if (!mesh.is_interior_face(face_id))
+            {
+                if (pressure_boundary_conditions == nullptr || !mesh.is_boundary_face(face_id) ||
+                    face >= boundary_locations.size())
+                {
+                    continue;
+                }
+                const auto location = boundary_locations[face];
+                if (!location.active)
+                {
+                    continue;
+                }
+                const auto& name = mesh.boundary_batch_name(location.batch_id);
+                const auto condition_iter = pressure_boundary_conditions->find(name);
+                const auto condition = condition_iter == pressure_boundary_conditions->end() ? BoundaryCondition{}
+                                                                                            : condition_iter->second;
+                if (condition.type == BoundaryConditionType::Neumann)
+                {
+                    continue;
+                }
+                if (condition.type != BoundaryConditionType::Dirichlet)
+                {
+                    throw std::invalid_argument("pressure_weighted_face_fluxes supports only Dirichlet "
+                                                "and Neumann pressure boundary conditions.");
+                }
+
+                const vec_type owner_velocity{
+                    velocity_values(owner_lid, 0), velocity_values(owner_lid, 1), velocity_values(owner_lid, 2)};
+                const vec_type owner_gradient{
+                    gradient_values(owner_lid, 0), gradient_values(owner_lid, 1), gradient_values(owner_lid, 2)};
+                const auto direct_gradient_flux =
+                    (static_cast<scalar_type>(condition.value) - pressure_values(owner_lid, 0)) *
+                    boundary_diffusion_coefficient(mesh, face_lid, owner_lid, scalar_type{1});
+                const auto interpolated_gradient_flux = owner_gradient.dot(area_vector);
+                flux_values(face_lid, 0) = owner_velocity.dot(area_vector) -
+                                         pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
+                continue;
+            }
+
+            const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
+            const auto neighbor_lid = packed_cell_local_id(mesh, neighbor_id);
+            const auto center_delta = mesh.cell_centroid(neighbor_id) - mesh.cell_centroid(owner_id);
+            const auto distance_squared = center_delta.dot(center_delta);
+            if (distance_squared <= scalar_type{})
             {
                 continue;
             }
-            const auto& name = mesh.boundary_batch_name(location.batch_id);
-            const auto condition_iter = pressure_boundary_conditions->find(name);
-            const auto condition =
-                condition_iter == pressure_boundary_conditions->end() ? BoundaryCondition{} : condition_iter->second;
-            if (condition.type == BoundaryConditionType::Neumann)
-            {
-                continue;
-            }
-            if (condition.type != BoundaryConditionType::Dirichlet)
-            {
-                throw std::invalid_argument("pressure_weighted_face_fluxes supports only Dirichlet "
-                                            "and Neumann pressure boundary conditions.");
-            }
 
-            const auto owner_velocity = velocity.local_value(owner_lid);
-            const auto direct_gradient_flux =
-                (static_cast<scalar_type>(condition.value) - pressure.local_value(owner_lid)) *
-                boundary_diffusion_coefficient(mesh, face_lid, owner_lid, scalar_type{1});
-            const auto interpolated_gradient_flux = pressure_gradient.local_value(owner_lid).dot(area_vector);
-            fluxes.set_owned_value(
-                face_lid, owner_velocity.dot(area_vector) -
-                              pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux));
-            continue;
+            const auto direct_gradient_flux = (pressure_values(neighbor_lid, 0) - pressure_values(owner_lid, 0)) *
+                                              area_vector.dot(center_delta) / distance_squared;
+            const auto [owner_weight, neighbor_weight] =
+                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid);
+            const vec_type owner_gradient{
+                gradient_values(owner_lid, 0), gradient_values(owner_lid, 1), gradient_values(owner_lid, 2)};
+            const vec_type neighbor_gradient{
+                gradient_values(neighbor_lid, 0), gradient_values(neighbor_lid, 1), gradient_values(neighbor_lid, 2)};
+            const auto interpolated_gradient = owner_gradient * owner_weight + neighbor_gradient * neighbor_weight;
+            const auto interpolated_gradient_flux = interpolated_gradient.dot(area_vector);
+            flux_values(face_lid, 0) =
+                flux_values(face_lid, 0) - pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
         }
-
-        const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
-        const auto neighbor_lid = packed_cell_local_id(mesh, neighbor_id);
-        const auto center_delta = mesh.cell_centroid(neighbor_id) - mesh.cell_centroid(owner_id);
-        const auto distance_squared = center_delta.dot(center_delta);
-        if (distance_squared <= scalar_type{})
-        {
-            continue;
-        }
-
-        const auto direct_gradient_flux = (pressure.local_value(neighbor_lid) - pressure.local_value(owner_lid)) *
-                                          area_vector.dot(center_delta) / distance_squared;
-        const auto [owner_weight, neighbor_weight] =
-            stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid);
-        const auto interpolated_gradient = pressure_gradient.local_value(owner_lid) * owner_weight +
-                                           pressure_gradient.local_value(neighbor_lid) * neighbor_weight;
-        const auto interpolated_gradient_flux = interpolated_gradient.dot(area_vector);
-        fluxes.set_owned_value(face_lid,
-            fluxes.value(face_lid) - pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux));
     }
     fluxes.sync_ghosts();
 }
