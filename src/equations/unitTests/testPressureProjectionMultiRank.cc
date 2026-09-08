@@ -515,3 +515,97 @@ TEST(PressureProjectionMultiRankTest,
 
     EXPECT_EQ(global_min(*comm, local_rejected), 1);
 }
+
+/** @brief PCG/DIC retains cross-rank pressure coupling after gauge elimination. */
+TEST(PressureProjectionMultiRankTest,
+     ParallelDicMatchesGmresPressureAndConservativeCorrectedFlux)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 2, 1, 0.25));
+    const auto row_map = mesh->owned_cell_map();
+    const auto comm = row_map->getComm();
+    if (comm->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+    ASSERT_GT(global_min(*comm, static_cast<int>(mesh->num_owned_cells())), 1);
+    const auto gauge = row_map->getMinAllGlobalIndex();
+    const auto last_gid = row_map->getMaxAllGlobalIndex();
+    std::vector<scalar_type> rates(mesh->num_owned_cells(), scalar_type{});
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto gid = row_map->getGlobalElement(
+            static_cast<Pack::local_ordinal_type>(owned));
+        rates[owned] = gid == gauge ? scalar_type{0.125}
+            : gid == last_gid ? scalar_type{-0.125} : scalar_type{};
+    }
+    const SimpleFluid::VolumeContinuityTarget<Pack> target(mesh, rates, 31);
+    const SimpleFluid::BoundaryConditionSet boundary_conditions;
+    const auto boundary_cache =
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            mesh, boundary_conditions);
+
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    options.max_iterations = 100;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> gmres_equation(mesh, options);
+    FieldType gmres_pressure(mesh, "distributed_gmres_pressure");
+    VectorFieldType gmres_velocity(mesh, SimpleFluid::vec3{}, "distributed_gmres_velocity");
+    const auto gmres = gmres_equation.project(
+        gmres_pressure, 0.1, 1.0, boundary_cache, gmres_velocity, target);
+    ASSERT_TRUE(gmres.linear_solve.converged);
+
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
+    SimpleFluid::PressureProjectionEquation<Pack> dic_equation(mesh, options);
+    FieldType dic_pressure(mesh, "distributed_dic_pressure");
+    VectorFieldType dic_velocity(mesh, SimpleFluid::vec3{}, "distributed_dic_velocity");
+    const auto dic = dic_equation.project(
+        dic_pressure, 0.1, 1.0, boundary_cache, dic_velocity, target);
+    ASSERT_TRUE(dic.linear_solve.converged);
+    EXPECT_LE(dic.linear_solve.achieved_tolerance, options.tolerance);
+    EXPECT_GT(dic.pressure_correction, 1.0e-6);
+    EXPECT_NEAR(dic.pressure_correction, gmres.pressure_correction, 1.0e-11);
+    EXPECT_NEAR(dic.continuity, 0.0, 1.0e-11);
+    EXPECT_NEAR(dic.continuity, gmres.continuity, 1.0e-11);
+
+    const auto matrix =
+        SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::pressure_matrix(dic_equation);
+    int local_remote_entries = 0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto row = static_cast<Pack::local_ordinal_type>(owned);
+        const auto row_gid = row_map->getGlobalElement(row);
+        EXPECT_NEAR(dic_pressure.value(row), gmres_pressure.value(row), 1.0e-10);
+        const auto velocity_difference = dic_velocity.value(row) - gmres_velocity.value(row);
+        EXPECT_NEAR(velocity_difference.dot(velocity_difference), 0.0, 1.0e-20);
+        const auto balance = SimpleFluid::FVM::cell_flux_balance<Pack>(
+            *mesh, dic_equation.corrected_face_fluxes(), row);
+        EXPECT_NEAR(balance, rates[owned], 1.0e-11);
+
+        typename Pack::matrix_type::local_inds_host_view_type columns;
+        typename Pack::matrix_type::values_host_view_type values;
+        matrix->getLocalRowView(row, columns, values);
+        for (size_t entry = 0; entry < columns.extent(0); ++entry)
+        {
+            const auto column_gid = matrix->getColMap()->getGlobalElement(columns[entry]);
+            if (column_gid == row_gid)
+                EXPECT_GT(values[entry], 0.0);
+            if (column_gid == gauge)
+                EXPECT_DOUBLE_EQ(values[entry], row_gid == gauge ? 1.0 : 0.0);
+            if (!row_map->isNodeGlobalElement(column_gid) && values[entry] != 0.0)
+                ++local_remote_entries;
+        }
+    }
+    // A two-cell fixture loses its only partition edge when the gauge is
+    // removed. This physical matrix must retain nonzero remote dependencies.
+    EXPECT_GT(global_sum(*comm, local_remote_entries), 0);
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
+        if (mesh->is_owned_face(face_lid))
+            EXPECT_NEAR(dic_equation.corrected_face_fluxes().value(face_lid),
+                        gmres_equation.corrected_face_fluxes().value(face_lid), 1.0e-11);
+    }
+}

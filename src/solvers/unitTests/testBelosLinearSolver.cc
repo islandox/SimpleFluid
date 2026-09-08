@@ -816,7 +816,7 @@ TEST(BelosLinearSolverTest, RejectsIfpack2ForNonCrsOperators)
 TEST(BelosLinearSolverTest, DICAppliesDiagonalIncompleteCholeskyInverse)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
-        GTEST_SKIP() << "Exact DIC currently requires one rank.";
+        GTEST_SKIP() << "Serial local-order check; distributed DIC has separate MPI coverage.";
 
     const auto matrix = block_matrix<3>({{
         {{4.0, -1.0, -1.0}}, {{-1.0, 4.0, -1.0}}, {{-1.0, -1.0, 4.0}}}});
@@ -863,7 +863,7 @@ TEST(BelosLinearSolverTest, DICAppliesDiagonalIncompleteCholeskyInverse)
 TEST(BelosLinearSolverTest, DICRejectsNonsymmetricAndNonpositiveMatrices)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
-        GTEST_SKIP() << "Exact DIC currently requires one rank.";
+        GTEST_SKIP() << "Serial local-order check; distributed DIC has separate MPI coverage.";
 
     for (const auto entries : {
              std::array<std::array<double, 2>, 2>{{{{2.0, -1.0}}, {{0.0, 2.0}}}},
@@ -877,12 +877,9 @@ TEST(BelosLinearSolverTest, DICRejectsNonsymmetricAndNonpositiveMatrices)
     }
 }
 
-/** @brief Reject distributed DIC consistently on all ranks before setup. */
-TEST(BelosLinearSolverTest, DICRejectsDistributedMatricesCollectively)
+/** @brief The existing Belos selector also supports distributed DIC factors. */
+TEST(BelosLinearSolverTest, DICSolvesDistributedBlockMatrices)
 {
-    if (Tpetra::getDefaultComm()->getSize() == 1)
-        GTEST_SKIP() << "Run with two ranks to check distributed rejection.";
-
     const auto matrix = block_matrix<2>({{{{2.0, -1.0}}, {{-1.0, 2.0}}}});
     Pack::vector_type rhs(matrix->getRowMap(), true);
     Pack::vector_type solution(matrix->getRowMap(), true);
@@ -891,15 +888,16 @@ TEST(BelosLinearSolverTest, DICRejectsDistributedMatricesCollectively)
     options.backend = SimpleFluid::LinearSolverBackend::Cg;
     options.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
     SimpleFluid::BelosLinearSolver<Pack> solver;
-    EXPECT_THROW(solver.solve(matrix, rhs, solution, options), std::invalid_argument);
-    EXPECT_EQ(preconditioner_setup_count(solver), 0U);
+    EXPECT_TRUE(solver.solve(matrix, rhs, solution, options));
+    EXPECT_LT(true_relative_residual(solver, matrix, rhs, solution), options.tolerance);
+    EXPECT_EQ(preconditioner_setup_count(solver), 1U);
 }
 
 /** @brief A noncommuting SPD factor exercises the actual PCG recurrence. */
 TEST(BelosLinearSolverTest, PCGWithDICSolvesSymmetricSystem)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
-        GTEST_SKIP() << "Exact DIC currently requires one rank.";
+        GTEST_SKIP() << "Serial local-order check; distributed DIC has separate MPI coverage.";
 
     const auto matrix = block_matrix<4>({{
         {{4.0, -1.0, 0.0, -1.0}}, {{-1.0, 5.0, -1.0, 0.0}},
