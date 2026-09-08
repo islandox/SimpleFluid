@@ -10,4 +10,5 @@ export_build_env "$repo_dir"
 simplefluid_build_target planar_ale_comparison "${SIMPLEFLUID_BUILD_JOBS:-4}"
 executable=$(simplefluid_executable planar_ale_comparison)
 "$executable" --mode "$mode" --output "$output" \
-    --water-properties "$case_dir/../reference_water.properties"
+    --water-properties "$case_dir/../reference_water.properties" \
+    --mesh-file "${SIMPLEFLUID_VERIFICATION_MESH:-$case_dir/mesh.dat}"

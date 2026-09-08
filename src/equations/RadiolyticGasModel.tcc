@@ -1301,12 +1301,14 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
             .ale = ale});
 
     field_type solution(d_mesh, "radiolytic_transport_solution");
+    LinearSolverOptions transport_options;
+    transport_options.tolerance=d_options.transport_solver_tolerance;
     const auto solve_statistics =
         d_transport_solver.solve_with_statistics(
             system.matrix,
             *system.rhs,
             solution.owned_data(),
-            LinearSolverOptions{});
+            transport_options);
     if (!solve_statistics.converged)
     {
         throw std::runtime_error(

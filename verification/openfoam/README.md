@@ -6,6 +6,12 @@ time discretization, acceptance tolerances, and model limitations.
 
 ## Dispersed bubbles and planar ALE
 
+For a bottom-driven flow with **solved liquid convection**, use
+[`bottomHeatedBubblyConvection`](bottomHeatedBubblyConvection/README.md).
+It adds localized heat and H2 production, gravity, cold walls, gas escape,
+and a 20-second plume/return-flow comparison with two-dimensional field figures.
+The fixed mesh accommodates physics currently rejected by the narrow ALE path.
+
 | Model | Steady verification | Transient verification |
 | --- | --- | --- |
 | [Dispersed bubbles](dispersedBubbleFlow/README.md) | Uniform microbubble production balanced by top escape | Clearance of an initial microbubble inventory |
@@ -62,6 +68,15 @@ README for the generated files and reference-application build details.
 `SIMPLEFLUID_ENABLE_IF97` remains OFF by default. In that configuration the
 two water-case executables exit with an explicit enable-IF97 diagnostic,
 and their solver CTests are not registered. No synthetic fluid is substituted.
+
+Each comparison also writes a `figures/index.html` gallery with temperature,
+liquid-density, gas-volume-fraction, and velocity distributions and relative
+errors. SVG output needs only Python; PNG/PDF exports use `rsvg-convert` when
+available. See [field figures and error definitions](WATER_FIELD_FIGURES.md)
+for spatial/time histories, zero-reference handling, and velocity scope.
+The cases use matched [boundary-layer meshes](BOUNDARY_LAYER_MESHES.md), with
+native-factory coordinates shared by both solvers and a finer convection mesh
+for sensitivity checks. Run-specific manifests retain the selected grid.
 
 The shared [`compare_verification.py`](compare_verification.py) requires
 explicit expected times, sample identifiers, quantity tolerances, and

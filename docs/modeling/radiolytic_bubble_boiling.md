@@ -39,6 +39,14 @@ bounded scalar update would otherwise discard.
 
 ## Configuration Keys
 
+`radiolytic_transport_solver_tolerance` optionally sets the relative linear
+solve tolerance for radiolytic finite-volume inventory transport (default
+`1e-10`). The typed option is `RadiolyticGasOptions::transport_solver_tolerance`.
+Graded meshes with nearly zero early escape may require tighter algebraic
+accuracy to satisfy the unchanged roundoff-level inventory checks; the
+bottom-heated boundary-layer fixture uses `1e-14`. This is separate from
+`local_ode_tolerance`, which controls local kinetics/radius calculations.
+
 Boiling keys:
 
 ```text

@@ -1,6 +1,7 @@
 // Independent OpenFOAM finite-volume reference for uniform thermal expansion.
 // The fluid and mesh share the affine normal velocity: relative flux is zero.
 #include "fvCFD.H"
+#include "StructuredCaseMesh.H"
 
 #include <cmath>
 #include <fstream>
@@ -12,6 +13,7 @@ int main(int argc, char* argv[])
     #include "setRootCase.H"
     #include "createTime.H"
     #include "createMesh.H"
+    const StructuredCaseMesh grid(mesh);
     const word mode(args.getOrDefault<word>("mode", "transient"));
     if (Pstream::parRun() || (mode != "steady" && mode != "transient"))
     {
@@ -54,6 +56,10 @@ int main(int argc, char* argv[])
     T.oldTime();
     rhoCp.oldTime();
     std::ofstream csv((runTime.path()/"history.csv").c_str());
+    std::ofstream spatial((runTime.path()/"fields.csv").c_str());
+    spatial.exceptions(std::ios::badbit | std::ios::failbit);
+    spatial << std::setprecision(17)
+        << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
     csv.exceptions(std::ios::badbit | std::ios::failbit);
     csv << std::setprecision(17)
         << "time_s,sample,temperature_K,level_m,volume_m3,liquid_mass_kg,energy_J,cumulative_heat_J,"
@@ -126,6 +132,13 @@ int main(int argc, char* argv[])
             volume += mesh.V()[celli];
             mass += rhoCp[celli]/cp*mesh.V()[celli];
             energy += rhoCp[celli]*mesh.V()[celli]*T[celli];
+            const scalar z = mesh.C()[celli].z();
+            const scalar dz = mesh.V()[celli]; // Unit cross-sectional area.
+            const label sample=grid.interval(grid.z,z/level);
+            // Kinematic affine reference only: this application solves no momentum.
+            const scalar uz = step ? z/level*(level-previousLevel)/dt : 0.0;
+            spatial << runTime.value() << ',' << sample << ',' << z-0.5*dz << ',' << z+0.5*dz << ','
+                    << T[celli] << ',' << rho0*(1-beta*(T[celli]-T0)) << ",0,0,0," << uz << '\n';
             check(T[celli]-exactT, 2e-7, "Cell temperature analytic error");
         }
         if (step)

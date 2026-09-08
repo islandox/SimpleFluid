@@ -340,6 +340,8 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
     SIMPLEFLUID_RADIOLYTIC_REAL(
         local_ode_tolerance, "local_ode_tolerance");
     SIMPLEFLUID_RADIOLYTIC_REAL(
+        transport_solver_tolerance, "radiolytic_transport_solver_tolerance");
+    SIMPLEFLUID_RADIOLYTIC_REAL(
         liquid_compressibility, "liquid_compressibility");
     SIMPLEFLUID_RADIOLYTIC_REAL(
         liquid_thermal_expansion, "liquid_thermal_expansion");
@@ -396,6 +398,8 @@ void validate_radiolytic_gas_options(
     }
     if (options.mode == RadiolyticGasMode::Disabled)
         return;
+
+    require_positive(options.transport_solver_tolerance, "radiolytic transport solver tolerance");
 
     require_positive(
         options.hydrogen_yield_mol_per_j,

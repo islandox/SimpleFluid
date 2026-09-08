@@ -304,6 +304,7 @@ namespace
         scalar(gas->max_population);
         scalar(gas->max_concentration);
         scalar(gas->local_ode_tolerance);
+        scalar(gas->transport_solver_tolerance);
         scalar(gas->max_subcycles);
         scalar(gas->max_radius_iterations);
         scalar(gas->liquid_compressibility);
