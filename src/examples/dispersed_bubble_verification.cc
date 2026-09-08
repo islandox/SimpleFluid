@@ -4,6 +4,7 @@
 #include "IF97ReferenceWater.hh"
 #include "VerificationMesh.hh"
 #include "VerificationLinearSolvers.hh"
+#include "VerificationParallel.hh"
 #include "equations/RadiolyticGasModel.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -33,8 +34,7 @@ using Model = SimpleFluid::RadiolyticGasModel<Pack, Mesh>;
 
 void require(bool condition, const std::string& message)
 {
-    if (!condition)
-        throw std::runtime_error(message);
+    SimpleFluid::Verification::ParallelContext(Tpetra::getDefaultComm()).require(condition, message);
 }
 
 std::map<std::string, double> read_parameters(const std::string& path)
@@ -84,7 +84,6 @@ int run(int argc, char** argv)
             throw std::runtime_error("Unknown argument " + option);
     }
     require(mode == "steady" || mode == "transient", "Mode must be steady or transient");
-    require(Tpetra::getDefaultComm()->getSize() == 1, "This matched Cartesian verification is serial");
     const auto values = read_parameters(parameters);
     const auto water = SimpleFluid::Verification::load_if97_reference_water(water_parameters);
     const auto& liquid = water.liquid;
@@ -106,6 +105,12 @@ int run(int argc, char** argv)
         "Shared mesh differs from bubble column");
     auto geometry = std::make_shared<Mesh::Cartesian>(grid.coordinates());
     auto mesh = std::make_shared<Mesh>(std::move(geometry));
+    const SimpleFluid::Verification::ParallelContext parallel(mesh->owned_cell_map()->getComm());
+    const int local_cells = static_cast<int>(mesh->num_owned_cells());
+    require(parallel.sum(local_cells) == cells, "Partitioned mesh differs from shared cell count");
+    std::vector<size_t> samples(local_cells);
+    for (int i = 0; i < local_cells; ++i)
+        samples[i] = grid.interval(z, mesh->cell_centroid(i).z);
     Field temperature(mesh, liquid.temperature, "T"), pressure(mesh, 0.0, "p");
     Field power(mesh, mode == "steady" ? p("power_density") : 0.0, "qdot");
     Velocity velocity(mesh, Mesh::Vec3{0.0, 0.0, p("carrier_velocity")}, "U");
@@ -168,15 +173,15 @@ int run(int argc, char** argv)
     double escaped = 0.0, produced = 0.0, escaped_number = 0.0, last_escape = 0.0;
     double maximum_change = 0.0;
     int steady_checks = 0;
+    output = parallel.output_directory(output).string();
     std::filesystem::create_directories(output);
     SimpleFluid::Verification::LinearSolverHistory linear_history(output);
     std::ofstream profiles(std::filesystem::path(output) / "profiles.csv");
     std::ofstream history(std::filesystem::path(output) / "history.csv");
     std::ofstream fields(std::filesystem::path(output) / "fields.csv");
-    fields.exceptions(std::ios::badbit | std::ios::failbit);
+    require(profiles.good() && history.good() && fields.good(), "Cannot create verification CSV files");
     fields << std::setprecision(17)
            << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
-    require(profiles.good() && history.good(), "Cannot create verification CSV files");
     profiles << std::setprecision(17)
              << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,temperature_K,absolute_pressure_Pa,"
                 "density_kg_m3,"
@@ -190,20 +195,22 @@ int run(int argc, char** argv)
     {
         const double inventory = gas.global_microbubble_hydrogen_moles();
         double number = 0.0;
-        for (int i = 0; i < cells; ++i)
+        for (int i = 0; i < local_cells; ++i)
             number += gas.micro_number_density().value(i) * mesh->cell_volume(i);
+        number = parallel.sum(number);
         const double balance = inventory + escaped - initial_inventory - produced;
         const double number_balance = (number + escaped_number - (initial_inventory + produced) / moles_per_bubble) /
                                       ((initial_inventory + produced) / moles_per_bubble);
         require(std::abs(balance) < 2e-13 && std::abs(number_balance) < 2e-8, "Global bubble conservation gate failed");
-        for (int i = 0; i < cells; ++i)
+        for (int i = 0; i < local_cells; ++i)
         {
+            const auto sample = samples[i];
             const double rho = material.density.value(i), cp = material.specific_heat_capacity.value(i);
             const double mu = material.dynamic_viscosity.value(i), k = material.thermal_conductivity.value(i);
             const auto u = velocity.value(i);
-            fields << time << ',' << i << ',' << z[i] << ',' << z[i + 1] << ',' << temperature.value(i) << ',' << rho
+            fields << time << ',' << sample << ',' << z[sample] << ',' << z[sample + 1] << ',' << temperature.value(i) << ',' << rho
                    << ',' << gas.alpha_g().value(i) << ',' << u.x << ',' << u.y << ',' << u.z << '\n';
-            profiles << time << ',' << i << ',' << 0.5 * (z[i] + z[i + 1]) << ',' << gas.micro_moles().value(i) << ','
+            profiles << time << ',' << sample << ',' << 0.5 * (z[sample] + z[sample + 1]) << ',' << gas.micro_moles().value(i) << ','
                      << gas.micro_number_density().value(i) << ',' << gas.alpha_g().value(i) << ','
                      << temperature.value(i) << ',' << gas.absolute_pressure().value(i) << ',' << rho << ',' << cp
                      << ',' << mu << ',' << k << ',' << mu / rho << ',' << k / (rho * cp) << ','
@@ -213,10 +220,12 @@ int run(int argc, char** argv)
                 << balance << ',' << maximum_change << '\n';
     };
     write(0.0);
+    const SimpleFluid::Verification::LoopTimer timer;
     for (int step = 1; step <= steps; ++step)
     {
         std::vector<double> previous;
-        for (int i = 0; i < cells; ++i)
+        previous.reserve(local_cells);
+        for (int i = 0; i < local_cells; ++i)
             previous.push_back(gas.micro_moles().value(i));
         gas.advance(step * dt, dt, temperature, pressure, velocity, flux, material, &power);
         const auto& statistics = gas.last_statistics();
@@ -230,8 +239,9 @@ int run(int argc, char** argv)
         produced += statistics.hydrogen_produced;
         last_escape = statistics.microbubble_hydrogen_escaped;
         maximum_change = 0.0;
-        for (int i = 0; i < cells; ++i)
+        for (int i = 0; i < local_cells; ++i)
             maximum_change = std::max(maximum_change, std::abs(gas.micro_moles().value(i) - previous[i]));
+        maximum_change = parallel.max(maximum_change);
         if (mode == "steady" && maximum_change < 1e-12 && std::abs(last_escape / dt - source * volume) < 2e-11)
             ++steady_checks;
         else
@@ -244,32 +254,42 @@ int run(int argc, char** argv)
         require(steady_checks >= 5, "Steady profile/source balance must converge for five consecutive steps");
         require(std::abs(last_escape / dt - source * volume) < 2e-11,
             "Steady outlet must balance nonzero bubble production");
-        for (int i = 0; i < cells; ++i)
+        bool continuum_passed = true;
+        for (int i = 0; i < local_cells; ++i)
         {
-            const double dz = z[i + 1] - z[i];
-            const double continuum = source * 0.5 * (z[i] + z[i + 1]) / speed;
+            const auto sample = samples[i];
+            const double dz = z[sample + 1] - z[sample];
+            const double continuum = source * 0.5 * (z[sample] + z[sample + 1]) / speed;
             const double truncation = source * (0.5 * dz / speed + dt);
-            require(std::abs(gas.micro_moles().value(i) - continuum) < truncation * 1.01 + 1e-12,
-                "Steady continuum profile exceeds upwind and split-source truncation bound");
+            continuum_passed = continuum_passed &&
+                std::abs(gas.micro_moles().value(i) - continuum) < truncation * 1.01 + 1e-12;
         }
+        require(continuum_passed,
+            "Steady continuum profile exceeds upwind and split-source truncation bound");
     }
     else
     {
         double l1 = 0.0;
-        for (int i = 0; i < cells; ++i)
+        for (int i = 0; i < local_cells; ++i)
         {
-            const double dz = z[i + 1] - z[i];
-            const double exact_cell = initial * std::clamp((z[i + 1] - speed * end) / dz, 0.0, 1.0);
+            const auto sample = samples[i];
+            const double dz = z[sample + 1] - z[sample];
+            const double exact_cell = initial * std::clamp((z[sample + 1] - speed * end) / dz, 0.0, 1.0);
             l1 += std::abs(gas.micro_moles().value(i) - exact_cell) * dz / (initial * height);
         }
+        l1 = parallel.sum(l1);
         require(l1 < 0.12, "Transient translating front exceeds first-order L1 error gate");
         require(escaped > 0.4 * initial_inventory && escaped < 0.6 * initial_inventory,
             "Transient escape does not match half-column residence time");
     }
     profiles.flush();
     history.flush();
-    require(profiles.good() && history.good(), "Failed writing verification CSV files");
-    std::cout << mode << " dispersed microbubble verification passed; profiles: " << output << "/profiles.csv\n";
+    fields.flush();
+    linear_history.flush();
+    require(profiles.good() && history.good() && fields.good(), "Failed writing verification CSV files");
+    parallel.write_timing(output, timer.wall_seconds(), timer.cpu_seconds());
+    if (parallel.is_root())
+        std::cout << mode << " dispersed microbubble verification passed; profiles: " << output << "/profiles.csv\n";
     return 0;
 }
 } // namespace

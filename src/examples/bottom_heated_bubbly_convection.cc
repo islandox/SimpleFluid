@@ -2,6 +2,7 @@
 #include "IF97ReferenceWater.hh"
 #include "VerificationMesh.hh"
 #include "VerificationLinearSolvers.hh"
+#include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
 
@@ -60,7 +61,6 @@ int run(int argc, char** argv)
         else
             throw std::invalid_argument("Unknown argument " + arg);
     }
-    require(Tpetra::getDefaultComm()->getSize() == 1, "This matched convection fixture is serial");
     require(std::isfinite(source_scale) && source_scale >= 0 && requested_steps >= 0, "Invalid run override");
     std::ifstream input(properties);
     require(input.good(), "Cannot read " + properties.string());
@@ -97,6 +97,8 @@ int run(int argc, char** argv)
         "Shared mesh extents differ from physical case");
     auto geometry = std::make_shared<Mesh::Cartesian>(grid.coordinates());
     auto mesh = std::make_shared<Mesh>(std::move(geometry));
+    const SimpleFluid::Verification::ParallelContext parallel(mesh->owned_cell_map()->getComm());
+    output = parallel.output_directory(output);
     SimpleFluid::BoundaryConditionSet bc;
     for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
     {
@@ -199,6 +201,7 @@ int run(int argc, char** argv)
         double mean_temperature = 0, max_div = 0;
         maximum_speed = alpha_max = uzmin = uzmax = 0;
         maximum_temperature = water.temperature;
+        bool local_valid = true;
         for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
         {
             const auto id = static_cast<Pack::local_ordinal_type>(cell);
@@ -206,8 +209,8 @@ int run(int argc, char** argv)
             const auto u = solver.velocity().value(id);
             const auto T = solver.temperature().value(id), a = bubbles->alpha_g().value(id);
             const double speed = std::sqrt(u.dot(u));
-            require(std::isfinite(T) && T > 290 && T < 320 && std::isfinite(speed) && a >= 0 && a < 0.02,
-                "Convection left the dilute, reference-water operating envelope");
+            local_valid = local_valid && std::isfinite(T) && T > 290 && T < 320 && std::isfinite(speed) && a >= 0 &&
+                          a < 0.02;
             maximum_temperature = std::max(maximum_temperature, T);
             maximum_speed = std::max(maximum_speed, speed);
             alpha_max = std::max(alpha_max, a);
@@ -217,13 +220,21 @@ int run(int argc, char** argv)
             double divergence = 0;
             for (const auto face : mesh->faces(id))
                 divergence +=
-                    (mesh->owner_cell(face) == id ? 1 : -1) * solver.pressure_corrected_face_fluxes().value(face);
+                    (mesh->owner_cell(face) == id ? 1 : -1) * solver.pressure_corrected_face_fluxes().local_value(face);
             max_div = std::max(max_div, std::abs(divergence) / mesh->cell_volume(id));
             const auto ix = grid.interval(x, c.x), iz = grid.interval(z, c.z);
             fields << solver.time() << ',' << iz * nx + ix << ',' << x[ix] << ',' << x[ix + 1] << ',' << z[iz] << ','
                    << z[iz + 1] << ',' << T << ',' << water.density * (1 - beta * (T - water.temperature)) << ',' << a
                    << ',' << u.x << ',' << u.y << ',' << u.z << '\n';
         }
+        parallel.require(local_valid, "Convection left the dilute, reference-water operating envelope");
+        mean_temperature = parallel.sum(mean_temperature);
+        maximum_temperature = parallel.max(maximum_temperature);
+        maximum_speed = parallel.max(maximum_speed);
+        alpha_max = parallel.max(alpha_max);
+        uzmin = parallel.min(uzmin);
+        uzmax = parallel.max(uzmax);
+        max_div = parallel.max(max_div);
         const double inventory = bubbles->global_submerged_hydrogen_moles();
         const double produced = bubbles->cumulative_hydrogen_produced();
         const double escaped = bubbles->cumulative_submerged_bubble_hydrogen_escaped();
@@ -234,10 +245,13 @@ int run(int argc, char** argv)
                 << ',' << maximum_speed << ',' << uzmin << ',' << uzmax << ',' << inventory << ',' << produced << ','
                 << escaped << ',' << balance << ',' << fission.integrated_power() << ',' << max_div << ','
                 << thermal_residual << '\n';
-        std::cout << "step=" << step << " t=" << solver.time() << " Tmax=" << maximum_temperature
-                  << " alpha=" << alpha_max << " Umax=" << maximum_speed << " uz=[" << uzmin << ',' << uzmax << "]\n";
+        if (parallel.rank() == 0)
+            std::cout << "step=" << step << " t=" << solver.time() << " Tmax=" << maximum_temperature
+                      << " alpha=" << alpha_max << " Umax=" << maximum_speed << " uz=[" << uzmin << ',' << uzmax << "]\n";
     };
     write(0);
+    mesh->owned_cell_map()->getComm()->barrier();
+    const SimpleFluid::Verification::LoopTimer loop_timer;
     for (int step = 1; step <= steps; ++step)
     {
         std::vector<double> old_temperature(mesh->num_owned_cells()), capacity(mesh->num_owned_cells());
@@ -255,22 +269,23 @@ int run(int argc, char** argv)
         linear_history.write(step, solver.time(), solver.last_step_statistics(),
             bubbles->last_statistics().transport_linear);
         require(std::abs(solver.time() - step * dt) < 1e-10, "Accepted physical time mismatch");
-        thermal_residual = -fission.integrated_power() * dt;
+        double local_thermal_residual = 0;
         for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
         {
             const auto id = static_cast<Pack::local_ordinal_type>(cell);
             const double T = solver.temperature().value(id);
-            thermal_residual += capacity[cell] * mesh->cell_volume(id) * (T - old_temperature[cell]);
+            local_thermal_residual += capacity[cell] * mesh->cell_volume(id) * (T - old_temperature[cell]);
             for (const auto face : mesh->faces(id))
             {
                 if (!mesh->is_exterior_face(face))
                     continue;
                 const auto f = mesh->face_centroid(face);
                 if (std::abs(f.x) < 1e-12 || std::abs(f.x - width) < 1e-12 || std::abs(f.z - height) < 1e-12)
-                    thermal_residual += dt * water.thermal_conductivity * mesh->face_area(face) *
+                    local_thermal_residual += dt * water.thermal_conductivity * mesh->face_area(face) *
                                         (T - water.temperature) / mesh->cell_to_face_distance(face, id);
             }
         }
+        thermal_residual = parallel.sum(local_thermal_residual) - fission.integrated_power() * dt;
         if (step % stride == 0 || step == steps)
             write(step);
     }
@@ -280,6 +295,10 @@ int run(int argc, char** argv)
     else if (steps >= total_steps)
         require(maximum_temperature - water.temperature > 0.05 && alpha_max > 1e-6 && uzmax > 1e-5 && uzmin < -1e-5,
             "Bottom source failed to develop heated bubbly upward flow and downward return flow");
+    fields.flush();
+    history.flush();
+    linear_history.flush();
+    parallel.write_timing(output, loop_timer.wall_seconds(), loop_timer.cpu_seconds());
     return 0;
 }
 } // namespace

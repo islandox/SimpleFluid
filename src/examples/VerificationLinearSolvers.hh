@@ -81,6 +81,7 @@ struct LinearSolverControls
 class LinearSolverHistory
 {
 public:
+    void flush() { d_stream.flush(); }
     explicit LinearSolverHistory(const std::filesystem::path& output)
     {
         std::filesystem::create_directories(output);

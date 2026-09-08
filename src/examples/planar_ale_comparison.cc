@@ -2,17 +2,20 @@
 #include "IF97ReferenceWater.hh"
 #include "VerificationMesh.hh"
 #include "VerificationLinearSolvers.hh"
+#include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
 
 #include <Tpetra_Core.hpp>
 
 #include <cmath>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -40,10 +43,6 @@ void check(double value, double tolerance, const char* what)
 int run(const std::string& mode, const std::filesystem::path& output, const std::filesystem::path& water_reference,
     const std::filesystem::path& mesh_file, const SimpleFluid::Verification::LinearSolverControls& linear_controls)
 {
-    if (Tpetra::getDefaultComm()->getSize() != 1)
-    {
-        throw std::runtime_error("The OpenFOAM comparison fixture is serial; run without mpiexec.");
-    }
     const auto reference = SimpleFluid::Verification::load_if97_reference_water(water_reference);
     const auto& water = reference.liquid;
     const double T0 = water.temperature;
@@ -57,6 +56,8 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         throw std::runtime_error("ALE fixture requires a unit-area, unit-height reference column");
     auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(grid.coordinates());
     auto mesh = std::make_shared<Mesh>(std::move(geometry));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    const SimpleFluid::Verification::ParallelContext parallel(communicator);
     SimpleFluid::BoundaryConditionSet bc;
     for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
     {
@@ -126,10 +127,11 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         throw std::runtime_error("Could not configure solver-integrated ALE.");
     }
 
-    std::filesystem::create_directories(output);
-    SimpleFluid::Verification::LinearSolverHistory linear_history(output);
-    std::ofstream csv(output / "history.csv");
-    std::ofstream spatial(output / "fields.csv");
+    const auto rank_output = parallel.output_directory(output);
+    std::filesystem::create_directories(rank_output);
+    SimpleFluid::Verification::LinearSolverHistory linear_history(rank_output);
+    std::ofstream csv(rank_output / "history.csv");
+    std::ofstream spatial(rank_output / "fields.csv");
     spatial.exceptions(std::ios::badbit | std::ios::failbit);
     spatial << std::setprecision(17)
             << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
@@ -145,6 +147,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
     double previous_level = 1.0;
     int quiet_count = 0;
     const int steps = heated_steps + (mode == "steady" ? quiet_steps : 0);
+    const SimpleFluid::Verification::LoopTimer loop_timer;
     for (int step = 0; step <= steps; ++step)
     {
         const double q = step <= heated_steps ? power : 0.0;
@@ -164,6 +167,8 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         double integrated_cp = 0.0;
         double integrated_mu = 0.0;
         double integrated_k = 0.0;
+        double maximum_temperature_error = 0.0;
+        const double level = solver.free_surface_diagnostics().pool_level;
         const auto& mass_density = solver.liquid_mass_inventory().cellMassInventory();
         const auto& fields = solver.material_properties();
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -180,14 +185,29 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
             const auto velocity = solver.velocity().value(cell);
             // This fixture contains liquid only. Export the solved cell velocity,
             // not a velocity reconstructed from the imposed affine mesh motion.
-            spatial << solver.time() << ',' << owned << ',' << z - 0.5 * cell_volume << ',' << z + 0.5 * cell_volume
+            const auto sample = grid.interval(grid.z, z / level);
+            spatial << solver.time() << ',' << sample << ',' << z - 0.5 * cell_volume << ',' << z + 0.5 * cell_volume
                     << ',' << solver.temperature().value(cell) << ',' << fields.density.value(cell) << ",0,"
                     << velocity.x << ',' << velocity.y << ',' << velocity.z << '\n';
-            check(solver.temperature().value(cell) - exact_temperature, 2.0e-7, "Cell temperature analytic error");
+            const auto temperature_error = solver.temperature().value(cell) - exact_temperature;
+            maximum_temperature_error = std::max(maximum_temperature_error,
+                std::isfinite(temperature_error) ? std::abs(temperature_error)
+                    : std::numeric_limits<double>::infinity());
         }
+        const std::array<double, 6> local_integrals{
+            volume, energy, integrated_density, integrated_cp, integrated_mu, integrated_k};
+        std::array<double, 6> global_integrals{};
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM,
+            static_cast<int>(local_integrals.size()), local_integrals.data(), global_integrals.data());
+        volume = global_integrals[0];
+        energy = global_integrals[1];
+        integrated_density = global_integrals[2];
+        integrated_cp = global_integrals[3];
+        integrated_mu = global_integrals[4];
+        integrated_k = global_integrals[5];
+        check(parallel.max(maximum_temperature_error), 2.0e-7, "Cell temperature analytic error");
         const double mass = solver.liquid_mass_inventory().totalMass();
         const double temperature = energy / (mass * cp);
-        const double level = solver.free_surface_diagnostics().pool_level;
         const double exact_level = 1.0 / (1.0 - beta * (exact_temperature - T0));
         const double density = integrated_density / volume;
         const double actual_cp = integrated_cp / volume;
@@ -197,15 +217,20 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         {
             cumulative_heat += q * volume * dt;
             const auto& relative_flux = solver.mesh_relative_face_fluxes();
+            double maximum_relative_flux = 0.0;
             for (const auto face : relative_flux.owned_face_ids())
             {
-                check(relative_flux.value(face), 2.0e-10, "Uniform expansion relative face flux");
+                const auto value = relative_flux.value(face);
+                maximum_relative_flux = std::max(maximum_relative_flux,
+                    std::isfinite(value) ? std::abs(value) : std::numeric_limits<double>::infinity());
             }
-            check(solver.planar_ale_diagnostics().continuity.maximum, 2.0e-10, "Absolute volume continuity");
+            check(parallel.max(maximum_relative_flux), 2.0e-10, "Uniform expansion relative face flux");
+            check(parallel.max(solver.planar_ale_diagnostics().continuity.maximum),
+                2.0e-10, "Absolute volume continuity");
         }
         const double mass_residual = mass - rho0;
         const double energy_residual = energy - rho0 * cp * T0 - cumulative_heat;
-        const double gcl = step ? solver.planar_ale_diagnostics().maximum_gcl_residual : 0.0;
+        const double gcl = step ? parallel.max(solver.planar_ale_diagnostics().maximum_gcl_residual) : 0.0;
         check(mass_residual, 2.0e-10, "Liquid mass conservation");
         check(energy_residual, energy_tolerance, "Liquid energy conservation");
         check(gcl, 2.0e-11, "Mesh GCL");
@@ -226,12 +251,16 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         previous_temperature = temperature;
         previous_level = level;
     }
+    csv.flush();
+    spatial.flush();
+    linear_history.flush();
+    parallel.write_timing(rank_output, loop_timer.wall_seconds(), loop_timer.cpu_seconds());
     if (mode == "steady" && quiet_count != quiet_steps)
     {
         throw std::runtime_error("Steady state did not satisfy five consecutive source-off steps.");
     }
     std::cout << "planarALE " << mode << ": " << steps << " accepted steps, " << quiet_count
-              << " source-off convergence checks; wrote " << output / "history.csv" << '\n';
+              << " source-off convergence checks; wrote " << rank_output / "history.csv" << '\n';
     return 0;
 }
 } // namespace

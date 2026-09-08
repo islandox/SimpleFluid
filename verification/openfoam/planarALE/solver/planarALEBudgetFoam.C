@@ -3,9 +3,12 @@
 #include "fvCFD.H"
 #include "StructuredCaseMesh.H"
 
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 
 int main(int argc, char* argv[])
 {
@@ -15,9 +18,9 @@ int main(int argc, char* argv[])
     #include "createMesh.H"
     const StructuredCaseMesh grid(mesh);
     const word mode(args.getOrDefault<word>("mode", "transient"));
-    if (Pstream::parRun() || (mode != "steady" && mode != "transient"))
+    if (mode != "steady" && mode != "transient")
     {
-        FatalErrorInFunction << "Use serial execution and -mode steady|transient" << exit(FatalError);
+        FatalErrorInFunction << "Use -mode steady|transient" << exit(FatalError);
     }
     const IOdictionary water
     (
@@ -46,7 +49,8 @@ int main(int argc, char* argv[])
     volScalarField rhoCp
     (
         IOobject("rhoCp", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::AUTO_WRITE), mesh,
-        dimensionedScalar("rhoCp", dimEnergy/dimVolume/dimTemperature, rho0*cp), "zeroGradient"
+        dimensionedScalar("rhoCp", dimEnergy/dimVolume/dimTemperature, rho0*cp),
+        StructuredCaseMesh::patch_types(mesh, "zeroGradient")
     );
     surfaceScalarField relativeHeatCapacityFlux
     (
@@ -76,6 +80,8 @@ int main(int argc, char* argv[])
                 << exit(FatalError);
         }
     };
+    const auto loopStart = std::chrono::steady_clock::now();
+    const auto cpuStart = std::clock();
     for (label step = 0; step <= steps; ++step)
     {
         const scalar q = step <= heatedSteps ? heating : 0.0;
@@ -106,13 +112,21 @@ int main(int argc, char* argv[])
                 energyEquation.solve();
                 T.correctBoundaryConditions();
                 scalar targetLevel = 0;
+                bool validDensity = true;
                 forAll(cellMass, celli)
                 {
                     const scalar liquidDensity = rho0*(1-beta*(T[celli]-T0));
                     if (liquidDensity <= 1 || !std::isfinite(liquidDensity))
-                        FatalErrorInFunction << "Invalid thermal liquid density" << exit(FatalError);
-                    targetLevel += cellMass[celli]/liquidDensity; // A = 1 m2
+                        validDensity = false;
+                    else
+                        targetLevel += cellMass[celli]/liquidDensity; // A = 1 m2
                 }
+                reduce(validDensity, andOp<bool>());
+                if (!validDensity)
+                    FatalErrorInFunction << "Invalid thermal liquid density" << exit(FatalError);
+                // Every rank uses the same liquid-volume target. The affine
+                // motion then agrees at shared points and at convergence.
+                reduce(targetLevel, sumOp<scalar>());
                 if (mag(targetLevel-level) <= 1e-13)
                 {
                     converged = true;
@@ -126,7 +140,7 @@ int main(int argc, char* argv[])
             const scalar a = 1-beta*(exactT-T0), b = q*dt/(rho0*cp);
             exactT += 2*b/(a+std::sqrt(a*a-4*beta*b));
         }
-        scalar volume = 0, mass = 0, energy = 0, gcl = 0;
+        scalar volume = 0, mass = 0, energy = 0, gcl = 0, temperatureError = 0;
         forAll(cellMass, celli)
         {
             volume += mesh.V()[celli];
@@ -139,8 +153,15 @@ int main(int argc, char* argv[])
             const scalar uz = step ? z/level*(level-previousLevel)/dt : 0.0;
             spatial << runTime.value() << ',' << sample << ',' << z-0.5*dz << ',' << z+0.5*dz << ','
                     << T[celli] << ',' << rho0*(1-beta*(T[celli]-T0)) << ",0,0,0," << uz << '\n';
-            check(T[celli]-exactT, 2e-7, "Cell temperature analytic error");
+            const scalar error = T[celli]-exactT;
+            temperatureError = max(temperatureError,
+                std::isfinite(error) ? mag(error) : std::numeric_limits<scalar>::infinity());
         }
+        reduce(volume, sumOp<scalar>());
+        reduce(mass, sumOp<scalar>());
+        reduce(energy, sumOp<scalar>());
+        reduce(temperatureError, maxOp<scalar>());
+        check(temperatureError, 2e-7, "Cell temperature analytic error");
         if (step)
         {
             cumulativeHeat += q*volume*dt;
@@ -149,6 +170,7 @@ int main(int argc, char* argv[])
                 gcl = max(gcl, mag((mesh.V()[celli]-mesh.V0()[celli])/dt
                     - meshDivergence[celli]*mesh.V()[celli]));
         }
+        reduce(gcl, maxOp<scalar>());
         const scalar temperature = energy/(mass*cp);
         const scalar exactLevel = 1/(1-beta*(exactT-T0));
         const scalar density = rho0*(1-beta*(temperature-T0));
@@ -174,6 +196,16 @@ int main(int argc, char* argv[])
         previousT = temperature;
         previousLevel = level;
     }
+    csv.flush();
+    spatial.flush();
+    const scalar loopWall = std::chrono::duration<double>(
+        std::chrono::steady_clock::now()-loopStart).count();
+    const scalar loopCpu = double(std::clock()-cpuStart)/CLOCKS_PER_SEC;
+    std::ofstream timing((runTime.path()/"timing.json").c_str());
+    timing.exceptions(std::ios::badbit | std::ios::failbit);
+    timing << std::setprecision(17) << "{\"rank\":" << Pstream::myProcNo()
+        << ",\"ranks\":" << Pstream::nProcs() << ",\"local_cells\":" << mesh.nCells()
+        << ",\"loop_wall_s\":" << loopWall << ",\"loop_cpu_s\":" << loopCpu << "}\n";
     if (mode == "steady" && quietCount != quietSteps)
         FatalErrorInFunction << "Steady state did not pass five consecutive source-off steps" << exit(FatalError);
     T.write();
