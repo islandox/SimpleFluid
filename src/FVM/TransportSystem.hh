@@ -184,6 +184,9 @@ public:
 
     const boundary_geometry_type& boundary_geometry() const;
 
+    /** @brief Whether any locally owned cell has a non-orthogonal transport face. */
+    bool has_non_orthogonal_faces() const;
+
     std::vector<detail::AffineLeastSquaresGradientStencil<MeshType>> scalar_affine_stencils(
         std::function<BoundaryCondition(int, size_t)> boundary_condition,
         std::function<typename MeshType::scalar_type(int, size_t)> boundary_value) const;
@@ -197,6 +200,7 @@ private:
     interior_stencils_type d_interior_stencils;
     boundary_locations_type d_boundary_locations;
     boundary_geometry_type d_boundary_geometry;
+    bool d_has_non_orthogonal_faces = true;
 };
 
 /**

@@ -767,6 +767,48 @@ TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
     return {matrix, rhs};
 }
 
+/**
+ * @brief Detect transport faces whose area is not parallel to the center direction.
+ *
+ * Exact cross products avoid imposing a numerical near-orthogonality cutoff.
+ * Degenerate geometry retains the normal assembly/validation path. The result
+ * is local; callers must agree collectively before skipping gradient imports.
+ */
+template<class MeshType>
+bool stored_transport_has_non_orthogonal_faces(const MeshType& mesh)
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        for (const auto face_lid : mesh.faces(cell_lid))
+        {
+            typename MeshType::Vec3 direction{};
+            if (mesh.is_interior_face(face_lid))
+            {
+                direction = mesh.cell_center_vector(face_lid, cell_lid);
+            }
+            else if (mesh.is_boundary_face(face_lid))
+            {
+                direction = mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
+            }
+            else
+            {
+                continue;
+            }
+            const auto area = mesh.face_area_vector_outward(face_lid, cell_lid);
+            if (direction.dot(direction) <= 0 || area.dot(area) <= 0 ||
+                area.x * direction.y != area.y * direction.x ||
+                area.x * direction.z != area.z * direction.x ||
+                area.y * direction.z != area.z * direction.y)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /** Apply a variable-coefficient explicit scalar non-orthogonal correction. */
 template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class DiffusivityValue,
     class BoundaryCoefficient, class Stencils, class BoundaryLocations>
@@ -787,19 +829,25 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
         correction_field.mesh_ptr(), "stored_variable_scalar_non_orthogonal_gradient");
     evaluate_stored_scalar_gradients(correction_field, stencils, gradients);
     const auto& mesh = correction_field.mesh();
+    const auto gradient_values = gradients.local_read_view();
+    const auto gradient_value = [&](local_ordinal_type cell_lid)
+    {
+        return typename MeshType::Vec3{
+            gradient_values(cell_lid, 0), gradient_values(cell_lid, 1), gradient_values(cell_lid, 2)};
+    };
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            auto gradient = gradients.local_value(cell_lid);
+            auto gradient = gradient_value(cell_lid);
             auto face_diffusivity = diffusivity_value(cell_lid);
             typename MeshType::Vec3 direction{};
             if (mesh.is_interior_face(face_lid))
             {
                 const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                gradient = (gradient + gradients.local_value(other)) / scalar_type{2};
+                gradient = (gradient + gradient_value(other)) / scalar_type{2};
                 face_diffusivity = face_coefficient_value(mesh, face_lid, cell_lid, other, diffusivity_value(cell_lid),
                     diffusivity_value(other), coefficient_interpolation);
                 direction = mesh.cell_center_vector(face_lid, cell_lid);
@@ -920,6 +968,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     }
 
     int invalid_coefficients = 0;
+    int has_nonzero_diffusivity = 0;
     if (incompatible_fields == 0)
     {
         for (size_t local = 0; local < mesh.num_local_cells(); ++local)
@@ -929,10 +978,21 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             const auto old_storage = old_storage_value(cell_lid);
             const auto advection = advection_value(cell_lid);
             const auto diffusivity = diffusivity_value(cell_lid);
+            has_nonzero_diffusivity = has_nonzero_diffusivity || diffusivity != scalar_type{};
             invalid_coefficients = invalid_coefficients || !std::isfinite(storage) || !std::isfinite(advection) ||
                                    !std::isfinite(diffusivity) || !std::isfinite(old_storage)
                                    || storage <= scalar_type{} || old_storage <= scalar_type{} ||
                                    advection < scalar_type{} || diffusivity < scalar_type{};
+        }
+    }
+    if (boundary_diffusivity != nullptr && invalid_boundary_cache == 0)
+    {
+        for (const auto& [batch_id, coefficients] : boundary_diffusivity->value)
+        {
+            for (const auto coefficient : coefficients)
+            {
+                has_nonzero_diffusivity = has_nonzero_diffusivity || coefficient != scalar_type{};
+            }
         }
     }
     int interpolation_state = 2;
@@ -946,9 +1006,9 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             break;
     }
     const auto validation_state = reduce_stored_validation_state<Pack>(
-        mesh, std::array<int, 8>{incompatible_fields, !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
+        mesh, std::array<int, 9>{incompatible_fields, !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
                   invalid_boundary_cache, invalid_geometry_cache, invalid_coefficients, interpolation_state,
-                  -interpolation_state, source ? 0 : 1});
+                  -interpolation_state, source ? 0 : 1, has_nonzero_diffusivity});
     const auto prefix = std::string(context);
     if (validation_state[0] != 0)
     {
@@ -1175,13 +1235,26 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         return boundary_values[boundary_index(batch_id, in_batch_id)];
     };
 
+    // A local shortcut must not strand another rank in a gradient import.
+    // Boundary overrides participate in the global diffusion test above;
+    // cache and callback validation remain unconditional even when it is zero.
+    bool needs_non_orthogonal_correction = validation_state[8] != 0;
+    if (needs_non_orthogonal_correction)
+    {
+        const auto local_non_orthogonal = geometry_cache == nullptr
+            ? stored_transport_has_non_orthogonal_faces(mesh)
+            : geometry_cache->has_non_orthogonal_faces();
+        needs_non_orthogonal_correction = reduce_stored_validation_state<Pack>(
+            mesh, std::array<int, 1>{local_non_orthogonal ? 1 : 0})[0] != 0;
+    }
+
     std::vector<AffineLeastSquaresGradientStencil<MeshType>> gradient_stencils;
     select_stored_scalar_affine_geometry(
         mesh, cached_boundary_condition, cached_boundary_value, geometry_cache, gradient_stencils, local_locations,
         locations);
 
     std::unique_ptr<VectorCellFieldStored<Pack, MeshType>> partition_gradients;
-    if (weights.implicit > scalar_type{})
+    if (needs_non_orthogonal_correction && weights.implicit > scalar_type{})
     {
         partition_gradients = std::make_unique<VectorCellFieldStored<Pack, MeshType>>(
             old_values.mesh_ptr(), "stored_partition_weighted_scalar_gradient");
@@ -1206,6 +1279,11 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     FlatMatrixRow<local_ordinal_type, scalar_type> row_values(mesh.num_local_cells(), 64);
     std::vector<StoredTransportMatrixRow<Pack>> rows;
     rows.reserve(mesh.num_owned_cells());
+    const auto old_value_data = old_values.local_read_view();
+    const auto older_value_data = older_values == nullptr
+        ? decltype(old_value_data){}
+        : older_values->local_read_view();
+    const auto face_flux_data = face_fluxes.local_read_view();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -1234,16 +1312,16 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             {
                 return transient
                          * (transient_coefficients.previous
-                                * old_values.local_value(cell_lid)
+                                * old_value_data(cell_lid, 0)
                             + transient_coefficients.older
                                 * (older_values == nullptr
                                        ? scalar_type{}
-                                       : older_values->local_value(cell_lid)))
+                                       : older_value_data(cell_lid, 0)))
                      + volume * source_values[owned];
             }
             const auto accepted_storage = old_storage_value(cell_lid);
             return accepted_storage * old_volume / time_step
-                     * old_values.local_value(cell_lid)
+                     * old_value_data(cell_lid, 0)
                  + new_volume * source_values[owned];
         }();
 
@@ -1276,7 +1354,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                 row_values.ensure(other);
             }
 
-            const auto owner_flux = face_fluxes.local_value(face_lid);
+            const auto owner_flux = face_flux_data(face_lid, 0);
             const auto outward_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_flux : -owner_flux;
             if (outward_flux >= scalar_type{})
             {
@@ -1307,11 +1385,11 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                     ? other
                     : cell_lid;
                 const auto upwind_value =
-                    old_values.local_value(upwind);
+                    old_value_data(upwind, 0);
                 const auto face_value =
                     bounded_linear_upwind_face_value(
                         upwind_value,
-                        old_values.local_value(downwind),
+                        old_value_data(downwind, 0),
                         convection_gradients->local_value(upwind),
                         cell_to_face_displacement(
                             mesh, face_lid, upwind));
@@ -1342,7 +1420,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                     add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
                     add_non_orthogonal_stencil(other, scalar_type{0.5}, face_diffusivity, tangential_area);
                 }
-                else if (weights.implicit > scalar_type{})
+                else if (needs_non_orthogonal_correction && weights.implicit > scalar_type{})
                 {
                     add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
                     if (partition_gradients == nullptr)
@@ -1401,7 +1479,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
-    if (correction_field != nullptr && weights.explicit_ > scalar_type{})
+    if (needs_non_orthogonal_correction && correction_field != nullptr && weights.explicit_ > scalar_type{})
     {
         add_stored_variable_scalar_explicit_non_orthogonal_correction<Pack>(*correction_field,
             cached_boundary_condition, diffusivity_value, boundary_face_diffusivity, *rhs, weights.explicit_,
@@ -1454,15 +1532,19 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
                                                      != old_storage_weight->mesh_ptr().get())
                                          ? 1
                                          : 0;
-    auto storage = [&](typename Pack::local_ordinal_type cell_lid) { return storage_weight.local_value(cell_lid); };
+    const auto storage_data = storage_weight.local_read_view();
+    const auto old_storage_data = old_storage_weight == nullptr
+        ? storage_data
+        : old_storage_weight->local_read_view();
+    const auto advection_data = advection_weight.local_read_view();
+    const auto diffusion_data = diffusivity.local_read_view();
+    auto storage = [&](typename Pack::local_ordinal_type cell_lid) { return storage_data(cell_lid, 0); };
     auto old_storage = [&](typename Pack::local_ordinal_type cell_lid)
     {
-        return old_storage_weight == nullptr
-            ? storage_weight.local_value(cell_lid)
-            : old_storage_weight->local_value(cell_lid);
+        return old_storage_data(cell_lid, 0);
     };
-    auto advection = [&](typename Pack::local_ordinal_type cell_lid) { return advection_weight.local_value(cell_lid); };
-    auto diffusion = [&](typename Pack::local_ordinal_type cell_lid) { return diffusivity.local_value(cell_lid); };
+    auto advection = [&](typename Pack::local_ordinal_type cell_lid) { return advection_data(cell_lid, 0); };
+    auto diffusion = [&](typename Pack::local_ordinal_type cell_lid) { return diffusion_data(cell_lid, 0); };
     return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, storage, old_storage,
         old_storage_weight != nullptr, advection, diffusion, std::move(boundary_condition),
         std::move(boundary_value), std::move(source), treatment,
@@ -1515,19 +1597,24 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
                         != old_specific_heat_capacity->mesh_ptr().get())
             ? 1
             : 0;
+    const auto density_data = density.local_read_view();
+    const auto specific_heat_capacity_data = specific_heat_capacity.local_read_view();
+    const auto conductivity_data = thermal_conductivity.local_read_view();
     auto capacity = [&](typename Pack::local_ordinal_type cell_lid)
-    { return density.local_value(cell_lid) * specific_heat_capacity.local_value(cell_lid); };
+    { return density_data(cell_lid, 0) * specific_heat_capacity_data(cell_lid, 0); };
     auto conductivity = [&](typename Pack::local_ordinal_type cell_lid)
-    { return thermal_conductivity.local_value(cell_lid); };
+    { return conductivity_data(cell_lid, 0); };
     const auto* accepted_density = old_density == nullptr ? &density : old_density;
     const auto* accepted_specific_heat_capacity =
         old_specific_heat_capacity == nullptr
         ? &specific_heat_capacity
         : old_specific_heat_capacity;
+    const auto accepted_density_data = accepted_density->local_read_view();
+    const auto accepted_specific_heat_capacity_data = accepted_specific_heat_capacity->local_read_view();
     auto old_capacity = [&](typename Pack::local_ordinal_type cell_lid)
     {
-        return accepted_density->local_value(cell_lid)
-            * accepted_specific_heat_capacity->local_value(cell_lid);
+        return accepted_density_data(cell_lid, 0)
+            * accepted_specific_heat_capacity_data(cell_lid, 0);
     };
     return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, capacity,
         old_capacity, old_density != nullptr || old_specific_heat_capacity != nullptr, capacity, conductivity,

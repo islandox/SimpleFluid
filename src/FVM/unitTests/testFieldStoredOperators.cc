@@ -13,6 +13,7 @@
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_Array.hpp>
@@ -76,6 +77,39 @@ SimpleFluid::SP<const Handle> make_skewed_semi_structured_handle()
             SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 4}, {1, 2, 4}, {2, 3, 4}, {3, 0, 4}},
             SimpleFluid::ArrReal{0.0, 1.0});
     return std::make_shared<Handle>(std::move(mesh));
+}
+
+/** @brief A sheared native hex line with explicit serial/MPI ownership. */
+SimpleFluid::SP<const Handle> make_skewed_partitioned_unstructured_handle()
+{
+    using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+    using Partitioned = SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
+    const auto reference = SimpleFluid::test::make_unstructured_hex_line(8, 0.125);
+    auto nodes = reference->nodes();
+    for (auto& node : nodes)
+    {
+        node.x += 0.3 * node.y;
+    }
+    SimpleFluid::Arr<Unstructured::CellDefinition> cells;
+    for (size_t local = 0; local < reference->num_cells(); ++local)
+    {
+        const auto cell = reference->cell_id(local);
+        cells.push_back({reference->cell_type(cell), reference->cell_nodes(cell)});
+    }
+    SimpleFluid::Arr<Unstructured::BoundaryFaceDefinition> boundaries;
+    for (const auto& [batch_id, batch] : reference->boundary_batches())
+    {
+        for (const auto face : batch.face_lids)
+        {
+            boundaries.push_back(
+                {reference->face_nodes(face), batch_id, reference->boundary_names().at(batch_id)});
+        }
+    }
+    auto geometry = std::make_shared<Unstructured>(nodes, cells, boundaries);
+    const auto communicator = Tpetra::getDefaultComm();
+    auto partition = SimpleFluid::MeshPartitioner<Pack>::partition(*geometry, communicator);
+    auto partitioned = std::make_shared<Partitioned>(geometry, std::move(partition.indexer), communicator);
+    return std::make_shared<Handle>(partitioned);
 }
 
 double stored_matrix_entry(
@@ -487,6 +521,57 @@ TEST(FieldStoredOperatorsTest, SupportsOrthogonalMeshHandle)
     expect_pressure_weighted_stored_fluxes(mesh);
 }
 
+/** @brief Affine pressure must not alter physical flux after workspace reuse. */
+TEST(FieldStoredOperatorsTest, PressureWeightedFluxPreservesAffinePressureOnGradedMesh)
+{
+    auto geometry = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 0.25, 0.75, 1.5, 3.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    const SimpleFluid::SP<const Handle> mesh = std::make_shared<Handle>(std::move(geometry));
+    SimpleFluid::VectorCellFieldStored<Pack> velocity(mesh, "velocity");
+    SimpleFluid::ScalarCellFieldStored<Pack> pressure(mesh, "pressure");
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(mesh, "fluxes");
+    SimpleFluid::FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack> workspace(mesh);
+
+    SimpleFluid::BoundaryConditionSet conditions;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        conditions.velocity[name] = {SimpleFluid::BoundaryConditionType::Neumann, {}};
+    }
+    const auto boundary_cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, conditions);
+
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const double speed = pass == 0 ? 0.375 : -0.625;
+        const double slope = pass == 0 ? 2.0 : -0.75;
+        const double offset = pass == 0 ? -1.0 : 3.0;
+        velocity.put_value({speed, 0.0, 0.0});
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            pressure.set_owned_value(cell, offset + slope * mesh->cell_centroid(cell).x);
+        }
+        pressure.sync_ghosts();
+        fluxes.put_value(17.0);
+
+        SimpleFluid::BoundaryConditionMap pressure_boundaries;
+        pressure_boundaries["xmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, offset};
+        pressure_boundaries["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, offset + slope * 3.0};
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity, pressure, 0.2, boundary_cache, pressure_boundaries, workspace, fluxes);
+
+        for (size_t local = 0; local < mesh->num_faces(); ++local)
+        {
+            const auto face = static_cast<Pack::local_ordinal_type>(local);
+            const double expected = speed * mesh->face_normal(face).x * mesh->face_area(face);
+            EXPECT_NEAR(fluxes.local_value(face), expected, 1.0e-12);
+            if (fluxes.is_owned(face))
+            {
+                EXPECT_DOUBLE_EQ(fluxes.value(face), fluxes.local_value(face));
+            }
+        }
+    }
+}
+
 /** @brief Native unstructured operators match an equivalent Cartesian line. */
 TEST(FieldStoredOperatorsTest,
      SupportsUnstructuredMeshHandleWithCartesianOperatorParity)
@@ -721,6 +806,109 @@ TEST(FieldStoredOperatorsTest, SupportsSemiStructuredMeshHandle)
         EXPECT_NEAR(value.y, 0.0, 1.0e-12);
         EXPECT_NEAR(value.z, 1.0, 1.0e-12);
     }
+}
+
+/** @brief Zero bulk diffusion must retain a nonzero boundary coefficient on every rank. */
+TEST(FieldStoredOperatorsTest, WeightedScalarZeroDiffusionRetainsBoundaryCorrections)
+{
+    using Scalar = SimpleFluid::ScalarCellFieldStored<Pack>;
+    using Cache = SimpleFluid::FVM::FieldStoredBoundaryCache<Pack, Handle>;
+    using Treatment = SimpleFluid::FVM::NonOrthogonalTreatment;
+    const auto mesh = make_skewed_partitioned_unstructured_handle();
+    Scalar scalar(mesh, "zero_diffusion_scalar"), weight(mesh, 1.0, "unit_weight"), diffusion(mesh, 0.0, "diffusion");
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(mesh, 0.0, "zero_flux");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        scalar.set_owned_value(cell, skewed_linear_scalar(mesh->cell_centroid(cell)));
+    }
+    scalar.sync_ghosts();
+    SimpleFluid::FVM::TransportGeometryCache<Handle> geometry_cache(*mesh);
+    if (mesh->num_owned_cells() != 0)
+    {
+        EXPECT_TRUE(geometry_cache.has_non_orthogonal_faces());
+    }
+    auto boundary_value = [&](int batch_id, size_t in_batch)
+    {
+        const auto face = mesh->boundary_face_batch(batch_id).face_lids.at(in_batch);
+        return skewed_linear_scalar(mesh->face_centroid(face));
+    };
+    auto assemble = [&](const Cache* boundary, Treatment treatment, const Scalar* correction)
+    {
+        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{
+                .old_values = scalar,
+                .face_fluxes = fluxes,
+                .time_step = 0.5,
+                .storage_weight = weight,
+                .advection_weight = weight,
+                .diffusivity = diffusion,
+                .boundary_condition = [](int, size_t)
+                { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, 0.0}; },
+                .boundary_value = boundary_value,
+                .source = [](Pack::local_ordinal_type) { return 0.125; },
+                .treatment = treatment,
+                .correction_field = correction,
+                .boundary_diffusivity = boundary,
+                .geometry_cache = &geometry_cache});
+    };
+
+    const auto no_diffusion = assemble(nullptr, Treatment::Hybrid, &scalar);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const auto volume = mesh->cell_volume(cell);
+        EXPECT_NEAR(no_diffusion.rhs->getData()[owned], volume * (2.0 * scalar.value(cell) + 0.125), 1e-12);
+        for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+        {
+            EXPECT_NEAR(stored_matrix_entry(*no_diffusion.matrix, cell, static_cast<Pack::local_ordinal_type>(local)),
+                owned == local ? 2.0 * volume : 0.0, 1e-12);
+        }
+    }
+
+    Cache boundary;
+    boundary.mesh = mesh;
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    Cache invalid_boundary;
+    invalid_boundary.mesh = mesh;
+    if (communicator->getRank() == 0)
+    {
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        {
+            invalid_boundary.value[batch_id].assign(batch.face_lids.size(), -0.7);
+        }
+    }
+    EXPECT_THROW(assemble(&invalid_boundary, Treatment::Hybrid, &scalar), std::invalid_argument);
+    // In a two-rank run, only rank zero has diffusion. The other rank must
+    // still participate in the explicit and implicit gradient imports.
+    if (communicator->getRank() == 0)
+    {
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        {
+            // One side avoids cancellation of an affine gradient's opposing
+            // boundary corrections, independent of the partition assignment.
+            if (mesh->boundary_batch_name(batch_id) == "ymin")
+            {
+                boundary.value[batch_id].assign(batch.face_lids.size(), 0.7);
+            }
+        }
+    }
+    const auto uncorrected = assemble(&boundary, Treatment::Explicit, nullptr);
+    const auto explicit_system = assemble(&boundary, Treatment::Explicit, &scalar);
+    const auto hybrid_system = assemble(&boundary, Treatment::Hybrid, &scalar);
+    const auto explicit_action = stored_matrix_action(*explicit_system.matrix, scalar);
+    const auto hybrid_action = stored_matrix_action(*hybrid_system.matrix, scalar);
+    double local_correction = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        local_correction = std::max(local_correction,
+            std::abs(explicit_system.rhs->getData()[owned] - uncorrected.rhs->getData()[owned]));
+        EXPECT_NEAR(explicit_action[owned] - explicit_system.rhs->getData()[owned],
+            hybrid_action[owned] - hybrid_system.rhs->getData()[owned], 1e-10);
+    }
+    double global_correction = 0.0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_correction, &global_correction);
+    EXPECT_GT(global_correction, 1e-8);
 }
 
 /** @brief Mapped scalar transport matches explicit/implicit/hybrid residuals. */
