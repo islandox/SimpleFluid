@@ -9,6 +9,8 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testFeedbackMapMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testPlanarFreeSurfaceModelMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     ".*/testDICPreconditionerMultiRank\\.cc$")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
@@ -67,6 +69,24 @@ target_link_libraries(
   SimpleFluid::Solvers
   GTest::gtest_main)
 simplefluid_configure_test_executable(testPlanarFreeSurfaceModelMultiRank)
+
+add_executable(
+  testDICPreconditionerMultiRank
+  testDICPreconditionerMultiRank.cc)
+target_link_libraries(
+  testDICPreconditionerMultiRank
+  SimpleFluid::Solvers
+  GTest::gtest_main)
+simplefluid_configure_test_executable(testDICPreconditionerMultiRank)
+
+foreach(_dic_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+      NAME DICPreconditioner_${_dic_procs}procs
+      TARGET testDICPreconditionerMultiRank
+      PROCS ${_dic_procs}
+      LABELS "mpi;linear_solver;dic"
+      TIMEOUT 120)
+endforeach()
 
 simplefluid_add_mpi_test(
     NAME RadiolyticGasModel_2procs

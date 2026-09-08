@@ -26,10 +26,10 @@ standalone smoothing solvers.
 
 `pcg` is an alias for the existing CG backend. The pressure equation clears
 off-diagonal gauge-row and gauge-column entries for CG, retaining the gauge
-diagonal, neighbor diagonals and prescribed zero gauge value. DIC uses a diagonal incomplete
-Cholesky recurrence with unchanged off-diagonal factors. It requires a serial
-symmetric matrix and positive finite pivots; distributed DIC is explicitly
-rejected. Under MPI, GS/SGS use local sweeps with Jacobi coupling between
+diagonal, neighbor diagonals and prescribed zero gauge value. DIC uses a
+diagonal incomplete-Cholesky recurrence with unchanged off-diagonal factors.
+It supports serial and distributed symmetric matrices with positive finite
+pivots. Under MPI, GS/SGS use local sweeps with Jacobi coupling between
 ranks. Forward GS, ILU0 and ILUT are rejected as CG preconditioners because
 they do not generally preserve the required symmetry.
 
@@ -47,6 +47,33 @@ This avoids an installed Trilinos 17.2 nested-subview indexing defect exposed
 when deflation removes the zero middle velocity component of a 2D case.
 Each RHS retains the requested tolerance and iteration limit, and the
 unchanged preconditioner is reused across columns within one solve call.
+
+### Distributed DIC
+
+`LinearPreconditioner::DIC` uses the matrix's Tpetra maps and Teuchos
+communicator. Each rank retains its owned factor rows and column-map halo.
+All cross-rank coefficients contribute to the diagonal recurrence and both
+triangular sweeps; Tpetra imports exchange dependency values. A distributed
+sparse transpose validates symmetry and supplies conjugate backward-factor
+coefficients. Setup and application reject invalid rank-local inputs
+collectively, including inconsistent maps, vector counts and zero-alpha
+branches. Empty ranks and subcommunicators are supported.
+
+Distributed factorization orders rows by ascending global ID, independent of
+local row permutations. Serial factorization retains its existing local row
+order. Thus the factors agree across decompositions when the serial map is
+ordered by global ID. Each communication stage completes all locally ready
+rows before exchanging remote dependencies. Factor setup records this
+schedule for reuse by Belos PCG and subsequent preconditioner applications.
+
+Communication cost depends on the partition and ordering: a contiguous
+partition of a chain needs at most one stage per rank, while interleaved
+ownership can require a stage per row. Each apply performs one forward and
+one reverse halo exchange between stages. This is a dependency-ordered
+preconditioner; MPI support does not imply efficient scaling for every mesh.
+The small comparison executables below retain their separate serial fixture
+restriction. Distributed DIC itself is tested through Tpetra/Belos solves and
+the production pressure-projection path on multiple ranks.
 
 ## Dispersed bubbles and planar ALE
 
