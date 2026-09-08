@@ -1,6 +1,6 @@
 # Planar ALE: OpenFOAM and SimpleFluid
 
-These serial fixtures compare **the same uniform thermal-expansion energy and
+These fixtures compare **the same uniform thermal-expansion energy and
 liquid-volume problem using IF97 reference-water properties** at every accepted
 time, including an explicitly checked source-off steady state. SimpleFluid runs its dimensional `BoussinesqSolver`
 with the enabled `planarALE` path, mutable geometry, cellwise liquid mass,
@@ -145,6 +145,14 @@ verification/openfoam/planarALE/run_simplefluid.sh transient /tmp/ale-sf
 verification/openfoam/planarALE/run_openfoam.sh transient /tmp/ale-of
 ```
 
+The solver executables also support MPI with the same mesh, timestep, and
+acceptance tolerances. SimpleFluid partitions its mesh automatically; OpenFOAM
+requires a decomposed case and the solver's `-parallel` option. The OpenFOAM
+Picard iteration sums liquid volume across ranks before choosing the next
+level, so shared mesh points move coherently. Both implementations reduce the
+energy, mass, volume, and maximum cell residuals over the complete case.
+The OpenFOAM application retains its reduced energy/volume scope in MPI.
+
 ## Outputs and acceptance
 
 The solvers also write `fields.csv` with individual cell bounds, temperature,
@@ -184,3 +192,12 @@ conservation/oracle residuals separately against zero, then compares the
 physical quantities. Passing means agreement for this constrained numerical
 fixture; it does not establish unrestricted ALE flow accuracy or physical
 validation.
+
+In MPI runs, SimpleFluid writes beneath `rankN/` and OpenFOAM beneath
+`processorN/`. Each `fields.csv` contains only owned cells with sample IDs
+derived from their reference coordinates; each `history.csv` contains the
+same globally reduced history. Combine the owned field files and retain one
+global history before comparison. Each rank also writes `timing.json` with
+its rank count and simulation-loop wall and process CPU seconds. These timers
+include step diagnostics and CSV output, and exclude mesh construction and
+solver setup before the loop.

@@ -1,7 +1,9 @@
 // Independent laminar momentum/pressure, energy, and dilute H2-moment reference.
 #include "fvCFD.H"
 #include "StructuredCaseMesh.H"
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 
@@ -11,7 +13,6 @@ int main(int argc, char* argv[])
     #include "createTime.H"
     #include "createMesh.H"
     const StructuredCaseMesh grid(mesh);
-    if (Pstream::parRun()) FatalErrorInFunction << "Serial comparison fixture" << exit(FatalError);
     IOdictionary properties(IOobject("verificationProperties",runTime.constant(),mesh,IOobject::MUST_READ,IOobject::NO_WRITE));
     auto par=[&](const word& key){return readScalar(properties.lookup(key));};
     const label nx=grid.nx(),steps=label(std::llround(par("end_time")/par("dt")));
@@ -27,28 +28,33 @@ int main(int argc, char* argv[])
     volScalarField p(IOobject("p",runTime.timeName(),mesh,IOobject::MUST_READ,IOobject::AUTO_WRITE),mesh);
     volScalarField T(IOobject("T",runTime.timeName(),mesh,IOobject::MUST_READ,IOobject::AUTO_WRITE),mesh);
     surfaceScalarField phi(IOobject("phi",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),fvc::flux(U));
+    const wordList scalarPatchTypes=StructuredCaseMesh::patch_types(mesh,"zeroGradient");
     volScalarField moles(IOobject("moles",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),mesh,
-        dimensionedScalar(dimensionSet(0,-3,0,0,1,0,0),Zero),"zeroGradient");
+        dimensionedScalar(dimensionSet(0,-3,0,0,1,0,0),Zero),scalarPatchTypes);
     volScalarField number(IOobject("number",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),mesh,
-        dimensionedScalar(dimless/dimVolume,Zero),"zeroGradient");
+        dimensionedScalar(dimless/dimVolume,Zero),scalarPatchTypes);
     volScalarField alpha(IOobject("alpha",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),mesh,
-        dimensionedScalar(dimless,Zero),"zeroGradient");
+        dimensionedScalar(dimless,Zero),scalarPatchTypes);
     volScalarField rhoCp(IOobject("rhoCp",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::NO_WRITE),mesh,
-        dimensionedScalar(dimEnergy/dimVolume/dimTemperature,rho0*cp),"zeroGradient");
+        dimensionedScalar(dimEnergy/dimVolume/dimTemperature,rho0*cp),scalarPatchTypes);
     volScalarField q(IOobject("q",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),mesh,
-        dimensionedScalar(dimEnergy/dimVolume/dimTime,Zero),"zeroGradient");
+        dimensionedScalar(dimEnergy/dimVolume/dimTime,Zero),scalarPatchTypes);
     volVectorField buoyancy(IOobject("buoyancy",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::NO_WRITE),mesh,
-        dimensionedVector(dimAcceleration,Zero),"zeroGradient");
+        dimensionedVector(dimAcceleration,Zero),StructuredCaseMesh::patch_types(mesh,"zeroGradient"));
     forAll(q,cell)
     {
         const vector c=mesh.C()[cell];
         if(c.x()>width/3 && c.x()<2*width/3 && c.z()<height/8) q[cell]=par("power_density");
     }
-    const scalar power=sum(q.primitiveField()*mesh.V());
+    const scalar power=gSum(q.primitiveField()*mesh.V());
     if(mag(power-par("power_density")*(width/3)*(height/8)*par("depth"))>1e-12)
         FatalErrorInFunction<<"Shared mesh must preserve source extent and power"<<exit(FatalError);
-    const scalar volume=sum(mesh.V().field());
+    const scalar volume=gSum(mesh.V().field());
     const label outlet=mesh.boundaryMesh().findPatchID("zmax");
+    label referenceCell=-1;
+    forAll(mesh.C(),cell)
+        if(grid.interval(grid.x,mesh.C()[cell].x())==0&&grid.interval(grid.z,mesh.C()[cell].z())==0)
+            referenceCell=cell;
     scalar produced=0,escaped=0,thermalResidual=0;
     std::ofstream fields((runTime.path()/"fields.csv").c_str()),history((runTime.path()/"history.csv").c_str());
     fields.exceptions(std::ios::badbit|std::ios::failbit);history.exceptions(std::ios::badbit|std::ios::failbit);
@@ -68,7 +74,9 @@ int main(int argc, char* argv[])
             fields<<runTime.value()<<','<<iz*nx+ix<<','<<grid.x[ix]<<','<<grid.x[ix+1]<<','<<grid.z[iz]<<','<<grid.z[iz+1]<<','
                   <<T[cell]<<','<<rho0*(1-beta*(T[cell]-T0))<<','<<alpha[cell]<<','<<U[cell].x()<<','<<U[cell].y()<<','<<U[cell].z()<<'\n';
         }
-        const scalar inventory=sum(moles.primitiveField()*mesh.V()),balance=inventory+escaped-produced;
+        reduce(tmax,maxOp<scalar>());reduce(tmean,sumOp<scalar>());reduce(amax,maxOp<scalar>());
+        reduce(umax,maxOp<scalar>());reduce(uzmin,minOp<scalar>());reduce(uzmax,maxOp<scalar>());
+        const scalar inventory=gSum(moles.primitiveField()*mesh.V()),balance=inventory+escaped-produced;
         const scalar continuity=gMax(mag(fvc::div(phi)().primitiveField()));
         check(mag(balance)<1e-13&&continuity<1e-6,"Hydrogen/continuity gate failed");
         check(mag(thermalResidual)<1e-6,"Discrete thermal step budget failed");
@@ -78,6 +86,9 @@ int main(int argc, char* argv[])
         if(step==steps)check(tmax-T0>0.05&&amax>1e-6&&uzmin< -1e-5&&uzmax>1e-5,"No heated bubbly plume and return flow");
     };
     write(0);
+    Pstream::barrier(Pstream::worldComm);
+    const auto loopStart=std::chrono::steady_clock::now();
+    const auto cpuStart=std::clock();
     for(label step=1;step<=steps;++step)
     {
         ++runTime;
@@ -98,7 +109,7 @@ int main(int argc, char* argv[])
             surfaceScalarField phiHbyA(fvc::flux(HbyA)+fvc::interpolate(rAU)*fvc::ddtCorr(U,phi));
             adjustPhi(phiHbyA,U,p);constrainPressure(p,U,phiHbyA,rAU);
             fvScalarMatrix pEqn(fvm::laplacian(rAU,p)==fvc::div(phiHbyA));
-            pEqn.setReference(0,0);pEqn.solve();
+            pEqn.setReference(referenceCell,0);pEqn.solve();
             phi=phiHbyA-pEqn.flux();
             U=HbyA-rAU*fvc::grad(p);U.correctBoundaryConditions();
         }
@@ -106,17 +117,22 @@ int main(int argc, char* argv[])
         const surfaceScalarField capacityFlux(fvc::flux(phi,rhoCp));
         solve(rhoCp*fvm::ddt(T)+fvm::div(capacityFlux,T)-fvm::laplacian(conductivity,T)==q);
         T.correctBoundaryConditions();
-        thermalResidual=sum(rhoCp.primitiveField()*(T.primitiveField()-oldT)*mesh.V())-power*dt;
+        scalar localThermalResidual=sum(rhoCp.primitiveField()*(T.primitiveField()-oldT)*mesh.V());
         forAll(T.boundaryField(),patch)
-            thermalResidual-=dt*k*sum(T.boundaryField()[patch].snGrad()*mesh.magSf().boundaryField()[patch]);
+            if(!mesh.boundary()[patch].coupled())
+                localThermalResidual-=dt*k*sum(T.boundaryField()[patch].snGrad()*mesh.magSf().boundaryField()[patch]);
+        reduce(localThermalResidual,sumOp<scalar>());
+        thermalResidual=localThermalResidual-power*dt;
         surfaceScalarField bubblePhi(phi+(mesh.Sf()&dimensionedVector("slip",dimVelocity,vector(0,0,par("slip_velocity")))));
         forAll(bubblePhi.boundaryField(),patch)
-            if(patch!=outlet)bubblePhi.boundaryFieldRef()[patch]=0;
+            if(mesh.boundary()[patch].coupled())continue;
+            else if(patch!=outlet)bubblePhi.boundaryFieldRef()[patch]=0;
             else bubblePhi.boundaryFieldRef()[patch]=max(bubblePhi.boundaryField()[patch],scalar(0));
         solve(fvm::ddt(moles)+fvm::div(bubblePhi,moles));
         solve(fvm::ddt(number)+fvm::div(bubblePhi,number));
         moles.correctBoundaryConditions();number.correctBoundaryConditions();
-        escaped+=dt*sum(bubblePhi.boundaryField()[outlet]*moles.boundaryField()[outlet]);
+        escaped+=dt*gSum(bubblePhi.boundaryField()[outlet]*moles.boundaryField()[outlet]);
+        scalar localProduced=0;
         forAll(T,cell)
         {
             const scalar t=T[cell],G=par("yield_molecules_per_100_ev");
@@ -128,7 +144,7 @@ int main(int argc, char* argv[])
             check(rn>1e-12&&rn<1e-3,"Nucleation radius outside supported range");
             const scalar source=q[cell]*par("yield_mol_per_j")*dt;
             moles[cell]+=source;number[cell]+=source/nb;
-            produced+=source*mesh.V()[cell];
+            localProduced+=source*mesh.V()[cell];
             if(moles[cell]>0&&number[cell]>0)
             {
                 const scalar target=moles[cell]*R*t/(number[cell]*fourPi);
@@ -142,9 +158,16 @@ int main(int argc, char* argv[])
             }
             else alpha[cell]=0;
         }
+        reduce(localProduced,sumOp<scalar>());produced+=localProduced;
         moles.correctBoundaryConditions();number.correctBoundaryConditions();alpha.correctBoundaryConditions();
         if(step%stride==0||step==steps)write(step);
     }
+    fields.flush();history.flush();
+    const scalar loopWall=std::chrono::duration<double>(std::chrono::steady_clock::now()-loopStart).count();
+    const scalar loopCpu=double(std::clock()-cpuStart)/CLOCKS_PER_SEC;
+    std::ofstream timings((runTime.path()/"timing.json").c_str());
+    timings<<std::setprecision(17)<<"{\"rank\":"<<Pstream::myProcNo()<<",\"ranks\":"<<Pstream::nProcs()
+           <<",\"local_cells\":"<<mesh.nCells()<<",\"loop_wall_s\":"<<loopWall<<",\"loop_cpu_s\":"<<loopCpu<<"}\n";
     U.write();T.write();alpha.write();p.write();
     return 0;
 }
