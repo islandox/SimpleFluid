@@ -27,6 +27,21 @@
 #include <stdexcept>
 #include <vector>
 
+namespace SimpleFluid::detail
+{
+
+template<TpetraTypePack Pack>
+struct PressureProjectionEquationTestAccess
+{
+    static Teuchos::RCP<const typename Pack::matrix_type> pressure_matrix(
+        const PressureProjectionEquation<Pack>& equation)
+    {
+        return equation.d_cached_pressure_matrix;
+    }
+};
+
+} // namespace SimpleFluid::detail
+
 namespace
 {
 
@@ -76,6 +91,50 @@ void expect_replicated(const Teuchos::Comm<int>& comm, scalar_type value)
 }
 
 } // namespace
+
+/** @brief CG removes the gauge column even on its neighboring MPI rank. */
+TEST(PressureProjectionMultiRankTest, CgEliminatesRemoteGaugeColumnAndMatchesGmres)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 1, 1, 0.5));
+    const auto row_map = mesh->owned_cell_map();
+    const auto comm = row_map->getComm();
+    if (comm->getSize() != 2)
+    {
+        GTEST_SKIP() << "This test requires exactly two MPI ranks.";
+    }
+    ASSERT_EQ(global_min(*comm, static_cast<int>(mesh->num_owned_cells())), 1);
+    const auto gauge = row_map->getMinAllGlobalIndex();
+    const auto row_gid = row_map->getGlobalElement(0);
+    const std::vector<scalar_type> rates{row_gid == gauge ? scalar_type{0.125} : scalar_type{-0.125}};
+    const SimpleFluid::VolumeContinuityTarget<Pack> target(mesh, rates, 1);
+    const SimpleFluid::BoundaryConditionSet boundary_conditions;
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance = 1.0e-12;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh, options);
+    FieldType gmres_pressure(mesh, "gmres_pressure");
+    VectorFieldType gmres_velocity(mesh, SimpleFluid::vec3{}, "gmres_velocity");
+    const auto gmres = equation.project(gmres_pressure, 0.1, 1.0, cache, gmres_velocity, target);
+    ASSERT_TRUE(gmres.linear_solve.converged);
+
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    equation.set_linear_solver_options(options);
+    FieldType cg_pressure(mesh, "cg_pressure");
+    VectorFieldType cg_velocity(mesh, SimpleFluid::vec3{}, "cg_velocity");
+    const auto cg = equation.project(cg_pressure, 0.1, 1.0, cache, cg_velocity, target);
+    ASSERT_TRUE(cg.linear_solve.converged);
+    EXPECT_NEAR(cg_pressure.value(0), gmres_pressure.value(0), 1.0e-12);
+    EXPECT_NEAR(cg.continuity, gmres.continuity, 1.0e-12);
+    EXPECT_NEAR(cg.continuity, 0.0, 1.0e-12);
+
+    Pack::vector_type unit_gauge(row_map, true);
+    Pack::vector_type gauge_column(row_map, true);
+    unit_gauge.replaceLocalValue(0, row_gid == gauge ? scalar_type{1} : scalar_type{});
+    const auto matrix = SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>::pressure_matrix(equation);
+    matrix->apply(unit_gauge, gauge_column);
+    gauge_column.update(-1.0, unit_gauge, 1.0);
+    EXPECT_NEAR(gauge_column.norm2(), 0.0, 1.0e-14);
+}
 
 /**
  * @brief A two-rank projection uses one global gauge and reports global

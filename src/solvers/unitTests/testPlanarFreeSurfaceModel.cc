@@ -922,6 +922,50 @@ TEST(LiquidMassInventoryTest, CellwiseInternalAdvectionRedistributesButConserves
     EXPECT_NEAR(inventory.totalMass(), 300.0, 1.0e-8);
 }
 
+TEST(LiquidMassInventoryTest, CellwiseBiCGStabGaussSeidelConservesMass)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    Pack::local_ordinal_type interior_face = -1;
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (mesh->is_interior_face(face))
+        {
+            interior_face = face;
+            flux.set_value(face, 0.2);
+        }
+    }
+    ASSERT_GE(interior_face, 0);
+    for (const auto preconditioner : {SimpleFluid::LinearPreconditioner::GaussSeidel,
+             SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel})
+    {
+        Inventory inventory(mesh, options);
+        inventory.initialize(2.0, [](Pack::local_ordinal_type cell) { return cell == 0 ? 200.0 : 100.0; });
+        inventory.updatePureLiquidDensity([](Pack::local_ordinal_type) { return 100.0; });
+        const auto owner = mesh->owner_cell(interior_face);
+        const auto neighbor = mesh->neighbor_cell(interior_face);
+        const auto old_owner = inventory.cellMassInventory().value(owner);
+        const auto old_neighbor = inventory.cellMassInventory().value(neighbor);
+        SimpleFluid::LinearSolverOptions linear;
+        linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+        linear.preconditioner = preconditioner;
+        const auto preview = inventory.previewCellwiseAdvance(0.5, flux, nullptr, nullptr, linear);
+        ASSERT_TRUE(preview.transportStatistics().has_value());
+        EXPECT_TRUE(preview.transportStatistics()->converged);
+        EXPECT_GT(preview.transportStatistics()->iterations, 0);
+        EXPECT_LE(preview.transportStatistics()->achieved_tolerance, linear.tolerance);
+        EXPECT_NEAR(preview.diagnostics().total_mass, 300.0, 1.0e-8);
+        EXPECT_DOUBLE_EQ(inventory.cellMassInventory().value(owner), old_owner);
+        inventory.commitPhaseChange(preview);
+        EXPECT_LT(inventory.cellMassInventory().value(owner), old_owner);
+        EXPECT_GT(inventory.cellMassInventory().value(neighbor), old_neighbor);
+        EXPECT_NEAR(inventory.totalMass(), 300.0, 1.0e-8);
+    }
+}
+
 TEST(LiquidMassInventoryTest, CellwiseDryoutAndBoundaryFluxRejectWithoutCommit)
 {
     using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
@@ -947,6 +991,16 @@ TEST(LiquidMassInventoryTest, CellwiseDryoutAndBoundaryFluxRejectWithoutCommit)
     cg_options.backend = SimpleFluid::LinearSolverBackend::Cg;
     EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, cg_options)),
         std::invalid_argument);
+    for (const auto preconditioner : {SimpleFluid::LinearPreconditioner::DIC,
+             static_cast<SimpleFluid::LinearPreconditioner>(-1),
+             static_cast<SimpleFluid::LinearPreconditioner>(100)})
+    {
+        SimpleFluid::LinearSolverOptions invalid;
+        invalid.preconditioner = preconditioner;
+        EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, invalid)),
+            std::invalid_argument);
+        EXPECT_DOUBLE_EQ(inventory.totalMass(), mass_before);
+    }
 }
 
 TEST(LiquidMassInventoryTest, NewCellwisePreviewInvalidatesOlderTrialToken)

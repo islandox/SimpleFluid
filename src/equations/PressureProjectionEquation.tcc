@@ -51,6 +51,13 @@ PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const 
 template<TpetraTypePack Pack, class MeshType>
 void PressureProjectionEquation<Pack, MeshType>::set_linear_solver_options(LinearSolverOptions options)
 {
+    if ((options.backend == LinearSolverBackend::Cg) != (d_linear_options.backend == LinearSolverBackend::Cg))
+    {
+        // CG eliminates the zero-pressure gauge column as well as its row.
+        // Switching policies must rebuild that numerical operator before use.
+        d_cached_pressure_matrix = Teuchos::null;
+        d_linear_solver.reset();
+    }
     d_linear_options = std::move(options);
 }
 
@@ -375,6 +382,32 @@ template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pa
         return iter == d_pressure_correction_boundary_conditions.end() ? BoundaryCondition{} : iter->second;
     };
     d_cached_pressure_matrix = FVM::pressure_poisson_matrix<Pack>(*d_mesh, d_pressure_gauge_gid, boundary_condition);
+    if (d_linear_options.backend == LinearSolverBackend::Cg && d_pressure_gauge_gid)
+    {
+        // The integrated face-diffusion coefficients form a symmetric,
+        // positive semidefinite operator even on nonuniform cells. The legacy
+        // row-only gauge breaks symmetry. Eliminating its column too retains
+        // the positive neighbor diagonals and yields the SPD gauge-reduced
+        // system. The prescribed gauge and its RHS are zero, so no RHS shift
+        // is necessary. Use the column map so remote gauge neighbors are also
+        // handled on distributed meshes.
+        const auto column_map = d_cached_pressure_matrix->getColMap();
+        d_cached_pressure_matrix->resumeFill();
+        if (column_map->isNodeGlobalElement(*d_pressure_gauge_gid))
+        {
+            const auto gauge_column = column_map->getLocalElement(*d_pressure_gauge_gid);
+            const scalar_type zero{};
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto row = static_cast<local_ordinal_type>(owned);
+                if (owned_map->getGlobalElement(row) != *d_pressure_gauge_gid)
+                {
+                    d_cached_pressure_matrix->replaceLocalValues(row, 1, &zero, &gauge_column);
+                }
+            }
+        }
+        d_cached_pressure_matrix->fillComplete();
+    }
 }
 
 /**

@@ -57,6 +57,7 @@ struct RadiolyticGasStepStatistics
     int clipped_cells = 0;
     int pressure_floor_cells = 0;
     int radius_solver_failures = 0;
+    LinearSolveSummary transport_linear; ///< All FV transport solves in this step.
 };
 
 /**
@@ -109,6 +110,9 @@ public:
 
     /**
      * @brief Replace model options and reinitialize dependent fields.
+     *
+     * Resets the transport solver to the default policy with the configured
+     * transport_solver_tolerance. Apply an explicit solver policy afterward.
      */
     void configure(const RadiolyticGasOptions& options);
     /**
@@ -118,6 +122,20 @@ public:
     {
         return d_options;
     }
+    /** @brief Return the policy used for dissolved and bubble FV transport. */
+    const LinearSolverOptions& transport_linear_solver_options() const noexcept
+    {
+        return d_transport_linear_options;
+    }
+    /**
+     * @brief Collectively replace the FV transport solver policy.
+     *
+     * Every rank must supply the same valid policy. The tolerance is also
+     * published in options().transport_solver_tolerance. Replacing the policy
+     * releases cached solver state while preserving the physical fields.
+     * CG is unsupported because the transported systems may be nonsymmetric.
+     */
+    void set_transport_linear_solver_options(LinearSolverOptions options);
     /**
      * @brief Return the selected radiolysis model family.
      */
@@ -507,6 +525,7 @@ private:
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     RadiolyticGasOptions d_options;
+    LinearSolverOptions d_transport_linear_options;
 
     field_type d_alpha_g;
     field_type d_alpha_l;

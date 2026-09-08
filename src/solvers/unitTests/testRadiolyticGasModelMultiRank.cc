@@ -152,6 +152,74 @@ void expect_same_on_all_ranks(const MeshType& mesh, double value)
 
 } // namespace
 
+/** @brief Collective policy selection rejects divergent ranks and supports GS. */
+TEST(RadiolyticGasModelMultiRankTest, TransportSolverPolicyIsCollective)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+
+    auto options = sheng_options();
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 1.0e-6;
+    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = 10.0;
+    options.free_surface_patches = {"zmax"};
+    options.microbubble_lifetime = 1.0e30;
+    options.large_bubble_dissolution_time = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    RadiolyticModelType model(mesh, options);
+    const auto original = model.transport_linear_solver_options();
+
+    auto candidate = original;
+    if (comm->getRank() == 0)
+        candidate.tolerance = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::exception);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.backend = SimpleFluid::LinearSolverBackend::Cg;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::exception);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.preconditioner = SimpleFluid::LinearPreconditioner::GaussSeidel;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.tolerance *= 2.0;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    EXPECT_EQ(model.transport_linear_solver_options().backend, original.backend);
+    EXPECT_EQ(model.transport_linear_solver_options().preconditioner, original.preconditioner);
+    EXPECT_DOUBLE_EQ(model.options().transport_solver_tolerance, original.tolerance);
+
+    candidate = original;
+    candidate.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    candidate.preconditioner = SimpleFluid::LinearPreconditioner::GaussSeidel;
+    model.set_transport_linear_solver_options(candidate);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.advance(0.025, 0.025, temperature, pressure, velocity, flux, material, &power);
+    const auto& statistics = model.last_statistics();
+    EXPECT_GT(statistics.hydrogen_escaped, 0.0);
+    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-13);
+    EXPECT_TRUE(statistics.transport_linear.converged);
+    EXPECT_EQ(statistics.transport_linear.solves, 5);
+    EXPECT_GT(statistics.transport_linear.iterations, 0);
+    EXPECT_LE(statistics.transport_linear.achieved_tolerance, candidate.tolerance);
+    expect_same_on_all_ranks(*mesh, statistics.transport_linear.solves);
+    expect_same_on_all_ranks(*mesh, statistics.transport_linear.iterations);
+    expect_same_on_all_ranks(*mesh, statistics.transport_linear.achieved_tolerance);
+}
+
 /**
  * @brief Two-rank radiolysis update conserves global H2 and void diagnostics.
  */

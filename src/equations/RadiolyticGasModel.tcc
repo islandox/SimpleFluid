@@ -103,6 +103,7 @@ RadiolyticGasModel<Pack, MeshType>::RadiolyticGasModel(
           d_mesh, "bubble_transport_carrier_volume_flux")
 {
     validate_radiolytic_gas_options(d_options);
+    d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     if (d_options.mode
             == RadiolyticGasMode::Sheng2024TwoPopulation
         && d_options.micro_to_large_conversion_coefficient == 1.0e-4
@@ -128,6 +129,9 @@ void RadiolyticGasModel<Pack, MeshType>::configure(
 {
     validate_radiolytic_gas_options(options);
     d_options = options;
+    d_transport_linear_options = {};
+    d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
+    d_transport_solver.reset();
     if (d_options.mode
             == RadiolyticGasMode::Sheng2024TwoPopulation
         && d_options.micro_to_large_conversion_coefficient == 1.0e-4
@@ -145,6 +149,36 @@ void RadiolyticGasModel<Pack, MeshType>::configure(
     d_cumulative_escaped_bubble_count = 0.0;
     d_last_statistics = {};
     initialize_fields();
+}
+
+/** @brief Validate and install a rank-consistent FV transport solver policy. */
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::set_transport_linear_solver_options(
+    LinearSolverOptions options)
+{
+    constexpr auto context = "Radiolytic transport linear solver options";
+    collective_detail::collective_local_validation(*d_mesh, context, [&]
+    {
+        BelosLinearSolver<Pack>::validate_options(options);
+        if (options.backend == LinearSolverBackend::Cg)
+        {
+            throw std::invalid_argument(
+                "Radiolytic transport requires GMRES or BiCGStab for its nonsymmetric systems.");
+        }
+    });
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(options.backend), context);
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(options.preconditioner), context);
+    collective_detail::require_uniform_value(*d_mesh, options.max_iterations, context);
+    collective_detail::require_uniform_value(*d_mesh, options.tolerance, context);
+    collective_detail::require_uniform_value(*d_mesh, options.verbosity, context);
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(options.reuse_preconditioner), context);
+
+    d_transport_solver.reset();
+    d_transport_linear_options = std::move(options);
+    d_options.transport_solver_tolerance = d_transport_linear_options.tolerance;
 }
 
 /**
@@ -1293,14 +1327,13 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
             .ale = ale});
 
     field_type solution(d_mesh, "radiolytic_transport_solution");
-    LinearSolverOptions transport_options;
-    transport_options.tolerance=d_options.transport_solver_tolerance;
     const auto solve_statistics =
         d_transport_solver.solve_with_statistics(
             system.matrix,
             *system.rhs,
             solution.owned_data(),
-            transport_options);
+            d_transport_linear_options);
+    d_last_statistics.transport_linear.add(solve_statistics);
     if (!solve_statistics.converged)
     {
         throw std::runtime_error(
