@@ -426,6 +426,111 @@ void advance_model(
     }
 }
 
+/** @brief Solver policies preserve configured tolerances and reset on configure. */
+TEST(RadiolyticGasModelTest, TransportSolverPolicyDefaultsAndConfigureReset)
+{
+    auto mesh = make_single_cell_mesh();
+    auto options = sheng_options();
+    options.transport_solver_tolerance = 3.0e-9;
+    RadiolyticModelType model(mesh, options);
+    auto linear = model.transport_linear_solver_options();
+    EXPECT_EQ(linear.backend, SimpleFluid::LinearSolverBackend::Gmres);
+    EXPECT_EQ(linear.preconditioner, SimpleFluid::LinearPreconditioner::None);
+    EXPECT_EQ(linear.max_iterations, 200);
+    EXPECT_DOUBLE_EQ(linear.tolerance, options.transport_solver_tolerance);
+
+    linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    linear.preconditioner = SimpleFluid::LinearPreconditioner::GaussSeidel;
+    linear.max_iterations = 123;
+    linear.tolerance = 2.0e-8;
+    model.set_transport_linear_solver_options(linear);
+    EXPECT_EQ(model.transport_linear_solver_options().backend, linear.backend);
+    EXPECT_EQ(model.transport_linear_solver_options().preconditioner, linear.preconditioner);
+    EXPECT_EQ(model.transport_linear_solver_options().max_iterations, linear.max_iterations);
+    EXPECT_DOUBLE_EQ(model.options().transport_solver_tolerance, linear.tolerance);
+
+    model.configure(options);
+    EXPECT_EQ(model.transport_linear_solver_options().backend, SimpleFluid::LinearSolverBackend::Gmres);
+    EXPECT_EQ(model.transport_linear_solver_options().preconditioner, SimpleFluid::LinearPreconditioner::None);
+    EXPECT_EQ(model.transport_linear_solver_options().max_iterations, 200);
+    EXPECT_DOUBLE_EQ(model.transport_linear_solver_options().tolerance, options.transport_solver_tolerance);
+}
+
+/** @brief Invalid solver changes leave the accepted policy and tolerance intact. */
+TEST(RadiolyticGasModelTest, TransportSolverPolicyRejectsInvalidOptions)
+{
+    RadiolyticModelType model(make_single_cell_mesh(), sheng_options());
+    const auto original = model.transport_linear_solver_options();
+    const auto expect_rejected = [&](auto change)
+    {
+        auto candidate = original;
+        change(candidate);
+        EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+        EXPECT_EQ(model.transport_linear_solver_options().backend, original.backend);
+        EXPECT_EQ(model.transport_linear_solver_options().preconditioner, original.preconditioner);
+        EXPECT_EQ(model.transport_linear_solver_options().max_iterations, original.max_iterations);
+        EXPECT_DOUBLE_EQ(model.transport_linear_solver_options().tolerance, original.tolerance);
+        EXPECT_DOUBLE_EQ(model.options().transport_solver_tolerance, original.tolerance);
+    };
+    expect_rejected([](auto& value) { value.max_iterations = 0; });
+    expect_rejected([](auto& value) { value.tolerance = 0.0; });
+    expect_rejected([](auto& value) { value.tolerance = std::numeric_limits<double>::quiet_NaN(); });
+    expect_rejected([](auto& value) { value.backend = static_cast<SimpleFluid::LinearSolverBackend>(-1); });
+    expect_rejected([](auto& value) { value.preconditioner = static_cast<SimpleFluid::LinearPreconditioner>(-1); });
+    expect_rejected([](auto& value) { value.backend = SimpleFluid::LinearSolverBackend::Cg; });
+}
+
+/** @brief GS-preconditioned transport matches the default five-scalar update. */
+TEST(RadiolyticGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    const auto options = ale_escape_options();
+    RadiolyticModelType reference(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{0.1, 0.0, 0.0}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    for (const auto face_lid : flux.owned_face_ids())
+        flux.set_value(face_lid, 0.1 * mesh->face_area_vector(face_lid).x);
+    auto material = make_water_properties(mesh);
+    reference.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material, &power);
+    ASSERT_EQ(reference.last_statistics().transport_linear.solves, 5);
+
+    for (const auto preconditioner : {SimpleFluid::LinearPreconditioner::GaussSeidel,
+             SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel})
+    {
+        RadiolyticModelType model(mesh, options);
+        auto linear = model.transport_linear_solver_options();
+        linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+        linear.preconditioner = preconditioner;
+        model.set_transport_linear_solver_options(linear);
+        model.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material, &power);
+        const auto summary = model.last_statistics().transport_linear;
+        EXPECT_TRUE(summary.converged);
+        EXPECT_EQ(summary.solves, 5);
+        EXPECT_GT(summary.iterations, 0);
+        EXPECT_LE(summary.achieved_tolerance, linear.tolerance);
+        for (const auto& [name, expected_field] : reference.output_fields())
+        {
+            SCOPED_TRACE(name);
+            const auto& actual_field = *model.output_fields().at(name);
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+                const auto expected = expected_field->value(cell_lid);
+                EXPECT_NEAR(actual_field.value(cell_lid), expected, std::max(1.0e-12, std::abs(expected) * 1.0e-8));
+            }
+        }
+        const auto accepted = model.snapshot();
+        model.advance(2.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material, &power);
+        model.restore(accepted);
+        EXPECT_EQ(model.last_statistics().transport_linear.solves, summary.solves);
+        EXPECT_EQ(model.last_statistics().transport_linear.iterations, summary.iterations);
+        EXPECT_DOUBLE_EQ(model.last_statistics().transport_linear.achieved_tolerance, summary.achieved_tolerance);
+    }
+}
+
 /**
  * @brief Ideal-gas source computes alpha production without changing alpha.
  */

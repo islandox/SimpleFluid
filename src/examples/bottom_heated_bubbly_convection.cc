@@ -1,6 +1,7 @@
 /** Bottom-localized heat and H2 production with solved buoyant circulation. */
 #include "IF97ReferenceWater.hh"
 #include "VerificationMesh.hh"
+#include "VerificationLinearSolvers.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
 
@@ -36,6 +37,7 @@ int run(int argc, char** argv)
     std::filesystem::path mesh_file = "verification/openfoam/bottomHeatedBubblyConvection/mesh.dat";
     int requested_steps = 0;
     double source_scale = 1.0;
+    SimpleFluid::Verification::LinearSolverControls linear_controls;
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -53,6 +55,8 @@ int run(int argc, char** argv)
             requested_steps = std::stoi(value);
         else if (arg == "--source-scale")
             source_scale = std::stod(value);
+        else if (linear_controls.parse(arg, value))
+            continue;
         else
             throw std::invalid_argument("Unknown argument " + arg);
     }
@@ -125,6 +129,7 @@ int run(int argc, char** argv)
     model.dynamic_viscosity = water.dynamic_viscosity;
     model.thermal_conductivity = water.thermal_conductivity;
     SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bc, time, linear, model);
+    linear_controls.apply_flow(solver);
     SimpleFluid::MaterialFeedbackOptions feedback;
     feedback.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqVoid;
     feedback.reference_density = feedback.liquid_density = water.density;
@@ -174,6 +179,8 @@ int run(int argc, char** argv)
     solver.configure_radiolytic_gas(gas);
     solver.initialize_linear_temperature({0, 0, 1}, water.temperature, water.temperature);
     auto* bubbles = solver.find_radiolytic_gas_model();
+    linear_controls.apply_gas(*bubbles);
+    SimpleFluid::Verification::LinearSolverHistory linear_history(output);
     std::filesystem::create_directories(output);
     std::ofstream fields(output / "fields.csv"), history(output / "history.csv");
     fields.exceptions(std::ios::badbit | std::ios::failbit);
@@ -245,6 +252,8 @@ int run(int argc, char** argv)
         {
             throw std::runtime_error("Step "+std::to_string(step)+": "+error.what());
         }
+        linear_history.write(step, solver.time(), solver.last_step_statistics(),
+            bubbles->last_statistics().transport_linear);
         require(std::abs(solver.time() - step * dt) < 1e-10, "Accepted physical time mismatch");
         thermal_residual = -fission.integrated_power() * dt;
         for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)

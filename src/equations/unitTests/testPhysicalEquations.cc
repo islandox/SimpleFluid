@@ -19,6 +19,7 @@
 #include "FVM/Operators.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 
@@ -52,6 +53,13 @@ struct BelosLinearSolverTestAccess
 template<TpetraTypePack Pack>
 struct PressureProjectionEquationTestAccess
 {
+    template<class MeshType>
+    static Teuchos::RCP<const typename Pack::matrix_type> pressure_matrix(
+        const PressureProjectionEquation<Pack, MeshType>& equation)
+    {
+        return equation.d_cached_pressure_matrix;
+    }
+
     static std::size_t preconditioner_setup_count(
         const PressureProjectionEquation<Pack>& equation) noexcept
     {
@@ -885,6 +893,116 @@ TEST(PhysicalEquationsTest, PressureProjectionUsesMueLuByDefault)
     EXPECT_EQ(
         equation.linear_solver_options().preconditioner,
         SimpleFluid::LinearPreconditioner::MueLu);
+}
+
+namespace
+{
+
+template<class TestMeshType>
+void expect_cg_pressure_projection_matches_gmres(SimpleFluid::SP<const TestMeshType> mesh)
+{
+    using Equation = SimpleFluid::PressureProjectionEquation<Pack, TestMeshType>;
+    using Access = SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>;
+    using CellField = typename Equation::field_type;
+    using VectorField = typename Equation::velocity_field_type;
+    const auto row_map = mesh->owned_cell_map();
+    ASSERT_EQ(row_map->getComm()->getSize(), 1);
+    const auto cells = mesh->num_owned_cells();
+
+    for (const bool has_dirichlet : {false, true})
+    {
+        SCOPED_TRACE(has_dirichlet ? "Dirichlet outlet" : "all-Neumann gauge");
+        SimpleFluid::BoundaryConditionSet boundary_conditions;
+        if (has_dirichlet)
+        {
+            boundary_conditions.pressure["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+        }
+        const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundary_conditions);
+        SimpleFluid::LinearSolverOptions options;
+        options.tolerance = 1.0e-12;
+        Equation equation(mesh, options, boundary_conditions.pressure);
+        std::vector<Pack::scalar_type> rates(cells, 0.0);
+        rates.front() = 0.075;
+        rates.back() = -0.075;
+        const typename Equation::continuity_target_type target(mesh, rates, 1);
+        CellField gmres_pressure(mesh, "gmres_pressure");
+        VectorField gmres_velocity(mesh, SimpleFluid::vec3{}, "gmres_velocity");
+        const auto gmres_result = equation.project(gmres_pressure, 0.2, 997.0, cache, gmres_velocity, target);
+        ASSERT_TRUE(gmres_result.linear_solve.converged);
+        const auto gmres_matrix = Access::pressure_matrix(equation);
+
+        options.backend = SimpleFluid::LinearSolverBackend::Cg;
+        options.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
+        equation.set_linear_solver_options(options);
+        EXPECT_TRUE(Access::pressure_matrix(equation).is_null());
+        CellField cg_pressure(mesh, "cg_pressure");
+        VectorField cg_velocity(mesh, SimpleFluid::vec3{}, "cg_velocity");
+        const auto cg_result = equation.project(cg_pressure, 0.2, 997.0, cache, cg_velocity, target);
+        ASSERT_TRUE(cg_result.linear_solve.converged);
+        const auto cg_matrix = Access::pressure_matrix(equation);
+        ASSERT_FALSE(cg_matrix.is_null());
+        EXPECT_NE(cg_matrix.getRawPtr(), gmres_matrix.getRawPtr());
+
+        std::vector<std::vector<Pack::scalar_type>> entries(cells, std::vector<Pack::scalar_type>(cells));
+        for (size_t owned = 0; owned < cells; ++owned)
+        {
+            const auto row = static_cast<Pack::local_ordinal_type>(owned);
+            typename Pack::matrix_type::local_inds_host_view_type columns;
+            typename Pack::matrix_type::values_host_view_type values;
+            cg_matrix->getLocalRowView(row, columns, values);
+            for (size_t entry = 0; entry < columns.extent(0); ++entry)
+            {
+                const auto column = row_map->getLocalElement(cg_matrix->getColMap()->getGlobalElement(columns[entry]));
+                entries[owned][column] += values[entry];
+            }
+            EXPECT_NEAR(cg_pressure.value(row), gmres_pressure.value(row), 1.0e-8);
+            const auto difference = cg_velocity.value(row) - gmres_velocity.value(row);
+            EXPECT_NEAR(difference.dot(difference), 0.0, 1.0e-20);
+            EXPECT_GT(entries[owned][owned], 0.0);
+        }
+        for (size_t row = 0; row < cells; ++row)
+        {
+            for (size_t column = 0; column < cells; ++column)
+            {
+                EXPECT_NEAR(entries[row][column], entries[column][row], 1.0e-13);
+            }
+        }
+        EXPECT_NEAR(cg_result.continuity, gmres_result.continuity, 1.0e-11);
+
+        // Going back to GMRES must discard the CG-specific matrix as well.
+        options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        options.preconditioner = SimpleFluid::LinearPreconditioner::None;
+        equation.set_linear_solver_options(options);
+        EXPECT_TRUE(Access::pressure_matrix(equation).is_null());
+        equation.rebuild_matrix();
+        const auto rebuilt = Access::pressure_matrix(equation);
+        Pack::vector_type probe(row_map, true);
+        Pack::vector_type before(row_map, true);
+        Pack::vector_type after(row_map, true);
+        probe.putScalar(1.0);
+        gmres_matrix->apply(probe, before);
+        rebuilt->apply(probe, after);
+        after.update(-1.0, before, 1.0);
+        EXPECT_NEAR(after.norm2(), 0.0, 1.0e-14);
+    }
+}
+
+} // namespace
+
+TEST(PhysicalEquationsTest, PressureProjectionPcgDicMatchesGmresOnNonuniformLegacyMesh)
+{
+    auto database = std::make_shared<SimpleFluid::Database>(*SimpleFluid::test::make_box_database(4, 2, 1));
+    database->set("X", SimpleFluid::ArrReal{0.0, 0.1, 0.3, 0.6, 1.0});
+    database->set("Y", SimpleFluid::ArrReal{0.0, 0.2, 1.0});
+    expect_cg_pressure_projection_matches_gmres<MeshType>(SimpleFluid::test::build_mesh<Pack>(database));
+}
+
+TEST(PhysicalEquationsTest, PressureProjectionPcgDicMatchesGmresOnNonuniformNativeMesh)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 0.1, 0.3, 0.6, 1.0}, {0.0, 0.2, 1.0}, {0.0, 1.0}}});
+    expect_cg_pressure_projection_matches_gmres<Handle>(std::make_shared<Handle>(geometry));
 }
 
 /** @brief Verifies MueLu reuse until pressure-projection matrix reconstruction. */

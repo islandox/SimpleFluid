@@ -1,6 +1,7 @@
 /** Solver-integrated uniform thermal expansion, compared with OpenFOAM FV. */
 #include "IF97ReferenceWater.hh"
 #include "VerificationMesh.hh"
+#include "VerificationLinearSolvers.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
 
@@ -37,7 +38,7 @@ void check(double value, double tolerance, const char* what)
 }
 
 int run(const std::string& mode, const std::filesystem::path& output, const std::filesystem::path& water_reference,
-    const std::filesystem::path& mesh_file)
+    const std::filesystem::path& mesh_file, const SimpleFluid::Verification::LinearSolverControls& linear_controls)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
     {
@@ -85,6 +86,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
     model.dynamic_viscosity = water.dynamic_viscosity;
     model.thermal_conductivity = water.thermal_conductivity;
     Solver solver(mesh, bc, time, linear, model);
+    linear_controls.apply_flow(solver);
     SimpleFluid::MaterialFeedbackOptions material;
     material.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
     material.reference_density = material.liquid_density = rho0;
@@ -125,6 +127,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
     }
 
     std::filesystem::create_directories(output);
+    SimpleFluid::Verification::LinearSolverHistory linear_history(output);
     std::ofstream csv(output / "history.csv");
     std::ofstream spatial(output / "fields.csv");
     spatial.exceptions(std::ios::badbit | std::ios::failbit);
@@ -149,6 +152,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         {
             source.set_enabled(q > 0.0);
             solver.step();
+            linear_history.write(step, solver.time(), solver.last_step_statistics());
             // Stable small root of BE: dT [1-beta(Told-T0)-beta*dT] = q*dt/(rho0*cp).
             const double a = 1.0 - beta * (exact_temperature - T0);
             const double b = q * dt / (rho0 * cp);
@@ -241,6 +245,7 @@ int main(int argc, char** argv)
         std::filesystem::path output = "planar_ale_comparison";
         std::filesystem::path water_reference = "verification/openfoam/reference_water.properties";
         std::filesystem::path mesh_file = "verification/openfoam/planarALE/mesh.dat";
+        SimpleFluid::Verification::LinearSolverControls linear_controls;
         for (int i = 1; i < argc; ++i)
         {
             const std::string argument = argv[i];
@@ -252,13 +257,15 @@ int main(int argc, char** argv)
                 water_reference = argv[++i];
             else if (argument == "--mesh-file" && i + 1 < argc)
                 mesh_file = argv[++i];
+            else if (i + 1 < argc && linear_controls.parse(argument, argv[i + 1]))
+                ++i;
             else
                 throw std::invalid_argument("Usage: planar_ale_comparison --mode steady|transient --output DIR "
                                             "--water-properties FILE");
         }
         if (mode != "steady" && mode != "transient")
             throw std::invalid_argument("--mode must be steady or transient");
-        return run(mode, output, water_reference, mesh_file);
+        return run(mode, output, water_reference, mesh_file, linear_controls);
     }
     catch (const std::exception& error)
     {

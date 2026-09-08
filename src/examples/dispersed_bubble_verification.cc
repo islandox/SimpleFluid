@@ -3,6 +3,7 @@
  */
 #include "IF97ReferenceWater.hh"
 #include "VerificationMesh.hh"
+#include "VerificationLinearSolvers.hh"
 #include "equations/RadiolyticGasModel.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -58,6 +59,7 @@ std::map<std::string, double> read_parameters(const std::string& path)
 int run(int argc, char** argv)
 {
     std::string mode = "transient", output = "dispersed_bubble_output";
+    SimpleFluid::Verification::LinearSolverControls linear_controls;
     std::string parameters = "verification/openfoam/dispersedBubbleFlow/reference.properties";
     std::string water_parameters = "verification/openfoam/reference_water.properties";
     std::string mesh_file = "verification/openfoam/dispersedBubbleFlow/mesh.dat";
@@ -76,6 +78,8 @@ int run(int argc, char** argv)
             water_parameters = value;
         else if (option == "--mesh-file")
             mesh_file = value;
+        else if (linear_controls.parse(option, value, false))
+            continue;
         else
             throw std::runtime_error("Unknown argument " + option);
     }
@@ -157,6 +161,7 @@ int run(int argc, char** argv)
     options.initial_micro_moles = initial;
     options.initial_micro_number_density = initial / moles_per_bubble;
     Model gas(mesh, options);
+    linear_controls.apply_gas(gas);
     gas.initialize_state(0.0, temperature, pressure, velocity, material);
     const double volume = height * width * width;
     const double initial_inventory = initial * volume;
@@ -164,6 +169,7 @@ int run(int argc, char** argv)
     double maximum_change = 0.0;
     int steady_checks = 0;
     std::filesystem::create_directories(output);
+    SimpleFluid::Verification::LinearSolverHistory linear_history(output);
     std::ofstream profiles(std::filesystem::path(output) / "profiles.csv");
     std::ofstream history(std::filesystem::path(output) / "history.csv");
     std::ofstream fields(std::filesystem::path(output) / "fields.csv");
@@ -214,6 +220,7 @@ int run(int argc, char** argv)
             previous.push_back(gas.micro_moles().value(i));
         gas.advance(step * dt, dt, temperature, pressure, velocity, flux, material, &power);
         const auto& statistics = gas.last_statistics();
+        linear_history.write_gas(step, step * dt, statistics.transport_linear);
         require(statistics.clipped_cells == 0 && statistics.radius_solver_failures == 0 &&
                     statistics.maximum_subcycles == 1,
             "Bubble clipping, radius failure, or unexpected subcycling");

@@ -4,6 +4,50 @@ These workflows run matched SimpleFluid and OpenFOAM cases and compare their
 outputs. Each case documents its equations, physical parameters, boundaries,
 time discretization, acceptance tolerances, and model limitations.
 
+## Linear solver experiments
+
+The three water verification executables accept optional solver overrides.
+For example, after building the Release targets with IF97 enabled:
+
+```sh
+build/gcc/bin/Release/bottom_heated_bubbly_convection \
+  --output /tmp/convection-pcg-dic-sgs \
+  --pressure-solver pcg --pressure-preconditioner dic \
+  --transport-solver bicgstab --transport-preconditioner sgs
+```
+
+The same options apply to `planar_ale_comparison`. The prescribed-flow
+`dispersed_bubble_verification` accepts only the two transport options.
+Omitting overrides retains the existing solver choices and tolerances.
+`gs` selects one forward Gauss-Seidel preconditioning sweep; `sgs` selects
+one symmetric sweep. Both use Ifpack2 relaxation with unit damping and zero
+initial preconditioner output. These are preconditioners for BiCGStab, not
+standalone smoothing solvers.
+
+`pcg` is an alias for the existing CG backend. The pressure equation clears
+off-diagonal gauge-row and gauge-column entries for CG, retaining the gauge
+diagonal, neighbor diagonals and prescribed zero gauge value. DIC uses a diagonal incomplete
+Cholesky recurrence with unchanged off-diagonal factors. It requires a serial
+symmetric matrix and positive finite pivots; distributed DIC is explicitly
+rejected. Under MPI, GS/SGS use local sweeps with Jacobi coupling between
+ranks. Forward GS, ILU0 and ILUT are rejected as CG preconditioners because
+they do not generally preserve the required symmetry.
+
+Each SimpleFluid executable writes `linear_solver_statistics.csv`, containing
+per-step flow aggregate and gas solve/iteration counts and maximum achieved
+true relative residuals. Flow counts combine momentum, pressure and thermal
+solves. BiCGStab sums iterations from independently solved RHS columns;
+other multi-RHS counts follow the selected Belos manager's semantics.
+They are diagnostics rather than equivalent units of work across
+different algorithms. The physical history and field comparison gates are
+unchanged, and timing a failed solve does not establish a speedup.
+
+The BiCGStab wrapper uses contiguous one-column buffers for multiple RHSs.
+This avoids an installed Trilinos 17.2 nested-subview indexing defect exposed
+when deflation removes the zero middle velocity component of a 2D case.
+Each RHS retains the requested tolerance and iteration limit, and the
+unchanged preconditioner is reused across columns within one solve call.
+
 ## Dispersed bubbles and planar ALE
 
 For a bottom-driven flow with **solved liquid convection**, use
