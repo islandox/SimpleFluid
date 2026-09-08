@@ -7,6 +7,8 @@
 #include "FVM/details/OperatorDetails.hh"
 
 #include <cstddef>
+#include <map>
+#include <utility>
 #include <vector>
 
 namespace SimpleFluid::FVM::detail
@@ -29,6 +31,7 @@ template<class MeshType> struct TransportAssemblyGeometry
     std::vector<size_t> face_offsets;
     std::vector<Face> faces;
     std::vector<bool> physical_boundary_faces;
+    std::map<std::pair<int, size_t>, size_t> boundary_indices;
 };
 
 template<class MeshType>
@@ -42,6 +45,15 @@ TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& 
     result.face_offsets.push_back(0);
     result.faces.reserve(mesh.num_owned_cells() * 6);
     result.physical_boundary_faces = physical_boundary_face_mask(mesh);
+    const auto locations = boundary_face_locations(mesh);
+    for (size_t face = 0; face < locations.size(); ++face)
+    {
+        const auto& location = locations[face];
+        if (location.active && result.physical_boundary_faces[face])
+        {
+            result.boundary_indices.emplace(std::pair{location.batch_id, location.in_batch_id}, face);
+        }
+    }
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);

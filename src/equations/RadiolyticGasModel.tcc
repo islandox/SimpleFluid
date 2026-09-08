@@ -1354,7 +1354,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                 .correction_field = &old_values,
                 .cached_matrix = system.matrix,
                 .geometry_cache = &d_transport_geometry_cache,
-                .ale = ale});
+                .ale = ale,
+                .symbolic_plan = &workspace.symbolic_plans.at(operator_slot)});
     }
     else
     {
@@ -1377,10 +1378,9 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
 
     // Keep the original zero initial guess. The shared matrix is numerically
     // refreshed each stage; only its adjacent number/moles solves share a factor.
-    solution.owned_data().putScalar(0.0);
     auto solve_options = d_transport_linear_options;
     solve_options.reuse_preconditioner = reuse_population_operator;
-    const auto solve_statistics = d_transport_solver.solve_with_statistics(
+    const auto solve_statistics = d_transport_solver.solve_from_zero_with_statistics(
         system.matrix, *system.rhs, solution.owned_data(), solve_options);
     d_last_statistics.transport_linear.add(solve_statistics);
     if (!solve_statistics.converged)
@@ -2851,7 +2851,10 @@ void RadiolyticGasModel<Pack, MeshType>::refresh_geometry()
     d_transport_geometry_cache.refresh();
     d_transport_solver = BelosLinearSolver<Pack>{};
     if (d_transport_workspace)
+    {
         d_transport_workspace->systems = {};
+        d_transport_workspace->symbolic_plans = {};
+    }
 }
 
 } // namespace SimpleFluid

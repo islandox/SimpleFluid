@@ -552,6 +552,7 @@ private:
         field_type micro_slip, large_slip, micro_alpha, large_alpha;
         // Dissolved, microbubble, and large-bubble graphs can differ.
         std::array<FVM::TransportSystem<Pack>, 3> systems;
+        std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 3> symbolic_plans;
     };
 
     SP<const mesh_type> d_mesh;

@@ -28,6 +28,7 @@
 
 #include <concepts>
 #include <functional>
+#include <optional>
 #include <type_traits>
 #include <utility>
 
@@ -209,6 +210,7 @@ private:
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     mutable velocity_field_type d_candidate_velocity;
+    mutable std::optional<typename field_traits::tensor_cell_type> d_stress_gradients;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable bool
         d_cached_graph_supports_non_orthogonal_correction = false;

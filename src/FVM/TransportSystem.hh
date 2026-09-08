@@ -261,6 +261,8 @@ struct BasicWeightedScalarTransportRequest
     const ScalarField* old_storage_weight = nullptr;
     /** Mapped active ALE trial; null preserves the fixed-grid assembly exactly. */
     const ALEControlVolumeState* ale = nullptr;
+    /** Optional mapped owned-graph plan; external matrices retain full validation. */
+    detail::StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr;
 };
 
 } // namespace detail
@@ -356,7 +358,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(
         request.treatment, request.correction_field, std::move(request.cached_matrix), std::move(request.implicit_sink),
         std::move(request.fixed_cell_value), request.boundary_diffusivity, request.geometry_cache,
         request.coefficient_interpolation, request.discretization, request.older_values,
-        request.old_storage_weight, request.ale);
+        request.old_storage_weight, request.ale, request.symbolic_plan);
 }
 
 /**
@@ -558,7 +560,8 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
  * explicit/implicit non-orthogonal corrections, and the deviatoric
  * transpose-gradient stress used by physical momentum transport. When
  * @p ale is non-null, @p face_fluxes must be the synchronized mesh-relative
- * volume flux.
+ * volume flux. The optional gradient workspace retains storage only; its
+ * values are recomputed and synchronized for every assembly.
  */
 template<TpetraTypePack Pack, class MeshType>
 VectorTransportSystem<Pack> physical_momentum_transport_system(
@@ -572,12 +575,13 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(
     const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_dynamic_viscosity = nullptr,
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
-    const ALEControlVolumeState* ale = nullptr)
+    const ALEControlVolumeState* ale = nullptr,
+    std::type_identity_t<TensorCellFieldStored<Pack, MeshType>>* gradient_workspace = nullptr)
 {
     return detail::stored_physical_momentum_transport_system<Pack>(old_velocity, face_fluxes, time_step,
         dynamic_viscosity, reference_density, std::move(boundary_value), std::move(acceleration_source), treatment,
         correction_field, std::move(cached_matrix), std::move(boundary_diffusion), boundary_dynamic_viscosity,
-        geometry_cache, coefficient_interpolation, ale);
+        geometry_cache, coefficient_interpolation, ale, gradient_workspace);
 }
 
 /**

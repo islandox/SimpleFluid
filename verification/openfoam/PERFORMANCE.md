@@ -10,16 +10,16 @@ The opt-in `recommended` policy uses these fixture-specific settings:
 
 | Fixture | Default ranks | Solver override |
 | --- | ---: | --- |
-| 1,008-cell bottom-heated convection | 2 | Pressure PCG/DIC |
-| 44-cell steady/transient bubbles | 1 | None |
-| 12-cell steady/transient ALE | 1 | None |
+| 1,008-cell bottom-heated convection | 2 | Pressure PCG/DIC; transport BiCGStab/SGS |
+| 44-cell steady/transient bubbles | 1 | Transport BiCGStab/SGS |
+| 12-cell steady/transient ALE | 1 | Pressure PCG/DIC |
 
-These choices come from the September 9, 2026 fixed-mesh measurements. They
-are starting points for repeating this experiment on another machine. The
-four-rank pressure-DIC run and the combined transport-BiCGStab/SGS pilot failed
-their true-residual acceptance gates in that experiment. Neither supplied an
-accepted performance result. General solver defaults and normal serial
-OpenFOAM comparison launchers keep their existing settings.
+These fixture-specific choices follow the September 9, 2026 reprofile at
+`e6a492c`. Two-rank SGS convection used less CPU time than four ranks; four
+ranks saved about 8% wall time while consuming 84% more CPU time. Pressure
+PCG/DIC reduced these small ALE loop times by about fourfold. The steady
+bubble SGS gain was modest, and the transient bubble timing ranges overlapped.
+Use explicit rank overrides to evaluate latency on a different machine.
 
 Prepare baseline and current IF97-enabled builds with the same compiler,
 configuration, dependencies, and build options. Keep both binary directories
@@ -51,6 +51,8 @@ use their respective libraries as well as their respective executables.
 `--ranks 1 2 4` explicitly overrides the recommendation for every selected
 fixture; a failure still stops the schedule and preserves its logs.
 `--policy default` selects the executables' normal algorithms for both builds.
+`--policy pressure-dic` keeps the former pressure-only experiment (normal gas
+transport); `--policy dic-sgs` explicitly selects the recommended combination.
 Rank counts and solver policies are independent: selecting `default` does not
 change the chosen ranks. Three repeats run by default, sequentially, with the
 baseline/current order alternating. Use `--repeats 1` for a focused check.

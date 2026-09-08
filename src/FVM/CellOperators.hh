@@ -1852,21 +1852,88 @@ auto cell_flux_balance(
 }
 
 /**
- * @brief Cached-view compatibility overload for a stored face field.
- *
- * FieldStored resolves owned/overlap rows itself; the supplied view is kept
- * only so solver kernels can share their legacy cached-view call shape.
+ * @brief Compute a stored balance from a cached overlap or owned face view.
+ * An owned-only view uses the field's published overlap values for remote faces.
  */
 template<TpetraTypePack Pack, class MeshType, class View>
 auto cell_flux_balance(
     const MeshType& mesh,
     const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    const View&,
+    const View& face_values,
     typename Pack::local_ordinal_type cell_lid)
     -> typename Pack::scalar_type
 {
-    return cell_flux_balance<Pack>(mesh, face_fluxes, cell_lid);
+    if (&mesh != &face_fluxes.mesh())
+        throw std::invalid_argument("cell_flux_balance requires the face field mesh.");
+    return detail::stored_cell_flux_balance(mesh, face_fluxes, face_values, cell_lid);
 }
+
+/** @brief Select mesh-local flux storage for the backend's balance convention. */
+template<class FaceField>
+auto face_flux_balance_read_view(const FaceField& field)
+{
+    if constexpr (requires { field.local_read_view(); })
+        return field.local_read_view();
+    else
+        return field.owned_read_view();
+}
+
+/**
+ * @brief Immutable ordered face/sign slots for repeated owned-cell balances.
+ * Geometry motion leaves these topology-only slots valid; topology replacement
+ * requires a new cache. Views are scoped by callers and never retained here.
+ */
+template<TpetraTypePack Pack, class MeshType>
+class CellFluxBalanceCache
+{
+public:
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+    template<class FaceField>
+    explicit CellFluxBalanceCache(const FaceField& field)
+    {
+        const auto& mesh = field.mesh();
+        d_offsets.reserve(mesh.num_owned_cells() + 1);
+        d_offsets.push_back(0);
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto cell_id = detail::query_cell_id(mesh, cell_lid);
+            for (const auto face_id : mesh.faces(cell_id))
+            {
+                const auto face_lid = static_cast<local_ordinal_type>(detail::packed_face_local_id(mesh, face_id));
+                if constexpr (std::same_as<MeshType, Mesh<Pack>>)
+                {
+                    if (!field.is_owned_face(face_lid))
+                        continue;
+                }
+                const auto owner = detail::packed_cell_local_id(mesh, mesh.owner_cell(face_id));
+                d_faces.push_back({face_lid, owner == cell_lid ? scalar_type{1} : scalar_type{-1}});
+            }
+            d_offsets.push_back(d_faces.size());
+        }
+    }
+
+    template<class View>
+    scalar_type balance(const View& mesh_local_values, local_ordinal_type cell_lid) const
+    {
+        const auto row = static_cast<size_t>(cell_lid);
+        if (row >= d_offsets.size() - 1)
+            throw std::out_of_range("Cell flux-balance cache requires an owned cell.");
+        scalar_type result{};
+        for (auto slot = d_offsets[row]; slot < d_offsets[row + 1]; ++slot)
+        {
+            const auto& face = d_faces[slot];
+            result += face.sign * mesh_local_values(face.row, 0);
+        }
+        return result;
+    }
+
+private:
+    struct FaceSlot { local_ordinal_type row; scalar_type sign; };
+    std::vector<size_t> d_offsets;
+    std::vector<FaceSlot> d_faces;
+};
 
 /** @brief Compute volume-normalized divergence from stored face fluxes. */
 template<TpetraTypePack Pack, class MeshType>
@@ -1884,12 +1951,13 @@ cell_divergence_from_fluxes(
             "cell_divergence_from_fluxes requires the face field mesh.");
     }
     std::vector<scalar_type> divergence(mesh.num_owned_cells());
+    const auto face_values = face_fluxes.local_read_view();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto cell_id = detail::query_cell_id(mesh, cell_lid);
         divergence[owned] = detail::stored_cell_flux_balance(
-                                mesh, face_fluxes, cell_lid)
+                                mesh, face_fluxes, face_values, cell_lid)
                           / static_cast<scalar_type>(
                                 mesh.cell_volume(cell_id));
     }

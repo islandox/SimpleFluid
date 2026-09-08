@@ -160,11 +160,16 @@ public:
         double beta = 0.0) const override
     {
         ASSERT_EQ(mode, Teuchos::NO_TRANS);
+        ++d_application_count;
         output.update(alpha, input, beta);
     }
 
+    std::size_t application_count() const { return d_application_count; }
+    void reset_application_count() const { d_application_count = 0; }
+
 private:
     Teuchos::RCP<const Pack::map_type> d_map;
+    mutable std::size_t d_application_count = 0;
 };
 
 /** @brief Reproduce recurrence/true-residual disagreement deterministically. */
@@ -479,6 +484,175 @@ TEST(BelosLinearSolverTest, UsesRhsScaledResidualForWarmStart)
     EXPECT_TRUE(statistics.converged);
     EXPECT_EQ(statistics.iterations, 0);
     EXPECT_LT(statistics.achieved_tolerance, options.tolerance);
+}
+
+/** @brief Count actual operator calls while exercising real Krylov managers. */
+TEST(BelosLinearSolverTest, ReusesPreparedInitialResidualAndSkipsVerifiedZeroScreening)
+{
+    const auto map = Teuchos::rcp(new Pack::map_type(
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+        3, 0, Tpetra::getDefaultComm()));
+    const auto op = Teuchos::rcp(new IdentityOperator(map));
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1.0);
+    for (const auto backend : {
+             SimpleFluid::LinearSolverBackend::Gmres,
+             SimpleFluid::LinearSolverBackend::Cg,
+             SimpleFluid::LinearSolverBackend::BiCGStab})
+    {
+        SCOPED_TRACE(SimpleFluid::to_string(backend));
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = backend;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        solution.putScalar(0.0);
+        op->reset_application_count();
+        const auto screened = solver.solve_with_statistics(op, rhs, solution, options);
+        ASSERT_TRUE(screened.converged);
+        const auto screened_calls = op->application_count();
+
+        // A poisoned incoming guess proves the explicit API establishes zero.
+        solution.putScalar(std::numeric_limits<double>::quiet_NaN());
+        op->reset_application_count();
+        const auto zero = solver.solve_from_zero_with_statistics(op, rhs, solution, options);
+        ASSERT_TRUE(zero.converged);
+        EXPECT_EQ(zero.iterations, screened.iterations);
+        EXPECT_EQ(op->application_count() + 1, screened_calls);
+        EXPECT_GE(op->application_count(), 1U); // The final true residual remains.
+        for (const auto value : solution.getData())
+            EXPECT_NEAR(value, 1.0, 1.0e-14);
+
+        if (backend == SimpleFluid::LinearSolverBackend::Cg)
+        {
+            solution.putScalar(1.0);
+            op->reset_application_count();
+            const auto warm = solver.solve_with_statistics(op, rhs, solution, options);
+            EXPECT_TRUE(warm.converged);
+            EXPECT_EQ(warm.iterations, 0);
+            // One screening apply and one final check; setProblem adds none.
+            EXPECT_EQ(op->application_count(), 2U);
+        }
+    }
+}
+
+TEST(BelosLinearSolverTest, RefreshesPreparedResidualForChangedMapsBackendsRhsAndColumnCounts)
+{
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    for (const auto rows : {3U, 5U, 3U})
+    {
+        const auto map = Teuchos::rcp(new Pack::map_type(
+            Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+            rows, 0, Tpetra::getDefaultComm()));
+        const auto op = Teuchos::rcp(new IdentityOperator(map));
+        for (const auto backend : {
+                 SimpleFluid::LinearSolverBackend::Gmres,
+                 SimpleFluid::LinearSolverBackend::Cg,
+                 SimpleFluid::LinearSolverBackend::BiCGStab})
+        {
+            SCOPED_TRACE(SimpleFluid::to_string(backend));
+            SimpleFluid::LinearSolverOptions options;
+            options.backend = backend;
+            for (const auto columns : {1U, 3U, 2U})
+            {
+                SCOPED_TRACE(columns);
+                Pack::multi_vector_type rhs(map, columns, true), solution(map, columns, true);
+                for (const double value : {2.0, -3.0})
+                {
+                    rhs.putScalar(value);
+                    auto statistics = solver.solve_from_zero_with_statistics(
+                        op, rhs, solution, options);
+                    ASSERT_TRUE(statistics.converged);
+                    statistics = solver.solve_with_statistics(op, rhs, solution, options);
+                    ASSERT_TRUE(statistics.converged);
+                    EXPECT_EQ(statistics.iterations, 0);
+
+                    // Retain the already exact first column while rejecting
+                    // nonfinite and catastrophically bad remaining guesses.
+                    for (std::size_t column = 1; column < columns; ++column)
+                    {
+                        auto values = solution.getDataNonConst(column);
+                        std::fill(values.begin(), values.end(), column == 1
+                            ? std::numeric_limits<double>::quiet_NaN() : -1.0e9 * value);
+                    }
+                    statistics = solver.solve_with_statistics(op, rhs, solution, options);
+                    ASSERT_TRUE(statistics.converged);
+                    for (std::size_t column = 0; column < columns; ++column)
+                        for (const auto actual : solution.getData(column))
+                            EXPECT_NEAR(actual, value, 1.0e-13);
+                }
+            }
+        }
+    }
+}
+
+TEST(BelosLinearSolverTest, VerifiedZeroBiCGStabHandlesStridedInactiveColumns)
+{
+    const auto matrix = block_matrix<3>({{
+        {{4.0, -0.5, 0.0}}, {{-1.5, 5.0, -0.5}}, {{0.0, -1.5, 6.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::multi_vector_type rhs_storage(map, 5, true), solution_storage(map, 5, true);
+    solution_storage.putScalar(55.0);
+    const Teuchos::Array<std::size_t> rhs_columns{4, 0, 2}, solution_columns{3, 1, 4};
+    auto rhs = rhs_storage.subViewNonConst(rhs_columns());
+    auto solution = solution_storage.subViewNonConst(solution_columns());
+    Pack::multi_vector_type exact(map, 3, true);
+    for (const auto column : {0U, 2U})
+    {
+        auto values = exact.getDataNonConst(column);
+        for (std::size_t row = 0; row < 3; ++row)
+            values[row] = (column + 1.0) * (row + 1.0);
+    }
+    matrix->apply(exact, *rhs);
+    solution->putScalar(std::numeric_limits<double>::quiet_NaN());
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    options.tolerance = 1.0e-12;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto statistics = solver.solve_from_zero_with_statistics(matrix, *rhs, *solution, options);
+    ASSERT_TRUE(statistics.converged);
+    for (std::size_t column = 0; column < 3; ++column)
+    {
+        const auto expected = exact.getData(column);
+        const auto actual = solution->getData(column);
+        for (std::size_t row = 0; row < 3; ++row)
+            EXPECT_NEAR(actual[row], expected[row], 1.0e-10);
+    }
+    for (const auto column : {0U, 2U})
+        for (const auto value : solution_storage.getData(column))
+            EXPECT_DOUBLE_EQ(value, 55.0);
+}
+
+TEST(BelosLinearSolverTest, RefinementReusesTheCheckedTrueResidualWithoutAnotherApply)
+{
+    const auto map = Teuchos::rcp(new Pack::map_type(
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+        3, 0, Tpetra::getDefaultComm()));
+    const auto op = Teuchos::rcp(new IdentityOperator(map));
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1.0);
+    for (const auto backend : {
+             SimpleFluid::LinearSolverBackend::Cg,
+             SimpleFluid::LinearSolverBackend::BiCGStab})
+    {
+        SCOPED_TRACE(SimpleFluid::to_string(backend));
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = backend;
+        options.tolerance = 1.0e-11;
+        options.max_iterations = 8;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        op->reset_application_count();
+        ASSERT_TRUE(solver.solve_from_zero_with_statistics(op, rhs, solution, options).converged);
+        const auto one_solve_calls = op->application_count();
+        ResidualGap gap{1.0002 * options.tolerance};
+        inject_residual_gap(solver, backend, gap);
+        op->reset_application_count();
+        const auto statistics = solver.solve_from_zero_with_statistics(op, rhs, solution, options);
+        EXPECT_TRUE(statistics.converged);
+        EXPECT_EQ(gap.solve_calls, 2);
+        EXPECT_EQ(statistics.iterations, 2);
+        // Each real Krylov solve has one final check. There is no extra
+        // initial SpMV before either solve or between the two solves.
+        EXPECT_EQ(op->application_count(), 2 * one_solve_calls);
+    }
 }
 
 /** @brief A retained reference norm bounds scaling for a tiny nonzero RHS. */

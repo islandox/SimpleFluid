@@ -39,3 +39,19 @@ simplefluid_add_mpi_test(
     ARGS "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively"
     LABELS "mpi;scalar_transport"
     TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME StoredTransportReuse_2procs
+    TARGET testStoredTransportReuse
+    PROCS 2
+    LABELS "mpi;transport;field_stored"
+    TIMEOUT 120)
+
+foreach(_cached_kernel IN ITEMS CellFluxBalanceCache StoredPressureFaceFluxCache)
+  simplefluid_add_mpi_test(
+      NAME ${_cached_kernel}_2procs
+      TARGET test${_cached_kernel}
+      PROCS 2
+      LABELS "mpi;fvm;cache"
+      TIMEOUT 120)
+endforeach()

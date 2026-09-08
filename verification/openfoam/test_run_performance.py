@@ -27,6 +27,22 @@ class PerformanceOutputsTest(unittest.TestCase):
             (directory / "timing.json").write_text(json.dumps(
                 {"rank": rank, "ranks": 2, "loop_wall_s": rank + 1, "loop_cpu_s": 0.5}))
 
+    def test_recommended_policies_are_fixture_specific(self):
+        for case in performance.CASES:
+            arguments = performance.solver_arguments(case, self.root, "recommended")
+            with self.subTest(case=case):
+                self.assertEqual("--pressure-preconditioner" in arguments, not case.startswith("bubble-"))
+                self.assertEqual("--transport-preconditioner" in arguments, not case.startswith("ale-"))
+                if not case.startswith("bubble-"):
+                    self.assertEqual(arguments[arguments.index("--pressure-preconditioner") + 1], "dic")
+                if not case.startswith("ale-"):
+                    self.assertEqual(arguments[arguments.index("--transport-preconditioner") + 1], "sgs")
+                plain = performance.solver_arguments(case, self.root, "default")
+                self.assertNotIn("--pressure-solver", plain)
+                self.assertNotIn("--transport-solver", plain)
+                pressure_only = performance.solver_arguments(case, self.root, "pressure-dic")
+                self.assertNotIn("--transport-solver", pressure_only)
+
     def test_owned_rows_and_slowest_rank_are_retained(self):
         timing = performance.merge_outputs(self.root, 2, 0)
         self.assertEqual(timing["loop_wall_s"], 2)

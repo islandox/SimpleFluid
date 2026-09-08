@@ -121,9 +121,9 @@ pressure reference is applied only by the rank owning the first global cell.
 The per-rank `timing.json` records elapsed and process CPU time for the time
 loop, including its diagnostics and CSV output, after mesh and solver setup.
 
-The opt-in [performance runner](../PERFORMANCE.md) selects two ranks and
-pressure PCG/DIC for this 1,008-cell fixture while keeping transport policies
-and all physical/linear tolerances unchanged. Explicit `--ranks` and
+The opt-in [performance runner](../PERFORMANCE.md) selects two ranks,
+pressure PCG/DIC, and transport BiCGStab/SGS for this 1,008-cell fixture.
+All physical and linear tolerances remain unchanged. Explicit `--ranks` and
 `--policy` arguments override those experiment settings. The ordinary paired
 comparison launcher above retains its serial execution and solver defaults.
 

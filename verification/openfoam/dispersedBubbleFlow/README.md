@@ -48,8 +48,9 @@ rows and retain one copy of the global history before applying the unchanged
 comparison manifests. Each rank also writes `timing.json`, containing
 the time-stepping loop's wall and CPU time, excluding mesh and model setup.
 
-The opt-in [performance runner](../PERFORMANCE.md) defaults these 44-cell
-fixtures to one rank, as measured MPI overhead exceeded the available speedup.
+The opt-in [performance runner](../PERFORMANCE.md) selects one rank and
+transport BiCGStab/SGS for these 44-cell fixtures. The steady-case policy gain
+was modest; transient timing ranges overlapped in the policy experiment.
 It supports explicit rank overrides and repeated baseline/current measurements
 with the same physical checks.
 
