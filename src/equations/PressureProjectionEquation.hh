@@ -225,6 +225,7 @@ private:
     mutable std::optional<typename Pack::global_ordinal_type> d_pressure_gauge_gid;
     mutable face_flux_field_type d_cached_face_fluxes;
     mutable face_flux_workspace_type d_face_flux_workspace;
+    FVM::CellFluxBalanceCache<Pack, mesh_type> d_flux_balance_cache;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
     real_t d_rhs_norm_reference = {};
