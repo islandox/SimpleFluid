@@ -11,6 +11,7 @@
 #pragma once
 
 #include "dataclass/TpetraTypes.hh"
+#include "solvers/DICPreconditioner.hh"
 
 #include <BelosBiCGStabSolMgr.hpp>
 #include <BelosLinearProblem.hpp>
@@ -30,8 +31,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <iostream>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 #include <string_view>
@@ -75,7 +78,7 @@ inline LinearSolverBackend parse_linear_solver_backend(
     {
         return LinearSolverBackend::Gmres;
     }
-    if (value == "cg" || value == "CG"
+    if (value == "cg" || value == "CG" || value == "pcg" || value == "PCG"
         || value == "pseudoBlockCG")
     {
         return LinearSolverBackend::Cg;
@@ -89,14 +92,17 @@ inline LinearSolverBackend parse_linear_solver_backend(
         "Unknown linear-solver backend '" + std::string(value) + "'.");
 }
 
-/** @brief Available right-preconditioning strategies for Belos solves. */
+/** @brief Available inverse preconditioners for Belos solves. */
 enum class LinearPreconditioner
 {
     None,
     MueLu,
     Jacobi,
     ILU0,
-    ILUT
+    ILUT,
+    DIC,
+    GaussSeidel,
+    SymmetricGaussSeidel
 };
 
 /**
@@ -115,6 +121,10 @@ inline std::string_view to_string(LinearPreconditioner preconditioner)
         case LinearPreconditioner::Jacobi:  return "jacobi";
         case LinearPreconditioner::ILU0:    return "ilu0";
         case LinearPreconditioner::ILUT:    return "ilut";
+        case LinearPreconditioner::DIC:     return "dic";
+        case LinearPreconditioner::GaussSeidel: return "gaussSeidel";
+        case LinearPreconditioner::SymmetricGaussSeidel:
+            return "symmetricGaussSeidel";
     }
 
     throw std::invalid_argument("Unknown LinearPreconditioner value.");
@@ -140,6 +150,14 @@ inline LinearPreconditioner parse_linear_preconditioner(
     }
     if (value == "ilut" || value == "ILUT")
         return LinearPreconditioner::ILUT;
+    if (value == "dic" || value == "DIC")
+        return LinearPreconditioner::DIC;
+    if (value == "gaussSeidel" || value == "GaussSeidel"
+        || value == "gs" || value == "GS")
+        return LinearPreconditioner::GaussSeidel;
+    if (value == "symmetricGaussSeidel" || value == "SymmetricGaussSeidel"
+        || value == "symGaussSeidel" || value == "sgs" || value == "SGS")
+        return LinearPreconditioner::SymmetricGaussSeidel;
     throw std::invalid_argument(
         "Unknown linear preconditioner '" + std::string(value) + "'.");
 }
@@ -159,6 +177,7 @@ struct LinearResidualScaling
 struct LinearSolveStatistics
 {
     bool converged = false;
+    /** BiCGStab sums iterations over independently solved RHS columns. */
     int iterations = 0;
     real_t achieved_tolerance = {};
     real_t rhs_norm = {};
@@ -192,12 +211,17 @@ struct LinearSolverOptions
     int verbosity = Belos::Errors + Belos::Warnings;
     /**
      * CG is intended only when both the operator and configured
-     * preconditioner preserve a symmetric positive-definite system. ILU0 and
-     * ILUT are not generally CG-compatible. GMRES and BiCGStab support the
-     * nonsymmetric transport and gauge-fixed pressure operators assembled by
-     * the general FVM path.
+     * preconditioner preserve a symmetric positive-definite system. ILU0,
+     * ILUT, and forward Gauss-Seidel are rejected with CG. GMRES and BiCGStab
+     * support the nonsymmetric transport and gauge-fixed pressure operators
+     * assembled by the general FVM path.
      */
     LinearSolverBackend backend = LinearSolverBackend::Gmres;
+    /**
+     * DIC requires a serial symmetric matrix with positive incomplete pivots.
+     * Gauss-Seidel variants use one unit-damped sweep from a zero guess;
+     * under MPI they relax within each rank, with Jacobi between ranks.
+     */
     LinearPreconditioner preconditioner = LinearPreconditioner::None;
     /**
      * @brief Reuse a preconditioner for consecutive solves with the exact
@@ -276,6 +300,8 @@ public:
         d_solver = Teuchos::null;
         d_backend.reset();
         d_residual_workspace = Teuchos::null;
+        d_bicgstab_rhs_workspace = Teuchos::null;
+        d_bicgstab_solution_workspace = Teuchos::null;
         d_preconditioner = Teuchos::null;
         d_preconditioner_operator = Teuchos::null;
         d_preconditioner_kind.reset();
@@ -304,6 +330,12 @@ public:
     {
         validate_options(options);
         validate_residual_scaling(residual_scaling);
+        if (options.backend == LinearSolverBackend::BiCGStab
+            && rhs.getNumVectors() > 1)
+        {
+            return solve_bicgstab_columns(
+                matrix, rhs, solution, options, residual_scaling);
+        }
         prepare_initial_guess(matrix, rhs, solution);
         auto x = Teuchos::rcpFromRef(solution);
         auto b = Teuchos::rcpFromRef(rhs);
@@ -346,13 +378,19 @@ public:
             }
         }
 
-        static_cast<void>(d_solver->solve());
+        const auto return_status = d_solver->solve();
         real_t rhs_norm{};
         const auto achieved_tolerance = true_relative_residual(
             matrix, rhs, solution, residual_scaling, &rhs_norm);
+        const bool converged = std::isfinite(achieved_tolerance)
+            && achieved_tolerance <= options.tolerance;
+        // Belos::Errors is zero and denotes diagnostics that are always printed.
+        if (!converged)
+        {
+            report_failed_solve(rhs, options, residual_scaling, return_status);
+        }
         return {
-            std::isfinite(achieved_tolerance)
-                && achieved_tolerance <= options.tolerance,
+            converged,
             d_solver->getNumIters(),
             achieved_tolerance,
             rhs_norm};
@@ -387,7 +425,7 @@ public:
             matrix, *b, *x, options, residual_scaling);
     }
 
-private:
+    /** @brief Validate local option values before callers agree across ranks. */
     static void validate_options(const LinearSolverOptions& options)
     {
         if (options.max_iterations <= 0)
@@ -403,6 +441,119 @@ private:
         }
         static_cast<void>(to_string(options.backend));
         static_cast<void>(to_string(options.preconditioner));
+        if (options.backend == LinearSolverBackend::Cg
+            && (options.preconditioner == LinearPreconditioner::ILU0
+                || options.preconditioner == LinearPreconditioner::ILUT
+                || options.preconditioner == LinearPreconditioner::GaussSeidel))
+        {
+            throw std::invalid_argument(
+                "CG requires a symmetric positive-definite preconditioner; "
+                "ILU0, ILUT, and forward Gauss-Seidel are not supported.");
+        }
+    }
+
+private:
+    /**
+     * @brief Solve BiCGStab columns in owned contiguous storage.
+     *
+     * Trilinos 17.2 Tpetra single-column subviews of a nonconstant-stride
+     * multivector use whichVectors[0] + index rather than whichVectors[index].
+     * BiCGStab's per-column axpy reaches that path after RHS deflation; e.g.
+     * surviving columns [0,2] cause an update intended for 2 to overwrite 1.
+     * Independent owning columns avoid nested deflated views entirely.
+     * Each RHS retains its tolerance and iteration limit. A preconditioner
+     * can safely be reused within this call because its matrix is unchanged.
+     */
+    LinearSolveStatistics solve_bicgstab_columns(
+        const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs, multi_vector_type& solution,
+        const LinearSolverOptions& options,
+        LinearResidualScaling residual_scaling)
+    {
+        if (rhs.getNumVectors() != solution.getNumVectors())
+        {
+            throw std::invalid_argument(
+                "BiCGStab requires matching RHS and solution vector counts.");
+        }
+        if (d_bicgstab_rhs_workspace.is_null()
+            || !d_bicgstab_rhs_workspace->getMap()->isSameAs(*rhs.getMap()))
+        {
+            d_bicgstab_rhs_workspace = Teuchos::rcp(
+                new multi_vector_type(rhs.getMap(), 1, false));
+        }
+        if (d_bicgstab_solution_workspace.is_null()
+            || !d_bicgstab_solution_workspace->getMap()->isSameAs(*solution.getMap()))
+        {
+            d_bicgstab_solution_workspace = Teuchos::rcp(
+                new multi_vector_type(solution.getMap(), 1, false));
+        }
+
+        LinearSolveStatistics combined;
+        combined.converged = true;
+        auto column_options = options;
+        for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+        {
+            {
+                const auto source = rhs.getData(column);
+                auto destination = d_bicgstab_rhs_workspace->getDataNonConst(0);
+                std::copy(source.begin(), source.end(), destination.begin());
+            }
+            {
+                const auto source = solution.getData(column);
+                auto destination = d_bicgstab_solution_workspace->getDataNonConst(0);
+                std::copy(source.begin(), source.end(), destination.begin());
+            }
+            const auto statistics = solve_with_statistics(
+                matrix, *d_bicgstab_rhs_workspace, *d_bicgstab_solution_workspace,
+                column_options, residual_scaling);
+            {
+                const auto source = d_bicgstab_solution_workspace->getData(0);
+                auto destination = solution.getDataNonConst(column);
+                std::copy(source.begin(), source.end(), destination.begin());
+            }
+            combined.converged = combined.converged && statistics.converged;
+            combined.iterations += statistics.iterations;
+            combined.achieved_tolerance = std::max(
+                combined.achieved_tolerance, statistics.achieved_tolerance);
+            combined.rhs_norm = std::max(combined.rhs_norm, statistics.rhs_norm);
+            column_options.reuse_preconditioner = true;
+        }
+        return combined;
+    }
+
+    /** @brief Report the true residual per RHS after an unsuccessful solve. */
+    void report_failed_solve(
+        const multi_vector_type& rhs,
+        const LinearSolverOptions& options,
+        LinearResidualScaling residual_scaling,
+        Belos::ReturnType return_status) const
+    {
+        Teuchos::Array<magnitude_type> rhs_norms(rhs.getNumVectors());
+        Teuchos::Array<magnitude_type> residual_norms(rhs.getNumVectors());
+        rhs.norm2(rhs_norms());
+        residual_workspace(rhs).norm2(residual_norms());
+        if (rhs.getMap()->getComm()->getRank() != 0)
+            return;
+
+        std::ostringstream message;
+        message.precision(std::numeric_limits<real_t>::max_digits10);
+        message << "BelosLinearSolver " << to_string(options.backend) << '/'
+                << to_string(options.preconditioner)
+                << " failed explicit residual check: Belos="
+                << (return_status == Belos::Converged ? "converged" : "unconverged")
+                << " iterations=" << d_solver->getNumIters()
+                << " tolerance=" << options.tolerance << '\n';
+        for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
+        {
+            const auto denominator = std::max(rhs_norms[column],
+                static_cast<magnitude_type>(residual_scaling.rhs_norm_floor));
+            const auto scaled = denominator > magnitude_type{}
+                ? residual_norms[column] / denominator : residual_norms[column];
+            message << "  RHS " << column << ": norm=" << rhs_norms[column]
+                    << " residual=" << residual_norms[column]
+                    << " scaled=" << scaled << '\n';
+        }
+        std::cerr << message.str();
     }
 
     static void validate_residual_scaling(
@@ -525,6 +676,25 @@ private:
 
         switch (options.preconditioner)
         {
+            case LinearPreconditioner::DIC:
+                d_preconditioner = Teuchos::rcp(
+                    new detail::DICPreconditioner<Pack>(*crs_matrix));
+                break;
+            case LinearPreconditioner::GaussSeidel:
+            case LinearPreconditioner::SymmetricGaussSeidel:
+                d_preconditioner = create_ifpack2_preconditioner(
+                    crs_matrix, "RELAXATION",
+                    [&options](Teuchos::ParameterList& parameters)
+                    {
+                        parameters.set("relaxation: type",
+                            options.preconditioner
+                                    == LinearPreconditioner::GaussSeidel
+                                ? "Gauss-Seidel" : "Symmetric Gauss-Seidel");
+                        parameters.set("relaxation: sweeps", 1);
+                        parameters.set("relaxation: damping factor", scalar_type{1});
+                        parameters.set("relaxation: zero starting solution", true);
+                    });
+                break;
             case LinearPreconditioner::Jacobi:
                 d_preconditioner =
                     create_ifpack2_preconditioner(
@@ -600,6 +770,9 @@ private:
         d_preconditioner_operator = matrix;
         d_preconditioner_kind = options.preconditioner;
         ++d_preconditioner_setup_count;
+        // Belos CG applies this inverse to the residual in its PCG recurrence
+        // and applies the original A to search directions. BiCGStab requires
+        // right attachment; retaining it also avoids preconditioned norm scaling.
         d_problem->setRightPrec(d_preconditioner);
     }
 
@@ -763,6 +936,8 @@ private:
     Teuchos::RCP<solver_type> d_solver;
     std::optional<LinearSolverBackend> d_backend;
     mutable Teuchos::RCP<multi_vector_type> d_residual_workspace;
+    Teuchos::RCP<multi_vector_type> d_bicgstab_rhs_workspace;
+    Teuchos::RCP<multi_vector_type> d_bicgstab_solution_workspace;
     Teuchos::RCP<const operator_type> d_preconditioner;
     Teuchos::RCP<const operator_type> d_preconditioner_operator;
     std::optional<LinearPreconditioner> d_preconditioner_kind;

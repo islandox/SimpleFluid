@@ -106,6 +106,7 @@ public:
         BoundaryConditionMap pressure_boundary_conditions = {},
         FVM::CellGradientScheme gradient_scheme = FVM::CellGradientScheme::LeastSquares);
 
+    /** Select pressure algebra; CG also applies a symmetry-preserving zero gauge. */
     void set_linear_solver_options(LinearSolverOptions options);
 
     const LinearSolverOptions& linear_solver_options() const noexcept;

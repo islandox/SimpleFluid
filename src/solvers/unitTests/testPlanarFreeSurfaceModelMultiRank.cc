@@ -172,6 +172,67 @@ TEST(LiquidMassInventoryMultiRankTest, CellwiseTransportAndPhaseSourcesArePartit
     inventory.commitPhaseChange(phase_preview);
 }
 
+TEST(LiquidMassInventoryMultiRankTest, CellwiseBiCGStabGaussSeidelConservesMass)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack, NativeMesh>;
+    auto cartesian = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0, 3.0, 4.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    auto mesh = std::make_shared<NativeMesh>(std::move(cartesian));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    ASSERT_EQ(communicator->getSize(), 2);
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory::face_flux_field_type flux(mesh, 0.0, "liquidMassFlux");
+    int local_partition_fluxes = 0;
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (mesh->is_interior_face(face))
+        {
+            flux.set_value(face, 0.05);
+            local_partition_fluxes += !mesh->is_owned_cell(mesh->owner_cell(face)) ||
+                                      !mesh->is_owned_cell(mesh->neighbor_cell(face));
+        }
+    }
+    flux.sync_ghosts();
+    ASSERT_GT(global_sum(*communicator, local_partition_fluxes), 0.0);
+    for (const auto preconditioner : {SimpleFluid::LinearPreconditioner::GaussSeidel,
+             SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel})
+    {
+        Inventory inventory(mesh, options);
+        inventory.initialize(
+            4.0, [&mesh](Pack::local_ordinal_type cell) { return 100.0 + 25.0 * mesh->cell_centroid(cell).x; });
+        const auto mass_before = inventory.totalMass();
+        SimpleFluid::LinearSolverOptions linear;
+        linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+        linear.preconditioner = preconditioner;
+        auto invalid = linear;
+        invalid.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
+        EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, invalid)),
+            std::invalid_argument);
+        invalid.preconditioner = static_cast<SimpleFluid::LinearPreconditioner>(100);
+        EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, invalid)),
+            std::invalid_argument);
+        invalid = linear;
+        if (communicator->getRank() == 0)
+            invalid.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
+        EXPECT_THROW(static_cast<void>(inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, invalid)),
+            std::invalid_argument);
+        EXPECT_DOUBLE_EQ(inventory.totalMass(), mass_before);
+
+        const auto preview = inventory.previewCellwiseAdvance(0.1, flux, nullptr, nullptr, linear);
+        ASSERT_TRUE(preview.transportStatistics().has_value());
+        EXPECT_TRUE(preview.transportStatistics()->converged);
+        EXPECT_GT(preview.transportStatistics()->iterations, 0);
+        EXPECT_LE(preview.transportStatistics()->achieved_tolerance, linear.tolerance);
+        EXPECT_NEAR(preview.diagnostics().total_mass, mass_before, mass_before * 1.0e-9);
+        EXPECT_NEAR(preview.diagnostics().step_mass_balance_residual, 0.0, mass_before * 1.0e-9);
+        expect_replicated(*communicator, preview.diagnostics().total_mass);
+        inventory.commitPhaseChange(preview);
+        EXPECT_NEAR(inventory.totalMass(), mass_before, mass_before * 1.0e-9);
+    }
+}
+
 TEST(LiquidMassInventoryMultiRankTest, CellwiseAdvanceCollectivelyRejectsDivergentSourceSelection)
 {
     using NativeMesh = SimpleFluid::MeshHandle<Pack>;

@@ -945,12 +945,16 @@ public:
             throw std::logic_error("cellMassInventory requires error depletion policy because source-side phase "
                                    "acceptance cannot be conservatively clamped here.");
         }
-        if (local_control[4] == 0 || local_control[5] == 0 || local_control[6] == 0 || backend < 0 || backend > 2 ||
-            backend == static_cast<int>(LinearSolverBackend::Cg) || preconditioner < 0 || preconditioner > 4)
+        if (local_control[4] == 0 || linear_options.backend == LinearSolverBackend::Cg ||
+            linear_options.preconditioner == LinearPreconditioner::DIC)
         {
             throw std::invalid_argument("Cellwise liquid-mass advance requires a positive finite timestep and "
                                         "nonsymmetric-compatible linear solver controls.");
         }
+        // Enum values and numeric validity already agree across ranks above.
+        // Share backend validation so newly supported transport policies work
+        // here without maintaining a second list of enum limits.
+        BelosLinearSolver<Pack>::validate_options(linear_options);
         const std::array<scalar_type, 2> local_scalar_control{
             time_step, static_cast<scalar_type>(linear_options.tolerance)};
         std::array<scalar_type, 2> minimum_scalar_control{};
