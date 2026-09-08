@@ -218,7 +218,8 @@ struct LinearSolverOptions
      */
     LinearSolverBackend backend = LinearSolverBackend::Gmres;
     /**
-     * DIC requires a serial symmetric matrix with positive incomplete pivots.
+     * DIC requires a symmetric matrix with positive incomplete pivots; its
+     * distributed factor retains cross-rank couplings using halo exchanges.
      * Gauss-Seidel variants use one unit-damped sweep from a zero guess;
      * under MPI they relax within each rank, with Jacobi between ranks.
      */
