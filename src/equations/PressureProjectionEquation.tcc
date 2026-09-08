@@ -37,7 +37,8 @@ PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const 
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "PressureProjectionEquation")),
       d_linear_options(linear_options), d_pressure_boundary_conditions(std::move(pressure_boundary_conditions)),
       d_pressure_correction_boundary_conditions(d_pressure_boundary_conditions), d_gradient_scheme(gradient_scheme),
-      d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"), d_face_flux_workspace(d_mesh)
+      d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"), d_face_flux_workspace(d_mesh),
+      d_flux_balance_cache(d_cached_face_fluxes)
 {
     require_owned_cell_map(d_mesh);
     for (auto& [name, condition] : d_pressure_correction_boundary_conditions)
@@ -645,25 +646,25 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     }
     if (d_cached_rhs.is_null())
     {
-        d_cached_rhs = Teuchos::rcp(new typename Pack::vector_type(d_mesh->owned_cell_map(), true));
-    }
-    else
-    {
-        d_cached_rhs->putScalar(0.0);
+        d_cached_rhs = Teuchos::rcp(new typename Pack::vector_type(d_mesh->owned_cell_map(), false));
     }
 
     {
-        const auto predictor_flux_values = d_cached_face_fluxes.owned_read_view();
+        const auto predictor_flux_values = FVM::face_flux_balance_read_view(d_cached_face_fluxes);
+        const auto rhs_values = d_cached_rhs->getLocalViewHost(Tpetra::Access::OverwriteAll);
         scalar_type local_compatibility_residual{};
         scalar_type local_compatibility_scale{};
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             const auto balance =
-                FVM::cell_flux_balance<Pack>(*d_mesh, d_cached_face_fluxes, predictor_flux_values, cell_lid);
+                d_flux_balance_cache.balance(predictor_flux_values, cell_lid);
             const auto target = continuity_target.integrated_rate(cell_lid);
             local_compatibility_residual += balance - target;
             local_compatibility_scale += std::abs(balance) + std::abs(target);
+            const auto row_gid = owned_map->getGlobalElement(cell_lid);
+            const auto is_pressure_gauge = d_pressure_gauge_gid && row_gid == *d_pressure_gauge_gid;
+            rhs_values(owned, 0) = is_pressure_gauge ? scalar_type{} : (-balance + target) / time_step;
         }
         const std::array<scalar_type, 2> local_values{local_compatibility_residual, local_compatibility_scale};
         std::array<scalar_type, 2> global_values{};
@@ -679,26 +680,9 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         }
     }
 
-    {
-        const auto predictor_flux_values = d_cached_face_fluxes.owned_read_view();
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            const auto row_gid = owned_map->getGlobalElement(cell_lid);
-            const auto is_pressure_gauge = d_pressure_gauge_gid && row_gid == *d_pressure_gauge_gid;
-            const auto rhs_value =
-                is_pressure_gauge
-                    ? scalar_type{}
-                    : (-FVM::cell_flux_balance<Pack>(*d_mesh, d_cached_face_fluxes, predictor_flux_values, cell_lid) +
-                          continuity_target.integrated_rate(cell_lid)) /
-                          time_step;
-            d_cached_rhs->replaceLocalValue(cell_lid, rhs_value);
-        }
-    }
-
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix = d_cached_pressure_matrix;
     const LinearResidualScaling residual_scaling{reuse_cached_predictor_flux ? d_rhs_norm_reference : real_t{}};
-    const auto linear_statistics = d_linear_solver.solve_with_statistics(
+    const auto linear_statistics = d_linear_solver.solve_from_zero_with_statistics(
         const_matrix, *d_cached_rhs, pressure_correction.owned_data(), d_linear_options, residual_scaling);
     if (!linear_statistics.converged)
     {
@@ -753,12 +737,12 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     scalar_type continuity_normalization_squared = {};
     scalar_type continuity_maximum = {};
     {
-        const auto corrected_flux_values = d_cached_face_fluxes.owned_read_view();
+        const auto corrected_flux_values = FVM::face_flux_balance_read_view(d_cached_face_fluxes);
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
             const auto balance =
-                FVM::cell_flux_balance<Pack>(*d_mesh, d_cached_face_fluxes, corrected_flux_values, cell_lid);
+                d_flux_balance_cache.balance(corrected_flux_values, cell_lid);
             const auto target = continuity_target.integrated_rate(cell_lid);
             const auto residual = balance - target;
             continuity_norm_squared += residual * residual;

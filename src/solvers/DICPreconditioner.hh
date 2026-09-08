@@ -27,6 +27,9 @@
 namespace SimpleFluid::detail
 {
 
+template<TpetraTypePack Pack>
+struct DICPreconditionerTestAccess;
+
 /**
  * @brief Apply a diagonal incomplete-Cholesky inverse with all matrix couplings.
  *
@@ -39,7 +42,9 @@ namespace SimpleFluid::detail
  * global row IDs. Tpetra imports communicate inverse pivots during setup and
  * triangular-solve values during apply; the matrix is never gathered. Each
  * communication stage completes every locally ready row before exchanging
- * remote dependencies. Stage count depends on the partition and ordering.
+ * remote dependencies. Application retains directional, remote-only imports
+ * for the dependencies consumed in each stage. Stage count depends on the
+ * partition and ordering.
  * An incomplete factor can break down even for an SPD input; nonpositive or
  * nonfinite pivots fail collectively rather than silently changing the factor.
  * Like the retained Belos solver, this object is not thread-safe: apply()
@@ -256,6 +261,8 @@ public:
     }
 
 private:
+    friend struct DICPreconditionerTestAccess<Pack>;
+
     struct GlobalEntry
     {
         global_ordinal_type column;
@@ -267,6 +274,12 @@ private:
         local_ordinal_type column;
         local_ordinal_type local_row;
         scalar_type value;
+    };
+
+    struct StageTransfer
+    {
+        Teuchos::RCP<const import_type> importer;
+        mutable Teuchos::RCP<multi_vector_type> halo;
     };
 
     static constexpr local_ordinal_type invalid_row()
@@ -331,9 +344,9 @@ private:
             "Distributed DIC requires a fill-complete square matrix with matching row, domain and range maps.");
         const bool unique_ownership = d_map->isOneToOne();
         require_collectively(unique_ownership, "Distributed DIC requires one-to-one row ownership.");
-        d_column_map = matrix.getColMap();
-        Teuchos::Array<int> owners(d_column_map->getLocalNumElements());
-        const auto lookup = d_map->getRemoteIndexList(d_column_map->getLocalElementList(), owners());
+        const auto column_map = matrix.getColMap();
+        Teuchos::Array<int> owners(column_map->getLocalNumElements());
+        const auto lookup = d_map->getRemoteIndexList(column_map->getLocalElementList(), owners());
         require_collectively(lookup != Tpetra::IDNotPresent,
             "Distributed DIC matrix columns must belong to its global row map.");
 
@@ -394,7 +407,7 @@ private:
                 }
                 else if (entry.column < gid && entry.value != scalar_type{})
                 {
-                    const auto column = d_column_map->getLocalElement(entry.column);
+                    const auto column = column_map->getLocalElement(entry.column);
                     valid_columns = valid_columns && column != invalid_row();
                     d_lower.push_back({column, d_map->getLocalElement(entry.column), entry.value});
                 }
@@ -404,7 +417,7 @@ private:
             {
                 if (entry->column > gid && entry->value != scalar_type{})
                 {
-                    const auto column = d_column_map->getLocalElement(entry->column);
+                    const auto column = column_map->getLocalElement(entry->column);
                     valid_columns = valid_columns && column != invalid_row();
                     d_upper.push_back({column, d_map->getLocalElement(entry->column), traits::conjugate(entry->value)});
                 }
@@ -417,9 +430,9 @@ private:
         require_collectively(valid_diagonal && valid_columns,
             "Distributed DIC requires diagonal entries and complete factor column maps.");
 
-        d_import = Teuchos::rcp(new import_type(d_map, d_column_map));
+        const import_type pivot_import(d_map, column_map);
         multi_vector_type pivots(d_map, 1, true);
-        multi_vector_type halo_pivots(d_column_map, 1, true);
+        multi_vector_type halo_pivots(column_map, 1, true);
         d_inverse_diagonal.assign(count, scalar_type{});
         std::vector<local_ordinal_type> ordered_rows(count);
         std::iota(ordered_rows.begin(), ordered_rows.end(), local_ordinal_type{});
@@ -486,11 +499,59 @@ private:
                 break;
             if (global[2] == 0)
                 throw std::invalid_argument("Distributed DIC factor dependencies made no progress.");
-            halo_pivots.doImport(pivots, *d_import, Tpetra::INSERT);
+            halo_pivots.doImport(pivots, pivot_import, Tpetra::INSERT);
         }
+        d_forward_transfers = make_stage_transfers(column_map, d_lower_offsets, d_lower);
+        d_backward_transfers = make_stage_transfers(column_map, d_upper_offsets, d_upper);
     }
 
-    /** Replay the factor schedule with one halo exchange between stages. */
+    /**
+     * Retain only remote values consumed by each triangular-solve stage.
+     *
+     * The established global factor schedule guarantees that every requested
+     * value has already been computed. Owned dependencies stay in the work
+     * vector; opposite-direction and other-stage halo values are not copied or
+     * sent. Remapping column slots leaves row and subtraction order unchanged.
+     * All ranks construct every plan, including ranks with no receiving rows:
+     * those ranks may still export values needed by another rank.
+     */
+    std::vector<StageTransfer> make_stage_transfers(
+        const Teuchos::RCP<const map_type>& column_map,
+        const std::vector<std::size_t>& offsets,
+        std::vector<DistributedEntry>& entries) const
+    {
+        const auto stages = d_stage_offsets.size() - 1;
+        std::vector<StageTransfer> transfers;
+        transfers.reserve(stages);
+        for (std::size_t stage = 0; stage < stages; ++stage)
+        {
+            Teuchos::Array<global_ordinal_type> remote_ids;
+            for (auto position = d_stage_offsets[stage]; position < d_stage_offsets[stage + 1]; ++position)
+            {
+                const auto row = d_stage_rows[position];
+                for (auto index = offsets[row]; index < offsets[row + 1]; ++index)
+                    if (entries[index].local_row == invalid_row())
+                        remote_ids.push_back(column_map->getGlobalElement(entries[index].column));
+            }
+            std::sort(remote_ids.begin(), remote_ids.end());
+            remote_ids.erase(std::unique(remote_ids.begin(), remote_ids.end()), remote_ids.end());
+            const auto target = Teuchos::rcp(new map_type(
+                Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+                remote_ids(), d_map->getIndexBase(), d_map->getComm()));
+            transfers.push_back({Teuchos::rcp(new import_type(d_map, target)), Teuchos::null});
+            for (auto position = d_stage_offsets[stage]; position < d_stage_offsets[stage + 1]; ++position)
+            {
+                const auto row = d_stage_rows[position];
+                for (auto index = offsets[row]; index < offsets[row + 1]; ++index)
+                    if (entries[index].local_row == invalid_row())
+                        entries[index].column = target->getLocalElement(
+                            column_map->getGlobalElement(entries[index].column));
+            }
+        }
+        return transfers;
+    }
+
+    /** Replay the factor schedule using its directional remote-only plans. */
     void apply_distributed(const multi_vector_type& input, multi_vector_type& output,
         Teuchos::ETransp mode, scalar_type alpha, scalar_type beta) const
     {
@@ -521,7 +582,10 @@ private:
         if (d_distributed_work.is_null() || d_distributed_work->getNumVectors() != vectors)
         {
             d_distributed_work = Teuchos::rcp(new multi_vector_type(d_map, vectors, false));
-            d_distributed_halo = Teuchos::rcp(new multi_vector_type(d_column_map, vectors, false));
+            for (const auto* transfers : {&d_forward_transfers, &d_backward_transfers})
+                for (const auto& transfer : *transfers)
+                    transfer.halo = Teuchos::rcp(new multi_vector_type(
+                        transfer.importer->getTargetMap(), vectors, false));
         }
         // Copy every input before publishing any output, including overlapping
         // differently permuted column views. getData honors nonconstant stride.
@@ -534,10 +598,11 @@ private:
         const auto stages = d_stage_offsets.size() - 1;
         for (std::size_t stage = 0; stage < stages; ++stage)
         {
+            const auto& transfer = d_forward_transfers[stage];
             if (stage != 0)
-                d_distributed_halo->doImport(*d_distributed_work, *d_import, Tpetra::INSERT);
+                transfer.halo->doImport(*d_distributed_work, *transfer.importer, Tpetra::INSERT);
             const auto owned = d_distributed_work->getLocalViewHost(Tpetra::Access::ReadWrite);
-            const auto remote = d_distributed_halo->getLocalViewHost(Tpetra::Access::ReadOnly);
+            const auto remote = transfer.halo->getLocalViewHost(Tpetra::Access::ReadOnly);
             for (auto position = d_stage_offsets[stage]; position < d_stage_offsets[stage + 1]; ++position)
             {
                 const auto row = d_stage_rows[position];
@@ -556,10 +621,11 @@ private:
         }
         for (auto stage = stages; stage-- > 0;)
         {
+            const auto& transfer = d_backward_transfers[stage];
             if (stage + 1 != stages)
-                d_distributed_halo->doImport(*d_distributed_work, *d_import, Tpetra::INSERT);
+                transfer.halo->doImport(*d_distributed_work, *transfer.importer, Tpetra::INSERT);
             const auto owned = d_distributed_work->getLocalViewHost(Tpetra::Access::ReadWrite);
-            const auto remote = d_distributed_halo->getLocalViewHost(Tpetra::Access::ReadOnly);
+            const auto remote = transfer.halo->getLocalViewHost(Tpetra::Access::ReadOnly);
             for (auto position = d_stage_offsets[stage + 1]; position-- > d_stage_offsets[stage];)
             {
                 const auto row = d_stage_rows[position];
@@ -593,13 +659,12 @@ private:
     std::vector<scalar_type> d_inverse_diagonal;
     mutable std::vector<scalar_type> d_workspace;
     bool d_distributed = false;
-    Teuchos::RCP<const map_type> d_column_map;
-    Teuchos::RCP<const import_type> d_import;
     std::vector<std::size_t> d_lower_offsets, d_upper_offsets;
     std::vector<DistributedEntry> d_lower, d_upper;
     std::vector<std::size_t> d_stage_offsets;
     std::vector<local_ordinal_type> d_stage_rows;
-    mutable Teuchos::RCP<multi_vector_type> d_distributed_work, d_distributed_halo;
+    std::vector<StageTransfer> d_forward_transfers, d_backward_transfers;
+    mutable Teuchos::RCP<multi_vector_type> d_distributed_work;
 };
 
 } // namespace SimpleFluid::detail

@@ -25,6 +25,7 @@
 #include <cmath>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -174,8 +175,9 @@ private:
  * @brief Reusable Rhie-Chow scratch storage for mesh-aware stored fields.
  *
  * The workspace retains a stored pressure-gradient field, boundary-face
- * locations, and mesh-only gradient geometry. It is tied to one exact mesh
- * instance and is not safe for concurrent evaluations.
+ * locations, mesh-only gradient geometry, and ordered pressure-face metrics.
+ * Geometry metrics reject stale epochs until refresh_geometry() is called.
+ * It is tied to one exact mesh instance and is not safe for concurrent evaluations.
  *
  * @tparam Pack Tpetra type pack used by the stored fields.
  * @tparam MeshType Runtime or statically dispatched mapped mesh.
@@ -185,6 +187,7 @@ class FieldStoredPressureWeightedFaceFluxWorkspace
 {
 public:
     using mesh_type = MeshType;
+    using face_geometry_type = detail::StoredPressureFaceGeometry<Pack>;
     using boundary_location_type =
         detail::BoundaryFaceLocation<mesh_type>;
 
@@ -196,7 +199,10 @@ public:
                   "rhie_chow_pressure_gradient_workspace"),
               d_mesh,
               false),
-          d_gradient_cache(d_mesh)
+          d_gradient_cache(d_mesh),
+          d_face_geometry(detail::stored_pressure_face_geometry<Pack>(*d_mesh)),
+          d_geometry_identity(detail::ale_geometry_identity(*d_mesh)),
+          d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
     {
     }
 
@@ -232,8 +238,27 @@ public:
         return d_gradient_cache;
     }
 
+    /** @brief Return ordered owned faces with current-epoch numeric metrics. */
+    const std::vector<face_geometry_type>& face_geometry() const
+    {
+        if (detail::ale_geometry_identity(*d_mesh) != d_geometry_identity ||
+            mesh_geometry_epoch(*d_mesh) != d_geometry_epoch)
+        {
+            throw std::invalid_argument(
+                "pressure face-flux geometry is stale for the mesh geometry epoch.");
+        }
+        return d_face_geometry;
+    }
+
     /** @brief Refresh Rhie--Chow reconstruction geometry after mesh motion. */
-    void refresh_geometry() { d_gradient_cache.refresh(); }
+    void refresh_geometry()
+    {
+        auto faces = detail::stored_pressure_face_geometry<Pack>(*d_mesh);
+        d_gradient_cache.refresh();
+        d_face_geometry = std::move(faces);
+        d_geometry_identity = detail::ale_geometry_identity(*d_mesh);
+        d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+    }
 
 private:
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
@@ -250,6 +275,9 @@ private:
     SP<const mesh_type> d_mesh;
     VectorCellFieldStored<Pack, mesh_type> d_pressure_gradient;
     CellGradientCache<Pack, mesh_type> d_gradient_cache;
+    std::vector<face_geometry_type> d_face_geometry;
+    const void* d_geometry_identity;
+    std::uint64_t d_geometry_epoch;
 };
 
 /**

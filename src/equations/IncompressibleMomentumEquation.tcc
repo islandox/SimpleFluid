@@ -601,6 +601,10 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
             }
             else
             {
+                if (!d_stress_gradients)
+                {
+                    d_stress_gradients.emplace(d_mesh, "momentum_transpose_stress_gradients");
+                }
                 return FVM::physical_momentum_transport_system<Pack>(
                     old_velocity, face_fluxes, options.time_step,
                     dynamic_viscosity, reference_density, boundary_value,
@@ -608,7 +612,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
                     correction_field, d_cached_physical_transport_matrix,
                     boundary_diffusion, boundary_dynamic_viscosity,
                     &d_transport_geometry_cache,
-                    options.coefficient_interpolation, ale);
+                    options.coefficient_interpolation, ale, &*d_stress_gradients);
             }
         }
         catch (...)

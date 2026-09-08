@@ -30,6 +30,28 @@ struct BelosLinearSolverTestAccess
     }
 };
 
+template<TpetraTypePack Pack>
+struct DICPreconditionerTestAccess
+{
+    static std::size_t stage_count(const DICPreconditioner<Pack>& inverse)
+    {
+        return inverse.d_stage_offsets.size() - 1;
+    }
+
+    static std::array<std::size_t, 2> transfer_rows(const DICPreconditioner<Pack>& inverse)
+    {
+        std::array<std::size_t, 2> result{};
+        for (const auto* transfers : {&inverse.d_forward_transfers, &inverse.d_backward_transfers})
+            for (const auto& transfer : *transfers)
+            {
+                result[0] += transfer.importer->getNumRemoteIDs();
+                result[1] += transfer.importer->getNumSameIDs()
+                    + transfer.importer->getNumPermuteIDs();
+            }
+        return result;
+    }
+};
+
 } // namespace SimpleFluid::detail
 
 namespace
@@ -265,6 +287,71 @@ TEST(DICPreconditionerMultiRankTest, ContiguousPartitionCombinesLocalAndRemoteDe
     SKIP_SINGLE_RANK(ContiguousPartitionCombinesLocalAndRemoteDependencies);
     check_factor_application(make_map(
         Tpetra::getDefaultComm(), false, false, Partition::Contiguous));
+}
+
+TEST(DICPreconditionerMultiRankTest, StageTransfersSendOnlyConsumedRemoteDependencies)
+{
+    SKIP_SINGLE_RANK(StageTransfersSendOnlyConsumedRemoteDependencies);
+    const auto comm = Tpetra::getDefaultComm();
+    const auto map = make_map(comm);
+    const FactorFixture fixture;
+    const auto matrix = make_matrix(map, fixture.matrix);
+    Inverse inverse(*matrix);
+    using Access = SimpleFluid::detail::DICPreconditionerTestAccess<Pack>;
+    const auto transferred = Access::transfer_rows(inverse);
+    EXPECT_EQ(transferred[1], 0U);
+
+    // The interleaved chain has one ready global row per stage. Every directed
+    // edge crossing the partition must therefore be received once; no other
+    // column is needed. This oracle comes from the input graph and ownership.
+    std::size_t expected_remote = 0;
+    for (const auto gid : map->getLocalElementList())
+    {
+        const auto row = global_index(gid);
+        for (std::size_t column = 0; column < row_count; ++column)
+            if (fixture.matrix[row][column] != 0.0
+                && map->getLocalElement(global_ids[column])
+                    == Teuchos::OrdinalTraits<LO>::invalid())
+                ++expected_remote;
+    }
+    EXPECT_EQ(transferred[0], expected_remote);
+
+    const Pack::import_type full_import(map, matrix->getColMap());
+    const auto old_remote = full_import.getNumRemoteIDs()
+        * 2 * (Access::stage_count(inverse) - 1);
+    const std::array<unsigned long long, 2> local{
+        static_cast<unsigned long long>(transferred[0]),
+        static_cast<unsigned long long>(old_remote)};
+    std::array<unsigned long long, 2> global{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM,
+        static_cast<int>(local.size()), local.data(), global.data());
+    EXPECT_LT(global[0], global[1]);
+}
+
+TEST(DICPreconditionerMultiRankTest, DirectionalApplicationsRemainSymmetricPositiveDefinite)
+{
+    SKIP_SINGLE_RANK(DirectionalApplicationsRemainSymmetricPositiveDefinite);
+    const auto map = make_map(Tpetra::getDefaultComm());
+    const auto matrix = make_matrix(map, FactorFixture{}.matrix);
+    Inverse inverse(*matrix);
+    Pack::multi_vector_type x(map, 1, true), y(map, 1, true);
+    Pack::multi_vector_type px(map, 1, true), py(map, 1, true);
+    fill_exact(x);
+    {
+        const auto values = y.getDataNonConst(0);
+        for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+            values[row] = exact_value(global_index(map->getGlobalElement(static_cast<LO>(row))), 2);
+    }
+    inverse.apply(x, px);
+    inverse.apply(y, py);
+    Teuchos::Array<double> x_py(1), y_px(1), x_px(1), y_py(1);
+    x.dot(py, x_py());
+    y.dot(px, y_px());
+    x.dot(px, x_px());
+    y.dot(py, y_py());
+    EXPECT_NEAR(x_py[0], y_px[0], 1.0e-12);
+    EXPECT_GT(x_px[0], 0.0);
+    EXPECT_GT(y_py[0], 0.0);
 }
 
 TEST(DICPreconditionerMultiRankTest, EmptyRankParticipatesInSetupAndApplication)

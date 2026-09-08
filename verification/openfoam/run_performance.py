@@ -73,12 +73,17 @@ def solver_arguments(case: str, inputs: Path, policy: str) -> list[str]:
                "--water-properties", str(inputs / "reference_water.properties")]
     if family == "bottomHeatedBubblyConvection":
         command += ["--properties", str(inputs / "reference.properties")]
-        if policy == "recommended":
-            command += ["--pressure-solver", "pcg", "--pressure-preconditioner", "dic"]
     else:
         command += ["--mode", mode]
         if family == "dispersedBubbleFlow":
             command += ["--parameters", str(inputs / "reference.properties")]
+    if policy in ("recommended", "dic-sgs"):
+        if family != "dispersedBubbleFlow":
+            command += ["--pressure-solver", "pcg", "--pressure-preconditioner", "dic"]
+        if family != "planarALE":
+            command += ["--transport-solver", "bicgstab", "--transport-preconditioner", "sgs"]
+    elif policy == "pressure-dic" and family != "dispersedBubbleFlow":
+        command += ["--pressure-solver", "pcg", "--pressure-preconditioner", "dic"]
     return command
 
 
@@ -205,7 +210,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="new output directory, never overwritten")
     parser.add_argument("--cases", choices=CASES, nargs="+", required=True)
     parser.add_argument("--ranks", type=positive_integer, nargs="+", help="override every selected fixture's rank count")
-    parser.add_argument("--policy", choices=("recommended", "default"), default="recommended")
+    parser.add_argument("--policy", choices=("recommended", "default", "pressure-dic", "dic-sgs"), default="recommended")
     parser.add_argument("--repeats", type=positive_integer, default=3)
     parser.add_argument("--timeout", type=positive_integer, default=1800, help="OpenMPI timeout per solver in seconds")
     parser.add_argument("--mpiexec", default="mpiexec")

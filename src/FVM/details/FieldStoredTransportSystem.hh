@@ -14,6 +14,7 @@
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/TransportAssemblyGeometry.hh"
 #include "fields/FieldStored.hh"
+#include "geometry/GeometryEpoch.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_CommHelpers.hpp>
@@ -46,12 +47,124 @@ template<TpetraTypePack Pack> struct StoredPreparedTransportMatrix
 {
     Teuchos::RCP<typename Pack::matrix_type> matrix;
     bool reused = false;
+    bool symbolic_reuse = false;
 };
 
 template<TpetraTypePack Pack> struct StoredTransportMatrixRow
 {
     std::vector<typename Pack::local_ordinal_type> columns;
     std::vector<typename Pack::scalar_type> values;
+};
+
+/**
+ * @brief Row slots for a matrix whose graph was created and frozen by assembly.
+ *
+ * Only newly assembled matrices enter this plan. Their Tpetra static graph
+ * forbids insertion/removal through the matrix API. External matrices always
+ * retain the full collective validation path. Required operator columns and
+ * map identities are checked on every reuse; numeric values are never cached.
+ */
+template<TpetraTypePack Pack> class StoredTransportSymbolicPlan
+{
+public:
+    using matrix_type = typename Pack::matrix_type;
+    using row_type = StoredTransportMatrixRow<Pack>;
+
+    template<class MeshType>
+    bool matches(const MeshType& mesh, const Teuchos::RCP<matrix_type>& matrix,
+        const std::vector<row_type>& rows) const
+    {
+        if (!owns(matrix) || !matrix->isFillComplete() || d_mesh != &mesh ||
+            d_geometry_epoch != mesh_geometry_epoch(mesh) ||
+            matrix->getCrsGraph().get() != d_graph.get() ||
+            matrix->getRowMap().get() != mesh.owned_cell_map().get() ||
+            matrix->getColMap().get() != mesh.overlap_cell_map().get() ||
+            matrix->getDomainMap().get() != mesh.owned_cell_map().get() ||
+            matrix->getRangeMap().get() != mesh.owned_cell_map().get() ||
+            rows.size() != d_columns.size())
+        {
+            return false;
+        }
+        for (size_t row = 0; row < rows.size(); ++row)
+        {
+            if (rows[row].columns != d_columns[row])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool owns(const Teuchos::RCP<matrix_type>& matrix) const noexcept
+    {
+        return !matrix.is_null() && matrix.get() == d_matrix.get() && matrix->isStaticGraph();
+    }
+
+private:
+    template<TpetraTypePack OtherPack, class MeshType>
+    friend Teuchos::RCP<typename OtherPack::matrix_type> finish_stored_transport_matrix(const MeshType&,
+        Teuchos::RCP<typename OtherPack::matrix_type>, size_t,
+        const std::vector<StoredTransportMatrixRow<OtherPack>>&, StoredTransportSymbolicPlan<OtherPack>*);
+
+    template<class MeshType>
+    void record(const MeshType& mesh, Teuchos::RCP<matrix_type> matrix, const std::vector<row_type>& rows)
+    {
+        d_matrix = std::move(matrix);
+        d_graph = d_matrix->getCrsGraph();
+        d_mesh = &mesh;
+        d_geometry_epoch = mesh_geometry_epoch(mesh);
+        d_columns.resize(rows.size());
+        d_slots.resize(rows.size());
+        // Views stay local to this validated graph snapshot.
+        const auto local_matrix = d_matrix->getLocalMatrixHost();
+        for (size_t row = 0; row < rows.size(); ++row)
+        {
+            d_columns[row] = rows[row].columns;
+            auto& slots = d_slots[row];
+            slots.clear();
+            for (const auto column : rows[row].columns)
+            {
+                size_t slot = local_matrix.graph.row_map(row);
+                const size_t end = local_matrix.graph.row_map(row + 1);
+                while (slot < end && local_matrix.graph.entries(slot) != column)
+                {
+                    ++slot;
+                }
+                if (slot == end)
+                {
+                    throw std::logic_error("Validated transport graph lost a required column.");
+                }
+                slots.push_back(slot);
+            }
+        }
+    }
+
+    void refresh_values(const std::vector<row_type>& rows) const
+    {
+        // Tpetra obtains this view through WrappedDualView::getHostView(ReadWrite):
+        // it synchronizes host values and marks them modified for device readers.
+        // Release the view on return before any matrix apply or solver operation.
+        const auto local_matrix = d_matrix->getLocalMatrixHost();
+        for (size_t entry = 0; entry < local_matrix.values.extent(0); ++entry)
+        {
+            local_matrix.values(entry) = typename Pack::scalar_type{};
+        }
+        for (size_t row = 0; row < rows.size(); ++row)
+        {
+            for (size_t entry = 0; entry < rows[row].values.size(); ++entry)
+            {
+                // Match setAllToScalar(0) followed by sumIntoLocalValues.
+                local_matrix.values(d_slots[row][entry]) += rows[row].values[entry];
+            }
+        }
+    }
+
+    Teuchos::RCP<matrix_type> d_matrix;
+    Teuchos::RCP<const typename matrix_type::crs_graph_type> d_graph;
+    const void* d_mesh = nullptr;
+    std::uint64_t d_geometry_epoch = 0;
+    std::vector<std::vector<typename Pack::local_ordinal_type>> d_columns;
+    std::vector<std::vector<size_t>> d_slots;
 };
 
 template<class Scalar> struct StoredNonOrthogonalWeights
@@ -151,16 +264,28 @@ StoredTransportMatrixRow<Pack> capture_stored_transport_row(
 template<TpetraTypePack Pack, class MeshType>
 StoredPreparedTransportMatrix<Pack> prepare_stored_transport_matrix(const MeshType& mesh,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
-    const std::vector<StoredTransportMatrixRow<Pack>>& rows)
+    const std::vector<StoredTransportMatrixRow<Pack>>& rows,
+    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr)
 {
     using matrix_type = typename Pack::matrix_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const int cache_state = cached_matrix.is_null() ? 0 : 1;
-    const auto cache_states = reduce_stored_validation_state<Pack>(mesh, std::array<int, 2>{cache_state, -cache_state});
+    const int plan_state = symbolic_plan == nullptr ? 0 : 1;
+    const int needs_validation = symbolic_plan != nullptr && symbolic_plan->matches(mesh, cached_matrix, rows) ? 0 : 1;
+    const auto cache_states = reduce_stored_validation_state<Pack>(mesh,
+        std::array<int, 5>{cache_state, -cache_state, plan_state, -plan_state, needs_validation});
     if (cache_states[0] != -cache_states[1])
     {
         throw std::invalid_argument("transport_system requires every rank to use the same cached-matrix category.");
+    }
+    if (cache_states[2] != -cache_states[3])
+    {
+        throw std::invalid_argument("transport_system requires every rank to use the same symbolic-plan category.");
+    }
+    if (cache_states[4] == 0)
+    {
+        return {std::move(cached_matrix), true, true};
     }
     if (cache_states[0] == 0)
     {
@@ -248,6 +373,48 @@ void add_stored_transport_values(const StoredPreparedTransportMatrix<Pack>& prep
         throw std::invalid_argument("transport_system cached matrix graph is incompatible with the "
                                     "operator.");
     }
+}
+
+/** Complete assembly, reusing validated immutable row slots when available. */
+template<TpetraTypePack Pack, class MeshType>
+Teuchos::RCP<typename Pack::matrix_type> finish_stored_transport_matrix(const MeshType& mesh,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
+    const std::vector<StoredTransportMatrixRow<Pack>>& rows, StoredTransportSymbolicPlan<Pack>* symbolic_plan)
+{
+    using matrix_type = typename Pack::matrix_type;
+    const auto prepared = prepare_stored_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), entries_per_row, rows, symbolic_plan);
+    auto matrix = prepared.matrix;
+    if (prepared.symbolic_reuse)
+    {
+        symbolic_plan->refresh_values(rows);
+        return matrix;
+    }
+    for (size_t row = 0; row < rows.size(); ++row)
+    {
+        add_stored_transport_values<Pack>(prepared, static_cast<typename Pack::local_ordinal_type>(row), rows[row]);
+    }
+    matrix->fillComplete();
+    if (symbolic_plan != nullptr && !prepared.reused)
+    {
+        // Freeze a graph created here, before any caller can retain a mutable
+        // graph owner. Tpetra rejects structural edits on the resulting matrix.
+        auto frozen = Teuchos::rcp(new matrix_type(matrix->getCrsGraph()));
+        frozen->fillComplete();
+        {
+            const auto original = matrix->getLocalMatrixHost();
+            const auto destination = frozen->getLocalMatrixHost();
+            Kokkos::deep_copy(destination.values, original.values);
+        }
+        matrix = std::move(frozen);
+        symbolic_plan->record(mesh, matrix, rows);
+    }
+    else if (symbolic_plan != nullptr && symbolic_plan->owns(matrix))
+    {
+        // An epoch or operator-column change took the full validation path.
+        symbolic_plan->record(mesh, matrix, rows);
+    }
+    return matrix;
 }
 
 /** Materialize a stored vector/tensor gradient from generic stencils. */
@@ -915,7 +1082,8 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
     ScalarTransportDiscretization discretization,
     const ScalarCellFieldStored<Pack, MeshType>* older_values,
-    const ALEControlVolumeState* ale)
+    const ALEControlVolumeState* ale,
+    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1171,7 +1339,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         return &local_assembly_geometry;
     }();
     const auto& physical_boundary_faces = assembly_geometry->physical_boundary_faces;
-    std::map<std::pair<int, size_t>, size_t> boundary_indices;
+    const auto& boundary_indices = assembly_geometry->boundary_indices;
     int unsupported_boundary_condition = 0;
     int invalid_boundary_condition_value = 0;
     int invalid_boundary_value = 0;
@@ -1186,8 +1354,6 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             {
                 continue;
             }
-            boundary_indices.emplace(
-                std::pair{location.batch_id, location.in_batch_id}, face);
             const auto condition =
                 boundary_condition(location.batch_id, location.in_batch_id);
             const auto value =
@@ -1540,13 +1706,8 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         }
     }
 
-    const auto prepared = prepare_stored_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32, rows);
-    const auto& matrix = prepared.matrix;
-    for (size_t row = 0; row < rows.size(); ++row)
-    {
-        add_stored_transport_values<Pack>(prepared, static_cast<local_ordinal_type>(row), rows[row]);
-    }
-    matrix->fillComplete();
+    const auto matrix = finish_stored_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 32, rows, symbolic_plan);
     return {matrix, rhs};
 }
 
@@ -1568,7 +1729,8 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
     ScalarTransportDiscretization discretization,
     const ScalarCellFieldStored<Pack, MeshType>* older_values,
     const ScalarCellFieldStored<Pack, MeshType>* old_storage_weight,
-    const ALEControlVolumeState* ale)
+    const ALEControlVolumeState* ale,
+    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr)
 {
     const auto incompatible_fields = old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
                                              old_values.mesh_ptr().get() != storage_weight.mesh_ptr().get() ||
@@ -1597,7 +1759,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
         std::move(boundary_value), std::move(source), treatment,
         correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
         boundary_diffusivity, geometry_cache, coefficient_interpolation, incompatible_fields,
-        "weighted_scalar_transport_system", discretization, older_values, ale);
+        "weighted_scalar_transport_system", discretization, older_values, ale, symbolic_plan);
 }
 
 /** Assemble mapped conservative physical temperature transport. */
@@ -2052,33 +2214,52 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
     const ScalarCellFieldStored<Pack, MeshType>& dynamic_viscosity, typename Pack::scalar_type reference_density,
     typename Pack::multi_vector_type& rhs, BoundaryDiffusion boundary_stress, BoundaryCoefficient boundary_viscosity,
     const Stencils& stencils, const BoundaryLocations& boundary_locations,
-    FaceCoefficientInterpolation coefficient_interpolation)
+    FaceCoefficientInterpolation coefficient_interpolation,
+    TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-    TensorCellFieldStored<Pack, MeshType> gradients(
-        old_velocity.mesh_ptr(), "stored_transpose_gradient_stress_velocity_gradient");
-    evaluate_stored_vector_gradients(old_velocity, stencils, gradients);
+    using tensor_type = typename TensorCellFieldStored<Pack, MeshType>::tensor_type;
+    std::unique_ptr<TensorCellFieldStored<Pack, MeshType>> local_gradients;
+    if (gradient_workspace == nullptr)
+    {
+        local_gradients = std::make_unique<TensorCellFieldStored<Pack, MeshType>>(
+            old_velocity.mesh_ptr(), "stored_transpose_gradient_stress_velocity_gradient");
+        gradient_workspace = local_gradients.get();
+    }
+    evaluate_stored_vector_gradients(old_velocity, stencils, *gradient_workspace);
+    // Acquire views after gradient synchronization and release them before reuse.
+    const auto gradient_data = gradient_workspace->local_read_view();
+    const auto viscosity_data = dynamic_viscosity.local_read_view();
+    const auto rhs_data = rhs.getLocalViewHost(Tpetra::Access::ReadWrite);
     const auto& mesh = old_velocity.mesh();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        std::array<scalar_type, 3> cell_rhs{rhs_data(cell_lid, 0), rhs_data(cell_lid, 1), rhs_data(cell_lid, 2)};
+        tensor_type cell_gradient{};
+        for (size_t component = 0; component < 3; ++component)
+        {
+            cell_gradient[component] = {gradient_data(cell_lid, component * 3),
+                gradient_data(cell_lid, component * 3 + 1), gradient_data(cell_lid, component * 3 + 2)};
+        }
         for (const auto face_lid : mesh.faces(cell_lid))
         {
-            auto face_gradient = gradients.local_value(cell_lid);
-            auto face_viscosity = dynamic_viscosity.local_value(cell_lid);
+            auto face_gradient = cell_gradient;
+            auto face_viscosity = viscosity_data(cell_lid, 0);
             if (mesh.is_interior_face(face_lid))
             {
                 const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                const auto other_gradient = gradients.local_value(other);
                 for (size_t component = 0; component < 3; ++component)
                 {
-                    face_gradient[component] = (face_gradient[component] + other_gradient[component]) / scalar_type{2};
+                    const typename MeshType::Vec3 other_gradient{gradient_data(other, component * 3),
+                        gradient_data(other, component * 3 + 1), gradient_data(other, component * 3 + 2)};
+                    face_gradient[component] = (face_gradient[component] + other_gradient) / scalar_type{2};
                 }
                 face_viscosity =
-                    face_coefficient_value(mesh, face_lid, cell_lid, other, dynamic_viscosity.local_value(cell_lid),
-                        dynamic_viscosity.local_value(other), coefficient_interpolation);
+                    face_coefficient_value(mesh, face_lid, cell_lid, other, viscosity_data(cell_lid, 0),
+                        viscosity_data(other, 0), coefficient_interpolation);
             }
             else
             {
@@ -2116,8 +2297,12 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
             const auto scale = face_viscosity / reference_density;
             for (size_t component = 0; component < 3; ++component)
             {
-                rhs.sumIntoLocalValue(cell_lid, component, scale * traction.component(component));
+                cell_rhs[component] += scale * traction.component(component);
             }
+        }
+        for (size_t component = 0; component < 3; ++component)
+        {
+            rhs_data(cell_lid, component) = cell_rhs[component];
         }
     }
 }
@@ -2139,7 +2324,8 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, BoundaryDiffusion boundary_diffusion,
     const BoundaryCache* boundary_dynamic_viscosity, const GeometryCache* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation,
-    const ALEControlVolumeState* ale)
+    const ALEControlVolumeState* ale,
+    TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -2163,7 +2349,9 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
         mesh, treatment, correction_field, "physical_momentum_transport_system");
 
     const int incompatible_fields = old_velocity.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
-                                            old_velocity.mesh_ptr().get() != dynamic_viscosity.mesh_ptr().get()
+                                            old_velocity.mesh_ptr().get() != dynamic_viscosity.mesh_ptr().get() ||
+                                            (gradient_workspace != nullptr &&
+                                                gradient_workspace->mesh_ptr().get() != &mesh)
                                         ? 1
                                         : 0;
     int invalid_boundary_cache = 0;
@@ -2431,7 +2619,8 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     }
 
     add_stored_deviatoric_transpose_gradient_stress<Pack>(old_velocity, dynamic_viscosity, reference_density, *rhs,
-        boundary_diffusion, boundary_viscosity, gradient_stencils, *locations, coefficient_interpolation);
+        boundary_diffusion, boundary_viscosity, gradient_stencils, *locations, coefficient_interpolation,
+        gradient_workspace);
 
     const auto prepared = prepare_stored_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32, rows);
     const auto& matrix = prepared.matrix;
