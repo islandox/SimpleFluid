@@ -51,7 +51,7 @@ The kinematic values follow `nu = mu/rho` and `alpha = k/(rho cp)` on both
 sides. SimpleFluid installs these values in its actual material fields;
 the comparison includes those fields and the derived kinematic values.
 
-A 1 m tall column of area 1 m² has 40 uniform cells, a 0.1 m/s
+A 1 m tall column of area 1 m² has 44 axially graded cells, a 0.1 m/s
 upward carrier velocity, and 0.4 m/s upward slip. Temperature is 300 K,
 and surface tension is approximately 0.071686 N/m. Carrier motion and
 temperature are prescribed; no momentum or energy equation is solved, so
@@ -62,6 +62,10 @@ saturated steam density is never used for the bubbles.
 SimpleFluid currently prevents bubble inflow at every boundary; only
 `zmax` allows outgoing bubbles. The OpenFOAM boundary flux is identically
 zero elsewhere. Thus the bottom supplies bubble-free carrier fluid.
+The [shared end-graded mesh](../BOUNDARY_LAYER_MESHES.md) has six layers at
+each z end, growth 1.3, and a first cell height of 7.839 mm. Both solvers read
+the same `mesh.dat`; inventory sums and analytic error bounds use actual cell
+volumes and heights.
 
 Both solvers advance the conserved microbubble molar concentration `c`
 and number density `N` using implicit Euler and first-order upwind at
@@ -123,7 +127,7 @@ The continuum solution is `c(z) = q z/U_b` and the steady outlet rate is
 outlet balance to `2e-11 mol/s` and a per-step maximum concentration change
 below `1e-12 mol/m³` for at least five consecutive steps. The expected upwind and source-splitting offset from
 the continuum cell-center profile is
-`q (dz/(2 U_b) + dt) = 3.5e-8 mol/m³`; each executable checks that bound
+`q (dz_i/(2 U_b) + dt)`, using each graded cell's actual height; each executable checks that bound
 with 1% numerical allowance. In particular, an empty-column or zero-flux
 "steady" result cannot pass these gates. The outlet rate uses the
 transported state `c*`, before the current production increment.
@@ -141,7 +145,14 @@ between 40% and 60% of the initial inventory, bracketing the exact 50%.
 
 ## Outputs and acceptance
 
-Both solvers write `profiles.csv` for all 40 cells at every declared
+Each solver additionally writes cell bounds and temperature, liquid density,
+gas fraction, and prescribed liquid velocity to `fields.csv`. The comparison
+launcher creates a `figures/index.html` gallery with final x–z distributions,
+absolute/relative errors, and complete time–height histories. See
+[figure definitions](../WATER_FIELD_FIGURES.md) for formats, denominator
+floors, and the distinction between prescribed carrier and bubble velocity.
+
+Both solvers write `profiles.csv` for all 44 cells at every declared
 physical output time and a global `history.csv` with inventory,
 production, escaped moles, outlet molar rate, and convergence information.
 Profiles include `c`, `N`, `alpha_g`, water state/material coefficients,

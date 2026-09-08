@@ -24,6 +24,8 @@ python3 "$case_dir/../reference_water.py" \
     --properties "$case_dir/../reference_water.properties" \
     --openfoam-dictionary "$output/constant/referenceWater"
 cp -R "$case_dir/solver/." "$output/solver/"
+cp "$case_dir/../StructuredCaseMesh.H" "$output/solver/"
+python3 "$case_dir/../structured_mesh.py" --mesh "${SIMPLEFLUID_VERIFICATION_MESH:-$case_dir/mesh.dat}" --openfoam-case "$output"
 # Keep compilation, executable, and case output under the selected run directory.
 export FOAM_USER_APPBIN="$output/bin"
 (cd "$output/solver" && wmake) >"$output/build.log" 2>&1

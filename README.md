@@ -363,6 +363,7 @@ Pre-built example executables:
 | `planar_ale_verification` | Four solver-integrated planar-ALE conservation cases: heating, gas generation, complete H2 escape, and rollback |
 | `dispersed_bubble_verification` | IF97 reference-water steady source/escape balance and transient bubble transport with matched OpenFOAM references |
 | `planar_ale_comparison` | IF97 reference-water linearized thermal expansion and source-off steady equilibrium with matched OpenFOAM moving-mesh references |
+| `bottom_heated_bubbly_convection` | IF97 reference-water bottom heat/H2 source with solved buoyant plume and return flow; matched OpenFOAM transient and x–z figures |
 
 Examples use `Database` configuration, documented environment controls, or a
 combination of both. Their CTest smoke settings intentionally reduce mesh size
