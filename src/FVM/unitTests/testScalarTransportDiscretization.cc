@@ -542,6 +542,22 @@ TEST(ScalarTransportDiscretizationTest, PeriodicBoundedLinearUpwindUsesWrappedCo
         mapped_advection, mapped_diffusion, mapped_condition, zero_boundary_value(),
         [](Pack::local_ordinal_type) { return 0.0; }, upwind, NonOrthogonalTreatment::Explicit);
     expect_systems_equal(mapped_advanced, mapped_upwind, 3);
+    TransportGeometryCache<MappedMesh> mapped_geometry(*mapped_mesh);
+    const auto mapped_cached = weighted_scalar_transport_system<Pack>(
+        MeshWeightedScalarTransportRequest<Pack, MappedMesh>{
+            .old_values = mapped_old,
+            .face_fluxes = mapped_flux,
+            .time_step = 0.25,
+            .storage_weight = mapped_storage,
+            .advection_weight = mapped_advection,
+            .diffusivity = mapped_diffusion,
+            .boundary_condition = mapped_condition,
+            .boundary_value = zero_boundary_value(),
+            .source = [](Pack::local_ordinal_type) { return 0.0; },
+            .treatment = NonOrthogonalTreatment::Explicit,
+            .discretization = advanced,
+            .geometry_cache = &mapped_geometry});
+    expect_systems_equal(mapped_cached, mapped_advanced, 3);
 }
 
 TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively)

@@ -8,9 +8,11 @@
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
+#include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/ScalarTransportDiscretization.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/TransportAssemblyGeometry.hh"
 #include "fields/FieldStored.hh"
 
 #include <Teuchos_Array.hpp>
@@ -261,39 +263,48 @@ void evaluate_stored_vector_gradients(const VectorCellFieldStored<Pack, MeshType
         throw std::invalid_argument("Stored vector gradient stencils are incompatible with the mesh.");
     }
 
-    for (size_t owned = 0; owned < stencils.size(); ++owned)
+    const auto field_data = field.local_read_view();
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto& stencil = stencils[owned];
-        tensor_type gradient{};
-        if constexpr (requires { stencil.constants; })
+        const auto gradient_data = gradients.owned_write_view();
+        for (size_t owned = 0; owned < stencils.size(); ++owned)
         {
-            gradient = stencil.constants;
-        }
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto& stencil = stencils[owned];
+            tensor_type gradient{};
+            if constexpr (requires { stencil.constants; })
+            {
+                gradient = stencil.constants;
+            }
 
-        const auto& entries = [&]() -> const auto&
-        {
-            if constexpr (requires { stencil.entries; })
+            const auto& entries = [&]() -> const auto&
             {
-                return stencil.entries;
+                if constexpr (requires { stencil.entries; })
+                {
+                    return stencil.entries;
+                }
+                else
+                {
+                    return stencil;
+                }
+            }();
+            for (const auto& entry : entries)
+            {
+                for (size_t component = 0; component < 3; ++component)
+                {
+                    const auto component_value = field_data(entry.cell_lid, component);
+                    gradient[component].x += entry.coefficient.x * component_value;
+                    gradient[component].y += entry.coefficient.y * component_value;
+                    gradient[component].z += entry.coefficient.z * component_value;
+                }
             }
-            else
+            for (size_t row = 0; row < 3; ++row)
             {
-                return stencil;
-            }
-        }();
-        for (const auto& entry : entries)
-        {
-            const auto value = field.local_value(entry.cell_lid);
-            for (size_t component = 0; component < 3; ++component)
-            {
-                const auto component_value = value.component(component);
-                gradient[component].x += entry.coefficient.x * component_value;
-                gradient[component].y += entry.coefficient.y * component_value;
-                gradient[component].z += entry.coefficient.z * component_value;
+                for (size_t column = 0; column < 3; ++column)
+                {
+                    gradient_data(cell_lid, 3 * row + column) = gradient[row].component(column);
+                }
             }
         }
-        gradients.set_owned_value(cell_lid, gradient);
     }
     gradients.sync_ghosts();
 }
@@ -310,16 +321,23 @@ void evaluate_stored_scalar_gradients(const ScalarCellFieldStored<Pack, MeshType
         throw std::invalid_argument("Stored scalar gradient stencils are incompatible with the mesh.");
     }
 
-    for (size_t owned = 0; owned < stencils.size(); ++owned)
+    const auto field_data = field.local_read_view();
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto& stencil = stencils[owned];
-        auto gradient = stencil.constant;
-        for (const auto& entry : stencil.entries)
+        const auto gradient_data = gradients.owned_write_view();
+        for (size_t owned = 0; owned < stencils.size(); ++owned)
         {
-            gradient = gradient + entry.coefficient * field.local_value(entry.cell_lid);
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto& stencil = stencils[owned];
+            auto gradient = stencil.constant;
+            for (const auto& entry : stencil.entries)
+            {
+                gradient = gradient + entry.coefficient * field_data(entry.cell_lid, 0);
+            }
+            for (size_t component = 0; component < 3; ++component)
+            {
+                gradient_data(cell_lid, component) = gradient.component(component);
+            }
         }
-        gradients.set_owned_value(cell_lid, gradient);
     }
     gradients.sync_ghosts();
 }
@@ -1142,12 +1160,22 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         locations->size());
     std::vector<scalar_type> boundary_values(
         locations->size(), scalar_type{});
-    const auto physical_boundary_faces =
-        physical_boundary_face_mask(mesh);
+    TransportAssemblyGeometry<MeshType> local_assembly_geometry;
+    const auto* assembly_geometry = [&]() -> const TransportAssemblyGeometry<MeshType>*
+    {
+        if (geometry_cache != nullptr)
+        {
+            return &geometry_cache->assembly_geometry();
+        }
+        local_assembly_geometry = transport_assembly_geometry(mesh);
+        return &local_assembly_geometry;
+    }();
+    const auto& physical_boundary_faces = assembly_geometry->physical_boundary_faces;
     std::map<std::pair<int, size_t>, size_t> boundary_indices;
     int unsupported_boundary_condition = 0;
     int invalid_boundary_condition_value = 0;
     int invalid_boundary_value = 0;
+    int has_dirichlet_boundary = 0;
     std::exception_ptr local_boundary_callback_error;
     try
     {
@@ -1164,6 +1192,8 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                 boundary_condition(location.batch_id, location.in_batch_id);
             const auto value =
                 boundary_value(location.batch_id, location.in_batch_id);
+            has_dirichlet_boundary = has_dirichlet_boundary
+                || condition.type == BoundaryConditionType::Dirichlet;
             unsupported_boundary_condition = unsupported_boundary_condition
                 || (condition.type != BoundaryConditionType::Dirichlet
                     && condition.type != BoundaryConditionType::Neumann);
@@ -1183,11 +1213,12 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     const auto boundary_callback_validation =
         reduce_stored_validation_state<Pack>(
             mesh,
-            std::array<int, 4>{
+            std::array<int, 5>{
                 local_boundary_callback_error ? 1 : 0,
                 unsupported_boundary_condition,
                 invalid_boundary_condition_value,
-                invalid_boundary_value});
+                invalid_boundary_value,
+                has_dirichlet_boundary});
     if (boundary_callback_validation[0] != 0)
     {
         if (local_boundary_callback_error)
@@ -1249,9 +1280,18 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     }
 
     std::vector<AffineLeastSquaresGradientStencil<MeshType>> gradient_stencils;
-    select_stored_scalar_affine_geometry(
-        mesh, cached_boundary_condition, cached_boundary_value, geometry_cache, gradient_stencils, local_locations,
-        locations);
+    // With zero diffusion and upwind advection, Neumann boundaries never use
+    // affine stencils. Retain reconstruction for Dirichlet boundaries because
+    // their implicit stencil entries also define reusable zero-valued slots.
+    // Both flags are already collective, and all callbacks remain validated.
+    if (validation_state[8] != 0
+        || discretization.convection != ScalarConvectionScheme::Upwind
+        || boundary_callback_validation[4] != 0)
+    {
+        select_stored_scalar_affine_geometry(
+            mesh, cached_boundary_condition, cached_boundary_value, geometry_cache, gradient_stencils, local_locations,
+            locations);
+    }
 
     std::unique_ptr<VectorCellFieldStored<Pack, MeshType>> partition_gradients;
     if (needs_non_orthogonal_correction && weights.implicit > scalar_type{})
@@ -1284,11 +1324,16 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         ? decltype(old_value_data){}
         : older_values->local_read_view();
     const auto face_flux_data = face_fluxes.local_read_view();
+    using gradient_view_type = decltype(partition_gradients->local_read_view());
+    const auto partition_gradient_data = partition_gradients == nullptr
+        ? gradient_view_type{} : partition_gradients->local_read_view();
+    const auto convection_gradient_data = convection_gradients == nullptr
+        ? gradient_view_type{} : convection_gradients->local_read_view();
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell_lid));
+        const auto volume = static_cast<scalar_type>(assembly_geometry->volumes[owned]);
         const auto cell_storage = storage_value(cell_lid);
         const auto cell_advection = advection_value(cell_lid);
         const auto new_volume = ale == nullptr
@@ -1344,18 +1389,20 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             }
         };
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        for (size_t face_index = assembly_geometry->face_offsets[owned];
+             face_index < assembly_geometry->face_offsets[owned + 1]; ++face_index)
         {
-            const auto is_interior = mesh.is_interior_face(face_lid);
-            local_ordinal_type other{};
+            const auto& face = assembly_geometry->faces[face_index];
+            const auto face_lid = face.face_lid;
+            const auto is_interior = face.interior;
+            const auto other = face.other;
             if (is_interior)
             {
-                other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
                 row_values.ensure(other);
             }
 
             const auto owner_flux = face_flux_data(face_lid, 0);
-            const auto outward_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_flux : -owner_flux;
+            const auto outward_flux = face.owned_orientation ? owner_flux : -owner_flux;
             if (outward_flux >= scalar_type{})
             {
                 add_matrix_entry(row_values, cell_lid, outward_flux * cell_advection);
@@ -1364,7 +1411,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             {
                 add_matrix_entry(row_values, other, outward_flux * advection_value(other));
             }
-            else if (mesh.is_boundary_face(face_lid))
+            else if (face.boundary)
             {
                 const auto index = packed_face_local_id(mesh, face_lid);
                 if (index < locations->size() && (*locations)[index].active)
@@ -1390,7 +1437,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                     bounded_linear_upwind_face_value(
                         upwind_value,
                         old_value_data(downwind, 0),
-                        convection_gradients->local_value(upwind),
+                        vector_view_value<Pack>(convection_gradient_data, upwind),
                         cell_to_face_displacement(
                             mesh, face_lid, upwind));
                 rhs_value += deferred_convection_rhs_correction(
@@ -1429,12 +1476,12 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                                                "reconstruction requires synchronized gradients.");
                     }
                     rhs_value += weights.implicit * face_diffusivity * scalar_type{0.5} *
-                                 partition_gradients->local_value(other).dot(tangential_area);
+                                 vector_view_value<Pack>(partition_gradient_data, other).dot(tangential_area);
                 }
                 continue;
             }
 
-            if (!mesh.is_boundary_face(face_lid))
+            if (!face.boundary)
             {
                 continue;
             }

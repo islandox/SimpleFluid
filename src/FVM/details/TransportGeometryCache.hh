@@ -14,6 +14,7 @@ TransportGeometryCache<MeshType>::TransportGeometryCache(const MeshType& mesh)
       d_interior_stencils(detail::least_squares_gradient_stencils(mesh)),
       d_boundary_locations(detail::boundary_face_locations(mesh)),
       d_boundary_geometry(detail::boundary_aware_gradient_geometry(mesh, d_boundary_locations)),
+      d_assembly_geometry(detail::transport_assembly_geometry(mesh)),
       d_has_non_orthogonal_faces(detail::stored_transport_has_non_orthogonal_faces(mesh))
 {
 }
@@ -35,10 +36,12 @@ template<class MeshType> void TransportGeometryCache<MeshType>::refresh()
     auto interior = detail::least_squares_gradient_stencils(*d_mesh);
     auto locations = detail::boundary_face_locations(*d_mesh);
     auto boundary = detail::boundary_aware_gradient_geometry(*d_mesh, locations);
+    auto assembly = detail::transport_assembly_geometry(*d_mesh);
     const auto has_non_orthogonal_faces = detail::stored_transport_has_non_orthogonal_faces(*d_mesh);
     d_interior_stencils = std::move(interior);
     d_boundary_locations = std::move(locations);
     d_boundary_geometry = std::move(boundary);
+    d_assembly_geometry = std::move(assembly);
     d_has_non_orthogonal_faces = has_non_orthogonal_faces;
     d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
 }
@@ -65,6 +68,14 @@ TransportGeometryCache<MeshType>::boundary_geometry() const
 {
     require_mesh(*d_mesh);
     return d_boundary_geometry;
+}
+
+template<class MeshType>
+const typename TransportGeometryCache<MeshType>::assembly_geometry_type&
+TransportGeometryCache<MeshType>::assembly_geometry() const
+{
+    require_mesh(*d_mesh);
+    return d_assembly_geometry;
 }
 
 template<class MeshType>

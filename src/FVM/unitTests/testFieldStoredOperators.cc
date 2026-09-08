@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -909,6 +910,161 @@ TEST(FieldStoredOperatorsTest, WeightedScalarZeroDiffusionRetainsBoundaryCorrect
     double global_correction = 0.0;
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_correction, &global_correction);
     EXPECT_GT(global_correction, 1e-8);
+}
+
+/** @brief The zero-diffusion shortcut preserves the upwind graph and collective validation. */
+TEST(FieldStoredOperatorsTest, ZeroDiffusionNeumannTransportRetainsValidationAndReusableGraph)
+{
+    using namespace SimpleFluid::FVM;
+    const auto mesh = make_skewed_partitioned_unstructured_handle();
+    SimpleFluid::ScalarCellFieldStored<Pack> scalar(mesh, 1.25, "scalar");
+    SimpleFluid::ScalarCellFieldStored<Pack> unit(mesh, 1.0, "unit");
+    SimpleFluid::ScalarCellFieldStored<Pack> zero(mesh, 0.0, "zero");
+    SimpleFluid::ScalarFaceFieldStored<Pack> flux(mesh, 0.0, "flux");
+    TransportGeometryCache<Handle> geometry(*mesh);
+    bool invalid_boundary = false;
+    const auto condition = [](int, size_t)
+    { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.0}; };
+    const auto boundary = [&](int, size_t)
+    {
+        return invalid_boundary && mesh->owned_cell_map()->getComm()->getRank() == 0
+            ? std::numeric_limits<double>::quiet_NaN() : 0.0;
+    };
+    const auto source = [](Pack::local_ordinal_type) { return 0.125; };
+    const auto assemble = [&](Teuchos::RCP<Pack::matrix_type> matrix)
+    {
+        return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, Handle>{
+            .old_values = scalar,
+            .face_fluxes = flux,
+            .time_step = 0.5,
+            .storage_weight = unit,
+            .advection_weight = unit,
+            .diffusivity = zero,
+            .boundary_condition = condition,
+            .boundary_value = boundary,
+            .source = source,
+            .treatment = NonOrthogonalTreatment::Hybrid,
+            .correction_field = &scalar,
+            .cached_matrix = std::move(matrix),
+            .geometry_cache = &geometry});
+    };
+    Teuchos::RCP<Pack::matrix_type> matrix;
+    for (const auto speed : {0.25, -0.5})
+    {
+        for (const auto face : flux.owned_face_ids())
+        {
+            flux.set_owned_value(face, speed * mesh->face_area_vector(face).x);
+        }
+        flux.sync_ghosts();
+        const auto baseline = transport_system<Pack>(scalar, flux, 0.5, 0.0, condition, boundary, source);
+        const auto system = assemble(matrix);
+        if (!matrix.is_null())
+        {
+            EXPECT_EQ(system.matrix.getRawPtr(), matrix.getRawPtr());
+        }
+        matrix = system.matrix;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_EQ(baseline.rhs->getData()[owned], system.rhs->getData()[owned]);
+            EXPECT_EQ(baseline.matrix->getNumEntriesInLocalRow(cell), matrix->getNumEntriesInLocalRow(cell));
+            for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+            {
+                const auto other = static_cast<Pack::local_ordinal_type>(local);
+                EXPECT_EQ(stored_matrix_entry(*baseline.matrix, cell, other),
+                    stored_matrix_entry(*matrix, cell, other));
+            }
+        }
+        const auto action = stored_matrix_action(*matrix, scalar);
+        invalid_boundary = true;
+        EXPECT_THROW(static_cast<void>(assemble(matrix)), std::invalid_argument);
+        EXPECT_TRUE(matrix->isFillComplete());
+        EXPECT_EQ(stored_matrix_action(*matrix, scalar), action);
+        invalid_boundary = false;
+    }
+}
+
+/** @brief Cached topology preserves changing coefficients and partition-face orientation. */
+TEST(FieldStoredOperatorsTest, WeightedTransportCachedTopologyMatchesFreshAssembly)
+{
+    using namespace SimpleFluid::FVM;
+    const auto mesh = make_skewed_partitioned_unstructured_handle();
+    SimpleFluid::ScalarCellFieldStored<Pack> scalar(mesh, 0.0, "scalar");
+    SimpleFluid::ScalarCellFieldStored<Pack> storage(mesh, 1.0, "storage");
+    SimpleFluid::ScalarCellFieldStored<Pack> diffusion(mesh, 0.0, "diffusion");
+    SimpleFluid::ScalarFaceFieldStored<Pack> flux(mesh, 0.0, "flux");
+    TransportGeometryCache<Handle> geometry(*mesh);
+    Teuchos::RCP<Pack::matrix_type> cached_matrix;
+    for (int generation = 0; generation < 3; ++generation)
+    {
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto center = mesh->cell_centroid(cell);
+            scalar.set_owned_value(cell, skewed_linear_scalar(center) + generation);
+            storage.set_owned_value(cell, 1.0 + center.x + 0.25 * generation);
+            diffusion.set_owned_value(cell, generation == 2 ? 0.0 : 0.4 + center.x);
+        }
+        for (const auto face : flux.owned_face_ids())
+        {
+            flux.set_owned_value(face,
+                (generation == 1 ? -0.3 : 0.2) * mesh->face_area_vector(face).x);
+        }
+        scalar.sync_ghosts();
+        storage.sync_ghosts();
+        diffusion.sync_ghosts();
+        flux.sync_ghosts();
+        const auto assemble = [&](const TransportGeometryCache<Handle>* cache,
+                                  Teuchos::RCP<Pack::matrix_type> matrix)
+        {
+            return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, Handle>{
+                .old_values = scalar,
+                .face_fluxes = flux,
+                .time_step = 0.5,
+                .storage_weight = storage,
+                .advection_weight = storage,
+                .diffusivity = diffusion,
+                .boundary_condition = [](int batch, size_t)
+                {
+                    return SimpleFluid::BoundaryCondition{
+                        batch % 2 == 0 ? SimpleFluid::BoundaryConditionType::Dirichlet
+                                       : SimpleFluid::BoundaryConditionType::Neumann,
+                        0.125};
+                },
+                .boundary_value = [](int, size_t) { return 1.25; },
+                .source = [](Pack::local_ordinal_type) { return 0.125; },
+                .treatment = NonOrthogonalTreatment::Hybrid,
+                .discretization = {ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind},
+                .correction_field = &scalar,
+                .cached_matrix = std::move(matrix),
+                .geometry_cache = cache});
+        };
+        const auto fresh = assemble(nullptr, Teuchos::null);
+        const auto fresh_cached_geometry = assemble(&geometry, Teuchos::null);
+        const auto cached = assemble(&geometry, cached_matrix);
+        if (!cached_matrix.is_null())
+        {
+            EXPECT_EQ(cached.matrix.getRawPtr(), cached_matrix.getRawPtr());
+        }
+        cached_matrix = cached.matrix;
+        for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            // Cached affine reconstruction groups the Dirichlet coefficient
+            // sums separately from interior faces; the existing uncached
+            // reconstruction adds them in face order and can differ by one ULP.
+            EXPECT_DOUBLE_EQ(fresh.rhs->getData()[row], cached.rhs->getData()[row]);
+            EXPECT_EQ(fresh_cached_geometry.rhs->getData()[row], cached.rhs->getData()[row]);
+            for (size_t column = 0; column < mesh->num_local_cells(); ++column)
+            {
+                const auto other = static_cast<Pack::local_ordinal_type>(column);
+                EXPECT_DOUBLE_EQ(stored_matrix_entry(*fresh.matrix, cell, other),
+                    stored_matrix_entry(*cached.matrix, cell, other));
+                EXPECT_EQ(stored_matrix_entry(*fresh_cached_geometry.matrix, cell, other),
+                    stored_matrix_entry(*cached.matrix, cell, other));
+            }
+        }
+    }
 }
 
 /** @brief Mapped scalar transport matches explicit/implicit/hybrid residuals. */
