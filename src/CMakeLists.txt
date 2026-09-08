@@ -538,6 +538,13 @@ if(BUILD_TESTING)
       LABELS "verification;integration"
       TIMEOUT 30)
     add_test(
+      NAME verification_performance_outputs
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/test_run_performance.py")
+    set_tests_properties(verification_performance_outputs PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+    add_test(
       NAME openfoam_water_field_figures
       COMMAND "${Python3_EXECUTABLE}"
               "${PROJECT_SOURCE_DIR}/verification/openfoam/test_plot_water_fields.py")

@@ -28,7 +28,7 @@ simplefluid_add_mpi_test(
     NAME FieldStoredTransportValidation_2procs
     TARGET testFieldStoredOperators
     PROCS 2
-    ARGS "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective"
+    ARGS "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective:FieldStoredOperatorsTest.WeightedTransportCachedTopologyMatchesFreshAssembly:FieldStoredOperatorsTest.ZeroDiffusionNeumannTransportRetainsValidationAndReusableGraph:FieldStoredOperatorsTest.WeightedScalarZeroDiffusionRetainsBoundaryCorrections"
     LABELS "mpi;non_orthogonal;field_stored"
     TIMEOUT 120)
 

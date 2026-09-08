@@ -218,6 +218,28 @@ TEST(RadiolyticGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     expect_same_on_all_ranks(*mesh, statistics.transport_linear.solves);
     expect_same_on_all_ranks(*mesh, statistics.transport_linear.iterations);
     expect_same_on_all_ranks(*mesh, statistics.transport_linear.achieved_tolerance);
+    // Every published column must retain the same halo values as an
+    // independent scalar import, including after a state rollback.
+    const auto check_publication = [&]
+    {
+        for (const auto& [name, field] : model.output_fields())
+        {
+            SCOPED_TRACE(name);
+            Pack::vector_type expected(field->overlap_data().getMap(), false);
+            Pack::import_type importer(field->owned_data().getMap(), expected.getMap());
+            expected.doImport(field->owned_data(), importer, Tpetra::REPLACE);
+            const auto values = expected.getData();
+            const auto actual = field->local_read_view();
+            for (size_t row = 0; row < values.size(); ++row)
+                EXPECT_DOUBLE_EQ(actual(row, 0), values[row]);
+        }
+    };
+    check_publication();
+    const auto accepted = model.snapshot();
+    model.advance(0.05, 0.025, temperature, pressure, velocity, flux, material, &power);
+    check_publication();
+    model.restore(accepted);
+    check_publication();
 }
 
 /**

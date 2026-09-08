@@ -531,6 +531,66 @@ TEST(RadiolyticGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
     }
 }
 
+/** @brief Reused graphs/factors follow changing fluxes and timestep after rollback. */
+TEST(RadiolyticGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    auto options = ale_escape_options();
+    RadiolyticModelType model(mesh, options);
+    RadiolyticModelType fresh(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    auto linear = model.transport_linear_solver_options();
+    linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    linear.preconditioner = SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel;
+    linear.reuse_preconditioner = true;
+    model.set_transport_linear_solver_options(linear);
+    fresh.set_transport_linear_solver_options(linear);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+    fresh.initialize_state(0.0, temperature, pressure, velocity, material);
+    double time = 0.0;
+    for (int step = 0; step < 4; ++step)
+    {
+        SCOPED_TRACE(step);
+        const auto accepted = model.snapshot();
+        // Force a new numeric system/graph for the reference at every step.
+        fresh.refresh_geometry();
+        const double speed = step % 2 == 0 ? 0.1 : -0.2;
+        const double dt = (step + 1) * 1.0e-4;
+        for (const auto face : flux.owned_face_ids())
+            flux.set_value(face, speed * mesh->face_area_vector(face).x);
+        const auto advance = [&](auto& candidate)
+        {
+            candidate.advance(time + dt, dt, temperature, pressure, velocity, flux, material, &power);
+        };
+        advance(model);
+        advance(fresh);
+        if (step == 2)
+        {
+            model.restore(accepted);
+            advance(model);
+        }
+        EXPECT_EQ(model.last_statistics().transport_linear.solves, 5);
+        EXPECT_TRUE(model.last_statistics().transport_linear.converged);
+        for (const auto& [name, expected] : fresh.output_fields())
+        {
+            SCOPED_TRACE(name);
+            const auto& actual = *model.output_fields().at(name);
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                EXPECT_DOUBLE_EQ(actual.value(cell), expected->value(cell));
+            }
+        }
+        EXPECT_DOUBLE_EQ(model.last_statistics().hydrogen_escaped, fresh.last_statistics().hydrogen_escaped);
+        time += dt;
+    }
+}
+
 /**
  * @brief Ideal-gas source computes alpha production without changing alpha.
  */

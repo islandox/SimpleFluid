@@ -48,6 +48,11 @@ rows and retain one copy of the global history before applying the unchanged
 comparison manifests. Each rank also writes `timing.json`, containing
 the time-stepping loop's wall and CPU time, excluding mesh and model setup.
 
+The opt-in [performance runner](../PERFORMANCE.md) defaults these 44-cell
+fixtures to one rank, as measured MPI overhead exceeded the available speedup.
+It supports explicit rank overrides and repeated baseline/current measurements
+with the same physical checks.
+
 ## Shared problem and numerical method
 
 [`reference.properties`](reference.properties) supplies both solvers' SI

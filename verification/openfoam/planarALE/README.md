@@ -201,3 +201,8 @@ global history before comparison. Each rank also writes `timing.json` with
 its rank count and simulation-loop wall and process CPU seconds. These timers
 include step diagnostics and CSV output, and exclude mesh construction and
 solver setup before the loop.
+
+The opt-in [performance runner](../PERFORMANCE.md) defaults these 12-cell
+fixtures to one rank, as measured MPI overhead exceeded the available speedup.
+It supports explicit rank overrides and repeated baseline/current measurements
+with the same physical checks.

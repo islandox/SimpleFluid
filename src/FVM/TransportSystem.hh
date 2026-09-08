@@ -167,6 +167,7 @@ public:
     using interior_stencils_type = std::vector<detail::LeastSquaresGradientStencil<MeshType>>;
     using boundary_locations_type = std::vector<detail::BoundaryFaceLocation<MeshType>>;
     using boundary_geometry_type = std::vector<detail::BoundaryAwareGradientCellGeometry<MeshType>>;
+    using assembly_geometry_type = detail::TransportAssemblyGeometry<MeshType>;
     explicit TransportGeometryCache(const MeshType& mesh);
 
     /** @brief Throw if this cache was built for another mesh instance. */
@@ -184,6 +185,9 @@ public:
 
     const boundary_geometry_type& boundary_geometry() const;
 
+    /** @brief Ordered face topology, owned volumes and physical boundary mask. */
+    const assembly_geometry_type& assembly_geometry() const;
+
     /** @brief Whether any locally owned cell has a non-orthogonal transport face. */
     bool has_non_orthogonal_faces() const;
 
@@ -200,6 +204,7 @@ private:
     interior_stencils_type d_interior_stencils;
     boundary_locations_type d_boundary_locations;
     boundary_geometry_type d_boundary_geometry;
+    assembly_geometry_type d_assembly_geometry;
     bool d_has_non_orthogonal_faces = true;
 };
 

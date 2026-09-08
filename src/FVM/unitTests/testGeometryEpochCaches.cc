@@ -77,6 +77,7 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     EXPECT_EQ(gradient_cache.geometry_epoch(), 0U);
     EXPECT_EQ(flux_workspace.gradient_cache().geometry_epoch(), 0U);
     const auto old_transport_coefficients = transport_coefficients(transport_cache);
+    const auto old_transport_volumes = transport_cache.assembly_geometry().volumes;
     const auto old_gradient_coefficients = gradient_coefficients(gradient_cache);
 
     ScalarField scalar(mesh, "linear_scalar");
@@ -97,6 +98,7 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     EXPECT_THROW(alias_transport_cache.require_mesh(*alias_mesh), std::invalid_argument);
     EXPECT_THROW(gradient_cache.require_mesh(*mesh), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(transport_cache.interior_stencils()), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(transport_cache.assembly_geometry()), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(transport_cache.has_non_orthogonal_faces()), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(gradient_cache.interior_geometry()), std::invalid_argument);
     EXPECT_THROW(SimpleFluid::FVM::cell_gradient(scalar, gradient, gradient_cache), std::invalid_argument);
@@ -115,6 +117,7 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     EXPECT_EQ(flux_workspace.gradient_cache().geometry_epoch(), 1U);
     EXPECT_EQ(alias_transport_cache.geometry_epoch(), 1U);
     EXPECT_NE(transport_coefficients(transport_cache), old_transport_coefficients);
+    EXPECT_NE(transport_cache.assembly_geometry().volumes, old_transport_volumes);
     EXPECT_NE(gradient_coefficients(gradient_cache), old_gradient_coefficients);
     EXPECT_NO_THROW(SimpleFluid::FVM::cell_gradient(scalar, gradient, gradient_cache));
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -130,6 +133,7 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     ASSERT_EQ(mesh->geometry_epoch(), 2U);
     EXPECT_THROW(transport_cache.require_mesh(*mesh), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(transport_cache.has_non_orthogonal_faces()), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(transport_cache.assembly_geometry()), std::invalid_argument);
     EXPECT_THROW(gradient_cache.require_mesh(*mesh), std::invalid_argument);
     EXPECT_THROW(flux_workspace.gradient_cache().require_mesh(*mesh), std::invalid_argument);
 
@@ -137,6 +141,7 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     gradient_cache.refresh();
     flux_workspace.refresh_geometry();
     EXPECT_EQ(transport_cache.geometry_epoch(), 2U);
+    EXPECT_EQ(transport_cache.assembly_geometry().volumes, old_transport_volumes);
     EXPECT_FALSE(transport_cache.has_non_orthogonal_faces());
     EXPECT_EQ(gradient_cache.geometry_epoch(), 2U);
     EXPECT_EQ(flux_workspace.gradient_cache().geometry_epoch(), 2U);
