@@ -177,7 +177,7 @@ struct LinearResidualScaling
 struct LinearSolveStatistics
 {
     bool converged = false;
-    /** BiCGStab sums iterations over independently solved RHS columns. */
+    /** Includes refinement; BiCGStab also sums independently solved columns. */
     int iterations = 0;
     real_t achieved_tolerance = {};
     real_t rhs_norm = {};
@@ -379,20 +379,56 @@ public:
             }
         }
 
-        const auto return_status = d_solver->solve();
+        auto return_status = d_solver->solve();
+        int iterations = d_solver->getNumIters();
         real_t rhs_norm{};
-        const auto achieved_tolerance = true_relative_residual(
+        auto achieved_tolerance = true_relative_residual(
             matrix, rhs, solution, residual_scaling, &rhs_norm);
+
+        // CG and BiCGStab stop on a recurrence residual, which can drift just
+        // below the requested tolerance while b - A*x is still just above it.
+        // Restart from that recomputed residual with a stricter internal target.
+        // Keep both the original iteration budget and a separate restart cap:
+        // a zero-iteration or stagnating retry must still terminate. The
+        // preconditioner and original RHS scaling remain unchanged.
+        auto refinement_options = options;
+        constexpr int maximum_refinements = 2;
+        for (int refinement = 0;
+             refinement < maximum_refinements
+                 && options.backend != LinearSolverBackend::Gmres
+                 && return_status == Belos::Converged
+                 && std::isfinite(achieved_tolerance)
+                 && achieved_tolerance > options.tolerance
+                 && achieved_tolerance / options.tolerance <= real_t{2}
+                 && iterations < options.max_iterations;
+             ++refinement)
+        {
+            refinement_options.max_iterations =
+                options.max_iterations - iterations;
+            refinement_options.tolerance *= real_t{0.1};
+            if (refinement_options.tolerance <= real_t{})
+                break;
+            configure(refinement_options);
+            d_solver->setParameters(d_parameters);
+            if (!d_problem->setProblem())
+                break;
+            return_status = d_solver->solve();
+            iterations += d_solver->getNumIters();
+            achieved_tolerance = true_relative_residual(
+                matrix, rhs, solution, residual_scaling, &rhs_norm);
+        }
+
         const bool converged = std::isfinite(achieved_tolerance)
             && achieved_tolerance <= options.tolerance;
         // Belos::Errors is zero and denotes diagnostics that are always printed.
         if (!converged)
         {
-            report_failed_solve(rhs, options, residual_scaling, return_status);
+            report_failed_solve(
+                rhs, options, residual_scaling, return_status, iterations);
         }
         return {
             converged,
-            d_solver->getNumIters(),
+            iterations,
             achieved_tolerance,
             rhs_norm};
     }
@@ -527,7 +563,8 @@ private:
         const multi_vector_type& rhs,
         const LinearSolverOptions& options,
         LinearResidualScaling residual_scaling,
-        Belos::ReturnType return_status) const
+        Belos::ReturnType return_status,
+        int iterations) const
     {
         Teuchos::Array<magnitude_type> rhs_norms(rhs.getNumVectors());
         Teuchos::Array<magnitude_type> residual_norms(rhs.getNumVectors());
@@ -542,7 +579,7 @@ private:
                 << to_string(options.preconditioner)
                 << " failed explicit residual check: Belos="
                 << (return_status == Belos::Converged ? "converged" : "unconverged")
-                << " iterations=" << d_solver->getNumIters()
+                << " iterations=" << iterations
                 << " tolerance=" << options.tolerance << '\n';
         for (std::size_t column = 0; column < rhs.getNumVectors(); ++column)
         {

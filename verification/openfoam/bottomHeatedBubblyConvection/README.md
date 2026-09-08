@@ -121,6 +121,12 @@ pressure reference is applied only by the rank owning the first global cell.
 The per-rank `timing.json` records elapsed and process CPU time for the time
 loop, including its diagnostics and CSV output, after mesh and solver setup.
 
+The opt-in [performance runner](../PERFORMANCE.md) selects two ranks and
+pressure PCG/DIC for this 1,008-cell fixture while keeping transport policies
+and all physical/linear tolerances unchanged. Explicit `--ranks` and
+`--policy` arguments override those experiment settings. The ordinary paired
+comparison launcher above retains its serial execution and solver defaults.
+
 ### Historical uniform-grid comparison (2026-09-08, GCC Debug / OpenFOAM v2606)
 
 Before boundary-layer refinement, the full 1000-step comparison passed its declared limits and all independent

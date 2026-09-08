@@ -18,7 +18,9 @@
 #include "FVM/TransportSystem.hh"
 #include "solvers/BelosLinearSolver.hh"
 
+#include <array>
 #include <map>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -480,7 +482,9 @@ private:
         bool liquid_weighted,
         field_type& escape_rate,
         const FVM::ALEControlVolumeState* ale,
-        Dimension slip_axis);
+        Dimension slip_axis,
+        size_t operator_slot = 0,
+        bool reuse_population_operator = false);
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
     CellKineticsState integrate_cell_kinetics(
@@ -497,6 +501,7 @@ private:
         const material_type& material);
     void sync_all_fields();
     /** @brief Compute a globally reduced volume integral. */
+    std::array<scalar_type, 5> population_integrals(std::span<const real_t> cell_volumes) const;
     scalar_type global_integral(const field_type& field,
         std::span<const real_t> cell_volumes = {}) const;
     /** @brief Sum a rank-local scalar and replicate it on every rank. */
@@ -521,6 +526,33 @@ private:
         const CellKineticsState& state);
     std::vector<field_type*> mutable_state_fields();
     std::vector<const field_type*> state_fields() const;
+
+    // Scratch storage is not accepted physical state. Numeric operators are
+    // rebuilt for each transport stage, including after a rejected ALE trial.
+    struct TransportWorkspace
+    {
+        explicit TransportWorkspace(const SP<const mesh_type>& mesh)
+            : flux(mesh, 0.0, "radiolytic_transport_flux"),
+              old_values(mesh, 0.0, "radiolytic_transport_old"),
+              storage(mesh, 1.0, "radiolytic_storage_weight"),
+              diffusion(mesh, 0.0, "radiolytic_diffusion_weight"),
+              solution(mesh, 0.0, "radiolytic_transport_solution"),
+              zero_flux(mesh, 0.0, "radiolytic_zero_flux"),
+              axial_flux(mesh, 0.0, "radiolytic_axial_bubble_flux"),
+              micro_slip(mesh, 0.0, "microbubble_slip_velocity"),
+              large_slip(mesh, 0.0, "large_bubble_slip_velocity"),
+              micro_alpha(mesh, 0.0, "transported_microbubble_volume_fraction"),
+              large_alpha(mesh, 0.0, "transported_large_bubble_volume_fraction")
+        {
+        }
+
+        face_flux_field_type flux;
+        field_type old_values, storage, diffusion, solution;
+        face_flux_field_type zero_flux, axial_flux;
+        field_type micro_slip, large_slip, micro_alpha, large_alpha;
+        // Dissolved, microbubble, and large-bubble graphs can differ.
+        std::array<FVM::TransportSystem<Pack>, 3> systems;
+    };
 
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
@@ -576,6 +608,10 @@ private:
     scalar_type d_cumulative_hydrogen_escaped = {};
     scalar_type d_cumulative_escaped_bubble_count = {};
     BelosLinearSolver<Pack> d_transport_solver;
+    std::unique_ptr<TransportWorkspace> d_transport_workspace;
+    Teuchos::RCP<typename Pack::multi_vector_type> d_state_sync_owned;
+    Teuchos::RCP<typename Pack::multi_vector_type> d_state_sync_overlap;
+    Teuchos::RCP<typename Pack::import_type> d_state_sync_import;
     statistics_type d_last_statistics;
     std::map<std::string, const field_type*> d_output_fields;
 };
