@@ -4,7 +4,9 @@
 #include "fvCFD.H"
 #include "StructuredCaseMesh.H"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 
@@ -14,7 +16,6 @@ int main(int argc, char *argv[])
     #include "createTime.H"
     #include "createMesh.H"
     const StructuredCaseMesh grid(mesh);
-    if (Pstream::parRun()) FatalErrorInFunction << "Serial reference only" << exit(FatalError);
     IOdictionary properties(IOobject("verificationProperties", runTime.constant(), mesh,
         IOobject::MUST_READ, IOobject::NO_WRITE));
     const auto parameter = [&](const word& name) { return readScalar(properties.lookup(name)); };
@@ -39,26 +40,32 @@ int main(int argc, char *argv[])
     const scalar end = parameter(mode + "_end_time");
     const label steps = label(std::llround(end / dt));
     const label writeSteps = label(std::llround(parameter(mode + "_write_interval") / dt));
-    if (mesh.nCells() != cells || writeSteps < 1 || mag(runTime.deltaTValue() - dt) > 1e-14)
+    if (returnReduce(mesh.nCells(), sumOp<label>()) != cells || writeSteps < 1 || mag(runTime.deltaTValue() - dt) > 1e-14)
         FatalErrorInFunction << "Unmatched mesh/time parameters" << exit(FatalError);
+    // Programmatically created moments must retain processor coupling after
+    // decomposePar; a uniform zeroGradient type would seal each partition.
+    const wordList momentPatchTypes = StructuredCaseMesh::patch_types(mesh, "zeroGradient");
     volScalarField microMoles(IOobject("microMoles", runTime.timeName(), mesh,
         IOobject::NO_READ, IOobject::AUTO_WRITE), mesh,
-        dimensionedScalar("initial", dimensionSet(0,-3,0,0,1,0,0), initial), "zeroGradient");
+        dimensionedScalar("initial", dimensionSet(0,-3,0,0,1,0,0), initial), momentPatchTypes);
     volScalarField microNumber(IOobject("microNumber", runTime.timeName(), mesh,
         IOobject::NO_READ, IOobject::AUTO_WRITE), mesh,
-        dimensionedScalar("initial", dimless/dimVolume, initial/molesPerBubble), "zeroGradient");
+        dimensionedScalar("initial", dimless/dimVolume, initial/molesPerBubble), momentPatchTypes);
     surfaceScalarField phi(IOobject("phi", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
         mesh.Sf() & dimensionedVector("bubbleVelocity", dimVelocity, vector(0,0,speed)));
     forAll(phi.boundaryField(), patch)
     {
-        if (mesh.boundary()[patch].name() != "zmax") phi.boundaryFieldRef()[patch] = 0.0;
+        if (!mesh.boundary()[patch].coupled() && mesh.boundary()[patch].name() != "zmax")
+            phi.boundaryFieldRef()[patch] = 0.0;
     }
     const label outlet = mesh.boundaryMesh().findPatchID("zmax");
-    if (outlet < 0) FatalErrorInFunction << "Missing outlet" << exit(FatalError);
+    if (returnReduce(outlet < 0, orOp<bool>()))
+        FatalErrorInFunction << "Missing outlet" << exit(FatalError);
     std::ofstream profiles((runTime.path()/"profiles.csv").c_str());
     std::ofstream history((runTime.path()/"history.csv").c_str());
     std::ofstream fields((runTime.path()/"fields.csv").c_str());
-    fields.exceptions(std::ios::badbit | std::ios::failbit);
+    if (returnReduce(!profiles.good() || !history.good() || !fields.good(), orOp<bool>()))
+        FatalErrorInFunction << "Cannot create verification CSV files" << exit(FatalError);
     fields << std::setprecision(17)
         << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
     profiles << std::setprecision(17)
@@ -71,8 +78,8 @@ int main(int argc, char *argv[])
     label steadyConsecutiveSteps = 0;
     auto writeCsv = [&](scalar time)
     {
-        const scalar inventory = sum(microMoles.primitiveField()*mesh.V());
-        const scalar number = sum(microNumber.primitiveField()*mesh.V());
+        const scalar inventory = gSum(microMoles.primitiveField()*mesh.V());
+        const scalar number = gSum(microNumber.primitiveField()*mesh.V());
         const scalar balance = inventory + escaped - initial*volume - produced;
         const scalar numberBalance = (number + escapedNumber - (initial*volume + produced)/molesPerBubble)
             / ((initial*volume + produced)/molesPerBubble);
@@ -96,6 +103,8 @@ int main(int argc, char *argv[])
                 << lastEscape/dt << ',' << balance << ',' << maximumChange << '\n';
     };
     writeCsv(0);
+    const auto loopWallStart = std::chrono::steady_clock::now();
+    const auto loopCpuStart = std::clock();
     for (label step = 1; step <= steps; ++step)
     {
         ++runTime;
@@ -106,17 +115,19 @@ int main(int argc, char *argv[])
         solve(fvm::ddt(microNumber) + fvm::div(phi, microNumber));
         microMoles.correctBoundaryConditions();
         microNumber.correctBoundaryConditions();
-        lastEscape = dt * sum(phi.boundaryField()[outlet] * microMoles.boundaryField()[outlet]);
+        lastEscape = dt * gSum(phi.boundaryField()[outlet] * microMoles.boundaryField()[outlet]);
         escaped += lastEscape;
-        escapedNumber += dt * sum(phi.boundaryField()[outlet] * microNumber.boundaryField()[outlet]);
+        escapedNumber += dt * gSum(phi.boundaryField()[outlet] * microNumber.boundaryField()[outlet]);
         microMoles.primitiveFieldRef() += source*dt;
         microNumber.primitiveFieldRef() += source*dt/molesPerBubble;
         produced += source*dt*volume;
-        maximumChange = max(mag(microMoles.primitiveField() - previous));
+        maximumChange = gMax(mag(microMoles.primitiveField() - previous));
         if (maximumChange < 1e-12 && mag(lastEscape/dt-source*volume) < 2e-11)
             ++steadyConsecutiveSteps;
         else steadyConsecutiveSteps = 0;
-        if (min(microMoles.primitiveField()) < 0 || min(microNumber.primitiveField()) < 0)
+        const scalar minimumMoles = gMin(microMoles.primitiveField());
+        const scalar minimumNumber = gMin(microNumber.primitiveField());
+        if (minimumMoles < 0 || minimumNumber < 0)
             FatalErrorInFunction << "Negative microbubble moment" << exit(FatalError);
         if (step % writeSteps == 0) writeCsv(step*dt);
     }
@@ -124,14 +135,16 @@ int main(int argc, char *argv[])
     {
         if (steadyConsecutiveSteps < 5)
             FatalErrorInFunction << "Steady convergence/outlet balance failed" << exit(FatalError);
+        bool continuumPassed = true;
         forAll(microMoles, cell)
         {
             const scalar exact = source*mesh.C()[cell].z()/speed;
             const scalar dz=mesh.V()[cell]/sqr(width);
             const scalar truncation = source*(0.5*dz/speed+dt);
-            if (mag(microMoles[cell]-exact) > truncation*1.01+1e-12)
-                FatalErrorInFunction << "Steady continuum profile failed" << exit(FatalError);
+            continuumPassed = continuumPassed && mag(microMoles[cell]-exact) <= truncation*1.01+1e-12;
         }
+        if (!returnReduce(continuumPassed, andOp<bool>()))
+            FatalErrorInFunction << "Steady continuum profile failed" << exit(FatalError);
     }
     else
     {
@@ -144,11 +157,20 @@ int main(int argc, char *argv[])
             const scalar exact = initial*std::clamp((upper-speed*end)/dz, scalar(0), scalar(1));
             l1 += mag(microMoles[cell]-exact)*dz/(initial*height);
         }
+        reduce(l1, sumOp<scalar>());
         if (l1 > 0.12 || escaped < 0.4*initial*volume || escaped > 0.6*initial*volume)
             FatalErrorInFunction << "Transient translating-front/escape gate failed" << exit(FatalError);
     }
-    profiles.flush(); history.flush();
-    if (!profiles.good() || !history.good()) FatalErrorInFunction << "CSV write failed" << exit(FatalError);
+    profiles.flush(); history.flush(); fields.flush();
+    const scalar loopWall = std::chrono::duration<scalar>(std::chrono::steady_clock::now()-loopWallStart).count();
+    const scalar loopCpu = scalar(std::clock()-loopCpuStart)/CLOCKS_PER_SEC;
+    std::ofstream performance((runTime.path()/"timing.json").c_str());
+    performance << std::setprecision(17) << "{\"rank\":" << Pstream::myProcNo()
+                << ",\"ranks\":" << Pstream::nProcs() << ",\"loop_wall_s\":" << loopWall
+                << ",\"loop_cpu_s\":" << loopCpu << "}\n";
+    profiles.flush(); history.flush(); fields.flush(); performance.flush();
+    if (returnReduce(!profiles.good() || !history.good() || !fields.good() || !performance.good(), orOp<bool>()))
+        FatalErrorInFunction << "CSV write failed" << exit(FatalError);
     Info << mode << " dispersed microbubble reference passed" << endl;
     return 0;
 }

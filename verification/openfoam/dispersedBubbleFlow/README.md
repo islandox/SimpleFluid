@@ -1,6 +1,6 @@
 # Dispersed microbubble transport: OpenFOAM versus SimpleFluid
 
-These serial cases compare the production `RadiolyticGasModel` microbubble
+These cases compare the production `RadiolyticGasModel` microbubble
 number and hydrogen-mole transport with an independent OpenFOAM finite-volume
 reference. Both use a prescribed carrier velocity and constant upward bubble
 slip in the current weak single-continuum model. They do not solve separate
@@ -36,6 +36,17 @@ There is no synthetic-fluid fallback.
 `run_openfoam.sh [mode] [output-directory]` run one side. The latter requires
 an empty output directory. Omitting the output argument creates a temporary
 directory. Neither standalone run establishes cross-solver agreement.
+
+Both drivers also support MPI on the same 44-cell mesh and physical schedule.
+SimpleFluid partitions the column when launched with MPI; OpenFOAM requires
+the generated case to be decomposed before starting the reference with
+`-parallel`. Each rank exports only its owned cells, with sample IDs derived
+from the shared cell edges. SimpleFluid places these CSV files under
+`rankN/`; OpenFOAM writes them under `processorN/`. Global history values
+are repeated consistently on every rank. Merge the disjoint profile/field
+rows and retain one copy of the global history before applying the unchanged
+comparison manifests. Each rank also writes `timing.json`, containing
+the time-stepping loop's wall and CPU time, excluding mesh and model setup.
 
 ## Shared problem and numerical method
 

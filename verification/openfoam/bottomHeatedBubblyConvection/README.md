@@ -110,6 +110,17 @@ requires the water to remain cold, gas-free, and stationary. Standalone
 SimpleFluid options `--steps N` and `--source-scale S` support such controls;
 paired comparisons always use the shared defaults.
 
+Both executables support distributed MPI solves. SimpleFluid partitions the
+Cartesian mesh along its largest cell-count direction; a matching OpenFOAM
+decomposition uses z slabs for this grid. Each rank writes only its owned
+cells, retaining the global coordinate-based sample IDs, under SimpleFluid's
+`rankN` output directory or OpenFOAM's `processorN` case directory. Each rank's
+history contains the same globally reduced diagnostics and conservation
+budgets. Processor interfaces retain liquid and bubble transport, and the
+pressure reference is applied only by the rank owning the first global cell.
+The per-rank `timing.json` records elapsed and process CPU time for the time
+loop, including its diagnostics and CSV output, after mesh and solver setup.
+
 ### Historical uniform-grid comparison (2026-09-08, GCC Debug / OpenFOAM v2606)
 
 Before boundary-layer refinement, the full 1000-step comparison passed its declared limits and all independent
