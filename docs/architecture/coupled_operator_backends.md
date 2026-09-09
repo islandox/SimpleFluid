@@ -218,3 +218,24 @@ combinations at two serial sizes and one two-rank size). Exact measured bytes,
 setup/apply/solve times, iteration sequences, RSS caveats, and the failed
 512-cell pilot are in the [measurement report](../benchmarks/coupled_operator/README.md).
 No commits or pushes were made; the checkout's initial worktree was clean.
+
+## Numeric preconditioner refresh correction
+
+The post-delivery 512-cell regression compares each updated true operator,
+RHS, C and Schur action with a fresh assembly before comparing solves. It
+reproduced a failure at the third generation: cached solve exhausted 400
+iterations while a fresh solve converged in 56, despite equivalent matrices.
+The linked Trilinos 17.2 `ParameterListInterpreter` keeps coarse matrices and
+smoothers under `reuse: type = full`; this is not a numeric refresh policy.
+
+Coupled MueLu now uses `RP`: retain transfer operators while refreshing coarse
+coefficients and smoother state. Momentum Jacobi, Schur construction, physical
+equations, tolerance, and Krylov settings remain unchanged. The benchmark
+metadata names this policy explicitly. The original `full`-reuse measurements
+above and in the benchmark report are historical, not results for this fix.
+
+`NumericUpdatesMatchFreshAssemblyAtScale` exercises four generations for all
+four operator/workspace combinations at 512 cells. It passes in serial and on
+two/four ranks. The focused CTest gate passed 22 tests including ELF exports;
+seven selected MPI registrations passed, including physical and ALE regressions.
+Broader supported-solver/backend qualification continues separately.

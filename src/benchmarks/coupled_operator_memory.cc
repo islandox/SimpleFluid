@@ -66,7 +66,7 @@ int main(int argc, char** argv)
                       << ",\"max_iterations\":" << linear.max_iterations
                       << ",\"block_size\":4,\"num_blocks\":"
                       << std::min<size_t>(linear.max_iterations / 4, mesh->owned_cell_map()->getGlobalNumElements())
-                      << ",\"preconditioner\":\"Ifpack2_Jacobi_MueLu_full_reuse\""
+                      << ",\"preconditioner\":\"Ifpack2_Jacobi_MueLu_RP_reuse\""
                       << ",\"scalar_bytes\":" << sizeof(Pack::scalar_type)
                       << ",\"local_index_bytes\":" << sizeof(Pack::local_ordinal_type)
                       << ",\"global_index_bytes\":" << sizeof(Pack::global_ordinal_type)
