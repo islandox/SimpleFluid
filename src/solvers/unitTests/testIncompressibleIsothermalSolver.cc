@@ -11,6 +11,7 @@
 
 #include "solvers/IncompressibleIsothermalSolver.hh"
 
+#include "solvers/unitTests/CoupledBackendTestSupport.hh"
 #include <gtest/gtest.h>
 
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -193,20 +194,26 @@ TEST(IncompressibleIsothermalSolverTest, AdvancesStandardKEpsilonThroughPisoAndC
     for (const auto coupling :
         {SimpleFluid::PressureVelocityCoupling::PISO, SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
     {
-        SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)));
-        auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
-        Solver solver(
-            mesh, slip_box_boundaries(), stable_time_options(coupling), focused_linear_options(), reference_density);
-        initialize_shear(solver);
+        for (const auto selection : SimpleFluid::test::backends_for(coupling))
+        {
+            SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+            SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)));
+            auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
+            Solver solver(mesh, slip_box_boundaries(),
+                SimpleFluid::test::with_coupled_backend(stable_time_options(coupling), selection),
+                focused_linear_options(), reference_density);
+            initialize_shear(solver);
 
-        auto& turbulence = solver.configure_turbulence(standard_k_epsilon_options());
-        ASSERT_NO_THROW(solver.step());
+            auto& turbulence = solver.configure_turbulence(standard_k_epsilon_options());
+            ASSERT_NO_THROW(solver.step());
 
-        EXPECT_EQ(solver.step_index(), 1);
-        EXPECT_TRUE(solver.last_step_statistics().converged);
-        EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
-        EXPECT_DOUBLE_EQ(solver.last_step_statistics().temperature, 0.0);
-        expect_positive_turbulence_fields(turbulence, std::as_const(solver).material_properties(), reference_density);
+            EXPECT_EQ(solver.step_index(), 1);
+            EXPECT_TRUE(solver.last_step_statistics().converged);
+            EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
+            EXPECT_DOUBLE_EQ(solver.last_step_statistics().temperature, 0.0);
+            expect_positive_turbulence_fields(
+                turbulence, std::as_const(solver).material_properties(), reference_density);
+        }
     }
 }
 

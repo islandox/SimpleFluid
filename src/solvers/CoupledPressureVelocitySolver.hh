@@ -11,6 +11,7 @@
 #pragma once
 
 #include "FVM/BoundaryCache.hh"
+#include "FVM/CellGradientScheme.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
@@ -472,6 +473,7 @@ private:
     {
         BoundaryConditionMap pressure_boundaries;
         scalar_type reference_density = {};
+        FVM::CellGradientScheme gradient_scheme = FVM::CellGradientScheme::LeastSquares;
         std::vector<detail::AffinePressureGradientStencil<Pack, mesh_type>> stencils;
         std::array<Teuchos::RCP<matrix_type>, 3> gradient_operators;
         std::array<Teuchos::RCP<vector_type>, 3> gradient_constants;

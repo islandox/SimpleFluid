@@ -282,6 +282,9 @@ manual measurement workflows.
       with retained-generation ownership and serial/two-/four-rank algebra tests.
 - [x] Add independent streamed distributed-product assembly retaining final
       stabilization/Schur matrices; record small separate-process memory results.
+- [x] Qualify coupled backend choices across current solver classes, native/legacy
+      mesh paths and supported ALE motion; align interpolation and pressure-gradient
+      reconstruction, and refresh MueLu numeric state during reuse.
 - [ ] Add native scalar face-based orthogonal diffusion and frozen upwind/BE
       transport, with independent operator/diagonal/preconditioner inputs.
 - [ ] Qualify coupled memory/performance at larger converged sizes and on
