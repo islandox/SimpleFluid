@@ -468,7 +468,7 @@ if(SIMPLEFLUID_ENABLE_IF97)
         --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
         --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_zero_source")
     set_tests_properties(bottom_convection_zero_source PROPERTIES
-      LABELS "verification;conservation;small_fixture" TIMEOUT 60
+      LABELS "verification;conservation;small_fixture;turbulence" TIMEOUT 60
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
     add_test(NAME bottom_convection_graded_transport
       COMMAND bottom_heated_bubbly_convection --steps 5
@@ -476,7 +476,7 @@ if(SIMPLEFLUID_ENABLE_IF97)
         --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
         --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_graded_transport")
     set_tests_properties(bottom_convection_graded_transport PROPERTIES
-      LABELS "verification;conservation;small_fixture" TIMEOUT 60
+      LABELS "verification;conservation;small_fixture;turbulence" TIMEOUT 60
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
   endif()
 else()
@@ -562,6 +562,9 @@ if(BUILD_TESTING)
     set_tests_properties(openfoam_water_field_figures PROPERTIES
       LABELS "verification;integration"
       TIMEOUT 30)
+    add_test(NAME openfoam_sst_field_figures
+      COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/test_plot_sst_fields.py")
+    set_tests_properties(openfoam_sst_field_figures PROPERTIES LABELS "verification;turbulence" TIMEOUT 30)
     add_test(NAME openfoam_boundary_layer_mesh
       COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/test_structured_mesh.py")
     set_tests_properties(openfoam_boundary_layer_mesh PROPERTIES LABELS "verification;geometry" TIMEOUT 30)

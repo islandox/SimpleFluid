@@ -44,8 +44,12 @@ class PerformanceOutputsTest(unittest.TestCase):
                 self.assertNotIn("--transport-solver", pressure_only)
 
     def test_owned_rows_and_slowest_rank_are_retained(self):
+        for rank in range(2):
+            (self.root / f"rank{rank}/turbulence.csv").write_text(f"time_s,sample,k_m2_s2\n0,{rank},1e-8\n")
         timing = performance.merge_outputs(self.root, 2, 0)
         self.assertEqual(timing["loop_wall_s"], 2)
+        with (self.root / "merged/turbulence.csv").open() as stream:
+            self.assertEqual([row["sample"] for row in csv.DictReader(stream)], ["0", "1"])
         self.assertEqual(timing["loop_cpu_sum_s"], 1)
         with (self.root / "merged/fields.csv").open() as stream:
             self.assertEqual([row["sample"] for row in csv.DictReader(stream)], ["0", "1"])
