@@ -39,10 +39,10 @@ this fixture's scope. See [the model support matrix](../../../docs/modeling/plan
 
 | Input | Both implementations |
 | --- | --- |
-| Initial liquid domain | Cartesian `[0,1] × [0,1] × [0,1]` m |
-| Mesh | `1 × 1 × 12` graded hexahedra; four layers at each z end; bottom fixed; affine axial expansion |
-| Vessel | Area `A = 1 m²`, bottom `0 m`, total height `2 m` |
-| Initial state | `T₀ = 300 K`, `p₀ = 101325 Pa` absolute; IF97 pure-liquid `ρ₀ ≈ 996.558 kg/m³`, `M = ρ₀ × 1 m³` |
+| Initial liquid domain | Cartesian `[0,10] × [0,10] × [0,10]` m |
+| Mesh | `10 × 10 × 84 = 8,400` graded hexahedra; four layers at each z end; bottom fixed; affine axial expansion |
+| Vessel | Area `A = 100 m²`, bottom `0 m`, total height `20 m` |
+| Initial state | `T₀ = 300 K`, `p₀ = 101325 Pa` absolute; IF97 pure-liquid `ρ₀ ≈ 996.558 kg/m³`, `M = ρ₀ × 1000 m³` |
 | Liquid density law | `ρₗ(T) = ρ₀[1 − β(T − T₀)]`; IF97 reference `β ≈ 2.744 × 10⁻⁴ K⁻¹` |
 | Heat capacity | IF97 reference `cₚ ≈ 4181.10 J/(kg K)` |
 | Transport coefficients | IF97 reference `μ ≈ 8.537 × 10⁻⁴ Pa s`, `k ≈ 0.6095 W/(m K)`; `ν(T) = μ/ρₗ(T)`, `α(T) = k/[ρₗ(T)cₚ]` |
@@ -50,16 +50,27 @@ this fixture's scope. See [the model support matrix](../../../docs/modeling/plan
 | Gravity / conduction | Zero gravity; physical reference conductivity with uniform temperature and zero heat flux |
 | Heating | `q = 400000 W/m³` over the **accepted new liquid-domain volume** |
 | Time discretization | Conservative Backward Euler; `Δt = 1 s` |
-| Nonlinear geometry coupling | Up to 30 iterations; level change at most `10⁻¹³ m` |
+| Nonlinear geometry coupling | Up to 30 iterations; level change at most `10⁻¹⁴ m` in SimpleFluid, `10⁻¹² m` in the reduced OpenFOAM reference |
 | Transient case | 20 heated steps; compare `t = 0, 1, …, 20 s` |
 | Steady case | Same heating, then five source-off steps; compare through `25 s` |
 
-SimpleFluid sets wall velocity to no-slip, moving-top velocity to slip, top
-pressure to zero gauge, and the remaining pressure boundaries to zero gradient.
-The ALE boundary owner imposes the top's absolute mesh-normal flux. Its solved
-relative face fluxes and absolute volume-continuity residual must each be below
-`2 × 10⁻¹⁰ m³/s`. This verifies the zero-relative-flux reduction used by the
-OpenFOAM reference. The latter has adiabatic temperature patches and advances
+SimpleFluid retains no-slip walls, slip moving-top velocity, top pressure at
+zero gauge, and zero-gradient pressure on the remaining boundaries. The ALE
+boundary owner imposes the top's absolute mesh-normal flux. Per-cell absolute
+volume-continuity residuals remain below `2 × 10⁻¹⁰ m³/s`.
+
+With multiple x/y columns, SimpleFluid retains weak internal circulation even
+for uniform heating. Its maximum relative face flux, divided by the initial
+liquid volume, must remain below `2 × 10⁻¹⁰ s⁻¹` (an absolute 2e-7 m³/s bound
+for this 1000 m³ case). Both the raw and normalized values are exported in its
+history. This diagnostic uses the same reference-volume normalization as the
+original 1 m³ fixture; it does not assert pointwise zero relative flow.
+The OpenFOAM reference imposes zero relative flux. Uniform scalar transport
+and the independently checked continuity, mass and temperature-uniformity
+gates allow comparison of their common energy/volume equations. Velocity
+agreement is not an acceptance criterion for this reduced reference.
+
+The latter has adiabatic temperature patches and advances
 conserved cell masses on the affine moving mesh; it has no momentum boundary
 conditions because it does not solve momentum. SimpleFluid's physical water
 viscosity does not enter the matched uniform energy and volume equations. Both
@@ -69,7 +80,8 @@ are derived as `ν₀ = μ/ρ₀` and `α₀ = k/(ρ₀cₚ)` and the recorded c
 use the current linearized liquid density. No steam or noncondensable gas is
 present; the prescribed vented pressure is distinct from solver gauge pressure.
 
-For each cell with conserved mass `M_c`, the reduced equations are
+For each reference cell with conserved mass `M_c`, the imposed zero-relative-flux
+OpenFOAM reduction is
 
 ```text
 (M_c cp T_c^(n+1) − M_c cp T_c^n) / dt = q^(n+1) V_c^(n+1)
@@ -93,19 +105,19 @@ An independent Backward-Euler oracle checks each solution. With
 ```text
 dT = 2 b / [a + sqrt(a² − 4 β b)]
 T^(n+1) = T^n + dT
-L^(n+1) = 1 / [1 − β(T^(n+1) − T₀)].
+L^(n+1) = L0 / [1 − β(T^(n+1) − T₀)].
 ```
 
 The continuous-time solution is not the acceptance oracle: both solvers use
 the same first-order time discretization. At `t = 20 s`, the water warms by
-approximately `1.92 K` and the level rises approximately `0.527 mm`
-(`T = 301.920513032049 K`, `L = 1.000527218931568 m` from the discrete oracle). This small
+approximately `1.92 K` and the level rises approximately `5.272 mm`
+(`T = 301.920513032049 K`, `L = 10.00527218931568 m` from the discrete oracle). This small
 change keeps the density linearization close to its reference state while
 resolving the physical expansion; it is not a nonlinear water EOS validation.
 After heating stops, both drivers require **all five** subsequent steps to
-satisfy `|ΔT| ≤ 2 × 10⁻⁸ K` and `|ΔL| ≤ 2 × 10⁻¹¹ m`, otherwise they exit
-nonzero. The final warmed, expanded equilibrium is the steady verification
-state. It is distinct from selecting an unconverged heated transient as steady.
+satisfy `|ΔT| ≤ 2 × 10⁻⁸ K` and `|ΔL| ≤ 2 × 10⁻¹⁰ m`, otherwise they exit
+nonzero. The final warmed, expanded thermal/volume equilibrium is the steady
+verification state; this does not require cell-velocity equilibrium. It is distinct from selecting an unconverged heated transient as steady.
 
 ## Run
 
@@ -114,9 +126,9 @@ configure the optional material library before running either pair:
 
 ```sh
 cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON
-SIMPLEFLUID_BUILD_CONFIG=Debug \
+SIMPLEFLUID_BUILD_CONFIG=Release \
   verification/openfoam/planarALE/run_comparison.sh transient /tmp/planar-ale-results
-SIMPLEFLUID_BUILD_CONFIG=Debug \
+SIMPLEFLUID_BUILD_CONFIG=Release \
   verification/openfoam/planarALE/run_comparison.sh steady /tmp/planar-ale-results
 ```
 
@@ -155,7 +167,8 @@ The OpenFOAM application retains its reduced energy/volume scope in MPI.
 
 ## Outputs and acceptance
 
-The solvers also write `fields.csv` with individual cell bounds, temperature,
+The solvers also write `fields.csv` for the central-y cell plane, with
+individual cell bounds, temperature,
 liquid density, zero gas fraction, and velocity. The launcher creates a
 `figures/index.html` gallery with final x–z distributions, absolute/relative
 errors, and full time–height histories. SimpleFluid exports its solved cell
@@ -180,12 +193,20 @@ executables before the global record is accepted.
 The [transient](transient.json) and [steady](steady.json) manifests declare
 physical units, the reference-water closure, exact time/sample coverage, and
 fixed absolute tolerances. Each energy budget residual must be below
-`5 × 10⁻⁵ J` and paired energies within `10⁻⁴ J`. These bounds allow accumulated
-floating-point subtraction roundoff against the approximately `1.25 GJ`
+`0.05 J` and paired energies within `0.1 J`. These bounds allow accumulated
+floating-point subtraction roundoff against the approximately `1.25 TJ`
 reference sensible energy. The budget bound is less than
-`7 × 10⁻¹²` of the heat input and resolves the roughly `2 kJ` accepted-volume
+`7 × 10⁻¹²` of the heat input and resolves the roughly `2 MJ` accepted-volume
 heating correction. The mass, geometry, GCL, analytic temperature, and steady
-convergence gates retain their original absolute tolerances.
+convergence gates retain their intensive tolerances; global extensive bounds scale
+with the 1000-fold volume and level bounds with the ten-fold height.
+The per-cell GCL bound remains 2e-11 m³/s because physical cell widths are
+retained. The SimpleFluid pressure solve uses a pressure-only relative tolerance
+of 1e-12 (temperature remains 1e-13), while production pressure compatibility
+and physical conservation guards remain unchanged. The tighter Picard level
+criterion accounts for area times level error entering the global pressure
+balance. Extended local accumulation prevents cell-count-dependent roundoff
+from inventing liquid volume or diagnostic energy.
 The [shared comparator](../compare_verification.py) rejects duplicate,
 missing, unexpected, nonfinite, and stale samples. It checks both solvers'
 conservation/oracle residuals separately against zero, then compares the
@@ -203,6 +224,7 @@ include step diagnostics and CSV output, and exclude mesh construction and
 solver setup before the loop.
 
 The opt-in [performance runner](../PERFORMANCE.md) selects one rank and
-pressure PCG/DIC for these 12-cell fixtures, following the measured ALE gain.
+pressure PCG/DIC based on measurements of the original scale-1 12-cell fixtures. This policy
+has not been retuned for the enlarged 8,400-cell default.
 It supports explicit rank overrides and repeated baseline/current measurements
 with the same physical checks.

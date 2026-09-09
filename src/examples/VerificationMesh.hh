@@ -14,6 +14,10 @@ namespace SimpleFluid::Verification
 struct VerificationMesh
 {
     ArrReal x, y, z;
+    size_t nx() const { return x.size() - 1; }
+    size_t ny() const { return y.size() - 1; }
+    size_t nz() const { return z.size() - 1; }
+    size_t cells() const { return nx() * ny() * nz(); }
     auto coordinates() const -> Vec3D<ArrReal> { return {{x, y, z}}; }
     static size_t interval(const ArrReal& edges, double center)
     {
@@ -51,8 +55,8 @@ inline VerificationMesh read_verification_mesh(const std::filesystem::path& path
             throw std::runtime_error("Malformed verification mesh edges");
         axes.emplace(axis, std::move(edges));
     }
-    if (axes.size() != 3 || axes.at("y").size() != 2)
-        throw std::runtime_error("Verification mesh requires x/y/z and one extrusion cell");
+    if (axes.size() != 3)
+        throw std::runtime_error("Verification mesh requires x/y/z cell edges");
     return {axes.at("x"), axes.at("y"), axes.at("z")};
 }
 } // namespace SimpleFluid::Verification

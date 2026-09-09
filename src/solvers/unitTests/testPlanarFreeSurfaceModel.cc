@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include "geometry/MeshHandle.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
 #include "utils/testing_environment.hh"
@@ -678,6 +680,35 @@ TEST(PlanarFreeSurfaceModelTest, ReportsClosedNonlinearConvergenceFailure)
     {
         EXPECT_NE(std::string(error.what()).find("failed to converge after 1 correctors"), std::string::npos);
     }
+}
+
+TEST(LiquidMassInventoryTest, LargeCartesianReferenceDoesNotInventVolumeSource)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    SimpleFluid::ArrReal x, y, z;
+    for (int i = 0; i <= 10; ++i)
+    {
+        x.push_back(i);
+        y.push_back(i);
+    }
+    for (int i = 0; i <= 80; ++i)
+        z.push_back(i / 8.0);
+    auto native = std::make_shared<NativeMesh::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, y, z}});
+    auto mesh = std::make_shared<NativeMesh>(std::move(native));
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    SimpleFluid::LiquidMassInventory<Pack, NativeMesh> inventory(mesh, options);
+    constexpr double density = 996.558076096375;
+    inventory.initialize(1000.0, [](auto) { return density; });
+    EXPECT_NEAR(inventory.totalMass(), density * 1000, 1e-9);
+    EXPECT_NEAR(inventory.liquidVolume(), 1000, 2e-12);
+    const double warm_density = density / 1.000026;
+    inventory.updatePureLiquidDensity([&](auto) { return warm_density; });
+    EXPECT_NEAR(inventory.liquidVolume(), 1000 * density / warm_density, 2e-12);
+    typename decltype(inventory)::face_flux_field_type flux(mesh, 0.0, "stationary");
+    const auto preview = inventory.previewCellwiseAdvance(1.0, flux);
+    EXPECT_NEAR(preview.diagnostics().liquid_volume, inventory.liquidVolume(), 2e-12);
+    EXPECT_NEAR(preview.diagnostics().step_mass_balance_residual, 0, 1e-9);
 }
 
 TEST(LiquidMassInventoryTest, PureDensityControlsVolumeAndPhaseChangeOnce)
