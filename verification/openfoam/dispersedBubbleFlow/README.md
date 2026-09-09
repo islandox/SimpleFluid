@@ -37,7 +37,7 @@ There is no synthetic-fluid fallback.
 an empty output directory. Omitting the output argument creates a temporary
 directory. Neither standalone run establishes cross-solver agreement.
 
-Both drivers also support MPI on the same 44-cell mesh and physical schedule.
+Both drivers also support MPI on the same 40,400-cell mesh and physical schedule.
 SimpleFluid partitions the column when launched with MPI; OpenFOAM requires
 the generated case to be decomposed before starting the reference with
 `-parallel`. Each rank exports only its owned cells, with sample IDs derived
@@ -49,7 +49,8 @@ comparison manifests. Each rank also writes `timing.json`, containing
 the time-stepping loop's wall and CPU time, excluding mesh and model setup.
 
 The opt-in [performance runner](../PERFORMANCE.md) selects one rank and
-transport BiCGStab/SGS for these 44-cell fixtures. The steady-case policy gain
+transport BiCGStab/SGS based on historical measurements of the scale-1 44-cell fixtures; these
+settings have not been retuned for the enlarged geometry. The steady-case policy gain
 was modest; transient timing ranges overlapped in the policy experiment.
 It supports explicit rank overrides and repeated baseline/current measurements
 with the same physical checks.
@@ -68,14 +69,17 @@ The kinematic values follow `nu = mu/rho` and `alpha = k/(rho cp)` on both
 sides. SimpleFluid installs these values in its actual material fields;
 the comparison includes those fields and the derived kinematic values.
 
-A 1 m tall column of area 1 m² has 44 axially graded cells, a 0.1 m/s
+A 10 m tall column of area 100 m² has 10 × 10 × 404 cells, a 0.1 m/s
 upward carrier velocity, and 0.4 m/s upward slip. Temperature is 300 K,
 and surface tension is approximately 0.071686 N/m. Carrier motion and
 temperature are prescribed; no momentum or energy equation is solved, so
 the material-column comparison verifies configuration, not drag or thermal
 transport. The physical surface tension and absolute pressure enter the
 gas moment/radius relation. Hydrogen remains a noncondensable ideal gas;
-saturated steam density is never used for the bubbles.
+saturated steam density is never used for the bubbles. The fixed absolute
+gas pressure omits hydrostatic variation, approximately 98 kPa over this 10 m
+water column. The enlarged case remains a prescribed transport verification,
+not a realistic pressure-dependent tall bubble column.
 SimpleFluid currently prevents bubble inflow at every boundary; only
 `zmax` allows outgoing bubbles. The OpenFOAM boundary flux is identically
 zero elsewhere. Thus the bottom supplies bubble-free carrier fluid.
@@ -135,13 +139,15 @@ model for uranyl-nitrate solution and does not validate radiolysis yields.
 The steady case starts at `c = 1e-6 mol/m³` and turns on a uniform
 `q = 1e-6 mol/(m³ s)` source. Sustained production is needed because the
 current model permits no bubble inflow. It runs to the same physical
-time `t = 10 s` on both sides; output times are 0, 2, 4, 6, 8, and 10 s.
+time `t = 100 s` on both sides; output times are 0, 20, 40, 60, 80, and 100 s.
+The timestep is unchanged; the longer endpoint allows steady escape in the
+ten-times-taller column.
 The comparison includes the approach to steady state and the converged
 profile.
 
 The continuum solution is `c(z) = q z/U_b` and the steady outlet rate is
-`q × column_volume = 1e-6 mol/s`. Each executable enforces the final
-outlet balance to `2e-11 mol/s` and a per-step maximum concentration change
+`q × column_volume = 1e-3 mol/s`. Each executable enforces the final
+outlet balance to `2e-8 mol/s` and a per-step maximum concentration change
 below `1e-12 mol/m³` for at least five consecutive steps. The expected upwind and source-splitting offset from
 the continuum cell-center profile is
 `q (dz_i/(2 U_b) + dt)`, using each graded cell's actual height; each executable checks that bound
@@ -156,20 +162,23 @@ source. It runs to `t = 1 s`, with output at 0, 0.25, 0.5, 0.75, and 1 s.
 The continuum solution is a bubble-free front translating upward at
 `U_b`: `c = 0` below `z = U_b t` and the initial value above it. The
 executable compares against exact cell averages of this front, with
-normalized integrated absolute error below 0.12, allowing the documented
+normalized integrated absolute error below 0.012 (the original 0.12 m
+front-smearing allowance divided by column height), allowing the documented
 first-order numerical diffusion. By 1 s, escaped inventory must be
-between 40% and 60% of the initial inventory, bracketing the exact 50%.
+between 4% and 6% of the initial inventory, bracketing the exact 5%.
+Physical cell widths, velocity and transient duration are unchanged.
 
 ## Outputs and acceptance
 
-Each solver additionally writes cell bounds and temperature, liquid density,
+Field output selects the central-y plane (all ten x columns); inventories and
+conservation gates include all 40,400 cells. Each solver additionally writes cell bounds and temperature, liquid density,
 gas fraction, and prescribed liquid velocity to `fields.csv`. The comparison
 launcher creates a `figures/index.html` gallery with final x–z distributions,
 absolute/relative errors, and complete time–height histories. See
 [figure definitions](../WATER_FIELD_FIGURES.md) for formats, denominator
 floors, and the distinction between prescribed carrier and bubble velocity.
 
-Both solvers write `profiles.csv` for all 44 cells at every declared
+Both solvers write `profiles.csv` for all 404 cells of the central x/y column at every declared
 physical output time and a global `history.csv` with inventory,
 production, escaped moles, outlet molar rate, and convergence information.
 Profiles include `c`, `N`, `alpha_g`, water state/material coefficients,
@@ -191,7 +200,7 @@ Water state/material columns use `2e-9` relative tolerance (temperature
 and absolute pressure use exact equality). These check the installed
 reference material independently of the gas-moment tolerances.
 It independently requires each solver's global hydrogen residual to be
-below `2e-13 mol` and number residual below `2e-8` relative. Solver exit
+below `2e-10 mol` and number residual below `2e-8` relative. Solver exit
 status also enforces analytic, conservation, boundedness, and steady or
 transient behavior gates. This supplies an independent numerical
 cross-check of the supported dispersed transport limit, not experimental

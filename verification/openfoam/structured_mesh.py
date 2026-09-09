@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consume shared native mesh edges; write exact one-cell OpenFOAM blocks."""
+"""Consume shared native mesh edges; write matching OpenFOAM multi-grading."""
 import argparse
 import json
 import math
@@ -17,27 +17,25 @@ def read_mesh(path):
         if len(values)<2 or not all(map(math.isfinite,values)) or any(b<=a for a,b in zip(values,values[1:])):
             raise ValueError('Invalid mesh edges')
         axes[name]=values
-    if set(axes)!=set('xyz') or len(axes['y'])!=2: raise ValueError('Expected x/y/z with one extrusion cell')
+    if set(axes)!=set('xyz'): raise ValueError('Expected x/y/z cell edges')
     return axes
 
 
 def write_openfoam(mesh_file,output):
     edges=read_mesh(mesh_file);out=Path(output)
-    x,y,z=(edges[k] for k in 'xyz');nx,nz=len(x)-1,len(z)-1
-    def vertex(i,j,k):return (k*2+j)*(nx+1)+i
-    points=[f'({xx:.17g} {yy:.17g} {zz:.17g})' for zz in z for yy in y for xx in x]
-    blocks=[];patches={name:[] for name in ['xmin','xmax','ymin','ymax','zmin','zmax']}
-    for k in range(nz):
-        for i in range(nx):
-            v=[vertex(i,0,k),vertex(i+1,0,k),vertex(i+1,1,k),vertex(i,1,k),vertex(i,0,k+1),vertex(i+1,0,k+1),vertex(i+1,1,k+1),vertex(i,1,k+1)]
-            blocks.append('hex ('+' '.join(map(str,v))+') (1 1 1) simpleGrading (1 1 1)')
-            for name,active,indices in [('xmin',i==0,[0,4,7,3]),('xmax',i==nx-1,[1,2,6,5]),('ymin',True,[0,1,5,4]),('ymax',True,[3,7,6,2]),('zmin',k==0,[0,3,2,1]),('zmax',k==nz-1,[4,5,6,7])]:
-                if active:patches[name].append('('+' '.join(str(v[q]) for q in indices)+')')
+    x,y,z=(edges[k] for k in 'xyz');nx,ny,nz=len(x)-1,len(y)-1,len(z)-1
     header=lambda name:f'FoamFile {{version 2.0; format ascii; class dictionary; object {name};}}\n'
-    text=header('blockMeshDict')+'scale 1;\nvertices (\n'+'\n'.join(points)+'\n);\nblocks (\n'+'\n'.join(blocks)+'\n);\nedges ();\nboundary (\n'
-    for name,faces in patches.items():
+    vertices=[(x[0],y[0],z[0]),(x[-1],y[0],z[0]),(x[-1],y[-1],z[0]),(x[0],y[-1],z[0]),
+              (x[0],y[0],z[-1]),(x[-1],y[0],z[-1]),(x[-1],y[-1],z[-1]),(x[0],y[-1],z[-1])]
+    # One multi-grading section per cell: its length and one cell, expansion 1.
+    # Avoid a million one-cell blocks while retaining every canonical edge.
+    grading=['('+' '.join(f'({b-a:.17g} 1 1)' for a,b in zip(values,values[1:]))+')' for values in (x,y,z)]
+    text=header('blockMeshDict')+'scale 1;\nvertices (\n'+'\n'.join('('+' '.join(f'{v:.17g}' for v in point)+')' for point in vertices)+'\n);\n'
+    text+=f'blocks (hex (0 1 2 3 4 5 6 7) ({nx} {ny} {nz}) simpleGrading ('+' '.join(grading)+'));\nedges ();\nboundary (\n'
+    faces={'xmin':'0 4 7 3','xmax':'1 2 6 5','ymin':'0 1 5 4','ymax':'3 7 6 2','zmin':'0 3 2 1','zmax':'4 5 6 7'}
+    for name,face in faces.items():
         kind='wall' if name in ['xmin','xmax','zmin'] else 'patch'
-        text+=f'{name} {{type {kind}; faces (\n'+ '\n'.join(faces)+'\n);}\n'
+        text+=f'{name} {{type {kind}; faces (({face}));}}\n'
     text+=');\nmergePatchPairs ();\n'
     (out/'system').mkdir(parents=True,exist_ok=True);(out/'constant').mkdir(parents=True,exist_ok=True)
     (out/'system/blockMeshDict').write_text(text)
@@ -49,10 +47,35 @@ def write_openfoam(mesh_file,output):
 
 def with_mesh_manifest(manifest_path,mesh_file,output):
     data=json.loads(Path(manifest_path).read_text());edges=read_mesh(mesh_file)
+    old_edges=data.get('mesh_edges_m',edges)
+    old_volume=data.get('tolerance_reference_volume_m3',mesh_statistics(old_edges)['volume_m3'])
+    new_volume=mesh_statistics(edges)['volume_m3'];volume_factor=new_volume/old_volume
+    old_height=data.get('tolerance_reference_height_m',old_edges['z'][-1]-old_edges['z'][0])
+    new_height=edges['z'][-1]-edges['z'][0];length_factor=new_height/old_height
+    volume_quantities={'volume_m3','liquid_mass_kg','energy_J','cumulative_heat_J','hydrogen_mol','produced_mol','escaped_mol','heat_power_W','wall_heat_loss_W'}
+    volume_residuals={'relative_flux_max_m3_s','hydrogen_balance_mol','thermal_step_residual_J','mass_residual_kg','energy_balance_residual_J'}
+    for name,entry in data['quantities'].items():
+        if name in volume_quantities:entry['absolute_tolerance']*=volume_factor
+        elif data['case']=='planarALE' and name=='level_m':entry['absolute_tolerance']*=length_factor
+    for name,entry in data.get('conservation',{}).items():
+        if name in volume_residuals:entry['absolute_tolerance']*=volume_factor
+        elif name=='analytic_level_error_m':entry['absolute_tolerance']*=length_factor
+    data['tolerance_reference_volume_m3']=new_volume
+    data['tolerance_reference_height_m']=new_height
+    source=data['spatial_output'].get('source_region')
+    if source:
+        for axis in ['x','z']:
+            factor=(edges[axis][-1]-edges[axis][0])/(old_edges[axis][-1]-old_edges[axis][0])
+            for suffix in ['lower_m','upper_m']:source[f'{axis}_{suffix}']*=factor
     count=(len(edges['x'])-1)*(len(edges['z'])-1)
     samples=[str(i) for i in range(count)]
     data['spatial_output']['cell_samples']=samples
-    if data['case']=='dispersedBubbleFlow':data['expected_samples']=samples
+    data['spatial_output']['layout']='xz'
+    data['spatial_output']['width_m']=edges['x'][-1]-edges['x'][0]
+    middle=(len(edges['y'])-1)//2
+    data['spatial_output']['y_slice_index']=middle
+    data['spatial_output']['y_slice_bounds_m']=edges['y'][middle:middle+2]
+    if data['case']=='dispersedBubbleFlow':data['expected_samples']=[str(i) for i in range(len(edges['z'])-1)]
     data['mesh_edges_m']=edges
     data['mesh_statistics']=mesh_statistics(edges)
     Path(output).write_text(json.dumps(data,indent=2)+'\n')

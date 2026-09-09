@@ -436,13 +436,20 @@ foreach(VERIFICATION_TARGET IN ITEMS dispersed_bubble_verification planar_ale_co
     add_executable(${VERIFICATION_TARGET} examples/if97_verification_unavailable.cc)
   endif()
   if(BUILD_TESTING AND SIMPLEFLUID_ENABLE_IF97)
+    if(VERIFICATION_TARGET STREQUAL "dispersed_bubble_verification")
+      set(VERIFICATION_SMALL_ARGS --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/dispersedBubbleFlow/mesh_scale1.dat"
+        --parameters "${PROJECT_SOURCE_DIR}/verification/openfoam/dispersedBubbleFlow/reference_scale1.properties")
+    else()
+      set(VERIFICATION_SMALL_ARGS --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/planarALE/mesh_scale1.dat")
+    endif()
     foreach(VERIFICATION_MODE IN ITEMS steady transient)
       add_test(
         NAME ${VERIFICATION_TARGET}_${VERIFICATION_MODE}
         COMMAND ${VERIFICATION_TARGET} --mode ${VERIFICATION_MODE}
+          ${VERIFICATION_SMALL_ARGS}
           --output "${CMAKE_CURRENT_BINARY_DIR}/verification/${VERIFICATION_TARGET}/${VERIFICATION_MODE}")
       set_tests_properties(${VERIFICATION_TARGET}_${VERIFICATION_MODE} PROPERTIES
-        LABELS "verification;conservation"
+        LABELS "verification;conservation;small_fixture"
         TIMEOUT 120
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
     endforeach()
@@ -457,15 +464,19 @@ if(SIMPLEFLUID_ENABLE_IF97)
   if(BUILD_TESTING)
     add_test(NAME bottom_convection_zero_source
       COMMAND bottom_heated_bubbly_convection --steps 10 --source-scale 0
+        --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/mesh_scale1.dat"
+        --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
         --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_zero_source")
     set_tests_properties(bottom_convection_zero_source PROPERTIES
-      LABELS "verification;conservation" TIMEOUT 60
+      LABELS "verification;conservation;small_fixture" TIMEOUT 60
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
     add_test(NAME bottom_convection_graded_transport
       COMMAND bottom_heated_bubbly_convection --steps 5
+        --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/mesh_scale1.dat"
+        --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
         --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_graded_transport")
     set_tests_properties(bottom_convection_graded_transport PROPERTIES
-      LABELS "verification;conservation" TIMEOUT 60
+      LABELS "verification;conservation;small_fixture" TIMEOUT 60
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
   endif()
 else()
