@@ -189,14 +189,18 @@ struct ConfiguredCase
 ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_correctors, bool include_gas = false,
     double bubble_slip_velocity = 0.0, bool zero_gas_tolerance = false,
     SimpleFluid::RadiolyticPressureMode pressure_mode = SimpleFluid::RadiolyticPressureMode::Constant,
-    bool use_celata_slip = false)
+    bool use_celata_slip = false,
+    SimpleFluid::CoupledOperatorBackend backend = SimpleFluid::CoupledOperatorBackend::Assembled,
+    SimpleFluid::CoupledWorkspacePolicy workspace = SimpleFluid::CoupledWorkspacePolicy::CachedProducts)
 {
     auto mesh = make_column();
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
     linear_options.max_iterations = 500;
-    auto solver =
-        std::make_unique<Solver>(mesh, planar_boundaries(), time_options(coupling), linear_options, physical_options());
+    auto options = time_options(coupling);
+    options.coupled_operator_backend = backend;
+    options.coupled_workspace_policy = workspace;
+    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), options, linear_options, physical_options());
 
     solver->configure_material_feedback(material_feedback_options());
     auto* heat_source = &solver->add_temperature_source("planar_ale_heat", power_density);
@@ -679,6 +683,34 @@ TEST_P(BoussinesqPlanarALECouplingTest, CourantUsesMeshRelativeTransportFluxWith
 
 INSTANTIATE_TEST_SUITE_P(PlanarALECouplingModes, BoussinesqPlanarALECouplingTest,
     testing::Values(Coupling::SIMPLE, Coupling::PISO, Coupling::PIMPLE, Coupling::CoupledKrylov), coupling_name);
+
+TEST(BoussinesqPlanarALETest, CompositeCoupledHeatingAndRollback)
+{
+    for (auto workspace :
+        {SimpleFluid::CoupledWorkspacePolicy::CachedProducts, SimpleFluid::CoupledWorkspacePolicy::StreamedProducts})
+    {
+        auto state = make_case(Coupling::CoupledKrylov, 1.0e-4, 8, false, 0., false,
+            SimpleFluid::RadiolyticPressureMode::Constant, false, SimpleFluid::CoupledOperatorBackend::BlockComposite,
+            workspace);
+        ASSERT_NO_THROW(state.solver->step());
+        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        EXPECT_GT(diagnostics.volume_source.global_material_source, 0.);
+        EXPECT_LE(diagnostics.continuity.maximum, 3.0e-10);
+        EXPECT_NEAR(diagnostics.liquid_mass_residual, 0., 1.0e-12);
+        EXPECT_NEAR(global_mesh_volume(*state.mesh), state.solver->free_surface_diagnostics().pool_volume, 2.0e-12);
+        expect_zero_relative_top_flux(state);
+
+        auto rejected =
+            make_case(Coupling::CoupledKrylov, 1.0, 2, false, 0., false, SimpleFluid::RadiolyticPressureMode::Constant,
+                false, SimpleFluid::CoupledOperatorBackend::BlockComposite, workspace);
+        const auto volume = global_mesh_volume(*rejected.mesh);
+        const auto top = top_elevation(*rejected.mesh);
+        EXPECT_THROW(rejected.solver->step(), std::runtime_error);
+        EXPECT_EQ(rejected.solver->step_index(), 0);
+        EXPECT_DOUBLE_EQ(global_mesh_volume(*rejected.mesh), volume);
+        EXPECT_DOUBLE_EQ(top_elevation(*rejected.mesh), top);
+    }
+}
 
 TEST(BoussinesqPlanarALETest, UniformHeatingMovesTopAndClosesConservativeBalances)
 {
