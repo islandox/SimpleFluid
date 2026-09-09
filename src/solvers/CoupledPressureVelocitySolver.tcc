@@ -528,7 +528,10 @@ public:
         pressure_parameters.set("smoother: type", "RELAXATION");
         pressure_parameters.sublist("smoother: params").set("relaxation: type", "Jacobi");
         pressure_parameters.set("coarse: type", "RELAXATION");
-        pressure_parameters.set("reuse: type", "full");
+        // Keep the transfer operators, but rebuild coarse coefficients and
+        // smoother diagonals when the Schur values change. MueLu's "full"
+        // mode retains both and would apply stale numeric preconditioning.
+        pressure_parameters.set("reuse: type", "RP");
         pressure_parameters.sublist("coarse: params").set("relaxation: type", "Jacobi");
         pressure_parameters.sublist("coarse: params").set("relaxation: sweeps", 4);
         Teuchos::RCP<operator_type> pressure_operator = d_schur;
