@@ -105,6 +105,20 @@ public:
     const Indexer& indexer() const noexcept { return d_topology.indexer(); }
     const Topology& topology() const noexcept { return d_topology; }
 
+    size_t topology_storage_bytes() const noexcept
+    {
+        size_t bytes = d_topology.storage_bytes() + d_xy_cell_nodes.capacity() * sizeof(Arr<unsigned>);
+        for (const auto& row : d_xy_cell_nodes) bytes += row.capacity() * sizeof(unsigned);
+        return bytes;
+    }
+    size_t geometry_storage_bytes() const noexcept
+    {
+        return (d_xy_nodes.capacity() + d_xy_cell_centroids.capacity() + d_xy_edge_centroids.capacity()
+                   + d_xy_edge_normals.capacity()) * sizeof(Vec3)
+            + (d_z_edges.capacity() + d_z_widths.capacity() + d_z_midpoints.capacity()
+                   + d_xy_cell_areas.capacity() + d_xy_edge_lengths.capacity()) * sizeof(real_t);
+    }
+
     /** @brief Revision shared by all handles observing this geometry. */
     std::uint64_t geometry_epoch() const noexcept { return d_geometry_state.epoch; }
 
@@ -123,7 +137,7 @@ private:
 
     real_t cell_volume_impl(cell_id_t cell_id) const;
     Vec3 cell_centroid_impl(cell_id_t cell_id) const;
-    std::vector<face_id_t> cell_faces_impl(cell_id_t cell_id) const;
+    EntityRange<face_id_t> cell_faces_impl(cell_id_t cell_id) const;
 
     cell_id_t owner_cell_impl(face_id_t face_id) const;
     cell_id_t neighbor_cell_impl(face_id_t face_id) const;
@@ -138,7 +152,7 @@ private:
     auto boundary_face_batch_impl(int batch_id) const;
     auto boundary_batch_ids_impl() const;
     int num_boundary_batches_impl() const noexcept;
-    auto boundary_batches_impl() const noexcept
+    auto boundary_batches_impl() const
     {
         return d_topology.boundary_batches();
     }

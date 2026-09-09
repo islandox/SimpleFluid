@@ -7,6 +7,9 @@
 
 #include <concepts>
 #include <cstdint>
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 namespace SimpleFluid
 {
@@ -28,18 +31,30 @@ struct GeometryEpochState
 
     GeometryEpochState(const GeometryEpochState& other) noexcept : epoch(other.epoch) {}
 
-    GeometryEpochState& operator=(const GeometryEpochState& other) noexcept
+    GeometryEpochState& operator=(const GeometryEpochState& other)
     {
-        epoch = other.epoch;
+        if (this == &other) return *this;
+        if (std::max(epoch, other.epoch) == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Geometry revision overflow during replacement.");
+        epoch = std::max(epoch, other.epoch) + 1;
         motion_owner = nullptr;
         return *this;
     }
 
-    GeometryEpochState(GeometryEpochState&& other) noexcept : epoch(other.epoch) {}
-
-    GeometryEpochState& operator=(GeometryEpochState&& other) noexcept
+    GeometryEpochState(GeometryEpochState&& other) : epoch(other.epoch)
     {
-        epoch = other.epoch;
+        if (other.epoch == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Geometry revision overflow during move.");
+        ++other.epoch;
+    }
+
+    GeometryEpochState& operator=(GeometryEpochState&& other)
+    {
+        if (this == &other) return *this;
+        if (std::max(epoch, other.epoch) == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Geometry revision overflow during replacement.");
+        epoch = std::max(epoch, other.epoch) + 1;
+        ++other.epoch;
         motion_owner = nullptr;
         return *this;
     }
@@ -57,7 +72,7 @@ concept GeometryEpochMesh = requires(const MeshType& mesh) {
  * Legacy mesh interfaces have no motion contract and remain permanently at
  * epoch zero. Runtime MeshHandle geometry advances explicitly.
  */
-template<class MeshType> constexpr std::uint64_t mesh_geometry_epoch(const MeshType& mesh) noexcept
+template<class MeshType> constexpr std::uint64_t mesh_geometry_epoch(const MeshType& mesh)
 {
     if constexpr (GeometryEpochMesh<MeshType>)
     {

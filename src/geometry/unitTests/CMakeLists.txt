@@ -61,3 +61,11 @@ target_link_libraries(testOrthogonalDiffusionProfile
 simplefluid_configure_test_executable(testOrthogonalDiffusionProfile)
 # This million-cell profiling executable is run manually with
 # --gtest_also_run_disabled_tests and is intentionally not registered with CTest.
+
+simplefluid_add_mpi_test(
+    NAME MultiRegionMeshSerialOnly_2procs
+    TARGET testMultiRegionMesh
+    PROCS 2
+    ARGS "--gtest_filter=MultiRegionMeshTest.SerialOnlyRejection"
+    LABELS "mpi;multi_region"
+    TIMEOUT 120)

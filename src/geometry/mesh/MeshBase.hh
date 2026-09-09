@@ -153,13 +153,13 @@ public:
         return derived().cell_centroid_impl(cell_id);
     }
 
-    auto cell_faces(cell_id_t cell_id) const
+    decltype(auto) cell_faces(cell_id_t cell_id) const
     {
         derived().check_cell_id(cell_id);
         return derived().cell_faces_impl(cell_id);
     }
 
-    auto faces(cell_id_t cell_id) const
+    decltype(auto) faces(cell_id_t cell_id) const
     {
         return cell_faces(cell_id);
     }

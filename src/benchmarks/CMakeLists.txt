@@ -94,3 +94,9 @@ if(BUILD_TESTING)
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
     )
 endif()
+
+# Deliberately opt-in: no timing or RSS threshold is a correctness test.
+add_executable(region_mesh_scaling region_mesh_scaling.cc)
+target_link_libraries(region_mesh_scaling PRIVATE SimpleFluid::Solvers)
+simplefluid_exe_reuse_precompiled_header(region_mesh_scaling)
+simplefluid_exclude_from_pgo_sources(region_mesh_scaling.cc)

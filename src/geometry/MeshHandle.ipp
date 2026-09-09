@@ -54,33 +54,38 @@ MeshHandle<Pack>::cell_centroid(local_ordinal_type cell_lid) const -> Vec3
         });
 }
 
-/// @brief Returns a span over the local-ids of the faces bounding the given cell.
-/// @param cell_lid  Local index of the query cell.
-/// @return A `std::span` over the local-ids of the bounding faces.
-/// @note Legacy meshes return a zero-copy view of their existing connectivity
-///       when face ordering is already owned-first.
+/// @brief Observe cell-face IDs without persistent connectivity or scratch storage.
+/// @param cell_lid Local cell ordinal, including supported halo cells.
+/// @return Independent sized/indexable range; the handle must remain alive.
 template<TpetraTypePack Pack>
-inline std::span<const typename MeshHandle<Pack>::local_ordinal_type>
-MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const
+inline auto MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const -> CellFaceRange
 {
     check_cell(cell_lid);
-    if (d_cell_face_offsets.empty())
+    const auto geometry = geometry_cell_lid(cell_lid);
+    const size_t count = visit([&](const auto& mesh) -> size_t
     {
-        if (const auto legacy = legacy_mesh())
+        const auto& native = mesh.faces(mesh.cell_id(static_cast<size_t>(geometry)));
+        size_t result = 0;
+        for (const auto face : native)
+            result += geometry_to_local_face(mesh.face_local_id(face)) != invalid_local_id();
+        return result;
+    });
+    return {this, static_cast<size_t>(cell_lid), count,
+        [](const void* source, size_t cell, size_t entry) -> local_ordinal_type
         {
-            const auto geometry_lid = geometry_cell_lid(cell_lid);
-            const auto& face_lids = legacy->faces(checked_local(
-                static_cast<size_t>(geometry_lid)));
-            return {
-                face_lids.empty() ? nullptr : &face_lids[0],
-                face_lids.size()};
-        }
-    }
-    const auto local = static_cast<size_t>(cell_lid);
-    const auto begin = d_cell_face_offsets[local];
-    const auto end   = d_cell_face_offsets[local + 1];
-    return std::span<const local_ordinal_type>(d_cell_face_lids)
-        .subspan(begin, end - begin);
+            const auto& handle = *static_cast<const MeshHandle*>(source);
+            const auto geometry = handle.geometry_cell_lid(checked_local(cell));
+            return handle.visit([&](const auto& mesh) -> local_ordinal_type
+            {
+                const auto& native = mesh.faces(mesh.cell_id(static_cast<size_t>(geometry)));
+                for (const auto face : native)
+                {
+                    const auto local = handle.geometry_to_local_face(mesh.face_local_id(face));
+                    if (local != invalid_local_id() && entry-- == 0) return local;
+                }
+                throw std::out_of_range("Cell-face range index out of bounds.");
+            });
+        }};
 }
 
 /// @}

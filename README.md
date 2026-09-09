@@ -774,6 +774,14 @@ submerged steam; the inventory is never silently discarded.
 | **BLAS** | Low-level vector/matrix operations |
 | **GTest** | C++ unit testing framework |
 
+## Compact conforming region meshes
+
+Static serial `MultiRegionMesh` composes Cartesian, straight-extruded and native
+unstructured regions through the existing `MeshHandle`/FVM path. Implicit
+cell-face traversal uses allocation-free ranges; regular interfaces store
+descriptors and share one canonical face per pair. See [region mesh contracts,
+example and storage accounting](docs/region_meshes.md).
+
 ## License
 
 This project is distributed under the MIT License.

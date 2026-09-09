@@ -37,6 +37,24 @@ Focused native regressions cover unstructured geometry, operators,
 faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
 partitioned-unstructured coverage.
 
+### Compact region composition
+
+`MultiRegionMesh` is a static serial backend of `MeshHandle`. Preserve its
+canonical seam-face identity and owner-oriented flux across every field and
+operator path. Native region providers retain geometry without copying it;
+child identity/layout/revision checks must run through the existing epoch
+cache seam. Do not treat an unchanged maximum child epoch as an unchanged
+composite. Topology region identity is separate from material membership and
+MPI ownership.
+
+Normal `MeshHandle::faces()` queries return independent sized/indexable ranges.
+Do not reintroduce implicit cell-face CSR while building fields, graphs, or
+solvers. `materialize_cell_faces()` is an explicit compatibility operation.
+Serial IDs are arithmetic and distributed lookup reuses required Tpetra maps;
+`indexer()` remains an opt-in compatibility allocation. Arbitrary native
+reordering is explicit and retains its permutation; composite reordering is
+currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
+
 ### Liquid-mass inventory transactions
 
 `LiquidMassInventory` defaults to the global `globalConstantMass` approximation.

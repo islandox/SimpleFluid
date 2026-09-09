@@ -172,6 +172,26 @@ verification items below mean the foundation as a whole is not yet complete.
 
 ---
 
+### Compact region composition
+
+- [x] Separate topology and geometry contracts with shared Cartesian topology
+      and independent coordinate providers.
+- [x] Add static conforming serial composition through `MeshHandle`, canonical
+      seam faces, explicit mixed HEX_8/prism-side interfaces, and namespaced BCs.
+- [x] Replace normal implicit cell-face materialization with independent ranges;
+      retain explicit compatibility CSR and preserve native ownership/halo queries.
+- [x] Add assembled FVM/flow regressions, diffusion example, VTU region metadata,
+      and an opt-in capacity/timing benchmark. Validation is recorded in
+      `docs/region_mesh_implementation.md`; no new physical-validation claim.
+- [ ] Composite MPI: multiple regions per rank and split regions, unique seam
+      ownership, halo traversal, field ordering, and conservative multi-rank tests.
+- [ ] Nonconforming interfaces: explicit conservative transfer operators and
+      subdivision/coverage rejection, with manufactured conservation tests.
+- [ ] Composite ALE: synchronized interface geometry, exact child revisions,
+      GCL and cache refresh, conservative transport, and forced rollback tests.
+- [ ] Independent extruded geometry providers and wider composite cell/output
+      types, with compatible-template and analytic-geometry tests.
+
 ### Two-equation RANS turbulence
 
 This program was added after the numbered multiphysics roadmap. It is tracked
