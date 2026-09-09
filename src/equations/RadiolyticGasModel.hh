@@ -11,15 +11,20 @@
 #pragma once
 
 #include "equations/BoussinesqModel.hh"
+#include "equations/CollectiveValidation.hh"
 #include "equations/RadiolyticGasProperties.hh"
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "FVM/TransportSystem.hh"
 #include "solvers/BelosLinearSolver.hh"
 
+#include <array>
 #include <map>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -34,10 +39,19 @@ struct RadiolyticGasStepStatistics
 {
     Scalar hydrogen_before = {};
     Scalar hydrogen_produced = {};
+    Scalar dissolved_hydrogen_outflow = {};
+    Scalar microbubble_hydrogen_escaped = {};
+    Scalar large_bubble_hydrogen_escaped = {};
+    Scalar submerged_bubble_hydrogen_escaped = {};
     Scalar hydrogen_escaped = {};
     Scalar hydrogen_after = {};
     Scalar inventory_error = {}; ///< Hydrogen conservation residual.
+    Scalar escaped_microbubble_count = {};
+    Scalar escaped_large_bubble_count = {};
     Scalar escaped_bubble_count = {};
+    Scalar cumulative_hydrogen_produced = {};
+    Scalar cumulative_dissolved_hydrogen_outflow = {};
+    Scalar cumulative_submerged_bubble_hydrogen_escaped = {};
     Scalar cumulative_hydrogen_escaped = {};
     Scalar cumulative_escaped_bubble_count = {};
     Scalar void_volume = {};
@@ -45,6 +59,7 @@ struct RadiolyticGasStepStatistics
     int clipped_cells = 0;
     int pressure_floor_cells = 0;
     int radius_solver_failures = 0;
+    LinearSolveSummary transport_linear; ///< All FV transport solves in this step.
 };
 
 /**
@@ -67,6 +82,27 @@ public:
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using statistics_type = RadiolyticGasStepStatistics<scalar_type>;
 
+    /** Opaque complete model snapshot for an ALE outer-step transaction. */
+    class StateSnapshot
+    {
+    private:
+        friend class RadiolyticGasModel;
+        const RadiolyticGasModel* d_owner = nullptr;
+        std::vector<std::vector<scalar_type>> d_fields;
+        std::vector<local_ordinal_type> d_transport_slip_face_ids;
+        std::vector<scalar_type> d_transport_slip_face_values;
+        std::vector<scalar_type> d_transport_carrier_face_values;
+        statistics_type d_statistics;
+        bool d_history_initialized = false;
+        bool d_initial_state_initialized = false;
+        scalar_type d_absolute_pressure_offset = {};
+        scalar_type d_cumulative_hydrogen_produced = {};
+        scalar_type d_cumulative_dissolved_hydrogen_outflow = {};
+        scalar_type d_cumulative_submerged_bubble_hydrogen_escaped = {};
+        scalar_type d_cumulative_hydrogen_escaped = {};
+        scalar_type d_cumulative_escaped_bubble_count = {};
+    };
+
     /**
      * @brief Construct a radiolysis model on a mesh.
      */
@@ -76,6 +112,9 @@ public:
 
     /**
      * @brief Replace model options and reinitialize dependent fields.
+     *
+     * Resets the transport solver to the default policy with the configured
+     * transport_solver_tolerance. Apply an explicit solver policy afterward.
      */
     void configure(const RadiolyticGasOptions& options);
     /**
@@ -85,6 +124,20 @@ public:
     {
         return d_options;
     }
+    /** @brief Return the policy used for dissolved and bubble FV transport. */
+    const LinearSolverOptions& transport_linear_solver_options() const noexcept
+    {
+        return d_transport_linear_options;
+    }
+    /**
+     * @brief Collectively replace the FV transport solver policy.
+     *
+     * Every rank must supply the same valid policy. The tolerance is also
+     * published in options().transport_solver_tolerance. Replacing the policy
+     * releases cached solver state while preserving the physical fields.
+     * CG is unsupported because the transported systems may be nonsymmetric.
+     */
+    void set_transport_linear_solver_options(LinearSolverOptions options);
     /**
      * @brief Return the selected radiolysis model family.
      */
@@ -148,7 +201,9 @@ public:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* fission_power_density);
+        const field_type* fission_power_density,
+        const FVM::ALEControlVolumeState* ale = nullptr,
+        Dimension slip_axis = Dimension::Z);
 
     /**
      * @brief Advance using the solver's authoritative scalar void state.
@@ -167,7 +222,9 @@ public:
         const material_type& material,
         const field_type* fission_power_density,
         const field_type& alpha_g,
-        scalar_type alpha_max);
+        scalar_type alpha_max,
+        const FVM::ALEControlVolumeState* ale = nullptr,
+        Dimension slip_axis = Dimension::Z);
 
     /**
      * @brief Synchronize ideal-mode diagnostics with canonical scalar void.
@@ -244,6 +301,106 @@ public:
     {
         return d_large_moles;
     }
+
+    /** EOS-derived unbounded gas-volume fraction used by conservative closure. */
+    const field_type& raw_bubble_volume_fraction() const noexcept { return d_alpha_g_raw; }
+    /** EOS-derived microbubble contribution before representational bounds. */
+    const field_type& raw_microbubble_volume_fraction() const noexcept { return d_alpha_g_micro; }
+    /** EOS-derived large-bubble contribution before representational bounds. */
+    const field_type& raw_large_bubble_volume_fraction() const noexcept { return d_alpha_g_large; }
+    /** Raw bubble fraction after transport and before this step's local kinetics. */
+    const field_type& transported_raw_bubble_volume_fraction() const noexcept
+    {
+        return d_transport_alpha_g_raw;
+    }
+    /** Slip-volume flux actually paired with the transported bubble state. */
+    const face_flux_field_type& transported_bubble_slip_volume_flux() const noexcept
+    {
+        return d_transport_bubble_slip_volume_flux;
+    }
+    /** Carrier part of the same implicit bubble transport face flux. */
+    const face_flux_field_type& transported_bubble_carrier_volume_flux() const noexcept
+    {
+        return d_transport_bubble_carrier_volume_flux;
+    }
+
+    [[nodiscard]] StateSnapshot snapshot() const;
+    void restore(const StateSnapshot& snapshot);
+    /** Refresh reconstruction geometry and discard retained numeric transport state. */
+    void refresh_geometry();
+
+    /** Build the owner-oriented raw bubble-volume slip flux [m^3/s]. */
+    void bubble_slip_volume_flux(const field_type& temperature,
+        const material_type& material, Dimension slip_axis,
+        face_flux_field_type& output) const;
+
+    /** @brief Global dissolved H2 inventory in moles. */
+    scalar_type global_dissolved_hydrogen_moles() const;
+    /** @brief Global submerged microbubble H2 inventory in moles. */
+    scalar_type global_microbubble_hydrogen_moles() const;
+    /** @brief Global submerged large-bubble H2 inventory in moles. */
+    scalar_type global_large_bubble_hydrogen_moles() const;
+    /** @brief Global gas-phase H2 inventory still submerged in the liquid. */
+    scalar_type global_submerged_bubble_hydrogen_moles() const;
+    /** @brief Global dissolved plus gas-phase H2 inventory still submerged. */
+    scalar_type global_submerged_hydrogen_moles() const;
+    /** @brief Total H2 generated over all accepted model advances. */
+    scalar_type cumulative_hydrogen_produced() const noexcept { return d_cumulative_hydrogen_produced; }
+    /** @brief Total dissolved H2 transported out of the modeled pool. */
+    scalar_type cumulative_dissolved_hydrogen_outflow() const noexcept
+    {
+        return d_cumulative_dissolved_hydrogen_outflow;
+    }
+    /** @brief Total H2 transferred out of submerged bubble populations. */
+    scalar_type cumulative_submerged_bubble_hydrogen_escaped() const noexcept
+    {
+        return d_cumulative_submerged_bubble_hydrogen_escaped;
+    }
+
+    /**
+     * @brief Current EOS-derived submerged bubble volume before alpha bounds.
+     *
+     * This is the volume integral of `alpha_g_raw`, not the bounded
+     * hydrodynamic void fraction.
+     */
+    scalar_type global_submerged_bubble_volume() const;
+    /** @brief Raw bubble volume hidden by the configured upper alpha bound. */
+    scalar_type global_unrepresented_bubble_volume() const;
+    /**
+     * @brief Re-evaluate raw bubble volume at an absolute-pressure offset.
+     *
+     * The candidate replaces the uniform thermodynamic pressure offset while
+     * retaining the accepted reconstructed gauge-pressure variation.  Current
+     * temperatures, population number densities, gas moles, the configured
+     * surface-tension correlation, and the existing Laplace/EOS radius solve
+     * are reused.  The accepted model fields are not modified.
+     */
+    scalar_type evaluate_submerged_bubble_volume(scalar_type candidate_absolute_pressure_offset) const;
+
+    /**
+     * @brief Lowest offset that keeps every reconstructed pressure valid.
+     *
+     * The returned collective value accounts for both the configured absolute
+     * pressure floor and the most negative accepted gauge-pressure variation.
+     * Constant and reconstructed pressure modes are supported.  All ranks in
+     * the model communicator must call this query together.
+     */
+    scalar_type minimum_valid_absolute_pressure_offset() const;
+
+    /** @brief Uniform absolute-pressure offset used by gas thermodynamics. */
+    scalar_type absolute_pressure_offset() const noexcept { return d_absolute_pressure_offset; }
+    /**
+     * @brief Shift the thermodynamic pressure offset and published pressure.
+     *
+     * Only constant and reconstructed pressure modes support an externally
+     * coupled offset.  Reconstructed mode retains every accepted gauge-pressure
+     * variation exactly.  For initialized two-population state, every
+     * pressure-dependent bubble diagnostic is reconstructed at the accepted
+     * offset without modifying conserved inventories or escape ledgers.  This
+     * is a collective operation.
+     */
+    void set_absolute_pressure_offset(scalar_type pressure_offset);
+
     /**
      * @brief Diagnostics from the most recent advance call.
      */
@@ -304,13 +461,17 @@ private:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* fission_power_density);
+        const field_type* fission_power_density,
+        const FVM::ALEControlVolumeState* ale,
+        Dimension slip_axis);
     void transport_populations(
         scalar_type time_step,
         const field_type& temperature,
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
-        const material_type& material);
+        const material_type& material,
+        const FVM::ALEControlVolumeState* ale,
+        Dimension slip_axis);
     void transport_scalar(
         field_type& field,
         scalar_type time_step,
@@ -319,21 +480,20 @@ private:
         scalar_type diffusivity,
         bool diffuse,
         bool liquid_weighted,
-        field_type& escape_rate);
-    CellProperties cell_properties(
-        local_ordinal_type cell_lid,
-        const field_type& temperature,
-        const velocity_field_type& velocity,
-        const material_type& material) const;
+        field_type& escape_rate,
+        const FVM::ALEControlVolumeState* ale,
+        Dimension slip_axis,
+        size_t operator_slot = 0,
+        bool reuse_population_operator = false);
+    CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
+        const field_type& density, const field_type& dynamic_viscosity) const;
     CellKineticsState integrate_cell_kinetics(
         local_ordinal_type cell_lid,
         scalar_type time_step,
         scalar_type power_density,
         const CellProperties& properties);
-    void reconstruct_derived_fields(
-        const field_type& temperature,
-        const velocity_field_type& velocity,
-        const material_type& material);
+    void reconstruct_derived_fields(const field_type& temperature, const field_type& density,
+        const field_type& dynamic_viscosity, bool record_event_statistics = true);
     void update_inertial_pressure(
         scalar_type time_step,
         const field_type& temperature,
@@ -341,13 +501,18 @@ private:
         const material_type& material);
     void sync_all_fields();
     /** @brief Compute a globally reduced volume integral. */
-    scalar_type global_integral(const field_type& field) const;
+    std::array<scalar_type, 5> population_integrals(std::span<const real_t> cell_volumes) const;
+    scalar_type global_integral(const field_type& field,
+        std::span<const real_t> cell_volumes = {}) const;
     /** @brief Sum a rank-local scalar and replicate it on every rank. */
     scalar_type global_sum(scalar_type local_value) const;
+    /** @brief Compute and replicate the communicator-wide scalar minimum. */
+    scalar_type global_min(scalar_type local_value) const;
     /** @brief Compute and replicate the communicator-wide integer maximum. */
     int global_max(int local_value) const;
     void reduce_event_statistics();
-    scalar_type total_hydrogen_inventory() const;
+    scalar_type total_hydrogen_inventory(
+        std::span<const real_t> cell_volumes = {}) const;
     scalar_type rise_velocity(
         scalar_type radius,
         scalar_type liquid_density,
@@ -359,10 +524,41 @@ private:
     void assign_cell_state(
         local_ordinal_type cell_lid,
         const CellKineticsState& state);
+    std::vector<field_type*> mutable_state_fields();
+    std::vector<const field_type*> state_fields() const;
+
+    // Scratch storage is not accepted physical state. Numeric operators are
+    // rebuilt for each transport stage, including after a rejected ALE trial.
+    struct TransportWorkspace
+    {
+        explicit TransportWorkspace(const SP<const mesh_type>& mesh)
+            : flux(mesh, 0.0, "radiolytic_transport_flux"),
+              old_values(mesh, 0.0, "radiolytic_transport_old"),
+              storage(mesh, 1.0, "radiolytic_storage_weight"),
+              diffusion(mesh, 0.0, "radiolytic_diffusion_weight"),
+              solution(mesh, 0.0, "radiolytic_transport_solution"),
+              zero_flux(mesh, 0.0, "radiolytic_zero_flux"),
+              axial_flux(mesh, 0.0, "radiolytic_axial_bubble_flux"),
+              micro_slip(mesh, 0.0, "microbubble_slip_velocity"),
+              large_slip(mesh, 0.0, "large_bubble_slip_velocity"),
+              micro_alpha(mesh, 0.0, "transported_microbubble_volume_fraction"),
+              large_alpha(mesh, 0.0, "transported_large_bubble_volume_fraction")
+        {
+        }
+
+        face_flux_field_type flux;
+        field_type old_values, storage, diffusion, solution;
+        face_flux_field_type zero_flux, axial_flux;
+        field_type micro_slip, large_slip, micro_alpha, large_alpha;
+        // Dissolved, microbubble, and large-bubble graphs can differ.
+        std::array<FVM::TransportSystem<Pack>, 3> systems;
+        std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 3> symbolic_plans;
+    };
 
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     RadiolyticGasOptions d_options;
+    LinearSolverOptions d_transport_linear_options;
 
     field_type d_alpha_g;
     field_type d_alpha_l;
@@ -370,6 +566,7 @@ private:
     field_type d_absolute_pressure;
     field_type d_previous_temperature;
     field_type d_previous_density;
+    field_type d_previous_dynamic_viscosity;
     field_type d_previous_alpha_g;
 
     field_type d_dissolved_hydrogen;
@@ -388,6 +585,7 @@ private:
     field_type d_alpha_g_micro;
     field_type d_alpha_g_large;
     field_type d_alpha_g_raw;
+    field_type d_transport_alpha_g_raw;
     field_type d_alpha_g_excess;
     field_type d_characteristic_radius;
 
@@ -399,12 +597,22 @@ private:
     field_type d_escape_molar_rate;
     field_type d_escape_number_rate;
     field_type d_inventory_error;
+    face_flux_field_type d_transport_bubble_slip_volume_flux;
+    face_flux_field_type d_transport_bubble_carrier_volume_flux;
 
     bool d_history_initialized = false;
     bool d_initial_state_initialized = false;
+    scalar_type d_absolute_pressure_offset = {};
+    scalar_type d_cumulative_hydrogen_produced = {};
+    scalar_type d_cumulative_dissolved_hydrogen_outflow = {};
+    scalar_type d_cumulative_submerged_bubble_hydrogen_escaped = {};
     scalar_type d_cumulative_hydrogen_escaped = {};
     scalar_type d_cumulative_escaped_bubble_count = {};
     BelosLinearSolver<Pack> d_transport_solver;
+    std::unique_ptr<TransportWorkspace> d_transport_workspace;
+    Teuchos::RCP<typename Pack::multi_vector_type> d_state_sync_owned;
+    Teuchos::RCP<typename Pack::multi_vector_type> d_state_sync_overlap;
+    Teuchos::RCP<typename Pack::import_type> d_state_sync_import;
     statistics_type d_last_statistics;
     std::map<std::string, const field_type*> d_output_fields;
 };

@@ -1,0 +1,17 @@
+FoamFile
+{
+    format ascii;
+    class dictionary;
+    object controlDict;
+}
+application planarALEBudgetFoam;
+startFrom startTime;
+startTime 0;
+stopAt endTime;
+endTime 25;
+deltaT 1;
+writeControl timeStep;
+writeInterval 25;
+writeFormat ascii;
+writePrecision 17;
+runTimeModifiable false;

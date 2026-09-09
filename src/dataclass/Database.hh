@@ -11,14 +11,13 @@
 #pragma once
 
 #include "typedefs.hh"
-#include "utils/TMP_helpers.hh"
-
 #include "DBNode.hh"
 
-#include <cstdint>
+#include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 namespace SimpleFluid
 {
@@ -44,62 +43,36 @@ public:
 
     bool contains(const std::string& key) const
     {
-        return d_key_types.contains(key);
+        return d_values.contains(key);
     }
 
     bool erase(const std::string& key);
 
     void clear()
     {
-        int_node.clear();
-        real_node.clear();
-        string_node.clear();
-        bool_node.clear();
-        vec_int_node.clear();
-        vec_real_node.clear();
-        vec_string_node.clear();
-        d_key_types.clear();
+        d_values.clear();
     }
 
     size_t size() const
     {
-        return d_key_types.size();
+        return d_values.size();
     }
 
 private:
-    /** @brief Identifies the typed node that owns a database key. */
-    enum class NodeKind : uint8_t
-    {
-        Int,
-        Real,
-        String,
-        Bool,
-        VecInt,
-        VecReal,
-        VecString
-    };
+    using DatabaseValue =
+        std::variant<int, real_t, std::string, bool, ArrInt, ArrReal, ArrString>;
 
     template<class T>
-    DBNode<T>& node();
+    static constexpr bool is_supported_value_v =
+        std::is_same_v<T, int> ||
+        std::is_same_v<T, real_t> ||
+        std::is_same_v<T, std::string> ||
+        std::is_same_v<T, bool> ||
+        std::is_same_v<T, ArrInt> ||
+        std::is_same_v<T, ArrReal> ||
+        std::is_same_v<T, ArrString>;
 
-    template<class T>
-    const DBNode<T>& node() const;
-
-    template<class T>
-    static consteval NodeKind node_kind();
-
-    bool erase_from_node(const std::string& key, NodeKind kind);
-
-    DBNode<int> int_node;
-    DBNode<real_t> real_node;
-    DBNode<std::string> string_node;
-    DBNode<bool> bool_node;
-
-    DBNode<std::vector<int>> vec_int_node;
-    DBNode<std::vector<real_t>> vec_real_node;
-    DBNode<std::vector<std::string>> vec_string_node;
-
-    std::unordered_map<std::string, NodeKind> d_key_types;
+    std::unordered_map<std::string, DatabaseValue> d_values;
 };
 
 /**
@@ -113,10 +86,13 @@ template <class T>
 void Database::set(const std::string& key, T&& value)
 {
     using Value = std::remove_cvref_t<T>;
+    static_assert(
+        is_supported_value_v<Value>,
+        "Unsupported Database value type");
 
-    erase(key);
-    node<Value>().set(key, std::forward<T>(value));
-    d_key_types[key] = node_kind<Value>();
+    d_values.insert_or_assign(
+        key,
+        DatabaseValue{std::in_place_type<Value>, std::forward<T>(value)});
 }
 
 /**
@@ -130,7 +106,17 @@ void Database::set(const std::string& key, T&& value)
 template <class T>
 T& Database::get(const std::string& key)
 {
-    return node<T>().get(key);
+    static_assert(
+        is_supported_value_v<T>,
+        "Unsupported Database value type");
+
+    auto iter = d_values.find(key);
+    if (iter == d_values.end() || !std::holds_alternative<T>(iter->second))
+    {
+        throw std::out_of_range("Database key not found: " + key);
+    }
+
+    return std::get<T>(iter->second);
 }
 
 /**
@@ -144,77 +130,17 @@ T& Database::get(const std::string& key)
 template <class T>
 const T& Database::get(const std::string& key) const
 {
-    return node<T>().get(key);
-}
+    static_assert(
+        is_supported_value_v<T>,
+        "Unsupported Database value type");
 
-/**
- * @brief Select the mutable typed node used to store @p T values.
- *
- * @tparam T Supported database value type.
- * @return Mutable node for @p T.
- */
-template<class T>
-DBNode<T>& Database::node()
-{
-    if constexpr (std::same_as<T, int>)
-        return int_node;
-    else if constexpr (std::same_as<T, real_t>)
-        return real_node;
-    else if constexpr (std::same_as<T, std::string>)
-        return string_node;
-    else if constexpr (std::same_as<T, bool>)
-        return bool_node;
-    else if constexpr (std::same_as<T, std::vector<int>>)
-        return vec_int_node;
-    else if constexpr (std::same_as<T, std::vector<real_t>>)
-        return vec_real_node;
-    else if constexpr (std::same_as<T, std::vector<std::string>>)
-        return vec_string_node;
-    else
-        static_assert(
-            utils::TMP::always_false_v<T>,
-            "Unsupported Database value type");
-}
+    auto iter = d_values.find(key);
+    if (iter == d_values.end() || !std::holds_alternative<T>(iter->second))
+    {
+        throw std::out_of_range("Database key not found: " + key);
+    }
 
-/**
- * @brief Select the const typed node used to store @p T values.
- *
- * @tparam T Supported database value type.
- * @return Const node for @p T.
- */
-template<class T>
-const DBNode<T>& Database::node() const
-{
-    return const_cast<Database*>(this)->node<T>();
-}
-
-/**
- * @brief Return the runtime node tag corresponding to @p T.
- *
- * @tparam T Supported database value type.
- * @return Node kind used by the key-type registry.
- */
-template<class T>
-consteval auto Database::node_kind() -> NodeKind
-{
-    if constexpr (std::same_as<T, int>)
-        return NodeKind::Int;
-    else if constexpr (std::same_as<T, real_t>)
-        return NodeKind::Real;
-    else if constexpr (std::same_as<T, std::string>)
-        return NodeKind::String;
-    else if constexpr (std::same_as<T, bool>)
-        return NodeKind::Bool;
-    else if constexpr (std::same_as<T, std::vector<int>>)
-        return NodeKind::VecInt;
-    else if constexpr (std::same_as<T, std::vector<real_t>>)
-        return NodeKind::VecReal;
-    else if constexpr (std::same_as<T, std::vector<std::string>>)
-        return NodeKind::VecString;
-    else
-        static_assert(
-            utils::TMP::always_false_v<T>,
-            "Unsupported Database value type");
+    return std::get<T>(iter->second);
 }
 
 } // namespace SimpleFluid

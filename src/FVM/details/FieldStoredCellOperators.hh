@@ -381,13 +381,18 @@ void stored_gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshTyp
     }
 }
 
-/** @brief Net owner-oriented stored face flux around one cell. */
-template<TpetraTypePack Pack, class MeshType>
+/** @brief Net owner-oriented flux using a scoped overlap or owned face view. */
+template<TpetraTypePack Pack, class MeshType, class View>
 auto stored_cell_flux_balance(const MeshType& mesh, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    typename Pack::local_ordinal_type cell_lid) -> typename Pack::scalar_type
+    const View& face_values, typename Pack::local_ordinal_type cell_lid) -> typename Pack::scalar_type
 {
     using scalar_type = typename Pack::scalar_type;
-
+    const bool local_view = face_values.extent(0) == face_fluxes.num_local_entries();
+    if (face_values.extent(1) != 1 ||
+        (!local_view && face_values.extent(0) != face_fluxes.num_owned_entries()))
+        throw std::invalid_argument("cell_flux_balance requires an owned or overlap scalar face view.");
+    // Owned-only compatibility callers still need published processor faces.
+    const auto overlap = local_view ? decltype(face_fluxes.local_read_view()){} : face_fluxes.local_read_view();
     scalar_type balance{};
     const auto cell_id = query_cell_id(mesh, cell_lid);
     for (const auto face_id : mesh.faces(cell_id))
@@ -395,9 +400,19 @@ auto stored_cell_flux_balance(const MeshType& mesh, const ScalarFaceFieldStored<
         const auto face_lid = static_cast<typename Pack::local_ordinal_type>(packed_face_local_id(mesh, face_id));
         const auto owner_lid = packed_cell_local_id(mesh, mesh.owner_cell(face_id));
         const auto sign = owner_lid == cell_lid ? scalar_type{1} : scalar_type{-1};
-        balance += sign * face_fluxes.local_value(face_lid);
+        const auto value = local_view || static_cast<size_t>(face_lid) < face_fluxes.num_owned_entries()
+            ? face_values(face_lid, 0) : overlap(face_lid, 0);
+        balance += sign * value;
     }
     return balance;
+}
+
+/** @brief Net owner-oriented stored face flux around one cell. */
+template<TpetraTypePack Pack, class MeshType>
+auto stored_cell_flux_balance(const MeshType& mesh, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
+    typename Pack::local_ordinal_type cell_lid) -> typename Pack::scalar_type
+{
+    return stored_cell_flux_balance(mesh, face_fluxes, face_fluxes.local_read_view(), cell_lid);
 }
 
 } // namespace SimpleFluid::FVM::detail

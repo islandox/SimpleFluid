@@ -17,17 +17,20 @@
 #endif
 #define SIMPLEFLUID_EQUATIONS_LOCAL
 #define SIMPLEFLUID_SOLVERS_LOCAL
+#define SIMPLEFLUID_LOCAL
 #define SIMPLEFLUID_PUBLIC_TYPE
 #elif defined(__GNUC__) || defined(__clang__)
 #define SIMPLEFLUID_EQUATIONS_EXPORT [[gnu::visibility("default")]]
 #define SIMPLEFLUID_SOLVERS_EXPORT [[gnu::visibility("default")]]
 #define SIMPLEFLUID_EQUATIONS_LOCAL [[gnu::visibility("hidden")]]
 #define SIMPLEFLUID_SOLVERS_LOCAL [[gnu::visibility("hidden")]]
+#define SIMPLEFLUID_LOCAL [[gnu::visibility("hidden")]]
 #define SIMPLEFLUID_PUBLIC_TYPE [[gnu::visibility("default")]]
 #else
 #define SIMPLEFLUID_EQUATIONS_EXPORT
 #define SIMPLEFLUID_SOLVERS_EXPORT
 #define SIMPLEFLUID_EQUATIONS_LOCAL
 #define SIMPLEFLUID_SOLVERS_LOCAL
+#define SIMPLEFLUID_LOCAL
 #define SIMPLEFLUID_PUBLIC_TYPE
 #endif

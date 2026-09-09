@@ -11,6 +11,7 @@
 #pragma once
 
 #include "FVM/BoundaryCache.hh"
+#include "FVM/ALEControlVolumeState.hh"
 #include "FVM/Operators.hh"
 #include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
@@ -23,6 +24,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <concepts>
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -57,6 +59,11 @@ public:
     TemperatureDiffusionEquation(SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions);
 
     void refresh_boundary_cache();
+
+    /**
+     * @brief Refresh numeric geometry and discard operator-dependent solve state.
+     */
+    void refresh_geometry();
 
     void advance_explicit(const std::vector<scalar_type>& old_temperature, scalar_type time_step,
         scalar_type thermal_diffusivity, field_type& temperature) const;
@@ -96,6 +103,17 @@ public:
         const boundary_cache_type* boundary_thermal_conductivity = nullptr,
         FVM::FaceCoefficientInterpolation coefficient_interpolation =
             FVM::FaceCoefficientInterpolation::Harmonic) const;
+
+    LinearSolveStatistics advance_physical(const field_type& old_temperature, const face_flux_field_type& face_fluxes,
+        scalar_type time_step, const material_type& material, field_type& temperature, const source_type& power_density,
+        FVM::NonOrthogonalTreatment treatment, const LinearSolverOptions& linear_options,
+        const field_type* thermal_conductivity_override,
+        const boundary_cache_type* boundary_thermal_conductivity,
+        FVM::FaceCoefficientInterpolation coefficient_interpolation,
+        const FVM::ALEControlVolumeState* ale,
+        const field_type* old_density,
+        const field_type* old_specific_heat_capacity,
+        const field_type* transport_density_override) const;
 
 private:
     SIMPLEFLUID_EQUATIONS_LOCAL

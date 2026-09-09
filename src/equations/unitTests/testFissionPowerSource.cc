@@ -185,6 +185,41 @@ TEST(FissionPowerSourceTest, RejectsInvalidDatabaseOptions)
     expect_invalid(non_finite);
 }
 
+/** @brief Verifies contextual diagnostics for required fission options. */
+TEST(FissionPowerSourceTest, ReportsRequiredOptionContext)
+{
+    SimpleFluid::Database missing;
+    missing.set("fission_power_mode", std::string{"constant"});
+    try
+    {
+        SimpleFluid::fission_power_source_options_from_database(missing);
+        FAIL() << "Expected a missing fission option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Fission power model"), std::string::npos);
+        EXPECT_NE(message.find("fission_power_density"), std::string::npos);
+        EXPECT_NE(message.find("required"), std::string::npos);
+    }
+
+    SimpleFluid::Database wrong_type;
+    wrong_type.set("fission_power_mode", std::string{"constant"});
+    wrong_type.set("fission_power_density", std::string{"high"});
+    try
+    {
+        SimpleFluid::fission_power_source_options_from_database(wrong_type);
+        FAIL() << "Expected a typed fission option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Fission power model"), std::string::npos);
+        EXPECT_NE(message.find("fission_power_density"), std::string::npos);
+        EXPECT_NE(message.find("wrong type"), std::string::npos);
+    }
+}
+
 /** @brief Verifies total-power normalization of constant and Gaussian profiles. */
 TEST(FissionPowerSourceTest, ConstantAndGaussianProfilesIntegrateCorrectly)
 {

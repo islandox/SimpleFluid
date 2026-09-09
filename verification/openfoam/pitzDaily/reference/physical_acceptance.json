@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "qualification": {
+    "status": "pending_external_qualification",
+    "scope": "physical_reference",
+    "reason": "No checked-in pair of mesh- and time-converged OpenFOAM v2606 and SimpleFluid profiles exists. Numeric CFD tolerances would therefore be unsubstantiated.",
+    "required_evidence": [
+      "OpenFOAM residual-control convergence and final x050/x100/x200 velocity profiles",
+      "SimpleFluid stationarity plus time-step and mesh-refinement evidence",
+      "matched case settings, compiler, MPI rank count, and source revisions",
+      "checked-in raw profiles with SHA-256 checksums",
+      "observed per-station ux/uy L2 and Linf errors with documented tolerance headroom"
+    ]
+  },
+  "reference_definition": {
+    "openfoam_case": "OpenFOAM.com v2606 incompressible/simpleFoam/pitzDaily",
+    "openfoam_profile_files": {
+      "x050": null,
+      "x100": null,
+      "x200": null
+    },
+    "simplefluid_source_revision": "unqualified",
+    "simplefluid_run": {
+      "mesh_divisor": 1,
+      "steps": null,
+      "dt_s": null,
+      "mpi_ranks": null,
+      "steady_state": null,
+      "linear_tolerance": null,
+      "steady_consecutive_steps": null,
+      "steady_min_steps": null,
+      "steady_max_retries": null,
+      "steady_rejection_recovery_steps": null,
+      "steady_tolerance": null,
+      "steady_min_dt_s": null,
+      "steady_max_dt_s": null,
+      "steady_target_courant": null,
+      "steady_dt_growth_factor": null,
+      "steady_dt_reduction_factor": null,
+      "steady_rejection_safety_factor": null,
+      "steady_relaxed_linear_tolerance": null,
+      "steady_full_accuracy_update_ratio": null,
+      "steady_progress_interval": null,
+      "rank_csv_files": []
+    },
+    "stations_m": {
+      "x050": 0.05,
+      "x100": 0.1,
+      "x200": 0.2
+    },
+    "velocity_units": "m/s"
+  },
+  "stations": {}
+}

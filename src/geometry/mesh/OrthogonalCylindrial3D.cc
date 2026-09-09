@@ -180,6 +180,37 @@ OrthogonalCylindrial3D::OrthogonalCylindrial3D(
 }
 
 /**
+ * @brief Replace axial coordinates without changing cylindrical topology.
+ * @param edges Strictly increasing axial edges with the existing size.
+ * @throws std::invalid_argument If the replacement layout is invalid.
+ */
+void OrthogonalCylindrial3D::replace_axial_edges_fixed_topology(Arr<real_t> edges)
+{
+    if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
+    {
+        throw std::overflow_error("OrthogonalCylindrial3D geometry epoch overflow.");
+    }
+    if (edges.size() != d_cell_edges[AXIAL].size())
+    {
+        throw std::invalid_argument("OrthogonalCylindrial3D fixed-topology update cannot change "
+                                    "the axial edge count.");
+    }
+
+    validate_edges(edges, "z");
+    auto midpoints = MeshUtils::consec_mid(edges);
+    auto widths = MeshUtils::consec_diff(edges);
+    auto radial_face_widths = widths;
+    auto theta_face_widths = widths;
+
+    d_cell_edges[AXIAL] = std::move(edges);
+    d_cell_midpoints[AXIAL] = std::move(midpoints);
+    d_cell_widths[AXIAL] = std::move(widths);
+    d_face_area_magnitudes[R_FACE][AXIAL] = std::move(radial_face_widths);
+    d_face_area_magnitudes[THETA_FACE][AXIAL] = std::move(theta_face_widths);
+    ++d_geometry_state.epoch;
+}
+
+/**
  * @brief Return a physical boundary batch name.
  * @param batch_id Boundary batch identifier.
  * @return Configured radial, angular, or axial boundary name.

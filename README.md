@@ -13,18 +13,30 @@ benchmarking, physical heat sources, updateable material properties, prescribed
 fission heating, and the baseline radiolytic-gas source. Numerical verification
 gaps and later multiphysics acceptance work remain tracked in `TODO.md`.
 
-**The advanced Phase 14.1 two-population radiolytic-bubble model is implemented
-in part and remains under verification.**
+The pressure–velocity, Boussinesq, turbulence, and optional-physics stacks now
+run directly on `MeshHandle`/`FieldStored` data for supported mapped meshes,
+without reconstructing a legacy mesh. Existing callers that supply the legacy
+`Mesh` backend retain their established object identity and behavior through a
+separate compatibility path.
+
+**The advanced Phase 14.1 two-population radiolytic-bubble model has broad
+implementation and focused conservation/transport coverage, but remains under
+physical validation and acceptance.**
 
 **Turbulent bubbly-flow scope:** the single-continuum RANS models and the
 radiolytic bubble-population model can run in the same `BoussinesqSolver` with
 sequential void-to-density/buoyancy feedback. This is not a full Euler–Euler
 two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
+Permanent serial and exact-two-rank regressions exercise that combined path,
+including causal changes from turbulence, dissolved-hydrogen advection, and
+void-dependent density feedback; a checked-in combined user example and
+quantitative bubbly-flow validation remain open.
 
 | Capability | Status |
 | ---------- | ------ |
 | Mesh & geometry infrastructure | ✅ |
-| Scalar & vector fields (Tpetra) | ✅ |
+| Scalar, vector, and tensor fields (Tpetra) | ✅ |
+| Native `MeshHandle`/`FieldStored` FVM and solver path | ✅ |
 | Orthogonal diffusion operator | ✅ |
 | Non-orthogonal correction (explicit/implicit/hybrid) | ✅ |
 | Momentum equation (transient + convection + diffusion) | ✅ |
@@ -36,19 +48,24 @@ two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
 | Boussinesq natural convection examples | ✅ |
 | Performance benchmarks & scaling tests | ✅ |
 | Physical heat sources & material-property fields | ✅ |
+| Solid subdomains & transient heat conduction | ✅ |
 | Prescribed fission power-density profiles | ✅ |
 | Baseline ideal-gas radiolytic source | ✅ |
 | Six two-equation RANS closures and wall treatments | ✅ |
 | Scalar void, boiling, feedback, and precursor infrastructure | 🚧 |
 | Two-population radiolytic-bubble model | 🚧 |
 | Weakly coupled RANS plus radiolytic bubble populations | 🚧 |
+| Fixed-grid planar volume budget and weak Boussinesq integration | 🚧 |
+| Structured planar geometry-motion/GCL substrate | ✅ |
+| Constrained solver-integrated planar ALE and generalized continuity | 🚧 |
+| Conservative pool occupancy and cross-mesh mapping | ⬜ |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
-| TH/neutronics multiphysics coupling | ⬜ |
+| In-memory TH/neutronics feedback and coupling scaffold | 🚧 |
 
 ## Governing Equations
 
-The code solves the incompressible Navier–Stokes equations with the Boussinesq
-approximation for buoyancy-driven flows:
+The default and fixed-grid paths solve the incompressible Navier–Stokes
+equations with the Boussinesq approximation for buoyancy-driven flows:
 
 $$
 \frac{\partial \mathbf{u}}{\partial t} + \nabla\cdot(\mathbf{u}\mathbf{u})
@@ -63,15 +80,34 @@ $$
 \frac{\partial T}{\partial t} + \nabla\cdot(\mathbf{u}T) = \alpha\nabla^2 T
 $$
 
+The constrained planar-ALE path instead advances conservative old/new-volume
+storage with the mesh-relative flux
+$\phi_{rel}=\phi_{abs}-\phi_m$ and enforces the integrated low-Mach target
+$\sum_f\phi_{abs,f}=Q_{V,c}$. Its supported model matrix and discrete
+equations are documented in
+[`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md).
+
+For a solid region, the velocity term is absent and the conservative thermal
+equation is
+
+$$
+\rho_s c_{p,s}\frac{\partial T_s}{\partial t}
+= \nabla\cdot(k_s\nabla T_s) + \dot q_s.
+$$
+
 ## Numerical Methods
 
 ### Discretization
 
 - **Collocated** finite-volume method on supported hexahedral and
   triangular-prism meshes
-- **First-order upwind** convection (implicit)
-- **Backward Euler** time integration
-- Gradient reconstruction via **least-squares** on extended stencils
+- **First-order upwind** convection (implicit) and **Backward Euler** time
+  integration by default
+- Opt-in constant-step **BDF2** and bounded **linear-upwind** deferred
+  correction for legacy and native mapped weighted-scalar transport, plus the
+  native mapped physical-temperature path
+- Gradient reconstruction via cached **least-squares** stencils, with a
+  selectable **Gauss-linear** path for pressure and turbulence gradients
 
 ### Diffusion Operator
 
@@ -125,13 +161,19 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - Runtime-switchable mesh types:
   - **Orthogonal Cartesian 3D** — structured hexahedral cells
   - **Orthogonal Cylindrical 3D** — polar-structured hexahedral cells
-  - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms
+  - **Unstructured mesh** — STK-free hexahedral and triangular-prism
+    connectivity; serial directly and distributed after
+    `MeshPartitioner`/`PartitionedMesh` adaptation
+  - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms,
+    currently serial-only
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
     other volume topologies are rejected during assembly
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends
 - Boundary condition support via sideset / side-part name mapping
+- Compact solid-cell subdomains with independent distributed maps and named
+  synthetic boundaries at solid/non-solid interfaces
 
 ### Mesh Generation
 
@@ -143,19 +185,32 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 
 - **Cell-centered** scalar and vector fields backed by Tpetra distributed vectors
 - **Face-centered** scalar and vector fields backed by Tpetra distributed vectors
-- `FieldStored` with mesh-aware construction and ghosted data exchange
-- `BoundaryFaceField` for sideset-indexed boundary data
+- `FieldStored` scalar, vector, and row-major tensor cell storage, plus scalar
+  and vector face/boundary-face storage
+- Mesh-aware owned/overlap maps, component and bulk host views, owned-face
+  indexing, and ghosted data exchange
+- `BoundaryFaceField` compatibility storage for sideset-indexed boundary data
 
 ### Solvers & Equations
 
 - `FluidSolver` — reusable transient incompressible pressure-velocity driver
+- `IncompressibleIsothermalSolver` — transient constant-density flow with
+  optional RANS transport and no temperature solve
 - `BoussinesqSolver` — thermal natural-convection specialization
 - `IncompressibleMomentumEquation` — generic velocity-transport assembly
 - `BoussinesqMomentumEquation` — incompressible momentum with buoyancy
 - `PressureProjectionEquation` — pressure-correction / Poisson system
 - `TemperatureDiffusionEquation` — energy equation assembly
+- `SolidHeatConductionEquation` — conservative, zero-advection solid energy
+  equation on a `SolidSubdomain`
 - `CoupledPressureVelocitySolver` — monolithic block-Krylov solver
 - `BelosLinearSolver` — unified interface to Trilinos iterative solvers
+- Direct `MeshHandle` execution through `MeshFieldTraits` for mapped pressure,
+  velocity, temperature, turbulence, material, and optional-physics fields
+- Selected-first `MeshReorderingFactory` layouts for range-backed solid
+  subdomains without parent-sized selection or reverse-index tables
+- Legacy `Mesh` execution through synchronized compatibility fields, without
+  replacing the mesh supplied by the caller
 - Runtime residual reporting for momentum, pressure, and continuity
 - Named volumetric heat sources and updateable physical material fields
 
@@ -206,17 +261,26 @@ absent. Those capabilities belong to the deferred Euler–Euler program in
 
 The shipped `pitz_daily` and `fissile_solution_tank_sst` examples exercise
 RANS without radiolytic bubbles, while the fissile-solution smoke examples
-exercise radiolysis without RANS. No checked-in example or regression test
-currently advances both subsystems in a nontrivial flow.
+exercise radiolysis without RANS. A permanent serial and exact-two-rank
+regression advances both subsystems in a sheared flow and checks turbulence,
+dissolved-hydrogen advection, fission production, bubble slip, hydrogen
+balance, and void-dependent density feedback. There is not yet a checked-in
+combined user-facing example or quantitative bubbly-flow validation case.
 
 ### FVM Operators
 
 - `DiffusionSystem` — scalar/vector orthogonal diffusion assembly
-- `TransportSystem` — semi-implicit convection–diffusion assembly
+- `TransportSystem` — semi-implicit scalar/vector, weighted, temperature, and
+  physical-momentum convection–diffusion assembly
 - `NonOrthogonalCorrection` — cross-diffusion flux decomposition ($S_f = E_f + T_f$)
-- `CellOperators` — gradient, divergence, Laplacian reconstruction
-- `FaceFlux` — Rhie–Chow face-flux interpolation
-- `MatrixOperators` — sparse matrix assembly helpers
+- `CellOperators` — cached scalar/vector gradient, divergence, and Laplacian
+  reconstruction for legacy and stored fields
+- `FaceFlux` — face interpolation, normal fluxes, cell balances, and
+  FieldStored/legacy Rhie–Chow interpolation
+- `MatrixOperators` — sparse diffusion, upwind, and pressure-Poisson assembly
+  helpers for legacy and mapped meshes
+- Mapped boundary and transport caches — reusable boundary locations,
+  least-squares geometry, and compatible transport-matrix graphs
 
 ### Data & Utilities
 
@@ -253,12 +317,17 @@ short-running physical smoke cases:
 | Skewed diffusion | Non-orthogonal mesh convergence with all three treatments |
 | Natural convection cavity | Differentially heated square cavity |
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
-| OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with velocity-profile comparison |
+| OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with an authenticated fail-closed comparator; the physical acceptance manifest remains pending qualification |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
+| Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
+| Fixed-grid planar volume budget | Analytic/component, global/cellwise inventory, Boussinesq integration, and two-rank conservation checks; no moving-surface claim |
+| Planar geometry/GCL substrate | Structured/extruded motion, transactions, epoch/cache staleness, quality, and serial/two-rank GCL/shared-face checks |
+| Constrained planar ALE | Old/new-volume transport, mesh-relative flux, generalized continuity, moving-boundary, rollback, and conservation component/integration checks; no quantitative pool-dynamics validation |
 
 The turbulence and radiolytic-bubble subsystems have separate focused serial
-and MPI coverage. A permanent combined RANS-plus-bubble regression and a
-quantitative turbulent bubbly-flow benchmark remain open.
+and MPI coverage plus a permanent combined serial and exact-two-rank
+regression. A checked-in combined user example and a quantitative turbulent
+bubbly-flow benchmark remain open.
 
 The cavity smoke tests do not currently assert agreement with Ghia et al. or
 with bundled OpenFOAM profile data. See
@@ -266,6 +335,14 @@ with bundled OpenFOAM profile data. See
 `verification/openfoam/pitzDaily/README.md` for the pitzDaily workflow. The
 matched Gaussian tank workflow and its interpretation are documented in
 `verification/openfoam/fissileSolutionTank/README.md`.
+Matched steady and transient checks for the supported dispersed-bubble
+transport and constrained planar-ALE models are documented in
+[`verification/openfoam/README.md`](verification/openfoam/README.md).
+They include independent OpenFOAM finite-volume reference applications,
+physical-time and sample-coverage checks, and conservation acceptance gates.
+Both case families require `SIMPLEFLUID_ENABLE_IF97=ON` and share IF97
+liquid-water reference properties with OpenFOAM; ALE retains the supported
+linear Boussinesq density approximation.
 
 ## Examples
 
@@ -277,14 +354,21 @@ Pre-built example executables:
 | `natural_convection_cylinder` | Cylindrical domain natural convection |
 | `natural_convection_sphere` | Spherical domain natural convection |
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
-| `pitz_daily` | OpenFOAM pitzDaily geometry with transient standard k-epsilon transport |
+| `natural_convection_shiri` | MPI-capable annular natural convection with standard k-epsilon and adaptive steady-state search |
+| `pitz_daily` | OpenFOAM pitzDaily geometry with transient isothermal standard k-epsilon transport |
 | `fissile_solution_tank_demo` | Cylindrical fissile-solution smoke case with Gaussian fission power |
 | `fissile_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
 | `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform fission power, radiolytic gas, and boiling |
+| `planar_free_surface_verification` | Five analytic fixed-grid volume-budget cases with CSV diagnostics |
+| `planar_ale_verification` | Four solver-integrated planar-ALE conservation cases: heating, gas generation, complete H2 escape, and rollback |
+| `dispersed_bubble_verification` | IF97 reference-water steady source/escape balance and transient bubble transport with matched OpenFOAM references |
+| `planar_ale_comparison` | IF97 reference-water linearized thermal expansion and source-off steady equilibrium with matched OpenFOAM moving-mesh references |
+| `bottom_heated_bubbly_convection` | IF97 reference-water bottom heat/H2 source with solved buoyant plume and return flow; matched OpenFOAM transient and x–z figures |
 
-Each example is configured via a `Database` object and runs a short transient
-simulation with VTU output. None is currently a combined turbulent
-radiolytic-bubble example.
+Examples use `Database` configuration, documented environment controls, or a
+combination of both. Their CTest smoke settings intentionally reduce mesh size
+and run length; production defaults can be substantially more expensive. None
+is currently a combined turbulent radiolytic-bubble example.
 
 ## Build
 
@@ -312,10 +396,21 @@ cmake --preset GCC-ninja-multi
 cmake --build --preset GCC-Release
 
 # Or manually
-cmake -B build -G "Ninja Multi-Config" \
+cmake -B build/manual -G "Ninja Multi-Config" \
   -DTrilinos_DIR=/path/to/trilinos/lib/cmake/Trilinos
-cmake --build build --config Release
+cmake --build build/manual --config Release
 ```
+
+The checked-in GCC and LLVM presets place their build trees under `build/gcc`
+and `build/llvm`, respectively. A manually configured tree uses whichever path
+was passed to `-B`.
+
+The optional water material library is enabled with
+`-DSIMPLEFLUID_ENABLE_IF97=ON` (default `OFF`). It provides SI water/steam
+properties, saturation data, and a liquid material-field adapter through
+`SimpleFluid::IF97`. CMake fetches a pinned CoolProp IF97 release if no local
+header is supplied. See [IF97 water properties](docs/modeling/if97_water.md)
+for offline configuration, usage, and solver integration boundaries.
 
 ### Run Tests
 
@@ -327,8 +422,8 @@ ctest --preset GCC-Debug
 ### Run Examples
 
 ```bash
-./build-gcc/bin/Release/natural_convection_box
-./build-gcc/bin/Release/natural_convection_cylinder
+./build/gcc/bin/Release/natural_convection_box
+./build/gcc/bin/Release/natural_convection_cylinder
 ```
 
 ## Performance Benchmarks
@@ -363,25 +458,25 @@ Run the larger profiling preset with frame pointers and debug symbols:
 
 ```bash
 cmake --build --preset GCC-RelWithDebInfo --target simplefluid_benchmark
-./build-gcc/bin/RelWithDebInfo/simplefluid_benchmark \
+./build/gcc/bin/RelWithDebInfo/simplefluid_benchmark \
   --preset release-profile \
-  --output build-gcc/benchmarks/release-profile.csv
+  --output build/gcc/benchmarks/release-profile.csv
 ```
 
 Run strong-scaling measurements sequentially:
 
 ```bash
-mpiexec -n 1 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
-mpiexec -n 2 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
-mpiexec -n 4 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build-gcc/benchmarks/mpi-strong.csv
+mpiexec -n 1 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/gcc/benchmarks/mpi-strong.csv
+mpiexec -n 2 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/gcc/benchmarks/mpi-strong.csv
+mpiexec -n 4 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-strong --output build/gcc/benchmarks/mpi-strong.csv
 ```
 
 Run weak-scaling measurements with approximately `32x32x8` cells per rank:
 
 ```bash
-mpiexec -n 1 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
-mpiexec -n 2 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
-mpiexec -n 4 ./build-gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build-gcc/benchmarks/mpi-weak.csv
+mpiexec -n 1 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/gcc/benchmarks/mpi-weak.csv
+mpiexec -n 2 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/gcc/benchmarks/mpi-weak.csv
+mpiexec -n 4 ./build/gcc/bin/Release/simplefluid_benchmark --preset mpi-weak --output build/gcc/benchmarks/mpi-weak.csv
 ```
 
 Use `--case`, `--configuration`, `--nx`, `--ny`, `--nz`, `--shear`,
@@ -423,6 +518,96 @@ solver.write_solution_vtu(
      .include_material_properties = true});
 ```
 
+## Solid Vessel Heat Conduction
+
+`MeshReorderingFactory::selected_cells_first()` evaluates a solid selector by
+stable geometry ID and centroid, then reorders local cell ordinals into a
+selected-owned prefix and a selected-ghost prefix. MPI ownership requires two
+ranges rather than one range spanning owned and ghost cells. Geometry IDs,
+Tpetra global IDs, face order, and ownership are preserved. The factory
+consumes a uniquely owned mutable handle and reorders it in place, avoiding a
+second parent-sized mesh/indexer; pass the handle with `std::move` before
+constructing fields or caches. Shared ownership is rejected when a permutation
+is needed. If every rank is already selected-first, the original ordering is
+retained.
+
+The reordered handle is intended to back the returned range layout and its
+subdomains. Reordered legacy/STK handles are rejected by `FluidSolver` because
+that compatibility path mirrors fields in the legacy mesh's original ordinal
+order. Native structured handles do not use that compatibility path.
+
+`SolidSubdomain` consumes that range certificate and builds compact
+owned/overlap cell and face maps. Cell membership and parent/subdomain
+translation are arithmetic; the subdomain retains no parent-sized selection,
+cell-reverse, or face-reverse arrays. Its only reverse face search is over the
+solid-sized face records. Native structured handles reuse their existing
+local/global indexer and add no persistent parent-sized permutation. Because
+explicit unstructured and STK storage cannot be physically reordered, those
+parent handles retain one forward and one reverse local-cell permutation; the
+subdomain does not duplicate them. A face between selected and unselected
+cells becomes a boundary named `solid_interface` by default; the face owner
+and normal are oriented outward from the solid. Selection runs only on owned
+cells and is imported to ghosts, so the same API works when the solid crosses
+MPI partitions or the parent is a legacy mesh wrapped in `MeshHandle`. The
+parent must retain every face-neighbor of a selected owned cell (normally one
+ghost layer); insufficient overlap is rejected.
+
+`SolidHeatConductionEquation` advances the physical solid energy balance with
+no advective-flux argument. It reuses the temperature operator's variable
+conductivity interpolation, non-orthogonal treatment, matrix cache, and
+publish-on-convergence behavior:
+
+```cpp
+using Pack = SimpleFluid::DefaultTpetraTypes;
+using Solid = SimpleFluid::SolidSubdomain<Pack>;
+using Reordering = SimpleFluid::MeshReorderingFactory<Pack>;
+
+// parent_mesh may contain fluid and solid cells. Here the outer radial cells
+// form the vessel wall. Reordering happens before any field or cache is bound
+// to the resulting mesh layout.
+auto wall_layout = Reordering::selected_cells_first(
+    std::move(parent_mesh),
+    [](Pack::global_ordinal_type, const Reordering::Vec3& center) {
+        return std::hypot(center.x, center.y) >= inner_wall_radius;
+    });
+auto wall = std::make_shared<Solid>(std::move(wall_layout));
+
+// Selecting every cell is also supported by constructing Solid(parent_mesh).
+
+SimpleFluid::ScalarCellFieldStored<Pack, Solid> wall_temperature(
+    wall, 300.0, "solid_temperature");
+
+SimpleFluid::BoussinesqModelOptions material_options;
+material_options.reference_density = 7850.0;
+material_options.density = 7850.0;                 // kg/m^3
+material_options.specific_heat_capacity = 500.0;  // J/(kg K)
+material_options.thermal_conductivity = 16.0;      // W/(m K)
+SimpleFluid::TimeStepperOptions time_options;
+SimpleFluid::MaterialPropertyFields<Pack, Solid> material(
+    wall, material_options, time_options);
+
+SimpleFluid::BoundaryConditionSet boundaries;
+boundaries.temperature["solid_interface"] = {
+    SimpleFluid::BoundaryConditionType::Dirichlet, 350.0};
+boundaries.temperature["rmax"] = {
+    SimpleFluid::BoundaryConditionType::Dirichlet, 300.0};
+
+SimpleFluid::SolidHeatConductionEquation<Pack> conduction(
+    wall, boundaries);
+conduction.advance(
+    wall_temperature, 0.1, material, wall_temperature,
+    [](Pack::local_ordinal_type) { return 0.0; }); // W/m^3
+```
+
+Missing temperature boundaries are homogeneous Neumann. A Neumann value is
+the outward temperature gradient in K/m, so a prescribed inward wall heat
+flux is converted consistently with its sign and the local conductivity. Use
+`set_boundary_conditions()` to replace prescribed interface or exterior data
+between time steps.
+Robin boundaries and automatic two-way temperature/flux continuity with a
+fluid solve are not yet implemented; the current interface is a standalone or
+prescribed-boundary solid solve, not a full conjugate-heat-transfer driver.
+
 ## Fission Power Source
 
 `FissionPowerSource` registers the specialized temperature source
@@ -461,8 +646,12 @@ may scale the base profile once per step at `t_n`; the retained
 
 `qdot_fission` is included by
 `SolutionOutputOptions::include_sources` and is additive with other named
-temperature sources. Neutronics feedback and file-based power import remain
-future work.
+temperature sources. The in-memory Phase 20 scaffold can import owned-cell
+power, register `T_liquid`, `alpha_g`, `rhoFeedback`, and precursor fields,
+export deterministic volume-averaged snapshots, and drive a callback-based
+outer loop with thermal-hydraulic subcycles and returned-power exchange. It is
+not a production external-neutronics protocol or a neutronics solver;
+file-based exchange remains future work.
 
 ## Radiolytic Gas Models
 
@@ -472,6 +661,12 @@ dissolved hydrogen, bubble populations, pressure-sensitive properties,
 transport, escape, and diagnostic inventory accounting, but is not yet fully
 accepted as a validated physical model.
 
+The delayed-neutron precursor model conservatively advances
+`alpha_l * C_i` with the projected liquid face flux, optional diffusion, and
+exact constant-source/decay integration. Its globally reduced diagnostics
+separate source addition, decay, boundary outflow, transport positivity
+adjustment, and balance error; distributed inputs are validated collectively.
+
 See [`docs/radiolytic-gas-models.md`](docs/radiolytic-gas-models.md) for the
 advanced radiolysis model and
 [`docs/modeling/radiolytic_bubble_boiling.md`](docs/modeling/radiolytic_bubble_boiling.md)
@@ -480,13 +675,87 @@ for the scalar void, boiling, feedback, precursor, and output workflow.
 The fissile-solution tank smoke cases build as `fissile_solution_tank_demo`
 and `constant_power_cylinder_vessel`.
 After `cmake --build --preset GCC-Debug`, run
-`build-gcc/bin/Debug/fissile_solution_tank_demo` or
-`build-gcc/bin/Debug/constant_power_cylinder_vessel` and inspect the generated
+`build/gcc/bin/Debug/fissile_solution_tank_demo` or
+`build/gcc/bin/Debug/constant_power_cylinder_vessel` and inspect the generated
 VTU files in ParaView. Use the corresponding `LLVM-Debug` preset and
-`build-llvm/bin/Debug` path for the LLVM build. The Gaussian tank demo keeps
+`build/llvm/bin/Debug` path for the LLVM build. The Gaussian tank demo keeps
 boiling disabled by default; the constant-power cylinder variant enables
 radiolytic gas plus bulk and wall boiling so the generated VTU contains the
 coupled gas-source and latent-heat fields.
+
+## Planar Free-Surface Volume Budget and ALE
+
+The optional fixed-grid Milestone-A component layer computes separate pure-liquid and
+submerged-bubble volumes, `clearLevel` and `poolLevel`, and either a vented
+constant-pressure or closed ideal-gas headspace closure. It uses the
+two-population model's raw EOS-derived bubble volume and exact transported
+bubble-inventory decrement, so dissolved gas and void hidden by the alpha cap
+are not lost or double counted. Liquid material volume uses `rhoLiquid`, not
+the void-reduced mixture density. The default liquid option is the explicitly
+approximate `globalConstantMass` model. The opt-in `cellMassInventory` mode
+conservatively transports local liquid mass on the fixed reference mesh with
+the projected single-continuum face-volume flux, applies accepted boiling and
+condensation sources transactionally, and evaluates volume with pure-liquid
+density. Its initial fill is a documented smeared distribution; a separate
+phase-weighted liquid flux, nonzero physical-boundary liquid flux, and separate
+solvent/fissile inventories remain unsupported.
+
+`BoussinesqSolver` can own this fixed-grid budget and advances it after the
+temperature, bubble/boiling, precursor, and material updates. The accepted
+headspace pressure becomes the constant/reconstructed gas-pressure offset for
+the next step. This integration requires the dimensional physical-model
+constructor; the legacy/default solver path rejects it.
+`free_surface_history()` retains initialization and accepted step snapshots,
+and `write_free_surface_history_csv()` writes their global
+liquid/gas/headspace/closure data on rank zero. Setting
+`SolutionOutputOptions::include_free_surface_fields`
+writes opt-in `rhoLiquid`, `clearLevel`, `poolLevel`, `headspacePressure`, and
+`poolOccupancy` arrays, plus `liquidMassInventory` in cellwise mode; the
+occupancy field is a cell-centre visualization approximation
+with an explicitly reported volume error.
+
+The fixed-grid mode does not move the mesh, relocate the escape boundary, or
+change incompressible continuity. The separate `planarALE` mode is enabled for
+a deliberately narrow matrix: a mutable native structured/extruded mesh,
+constant-area vessel, Backward Euler, laminar dimensional Boussinesq
+temperature transport, thermal-only pure-liquid density feedback,
+`cellMassInventory`, vented headspace, and either no radiolysis or the Sheng
+two-population model with uniform geometry-invariant fission power, advective
+dissolved H2, general bubble transport, and exactly the moving-top escape patch.
+Cartesian X/Y/Z and cylindrical
+axial-Z motion are supported in serial/MPI; semi-structured axial-Z motion is
+serial only.
+
+The ALE path retains absolute projected fluid flux for pressure and continuity
+diagnostics, and uses a distinct mesh-relative flux for transport and its
+Courant diagnostic. It assembles conservative old/new-volume Backward-Euler
+storage. Temperature conserves
+$V_c m_{l,c}^*c_{p,c}T_c$ using the accepted/trial cellwise liquid-mass
+density, not pure-liquid or void-reduced mixture density over the
+bubble-displaced pool volume. The solver applies one integrated cellwise
+volume target to every pressure-velocity algorithm and treats the moving top
+as slip: tangential liquid motion is preserved while the exact mesh-normal
+absolute flux is imposed by pressure/continuity boundary ownership. It
+refreshes geometry-epoch-dependent numeric state and accepts or rolls back
+geometry, fields, model ledgers, time, and history as one logical step.
+Accepted ALE diagnostics retain the
+per-outer-corrector level, target-change, continuity, material-state, and
+gas-state residual histories.
+This is a constrained flat-surface model with conservation-focused test
+coverage, not physical validation of free-surface dynamics.
+
+Closed headspace, tabulated vessels, RANS, boiling/steam, precursors, scalar-
+void-only transport, solids, dynamic user callbacks, legacy/const-only and
+general unstructured meshes, non-Backward-Euler time integration, nonadiabatic
+temperature boundaries, and nonzero physical liquid boundary flux fail closed.
+Neither mode provides conservative pool occupancy or cross-mesh mapping. See
+[`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md)
+for equations, all `free_surface_*` keys/defaults/SI units, the exact support
+and rejection matrix, diagnostics, verification scope, and remaining mapping
+work. Fixed-grid vented boiling mass accounting remains available, but ALE
+boiling and steam transport/escape are deferred. Removing or replacing the
+fixed-grid free-surface model is rejected while boiling still owns nonzero
+submerged steam; the inventory is never silently discarded.
 
 ## Dependencies
 

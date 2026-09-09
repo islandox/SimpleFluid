@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/mesh/LocalGlobalIndexer.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -27,7 +28,10 @@
 #include <Tpetra_Core.hpp>
 
 #include <algorithm>
+#include <concepts>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -40,6 +44,9 @@
 
 namespace SimpleFluid
 {
+
+template<TpetraTypePack Pack>
+class MeshReorderingFactory;
 
 namespace detail
 {
@@ -65,15 +72,23 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
 /**
  * @brief Runtime-polymorphic distributed view of supported mesh families.
  *
- * MeshHandle normalizes structured, semi-structured, and legacy STK meshes
- * into one FVM-facing API. It builds owned/overlap maps and translates compact
- * local IDs to each concrete mesh's geometry IDs.
+ * MeshHandle normalizes structured, semi-structured, unstructured, and legacy
+ * STK meshes into one FVM-facing API. Cartesian and cylindrical meshes are
+ * distributed automatically. Unstructured meshes require explicit
+ * partitioning before multi-rank construction, while SemiStructuredXY_Z is
+ * currently serial-only and rejects construction on a multi-rank communicator.
+ * The handle builds owned/overlap maps and translates compact local IDs to each
+ * concrete mesh's geometry IDs. Construction from a mutable mesh retains that
+ * exact object for controlled mutable visitation while the established
+ * variant() and visit() observer surface remains deeply const.
  *
  * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
+    friend class MeshReorderingFactory<Pack>;
+
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -103,11 +118,21 @@ public:
     using SemiStructuredPtr = SP<const SemiStructured>;
     using UnstructuredPtr = SP<const Unstructured>;
     using STKAdapterPtr = SP<const STKAdapter>;
+    using MutableCartesianPtr = SP<Cartesian>;
+    using MutableCylindricalPtr = SP<Cylindrical>;
+    using MutableSemiStructuredPtr = SP<SemiStructured>;
+    using MutableUnstructuredPtr = SP<Unstructured>;
+    using MutableSTKAdapterPtr = SP<STKAdapter>;
     using variant_type = std::variant<CartesianPtr,
                                       CylindricalPtr,
                                       SemiStructuredPtr,
                                       UnstructuredPtr,
                                       STKAdapterPtr>;
+    using mutable_variant_type = std::variant<MutableCartesianPtr,
+                                              MutableCylindricalPtr,
+                                              MutableSemiStructuredPtr,
+                                              MutableUnstructuredPtr,
+                                              MutableSTKAdapterPtr>;
 
     /** @brief Locally visible faces belonging to one boundary batch. */
     struct BoundaryFaceBatch
@@ -130,19 +155,91 @@ public:
     explicit MeshHandle(CartesianPtr mesh,
                         DistributionOptions options = {});
 
+    /** @brief Retain mutable ownership of a distributed Cartesian mesh. */
+    explicit MeshHandle(MutableCartesianPtr mesh,
+                        DistributionOptions options = {});
+
+    /** @brief Retain mutable ownership supplied through a Cartesian subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, Cartesian>
+                  && std::derived_from<Derived, Cartesian>)
+    explicit MeshHandle(
+        SP<Derived> mesh,
+        DistributionOptions options = {})
+        : MeshHandle(
+              std::static_pointer_cast<Cartesian>(std::move(mesh)),
+              options)
+    {
+    }
+
     /** @brief Build a distributed handle for a cylindrical mesh. */
     explicit MeshHandle(CylindricalPtr mesh,
                         DistributionOptions options = {});
 
-    /** @brief Build a handle for a semi-structured mesh. */
+    /** @brief Retain mutable ownership of a distributed cylindrical mesh. */
+    explicit MeshHandle(MutableCylindricalPtr mesh,
+                        DistributionOptions options = {});
+
+    /** @brief Retain mutable ownership supplied through a cylindrical subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, Cylindrical>
+                  && std::derived_from<Derived, Cylindrical>)
+    explicit MeshHandle(
+        SP<Derived> mesh,
+        DistributionOptions options = {})
+        : MeshHandle(
+              std::static_pointer_cast<Cylindrical>(std::move(mesh)),
+              options)
+    {
+    }
+
+    /**
+     * @brief Build a serial-only handle for a semi-structured mesh.
+     * @throws std::runtime_error On a communicator containing multiple ranks.
+     */
     explicit MeshHandle(SemiStructuredPtr mesh);
+
+    /** @brief Retain mutable ownership of a serial semi-structured mesh. */
+    explicit MeshHandle(MutableSemiStructuredPtr mesh);
+
+    /** @brief Retain mutable ownership supplied through a semi-structured subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, SemiStructured>
+                  && std::derived_from<Derived, SemiStructured>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<SemiStructured>(
+              std::move(mesh)))
+    {
+    }
 
     /** @brief Build a serial unstructured mesh handle. */
     explicit MeshHandle(UnstructuredPtr mesh);
 
+    /** @brief Retain mutable ownership of a serial unstructured mesh. */
+    explicit MeshHandle(MutableUnstructuredPtr mesh);
+
+    /** @brief Retain mutable ownership supplied through an unstructured subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, Unstructured>
+                  && std::derived_from<Derived, Unstructured>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<Unstructured>(
+              std::move(mesh)))
+    {
+    }
+
     /** @brief Build a handle from a previously partitioned mesh. */
     MeshHandle(
         UnstructuredPtr mesh,
+        const unstructured_indexer_type& indexer);
+
+    /** @brief Retain mutable ownership of an indexed unstructured mesh. */
+    MeshHandle(
+        MutableUnstructuredPtr mesh,
         const unstructured_indexer_type& indexer);
 
     /**
@@ -166,18 +263,87 @@ public:
                 "MeshHandle requires a non-null partitioned mesh.");
         }
         d_mesh = UnstructuredPtr(partitioned->mesh_ptr());
+        if constexpr (!std::is_const_v<Partitioned>
+                      && requires { partitioned->mutable_mesh_ptr(); })
+        {
+            if (auto mutable_mesh = partitioned->mutable_mesh_ptr())
+            {
+                const auto& read_only_mesh =
+                    std::get<UnstructuredPtr>(d_mesh);
+                const bool same_owner =
+                    !mutable_mesh.owner_before(read_only_mesh)
+                    && !read_only_mesh.owner_before(mutable_mesh);
+                if (mutable_mesh.get() != read_only_mesh.get()
+                    || !same_owner)
+                {
+                    throw std::invalid_argument(
+                        "MeshHandle partition views must reference the same "
+                        "geometry object.");
+                }
+                d_mutable_mesh.emplace(
+                    MutableUnstructuredPtr(std::move(mutable_mesh)));
+            }
+        }
         initialize_unstructured(
             std::get<UnstructuredPtr>(d_mesh),
-            partitioned->indexer());
+            partitioned->indexer(),
+            partitioned->owned_cell_map()->getComm());
     }
 
     /** @brief Build a handle around a legacy STK adapter. */
     explicit MeshHandle(STKAdapterPtr mesh);
 
+    /** @brief Retain mutable ownership of a legacy STK adapter. */
+    explicit MeshHandle(MutableSTKAdapterPtr mesh);
+
+    /** @brief Retain mutable ownership supplied through an STK-adapter subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, STKAdapter>
+                  && std::derived_from<Derived, STKAdapter>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<STKAdapter>(
+              std::move(mesh)))
+    {
+    }
+
     /** @brief Adapt a legacy distributed mesh and build a runtime handle. */
     explicit MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh);
 
+    /** @brief Adapt and retain mutable ownership of a legacy distributed mesh. */
+    explicit MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh);
+
+    /** @brief Adapt mutable ownership supplied through a legacy-mesh subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, SimpleFluid::Mesh<Pack>>
+                  && std::derived_from<Derived, SimpleFluid::Mesh<Pack>>)
+    explicit MeshHandle(SP<Derived> mesh)
+        : MeshHandle(std::static_pointer_cast<SimpleFluid::Mesh<Pack>>(
+              std::move(mesh)))
+    {
+    }
+
     const variant_type& variant() const noexcept { return d_mesh; }
+
+    /**
+     * @brief Identity of the concrete geometry shared by this handle.
+     *
+     * Separately constructed alias handles around the same native mesh report
+     * the same identity.  This lets fixed-topology motion and ALE consumers
+     * reject a copied or otherwise unrelated geometry even when its topology
+     * happens to be equivalent.
+     */
+    [[nodiscard]] const void* geometry_identity() const noexcept
+    {
+        return std::visit(
+            [](const auto& mesh) noexcept -> const void*
+            {
+                return mesh.get();
+            },
+            d_mesh);
+    }
+
     /**
      * @brief Return the local/global indexer.
      *
@@ -210,9 +376,75 @@ public:
             d_mesh);
     }
 
+    /**
+     * @brief Invoke a visitor with mutable access to the concrete geometry.
+     *
+     * Mutable access is available only when the handle was built from a
+     * mutable mesh pointer. The const visit() overload remains a read-only
+     * observer for every handle.
+     *
+     * @warning This low-level ownership seam does not publish a geometry epoch.
+     *          Direct geometry changes through it after fields or geometry
+     *          caches have been constructed are unsupported. Use a controlled
+     *          mesh-motion transaction instead.
+     *
+     * @throws std::logic_error If the handle was built from a const mesh.
+     */
+    template<class Visitor>
+    decltype(auto) visit_mutable(Visitor&& visitor)
+    {
+        if (!d_mutable_mesh)
+        {
+            throw std::logic_error(
+                "MeshHandle does not retain mutable geometry ownership.");
+        }
+        return std::visit(
+            [&](auto& mesh) -> decltype(auto)
+            {
+                return std::forward<Visitor>(visitor)(*mesh);
+            },
+            *d_mutable_mesh);
+    }
+
+    /** @brief True when visit_mutable() can access the concrete geometry. */
+    bool has_mutable_geometry() const noexcept
+    {
+        return d_mutable_mesh.has_value();
+    }
+
+    /**
+     * @brief Monotone revision of the fixed-topology geometry.
+     *
+     * Topology, global IDs, maps, and partitioning are not part of this
+     * revision. Geometry-dependent caches may retain their graph structure,
+     * but must refresh numeric data whenever this value changes.
+     */
+    std::uint64_t geometry_epoch() const noexcept
+    {
+        return std::visit(
+            [](const auto& mesh) noexcept -> std::uint64_t
+            {
+                if constexpr (requires { mesh->geometry_epoch(); })
+                {
+                    return mesh->geometry_epoch();
+                }
+                else
+                {
+                    return 0;
+                }
+            },
+            d_mesh);
+    }
+
     bool is_stk() const noexcept
     {
         return std::holds_alternative<STKAdapterPtr>(d_mesh);
+    }
+
+    /** @brief True after a factory has changed this handle's local cell order. */
+    bool has_reordered_cells() const noexcept
+    {
+        return d_cells_reordered;
     }
 
     SP<const SimpleFluid::Mesh<Pack>> legacy_mesh() const noexcept
@@ -350,6 +582,8 @@ public:
                             local_ordinal_type cell_lid) const;
     real_t cell_to_face_distance(local_ordinal_type face_lid,
                                  local_ordinal_type cell_lid) const;
+    /** @brief True if the underlying geometry has no cell across a face. */
+    bool is_geometry_exterior_face(local_ordinal_type face_lid) const;
     bool is_exterior_face(local_ordinal_type face_lid) const;
     bool is_interior_face(local_ordinal_type face_lid) const;
     int boundary_id(local_ordinal_type face_lid) const;
@@ -430,7 +664,7 @@ public:
 
 private:
     template<class Pointer>
-    static Pointer require_mesh(Pointer mesh)
+    SIMPLEFLUID_LOCAL static Pointer require_mesh(Pointer mesh)
     {
         if (!mesh)
         {
@@ -440,7 +674,7 @@ private:
         return mesh;
     }
 
-    static local_ordinal_type checked_local(size_t value)
+    SIMPLEFLUID_LOCAL static local_ordinal_type checked_local(size_t value)
     {
         if (value > static_cast<size_t>(
                 std::numeric_limits<local_ordinal_type>::max()))
@@ -451,7 +685,7 @@ private:
         return static_cast<local_ordinal_type>(value);
     }
 
-    static std::vector<global_ordinal_type> checked_global_ids(
+    SIMPLEFLUID_LOCAL static std::vector<global_ordinal_type> checked_global_ids(
         std::vector<size_t> ids)
     {
         std::vector<global_ordinal_type> result;
@@ -474,36 +708,40 @@ private:
         return result;
     }
 
-    std::string local_output_filename(
+    SIMPLEFLUID_LOCAL std::string local_output_filename(
         const std::string& filename) const;
 
-    void add_geometry_cell_data(VTUWriter& writer) const;
+    SIMPLEFLUID_LOCAL void add_geometry_cell_data(VTUWriter& writer) const;
 
     template<class MeshType>
-    VTUWriter::VectorData collect_vtu_points(
+    SIMPLEFLUID_LOCAL VTUWriter::VectorData collect_vtu_points(
         const MeshType& mesh) const;
 
-    void write_vtu(
+    SIMPLEFLUID_LOCAL void write_vtu(
         const std::string& filename,
         VTUWriter::TopologyHandle topology) const;
 
-    VTUWriter::TopologyHandle legacy_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle legacy_vtu_topology(
         const STKAdapter& mesh) const;
 
     template<class MeshType>
-    VTUWriter::TopologyHandle orthogonal_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle orthogonal_vtu_topology(
         const MeshType& mesh) const;
 
-    VTUWriter::TopologyHandle semi_structured_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle semi_structured_vtu_topology(
         const SemiStructured& mesh) const;
 
-    VTUWriter::TopologyHandle unstructured_vtu_topology(
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle unstructured_vtu_topology(
         const Unstructured& mesh) const;
 
-    global_ordinal_type geometry_cell_lid(
+    SIMPLEFLUID_LOCAL global_ordinal_type geometry_cell_lid(
         local_ordinal_type local_id) const
     {
         check_cell(local_id);
+        if (!d_cell_geometry_lids.empty())
+        {
+            return d_cell_geometry_lids[static_cast<size_t>(local_id)];
+        }
         if (std::holds_alternative<UnstructuredPtr>(d_mesh)
             || is_stk())
         {
@@ -512,7 +750,7 @@ private:
         return d_indexer.cell_global_id(local_id);
     }
 
-    global_ordinal_type geometry_face_lid(
+    SIMPLEFLUID_LOCAL global_ordinal_type geometry_face_lid(
         local_ordinal_type local_id) const
     {
         check_face(local_id);
@@ -532,24 +770,24 @@ private:
     }
 
     template<class Function>
-    decltype(auto) visit_geometry_cell(
+    SIMPLEFLUID_LOCAL decltype(auto) visit_geometry_cell(
         local_ordinal_type cell_lid,
         Function&& function) const;
 
     template<class Function>
-    decltype(auto) visit_geometry_face(
+    SIMPLEFLUID_LOCAL decltype(auto) visit_geometry_face(
         local_ordinal_type face_lid,
         Function&& function) const;
 
-    local_ordinal_type adjacent_cell(local_ordinal_type face_lid,
-                                     bool owner) const;
+    SIMPLEFLUID_LOCAL local_ordinal_type adjacent_cell(
+        local_ordinal_type face_lid, bool owner) const;
 
     /**
      * @brief Convert an orthogonal (i,j,k) cell ID to the field local ordinal.
      * @throws std::invalid_argument if the mesh does not use
      *         OrthogonalIndexer::CellID.
      */
-    local_ordinal_type cell_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type cell_local_id(
         Meshes::OrthogonalIndexer::CellID id) const
     {
         return geometry_to_local_cell(
@@ -562,7 +800,7 @@ private:
      * @throws std::invalid_argument if the mesh does not use
      *         OrthogonalIndexer::FaceID.
      */
-    local_ordinal_type face_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type face_local_id(
         Meshes::OrthogonalIndexer::FaceID id) const
     {
         return geometry_to_local_face(
@@ -575,7 +813,7 @@ private:
      * @throws std::invalid_argument if the mesh does not use
      *         SemiStructuredIndexer::CellID.
      */
-    local_ordinal_type cell_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type cell_local_id(
         Meshes::SemiStructuredIndexer::CellID id) const
     {
         return geometry_to_local_cell(
@@ -588,7 +826,7 @@ private:
      * @throws std::invalid_argument if the mesh does not use
      *         SemiStructuredIndexer::FaceID.
      */
-    local_ordinal_type face_local_id(
+    SIMPLEFLUID_LOCAL local_ordinal_type face_local_id(
         Meshes::SemiStructuredIndexer::FaceID id) const
     {
         return geometry_to_local_face(
@@ -596,39 +834,40 @@ private:
     }
 
     template<class MeshType>
-    void initialize_orthogonal(SP<const MeshType> mesh,
-                               DistributionOptions options);
+    SIMPLEFLUID_LOCAL void initialize_orthogonal(
+        SP<const MeshType> mesh, DistributionOptions options);
 
-    void initialize_semi_structured(SemiStructuredPtr mesh);
+    SIMPLEFLUID_LOCAL void initialize_semi_structured(SemiStructuredPtr mesh);
 
-    void initialize_unstructured(UnstructuredPtr mesh);
+    SIMPLEFLUID_LOCAL void initialize_unstructured(UnstructuredPtr mesh);
 
-    void initialize_unstructured(
+    SIMPLEFLUID_LOCAL void initialize_unstructured(
         UnstructuredPtr mesh,
-        const unstructured_indexer_type& indexer);
+        const unstructured_indexer_type& indexer,
+        Teuchos::RCP<const typename Pack::comm_type> comm);
 
-    void initialize_stk(STKAdapterPtr adapter);
-
-    template<class MeshType>
-    void initialize_serial(const MeshType& mesh);
-
-    void initialize_cells(std::vector<size_t> owned,
-                          std::vector<size_t> ghost);
-
-    void initialize_faces(std::vector<size_t> owned,
-                          std::vector<size_t> overlap);
-
-    void initialize_indexer(indexer_type indexer);
-
-    void initialize_cell_faces();
-
-    void materialize_legacy_indexer() const;
+    SIMPLEFLUID_LOCAL void initialize_stk(STKAdapterPtr adapter);
 
     template<class MeshType>
-    void initialize_boundary_batches(const MeshType& mesh);
+    SIMPLEFLUID_LOCAL void initialize_serial(const MeshType& mesh);
+
+    SIMPLEFLUID_LOCAL void initialize_cells(
+        std::vector<size_t> owned, std::vector<size_t> ghost);
+
+    SIMPLEFLUID_LOCAL void initialize_faces(
+        std::vector<size_t> owned, std::vector<size_t> overlap);
+
+    SIMPLEFLUID_LOCAL void initialize_indexer(indexer_type indexer);
+
+    SIMPLEFLUID_LOCAL void initialize_cell_faces();
+
+    SIMPLEFLUID_LOCAL void materialize_legacy_indexer() const;
+
+    template<class MeshType>
+    SIMPLEFLUID_LOCAL void initialize_boundary_batches(const MeshType& mesh);
 
     template<class CommPtr, class Range>
-    Teuchos::RCP<const map_type> make_map(
+    SIMPLEFLUID_LOCAL Teuchos::RCP<const map_type> make_map(
         const CommPtr& comm,
         const Range& ids) const
     {
@@ -649,7 +888,7 @@ private:
     }
 
     template<class CommPtr>
-    void create_maps(const CommPtr& comm)
+    SIMPLEFLUID_LOCAL void create_maps(const CommPtr& comm)
     {
         std::vector<global_ordinal_type> boundary_faces;
         for (const auto& [batch_id, batch] : d_boundary_batches)
@@ -676,12 +915,12 @@ private:
         d_boundary_face_map = make_map(comm, boundary_faces);
     }
 
-    void check_cell(local_ordinal_type cell_lid) const
+    SIMPLEFLUID_LOCAL void check_cell(local_ordinal_type cell_lid) const
     {
         CHECK_BOUNDS(cell_lid, 0, num_local_cells());
     }
 
-    void check_face(local_ordinal_type face_lid) const
+    SIMPLEFLUID_LOCAL void check_face(local_ordinal_type face_lid) const
     {
         CHECK_BOUNDS(face_lid, 0, num_faces());
     }
@@ -692,7 +931,7 @@ private:
      * @throws std::invalid_argument if the mesh type does not accept the ID.
      */
     template<class CellID>
-    size_t visit_indexed_cell(CellID id) const
+    SIMPLEFLUID_LOCAL size_t visit_indexed_cell(CellID id) const
     {
         return visit(
             [&](const auto& mesh) -> size_t
@@ -716,7 +955,7 @@ private:
      * @throws std::invalid_argument if the mesh type does not accept the ID.
      */
     template<class FaceID>
-    size_t visit_indexed_face(FaceID id) const
+    SIMPLEFLUID_LOCAL size_t visit_indexed_face(FaceID id) const
     {
         return visit(
             [&](const auto& mesh) -> size_t
@@ -739,9 +978,15 @@ private:
      * @returns The local ordinal, or invalid_local_id() if not locally
      *          available.
      */
-    local_ordinal_type geometry_to_local_cell(
+    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_cell(
         size_t geometry_lid) const noexcept
     {
+        if (!d_cell_local_lids_by_geometry.empty())
+        {
+            return geometry_lid < d_cell_local_lids_by_geometry.size()
+                ? d_cell_local_lids_by_geometry[geometry_lid]
+                : invalid_local_id();
+        }
         if (std::holds_alternative<UnstructuredPtr>(d_mesh)
             || is_stk())
         {
@@ -762,7 +1007,7 @@ private:
      * @returns The local ordinal, or invalid_local_id() if not locally
      *          available.
      */
-    local_ordinal_type geometry_to_local_face(
+    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_face(
         size_t geometry_lid) const noexcept
     {
         if (is_stk())
@@ -792,8 +1037,12 @@ private:
     }
 
     variant_type d_mesh;
+    std::optional<mutable_variant_type> d_mutable_mesh;
     mutable indexer_type d_indexer;
     mutable bool d_legacy_indexer_materialized = false;
+    bool d_cells_reordered = false;
+    std::vector<global_ordinal_type> d_cell_geometry_lids;
+    std::vector<local_ordinal_type> d_cell_local_lids_by_geometry;
     std::vector<local_ordinal_type> d_legacy_face_geometry_lids;
     std::vector<local_ordinal_type> d_legacy_face_local_lids;
     std::vector<size_t> d_cell_face_offsets;

@@ -21,11 +21,17 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "solvers/FluidSolver.hh"
+#include "solvers/FieldStateTransaction.hh"
+#include "solvers/PlanarALEBoundary.hh"
+#include "solvers/PlanarFreeSurfaceModel.hh"
+#include "solvers/VolumeContinuityModel.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 
 #include <algorithm>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -75,6 +81,59 @@ public:
     using scalar_void_fraction_model_type = ScalarVoidFractionModel<Pack, mesh_type>;
     using material_feedback_model_type = MaterialFeedbackModel<Pack, mesh_type>;
     using precursor_model_type = DelayedNeutronPrecursorModel<Pack, mesh_type>;
+    using free_surface_model_type = PlanarFreeSurfaceModel;
+    using liquid_mass_inventory_type = LiquidMassInventory<Pack, mesh_type>;
+    using free_surface_diagnostics_type = FreeSurfaceDiagnostics;
+    using liquid_mass_diagnostics_type = typename liquid_mass_inventory_type::diagnostics_type;
+    using boiling_diagnostics_type = typename boiling_source_model_type::diagnostics_type;
+    using ale_motion_type = PlanarALEMeshMotion<Pack>;
+    using ale_boundary_type = PlanarALEBoundary<Pack>;
+    using volume_continuity_model_type = VolumeContinuityModel<Pack, mesh_type>;
+    using continuity_target_type = typename base_type::continuity_target_type;
+    using continuity_residual_type = typename base_type::continuity_residual_type;
+    using volume_source_diagnostics_type = typename volume_continuity_model_type::diagnostics_type;
+
+    /** Accepted diagnostics for the constrained flat-surface ALE path. */
+    struct PlanarALEStepDiagnostics
+    {
+        bool initialized = false;
+        std::uint64_t old_geometry_epoch = 0;
+        std::uint64_t new_geometry_epoch = 0;
+        scalar_type old_mesh_volume = {};       ///< [m^3]
+        scalar_type new_mesh_volume = {};       ///< [m^3]
+        scalar_type mesh_vessel_mismatch = {};  ///< Actual mesh minus closure pool [m^3]
+        scalar_type maximum_gcl_residual = {};  ///< [m^3/s]
+        scalar_type maximum_normalized_gcl_residual = {};
+        MeshQualityMetrics mesh_quality;
+        int outer_correctors = 0;
+        scalar_type level_residual = {};        ///< [m]
+        scalar_type pressure_residual = {};     ///< [Pa]
+        scalar_type material_state_residual = {}; ///< normalized Picard change
+        scalar_type gas_state_residual = {};      ///< normalized Picard change
+        scalar_type energy_residual = {};       ///< [J]
+        scalar_type normalized_energy_residual = {};
+        scalar_type liquid_mass_residual = {};  ///< [kg]
+        scalar_type gas_inventory_residual = {}; ///< [mol]
+        volume_source_diagnostics_type volume_source;
+        continuity_residual_type continuity;
+        std::vector<scalar_type> level_residual_history;     ///< [m]
+        std::vector<scalar_type> target_change_history;      ///< [m^3/s]
+        std::vector<scalar_type> continuity_maximum_history; ///< [m^3/s]
+        std::vector<scalar_type> material_state_residual_history;
+        std::vector<scalar_type> gas_state_residual_history;
+        std::size_t rejected_transactions = 0;
+        std::string last_rejection_reason;
+    };
+    struct FreeSurfaceHistoryRecord
+    {
+        free_surface_diagnostics_type free_surface;
+        liquid_mass_diagnostics_type liquid_mass;
+        scalar_type pool_occupancy_volume_error = {};
+        scalar_type microbubble_hydrogen_moles = {};
+        scalar_type large_bubble_hydrogen_moles = {};
+        std::optional<boiling_diagnostics_type> boiling;
+        std::optional<PlanarALEStepDiagnostics> planar_ale;
+    };
     // Retain the historical legacy cell alias for downstream code that uses
     // it for STK-only model helpers.
     using cell_type = typename legacy_mesh_type::CellType;
@@ -90,6 +149,10 @@ public:
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
 
+    /** @brief Retain a mutable native handle for controlled mesh motion. */
+    BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
+
     /**
      * @brief Construct with explicit physical models on a runtime handle.
      *
@@ -98,6 +161,10 @@ public:
      * does not wrap a legacy mesh.
      */
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options);
+
+    /** @brief Construct physical Boussinesq transport on a mutable native handle. */
+    BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options);
 
     /**
@@ -186,7 +253,7 @@ public:
     /**
      * @brief Remove the optional radiolytic gas model, if present.
      */
-    bool remove_radiolytic_gas_model() noexcept;
+    bool remove_radiolytic_gas_model();
     /**
      * @brief Return the mutable radiolytic gas model, or nullptr when absent.
      */
@@ -207,7 +274,7 @@ public:
     /**
      * @brief Remove the optional boiling source model, if present.
      */
-    bool remove_boiling_source_model() noexcept;
+    bool remove_boiling_source_model();
     /**
      * @brief Return the mutable boiling source model, or nullptr when absent.
      */
@@ -245,7 +312,7 @@ public:
     /**
      * @brief Remove the optional material-feedback model, if present.
      */
-    bool remove_material_feedback_model() noexcept;
+    bool remove_material_feedback_model();
     /**
      * @brief Return the mutable material-feedback model, or nullptr.
      */
@@ -257,14 +324,18 @@ public:
 
     /**
      * @brief Configure delayed-neutron precursor groups from explicit options.
+     * @note Invoke collectively on every mesh rank.
      */
     precursor_model_type& configure_precursors(const DelayedNeutronPrecursorOptions& options);
     /**
      * @brief Configure delayed-neutron precursor groups from database keys.
+     * @note Invoke collectively on every mesh rank.
      */
     precursor_model_type& configure_precursors(const Database& database);
     /**
      * @brief Remove the optional precursor model, if present.
+     * @note Invoke consistently on every mesh rank. A later step rejects a
+     *       rank-divergent precursor state collectively.
      */
     bool remove_precursor_model() noexcept;
     /**
@@ -276,6 +347,78 @@ public:
      */
     const precursor_model_type* find_precursor_model() const noexcept;
 
+    /**
+     * @brief Configure optional fixed-grid or solver-integrated planar free-surface coupling.
+     *
+     * Disabled options remove any existing model and return nullptr.  The
+     * model is initialized after the primary fields, or lazily at the first
+     * step when callers use the fields' default initial state.
+     *
+     * @note Invoke collectively on every mesh rank.
+     */
+    free_surface_model_type* configure_free_surface(const FreeSurfaceOptions& options);
+    /** Configure optional planar free-surface coupling from flat keys. */
+    free_surface_model_type* configure_free_surface(const Database& database);
+    /**
+     * Remove the free-surface model, inventory, and published fields.
+     *
+     * @note Invoke consistently on every mesh rank before the next collective
+     *       solver step. Rank-divergent removal is rejected collectively.
+     */
+    bool remove_free_surface_model();
+    /** Return the mutable configured free-surface model, or nullptr. */
+    free_surface_model_type* find_free_surface_model() noexcept;
+    /** Return the configured free-surface model, or nullptr. */
+    const free_surface_model_type* find_free_surface_model() const noexcept;
+
+    /** Return the accepted free-surface diagnostics snapshot. */
+    free_surface_diagnostics_type free_surface_diagnostics() const;
+    /** Return the mutable liquid-mass inventory; throws when disabled. */
+    liquid_mass_inventory_type& liquid_mass_inventory();
+    /** Return the liquid-mass inventory; throws when disabled. */
+    const liquid_mass_inventory_type& liquid_mass_inventory() const;
+    /** Return the liquid-mass inventory, or nullptr when disabled. */
+    liquid_mass_inventory_type* find_liquid_mass_inventory() noexcept;
+    /** Return the liquid-mass inventory, or nullptr when disabled. */
+    const liquid_mass_inventory_type* find_liquid_mass_inventory() const noexcept;
+
+    /** Pure (bubble-free) liquid-density field [kg/m^3]. */
+    const field_type& rho_liquid() const;
+    /** Spatially constant diagnostic clear-level field [m]. */
+    const field_type& clear_level() const;
+    /** Spatially constant diagnostic pool-level field [m]. */
+    const field_type& pool_level() const;
+    /** Spatially constant absolute headspace-pressure field [Pa]. */
+    const field_type& headspace_pressure() const;
+    /**
+     * Cell-centre planar pool indicator (0 or 1).
+     *
+     * This is a visualization/feedback approximation, not a conservative
+     * cut-cell volume fraction.
+     */
+    const field_type& pool_occupancy() const;
+    /** Global signed occupancy-volume error relative to pool volume [m^3]. */
+    scalar_type pool_occupancy_volume_error() const;
+    /** Whether the fully transactional planar-ALE path is configured. */
+    bool planar_ale_enabled() const noexcept
+    {
+        return d_free_surface_model && d_free_surface_options.mode == FreeSurfaceMode::PlanarALE;
+    }
+    /** Honest free-surface capability label for diagnostics and applications. */
+    std::string_view free_surface_approximation_label() const noexcept
+    {
+        return planar_ale_enabled() ? "solver-integrated flat planar ALE (not VOF or Euler-Euler)"
+                                    : free_surface_model_type::approximationLabel();
+    }
+    /** Diagnostics from the latest accepted ALE step (plus rejection count). */
+    const PlanarALEStepDiagnostics& planar_ale_diagnostics() const noexcept { return d_planar_ale_diagnostics; }
+    /** Accepted absolute-minus-mesh carrier flux; throws when ALE is inactive. */
+    const face_flux_field_type& mesh_relative_face_fluxes() const;
+    /** Accepted initialization and per-step global free-surface history. */
+    const std::vector<FreeSurfaceHistoryRecord>& free_surface_history() const noexcept;
+    /** Write the accepted history on mesh rank zero using a fixed CSV schema. */
+    void write_free_surface_history_csv(const std::string& filename) const;
+
     void set_material_updater(typename material_type::updater_type updater);
     void clear_material_updater() noexcept;
 
@@ -283,6 +426,12 @@ public:
     void write_solution_vtu(const std::string& filename, const SolutionOutputOptions& output_options) const;
     void write_parallel_solution_vtu(
         const std::string& filename, const SolutionOutputOptions& output_options = {}) const;
+
+protected:
+    /** Refresh Boussinesq momentum/temperature plus shared solver geometry. */
+    void refresh_geometry_dependent_state() override;
+    /** Use accepted mesh-relative transport flux while planar ALE is active. */
+    const face_flux_field_type& courant_transport_face_fluxes() const override;
 
 private:
     using base_type::begin_step;
@@ -305,6 +454,7 @@ private:
     using base_type::native_coupled_pressure_velocity_solver;
     using base_type::native_momentum_equation;
     using base_type::native_pressure_face_flux_workspace;
+    using base_type::native_pressure_projection;
     using base_type::native_velocity_boundary_cache;
     using base_type::old_face_fluxes;
     using base_type::predictor_pressure_gradient;
@@ -313,6 +463,10 @@ private:
     using base_type::projected_face_fluxes;
     using base_type::require_mesh;
     using base_type::solve_pressure_velocity_coupling;
+    using base_type::refine_volume_continuity;
+    using base_type::set_volume_continuity_target;
+    using base_type::clear_volume_continuity_target;
+    using base_type::volume_continuity_target;
     using base_type::sync_primary_fields_from_legacy;
     using base_type::sync_primary_fields_to_legacy;
     using base_type::uses_legacy_backend;
@@ -325,6 +479,11 @@ private:
 
     SIMPLEFLUID_SOLVERS_LOCAL
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
+        TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options,
+        bool physical_model_enabled, PhysicalModelTag);
+
+    SIMPLEFLUID_SOLVERS_LOCAL
+    BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options,
         bool physical_model_enabled, PhysicalModelTag);
 
@@ -378,6 +537,65 @@ private:
     const field_type* active_alpha_l_field() const noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL
     void ensure_scalar_void_fraction_model();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_step_coupling() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_turbulence(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    bool advance_pre_temperature_models(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_temperature_transport(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_post_temperature_models(scalar_type time_step, bool sheng_after_temperature);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_collective_model_state() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_free_surface_configuration(const FreeSurfaceOptions& options) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_planar_ale_support(const FreeSurfaceOptions& options) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void validate_planar_ale_runtime_parity() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void initialize_planar_ale_if_needed();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void step_planar_ale();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void form_mesh_relative_flux(face_flux_field_type& absolute_flux);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    std::vector<scalar_type> material_volumes(const field_type& liquid_mass_density,
+        const field_type& pure_liquid_density, std::span<const real_t> cell_volumes) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type volume_weighted_mean_pressure() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type total_sensible_energy(const field_type& density, const field_type& heat_capacity,
+        std::span<const real_t> cell_volumes) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void configure_ale_pressure_boundary(std::uint64_t generation);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void clear_ale_pressure_boundary() noexcept;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void initialize_free_surface_if_needed(
+        bool allow_default_fields = false, bool dependencies_already_refreshed = false);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void advance_free_surface(scalar_type time_step);
+    struct FreeSurfaceAccountingPreview
+    {
+        typename liquid_mass_inventory_type::diagnostics_type liquid;
+        scalar_type liquid_volume_deficit = {};
+    };
+    SIMPLEFLUID_SOLVERS_LOCAL
+    FreeSurfaceUpdate make_free_surface_update(
+        scalar_type time, bool initializing, const FreeSurfaceAccountingPreview* preview = nullptr);
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type pure_liquid_density(local_ordinal_type cell_lid) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type headspace_temperature(scalar_type time) const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    scalar_type scalar_void_volume() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void publish_free_surface_fields();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void record_free_surface_history();
 
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
@@ -389,6 +607,29 @@ private:
     bool d_scalar_void_fraction_explicitly_configured = false;
     std::unique_ptr<material_feedback_model_type> d_material_feedback_model;
     std::unique_ptr<precursor_model_type> d_precursor_model;
+    std::unique_ptr<free_surface_model_type> d_free_surface_model;
+    std::unique_ptr<liquid_mass_inventory_type> d_liquid_mass_inventory;
+    std::unique_ptr<field_type> d_clear_level;
+    std::unique_ptr<field_type> d_pool_level;
+    std::unique_ptr<field_type> d_headspace_pressure;
+    std::unique_ptr<field_type> d_pool_occupancy;
+    std::unique_ptr<ale_motion_type> d_ale_motion;
+    std::unique_ptr<ale_boundary_type> d_ale_boundary;
+    std::unique_ptr<volume_continuity_model_type> d_volume_continuity_model;
+    std::unique_ptr<face_flux_field_type> d_mesh_relative_face_flux;
+    std::unique_ptr<face_flux_field_type> d_bubble_slip_volume_flux;
+    std::unique_ptr<field_type> d_mesh_volume_rate;
+    std::unique_ptr<field_type> d_continuity_residual;
+    std::unique_ptr<field_type> d_ale_old_density;
+    std::unique_ptr<field_type> d_ale_old_heat_capacity;
+    std::optional<FVM::ALEControlVolumeState> d_active_ale;
+    const field_type* d_ale_temperature_density = nullptr;
+    std::uint64_t d_ale_target_generation = 0;
+    PlanarALEStepDiagnostics d_planar_ale_diagnostics;
+    FreeSurfaceOptions d_free_surface_options;
+    scalar_type d_pool_occupancy_volume_error = {};
+    std::vector<FreeSurfaceHistoryRecord> d_free_surface_history;
+    bool d_free_surface_step_failed = false;
 };
 
 extern template class BoussinesqSolver<DefaultTpetraTypes>;

@@ -14,6 +14,10 @@
 
 namespace SimpleFluid
 {
+RetryableMomentumNonconvergence::RetryableMomentumNonconvergence(const char* message) : std::runtime_error(message) {}
+
+RetryableMomentumNonconvergence::~RetryableMomentumNonconvergence() noexcept = default;
+
 template class IncompressibleMomentumEquation<DefaultTpetraTypes>;
 template class IncompressibleMomentumEquation<
     DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;

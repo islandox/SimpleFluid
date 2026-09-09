@@ -9,28 +9,49 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()
 
-if(MPIEXEC_EXECUTABLE
-   AND (SIMPLEFLUID_MAX_TEST_PROCS EQUAL 0
-        OR SIMPLEFLUID_MAX_TEST_PROCS GREATER_EQUAL 2))
-  add_test(
-    NAME NonOrthogonalPartitionFaces_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testFvmOperators>"
-            "--gtest_filter=FvmOperatorsTest.ImplicitNonOrthogonalMatrixMatchesFullResidual:FvmOperatorsTest.ImplicitNonOrthogonalRejectsInconsistentPartitionCorrectionInputs:FvmOperatorsTest.TransportAssemblersRejectInconsistentPartitionGradientInputs:FvmOperatorsTest.HybridNonOrthogonalSolveSupportsPartitionFaces:FvmOperatorsTest.VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph:FvmOperatorsTest.ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients:FvmOperatorsTest.PhysicalTemperatureNonOrthogonalTreatmentsMatchExplicitResidual:FvmOperatorsTest.MappedUpwindConvectionUsesPartitionFaceGhostFlux")
-  set_tests_properties(NonOrthogonalPartitionFaces_2procs PROPERTIES
-    LABELS "mpi;non_orthogonal"
-    PROCESSORS 2
+simplefluid_add_mpi_test(
+    NAME ALETransport_2procs
+    TARGET testALETransport
+    PROCS 2
+    LABELS "mpi;ale;transport;conservation"
     TIMEOUT 120)
 
-  add_test(
-    NAME FieldStoredTransportValidation_2procs
-    COMMAND "${MPIEXEC_EXECUTABLE}" ${MPIEXEC_PREFLAGS}
-            "${MPIEXEC_NUMPROC_FLAG}" "2"
-            "$<TARGET_FILE:testFieldStoredOperators>"
-            "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective")
-  set_tests_properties(FieldStoredTransportValidation_2procs PROPERTIES
-    LABELS "mpi;non_orthogonal;field_stored"
-    PROCESSORS 2
+simplefluid_add_mpi_test(
+    NAME NonOrthogonalPartitionFaces_2procs
+    TARGET testFvmOperators
+    PROCS 2
+    ARGS "--gtest_filter=FvmOperatorsTest.ImplicitNonOrthogonalMatrixMatchesFullResidual:FvmOperatorsTest.ImplicitNonOrthogonalRejectsInconsistentPartitionCorrectionInputs:FvmOperatorsTest.TransportAssemblersRejectInconsistentPartitionGradientInputs:FvmOperatorsTest.HybridNonOrthogonalSolveSupportsPartitionFaces:FvmOperatorsTest.VectorTransportImplicitNonOrthogonalDiffusionExpandsGradientGraph:FvmOperatorsTest.ExplicitVariableDiffusionUsesBoundaryValuesAndSparseCoefficients:FvmOperatorsTest.PhysicalTemperatureNonOrthogonalTreatmentsMatchExplicitResidual:FvmOperatorsTest.MappedUpwindConvectionUsesPartitionFaceGhostFlux"
+    LABELS "mpi;non_orthogonal"
     TIMEOUT 120)
-endif()
+
+simplefluid_add_mpi_test(
+    NAME FieldStoredTransportValidation_2procs
+    TARGET testFieldStoredOperators
+    PROCS 2
+    ARGS "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective:FieldStoredOperatorsTest.WeightedTransportCachedTopologyMatchesFreshAssembly:FieldStoredOperatorsTest.ZeroDiffusionNeumannTransportRetainsValidationAndReusableGraph:FieldStoredOperatorsTest.WeightedScalarZeroDiffusionRetainsBoundaryCorrections"
+    LABELS "mpi;non_orthogonal;field_stored"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME ScalarTransportDiscretizationValidation_2procs
+    TARGET testScalarTransportDiscretization
+    PROCS 2
+    ARGS "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively"
+    LABELS "mpi;scalar_transport"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME StoredTransportReuse_2procs
+    TARGET testStoredTransportReuse
+    PROCS 2
+    LABELS "mpi;transport;field_stored"
+    TIMEOUT 120)
+
+foreach(_cached_kernel IN ITEMS CellFluxBalanceCache StoredPressureFaceFluxCache)
+  simplefluid_add_mpi_test(
+      NAME ${_cached_kernel}_2procs
+      TARGET test${_cached_kernel}
+      PROCS 2
+      LABELS "mpi;fvm;cache"
+      TIMEOUT 120)
+endforeach()

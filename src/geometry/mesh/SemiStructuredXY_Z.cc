@@ -133,6 +133,33 @@ SemiStructuredXY_Z::SemiStructuredXY_Z(
 }
 
 /**
+ * @brief Replace extrusion coordinates without changing XY or layer topology.
+ * @param edges Strictly increasing axial edges with the existing size.
+ * @throws std::invalid_argument If the replacement layout is invalid.
+ */
+void SemiStructuredXY_Z::replace_axial_edges_fixed_topology(Arr<real_t> edges)
+{
+    if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
+    {
+        throw std::overflow_error("SemiStructuredXY_Z geometry epoch overflow.");
+    }
+    if (edges.size() != d_z_edges.size())
+    {
+        throw std::invalid_argument("SemiStructuredXY_Z fixed-topology update cannot change the "
+                                    "axial edge count.");
+    }
+
+    validate_z_edges(edges);
+    auto widths = MeshUtils::consec_diff(edges);
+    auto midpoints = MeshUtils::consec_mid(edges);
+
+    d_z_edges = std::move(edges);
+    d_z_widths = std::move(widths);
+    d_z_midpoints = std::move(midpoints);
+    ++d_geometry_state.epoch;
+}
+
+/**
  * @brief Triangulate a convex XY polygon and extrude it through Z.
  * @param xy_boundary Convex counter-clockwise polygon vertices.
  * @param z_edges Strictly increasing axial edge coordinates.

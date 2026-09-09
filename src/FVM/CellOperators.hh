@@ -10,14 +10,15 @@
  */
 #pragma once
 
+#include "FVM/CellGradientScheme.hh"
+#include "FVM/details/FieldStoredCellOperators.hh"
+#include "FVM/details/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
-#include "FVM/CellGradientScheme.hh"
-#include "FVM/details/FieldStoredCellOperators.hh"
-#include "FVM/details/OperatorDetails.hh"
+#include "geometry/GeometryEpoch.hh"
 
 #include <algorithm>
 #include <array>
@@ -39,10 +40,12 @@ namespace SimpleFluid::FVM
  * reconstruction variants: an interior-neighbor-only stencil and a
  * boundary-aware stencil. Boundary condition types and values remain dynamic;
  * only topology, directions, normal distances, and least-squares weights are
- * cached. Rebuild the cache after any mesh topology or geometry revision.
+ * cached. Fixed-topology geometry motion invalidates the cache until refresh()
+ * rebuilds its numeric data; topology changes require a new cache.
  *
- * Cached data are immutable after construction, so one cache may be read by
- * concurrent evaluations provided their fields and callbacks are independent.
+ * Cached data are read-only between refreshes, so one cache may be read by
+ * concurrent evaluations provided refresh() is not running and their fields
+ * and callbacks are independent.
  *
  * @tparam Pack Tpetra type pack used by the mesh and fields.
  * @tparam MeshType Runtime or statically dispatched mesh interface.
@@ -85,15 +88,10 @@ public:
      * @throws std::invalid_argument if @p mesh is null.
      */
     explicit CellGradientCache(SP<const mesh_type> mesh)
-        : d_mesh(require_mesh(std::move(mesh))),
-          d_boundary_locations(
-              detail::boundary_face_locations(*d_mesh)),
-          d_interior_geometry(
-              build_geometry(
-                  *d_mesh, d_boundary_locations, false)),
-          d_boundary_geometry(
-              build_geometry(
-                  *d_mesh, d_boundary_locations, true))
+        : d_mesh(require_mesh(std::move(mesh))), d_boundary_locations(detail::boundary_face_locations(*d_mesh)),
+          d_interior_geometry(build_geometry(*d_mesh, d_boundary_locations, false)),
+          d_boundary_geometry(build_geometry(*d_mesh, d_boundary_locations, true)),
+          d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
     {
     }
 
@@ -118,26 +116,45 @@ public:
             throw std::invalid_argument(
                 "Cell-gradient cache belongs to another mesh.");
         }
+        if (mesh_geometry_epoch(mesh) != d_geometry_epoch)
+        {
+            throw std::invalid_argument("Cell-gradient cache is stale for the mesh geometry epoch.");
+        }
     }
 
-    /** @brief Return interior-neighbor-only reconstruction weights. */
-    const std::vector<CellGeometry>&
-    interior_geometry() const noexcept
+    /** @brief Rebuild geometry-dependent weights at the current mesh epoch. */
+    void refresh()
     {
+        auto locations = detail::boundary_face_locations(*d_mesh);
+        auto interior = build_geometry(*d_mesh, locations, false);
+        auto boundary = build_geometry(*d_mesh, locations, true);
+        d_boundary_locations = std::move(locations);
+        d_interior_geometry = std::move(interior);
+        d_boundary_geometry = std::move(boundary);
+        d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+    }
+
+    /** @brief Geometry epoch represented by this cache. */
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
+
+    /** @brief Return interior-neighbor-only reconstruction weights. */
+    const std::vector<CellGeometry>& interior_geometry() const
+    {
+        require_mesh(*d_mesh);
         return d_interior_geometry;
     }
 
     /** @brief Return boundary-aware reconstruction weights. */
-    const std::vector<CellGeometry>&
-    boundary_geometry() const noexcept
+    const std::vector<CellGeometry>& boundary_geometry() const
     {
+        require_mesh(*d_mesh);
         return d_boundary_geometry;
     }
 
     /** @brief Return the cached per-face boundary lookup. */
-    const std::vector<boundary_location_type>&
-    boundary_locations() const noexcept
+    const std::vector<boundary_location_type>& boundary_locations() const
     {
+        require_mesh(*d_mesh);
         return d_boundary_locations;
     }
 
@@ -291,6 +308,7 @@ private:
     std::vector<boundary_location_type> d_boundary_locations;
     std::vector<CellGeometry> d_interior_geometry;
     std::vector<CellGeometry> d_boundary_geometry;
+    std::uint64_t d_geometry_epoch = 0;
 };
 
 namespace detail
@@ -1834,21 +1852,88 @@ auto cell_flux_balance(
 }
 
 /**
- * @brief Cached-view compatibility overload for a stored face field.
- *
- * FieldStored resolves owned/overlap rows itself; the supplied view is kept
- * only so solver kernels can share their legacy cached-view call shape.
+ * @brief Compute a stored balance from a cached overlap or owned face view.
+ * An owned-only view uses the field's published overlap values for remote faces.
  */
 template<TpetraTypePack Pack, class MeshType, class View>
 auto cell_flux_balance(
     const MeshType& mesh,
     const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    const View&,
+    const View& face_values,
     typename Pack::local_ordinal_type cell_lid)
     -> typename Pack::scalar_type
 {
-    return cell_flux_balance<Pack>(mesh, face_fluxes, cell_lid);
+    if (&mesh != &face_fluxes.mesh())
+        throw std::invalid_argument("cell_flux_balance requires the face field mesh.");
+    return detail::stored_cell_flux_balance(mesh, face_fluxes, face_values, cell_lid);
 }
+
+/** @brief Select mesh-local flux storage for the backend's balance convention. */
+template<class FaceField>
+auto face_flux_balance_read_view(const FaceField& field)
+{
+    if constexpr (requires { field.local_read_view(); })
+        return field.local_read_view();
+    else
+        return field.owned_read_view();
+}
+
+/**
+ * @brief Immutable ordered face/sign slots for repeated owned-cell balances.
+ * Geometry motion leaves these topology-only slots valid; topology replacement
+ * requires a new cache. Views are scoped by callers and never retained here.
+ */
+template<TpetraTypePack Pack, class MeshType>
+class CellFluxBalanceCache
+{
+public:
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+    template<class FaceField>
+    explicit CellFluxBalanceCache(const FaceField& field)
+    {
+        const auto& mesh = field.mesh();
+        d_offsets.reserve(mesh.num_owned_cells() + 1);
+        d_offsets.push_back(0);
+        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto cell_id = detail::query_cell_id(mesh, cell_lid);
+            for (const auto face_id : mesh.faces(cell_id))
+            {
+                const auto face_lid = static_cast<local_ordinal_type>(detail::packed_face_local_id(mesh, face_id));
+                if constexpr (std::same_as<MeshType, Mesh<Pack>>)
+                {
+                    if (!field.is_owned_face(face_lid))
+                        continue;
+                }
+                const auto owner = detail::packed_cell_local_id(mesh, mesh.owner_cell(face_id));
+                d_faces.push_back({face_lid, owner == cell_lid ? scalar_type{1} : scalar_type{-1}});
+            }
+            d_offsets.push_back(d_faces.size());
+        }
+    }
+
+    template<class View>
+    scalar_type balance(const View& mesh_local_values, local_ordinal_type cell_lid) const
+    {
+        const auto row = static_cast<size_t>(cell_lid);
+        if (row >= d_offsets.size() - 1)
+            throw std::out_of_range("Cell flux-balance cache requires an owned cell.");
+        scalar_type result{};
+        for (auto slot = d_offsets[row]; slot < d_offsets[row + 1]; ++slot)
+        {
+            const auto& face = d_faces[slot];
+            result += face.sign * mesh_local_values(face.row, 0);
+        }
+        return result;
+    }
+
+private:
+    struct FaceSlot { local_ordinal_type row; scalar_type sign; };
+    std::vector<size_t> d_offsets;
+    std::vector<FaceSlot> d_faces;
+};
 
 /** @brief Compute volume-normalized divergence from stored face fluxes. */
 template<TpetraTypePack Pack, class MeshType>
@@ -1866,12 +1951,13 @@ cell_divergence_from_fluxes(
             "cell_divergence_from_fluxes requires the face field mesh.");
     }
     std::vector<scalar_type> divergence(mesh.num_owned_cells());
+    const auto face_values = face_fluxes.local_read_view();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto cell_id = detail::query_cell_id(mesh, cell_lid);
         divergence[owned] = detail::stored_cell_flux_balance(
-                                mesh, face_fluxes, cell_lid)
+                                mesh, face_fluxes, face_values, cell_lid)
                           / static_cast<scalar_type>(
                                 mesh.cell_volume(cell_id));
     }

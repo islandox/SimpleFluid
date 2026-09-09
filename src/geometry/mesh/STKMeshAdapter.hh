@@ -13,6 +13,9 @@
 
 #include "geometry/Mesh.hh"
 
+#include <concepts>
+#include <cstddef>
+#include <memory>
 #include <utility>
 
 namespace SimpleFluid::Meshes
@@ -52,8 +55,51 @@ public:
         }
     }
 
+    /** @brief Wrap a mutable assembled legacy mesh without copying it. */
+    explicit STKMeshAdapter(SP<mesh_type> mesh)
+        : d_mesh(mesh),
+          d_mutable_mesh(std::move(mesh))
+    {
+        if (!d_mesh)
+        {
+            throw std::invalid_argument(
+                "STKMeshAdapter requires a non-null mesh.");
+        }
+    }
+
+    /** @brief Preserve null-pointer validation without cv-overload ambiguity. */
+    explicit STKMeshAdapter(std::nullptr_t)
+        : STKMeshAdapter(SP<const mesh_type>{})
+    {
+    }
+
+    /** @brief Wrap mutable ownership supplied through a legacy-mesh subtype. */
+    template<class Derived>
+        requires (!std::is_const_v<Derived>
+                  && !std::same_as<Derived, mesh_type>
+                  && std::derived_from<Derived, mesh_type>)
+    explicit STKMeshAdapter(SP<Derived> mesh)
+        : STKMeshAdapter(std::static_pointer_cast<mesh_type>(
+              std::move(mesh)))
+    {
+    }
+
     const mesh_type& mesh() const noexcept { return *d_mesh; }
     SP<const mesh_type> mesh_ptr() const noexcept { return d_mesh; }
+    bool has_mutable_mesh() const noexcept
+    {
+        return static_cast<bool>(d_mutable_mesh);
+    }
+    mesh_type& mutable_mesh()
+    {
+        if (!d_mutable_mesh)
+        {
+            throw std::logic_error(
+                "STKMeshAdapter does not retain mutable mesh ownership.");
+        }
+        return *d_mutable_mesh;
+    }
+    SP<mesh_type> mutable_mesh_ptr() noexcept { return d_mutable_mesh; }
 
     size_t spatial_dimension() const noexcept
     {
@@ -182,6 +228,7 @@ public:
 
 private:
     SP<const mesh_type> d_mesh;
+    SP<mesh_type> d_mutable_mesh;
 };
 
 } // namespace SimpleFluid::Meshes

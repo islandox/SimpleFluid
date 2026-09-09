@@ -12,12 +12,15 @@
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/unitTests/test_mesh_helpers.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_Array.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -43,6 +46,22 @@ SimpleFluid::SP<const Handle> make_cartesian_handle()
     return std::make_shared<Handle>(std::move(mesh));
 }
 
+SimpleFluid::SP<const Handle> make_cartesian_line_handle()
+{
+    auto mesh = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            {0.0, 1.0, 2.0, 3.0},
+            {0.0, 1.0},
+            {0.0, 1.0}}});
+    return std::make_shared<Handle>(std::move(mesh));
+}
+
+SimpleFluid::SP<const Handle> make_unstructured_handle()
+{
+    return std::make_shared<Handle>(
+        SimpleFluid::test::make_unstructured_hex_line(3));
+}
+
 SimpleFluid::SP<const Handle> make_semi_structured_handle()
 {
     auto mesh = std::make_shared<SemiStructured>(
@@ -59,6 +78,39 @@ SimpleFluid::SP<const Handle> make_skewed_semi_structured_handle()
             SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 4}, {1, 2, 4}, {2, 3, 4}, {3, 0, 4}},
             SimpleFluid::ArrReal{0.0, 1.0});
     return std::make_shared<Handle>(std::move(mesh));
+}
+
+/** @brief A sheared native hex line with explicit serial/MPI ownership. */
+SimpleFluid::SP<const Handle> make_skewed_partitioned_unstructured_handle()
+{
+    using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+    using Partitioned = SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
+    const auto reference = SimpleFluid::test::make_unstructured_hex_line(8, 0.125);
+    auto nodes = reference->nodes();
+    for (auto& node : nodes)
+    {
+        node.x += 0.3 * node.y;
+    }
+    SimpleFluid::Arr<Unstructured::CellDefinition> cells;
+    for (size_t local = 0; local < reference->num_cells(); ++local)
+    {
+        const auto cell = reference->cell_id(local);
+        cells.push_back({reference->cell_type(cell), reference->cell_nodes(cell)});
+    }
+    SimpleFluid::Arr<Unstructured::BoundaryFaceDefinition> boundaries;
+    for (const auto& [batch_id, batch] : reference->boundary_batches())
+    {
+        for (const auto face : batch.face_lids)
+        {
+            boundaries.push_back(
+                {reference->face_nodes(face), batch_id, reference->boundary_names().at(batch_id)});
+        }
+    }
+    auto geometry = std::make_shared<Unstructured>(nodes, cells, boundaries);
+    const auto communicator = Tpetra::getDefaultComm();
+    auto partition = SimpleFluid::MeshPartitioner<Pack>::partition(*geometry, communicator);
+    auto partitioned = std::make_shared<Partitioned>(geometry, std::move(partition.indexer), communicator);
+    return std::make_shared<Handle>(partitioned);
 }
 
 double stored_matrix_entry(
@@ -470,6 +522,122 @@ TEST(FieldStoredOperatorsTest, SupportsOrthogonalMeshHandle)
     expect_pressure_weighted_stored_fluxes(mesh);
 }
 
+/** @brief Affine pressure must not alter physical flux after workspace reuse. */
+TEST(FieldStoredOperatorsTest, PressureWeightedFluxPreservesAffinePressureOnGradedMesh)
+{
+    auto geometry = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 0.25, 0.75, 1.5, 3.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    const SimpleFluid::SP<const Handle> mesh = std::make_shared<Handle>(std::move(geometry));
+    SimpleFluid::VectorCellFieldStored<Pack> velocity(mesh, "velocity");
+    SimpleFluid::ScalarCellFieldStored<Pack> pressure(mesh, "pressure");
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(mesh, "fluxes");
+    SimpleFluid::FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack> workspace(mesh);
+
+    SimpleFluid::BoundaryConditionSet conditions;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        conditions.velocity[name] = {SimpleFluid::BoundaryConditionType::Neumann, {}};
+    }
+    const auto boundary_cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, conditions);
+
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const double speed = pass == 0 ? 0.375 : -0.625;
+        const double slope = pass == 0 ? 2.0 : -0.75;
+        const double offset = pass == 0 ? -1.0 : 3.0;
+        velocity.put_value({speed, 0.0, 0.0});
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            pressure.set_owned_value(cell, offset + slope * mesh->cell_centroid(cell).x);
+        }
+        pressure.sync_ghosts();
+        fluxes.put_value(17.0);
+
+        SimpleFluid::BoundaryConditionMap pressure_boundaries;
+        pressure_boundaries["xmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, offset};
+        pressure_boundaries["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, offset + slope * 3.0};
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity, pressure, 0.2, boundary_cache, pressure_boundaries, workspace, fluxes);
+
+        for (size_t local = 0; local < mesh->num_faces(); ++local)
+        {
+            const auto face = static_cast<Pack::local_ordinal_type>(local);
+            const double expected = speed * mesh->face_normal(face).x * mesh->face_area(face);
+            EXPECT_NEAR(fluxes.local_value(face), expected, 1.0e-12);
+            if (fluxes.is_owned(face))
+            {
+                EXPECT_DOUBLE_EQ(fluxes.value(face), fluxes.local_value(face));
+            }
+        }
+    }
+}
+
+/** @brief Native unstructured operators match an equivalent Cartesian line. */
+TEST(FieldStoredOperatorsTest,
+     SupportsUnstructuredMeshHandleWithCartesianOperatorParity)
+{
+    const auto unstructured = make_unstructured_handle();
+    const auto cartesian = make_cartesian_line_handle();
+
+    ASSERT_FALSE(unstructured->legacy_mesh());
+    ASSERT_EQ(
+        unstructured->num_owned_cells(),
+        cartesian->num_owned_cells());
+    ASSERT_EQ(
+        unstructured->num_local_cells(),
+        cartesian->num_local_cells());
+
+    expect_constant_velocity_fluxes(unstructured);
+    expect_stored_matrix_operators(unstructured);
+    expect_pressure_weighted_stored_fluxes(unstructured);
+
+    auto boundary_condition = [](int, size_t)
+    {
+        return SimpleFluid::BoundaryCondition{
+            SimpleFluid::BoundaryConditionType::Dirichlet, 0.25};
+    };
+    auto source = [](Pack::local_ordinal_type cell_lid)
+    {
+        return 0.5 + static_cast<double>(cell_lid);
+    };
+    const auto unstructured_system =
+        SimpleFluid::FVM::diffusion_system<Pack>(
+            *unstructured, 0.7, boundary_condition, source);
+    const auto cartesian_system =
+        SimpleFluid::FVM::diffusion_system<Pack>(
+            *cartesian, 0.7, boundary_condition, source);
+
+    for (size_t row = 0;
+         row < unstructured->num_owned_cells();
+         ++row)
+    {
+        const auto row_lid =
+            static_cast<Pack::local_ordinal_type>(row);
+        EXPECT_NEAR(
+            unstructured_system.rhs->getData()[row],
+            cartesian_system.rhs->getData()[row],
+            1.0e-12);
+        for (size_t column = 0;
+             column < unstructured->num_local_cells();
+             ++column)
+        {
+            const auto column_lid =
+                static_cast<Pack::local_ordinal_type>(column);
+            EXPECT_NEAR(
+                stored_matrix_entry(
+                    *unstructured_system.matrix,
+                    row_lid,
+                    column_lid),
+                stored_matrix_entry(
+                    *cartesian_system.matrix,
+                    row_lid,
+                    column_lid),
+                1.0e-12);
+        }
+    }
+}
+
 /** @brief Covers static dispatch through PartitionedMesh and FieldStored. */
 TEST(FieldStoredOperatorsTest, SupportsStaticOrthogonalMesh)
 {
@@ -638,6 +806,264 @@ TEST(FieldStoredOperatorsTest, SupportsSemiStructuredMeshHandle)
         EXPECT_NEAR(value.x, 0.0, 1.0e-12);
         EXPECT_NEAR(value.y, 0.0, 1.0e-12);
         EXPECT_NEAR(value.z, 1.0, 1.0e-12);
+    }
+}
+
+/** @brief Zero bulk diffusion must retain a nonzero boundary coefficient on every rank. */
+TEST(FieldStoredOperatorsTest, WeightedScalarZeroDiffusionRetainsBoundaryCorrections)
+{
+    using Scalar = SimpleFluid::ScalarCellFieldStored<Pack>;
+    using Cache = SimpleFluid::FVM::FieldStoredBoundaryCache<Pack, Handle>;
+    using Treatment = SimpleFluid::FVM::NonOrthogonalTreatment;
+    const auto mesh = make_skewed_partitioned_unstructured_handle();
+    Scalar scalar(mesh, "zero_diffusion_scalar"), weight(mesh, 1.0, "unit_weight"), diffusion(mesh, 0.0, "diffusion");
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(mesh, 0.0, "zero_flux");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        scalar.set_owned_value(cell, skewed_linear_scalar(mesh->cell_centroid(cell)));
+    }
+    scalar.sync_ghosts();
+    SimpleFluid::FVM::TransportGeometryCache<Handle> geometry_cache(*mesh);
+    if (mesh->num_owned_cells() != 0)
+    {
+        EXPECT_TRUE(geometry_cache.has_non_orthogonal_faces());
+    }
+    auto boundary_value = [&](int batch_id, size_t in_batch)
+    {
+        const auto face = mesh->boundary_face_batch(batch_id).face_lids.at(in_batch);
+        return skewed_linear_scalar(mesh->face_centroid(face));
+    };
+    auto assemble = [&](const Cache* boundary, Treatment treatment, const Scalar* correction)
+    {
+        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+            SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{
+                .old_values = scalar,
+                .face_fluxes = fluxes,
+                .time_step = 0.5,
+                .storage_weight = weight,
+                .advection_weight = weight,
+                .diffusivity = diffusion,
+                .boundary_condition = [](int, size_t)
+                { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, 0.0}; },
+                .boundary_value = boundary_value,
+                .source = [](Pack::local_ordinal_type) { return 0.125; },
+                .treatment = treatment,
+                .correction_field = correction,
+                .boundary_diffusivity = boundary,
+                .geometry_cache = &geometry_cache});
+    };
+
+    const auto no_diffusion = assemble(nullptr, Treatment::Hybrid, &scalar);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const auto volume = mesh->cell_volume(cell);
+        EXPECT_NEAR(no_diffusion.rhs->getData()[owned], volume * (2.0 * scalar.value(cell) + 0.125), 1e-12);
+        for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+        {
+            EXPECT_NEAR(stored_matrix_entry(*no_diffusion.matrix, cell, static_cast<Pack::local_ordinal_type>(local)),
+                owned == local ? 2.0 * volume : 0.0, 1e-12);
+        }
+    }
+
+    Cache boundary;
+    boundary.mesh = mesh;
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    Cache invalid_boundary;
+    invalid_boundary.mesh = mesh;
+    if (communicator->getRank() == 0)
+    {
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        {
+            invalid_boundary.value[batch_id].assign(batch.face_lids.size(), -0.7);
+        }
+    }
+    EXPECT_THROW(assemble(&invalid_boundary, Treatment::Hybrid, &scalar), std::invalid_argument);
+    // In a two-rank run, only rank zero has diffusion. The other rank must
+    // still participate in the explicit and implicit gradient imports.
+    if (communicator->getRank() == 0)
+    {
+        for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        {
+            // One side avoids cancellation of an affine gradient's opposing
+            // boundary corrections, independent of the partition assignment.
+            if (mesh->boundary_batch_name(batch_id) == "ymin")
+            {
+                boundary.value[batch_id].assign(batch.face_lids.size(), 0.7);
+            }
+        }
+    }
+    const auto uncorrected = assemble(&boundary, Treatment::Explicit, nullptr);
+    const auto explicit_system = assemble(&boundary, Treatment::Explicit, &scalar);
+    const auto hybrid_system = assemble(&boundary, Treatment::Hybrid, &scalar);
+    const auto explicit_action = stored_matrix_action(*explicit_system.matrix, scalar);
+    const auto hybrid_action = stored_matrix_action(*hybrid_system.matrix, scalar);
+    double local_correction = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        local_correction = std::max(local_correction,
+            std::abs(explicit_system.rhs->getData()[owned] - uncorrected.rhs->getData()[owned]));
+        EXPECT_NEAR(explicit_action[owned] - explicit_system.rhs->getData()[owned],
+            hybrid_action[owned] - hybrid_system.rhs->getData()[owned], 1e-10);
+    }
+    double global_correction = 0.0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_correction, &global_correction);
+    EXPECT_GT(global_correction, 1e-8);
+}
+
+/** @brief The zero-diffusion shortcut preserves the upwind graph and collective validation. */
+TEST(FieldStoredOperatorsTest, ZeroDiffusionNeumannTransportRetainsValidationAndReusableGraph)
+{
+    using namespace SimpleFluid::FVM;
+    const auto mesh = make_skewed_partitioned_unstructured_handle();
+    SimpleFluid::ScalarCellFieldStored<Pack> scalar(mesh, 1.25, "scalar");
+    SimpleFluid::ScalarCellFieldStored<Pack> unit(mesh, 1.0, "unit");
+    SimpleFluid::ScalarCellFieldStored<Pack> zero(mesh, 0.0, "zero");
+    SimpleFluid::ScalarFaceFieldStored<Pack> flux(mesh, 0.0, "flux");
+    TransportGeometryCache<Handle> geometry(*mesh);
+    bool invalid_boundary = false;
+    const auto condition = [](int, size_t)
+    { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.0}; };
+    const auto boundary = [&](int, size_t)
+    {
+        return invalid_boundary && mesh->owned_cell_map()->getComm()->getRank() == 0
+            ? std::numeric_limits<double>::quiet_NaN() : 0.0;
+    };
+    const auto source = [](Pack::local_ordinal_type) { return 0.125; };
+    const auto assemble = [&](Teuchos::RCP<Pack::matrix_type> matrix)
+    {
+        return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, Handle>{
+            .old_values = scalar,
+            .face_fluxes = flux,
+            .time_step = 0.5,
+            .storage_weight = unit,
+            .advection_weight = unit,
+            .diffusivity = zero,
+            .boundary_condition = condition,
+            .boundary_value = boundary,
+            .source = source,
+            .treatment = NonOrthogonalTreatment::Hybrid,
+            .correction_field = &scalar,
+            .cached_matrix = std::move(matrix),
+            .geometry_cache = &geometry});
+    };
+    Teuchos::RCP<Pack::matrix_type> matrix;
+    for (const auto speed : {0.25, -0.5})
+    {
+        for (const auto face : flux.owned_face_ids())
+        {
+            flux.set_owned_value(face, speed * mesh->face_area_vector(face).x);
+        }
+        flux.sync_ghosts();
+        const auto baseline = transport_system<Pack>(scalar, flux, 0.5, 0.0, condition, boundary, source);
+        const auto system = assemble(matrix);
+        if (!matrix.is_null())
+        {
+            EXPECT_EQ(system.matrix.getRawPtr(), matrix.getRawPtr());
+        }
+        matrix = system.matrix;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_EQ(baseline.rhs->getData()[owned], system.rhs->getData()[owned]);
+            EXPECT_EQ(baseline.matrix->getNumEntriesInLocalRow(cell), matrix->getNumEntriesInLocalRow(cell));
+            for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+            {
+                const auto other = static_cast<Pack::local_ordinal_type>(local);
+                EXPECT_EQ(stored_matrix_entry(*baseline.matrix, cell, other),
+                    stored_matrix_entry(*matrix, cell, other));
+            }
+        }
+        const auto action = stored_matrix_action(*matrix, scalar);
+        invalid_boundary = true;
+        EXPECT_THROW(static_cast<void>(assemble(matrix)), std::invalid_argument);
+        EXPECT_TRUE(matrix->isFillComplete());
+        EXPECT_EQ(stored_matrix_action(*matrix, scalar), action);
+        invalid_boundary = false;
+    }
+}
+
+/** @brief Cached topology preserves changing coefficients and partition-face orientation. */
+TEST(FieldStoredOperatorsTest, WeightedTransportCachedTopologyMatchesFreshAssembly)
+{
+    using namespace SimpleFluid::FVM;
+    const auto mesh = make_skewed_partitioned_unstructured_handle();
+    SimpleFluid::ScalarCellFieldStored<Pack> scalar(mesh, 0.0, "scalar");
+    SimpleFluid::ScalarCellFieldStored<Pack> storage(mesh, 1.0, "storage");
+    SimpleFluid::ScalarCellFieldStored<Pack> diffusion(mesh, 0.0, "diffusion");
+    SimpleFluid::ScalarFaceFieldStored<Pack> flux(mesh, 0.0, "flux");
+    TransportGeometryCache<Handle> geometry(*mesh);
+    Teuchos::RCP<Pack::matrix_type> cached_matrix;
+    for (int generation = 0; generation < 3; ++generation)
+    {
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto center = mesh->cell_centroid(cell);
+            scalar.set_owned_value(cell, skewed_linear_scalar(center) + generation);
+            storage.set_owned_value(cell, 1.0 + center.x + 0.25 * generation);
+            diffusion.set_owned_value(cell, generation == 2 ? 0.0 : 0.4 + center.x);
+        }
+        for (const auto face : flux.owned_face_ids())
+        {
+            flux.set_owned_value(face,
+                (generation == 1 ? -0.3 : 0.2) * mesh->face_area_vector(face).x);
+        }
+        scalar.sync_ghosts();
+        storage.sync_ghosts();
+        diffusion.sync_ghosts();
+        flux.sync_ghosts();
+        const auto assemble = [&](const TransportGeometryCache<Handle>* cache,
+                                  Teuchos::RCP<Pack::matrix_type> matrix)
+        {
+            return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, Handle>{
+                .old_values = scalar,
+                .face_fluxes = flux,
+                .time_step = 0.5,
+                .storage_weight = storage,
+                .advection_weight = storage,
+                .diffusivity = diffusion,
+                .boundary_condition = [](int batch, size_t)
+                {
+                    return SimpleFluid::BoundaryCondition{
+                        batch % 2 == 0 ? SimpleFluid::BoundaryConditionType::Dirichlet
+                                       : SimpleFluid::BoundaryConditionType::Neumann,
+                        0.125};
+                },
+                .boundary_value = [](int, size_t) { return 1.25; },
+                .source = [](Pack::local_ordinal_type) { return 0.125; },
+                .treatment = NonOrthogonalTreatment::Hybrid,
+                .discretization = {ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind},
+                .correction_field = &scalar,
+                .cached_matrix = std::move(matrix),
+                .geometry_cache = cache});
+        };
+        const auto fresh = assemble(nullptr, Teuchos::null);
+        const auto fresh_cached_geometry = assemble(&geometry, Teuchos::null);
+        const auto cached = assemble(&geometry, cached_matrix);
+        if (!cached_matrix.is_null())
+        {
+            EXPECT_EQ(cached.matrix.getRawPtr(), cached_matrix.getRawPtr());
+        }
+        cached_matrix = cached.matrix;
+        for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            // Cached affine reconstruction groups the Dirichlet coefficient
+            // sums separately from interior faces; the existing uncached
+            // reconstruction adds them in face order and can differ by one ULP.
+            EXPECT_DOUBLE_EQ(fresh.rhs->getData()[row], cached.rhs->getData()[row]);
+            EXPECT_EQ(fresh_cached_geometry.rhs->getData()[row], cached.rhs->getData()[row]);
+            for (size_t column = 0; column < mesh->num_local_cells(); ++column)
+            {
+                const auto other = static_cast<Pack::local_ordinal_type>(column);
+                EXPECT_DOUBLE_EQ(stored_matrix_entry(*fresh.matrix, cell, other),
+                    stored_matrix_entry(*cached.matrix, cell, other));
+                EXPECT_EQ(stored_matrix_entry(*fresh_cached_geometry.matrix, cell, other),
+                    stored_matrix_entry(*cached.matrix, cell, other));
+            }
+        }
     }
 }
 

@@ -10,14 +10,19 @@
  */
 #pragma once
 
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
 #include "equations/BoussinesqModel.hh"
 #include "fields/MeshFieldTraits.hh"
+
+#include <Teuchos_CommHelpers.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -149,10 +154,12 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
     const TimeStepperOptions& time_options)
 {
     MaterialFeedbackOptions options;
+    const detail::DatabaseOptionReader reader(
+        database, "Material feedback model");
     options.reference_density = model_options.reference_density;
     options.liquid_density = model_options.density;
-    options.gas_density = detail::database_value_or<real_t>(
-        database, "gas_density", options.gas_density);
+    options.gas_density = reader.value_or<real_t>(
+        "gas_density", options.gas_density);
     options.reference_temperature = time_options.reference_temperature;
     options.thermal_expansion = time_options.thermal_expansion;
     options.reference_dynamic_viscosity =
@@ -160,15 +167,15 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
             model_options.reference_density
           * time_options.kinematic_viscosity);
     options.density_mode = parse_density_feedback_mode(
-        detail::database_value_or<std::string>(
-            database, "density_feedback_model", "constant"));
+        reader.value_or<std::string>(
+            "density_feedback_model", "constant"));
     options.viscosity_mode = parse_viscosity_feedback_mode(
-        detail::database_value_or<std::string>(
-            database, "viscosity_feedback_model", "constant"));
-    options.min_density = detail::database_value_or<real_t>(
-        database, "min_density", options.min_density);
-    options.min_viscosity = detail::database_value_or<real_t>(
-        database, "min_viscosity", options.min_viscosity);
+        reader.value_or<std::string>(
+            "viscosity_feedback_model", "constant"));
+    options.min_density = reader.value_or<real_t>(
+        "min_density", options.min_density);
+    options.min_viscosity = reader.value_or<real_t>(
+        "min_viscosity", options.min_viscosity);
     validate_material_feedback_options(options);
     return options;
 }
@@ -190,6 +197,16 @@ public:
     using field_type = typename field_traits::scalar_cell_type;
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using context_type = BoussinesqUpdateContext<Pack, mesh_type>;
+
+    /** Opaque accepted-state copy of the published feedback mirrors. */
+    class StateSnapshot
+    {
+    private:
+        friend class MaterialFeedbackModel;
+        const MaterialFeedbackModel* d_owner = nullptr;
+        std::vector<scalar_type> d_density;
+        std::vector<scalar_type> d_viscosity;
+    };
 
     /**
      * @brief Construct a material-feedback model on a mesh.
@@ -244,6 +261,42 @@ public:
     }
 
     /**
+     * @brief Evaluate the material (bubble-free) liquid density.
+     *
+     * Free-surface and inventory closures must use this value rather than the
+     * mixture density published through `material.density` by the void-aware
+     * feedback modes.  The argument is an absolute temperature in K and the
+     * return value has units kg/m^3.
+     */
+    [[nodiscard]] scalar_type pure_liquid_density(scalar_type temperature) const
+    {
+        if (!std::isfinite(temperature))
+        {
+            throw std::invalid_argument("Pure-liquid density requires a finite temperature.");
+        }
+
+        scalar_type density = d_options.reference_density;
+        switch (d_options.density_mode)
+        {
+            case DensityFeedbackMode::Constant:
+                density = d_options.reference_density;
+                break;
+            case DensityFeedbackMode::BoussinesqTemperatureOnly:
+            case DensityFeedbackMode::BoussinesqVoid:
+                density = boussinesq_liquid_density(temperature);
+                break;
+            case DensityFeedbackMode::Mixture:
+                density = d_options.liquid_density;
+                break;
+        }
+        if (!std::isfinite(density) || density <= scalar_type{})
+        {
+            throw std::runtime_error("Pure-liquid density is non-positive or non-finite.");
+        }
+        return density;
+    }
+
+    /**
      * @brief Density feedback field written during the last apply call.
      */
     const field_type& density_feedback() const noexcept
@@ -268,6 +321,45 @@ public:
         return d_output_fields;
     }
 
+    /** Capture feedback-owned output fields for a solver transaction. */
+    [[nodiscard]] StateSnapshot snapshot() const
+    {
+        StateSnapshot result;
+        result.d_owner = this;
+        result.d_density.resize(d_mesh->num_owned_cells());
+        result.d_viscosity.resize(d_mesh->num_owned_cells());
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            result.d_density[owned] = d_density_feedback.value(cell_lid);
+            result.d_viscosity[owned] = d_viscosity_feedback.value(cell_lid);
+        }
+        return result;
+    }
+
+    /** Restore feedback-owned mirrors and synchronize their overlap values. */
+    void restore(const StateSnapshot& snapshot)
+    {
+        const int local_invalid = snapshot.d_owner != this ||
+                                  snapshot.d_density.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_viscosity.size() != d_mesh->num_owned_cells();
+        int any_invalid = 0;
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::invalid_argument("MaterialFeedbackModel snapshot is foreign or incompatible.");
+        }
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            d_density_feedback.set_owned_value(cell_lid, snapshot.d_density[owned]);
+            d_viscosity_feedback.set_owned_value(cell_lid, snapshot.d_viscosity[owned]);
+        }
+        d_density_feedback.sync_ghosts();
+        d_viscosity_feedback.sync_ghosts();
+    }
+
     /**
      * @brief Apply feedback to the solver material-property fields.
      */
@@ -288,22 +380,27 @@ public:
                 "MaterialFeedbackModel received alpha_g on the wrong mesh.");
         }
 
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto alpha =
-                alpha_g == nullptr ? scalar_type{} : alpha_g->value(cell_lid);
-            const auto density =
-                std::max(density_value(context, cell_lid, alpha),
-                         d_options.min_density);
-            const auto viscosity =
-                std::max(viscosity_value(), d_options.min_viscosity);
-            d_density_feedback.set_owned_value(cell_lid, density);
-            d_viscosity_feedback.set_owned_value(cell_lid, viscosity);
-            material.density.set_owned_value(cell_lid, density);
-            material.dynamic_viscosity.set_owned_value(cell_lid, viscosity);
-        }
+        collective_detail::collective_local_validation(
+            *d_mesh, "Material feedback evaluation", [&]
+            {
+                for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell_lid =
+                        static_cast<local_ordinal_type>(owned);
+                    const auto alpha = alpha_g == nullptr
+                        ? scalar_type{}
+                        : alpha_g->value(cell_lid);
+                    const auto density = std::max(
+                        density_value(context, cell_lid, alpha),
+                        d_options.min_density);
+                    const auto viscosity = std::max(
+                        viscosity_value(), d_options.min_viscosity);
+                    d_density_feedback.set_owned_value(cell_lid, density);
+                    d_viscosity_feedback.set_owned_value(cell_lid, viscosity);
+                    material.density.set_owned_value(cell_lid, density);
+                    material.dynamic_viscosity.set_owned_value(cell_lid, viscosity);
+                }
+            });
         d_density_feedback.sync_ghosts();
         d_viscosity_feedback.sync_ghosts();
         material.validate_and_sync();
@@ -327,13 +424,10 @@ private:
             case DensityFeedbackMode::Constant:
                 return d_options.reference_density;
             case DensityFeedbackMode::BoussinesqTemperatureOnly:
-                return boussinesq_liquid_density(
-                    context.temperature.value(cell_lid));
+                return pure_liquid_density(context.temperature.value(cell_lid));
             case DensityFeedbackMode::BoussinesqVoid:
             {
-                const auto liquid =
-                    boussinesq_liquid_density(
-                        context.temperature.value(cell_lid));
+                const auto liquid = pure_liquid_density(context.temperature.value(cell_lid));
                 return liquid * (1.0 - alpha)
                      + d_options.gas_density * alpha;
             }

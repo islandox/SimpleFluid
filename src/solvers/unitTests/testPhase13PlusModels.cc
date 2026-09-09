@@ -31,7 +31,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -61,6 +63,21 @@ make_native_single_cell_mesh()
         std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
             SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
                 {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+    return std::make_shared<SimpleFluid::MeshHandle<Pack>>(
+        std::move(cartesian));
+}
+
+/** @brief Build an eight-cell native line that partitions across MPI ranks. */
+SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>
+make_native_distributed_line_mesh()
+{
+    auto cartesian =
+        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+                {0.0, 0.125, 0.25, 0.375, 0.5,
+                 0.625, 0.75, 0.875, 1.0},
+                {0.0, 1.0},
+                {0.0, 1.0}}});
     return std::make_shared<SimpleFluid::MeshHandle<Pack>>(
         std::move(cartesian));
 }
@@ -160,6 +177,11 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
     model.update(1.0e-6, temperature, material, void_model);
     EXPECT_DOUBLE_EQ(model.source_alpha_boil().value(0), 0.0);
     EXPECT_DOUBLE_EQ(model.latent_heat_sink().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_mass_rate().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_rate().value(0), 0.0);
+    void_model.update_explicit(1.0e-6, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(1.0e-6, void_model, true);
 
     temperature.put_scalar(383.0);
     model.update(1.0e-6, temperature, material, void_model);
@@ -175,6 +197,16 @@ TEST(BoilingSourceModelTest, BulkThresholdAndLatentHeatAreConsistent)
         -model.temperature_source(0),
         model.latent_heat_sink().value(0),
         1.0e-12);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), model.latent_heat_sink().value(0) / options.latent_heat);
+    const auto expected_accepted_mass = expected_energy / options.latent_heat * mesh->cell_volume(0) * 1.0e-6;
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), expected_accepted_mass, 1.0e-12);
+    EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_this_step(), 0.0);
+
+    void_model.update_explicit(1.0e-6, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(1.0e-6, void_model, true);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), expected_accepted_mass, 1.0e-12);
+    EXPECT_NEAR(model.global_submerged_steam_volume(), expected_accepted_mass / options.gas_density, 1.0e-12);
+    EXPECT_NEAR(model.last_phase_change_diagnostics().mass_balance_residual, 0.0, 1.0e-14);
 }
 
 /** @brief Verify wall boiling power is distributed to the owning cell. */
@@ -222,6 +254,8 @@ TEST(BoilingSourceModelTest, WallSourceDistributesToOwnerCell)
         model.source_alpha_boil().value(0),
         expected_mass_rate / options.gas_density,
         1.0e-12);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), model.latent_heat_sink().value(0) / options.latent_heat);
+    EXPECT_DOUBLE_EQ(model.rejected_vapor_mass_rate().value(0), 0.0);
 }
 
 /** @brief Verify active boiling modes reject nonphysical parameters. */
@@ -303,9 +337,21 @@ TEST(BoilingSourceModelTest,
         boiling_model.source_alpha_boil().value(0), 0.02, 1.0e-14);
     EXPECT_NEAR(
         boiling_model.latent_heat_sink().value(0), 0.2, 1.0e-14);
+    EXPECT_DOUBLE_EQ(boiling_model.phase_change_mass_rate().value(0),
+        boiling_model.latent_heat_sink().value(0) / boiling_options.latent_heat);
     EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-14);
     EXPECT_NEAR(
         void_model.source_alpha_total().value(0), 0.1, 1.0e-14);
+    const auto requested_mass = 1000.0 * 4200.0 * (383.0 - 373.0) / boiling_options.boiling_time_scale /
+                                boiling_options.latent_heat * mesh->cell_volume(0);
+    const auto accepted_mass = 0.02 * boiling_options.gas_density * mesh->cell_volume(0);
+    EXPECT_NEAR(boiling_model.accepted_evaporation_mass_this_step(), accepted_mass, 1.0e-14);
+    EXPECT_NEAR(boiling_model.rejected_vapor_mass_this_step(), requested_mass - accepted_mass, 1.0e-9);
+    EXPECT_NEAR(
+        boiling_model.last_phase_change_diagnostics().rejected_void_volume, requested_mass - accepted_mass, 1.0e-9);
+    boiling_model.complete_void_fraction_update(1.0, void_model, true);
+    EXPECT_NEAR(boiling_model.global_submerged_steam_mass(), accepted_mass, 1.0e-14);
+    EXPECT_NEAR(boiling_model.last_phase_change_diagnostics().void_balance_residual, 0.0, 1.0e-14);
 
     radiolysis.put_scalar(0.0);
     boiling_model.update(
@@ -316,6 +362,12 @@ TEST(BoilingSourceModelTest,
         &radiolysis);
     EXPECT_DOUBLE_EQ(boiling_model.source_alpha_boil().value(0), 0.0);
     EXPECT_DOUBLE_EQ(boiling_model.latent_heat_sink().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(boiling_model.phase_change_mass_rate().value(0), 0.0);
+    EXPECT_NEAR(boiling_model.rejected_vapor_mass_this_step(), requested_mass, 1.0e-9);
+    void_model.update_explicit(1.0, nullptr, &boiling_model.source_alpha_boil());
+    boiling_model.complete_void_fraction_update(1.0, void_model, true);
+    EXPECT_NEAR(
+        boiling_model.last_phase_change_diagnostics().cumulative_accepted_evaporation_mass, accepted_mass, 1.0e-14);
 }
 
 /** @brief Verify collapse-created void capacity is bounded by the time step. */
@@ -356,6 +408,270 @@ TEST(BoilingSourceModelTest, CollapseCapacityIsTimestepBounded)
     EXPECT_NEAR(void_model.alpha_g().value(0), 0.2, 1.0e-14);
     EXPECT_NEAR(
         void_model.source_alpha_total().value(0), 0.0, 1.0e-14);
+    boiling_model.complete_void_fraction_update(2.0, void_model, true);
+    EXPECT_NEAR(boiling_model.accepted_evaporation_mass_this_step(), 0.2, 1.0e-14);
+    EXPECT_NEAR(boiling_model.condensed_liquid_mass_this_step(), 0.0, 1.0e-14);
+    EXPECT_NEAR(boiling_model.global_submerged_steam_mass(), 0.2, 1.0e-14);
+    EXPECT_NEAR(boiling_model.last_phase_change_diagnostics().nonsteam_collapse_volume, 0.2, 1.0e-14);
+    EXPECT_DOUBLE_EQ(boiling_model.condensation_latent_heat_release().value(0), 0.0);
+    EXPECT_NEAR(boiling_model.temperature_source(0), -1.0, 1.0e-14);
+    EXPECT_NEAR(boiling_model.last_phase_change_diagnostics().mass_balance_residual, 0.0, 1.0e-14);
+}
+
+/** @brief Legacy boiling does not add condensate heat without free-surface ownership. */
+TEST(BoilingSourceModelTest, PhaseInventoryCouplingIsExplicitAndDefaultOff)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.initial_alpha = 0.1;
+    void_options.alpha_collapse_time = 1.0;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh, void_options);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    model.update(0.1, temperature, material, void_model);
+    void_model.update_explicit(0.1, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(0.1, void_model);
+
+    EXPECT_DOUBLE_EQ(model.condensed_liquid_mass_this_step(), 0.0);
+    EXPECT_DOUBLE_EQ(model.global_submerged_steam_mass(), 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_latent_heat_release().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.temperature_source(0), -model.latent_heat_sink().value(0));
+}
+
+/** @brief Verify accepted mass is the sole liquid-inventory decrement input. */
+TEST(BoilingSourceModelTest, PublishesAcceptedEvaporationMassWithoutSilentCapLoss)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 300.0, "temperature");
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.1;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh, void_options);
+
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_wall_boiling = true;
+    options.latent_heat = 20.0;
+    options.gas_density = 4.0;
+    options.wall_evaporation_fraction = 0.5;
+    options.wall_heat_flux = 80.0;
+    options.wall_boiling_patches = {"zmax"};
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    constexpr double time_step = 0.5;
+    model.update(time_step, temperature, material, void_model);
+
+    // Requested wall evaporation is 2 kg/(m^3 s), but the void cap admits
+    // only 0.8 kg/(m^3 s): a liquid inventory must remove the accepted 0.4 kg.
+    EXPECT_NEAR(model.phase_change_mass_rate().value(0), 0.8, 1.0e-14);
+    EXPECT_NEAR(model.rejected_vapor_mass_rate().value(0), 1.2, 1.0e-14);
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.rejected_vapor_mass_this_step(), 0.6, 1.0e-14);
+    EXPECT_DOUBLE_EQ(model.phase_change_mass_rate().value(0), model.latent_heat_sink().value(0) / options.latent_heat);
+
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.global_submerged_steam_volume(), 0.1, 1.0e-14);
+    EXPECT_NEAR(model.last_phase_change_diagnostics().mass_balance_residual, 0.0, 1.0e-14);
+}
+
+/** @brief Verify scalar collapse returns tracked steam mass conservatively. */
+TEST(BoilingSourceModelTest, CompletionBalancesEvaporationCollapseAndCondensateReturn)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionOptions void_options;
+    void_options.alpha_max = 0.2;
+    void_options.alpha_collapse_time = 0.5;
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh, void_options);
+
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 2.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    constexpr double time_step = 0.1;
+    model.update(time_step, temperature, material, void_model);
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), 0.4, 1.0e-14);
+    EXPECT_NEAR(model.global_submerged_steam_volume(), 0.2, 1.0e-14);
+
+    temperature.put_scalar(300.0);
+    model.update(time_step, temperature, material, void_model);
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+
+    const auto& diagnostics = model.last_phase_change_diagnostics();
+    EXPECT_DOUBLE_EQ(diagnostics.accepted_evaporation_mass, 0.0);
+    EXPECT_NEAR(diagnostics.scalar_void_collapse_volume, 0.04, 1.0e-14);
+    EXPECT_DOUBLE_EQ(diagnostics.nonsteam_collapse_volume, 0.0);
+    EXPECT_NEAR(diagnostics.condensed_liquid_mass, 0.08, 1.0e-14);
+    EXPECT_NEAR(diagnostics.condensation_latent_energy_release, diagnostics.condensed_liquid_mass * options.latent_heat,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.submerged_steam_mass, 0.32, 1.0e-14);
+    EXPECT_NEAR(diagnostics.submerged_steam_volume, 0.16, 1.0e-14);
+    EXPECT_NEAR(diagnostics.cumulative_accepted_evaporation_mass, 0.4, 1.0e-14);
+    EXPECT_NEAR(diagnostics.cumulative_condensed_liquid_mass, 0.08, 1.0e-14);
+    EXPECT_NEAR(diagnostics.mass_balance_residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(diagnostics.void_balance_residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(diagnostics.latent_energy_balance_residual, 0.0, 1.0e-14);
+    EXPECT_NEAR(model.condensation_latent_heat_release().value(0),
+        diagnostics.condensed_liquid_mass * options.latent_heat / (mesh->cell_volume(0) * time_step), 1.0e-14);
+    EXPECT_NEAR(model.condensation_mass_rate().value(0),
+        diagnostics.condensed_liquid_mass / (mesh->cell_volume(0) * time_step), 1.0e-14);
+    EXPECT_NEAR(model.condensation_latent_heat_release().value(0),
+        model.condensation_mass_rate().value(0) * options.latent_heat, 1.0e-14);
+    EXPECT_NEAR(model.temperature_source(0), model.condensation_latent_heat_release().value(0), 1.0e-14);
+}
+
+/** @brief Verify source acceptance and inventory completion cannot overlap. */
+TEST(BoilingSourceModelTest, EnforcesPhaseChangeCompletionOrder)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    model.update(0.1, temperature, material, void_model);
+    EXPECT_TRUE(model.phase_change_completion_pending());
+    EXPECT_THROW(model.update(0.1, temperature, material, void_model), std::logic_error);
+
+    void_model.update_explicit(0.1, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(0.1, void_model, true);
+    EXPECT_FALSE(model.phase_change_completion_pending());
+    EXPECT_THROW(model.complete_void_fraction_update(0.1, void_model, true), std::logic_error);
+
+    SimpleFluid::BoilingSourceModel<Pack> disabled(mesh);
+    EXPECT_NO_THROW(disabled.complete_void_fraction_update(0.1, void_model));
+}
+
+/** @brief A failed void closure leaves steam and cumulative state uncommitted. */
+TEST(BoilingSourceModelTest, FailedCompletionIsTransactionalAndCanBeRetried)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    constexpr double time_step = 0.1;
+    model.update(time_step, temperature, material, void_model);
+    const auto accepted = model.accepted_evaporation_mass_this_step();
+    ASSERT_GT(accepted, 0.0);
+
+    // Deliberately omit the accepted boiling source from the scalar update.
+    void_model.update_explicit(time_step, nullptr, nullptr);
+    EXPECT_THROW(model.complete_void_fraction_update(time_step, void_model, true), std::runtime_error);
+    EXPECT_TRUE(model.phase_change_completion_pending());
+    EXPECT_DOUBLE_EQ(model.global_submerged_steam_mass(), 0.0);
+    EXPECT_DOUBLE_EQ(model.last_phase_change_diagnostics().cumulative_accepted_evaporation_mass, 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_latent_heat_release().value(0), 0.0);
+    EXPECT_DOUBLE_EQ(model.condensation_mass_rate().value(0), 0.0);
+
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    EXPECT_NO_THROW(model.complete_void_fraction_update(time_step, void_model, true));
+    EXPECT_FALSE(model.phase_change_completion_pending());
+    EXPECT_NEAR(model.global_submerged_steam_mass(), accepted, 1.0e-14);
+}
+
+/** @brief Rank-local invalid inputs are rejected collectively before reductions. */
+TEST(BoilingSourceModelTest, CollectivelyRejectsRankAsymmetricInvalidCellState)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(2, 1, 1));
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() < 2)
+    {
+        GTEST_SKIP() << "requires at least two MPI ranks";
+    }
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 383.0, "temperature");
+    FieldType reserved(mesh, 0.0, "reserved_alpha_source");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 10.0;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    int local_injected = 0;
+    if (communicator->getRank() == 1 && mesh->num_owned_cells() > 0)
+    {
+        reserved.set_owned_value(0, std::numeric_limits<Pack::scalar_type>::quiet_NaN());
+        local_injected = 1;
+    }
+    int injected = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_injected, &injected);
+    ASSERT_EQ(injected, 1);
+    reserved.sync_ghosts();
+    EXPECT_THROW(model.update(0.1, temperature, material, void_model, &reserved), std::invalid_argument);
+    EXPECT_FALSE(model.phase_change_completion_pending());
+
+    reserved.put_scalar(0.0);
+    if (communicator->getRank() == 1 && mesh->num_owned_cells() > 0)
+    {
+        temperature.set_owned_value(0, std::numeric_limits<Pack::scalar_type>::quiet_NaN());
+    }
+    temperature.sync_ghosts();
+    EXPECT_THROW(model.update(0.1, temperature, material, void_model, &reserved), std::runtime_error);
+    EXPECT_FALSE(model.phase_change_completion_pending());
+}
+
+/** @brief Verify accepted evaporation is reduced over owned cells only. */
+TEST(BoilingSourceModelTest, GloballyReducesAcceptedEvaporationMass)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
+    auto material = make_water_properties(mesh);
+    FieldType temperature(mesh, 374.0, "temperature");
+    SimpleFluid::ScalarVoidFractionModel<Pack> void_model(mesh);
+    SimpleFluid::BoilingSourceOptions options;
+    options.enable_bulk_boiling = true;
+    options.saturation_temperature = 373.0;
+    options.boiling_time_scale = 1.0;
+    options.latent_heat = 1.0e8;
+    options.gas_density = 1.0;
+    SimpleFluid::BoilingSourceModel<Pack> model(mesh, options);
+
+    double local_volume = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        local_volume += mesh->cell_volume(static_cast<MeshType::local_ordinal_type>(owned));
+    }
+    double global_volume = 0.0;
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_volume, &global_volume);
+
+    constexpr double time_step = 0.1;
+    constexpr double accepted_mass_rate = 0.042;
+    model.update(time_step, temperature, material, void_model);
+    EXPECT_NEAR(model.accepted_evaporation_mass_this_step(), accepted_mass_rate * global_volume * time_step, 1.0e-14);
+    void_model.update_explicit(time_step, nullptr, &model.source_alpha_boil());
+    model.complete_void_fraction_update(time_step, void_model, true);
+    EXPECT_NEAR(model.global_submerged_steam_mass(), accepted_mass_rate * global_volume * time_step, 1.0e-14);
 }
 
 /** @brief Verify radiolysis and boiling sources aggregate within void bounds. */
@@ -906,6 +1222,8 @@ TEST(Phase13PlusCouplingTest,
 
         radiolysis.configure(make_sheng_test_options());
         EXPECT_THROW(solver.step(), std::logic_error);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+        EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
@@ -959,6 +1277,8 @@ TEST(Phase13PlusCouplingTest,
         void_model->configure(collapse_options);
 
         EXPECT_THROW(solver.step(), std::logic_error);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+        EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
@@ -992,6 +1312,12 @@ TEST(MaterialFeedbackModelTest, BoussinesqVoidDensityAndFloors)
     EXPECT_NEAR(material.density.value(0), expected_density, 1.0e-12);
     EXPECT_DOUBLE_EQ(material.dynamic_viscosity.value(0), 2.0e-3);
     EXPECT_DOUBLE_EQ(model.density_feedback().value(0), expected_density);
+    EXPECT_DOUBLE_EQ(model.pure_liquid_density(temperature.value(0)), expected_liquid_density);
+
+    alpha.put_scalar(0.75);
+    model.apply(context, &alpha, material);
+    EXPECT_NE(material.density.value(0), expected_density);
+    EXPECT_DOUBLE_EQ(model.pure_liquid_density(temperature.value(0)), expected_liquid_density);
 }
 
 /** @brief Compare precursor source and decay integration with analytic values. */
@@ -1021,15 +1347,109 @@ TEST(DelayedNeutronPrecursorModelTest, SourceAndDecayAreAnalytic)
     options.source_terms = {4.0};
     model.configure(options);
     model.advance(0.5, alpha_l, nullptr);
+    const auto expected_source_solution =
+        4.0 / 2.0 * (1.0 - std::exp(-1.0));
     EXPECT_NEAR(
         model.concentration(0).value(0),
-        4.0 / 2.0 * (1.0 - std::exp(-1.0)),
+        expected_source_solution,
         1.0e-12);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.inventory_before, 0.0, 1.0e-14);
+    EXPECT_NEAR(diagnostics.source_added, 2.0 * volume, 1.0e-12);
+    EXPECT_NEAR(
+        diagnostics.decay_removed,
+        (2.0 - expected_source_solution) * volume,
+        1.0e-12);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        expected_source_solution * volume,
+        1.0e-12);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
 
     options.decay_constants = {1.0e-18};
     model.configure(options);
     model.advance(0.5, alpha_l, nullptr);
     EXPECT_NEAR(model.concentration(0).value(0), 2.0, 1.0e-12);
+}
+
+/** @brief Keep the source response finite as positive decay approaches zero. */
+TEST(DelayedNeutronPrecursorModelTest, TinyDecayConstantPreservesFiniteSourceLimit)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0e-320};
+    options.source_terms = {4.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(0.5, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_TRUE(std::isfinite(concentration));
+    EXPECT_NEAR(concentration, 2.0, 1.0e-12);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 2.0 * volume, 1.0e-12);
+    EXPECT_NEAR(diagnostics.decay_removed, 0.0, 1.0e-14);
+    EXPECT_TRUE(std::isfinite(diagnostics.balance_error));
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
+}
+
+/** @brief Avoid cancellation when decay is much faster than the time step. */
+TEST(DelayedNeutronPrecursorModelTest, LargeDecayStepUsesDirectExponentialResponse)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0};
+    options.source_terms = {1.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(1.0e16, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_TRUE(std::isfinite(concentration));
+    EXPECT_NEAR(concentration, 1.0, 1.0e-14);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(diagnostics.decay_removed, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        concentration * volume,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-14);
+}
+
+/** @brief Keep balance closure when a large inventory decays to a survivor. */
+TEST(DelayedNeutronPrecursorModelTest,
+     LargeInitialInventoryKeepsStableBalanceDiagnostic)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.decay_constants = {1.0};
+    options.initial_concentrations = {1.0e16};
+    options.source_terms = {1.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 1.0, "alpha_l");
+
+    model.advance(1.0e16, alpha_l, nullptr);
+
+    const auto concentration = model.concentration(0).value(0);
+    EXPECT_NEAR(concentration, 1.0, 1.0e-14);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto volume = mesh->cell_volume(0);
+    EXPECT_NEAR(diagnostics.source_added, 1.0e16 * volume, 4.0);
+    EXPECT_NEAR(diagnostics.decay_removed, 2.0e16 * volume, 8.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        concentration * volume,
+        1.0e-14);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-14);
 }
 
 /** @brief Verify precursor inventory survives a changing liquid fraction. */
@@ -1151,6 +1571,318 @@ TEST(DelayedNeutronPrecursorModelTest,
               * model.concentration(0).value(cell_lid),
             1.0e-12);
     }
+}
+
+/** @brief Verify liquid flux advects precursors and reports a closed balance. */
+TEST(DelayedNeutronPrecursorModelTest,
+     LiquidAdvectionConservesDistributedInventory)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel =
+        SimpleFluid::DelayedNeutronPrecursorModel<Pack, NativeMesh>;
+    using NativeField = typename NativeModel::field_type;
+    using NativeFaceField = typename NativeModel::face_flux_field_type;
+
+    auto mesh = make_native_distributed_line_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.power_yields = {1.0};
+    NativeModel model(mesh, options);
+    NativeField alpha_l(mesh, 0.7, "alpha_l");
+    NativeField fission_power(mesh, "qdot_fission");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<NativeMesh::local_ordinal_type>(owned);
+        const auto x = mesh->cell_centroid(cell_lid).x;
+        fission_power.set_owned_value(cell_lid, 2.0 - x);
+    }
+    fission_power.sync_ghosts();
+    model.advance(0.1, alpha_l, &fission_power);
+
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    NativeFaceField liquid_flux(mesh, 0.0, "liquid_face_flux");
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto face_lid =
+            static_cast<NativeMesh::local_ordinal_type>(face);
+        if (!mesh->is_owned_face(face_lid)
+            || !mesh->is_interior_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        const auto neighbor = mesh->neighbor_cell(face_lid);
+        const auto crosses_partition =
+            !mesh->is_owned_cell(owner) || !mesh->is_owned_cell(neighbor);
+        if (communicator->getSize() > 1 && !crosses_partition)
+        {
+            continue;
+        }
+        const auto outward_area =
+            mesh->face_area_vector_outward(face_lid, owner);
+        liquid_flux.set_owned_value(face_lid, 0.05 * outward_area.x);
+    }
+    liquid_flux.sync_ghosts();
+
+    std::vector<double> concentration_before(mesh->num_owned_cells());
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<NativeMesh::local_ordinal_type>(owned);
+        concentration_before[owned] = model.concentration(0).value(cell_lid);
+    }
+    int local_nonzero_partition_fluxes = 0;
+    for (const auto face_lid : liquid_flux.owned_face_ids())
+    {
+        if (!mesh->is_interior_face(face_lid))
+        {
+            continue;
+        }
+        const auto owner = mesh->owner_cell(face_lid);
+        const auto neighbor = mesh->neighbor_cell(face_lid);
+        if ((!mesh->is_owned_cell(owner) || !mesh->is_owned_cell(neighbor))
+            && std::abs(liquid_flux.value(face_lid)) > 1.0e-14)
+        {
+            ++local_nonzero_partition_fluxes;
+        }
+    }
+    if (communicator->getSize() > 1)
+    {
+        int global_nonzero_partition_fluxes = 0;
+        Teuchos::reduceAll(
+            *communicator,
+            Teuchos::REDUCE_SUM,
+            1,
+            &local_nonzero_partition_fluxes,
+            &global_nonzero_partition_fluxes);
+        ASSERT_GT(global_nonzero_partition_fluxes, 0);
+    }
+
+    constexpr double time_step = 0.05;
+    model.advance(time_step, alpha_l, nullptr, &liquid_flux);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+
+    double local_profile_change = 0.0;
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell_lid =
+            static_cast<NativeMesh::local_ordinal_type>(owned);
+        local_profile_change +=
+            std::abs(model.concentration(0).value(cell_lid)
+                     - concentration_before[owned])
+          * mesh->cell_volume(cell_lid);
+    }
+    double global_profile_change = 0.0;
+    Teuchos::reduceAll(
+        *communicator,
+        Teuchos::REDUCE_SUM,
+        1,
+        &local_profile_change,
+        &global_profile_change);
+
+    EXPECT_GT(diagnostics.inventory_before, 0.0);
+    EXPECT_GT(global_profile_change, 1.0e-12);
+    EXPECT_DOUBLE_EQ(diagnostics.source_added, 0.0);
+    EXPECT_DOUBLE_EQ(diagnostics.decay_removed, 0.0);
+    EXPECT_DOUBLE_EQ(diagnostics.boundary_outflow, 0.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after,
+        diagnostics.inventory_before,
+        std::max(1.0e-12,
+                 std::abs(diagnostics.inventory_before) * 1.0e-10));
+    EXPECT_NEAR(
+        diagnostics.balance_error,
+        0.0,
+        std::max(1.0e-12,
+                 std::abs(diagnostics.inventory_before) * 1.0e-10));
+}
+
+/** @brief Verify rank-local input differences fail collectively before transport. */
+TEST(DelayedNeutronPrecursorModelTest,
+     CollectivelyRejectsRankDivergentAdvanceSelection)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel =
+        SimpleFluid::DelayedNeutronPrecursorModel<Pack, NativeMesh>;
+    using NativeField = typename NativeModel::field_type;
+    using NativeFaceField = typename NativeModel::face_flux_field_type;
+
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() < 2)
+    {
+        GTEST_SKIP() << "Rank-divergent validation requires at least two ranks.";
+    }
+
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    NativeModel model(mesh, options);
+    NativeField alpha_l(mesh, 0.7, "alpha_l");
+    NativeFaceField liquid_flux(mesh, 0.0, "liquid_face_flux");
+    const auto* selected_flux =
+        communicator->getRank() == 0 ? &liquid_flux : nullptr;
+    EXPECT_THROW(
+        model.advance(0.05, alpha_l, nullptr, selected_flux),
+        std::invalid_argument);
+
+    NativeModel invalid_field_model(mesh, options);
+    if (communicator->getRank() == 0)
+    {
+        alpha_l.set_owned_value(0, -0.1);
+    }
+    EXPECT_THROW(
+        invalid_field_model.advance(0.05, alpha_l, nullptr),
+        std::invalid_argument);
+
+    NativeModel inconsistent_timestep_model(mesh, options);
+    alpha_l.put_scalar(0.7);
+    const auto rank_dependent_time_step =
+        communicator->getRank() == 0 ? 0.05 : 0.1;
+    EXPECT_THROW(
+        inconsistent_timestep_model.advance(
+            rank_dependent_time_step, alpha_l, nullptr),
+        std::invalid_argument);
+
+}
+
+/** @brief Reject rank-divergent configuration and invalid power before syncs. */
+TEST(DelayedNeutronPrecursorModelTest,
+     CollectivelyRejectsRankDivergentConfigurationAndPower)
+{
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel =
+        SimpleFluid::DelayedNeutronPrecursorModel<Pack, NativeMesh>;
+    using NativeField = typename NativeModel::field_type;
+
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::DelayedNeutronPrecursorOptions divergent_groups;
+    divergent_groups.group_count =
+        communicator->getRank() == 0 ? 0 : 1;
+    EXPECT_THROW(
+        (NativeModel(mesh, divergent_groups)),
+        std::invalid_argument);
+
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {1.0};
+    NativeModel model(mesh, options);
+
+    EXPECT_THROW(model.configure(divergent_groups), std::invalid_argument);
+    EXPECT_TRUE(model.enabled());
+    EXPECT_EQ(model.group_count(), 1u);
+
+    auto divergent_initial = options;
+    divergent_initial.initial_concentrations = {
+        communicator->getRank() == 0 ? 1.0 : 2.0};
+    EXPECT_THROW(
+        model.configure(divergent_initial),
+        std::invalid_argument);
+
+    auto divergent_options = options;
+    divergent_options.source_terms = {
+        communicator->getRank() == 0 ? 1.0 : 2.0};
+    EXPECT_THROW(
+        model.configure(divergent_options),
+        std::invalid_argument);
+
+    auto rank_local_invalid_options = options;
+    rank_local_invalid_options.source_terms = {
+        communicator->getRank() == 0 ? -1.0 : 1.0};
+    EXPECT_THROW(
+        model.configure(rank_local_invalid_options),
+        std::invalid_argument);
+
+    NativeField alpha_l(mesh, 0.7, "alpha_l");
+    NativeField fission_power(mesh, 1.0, "qdot_fission");
+    if (communicator->getRank() == 0)
+    {
+        EXPECT_GT(mesh->num_owned_cells(), 0u);
+        if (mesh->num_owned_cells() > 0)
+        {
+            fission_power.set_owned_value(0, -1.0);
+        }
+    }
+    fission_power.sync_ghosts();
+    EXPECT_THROW(
+        model.advance(0.05, alpha_l, &fission_power),
+        std::invalid_argument);
+}
+
+/** @brief Reject asymmetric solver precursor state before entering a step. */
+TEST(DelayedNeutronPrecursorModelTest,
+     SolverRejectsRankDivergentPrecursorPresenceBeforeStep)
+{
+    auto mesh = make_native_distributed_line_mesh();
+    const auto communicator = mesh->owned_cell_map()->getComm();
+    if (communicator->getSize() != 2)
+    {
+        GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
+    }
+
+    SimpleFluid::TimeStepperOptions time_options;
+    time_options.time_step = 0.05;
+    SimpleFluid::BoussinesqSolver<Pack> solver(
+        mesh, {}, time_options, {});
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {1.0};
+    solver.configure_precursors(options);
+    if (communicator->getRank() == 0)
+    {
+        EXPECT_TRUE(solver.remove_precursor_model());
+    }
+
+    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_EQ(solver.step_index(), 0);
+}
+
+/** @brief Verify an implicit outlet loss is included in the diagnostics. */
+TEST(DelayedNeutronPrecursorModelTest, BoundaryOutflowClosesInventoryBalance)
+{
+    auto mesh = make_single_cell_mesh();
+    SimpleFluid::DelayedNeutronPrecursorOptions options;
+    options.group_count = 1;
+    options.initial_concentrations = {4.0};
+    SimpleFluid::DelayedNeutronPrecursorModel<Pack> model(mesh, options);
+    FieldType alpha_l(mesh, 0.75, "alpha_l");
+    SimpleFluid::FaceField<Pack> liquid_flux(
+        mesh, 0.0, "liquid_face_flux");
+
+    MeshType::local_ordinal_type outlet = -1;
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        static_cast<void>(batch_id);
+        if (!batch.face_lids.empty())
+        {
+            outlet = batch.face_lids.front();
+            break;
+        }
+    }
+    ASSERT_GE(outlet, 0);
+    liquid_flux.set_value(outlet, 0.25);
+
+    constexpr double time_step = 0.2;
+    model.advance(time_step, alpha_l, nullptr, &liquid_flux);
+    const auto& diagnostics = model.last_inventory_diagnostics(0);
+    const auto expected_concentration =
+        4.0 / (1.0 + time_step * 0.25 / mesh->cell_volume(0));
+
+    EXPECT_NEAR(model.concentration(0).value(0),
+                expected_concentration, 1.0e-12);
+    EXPECT_GT(diagnostics.boundary_outflow, 0.0);
+    EXPECT_NEAR(
+        diagnostics.inventory_after + diagnostics.boundary_outflow,
+        diagnostics.inventory_before,
+        1.0e-12);
+    EXPECT_NEAR(diagnostics.balance_error, 0.0, 1.0e-12);
 }
 
 /** @brief Verify precursor diffusion includes explicit non-orthogonal correction. */
@@ -1469,6 +2201,70 @@ TEST(Phase13PlusDatabaseTest, ParsesFlatKeysAndDefaults)
         (SimpleFluid::ArrReal{0.1, 0.2}));
 }
 
+/** @brief Verify each Phase 13 parser identifies an ill-typed option and owner. */
+TEST(Phase13PlusDatabaseTest, ReportsWrongTypedOptionContext)
+{
+    auto expect_context =
+        [](auto&& parse, const std::string& context, const std::string& key)
+    {
+        try
+        {
+            parse();
+            FAIL() << "Expected a typed model option failure.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            const std::string message(error.what());
+            EXPECT_NE(message.find(context), std::string::npos);
+            EXPECT_NE(message.find(key), std::string::npos);
+            EXPECT_NE(message.find("wrong type"), std::string::npos);
+        }
+    };
+
+    SimpleFluid::Database boiling;
+    boiling.set("enable_bulk_boiling", std::string{"yes"});
+    expect_context(
+        [&] { SimpleFluid::boiling_source_options_from_database(boiling); },
+        "Boiling source model",
+        "enable_bulk_boiling");
+
+    SimpleFluid::Database scalar_void;
+    scalar_void.set("alpha_min", std::string{"zero"});
+    expect_context(
+        [&]
+        {
+            SimpleFluid::scalar_void_fraction_options_from_database(
+                scalar_void);
+        },
+        "Scalar void-fraction model",
+        "alpha_min");
+
+    SimpleFluid::Database feedback;
+    feedback.set("density_feedback_model", SimpleFluid::real_t{1.0});
+    SimpleFluid::TimeStepperOptions time_options;
+    const auto model_options =
+        SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
+    expect_context(
+        [&]
+        {
+            SimpleFluid::material_feedback_options_from_database(
+                feedback, model_options, time_options);
+        },
+        "Material feedback model",
+        "density_feedback_model");
+
+    SimpleFluid::Database precursor;
+    precursor.set("precursor_group_count", SimpleFluid::real_t{2.0});
+    expect_context(
+        [&]
+        {
+            SimpleFluid::delayed_neutron_precursor_options_from_database(
+                precursor);
+        },
+        "Delayed-neutron precursor model",
+        "precursor_group_count");
+}
+
 /** @brief Verify feedback mapping preserves a constant field average. */
 TEST(FeedbackMapTest, PreservesConstantFieldAverage)
 {
@@ -1631,6 +2427,8 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
     EXPECT_NE(contents.find("Name=\"S_alpha_boil\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"S_alpha_total\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"latentHeatSink\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"condensationLatentHeatRelease\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"condensationMassRate\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"rhoFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"muFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"C_1\""), std::string::npos);

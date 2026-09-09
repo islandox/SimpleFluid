@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/GeometryEpoch.hh"
 #include "geometry/mesh/MeshBase.hh"
 #include "geometry/mesh/SemiStructMeshTopo.hh"
 
@@ -21,6 +22,8 @@
 
 namespace SimpleFluid::Meshes
 {
+
+class PlanarALEGeometryAccess;
 
 /**
  * @brief Serial mesh formed by extruding a polygonal XY topology through Z.
@@ -102,8 +105,14 @@ public:
     const Indexer& indexer() const noexcept { return d_topology.indexer(); }
     const Topology& topology() const noexcept { return d_topology; }
 
+    /** @brief Revision shared by all handles observing this geometry. */
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_state.epoch; }
+
 private:
     friend Base;
+    friend class PlanarALEGeometryAccess;
+
+    void replace_axial_edges_fixed_topology(Arr<real_t> edges);
 
     void check_cell_id(cell_id_t cell_id) const;
     void check_face_id(face_id_t face_id) const;
@@ -149,6 +158,7 @@ private:
     Arr<Vec3> d_xy_edge_normals;
 
     Topology d_topology;
+    GeometryEpochState d_geometry_state;
 };
 
 using SemiStructuredXYZ3D = SemiStructuredXY_Z;

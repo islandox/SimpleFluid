@@ -107,6 +107,9 @@ set(SIMPLEFLUID_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
     geometry/Mesh.cc
     geometry/MeshHandle.cc
+    geometry/PlanarALEMeshMotion.cc
+    geometry/MeshReorderingFactory.cc
+    geometry/SolidSubdomain.cc
     geometry/STKMesh.cc
     geometry/MeshFactory.cc
     geometry/mesh/LocalGlobalIndexer.cc
@@ -164,6 +167,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     equations/PressureProjectionEquation.cc
     equations/RadiolyticGasPhysics.cc
     equations/RadiolyticGasProperties.cc
+    equations/SolidHeatConductionEquation.cc
     equations/TemperatureDiffusionEquation.cc
     equations/turbulence/TurbulenceModel.cc
     equations/turbulence/TurbulenceScalarTransportEquation.cc
@@ -174,6 +178,8 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     solvers/BoussinesqSolver.cc
     solvers/CoupledPressureVelocitySolver.cc
     solvers/FluidSolver.cc
+    solvers/IncompressibleIsothermalSolver.cc
+    solvers/PlanarFreeSurfaceModel.cc
     solvers/SteadyStateSearch.cc
 )
 
@@ -258,7 +264,8 @@ if(UNIX)
 endif()
 
 # Keep the export map enforceable as the static Trilinos dependency set evolves.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+if(BUILD_TESTING
+   AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Clang-built Trilinos emits substantially more weak Kokkos template
     # definitions in Debug than GCC-built archives.  Both sets are part of
@@ -323,6 +330,11 @@ add_library(SimpleFluid INTERFACE)
 add_library(SimpleFluid::SimpleFluid ALIAS SimpleFluid)
 target_link_libraries(SimpleFluid INTERFACE SimpleFluidSolvers)
 
+if(SIMPLEFLUID_ENABLE_IF97)
+    add_subdirectory(materials)
+    target_link_libraries(SimpleFluid INTERFACE SimpleFluidIF97)
+endif()
+
 # Reuse a visibility-compatible PCH for every object embedded in the DSO.
 target_precompile_headers(SimpleFluidCore REUSE_FROM SimpleFluidSharedPch)
 target_precompile_headers(SimpleFluidMesh REUSE_FROM SimpleFluidSharedPch)
@@ -351,36 +363,124 @@ function(simplefluid_exe_reuse_precompiled_header target_name)
         ${target_name} REUSE_FROM SimpleFluidExecutablePch)
 endfunction()
 
-function(simplefluid_configure_test_executable target_name)
-    simplefluid_exe_reuse_precompiled_header(${target_name})
+if(BUILD_TESTING)
+    function(simplefluid_configure_test_executable target_name)
+        simplefluid_exe_reuse_precompiled_header(${target_name})
 
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
-       AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-       AND SIMPLEFLUID_ENABLE_LTO
-       AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
-        set_target_properties(${target_name} PROPERTIES
-            INTERPROCEDURAL_OPTIMIZATION FALSE
-            INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
-            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
-        target_compile_options(${target_name} PRIVATE
-            "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-fno-lto>")
-        target_link_options(${target_name} PRIVATE
-            "$<$<CONFIG:Release,RelWithDebInfo>:-fno-lto>"
-            "$<$<CONFIG:Release,RelWithDebInfo>:-fno-use-linker-plugin>")
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+           AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+           AND SIMPLEFLUID_ENABLE_LTO
+           AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+            set_target_properties(${target_name} PROPERTIES
+                INTERPROCEDURAL_OPTIMIZATION FALSE
+                INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE
+                INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+            target_compile_options(${target_name} PRIVATE
+                "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-fno-lto>")
+            target_link_options(${target_name} PRIVATE
+                "$<$<CONFIG:Release,RelWithDebInfo>:-fno-lto>"
+                "$<$<CONFIG:Release,RelWithDebInfo>:-fno-use-linker-plugin>")
+        endif()
+    endfunction()
+
+    add_subdirectory(dataclass/unitTests)
+    add_subdirectory(geometry/unitTests)
+    add_subdirectory(parallel/unitTests)
+    add_subdirectory(fields/unitTests)
+    add_subdirectory(FVM/unitTests)
+    add_subdirectory(equations/unitTests)
+    add_subdirectory(solvers/unitTests)
+    add_subdirectory(io/unitTests)
+    if(SIMPLEFLUID_ENABLE_IF97)
+        add_subdirectory(materials/unitTests)
     endif()
-endfunction()
-
-add_subdirectory(dataclass/unitTests)
-add_subdirectory(geometry/unitTests)
-add_subdirectory(parallel/unitTests)
-add_subdirectory(fields/unitTests)
-add_subdirectory(FVM/unitTests)
-add_subdirectory(equations/unitTests)
-add_subdirectory(solvers/unitTests)
-add_subdirectory(io/unitTests)
+endif()
 
 if(SIMPLEFLUID_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
+endif()
+
+add_executable(verification_boundary_layer_mesh examples/verification_boundary_layer_mesh.cc)
+target_link_libraries(verification_boundary_layer_mesh PRIVATE SimpleFluid::Mesh)
+simplefluid_exclude_from_pgo_sources(examples/verification_boundary_layer_mesh.cc)
+
+add_executable(
+    planar_free_surface_verification
+    examples/planar_free_surface_verification.cc)
+target_link_libraries(planar_free_surface_verification PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(planar_free_surface_verification)
+
+# This analytic verification driver is not part of the production PGO training
+# workload, so optimize it normally in profile-use builds.
+simplefluid_exclude_from_pgo_sources(
+    examples/planar_free_surface_verification.cc)
+
+add_executable(
+    planar_ale_verification
+    examples/planar_ale_verification.cc)
+target_link_libraries(planar_ale_verification PRIVATE SimpleFluid)
+simplefluid_exe_reuse_precompiled_header(planar_ale_verification)
+simplefluid_exclude_from_pgo_sources(
+    examples/planar_ale_verification.cc)
+
+foreach(VERIFICATION_TARGET IN ITEMS dispersed_bubble_verification planar_ale_comparison)
+  if(SIMPLEFLUID_ENABLE_IF97)
+    add_executable(${VERIFICATION_TARGET} examples/${VERIFICATION_TARGET}.cc)
+    target_link_libraries(${VERIFICATION_TARGET} PRIVATE SimpleFluid SimpleFluid::IF97)
+    simplefluid_exe_reuse_precompiled_header(${VERIFICATION_TARGET})
+    simplefluid_exclude_from_pgo_sources(examples/${VERIFICATION_TARGET}.cc)
+  else()
+    # Select a separate source instead of changing compile definitions on a
+    # target that reuses the shared executable PCH. Default builds retain a
+    # useful launcher diagnostic without linking or discovering IF97.
+    add_executable(${VERIFICATION_TARGET} examples/if97_verification_unavailable.cc)
+  endif()
+  if(BUILD_TESTING AND SIMPLEFLUID_ENABLE_IF97)
+    if(VERIFICATION_TARGET STREQUAL "dispersed_bubble_verification")
+      set(VERIFICATION_SMALL_ARGS --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/dispersedBubbleFlow/mesh_scale1.dat"
+        --parameters "${PROJECT_SOURCE_DIR}/verification/openfoam/dispersedBubbleFlow/reference_scale1.properties")
+    else()
+      set(VERIFICATION_SMALL_ARGS --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/planarALE/mesh_scale1.dat")
+    endif()
+    foreach(VERIFICATION_MODE IN ITEMS steady transient)
+      add_test(
+        NAME ${VERIFICATION_TARGET}_${VERIFICATION_MODE}
+        COMMAND ${VERIFICATION_TARGET} --mode ${VERIFICATION_MODE}
+          ${VERIFICATION_SMALL_ARGS}
+          --output "${CMAKE_CURRENT_BINARY_DIR}/verification/${VERIFICATION_TARGET}/${VERIFICATION_MODE}")
+      set_tests_properties(${VERIFICATION_TARGET}_${VERIFICATION_MODE} PROPERTIES
+        LABELS "verification;conservation;small_fixture"
+        TIMEOUT 120
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    endforeach()
+  endif()
+endforeach()
+
+if(SIMPLEFLUID_ENABLE_IF97)
+  add_executable(bottom_heated_bubbly_convection examples/bottom_heated_bubbly_convection.cc)
+  target_link_libraries(bottom_heated_bubbly_convection PRIVATE SimpleFluid SimpleFluid::IF97)
+  simplefluid_exe_reuse_precompiled_header(bottom_heated_bubbly_convection)
+  simplefluid_exclude_from_pgo_sources(examples/bottom_heated_bubbly_convection.cc)
+  if(BUILD_TESTING)
+    add_test(NAME bottom_convection_zero_source
+      COMMAND bottom_heated_bubbly_convection --steps 10 --source-scale 0
+        --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/mesh_scale1.dat"
+        --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
+        --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_zero_source")
+    set_tests_properties(bottom_convection_zero_source PROPERTIES
+      LABELS "verification;conservation;small_fixture;turbulence" TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    add_test(NAME bottom_convection_graded_transport
+      COMMAND bottom_heated_bubbly_convection --steps 5
+        --mesh-file "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/mesh_scale1.dat"
+        --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
+        --output "${CMAKE_CURRENT_BINARY_DIR}/verification/bottom_convection_graded_transport")
+    set_tests_properties(bottom_convection_graded_transport PROPERTIES
+      LABELS "verification;conservation;small_fixture;turbulence" TIMEOUT 60
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+  endif()
+else()
+  add_executable(bottom_heated_bubbly_convection examples/if97_verification_unavailable.cc)
 endif()
 
 add_executable(natural_convection_box examples/natural_convection_box.cc)
@@ -408,11 +508,14 @@ simplefluid_require_complete_pgo(SimpleFluidCore)
 simplefluid_require_complete_pgo(SimpleFluidFVM)
 simplefluid_require_complete_pgo(SimpleFluidSolvers)
 
-# Require profiles for every Mesh archive member linked into Shiri. The four
+# Require profiles for every Mesh archive member linked into Shiri. The six
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     geometry/BoundaryLayerMeshFactory.cc
+    geometry/MeshReorderingFactory.cc
+    geometry/PlanarALEMeshMotion.cc
+    geometry/SolidSubdomain.cc
     geometry/mesh/OrthogonalLocalGlobalIndexer.cc
     geometry/mesh/PartitionedMeshBase.cc
     geometry/mesh/SemiStructuredXY_Z.cc)
@@ -427,6 +530,49 @@ simplefluid_exclude_from_pgo_sources(
 add_executable(pitz_daily examples/pitz_daily.cc)
 target_link_libraries(pitz_daily PRIVATE SimpleFluid)
 simplefluid_exe_reuse_precompiled_header(pitz_daily)
+
+if(BUILD_TESTING)
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(
+      NAME pitz_daily_profile_comparator_fixture
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_compare_profiles.py")
+    set_tests_properties(pitz_daily_profile_comparator_fixture PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+    add_test(
+      NAME openfoam_verification_comparator
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/test_compare_verification.py")
+    set_tests_properties(openfoam_verification_comparator PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+    add_test(
+      NAME verification_performance_outputs
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/test_run_performance.py")
+    set_tests_properties(verification_performance_outputs PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+    add_test(
+      NAME openfoam_water_field_figures
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/test_plot_water_fields.py")
+    set_tests_properties(openfoam_water_field_figures PROPERTIES
+      LABELS "verification;integration"
+      TIMEOUT 30)
+    add_test(NAME openfoam_sst_field_figures
+      COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/test_plot_sst_fields.py")
+    set_tests_properties(openfoam_sst_field_figures PROPERTIES LABELS "verification;turbulence" TIMEOUT 30)
+    add_test(NAME openfoam_boundary_layer_mesh
+      COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/test_structured_mesh.py")
+    set_tests_properties(openfoam_boundary_layer_mesh PROPERTIES LABELS "verification;geometry" TIMEOUT 30)
+  else()
+    message(WARNING
+      "Python 3 was not found; the OpenFOAM comparator fixture tests are disabled")
+  endif()
+endif()
 
 add_executable(fissile_solution_tank_demo examples/fissile_solution_tank_demo.cc)
 target_link_libraries(fissile_solution_tank_demo PRIVATE SimpleFluid)
@@ -447,7 +593,9 @@ simplefluid_exe_reuse_precompiled_header(constant_power_cylinder_vessel)
 # Any production executable requested from a USE tree must have been present in
 # the training run. The presets build Shiri only; building another application
 # later therefore fails loudly until its workload is added to training.
-foreach(EXAMPLE_TARGET IN ITEMS
+set(SIMPLEFLUID_EXAMPLE_TARGETS
+    planar_free_surface_verification
+    planar_ale_verification
     natural_convection_box
     natural_convection_cylinder
     natural_convection_sphere
@@ -457,21 +605,68 @@ foreach(EXAMPLE_TARGET IN ITEMS
     fissile_solution_tank_demo
     fissile_solution_tank_sst
     constant_power_cylinder_vessel)
+foreach(EXAMPLE_TARGET IN LISTS SIMPLEFLUID_EXAMPLE_TARGETS)
   simplefluid_require_complete_pgo(${EXAMPLE_TARGET})
-  add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
-  set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
-      LABELS integration
-      WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
 
-set_tests_properties(natural_convection_shiri_smoke PROPERTIES
-    ENVIRONMENT
-        "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
+if(BUILD_TESTING)
+  foreach(EXAMPLE_TARGET IN LISTS SIMPLEFLUID_EXAMPLE_TARGETS)
+    add_test(NAME ${EXAMPLE_TARGET}_smoke COMMAND ${EXAMPLE_TARGET})
+    set_tests_properties(${EXAMPLE_TARGET}_smoke PROPERTIES
+        LABELS integration
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endforeach()
 
-set_tests_properties(fissile_solution_tank_sst_smoke PROPERTIES
-    ENVIRONMENT
-        "SIMPLEFLUID_TANK_RZ_SPACING=0.05;SIMPLEFLUID_TANK_CIRCUMFERENTIAL_SPACING=0.1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_COUNT=1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_FIRST_HEIGHT=0.01;SIMPLEFLUID_TANK_STEPS=1;SIMPLEFLUID_TANK_DT=0.001")
+  set(SIMPLEFLUID_PLANAR_FREE_SURFACE_VERIFICATION_SUBCASES
+      uniformHeating
+      gasGeneration
+      completeEscape
+      closedHeadspace
+      boilingMassLoss)
+  foreach(SUBCASE IN LISTS SIMPLEFLUID_PLANAR_FREE_SURFACE_VERIFICATION_SUBCASES)
+    add_test(
+        NAME planar_free_surface_${SUBCASE}
+        COMMAND planar_free_surface_verification ${SUBCASE})
+    set_tests_properties(planar_free_surface_${SUBCASE} PROPERTIES
+        LABELS verification
+        TIMEOUT 10
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endforeach()
 
-set_tests_properties(pitz_daily_smoke PROPERTIES
-    ENVIRONMENT
-        "SIMPLEFLUID_PITZ_MESH_DIVISOR=40;SIMPLEFLUID_PITZ_STEPS=1;SIMPLEFLUID_PITZ_DT=1e-6")
+  set(SIMPLEFLUID_PLANAR_ALE_VERIFICATION_SUBCASES
+      aleUniformHeating
+      aleGasGeneration
+      aleCompleteEscape
+      aleFailureRollback)
+  foreach(SUBCASE IN LISTS SIMPLEFLUID_PLANAR_ALE_VERIFICATION_SUBCASES)
+    add_test(
+        NAME planar_ale_${SUBCASE}
+        COMMAND planar_ale_verification ${SUBCASE})
+    set_tests_properties(planar_ale_${SUBCASE} PROPERTIES
+        LABELS "verification;ale;conservation"
+        TIMEOUT 30
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  endforeach()
+
+  set_tests_properties(natural_convection_shiri_smoke PROPERTIES
+      ENVIRONMENT
+          "SIMPLEFLUID_SHIRI_NR=4;SIMPLEFLUID_SHIRI_NTHETA=4;SIMPLEFLUID_SHIRI_NZ=6;SIMPLEFLUID_SHIRI_STEPS=1")
+
+  set_tests_properties(fissile_solution_tank_sst_smoke PROPERTIES
+      ENVIRONMENT
+          "SIMPLEFLUID_TANK_RZ_SPACING=0.05;SIMPLEFLUID_TANK_CIRCUMFERENTIAL_SPACING=0.1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_COUNT=1;SIMPLEFLUID_TANK_BOUNDARY_LAYER_FIRST_HEIGHT=0.01;SIMPLEFLUID_TANK_STEPS=1;SIMPLEFLUID_TANK_DT=0.001")
+
+  set_tests_properties(pitz_daily_smoke PROPERTIES
+      ENVIRONMENT
+          "SIMPLEFLUID_PITZ_MESH_DIVISOR=40;SIMPLEFLUID_PITZ_STEPS=1;SIMPLEFLUID_PITZ_DT=1e-6")
+
+  add_test(
+      NAME pitz_daily_steady_smoke
+      COMMAND ${CMAKE_COMMAND}
+          "-DSIMPLEFLUID_PITZ_DAILY_EXECUTABLE=$<TARGET_FILE:pitz_daily>"
+          "-DSIMPLEFLUID_PITZ_WORKING_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/pitz_daily_steady_smoke"
+          -P "${PROJECT_SOURCE_DIR}/cmake/RunPitzDailySteadySmoke.cmake")
+  set_tests_properties(pitz_daily_steady_smoke PROPERTIES
+      LABELS integration
+      TIMEOUT 60)
+endif()

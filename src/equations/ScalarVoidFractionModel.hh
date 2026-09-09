@@ -10,8 +10,10 @@
  */
 #pragma once
 
-#include "equations/BoussinesqModel.hh"
 #include "FVM/TransportSystem.hh"
+#include "dataclass/Database.hh"
+#include "dataclass/DatabaseOptionReader.hh"
+#include "dataclass/typedefs.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -22,6 +24,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -99,18 +102,19 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
     const Database& database)
 {
     ScalarVoidFractionOptions options;
-    options.alpha_min = detail::database_value_or<real_t>(
-        database, "alpha_min", options.alpha_min);
-    options.alpha_max = detail::database_value_or<real_t>(
-        database, "alpha_max", options.alpha_max);
-    options.initial_alpha = detail::database_value_or<real_t>(
-        database, "initial_alpha_g", options.initial_alpha);
-    options.alpha_collapse_time = detail::database_value_or<real_t>(
-        database,
+    const detail::DatabaseOptionReader reader(
+        database, "Scalar void-fraction model");
+    options.alpha_min = reader.value_or<real_t>(
+        "alpha_min", options.alpha_min);
+    options.alpha_max = reader.value_or<real_t>(
+        "alpha_max", options.alpha_max);
+    options.initial_alpha = reader.value_or<real_t>(
+        "initial_alpha_g", options.initial_alpha);
+    options.alpha_collapse_time = reader.value_or<real_t>(
         "alpha_collapse_time",
         options.alpha_collapse_time);
-    options.alpha_diffusivity = detail::database_value_or<real_t>(
-        database, "alpha_diffusivity", options.alpha_diffusivity);
+    options.alpha_diffusivity = reader.value_or<real_t>(
+        "alpha_diffusivity", options.alpha_diffusivity);
     validate_scalar_void_fraction_options(options);
     return options;
 }
@@ -131,6 +135,16 @@ public:
     using field_traits = MeshFieldTraits<Pack, mesh_type>;
     using field_type = typename field_traits::scalar_cell_type;
     using face_flux_field_type = typename field_traits::scalar_face_type;
+
+    class StateSnapshot
+    {
+    private:
+        friend class ScalarVoidFractionModel;
+        const ScalarVoidFractionModel* d_owner = nullptr;
+        std::vector<scalar_type> d_alpha_g;
+        std::vector<scalar_type> d_alpha_l;
+        std::vector<scalar_type> d_source;
+    };
 
     /**
      * @brief Construct a scalar void-fraction model on a mesh.
@@ -221,6 +235,56 @@ public:
         noexcept
     {
         return d_output_fields;
+    }
+
+    [[nodiscard]] StateSnapshot snapshot() const
+    {
+        StateSnapshot result;
+        result.d_owner = this;
+        result.d_alpha_g.resize(d_mesh->num_owned_cells());
+        result.d_alpha_l.resize(d_mesh->num_owned_cells());
+        result.d_source.resize(d_mesh->num_owned_cells());
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            result.d_alpha_g[owned] = d_alpha_g.value(cell);
+            result.d_alpha_l[owned] = d_alpha_l.value(cell);
+            result.d_source[owned] = d_source_alpha_total.value(cell);
+        }
+        return result;
+    }
+
+    void restore(const StateSnapshot& snapshot)
+    {
+        const int local_invalid = snapshot.d_owner != this ||
+                                  snapshot.d_alpha_g.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_alpha_l.size() != d_mesh->num_owned_cells() ||
+                                  snapshot.d_source.size() != d_mesh->num_owned_cells();
+        int any_invalid = 0;
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
+        if (any_invalid != 0)
+        {
+            throw std::invalid_argument("ScalarVoidFractionModel snapshot is foreign or incompatible.");
+        }
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            d_alpha_g.set_owned_value(cell, snapshot.d_alpha_g[owned]);
+            d_alpha_l.set_owned_value(cell, snapshot.d_alpha_l[owned]);
+            d_source_alpha_total.set_owned_value(cell, snapshot.d_source[owned]);
+        }
+        sync_fields();
+        refresh_geometry();
+    }
+
+    void refresh_geometry()
+    {
+        if (d_transport_geometry_cache)
+        {
+            d_transport_geometry_cache->refresh();
+        }
+        d_diffusion_solver.reset();
     }
 
     /**
@@ -362,22 +426,18 @@ private:
         };
 
         auto system = FVM::weighted_scalar_transport_system<Pack>(
-            d_alpha_g,
-            zero_flux,
-            time_step,
-            unit_weight,
-            unit_weight,
-            diffusivity,
-            zero_neumann,
-            zero_boundary_value,
-            zero_source,
-            FVM::NonOrthogonalTreatment::Explicit,
-            nullptr,
-            Teuchos::null,
-            {},
-            {},
-            nullptr,
-            &*d_transport_geometry_cache);
+            FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
+                .old_values = d_alpha_g,
+                .face_fluxes = zero_flux,
+                .time_step = time_step,
+                .storage_weight = unit_weight,
+                .advection_weight = unit_weight,
+                .diffusivity = diffusivity,
+                .boundary_condition = zero_neumann,
+                .boundary_value = zero_boundary_value,
+                .source = zero_source,
+                .treatment = FVM::NonOrthogonalTreatment::Explicit,
+                .geometry_cache = &*d_transport_geometry_cache});
         field_type solution(d_mesh, "alpha_diffusion_solution");
         const auto statistics =
             d_diffusion_solver.solve_with_statistics(

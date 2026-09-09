@@ -34,6 +34,21 @@ MeshHandle<Pack>::MeshHandle(
 }
 
 /**
+ * @brief Construct and distribute a mutable Cartesian mesh handle.
+ *
+ * @param mesh Mutable Cartesian mesh to retain.
+ * @param options Partition override and ghost-layer configuration.
+ */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableCartesianPtr mesh,
+    DistributionOptions options)
+    : MeshHandle(CartesianPtr(mesh), options)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
+/**
  * @brief Construct and distribute a cylindrical mesh handle.
  *
  * @param mesh Cylindrical mesh to wrap.
@@ -49,6 +64,21 @@ MeshHandle<Pack>::MeshHandle(
 }
 
 /**
+ * @brief Construct and distribute a mutable cylindrical mesh handle.
+ *
+ * @param mesh Mutable cylindrical mesh to retain.
+ * @param options Partition override and ghost-layer configuration.
+ */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableCylindricalPtr mesh,
+    DistributionOptions options)
+    : MeshHandle(CylindricalPtr(mesh), options)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
+/**
  * @brief Construct a serial semi-structured mesh handle.
  *
  * @param mesh Semi-structured mesh to wrap.
@@ -58,6 +88,14 @@ MeshHandle<Pack>::MeshHandle(SemiStructuredPtr mesh)
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_semi_structured(std::get<SemiStructuredPtr>(d_mesh));
+}
+
+/** @brief Construct a mutable serial semi-structured mesh handle. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableSemiStructuredPtr mesh)
+    : MeshHandle(SemiStructuredPtr(mesh))
+{
+    d_mutable_mesh.emplace(std::move(mesh));
 }
 
 /**
@@ -70,6 +108,14 @@ MeshHandle<Pack>::MeshHandle(UnstructuredPtr mesh)
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_unstructured(std::get<UnstructuredPtr>(d_mesh));
+}
+
+/** @brief Construct a mutable serial unstructured mesh handle. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableUnstructuredPtr mesh)
+    : MeshHandle(UnstructuredPtr(mesh))
+{
+    d_mutable_mesh.emplace(std::move(mesh));
 }
 
 /**
@@ -85,7 +131,18 @@ MeshHandle<Pack>::MeshHandle(
     : d_mesh(require_mesh(std::move(mesh)))
 {
     initialize_unstructured(
-        std::get<UnstructuredPtr>(d_mesh), indexer);
+        std::get<UnstructuredPtr>(d_mesh), indexer,
+        Tpetra::getDefaultComm());
+}
+
+/** @brief Construct a mutable handle from an indexed unstructured mesh. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableUnstructuredPtr mesh,
+    const unstructured_indexer_type& indexer)
+    : MeshHandle(UnstructuredPtr(mesh), indexer)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
 }
 
 /**
@@ -100,6 +157,20 @@ MeshHandle<Pack>::MeshHandle(STKAdapterPtr mesh)
     initialize_stk(std::get<STKAdapterPtr>(d_mesh));
 }
 
+/** @brief Construct a mutable handle around a legacy STK adapter. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableSTKAdapterPtr mesh)
+    : MeshHandle(STKAdapterPtr(mesh))
+{
+    if (!mesh->has_mutable_mesh())
+    {
+        throw std::invalid_argument(
+            "MeshHandle requires mutable legacy geometry when constructed "
+            "from a mutable STK adapter pointer.");
+    }
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
 /**
  * @brief Adapt a legacy distributed mesh and construct its handle.
  *
@@ -107,6 +178,14 @@ MeshHandle<Pack>::MeshHandle(STKAdapterPtr mesh)
  */
 template<TpetraTypePack Pack>
 MeshHandle<Pack>::MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh)
+    : MeshHandle(STKAdapterPtr(
+          std::make_shared<STKAdapter>(std::move(mesh))))
+{
+}
+
+/** @brief Adapt a mutable legacy distributed mesh and construct its handle. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh)
     : MeshHandle(std::make_shared<STKAdapter>(std::move(mesh)))
 {
 }
@@ -302,11 +381,13 @@ void MeshHandle<Pack>::initialize_unstructured(
  *
  * @param mesh Previously partitioned unstructured mesh.
  * @param indexer Mapping from mesh-local IDs to original global IDs.
+ * @param comm Communicator that owns the partition.
  */
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_unstructured(
     UnstructuredPtr mesh,
-    const unstructured_indexer_type& indexer)
+    const unstructured_indexer_type& indexer,
+    Teuchos::RCP<const typename Pack::comm_type> comm)
 {
     if (mesh->num_cells() != indexer.num_local_cells()
         || mesh->num_owned_cells() != indexer.num_owned_cells()
@@ -349,7 +430,7 @@ void MeshHandle<Pack>::initialize_unstructured(
         global_ids(indexer.node_global_ids())));
     initialize_cell_faces();
     initialize_boundary_batches(*mesh);
-    create_maps(Tpetra::getDefaultComm());
+    create_maps(comm ? std::move(comm) : Tpetra::getDefaultComm());
 }
 
 /**
@@ -546,7 +627,8 @@ void MeshHandle<Pack>::materialize_legacy_indexer() const
         (local < legacy->num_owned_cells()
              ? owned_cells
              : ghost_cells)
-            .push_back(local);
+            .push_back(static_cast<size_t>(geometry_cell_lid(
+                checked_local(local))));
     }
 
     std::vector<size_t> owned_faces;
@@ -860,7 +942,9 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::legacy_vtu_topology(
 
     for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
-        const auto& cell = legacy.cell(checked_local(lid));
+        const auto geometry_lid = geometry_cell_lid(checked_local(lid));
+        const auto& cell = legacy.cell(checked_local(
+            static_cast<size_t>(geometry_lid)));
         for (const auto node_gid : cell.node_gids)
         {
             connectivity.push_back(append_node(node_gid));

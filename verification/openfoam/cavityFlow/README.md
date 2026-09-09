@@ -36,9 +36,11 @@ SIMPLEFLUID_PROFILE_OUTPUT_DIR="$PWD/profiles-64" \
 ```
 
 The launcher sources `verification/environments.sh` and builds the
-`GCC-RelWithDebInfo` preset by default. Set `SIMPLEFLUID_COMPILER=LLVM` to use
-the corresponding LLVM preset, `SIMPLEFLUID_BUILD_CONFIG=Debug` for a debug
-run, or `SIMPLEFLUID_BUILD_DIR` for a custom, already-configured build tree.
+`GCC-RelWithDebInfo` preset by default, using
+`build/gcc/bin/RelWithDebInfo`. Set `SIMPLEFLUID_COMPILER=LLVM` to use the
+corresponding LLVM preset and `build/llvm/bin/RelWithDebInfo`,
+`SIMPLEFLUID_BUILD_CONFIG=Debug` for a debug run, or
+`SIMPLEFLUID_BUILD_DIR` for a custom, already-configured build tree.
 
 The helper samples the nearest cell-center line and volume-averages symmetric
 ties, which handles even structured grids where the geometric centerline lies

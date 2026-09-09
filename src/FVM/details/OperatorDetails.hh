@@ -276,6 +276,30 @@ inline MeshUtils::Vec3 non_orthogonal_area_vector(
 }
 
 /**
+ * @brief Form a cell-to-face displacement without crossing the long side of
+ *        a periodic seam.
+ *
+ * Most faces can use the stored centroids directly. For the cell reached
+ * through a periodic pairing, however, the retained boundary-face centroid
+ * can lie behind the cell relative to its outward normal. In that case the
+ * mesh's wrapped cell-to-face distance and oriented normal define the local
+ * displacement used for reconstruction.
+ */
+template<class MeshType, class FaceID, class CellID>
+auto cell_to_face_displacement(
+    const MeshType& mesh, FaceID face_id, CellID cell_id)
+{
+    const auto raw =
+        mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+    const auto outward = mesh.face_normal_outward(face_id, cell_id);
+    if (raw.dot(outward) >= real_t{})
+    {
+        return raw;
+    }
+    return outward * mesh.cell_to_face_distance(face_id, cell_id);
+}
+
+/**
  * @brief Convert a packed cell LID to the mesh's native cell identifier.
  * @tparam MeshType Mesh interface type.
  * @param mesh Mesh that owns the identifier mapping.
@@ -863,6 +887,52 @@ boundary_face_locations(const MeshType& mesh)
     }
 
     return locations;
+}
+
+/**
+ * @brief Mark packed face ordinals that remain physical boundary faces.
+ *
+ * Periodic pairing can leave entries in the mesh's named boundary batches
+ * after the corresponding faces become interior.  Walk the native boundary
+ * identifiers so structured meshes are handled without converting packed
+ * ordinals back to their native face-ID type.
+ */
+template<class MeshType>
+std::vector<bool> physical_boundary_face_mask(const MeshType& mesh)
+{
+    std::vector<bool> physical(mesh.num_faces(), false);
+
+    if constexpr (std::ranges::range<
+                      decltype(mesh.boundary_face_batch(0))>)
+    {
+        for (int batch_id : mesh.boundary_batch_ids())
+        {
+            for (const auto face_id : mesh.boundary_face_batch(batch_id))
+            {
+                if (mesh.is_boundary_face(face_id))
+                {
+                    physical[packed_face_local_id(mesh, face_id)] = true;
+                }
+            }
+        }
+    }
+    else
+    {
+        for (const auto& [batch_id, boundary_batch] :
+             mesh.boundary_batches())
+        {
+            static_cast<void>(batch_id);
+            for (const auto face_id : boundary_batch.face_lids)
+            {
+                if (mesh.is_boundary_face(face_id))
+                {
+                    physical[packed_face_local_id(mesh, face_id)] = true;
+                }
+            }
+        }
+    }
+
+    return physical;
 }
 
 /** @brief Static least-squares geometry for one boundary sample. */

@@ -19,6 +19,9 @@
 
 #include <array>
 #include <cmath>
+#include <exception>
+#include <limits>
+#include <string>
 
 namespace
 {
@@ -149,6 +152,96 @@ void expect_same_on_all_ranks(const MeshType& mesh, double value)
 
 } // namespace
 
+/** @brief Collective policy selection rejects divergent ranks and supports GS. */
+TEST(RadiolyticGasModelMultiRankTest, TransportSolverPolicyIsCollective)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+
+    auto options = sheng_options();
+    options.initial_micro_number_density = 1.0e10;
+    options.initial_micro_moles = 1.0e-6;
+    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = 10.0;
+    options.free_surface_patches = {"zmax"};
+    options.microbubble_lifetime = 1.0e30;
+    options.large_bubble_dissolution_time = 1.0e30;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    RadiolyticModelType model(mesh, options);
+    const auto original = model.transport_linear_solver_options();
+
+    auto candidate = original;
+    if (comm->getRank() == 0)
+        candidate.tolerance = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::exception);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.backend = SimpleFluid::LinearSolverBackend::Cg;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::exception);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.preconditioner = SimpleFluid::LinearPreconditioner::GaussSeidel;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    candidate = original;
+    if (comm->getRank() == 0)
+        candidate.tolerance *= 2.0;
+    EXPECT_THROW(model.set_transport_linear_solver_options(candidate), std::invalid_argument);
+    EXPECT_EQ(model.transport_linear_solver_options().backend, original.backend);
+    EXPECT_EQ(model.transport_linear_solver_options().preconditioner, original.preconditioner);
+    EXPECT_DOUBLE_EQ(model.options().transport_solver_tolerance, original.tolerance);
+
+    candidate = original;
+    candidate.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    candidate.preconditioner = SimpleFluid::LinearPreconditioner::GaussSeidel;
+    model.set_transport_linear_solver_options(candidate);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.advance(0.025, 0.025, temperature, pressure, velocity, flux, material, &power);
+    const auto& statistics = model.last_statistics();
+    EXPECT_GT(statistics.hydrogen_escaped, 0.0);
+    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-13);
+    EXPECT_TRUE(statistics.transport_linear.converged);
+    EXPECT_EQ(statistics.transport_linear.solves, 5);
+    EXPECT_GT(statistics.transport_linear.iterations, 0);
+    EXPECT_LE(statistics.transport_linear.achieved_tolerance, candidate.tolerance);
+    expect_same_on_all_ranks(*mesh, statistics.transport_linear.solves);
+    expect_same_on_all_ranks(*mesh, statistics.transport_linear.iterations);
+    expect_same_on_all_ranks(*mesh, statistics.transport_linear.achieved_tolerance);
+    // Every published column must retain the same halo values as an
+    // independent scalar import, including after a state rollback.
+    const auto check_publication = [&]
+    {
+        for (const auto& [name, field] : model.output_fields())
+        {
+            SCOPED_TRACE(name);
+            Pack::vector_type expected(field->overlap_data().getMap(), false);
+            Pack::import_type importer(field->owned_data().getMap(), expected.getMap());
+            expected.doImport(field->owned_data(), importer, Tpetra::REPLACE);
+            const auto values = expected.getData();
+            const auto actual = field->local_read_view();
+            for (size_t row = 0; row < values.size(); ++row)
+                EXPECT_DOUBLE_EQ(actual(row, 0), values[row]);
+        }
+    };
+    check_publication();
+    const auto accepted = model.snapshot();
+    model.advance(0.05, 0.025, temperature, pressure, velocity, flux, material, &power);
+    check_publication();
+    model.restore(accepted);
+    check_publication();
+}
+
 /**
  * @brief Two-rank radiolysis update conserves global H2 and void diagnostics.
  */
@@ -205,6 +298,10 @@ TEST(RadiolyticGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
         statistics.hydrogen_produced,
         expected_produced,
         expected_produced * 1.0e-10);
+    EXPECT_DOUBLE_EQ(statistics.cumulative_hydrogen_produced, statistics.hydrogen_produced);
+    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), statistics.cumulative_hydrogen_produced);
+    EXPECT_DOUBLE_EQ(statistics.cumulative_dissolved_hydrogen_outflow, 0.0);
+    EXPECT_DOUBLE_EQ(statistics.cumulative_submerged_bubble_hydrogen_escaped, 0.0);
     EXPECT_NEAR(
         statistics.inventory_error,
         0.0,
@@ -216,9 +313,35 @@ TEST(RadiolyticGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
         global_integral(model.alpha_g()),
         std::max(1.0e-14, statistics.void_volume * 1.0e-10));
 
+    const auto dissolved_moles = model.global_dissolved_hydrogen_moles();
+    const auto microbubble_moles = model.global_microbubble_hydrogen_moles();
+    const auto large_bubble_moles = model.global_large_bubble_hydrogen_moles();
+    const auto bubble_moles = model.global_submerged_bubble_hydrogen_moles();
+    const auto total_submerged_moles = model.global_submerged_hydrogen_moles();
+    const auto raw_bubble_volume = model.global_submerged_bubble_volume();
+    EXPECT_NEAR(dissolved_moles, global_integral(model.dissolved_hydrogen_inventory()),
+        std::max(1.0e-14, std::abs(dissolved_moles) * 1.0e-12));
+    EXPECT_NEAR(microbubble_moles, global_integral(model.micro_moles()),
+        std::max(1.0e-14, std::abs(microbubble_moles) * 1.0e-12));
+    EXPECT_NEAR(large_bubble_moles, global_integral(model.large_moles()),
+        std::max(1.0e-14, std::abs(large_bubble_moles) * 1.0e-12));
+    EXPECT_DOUBLE_EQ(bubble_moles, microbubble_moles + large_bubble_moles);
+    EXPECT_DOUBLE_EQ(total_submerged_moles, dissolved_moles + bubble_moles);
+    EXPECT_NEAR(raw_bubble_volume, global_integral(*model.output_fields().at("alpha_g_raw")),
+        std::max(1.0e-14, std::abs(raw_bubble_volume) * 1.0e-12));
+
     expect_same_on_all_ranks(*mesh, statistics.hydrogen_produced);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_hydrogen_produced);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_dissolved_hydrogen_outflow);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_submerged_bubble_hydrogen_escaped);
     expect_same_on_all_ranks(*mesh, statistics.inventory_error);
     expect_same_on_all_ranks(*mesh, statistics.void_volume);
+    expect_same_on_all_ranks(*mesh, dissolved_moles);
+    expect_same_on_all_ranks(*mesh, microbubble_moles);
+    expect_same_on_all_ranks(*mesh, large_bubble_moles);
+    expect_same_on_all_ranks(*mesh, bubble_moles);
+    expect_same_on_all_ranks(*mesh, total_submerged_moles);
+    expect_same_on_all_ranks(*mesh, raw_bubble_volume);
 
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
@@ -292,6 +415,12 @@ TEST(RadiolyticGasModelMultiRankTest,
         *model.output_fields().at("bubble_escape_number_rate");
 
     EXPECT_GT(statistics.hydrogen_escaped, 0.0);
+    EXPECT_DOUBLE_EQ(statistics.dissolved_hydrogen_outflow, 0.0);
+    EXPECT_NEAR(statistics.submerged_bubble_hydrogen_escaped, statistics.hydrogen_escaped, 1.0e-13);
+    EXPECT_NEAR(statistics.microbubble_hydrogen_escaped, statistics.submerged_bubble_hydrogen_escaped, 1.0e-13);
+    EXPECT_DOUBLE_EQ(
+        model.cumulative_submerged_bubble_hydrogen_escaped(), statistics.submerged_bubble_hydrogen_escaped);
+    EXPECT_DOUBLE_EQ(statistics.large_bubble_hydrogen_escaped, 0.0);
     EXPECT_GT(statistics.escaped_bubble_count, 0.0);
     EXPECT_NEAR(
         statistics.hydrogen_after + statistics.hydrogen_escaped,
@@ -312,10 +441,14 @@ TEST(RadiolyticGasModelMultiRankTest,
         count_before * 1.0e-10);
 
     expect_same_on_all_ranks(*mesh, statistics.hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.submerged_bubble_hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.microbubble_hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.large_bubble_hydrogen_escaped);
     expect_same_on_all_ranks(*mesh, statistics.escaped_bubble_count);
     expect_same_on_all_ranks(*mesh, statistics.inventory_error);
     expect_same_on_all_ranks(
         *mesh, statistics.cumulative_hydrogen_escaped);
+    expect_same_on_all_ranks(*mesh, statistics.cumulative_submerged_bubble_hydrogen_escaped);
     expect_same_on_all_ranks(
         *mesh, statistics.cumulative_escaped_bubble_count);
 }
@@ -363,7 +496,131 @@ TEST(RadiolyticGasModelMultiRankTest, ReducesClippedCellCountGlobally)
         mesh->owned_cell_map()->getGlobalNumElements());
     EXPECT_EQ(
         model.last_statistics().clipped_cells, expected_clipped);
+    const auto raw_bubble_volume = model.global_submerged_bubble_volume();
+    const auto bounded_bubble_volume = global_integral(model.alpha_g());
+    const auto unrepresented_bubble_volume = model.global_unrepresented_bubble_volume();
+    EXPECT_GT(raw_bubble_volume, bounded_bubble_volume);
+    EXPECT_NEAR(unrepresented_bubble_volume, raw_bubble_volume - bounded_bubble_volume, raw_bubble_volume * 1.0e-12);
+    EXPECT_NEAR(
+        raw_bubble_volume, global_integral(*model.output_fields().at("alpha_g_raw")), raw_bubble_volume * 1.0e-12);
     expect_same_on_all_ranks(
         *mesh,
         static_cast<double>(model.last_statistics().clipped_cells));
+    expect_same_on_all_ranks(*mesh, raw_bubble_volume);
+    expect_same_on_all_ranks(*mesh, unrepresented_bubble_volume);
+}
+
+/** @brief Reconstructed pressure domains and rejected candidates are global. */
+TEST(RadiolyticGasModelMultiRankTest, CollectivelyValidatesReconstructedPressureOffset)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 1, 1, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto options = sheng_options();
+    options.pressure_mode = SimpleFluid::RadiolyticPressureMode::Reconstructed;
+    options.minimum_absolute_pressure = 5.0e4;
+    options.initial_micro_number_density = 2.0e8;
+    options.initial_micro_moles = 3.0e-6;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        pressure.set_owned_value(static_cast<Pack::local_ordinal_type>(owned), comm->getRank() == 0 ? -1000.0 : 1000.0);
+    }
+    pressure.sync_ghosts();
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    const auto minimum_offset = model.minimum_valid_absolute_pressure_offset();
+    EXPECT_NEAR(minimum_offset, options.minimum_absolute_pressure + 1000.0, 1.0e-10);
+    expect_same_on_all_ranks(*mesh, minimum_offset);
+
+    const auto rank_divergent_candidate = comm->getRank() == 0 ? minimum_offset - 1.0 : 2.0e5;
+    EXPECT_THROW(model.evaluate_submerged_bubble_volume(rank_divergent_candidate), std::invalid_argument);
+    const auto old_offset = model.absolute_pressure_offset();
+    EXPECT_THROW(model.set_absolute_pressure_offset(comm->getRank() == 0 ? 1.5e5 : 2.0e5), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(model.absolute_pressure_offset(), old_offset);
+
+    const auto expected_volume = model.evaluate_submerged_bubble_volume(2.0e5);
+    model.set_absolute_pressure_offset(2.0e5);
+    EXPECT_NEAR(model.global_submerged_bubble_volume(), expected_volume, std::max(1.0e-14, expected_volume * 1.0e-11));
+    expect_same_on_all_ranks(*mesh, model.global_submerged_bubble_volume());
+}
+
+/** @brief A rank-local slip-property failure is reported before bubble transport. */
+TEST(RadiolyticGasModelMultiRankTest,
+     RankLocalBubbleSlipFailureThrowsCoherently)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    auto options = sheng_options();
+    options.initial_large_number_density = 100.0;
+    options.initial_large_moles = 1.0e-6;
+    options.rise_velocity_mode =
+        SimpleFluid::BubbleRiseVelocityMode::Celata2007;
+    options.bubble_gas_density = 1.2;
+    RadiolyticModelType model(mesh, options);
+
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(
+        0.0, temperature, pressure, velocity, material);
+
+    ASSERT_GT(mesh->num_owned_cells(), 0U);
+    if (comm->getRank() == 0)
+    {
+        // Deliberately leave overlap values untouched: only rank 0's owned
+        // cell may fail the purely local bubble-slip validation stage.
+        material.dynamic_viscosity.set_owned_value(
+            0, std::numeric_limits<double>::quiet_NaN());
+    }
+
+    bool rejected = false;
+    std::string message;
+    try
+    {
+        model.advance(
+            1.0e-6,
+            1.0e-6,
+            temperature,
+            pressure,
+            velocity,
+            flux,
+            material,
+            &power);
+    }
+    catch (const std::exception& error)
+    {
+        rejected = true;
+        message = error.what();
+    }
+
+    EXPECT_TRUE(rejected);
+    if (comm->getRank() == 0)
+    {
+        EXPECT_NE(message.find("dynamic viscosity"), std::string::npos);
+    }
+    else
+    {
+        EXPECT_NE(
+            message.find(
+                "Radiolytic bubble-slip evaluation failed on another rank"),
+            std::string::npos);
+    }
 }

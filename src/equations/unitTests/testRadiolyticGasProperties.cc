@@ -296,6 +296,26 @@ TEST(RadiolyticGasPropertiesTest, ParsesFlatRuntimeSelectors)
     EXPECT_DOUBLE_EQ(options.alpha_max, 0.95);
 }
 
+/** @brief Verifies contextual diagnostics for incorrectly typed gas options. */
+TEST(RadiolyticGasPropertiesTest, ReportsWrongTypedOptionContext)
+{
+    SimpleFluid::Database database;
+    database.set("enable_radiolysis", std::string{"yes"});
+
+    try
+    {
+        SimpleFluid::radiolytic_gas_options_from_database(database);
+        FAIL() << "Expected a typed radiolytic gas option failure.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        const std::string message(error.what());
+        EXPECT_NE(message.find("Radiolytic gas model"), std::string::npos);
+        EXPECT_NE(message.find("enable_radiolysis"), std::string::npos);
+        EXPECT_NE(message.find("wrong type"), std::string::npos);
+    }
+}
+
 /** @brief Verifies that enabled radiolysis requires yield and rate-limit inputs. */
 TEST(RadiolyticGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
 {
@@ -311,6 +331,22 @@ TEST(RadiolyticGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
     EXPECT_THROW(
         SimpleFluid::validate_radiolytic_gas_options(options),
         std::invalid_argument);
+}
+
+TEST(RadiolyticGasPropertiesTest, TransportToleranceIsOptionalValidatedAndParsed)
+{
+    EXPECT_DOUBLE_EQ(SimpleFluid::RadiolyticGasOptions{}.transport_solver_tolerance,1e-10);
+    SimpleFluid::Database database;
+    database.set("enable_radiolysis",true);
+    database.set("hydrogen_yield_mol_per_j",SimpleFluid::real_t{2e-7});
+    database.set("max_source_alpha_rate",SimpleFluid::real_t{1});
+    database.set("radiolytic_transport_solver_tolerance",SimpleFluid::real_t{1e-14});
+    EXPECT_DOUBLE_EQ(SimpleFluid::radiolytic_gas_options_from_database(database).transport_solver_tolerance,1e-14);
+    for(double value:{0.0,-1.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+    {
+        database.set("radiolytic_transport_solver_tolerance",value);
+        EXPECT_THROW(SimpleFluid::radiolytic_gas_options_from_database(database),std::invalid_argument);
+    }
 }
 
 } // namespace

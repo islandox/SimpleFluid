@@ -10,14 +10,18 @@
  */
 #pragma once
 
+#include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
+#include "FVM/ScalarTransportDiscretization.hh"
 #include "FVM/details/FieldStoredTransportSystem.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
+#include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
+#include "geometry/GeometryEpoch.hh"
 #include "geometry/Mesh.hh"
 
 #include <Teuchos_Array.hpp>
@@ -152,8 +156,8 @@ template<TpetraTypePack Pack> struct VectorTransportSystem
  * The cache owns only topology- and geometry-dependent data. Boundary
  * condition types and values remain callback-driven and are materialized for
  * each assembly, so changing boundary data does not require rebuilding this
- * cache. The referenced mesh topology and geometry must remain unchanged for
- * the cache lifetime; construct a new cache after any mesh revision.
+ * cache. Fixed-topology geometry motion invalidates the cache until refresh()
+ * rebuilds its numeric data; topology changes require a new cache.
  *
  * @tparam MeshType Mesh interface used by the transport fields.
  */
@@ -163,16 +167,29 @@ public:
     using interior_stencils_type = std::vector<detail::LeastSquaresGradientStencil<MeshType>>;
     using boundary_locations_type = std::vector<detail::BoundaryFaceLocation<MeshType>>;
     using boundary_geometry_type = std::vector<detail::BoundaryAwareGradientCellGeometry<MeshType>>;
+    using assembly_geometry_type = detail::TransportAssemblyGeometry<MeshType>;
     explicit TransportGeometryCache(const MeshType& mesh);
 
     /** @brief Throw if this cache was built for another mesh instance. */
     void require_mesh(const MeshType& mesh) const;
 
-    const interior_stencils_type& interior_stencils() const noexcept;
+    /** @brief Rebuild all geometry-dependent data at the mesh's current epoch. */
+    void refresh();
 
-    const boundary_locations_type& boundary_locations() const noexcept;
+    /** @brief Geometry epoch represented by this cache. */
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
 
-    const boundary_geometry_type& boundary_geometry() const noexcept;
+    const interior_stencils_type& interior_stencils() const;
+
+    const boundary_locations_type& boundary_locations() const;
+
+    const boundary_geometry_type& boundary_geometry() const;
+
+    /** @brief Ordered face topology, owned volumes and physical boundary mask. */
+    const assembly_geometry_type& assembly_geometry() const;
+
+    /** @brief Whether any locally owned cell has a non-orthogonal transport face. */
+    bool has_non_orthogonal_faces() const;
 
     std::vector<detail::AffineLeastSquaresGradientStencil<MeshType>> scalar_affine_stencils(
         std::function<BoundaryCondition(int, size_t)> boundary_condition,
@@ -183,9 +200,12 @@ public:
 
 private:
     const MeshType* d_mesh;
+    std::uint64_t d_geometry_epoch = 0;
     interior_stencils_type d_interior_stencils;
     boundary_locations_type d_boundary_locations;
     boundary_geometry_type d_boundary_geometry;
+    assembly_geometry_type d_assembly_geometry;
+    bool d_has_non_orthogonal_faces = true;
 };
 
 /**
@@ -197,6 +217,74 @@ private:
  */
 extern template class TransportGeometryCache<Mesh<DefaultTpetraTypes>>;
 extern template class TransportGeometryCache<MeshHandle<DefaultTpetraTypes>>;
+
+namespace detail
+{
+
+/**
+ * @brief Backend-independent named inputs for weighted scalar transport.
+ *
+ * Field and cache references or pointers are non-owning and are not retained
+ * after assembly. Callback and matrix-cache members are owned by value and
+ * consumed during the call. The discretization defaults reproduce the
+ * historical backward-Euler/upwind path.
+ *
+ * @tparam Pack Tpetra type pack used by the transport fields.
+ * @tparam ScalarField Backend-specific scalar cell field.
+ * @tparam FaceFluxField Backend-specific scalar face-flux field.
+ * @tparam BoundaryCacheType Backend-specific boundary-coefficient cache.
+ * @tparam GeometryCacheType Backend-specific transport-geometry cache.
+ */
+template<TpetraTypePack Pack, class ScalarField, class FaceFluxField, class BoundaryCacheType, class GeometryCacheType>
+struct BasicWeightedScalarTransportRequest
+{
+    const ScalarField& old_values;
+    const FaceFluxField& face_fluxes;
+    typename Pack::scalar_type time_step;
+    const ScalarField& storage_weight;
+    const ScalarField& advection_weight;
+    const ScalarField& diffusivity;
+    ScalarBoundaryConditionProvider<Pack> boundary_condition;
+    ScalarBoundaryValueProvider<Pack> boundary_value;
+    ScalarCellValueProvider<Pack> source;
+    NonOrthogonalTreatment treatment;
+    ScalarTransportDiscretization discretization{};
+    const ScalarField* older_values = nullptr;
+    const ScalarField* correction_field = nullptr;
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
+    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink = {};
+    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value = {};
+    const BoundaryCacheType* boundary_diffusivity = nullptr;
+    const GeometryCacheType* geometry_cache = nullptr;
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
+    /** Mapped accepted-old storage coefficient; null means unchanged from storage_weight. */
+    const ScalarField* old_storage_weight = nullptr;
+    /** Mapped active ALE trial; null preserves the fixed-grid assembly exactly. */
+    const ALEControlVolumeState* ale = nullptr;
+    /** Optional mapped owned-graph plan; external matrices retain full validation. */
+    detail::StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr;
+};
+
+} // namespace detail
+
+/** @brief Named inputs for legacy weighted scalar transport assembly. */
+template<TpetraTypePack Pack>
+using WeightedScalarTransportRequest = detail::BasicWeightedScalarTransportRequest<Pack, CellField<Pack>,
+    FaceField<Pack>, BoundaryCache<Pack>, TransportGeometryCache<Mesh<Pack>>>;
+
+/** @brief Named inputs for mapped FieldStored weighted scalar transport. */
+template<TpetraTypePack Pack, class MeshType>
+using FieldStoredWeightedScalarTransportRequest =
+    detail::BasicWeightedScalarTransportRequest<Pack, ScalarCellFieldStored<Pack, MeshType>,
+        ScalarFaceFieldStored<Pack, MeshType>, FieldStoredBoundaryCache<Pack, MeshType>,
+        TransportGeometryCache<MeshType>>;
+
+/** @brief Select the legacy or FieldStored request for a mesh backend. */
+template<TpetraTypePack Pack, class MeshType>
+using MeshWeightedScalarTransportRequest = detail::BasicWeightedScalarTransportRequest<Pack,
+    typename MeshFieldTraits<Pack, std::remove_cv_t<MeshType>>::scalar_cell_type,
+    typename MeshFieldTraits<Pack, std::remove_cv_t<MeshType>>::scalar_face_type,
+    MeshBoundaryCache<Pack, std::remove_cv_t<MeshType>>, TransportGeometryCache<std::remove_cv_t<MeshType>>>;
 
 /**
  * @brief Assemble scalar transport directly on a mapped FieldStored mesh.
@@ -253,11 +341,34 @@ TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStore
 }
 
 /**
- * @brief Assemble weighted scalar transport directly on mapped fields.
+ * @brief Assemble mapped weighted scalar transport from named inputs.
+ *
+ * When @c request.ale is non-null, @c request.face_fluxes must contain the
+ * synchronized owner-oriented relative flux produced by
+ * mesh_relative_face_fluxes(); the absolute pressure/continuity flux remains a
+ * separate field.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> weighted_scalar_transport_system(
+    FieldStoredWeightedScalarTransportRequest<Pack, MeshType> request)
+{
+    return detail::stored_weighted_scalar_transport_system<Pack>(request.old_values, request.face_fluxes,
+        request.time_step, request.storage_weight, request.advection_weight, request.diffusivity,
+        std::move(request.boundary_condition), std::move(request.boundary_value), std::move(request.source),
+        request.treatment, request.correction_field, std::move(request.cached_matrix), std::move(request.implicit_sink),
+        std::move(request.fixed_cell_value), request.boundary_diffusivity, request.geometry_cache,
+        request.coefficient_interpolation, request.discretization, request.older_values,
+        request.old_storage_weight, request.ale, request.symbolic_plan);
+}
+
+/**
+ * @brief Compatibility overload for weighted scalar transport on mapped fields.
  *
  * Storage, advection, and diffusion coefficients are cell fields. The
  * overload mirrors the legacy weighted system while retaining the original
- * mapped mesh and FieldStored ownership.
+ * mapped mesh and FieldStored ownership. Supplying @p old_storage_weight uses
+ * the conservative accepted-old product for Backward Euler. With @p ale, the
+ * face field is the synchronized mesh-relative flux.
  */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
@@ -273,19 +384,92 @@ TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStor
     std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value = {},
     const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_diffusivity = nullptr,
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
-    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_storage_weight = nullptr,
+    const ALEControlVolumeState* ale = nullptr)
 {
-    return detail::stored_weighted_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, storage_weight,
-        advection_weight, diffusivity, std::move(boundary_condition), std::move(boundary_value), std::move(source),
-        treatment, correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
-        boundary_diffusivity, geometry_cache, coefficient_interpolation);
+    return weighted_scalar_transport_system<Pack>(FieldStoredWeightedScalarTransportRequest<Pack, MeshType>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation,
+        .old_storage_weight = old_storage_weight,
+        .ale = ale});
+}
+
+/**
+ * @brief Assemble mapped weighted scalar transport with opt-in schemes.
+ *
+ * BDF2 requires @p older_values on the same mesh. Bounded linear upwind uses
+ * the lagged @p old_values field for its limited deferred correction. The
+ * current @p storage_weight multiplies the complete fixed-grid BDF2
+ * derivative. ALE and distinct accepted-old storage are deliberately limited
+ * to Backward Euler.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> weighted_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    const ScalarCellFieldStored<Pack, MeshType>& storage_weight,
+    const ScalarCellFieldStored<Pack, MeshType>& advection_weight,
+    const ScalarCellFieldStored<Pack, MeshType>& diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> source,
+    ScalarTransportDiscretization discretization, NonOrthogonalTreatment treatment,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* older_values = nullptr,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink = {},
+    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value = {},
+    const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_diffusivity = nullptr,
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_storage_weight = nullptr,
+    const ALEControlVolumeState* ale = nullptr)
+{
+    return weighted_scalar_transport_system<Pack>(FieldStoredWeightedScalarTransportRequest<Pack, MeshType>{
+        .old_values = old_values,
+        .face_fluxes = face_fluxes,
+        .time_step = time_step,
+        .storage_weight = storage_weight,
+        .advection_weight = advection_weight,
+        .diffusivity = diffusivity,
+        .boundary_condition = std::move(boundary_condition),
+        .boundary_value = std::move(boundary_value),
+        .source = std::move(source),
+        .treatment = treatment,
+        .discretization = discretization,
+        .older_values = older_values,
+        .correction_field = correction_field,
+        .cached_matrix = std::move(cached_matrix),
+        .implicit_sink = std::move(implicit_sink),
+        .fixed_cell_value = std::move(fixed_cell_value),
+        .boundary_diffusivity = boundary_diffusivity,
+        .geometry_cache = geometry_cache,
+        .coefficient_interpolation = coefficient_interpolation,
+        .old_storage_weight = old_storage_weight,
+        .ale = ale});
 }
 
 /**
  * @brief Assemble conservative physical temperature transport on mapped fields.
  *
  * The transient and advective coefficient is rho*cp, diffusion uses thermal
- * conductivity, and the source is volumetric power density.
+ * conductivity, and the source is volumetric power density. Under ALE,
+ * accepted-old density and heat capacity may be supplied separately so the
+ * conservative old-time product is evaluated on accepted geometry. The ALE
+ * face field is the synchronized mesh-relative volume flux.
  */
 template<TpetraTypePack Pack, class MeshType>
 TransportSystem<Pack> physical_temperature_transport_system(
@@ -300,19 +484,58 @@ TransportSystem<Pack> physical_temperature_transport_system(
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_thermal_conductivity = nullptr,
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
-    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    const ALEControlVolumeState* ale = nullptr,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr)
 {
     return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
         specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
         std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
-        geometry_cache, coefficient_interpolation);
+        geometry_cache, coefficient_interpolation, ScalarTransportDiscretization{},
+        static_cast<const ScalarCellFieldStored<Pack, MeshType>*>(nullptr),
+        old_density, old_specific_heat_capacity, ale);
+}
+
+/**
+ * @brief Assemble mapped physical temperature with opt-in scalar schemes.
+ *
+ * Fixed-grid BDF2 retains its historical current-capacity convention. ALE is
+ * restricted to Backward Euler and may use distinct accepted-old properties.
+ */
+template<TpetraTypePack Pack, class MeshType>
+TransportSystem<Pack> physical_temperature_transport_system(
+    const ScalarCellFieldStored<Pack, MeshType>& old_temperature,
+    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
+    const ScalarCellFieldStored<Pack, MeshType>& density,
+    const ScalarCellFieldStored<Pack, MeshType>& specific_heat_capacity,
+    const ScalarCellFieldStored<Pack, MeshType>& thermal_conductivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> power_density, ScalarTransportDiscretization discretization,
+    NonOrthogonalTreatment treatment,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* older_temperature = nullptr,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_thermal_conductivity = nullptr,
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    const ALEControlVolumeState* ale = nullptr,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr)
+{
+    return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
+        specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
+        std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
+        geometry_cache, coefficient_interpolation, discretization, older_temperature,
+        old_density, old_specific_heat_capacity, ale);
 }
 
 /**
  * @brief Assemble mapped vector transport with selectable treatment.
  *
  * Explicit, implicit, and hybrid non-orthogonal treatments use the same
- * mapped reconstruction stencils as the legacy mesh path.
+ * mapped reconstruction stencils as the legacy mesh path. When @p ale is
+ * non-null, @p face_fluxes must be the synchronized mesh-relative flux.
  */
 template<TpetraTypePack Pack, class MeshType>
 VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFieldStored<Pack, MeshType>& old_values,
@@ -322,11 +545,12 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     const std::type_identity_t<VectorCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
-    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr)
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
+    const ALEControlVolumeState* ale = nullptr)
 {
     return detail::stored_vector_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
         std::move(boundary_value), std::move(right_hand_source), treatment, correction_field, std::move(cached_matrix),
-        std::move(boundary_diffusion), geometry_cache);
+        std::move(boundary_diffusion), geometry_cache, ale);
 }
 
 /**
@@ -334,7 +558,10 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
  *
  * The mapped path includes variable-coefficient orthogonal diffusion,
  * explicit/implicit non-orthogonal corrections, and the deviatoric
- * transpose-gradient stress used by physical momentum transport.
+ * transpose-gradient stress used by physical momentum transport. When
+ * @p ale is non-null, @p face_fluxes must be the synchronized mesh-relative
+ * volume flux. The optional gradient workspace retains storage only; its
+ * values are recomputed and synchronized for every assembly.
  */
 template<TpetraTypePack Pack, class MeshType>
 VectorTransportSystem<Pack> physical_momentum_transport_system(
@@ -347,12 +574,14 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     const std::type_identity_t<FieldStoredBoundaryCache<Pack, MeshType>>* boundary_dynamic_viscosity = nullptr,
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
-    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic)
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    const ALEControlVolumeState* ale = nullptr,
+    std::type_identity_t<TensorCellFieldStored<Pack, MeshType>>* gradient_workspace = nullptr)
 {
     return detail::stored_physical_momentum_transport_system<Pack>(old_velocity, face_fluxes, time_step,
         dynamic_viscosity, reference_density, std::move(boundary_value), std::move(acceleration_source), treatment,
         correction_field, std::move(cached_matrix), std::move(boundary_diffusion), boundary_dynamic_viscosity,
-        geometry_cache, coefficient_interpolation);
+        geometry_cache, coefficient_interpolation, ale, gradient_workspace);
 }
 
 /**
@@ -542,18 +771,24 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr);
 
+/** @brief Assemble legacy weighted scalar transport from named inputs. */
+template<TpetraTypePack Pack>
+TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRequest<Pack> request);
+
 /**
- * @brief Assemble conservative scalar transport with independent storage,
+ * @brief Compatibility overload for conservative scalar transport with independent storage,
  *        advection, and diffusion weights.
  *
  * The solved variable is phi:
  *
- *   d(storage_weight * phi)/dt
+ *   storage_weight * d(phi)/dt
  * + div(face_flux * advection_weight * phi)
  * = div(diffusivity * grad(phi)) + source - implicit_sink * phi.
  *
  * Boundary diffusion honors the supplied boundary-condition type, while
  * advection remains first-order upwind and outflow conservative.
+ * The current storage field is held as the coefficient of the complete time
+ * derivative; historical storage values are not part of this API.
  *
  * @param face_fluxes Oriented volumetric fluxes on the @p old_values mesh.
  * @param time_step Must be positive.
@@ -567,9 +802,10 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or a
- *         validated time step, coefficient, sink, or fixed value is invalid.
- * @throws std::runtime_error For a Robin boundary condition, which is not yet
+ *         validated time step, coefficient, sink, fixed value, boundary
+ *         condition, or boundary value is invalid. Robin conditions are not
  *         implemented by this assembly path.
+ * @throws std::runtime_error If a boundary callback fails on another rank.
  */
 template<TpetraTypePack Pack>
 TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& old_values,
@@ -577,6 +813,32 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
     const CellField<Pack>& advection_weight, const CellField<Pack>& diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
     ScalarCellValueProvider<Pack> source, NonOrthogonalTreatment treatment,
+    const CellField<Pack>* correction_field = nullptr,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
+    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink = {},
+    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value = {},
+    const BoundaryCache<Pack>* boundary_diffusivity = nullptr,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
+
+/**
+ * @brief Assemble weighted scalar transport with opt-in temporal and
+ *        convective schemes.
+ *
+ * This overload is intentionally distinct from the historical ABI entry
+ * point: @p discretization precedes @p treatment. BDF2 requires
+ * @p older_values on the same mesh. All remaining defaults match the
+ * established weighted transport path. The current @p storage_weight
+ * multiplies the complete BDF2 derivative; historical storage fields are not
+ * accepted or inferred.
+ */
+template<TpetraTypePack Pack>
+TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& old_values,
+    const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step, const CellField<Pack>& storage_weight,
+    const CellField<Pack>& advection_weight, const CellField<Pack>& diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> source, ScalarTransportDiscretization discretization,
+    NonOrthogonalTreatment treatment, const CellField<Pack>* older_values = nullptr,
     const CellField<Pack>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink = {},
@@ -600,9 +862,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or the
- *         time step is not positive.
- * @throws std::runtime_error For a Robin boundary condition, which is not yet
- *         implemented by this assembly path.
+ *         time step, boundary condition, or boundary value is invalid. Robin
+ *         conditions are not implemented by this assembly path.
+ * @throws std::runtime_error If a boundary callback fails on another rank.
  */
 template<TpetraTypePack Pack>
 TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack>& old_temperature,
