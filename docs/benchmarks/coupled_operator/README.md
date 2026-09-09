@@ -18,7 +18,8 @@ composite processes. Benchmark processes run sequentially after builds/tests.
 The subsequent `6033af4` correction refreshes MueLu numeric state with `RP`
 reuse. The `full`-reuse timings and failed pilot here are historical. See
 [the current solver qualification](../../architecture/coupled_solver_backend_validation.md)
-for the corrected convergence tests and expanded solver/mesh coverage.
+for the corrected convergence tests and expanded solver/mesh coverage, and
+[the post-fix measurements](RP_RESULTS.md) for successful 512/1,728-cell runs.
 
 ## Serial measurements
 

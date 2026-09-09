@@ -127,3 +127,21 @@ parameter combination, or million-cell performance. The original small
 MueLu `RP` reuse explicitly. Detailed preconditioner/Krylov allocation tracing
 and separate preconditioner setup timing remain unavailable in the existing
 benchmark, rather than inferred from CRS payload counts.
+
+
+## Larger convergence verification
+
+On clean commit `64059d787ff4fee246f1e255a1a54ae181d1129d`, all 16
+separate-process benchmark runs completed: every operator/workspace choice at
+512 and 1,728 cells in serial, plus 1,728 cells on two and four ranks. Each
+completed the first solve and three numeric updates with tolerance `1e-9`
+and the existing 400-iteration cap. All combinations have matching iteration
+sequences within each size/rank case, and maximum true relative residual is
+below `9.014e-10`. Composite monolithic build counters remain zero.
+
+The [post-fix measurement report](../benchmarks/coupled_operator/RP_RESULTS.md)
+records memory, setup/apply/solve times, residuals and retained storage,
+including slower Debug applications. The earlier failed pilot remains marked
+failed. This completes the current coupled solver/backend qualification;
+scalar face-based operators and broader device/performance work remain outside
+this coupled delivery.
