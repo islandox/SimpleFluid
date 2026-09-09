@@ -424,5 +424,78 @@ TEST_P(CompositeMeshTest, StreamedProductsPreserveNumericsAndReleaseStorage)
     EXPECT_THROW(coupled_workspace_policy_from_string("local_only"), std::invalid_argument);
 }
 
+TEST(CoupledBlockOperatorTest, NumericUpdatesMatchFreshAssemblyAtScale)
+{
+    Vec3D<ArrReal> edges;
+    for (int axis = 0; axis < 3; ++axis)
+        for (int i = 0; i <= 8; ++i)
+            edges[axis].push_back(i / 8.0);
+    SP<const Handle> mesh = std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(edges));
+    BoundaryConditionSet boundaries;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+        boundaries.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+    const auto boundary = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    LinearSolverOptions linear;
+    linear.tolerance = 1e-9;
+    linear.max_iterations = 400;
+    for (const auto backend : {Backend::Assembled, Backend::BlockComposite})
+        for (const auto workspace : {CoupledWorkspacePolicy::CachedProducts, CoupledWorkspacePolicy::StreamedProducts})
+        {
+            SCOPED_TRACE(std::string(to_string(backend)) + "/" + std::string(to_string(workspace)));
+            Solver reused(mesh), fresh(mesh);
+            fresh.set_rebuild_policy(CoupledRebuildPolicy::Always);
+            IncompressibleMomentumEquation<Pack, Handle> equation(mesh), reference_equation(mesh);
+            VectorCellFieldStored<Pack> u(mesh, vec3<double>{}, "u"), reference_u(mesh, vec3<double>{}, "reference_u");
+            ScalarCellFieldStored<Pack> p(mesh, 0., "p"), reference_p(mesh, 0., "reference_p");
+            ScalarFaceFieldStored<Pack> flux(mesh, 0., "phi");
+            TimeStepperOptions options;
+            options.time_step = .01;
+            options.non_orthogonal_treatment = FVM::NonOrthogonalTreatment::Explicit;
+            options.coupled_operator_backend = backend;
+            options.coupled_workspace_policy = workspace;
+            for (int step = 0; step < 4; ++step)
+            {
+                SCOPED_TRACE(step);
+                for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+                {
+                    u.set_owned_value(static_cast<LO>(cell), {.1, .2, -.1});
+                    reference_u.set_owned_value(static_cast<LO>(cell), {.1, .2, -.1});
+                }
+                p.owned_data().putScalar(0.);
+                reference_p.owned_data().putScalar(0.);
+                const auto system = reused.assemble(equation, u, p, flux, boundary, boundaries, options);
+                auto reference_options = options;
+                reference_options.coupled_operator_backend = Backend::Assembled;
+                reference_options.coupled_workspace_policy = CoupledWorkspacePolicy::CachedProducts;
+                const auto reference = fresh.assemble(
+                    reference_equation, reference_u, reference_p, flux, boundary, boundaries, reference_options);
+                expect_near(*system.rhs, *reference.rhs);
+                MV x(system.map, 1), a(system.map, 1), b(system.map, 1);
+                fill(x);
+                system.linear_operator->apply(x, a);
+                reference.linear_operator->apply(x, b);
+                expect_near(a, b);
+                MV q(mesh->owned_cell_map(), 1), ca(mesh->owned_cell_map(), 1), cb(mesh->owned_cell_map(), 1);
+                fill(q);
+                system.pressure_stabilization->apply(q, ca);
+                reference.pressure_stabilization->apply(q, cb);
+                expect_near(ca, cb);
+                system.schur->apply(q, ca);
+                reference.schur->apply(q, cb);
+                expect_near(ca, cb);
+                const auto ref_result = fresh.solve(reference, reference_u, reference_p, linear);
+                const auto result = reused.solve(system, u, p, linear);
+                ASSERT_TRUE(ref_result.converged) << "fresh iterations=" << ref_result.iterations;
+                ASSERT_TRUE(result.converged)
+                    << "reused iterations=" << result.iterations << ", fresh iterations=" << ref_result.iterations;
+                MV delta(u.owned_data(), Teuchos::Copy);
+                delta.update(-1., reference_u.owned_data(), 1.);
+                for (size_t component = 0; component < 3; ++component)
+                    EXPECT_LT(delta.getVector(component)->normInf(), 1e-8);
+                options.time_step *= 1.1;
+            }
+        }
+}
+
 INSTANTIATE_TEST_SUITE_P(Native, CompositeMeshTest, testing::Values(0, 1, 2));
 } // namespace
