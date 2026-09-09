@@ -96,7 +96,7 @@ jobs:
     - name: Install dependencies
       uses: ./.github/actions/setup-trilinos-source
       with:
-        trilinos-version: trilinos-release-17-1-1
+        trilinos-version: trilinos-release-17-2-1
         compiler-id: ${{ matrix.compiler_id }}
         c-compiler: ${{ matrix.c_compiler }}
         cxx-compiler: ${{ matrix.cpp_compiler }}

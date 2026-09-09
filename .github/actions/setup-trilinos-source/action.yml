@@ -5,7 +5,7 @@ inputs:
   trilinos-version:
     description: Trilinos git tag
     required: false
-    default: trilinos-release-17-1-1
+    default: trilinos-release-17-2-1
   compiler-id:
     required: true
   c-compiler:
@@ -312,7 +312,7 @@ runs:
         fi
 
         # Backport the dependent-template fix present on Trilinos master.
-        # Apple Clang 21 rejects these calls in the pinned 17.1.1 release.
+        # Apple Clang 21 rejects these calls in the older 17.1.1 release.
         if [ "$RUNNER_OS" = "macOS" ] && \
            [ "${{ inputs.trilinos-version }}" = "trilinos-release-17-1-1" ]; then
           MUELU_MAXWELL="${{ github.workspace }}/_deps/Trilinos/packages/muelu/src/Operators/MueLu_Maxwell1_def.hpp"
