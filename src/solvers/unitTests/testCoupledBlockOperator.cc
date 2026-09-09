@@ -255,7 +255,9 @@ TEST_P(CompositeMeshTest, ReferenceSolveAndRetainedGenerations)
     MV reference_pressure(pressure.owned_data(), Teuchos::Copy);
     velocity.owned_data().putScalar(0.0);
     pressure.owned_data().putScalar(0.0);
+    const auto operator_owners = composite.linear_operator.strong_count();
     EXPECT_TRUE(solver.solve(composite, velocity, pressure, linear).converged);
+    EXPECT_EQ(composite.linear_operator.strong_count(), operator_owners);
     // Linear convergence tolerance controls solution comparisons.
     MV delta(velocity.owned_data(), Teuchos::Copy);
     delta.update(-1., reference_velocity, 1.);

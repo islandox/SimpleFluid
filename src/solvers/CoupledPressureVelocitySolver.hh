@@ -544,7 +544,6 @@ private:
     mutable pressure_graph_signature_type d_cached_pressure_graph_signature;
     mutable Teuchos::RCP<preconditioner_type> d_preconditioner;
     mutable Teuchos::RCP<solver_type> d_belos_solver;
-    mutable const operator_type* d_last_belos_matrix = nullptr;
     mutable Teuchos::RCP<vector_type> d_solution;
     std::vector<std::string> d_fixed_boundary_flux_names;
     fixed_boundary_flux_provider_type d_fixed_boundary_flux_provider;
