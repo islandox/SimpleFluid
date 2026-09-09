@@ -699,7 +699,7 @@ TEST(LiquidMassInventoryTest, LargeCartesianReferenceDoesNotInventVolumeSource)
     options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
     SimpleFluid::LiquidMassInventory<Pack, NativeMesh> inventory(mesh, options);
     constexpr double density = 996.558076096375;
-    inventory.initialize(1000.0, [](auto) { return density; });
+    inventory.initialize(1000.0, [density](auto) { return density; });
     EXPECT_NEAR(inventory.totalMass(), density * 1000, 1e-9);
     EXPECT_NEAR(inventory.liquidVolume(), 1000, 2e-12);
     const double warm_density = density / 1.000026;
