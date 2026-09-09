@@ -10,11 +10,12 @@
  */
 #pragma once
 
-#include "dataclass/vec3.hh"
-#include "dataclass/typedefs.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
+#include "dataclass/typedefs.hh"
+#include "dataclass/vec3.hh"
+#include "equations/CoupledOperatorBackend.hh"
 #include "equations/PressureVelocityCoupling.hh"
 
 namespace SimpleFluid
@@ -45,6 +46,8 @@ struct TimeStepperOptions
         PressureVelocityCoupling::PISO;
     int n_pressure_correctors = 1;
     int n_outer_correctors = 1;
+    CoupledOperatorBackend coupled_operator_backend = CoupledOperatorBackend::Assembled;
+    CoupledWorkspacePolicy coupled_workspace_policy = CoupledWorkspacePolicy::CachedProducts;
 
     vec3<real_t> gravity_vector() const noexcept
     {

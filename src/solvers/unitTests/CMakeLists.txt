@@ -266,3 +266,12 @@ simplefluid_add_mpi_test(
     ARGS "--gtest_filter=VolumeContinuityModelTest.CollectivelyRejectsRankDivergentGlobalAndOptionalInputs"
     LABELS "mpi;ale;continuity;validation"
     TIMEOUT 120)
+
+foreach(_composite_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+      NAME CoupledBlockOperator_${_composite_procs}procs
+      TARGET testCoupledBlockOperator
+      PROCS ${_composite_procs}
+      LABELS "mpi;pressure_velocity;composite"
+      TIMEOUT 180)
+endforeach()

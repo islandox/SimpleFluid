@@ -126,10 +126,20 @@ Three non-orthogonal treatments, selectable at runtime:
 | `SIMPLE` | Predictor → pressure correction → velocity correction → flux correction |
 | `PISO` | One momentum predictor + multiple pressure corrections per step |
 | `PIMPLE` | Outer nonlinear loop with inner PISO corrections |
-| `coupledKrylov` | Monolithic $\begin{bmatrix}A_u & G \\ D & 0\end{bmatrix}$ system with a block Schur preconditioner and MueLu AMG on the Schur complement |
+| `coupledKrylov` | $\begin{bmatrix}A_u & G \\ D & C\end{bmatrix}$ system (including Rhie–Chow stabilization) with a block Schur preconditioner and MueLu AMG on the Schur complement |
 
 The coupled Krylov solver uses Belos **block GMRES** with an Ifpack2/MueLu
 block-preconditioning strategy for robust convergence on challenging meshes.
+
+The default coupled representation is assembled CRS. The opt-in
+`TimeStepperOptions::coupled_operator_backend = CoupledOperatorBackend::BlockComposite`
+uses the existing momentum, gradient, divergence and stabilization blocks
+without constructing the monolithic matrix. Independently,
+`coupled_workspace_policy = CoupledWorkspacePolicy::StreamedProducts` releases
+sparse products component by component. Both choices preserve the assembled
+momentum/Schur preconditioners. See the [architecture, supported scope and
+measured tradeoffs](docs/architecture/coupled_operator_backends.md).
+These options do not implement scalar matrix-free transport.
 
 ### Segregated Linear Solves
 

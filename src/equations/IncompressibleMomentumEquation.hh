@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "FVM/NumericAssemblyLease.hh"
+
 #include "SimpleFluidExport.hh"
 #include "equations/EquationForward.hh"
 #include "equations/EquationValidation.hh"
@@ -78,6 +80,12 @@ public:
      * epoch survive this call.
      */
     void refresh_geometry();
+
+    /** Protect a coupled generation across subsequent equation assemblies. */
+    void protect_numeric_generation(const std::shared_ptr<FVM::NumericAssemblyLease>& lease) const
+    {
+        d_coupled_numeric_lease = lease;
+    }
 
     LinearSolveSummary advance_velocity(
         const velocity_field_type& old_velocity,
@@ -209,6 +217,19 @@ private:
 
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
+    mutable std::weak_ptr<FVM::NumericAssemblyLease> d_coupled_numeric_lease;
+
+    void detach_protected_numeric_generation() const
+    {
+        const auto lease = d_coupled_numeric_lease.lock();
+        if (lease && lease->protected_generation)
+        {
+            d_cached_transport_matrix = Teuchos::null;
+            d_cached_physical_transport_matrix = Teuchos::null;
+        }
+        d_coupled_numeric_lease.reset();
+    }
+
     mutable velocity_field_type d_candidate_velocity;
     mutable std::optional<typename field_traits::tensor_cell_type> d_stress_gradients;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;

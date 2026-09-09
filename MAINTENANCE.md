@@ -433,6 +433,30 @@ Put runnable cases in `src/examples` and reusable timing cases in
 bounded smoke test, and document environment knobs that reduce runtime for CI.
 Do not make an example the only verification of a numerical feature.
 
+### Coupled representation and numerical ownership
+
+Use `CoupledPressureVelocitySystem::linear_operator` for solver binding and
+true residuals. `matrix` and `overlap_map` are null for `BlockComposite`;
+scalar block applications own halo communication. Do not allocate a coupled
+CRS graph to recover its column map. Existing assembled systems retain both
+handles as aliases of the same allocation.
+
+The equation's weak `NumericAssemblyLease` prevents in-place momentum updates
+while a caller retains a coupled generation. Only the solver's collective
+ownership check may release protection; it accounts for the assembled alias
+and dormant Belos iteration. Cache clearing must leave retained generations
+protected. Do not replace this with unconditional block copies or a raw
+matrix reference-count assumption. Public block handles remain mutable for
+source compatibility; callers must not mutate them during a solve.
+
+`StreamedProducts` directly accumulates distributed products into the final C
+and Schur matrices. Apply diagonal regularization after duplicate compression
+and full component accumulation. Keep Tpetra remote-row multiplication; field
+halos alone are insufficient. Weak storage observers must not prolong matrix
+lifetimes. Their view-byte statistics exclude maps/importers and solver
+internals; never present them as total RSS. See
+[the ownership inventory and benchmark limitations](docs/architecture/coupled_operator_backends.md).
+
 ## Performance work
 
 Use `RelWithDebInfo` for profiling; the project preserves frame pointers in

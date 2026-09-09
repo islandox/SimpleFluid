@@ -14,6 +14,7 @@
 #include "FVM/details/OperatorDetails.hh"
 #include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
+#include "equations/CoupledOperatorBackend.hh"
 #include "equations/EquationForward.hh"
 #include "equations/VolumeContinuityTarget.hh"
 #include "fields/CellField.hh"
@@ -21,6 +22,7 @@
 #include "fields/MeshFieldTraits.hh"
 #include "fields/VectorCellField.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "solvers/CoupledBlockOperator.hh"
 
 #include <BelosBlockGmresSolMgr.hpp>
 #include <BelosLinearProblem.hpp>
@@ -89,6 +91,12 @@ template<TpetraTypePack Pack> struct CoupledPressureVelocitySystem
     std::uint64_t geometry_epoch = 0;
     std::uint64_t continuity_target_generation = 0;
     std::uint64_t fixed_boundary_flux_revision = 0;
+    /// True operator. matrix and overlap_map are null for block_composite;
+    /// communication uses the scalar block maps/importers instead.
+    Teuchos::RCP<const typename Pack::operator_type> linear_operator;
+    std::shared_ptr<FVM::NumericAssemblyLease> numeric_lease;
+    CoupledOperatorBackend operator_backend = CoupledOperatorBackend::Assembled;
+    CoupledWorkspacePolicy workspace_policy = CoupledWorkspacePolicy::CachedProducts;
 };
 
 /**
@@ -125,6 +133,10 @@ enum class CoupledRebuildPolicy : std::uint8_t
  */
 struct CoupledPressureVelocityCacheStatistics
 {
+    size_t coupled_matrix_builds = 0;
+    size_t composite_operator_builds = 0;
+    size_t streamed_product_peak = 0;
+    size_t streamed_products_live = 0;
     size_t coupled_map_builds = 0;
     size_t static_geometry_builds = 0;
     size_t static_geometry_reuses = 0;
@@ -135,6 +147,19 @@ struct CoupledPressureVelocityCacheStatistics
     size_t belos_solver_builds = 0;
     size_t belos_solver_reuses = 0;
     size_t preconditioner_scratch_allocations = 0;
+};
+
+/** Locally observed live CRS device-view payload, deduplicated by allocation address.
+ * Excludes maps/imports, allocator metadata, Ifpack2/MueLu internals and Krylov
+ * storage. On host-only Kokkos these are host allocations, counted once.
+ */
+struct CoupledStorageStatistics
+{
+    size_t live_matrices = 0;
+    size_t graph_bytes = 0;
+    size_t value_bytes = 0;
+    size_t composite_scratch_bytes = 0;
+    size_t composite_scratch_allocations = 0;
 };
 
 namespace detail
@@ -267,7 +292,9 @@ SIMPLEFLUID_SOLVERS_LOCAL Teuchos::RCP<typename Pack::matrix_type> build_schur_a
     const typename Pack::matrix_type& pressure_stabilization,
     std::optional<typename Pack::global_ordinal_type> pressure_gauge_gid,
     Teuchos::RCP<typename Pack::matrix_type> cached_schur = Teuchos::null,
-    CoupledSchurWorkspace<Pack>* workspace = nullptr, bool* reused_products = nullptr);
+    CoupledSchurWorkspace<Pack>* workspace = nullptr, bool* reused_products = nullptr,
+    CoupledWorkspacePolicy policy = CoupledWorkspacePolicy::CachedProducts,
+    CoupledPressureVelocityCacheStatistics* statistics = nullptr);
 
 /**
  * @brief Apply a block-triangular velocity-pressure preconditioner.
@@ -344,6 +371,8 @@ public:
      * Instrumentation counters remain cumulative across this operation.
      */
     void clear_cache();
+
+    CoupledStorageStatistics storage_statistics() const;
 
     /**
      * Prescribe exact owner-oriented volume fluxes [m^3/s] on named
@@ -458,6 +487,9 @@ private:
     static pressure_graph_signature_type pressure_graph_signature(const BoundaryConditionMap& boundaries);
 
     SIMPLEFLUID_SOLVERS_LOCAL
+    bool has_external_generation() const;
+    void prepare_numeric_generation(const momentum_equation_type& equation, const TimeStepperOptions& options) const;
+
     bool can_reuse_assembly_graph(
         const momentum_system_type& momentum, const pressure_graph_signature_type& pressure_signature) const;
 
@@ -498,6 +530,11 @@ private:
     mutable std::uint64_t d_geometry_epoch = 0;
     mutable CoupledPressureVelocityCacheStatistics d_cache_statistics;
     mutable system_type d_cached_system;
+    mutable std::optional<std::pair<CoupledOperatorBackend, CoupledWorkspacePolicy>> d_logged_backends;
+    // Weak observers include retained old generations without keeping them alive.
+    mutable std::vector<Teuchos::RCP<matrix_type>> d_observed_matrices;
+    mutable std::vector<Teuchos::RCP<const operator_type>> d_observed_operators;
+    void observe_storage() const;
     mutable StaticGeometryCache d_static_geometry;
     mutable detail::CoupledSchurWorkspace<Pack> d_schur_workspace;
     mutable std::array<Teuchos::RCP<matrix_type>, 3> d_gradient_stabilization_products;
@@ -505,7 +542,7 @@ private:
     mutable pressure_graph_signature_type d_cached_pressure_graph_signature;
     mutable Teuchos::RCP<preconditioner_type> d_preconditioner;
     mutable Teuchos::RCP<solver_type> d_belos_solver;
-    mutable const matrix_type* d_last_belos_matrix = nullptr;
+    mutable const operator_type* d_last_belos_matrix = nullptr;
     mutable Teuchos::RCP<vector_type> d_solution;
     std::vector<std::string> d_fixed_boundary_flux_names;
     fixed_boundary_flux_provider_type d_fixed_boundary_flux_provider;
