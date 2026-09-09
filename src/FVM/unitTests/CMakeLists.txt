@@ -55,3 +55,17 @@ foreach(_cached_kernel IN ITEMS CellFluxBalanceCache StoredPressureFaceFluxCache
       LABELS "mpi;fvm;cache"
       TIMEOUT 120)
 endforeach()
+
+foreach(_region_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(
+        NAME MultiRegionTransport_${_region_procs}procs
+        TARGET testMultiRegionTransportMultiRank
+        PROCS ${_region_procs}
+        LABELS "mpi;multi_region;transport"
+        TIMEOUT 120)
+endforeach()
+
+foreach(_region_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME MultiRegionALE_${_region_procs}procs TARGET testMultiRegionALE
+        PROCS ${_region_procs} LABELS "mpi;multi_region;ale;conservation" TIMEOUT 120)
+endforeach()

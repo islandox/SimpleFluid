@@ -43,10 +43,9 @@ TEST(RegionProvidersTest, SharedTopologyIndependentGeometryAndLifetime)
     EXPECT_THROW((CartesianRegion("bad", std::make_shared<const RectilinearTopology>(a.topology()), mismatch)), std::invalid_argument);
 }
 
-TEST(MultiRegionMeshTest, SerialOnlyRejection)
+TEST(MultiRegionMeshTest, ImplicitConstruction)
 {
-    if (Tpetra::getDefaultComm()->getSize() == 1) { EXPECT_NO_THROW(test::two_regions()); }
-    else EXPECT_THROW(test::two_regions(), std::runtime_error);
+    EXPECT_NO_THROW(test::two_regions());
 }
 TEST(MultiRegionMeshTest, CanonicalIncidenceMatchesSingleBlock)
 {
@@ -76,7 +75,7 @@ TEST(MultiRegionMeshTest, CanonicalIncidenceMatchesSingleBlock)
         }
     }
     EXPECT_EQ(seam, 4U);
-    Handle handle(mesh);
+    Handle handle(std::static_pointer_cast<const MultiRegionMesh>(mesh));
     EXPECT_EQ(handle.connectivity_storage_bytes(), 0U); EXPECT_FALSE(handle.has_materialized_indexer());
     EXPECT_FALSE(handle.has_mutable_geometry());
     EXPECT_THROW(handle.visit_mutable([](auto&){}), std::logic_error);
@@ -199,7 +198,8 @@ TEST(MultiRegionMeshTest, CountsSharedTopologyOnce)
     MultiRegionMesh mesh({CartesianRegion("a",topology,a),CartesianRegion("b",topology,b)},
         {StructuredPatchInterface{{0,1},{1,0}}});
     EXPECT_EQ(mesh.storage_report().topology,topology->storage_report().topology);
-    EXPECT_EQ(mesh.storage_report().geometry,a->storage_report().geometry+b->storage_report().geometry);
+    // Initial/current two-point axial parameters belong to the composite.
+    EXPECT_EQ(mesh.storage_report().geometry,a->storage_report().geometry+b->storage_report().geometry+4*sizeof(real_t));
 }
 TEST(MultiRegionMeshTest, ExactChildEpochSnapshotDetectsTheLowerEpochChanging)
 {
@@ -278,4 +278,173 @@ TEST(MultiRegionMeshTest, BoundaryNameCollisionsRequireExplicitMergePolicy)
     auto faces=merged.boundary_face_batch(0);
     EXPECT_EQ(std::ranges::distance(faces),6);
     EXPECT_EQ(merged.boundary_batch_name(0),"wall");
+}
+
+TEST(MultiRegionMeshTest, NonconformingFacesAreCanonicalConservativeSubfaces)
+{
+    auto mesh=test::coarse_fine_regions();
+    const auto& interface=std::get<NonconformingInterface>(mesh->interfaces()[0]);
+    EXPECT_EQ(mesh->cell_faces(0).size(),7U);
+    std::vector<unsigned> incidence(mesh->num_faces());
+    for(size_t c=0;c<mesh->num_cells();++c)
+    {
+        MeshUtils::Vec3 closure{};
+        for(auto f:mesh->cell_faces(c)) { ++incidence[f]; closure=closure+mesh->face_area_vector_outward(f,c); }
+        EXPECT_NEAR(closure.norm(),0,1e-13);
+    }
+    for(size_t f=0;f<mesh->num_faces();++f) EXPECT_EQ(incidence[f],mesh->is_exterior_face(f)?1U:2U);
+    for(const auto& group:interface.faces)
+    {
+        const RegionFace native{0,group.coarse_face};
+        EXPECT_THROW(mesh->canonical_face(native),std::invalid_argument);
+        EXPECT_EQ(mesh->logical_faces(native).size(),2U);
+        real_t sum=0;
+        for(const auto weight:mesh->face_flux_weights(native)) { EXPECT_DOUBLE_EQ(weight.coefficient,-0.5); sum+=weight.coefficient; }
+        EXPECT_DOUBLE_EQ(sum,-1.0);
+        EXPECT_DOUBLE_EQ(mesh->restrict_face_flux(native,[](uint64_t){return -1.5;}),3.0);
+    }
+    EXPECT_THROW(test::coarse_fine_regions(0.9),std::invalid_argument);
+    auto bad=interface; bad.faces[0].fine_faces.pop_back();
+    EXPECT_THROW((MultiRegionMesh(mesh->regions(),{bad})),std::invalid_argument);
+    bad=interface; bad.faces[0].fine_faces[1]=bad.faces[0].fine_faces[0];
+    EXPECT_THROW((MultiRegionMesh(mesh->regions(),{bad})),std::invalid_argument);
+}
+TEST(MultiRegionMeshTest, PlanarSubdivisionRejectsOverlapAndNonplanarity)
+{
+    auto rectangle=[](real_t y0,real_t y1,real_t sign)
+    {
+        return InterfaceFacePolygon{{0,(y0+y1)/2,0.5},{sign*(y1-y0),0,0},y1-y0,
+            {{0,y0,0},{0,y1,0},{0,y1,1},{0,y0,1}}};
+    };
+    const auto coarse=rectangle(0,1,1);
+    std::vector<InterfaceFacePolygon> fine{rectangle(0,0.5,-1),rectangle(0.5,1,-1)};
+    EXPECT_NO_THROW(validate_planar_subdivision(coarse,fine,1e-12,1e-10));
+    fine[1]=rectangle(0.4,0.9,-1);
+    EXPECT_THROW(validate_planar_subdivision(coarse,fine,1e-12,1e-10),std::invalid_argument);
+    fine[1]=rectangle(0.5,1,-1); fine[1].vertices[0].x=0.1;
+    EXPECT_THROW(validate_planar_subdivision(coarse,fine,1e-12,1e-10),std::invalid_argument);
+}
+
+TEST(RegionProvidersTest, IndependentExtrusionsShareTopologyAndMatchAnalyticMetrics)
+{
+    auto topology=std::make_shared<const ExtrudedTopology>(3,Arr<Arr<unsigned>>{{0,1,2}},2);
+    auto a=extruded_region("a",topology,{{0,0,0},{1,0,0},{0,1,0}},{0,1,3});
+    auto b=extruded_region("b",topology,{{0,0,0},{2,0,0},{0,3,0}},{0,2,6});
+    EXPECT_EQ(&a.topology(),&b.topology());
+    EXPECT_DOUBLE_EQ(a.geometry().cell_volume(0),0.5); EXPECT_DOUBLE_EQ(b.geometry().cell_volume(0),6);
+    EXPECT_DOUBLE_EQ(b.geometry().cell_volume(1),12);
+    EXPECT_NEAR(b.geometry().cell_centroid(0).x,2.0/3,1e-14);
+    EXPECT_DOUBLE_EQ(b.geometry().cell_centroid(1).z,4);
+    EXPECT_TRUE(std::ranges::equal(a.topology().cell_faces(1),b.topology().cell_faces(1)));
+    EXPECT_THROW((ExtrudedGeometry(topology,{{0,0,0},{1,0,0},{0,1,0}},{0,1})),std::invalid_argument);
+    EXPECT_THROW((ExtrudedGeometry(topology,{{0,0,0},{-1,0,0},{0,1,0}},{0,1,2})),std::invalid_argument);
+    const SemiStructuredXY_Z native({{0,0,0},{1,0,0},{0,1,0}},{{0,1,2}},{0,1,3});
+    for(size_t f=0;f<a.layout().faces;++f)
+    {
+        EXPECT_NEAR(a.geometry().face_area(f),native.face_area(native.face_id(f)),1e-13);
+        EXPECT_NEAR((a.geometry().face_centroid(f)-native.face_centroid(native.face_id(f))).norm(),0,1e-13);
+    }
+    auto composite=test::independent_extruded_regions();
+    EXPECT_EQ(composite->num_cells(),4U); EXPECT_EQ(composite->num_faces(),16U);
+}
+TEST(MultiRegionMeshTest, TranslatedPeriodicFacesUseAdjacentImages)
+{
+    const auto mesh=test::periodic_regions();
+    auto handle=std::make_shared<Handle>(mesh);
+    size_t periodic=0;
+    for(size_t f=0;f<mesh->num_faces();++f)
+        if(std::abs(mesh->face_centroid(f).x)<1e-12 && std::abs(mesh->face_normal(f).x)>0.5)
+        {
+            ++periodic;
+            const auto owner=mesh->owner_cell(f),neighbor=mesh->neighbor_cell(f);
+            EXPECT_FALSE(mesh->is_boundary_face(f));
+            EXPECT_NEAR(mesh->cell_to_face_distance(f,owner),0.25,1e-14);
+            EXPECT_NEAR(mesh->cell_to_face_distance(f,neighbor),0.25,1e-14);
+            EXPECT_NEAR(mesh->cell_center_vector(f,owner).x,-0.5,1e-14);
+            EXPECT_NEAR(handle->cell_center_vector(f,neighbor).x,0.5,1e-14);
+        }
+    EXPECT_EQ(periodic,4U);
+    for(size_t c=0;c<mesh->num_cells();++c)
+    {
+        const auto faces=mesh->cell_faces(c); const auto distances=mesh->face_distances(c);
+        ASSERT_EQ(faces.size(),distances.size());
+        for(size_t i=0;i<faces.size();++i) EXPECT_NEAR(distances[i],mesh->cell_to_face_distance(faces[i],c),1e-14);
+    }
+    const auto quality=evaluate_mesh_quality(*handle);
+    EXPECT_GT(quality.minimum_normal_distance,0);
+    EXPECT_NEAR(quality.maximum_non_orthogonality_degrees,0,1e-12);
+}
+TEST(MultiRegionMeshTest, CylindricalRingMatchesNativeGeometryAndIncidence)
+{
+    const auto mesh=test::cylindrical_regions();
+    const real_t pi=std::acos(-1.0);
+    OrthogonalCylindrial3D native(Vec3D<ArrReal>{{{1,1.5,2},{0,pi/4,pi/2,3*pi/4,pi,5*pi/4,3*pi/2,7*pi/4,2*pi},{0,0.5,1}}});
+    EXPECT_EQ(mesh->num_cells(),native.num_cells()); EXPECT_EQ(mesh->num_faces(),native.num_faces());
+    for(size_t c=0;c<mesh->num_cells();++c)
+    {
+        bool found=false;
+        for(size_t n=0;n<native.num_cells();++n)
+            if((mesh->cell_centroid(c)-native.cell_centroid(native.cell_id(n))).norm()<1e-12)
+            { found=true; EXPECT_NEAR(mesh->cell_volume(c),native.cell_volume(native.cell_id(n)),1e-13); }
+        EXPECT_TRUE(found);
+    }
+    EXPECT_EQ(mesh->vtu_topology()->cell_offsets.size(),mesh->num_cells());
+}
+
+TEST(MultiRegionMeshTest, DegenerateCylindricalOutputAndInvalidPeriodicTranslationAreRejected)
+{
+    const real_t pi=std::acos(-1.0);
+    auto cylinder=std::make_shared<OrthogonalCylindrial3D>(Vec3D<ArrReal>{{{1,2},{0,pi,2*pi},{0,1}}});
+    EXPECT_THROW((MultiRegionMesh({native_region("cylinder",cylinder)},{})),std::invalid_argument);
+    auto reference=test::periodic_regions();
+    auto interfaces=reference->interfaces();
+    std::get<StructuredPatchInterface>(interfaces.back()).periodic_translation=MeshUtils::Vec3{1.9,0,0};
+    EXPECT_THROW((MultiRegionMesh(reference->regions(),interfaces)),std::invalid_argument);
+}
+
+TEST(RegionProvidersTest, SharedMultiCellExtrusionPreservesNativeBaseNumbering)
+{
+    const Arr<MeshUtils::Vec3> nodes{{0,0,0},{1,0,0},{1,1,0},{0,1,0}};
+    const Arr<Arr<unsigned>> cells{{0,1,3},{1,2,3}}; const ArrReal z{0,0.2,0.7,1};
+    auto topology=std::make_shared<const ExtrudedTopology>(4,cells,3);
+    auto region=extruded_region("shared",topology,nodes,z);
+    SemiStructuredXY_Z native(nodes,cells,z);
+    for(size_t c=0;c<region.layout().cells;++c)
+    {
+        EXPECT_NEAR(region.geometry().cell_volume(c),native.cell_volume(native.cell_id(c)),1e-14);
+        const auto actual=region.topology().cell_faces(c); const auto expected=native.cell_faces(native.cell_id(c));
+        ASSERT_EQ(actual.size(),expected.size());
+        for(size_t f=0;f<actual.size();++f) EXPECT_EQ(actual[f],native.face_local_id(expected[f]));
+    }
+    for(size_t f=0;f<region.layout().faces;++f)
+        EXPECT_NEAR((region.geometry().face_area_vector(f)-native.face_area_vector(native.face_id(f))).norm(),0,1e-13);
+}
+
+TEST(MultiRegionMeshTest, FluxTransferConservesEvenAtTheGeometryMatchingTolerance)
+{
+    auto mesh=test::coarse_fine_regions(1.0-5e-11);
+    const auto& interface=std::get<NonconformingInterface>(mesh->interfaces()[0]);
+    for(const auto& group:interface.faces)
+    {
+        const RegionFace native{0,group.coarse_face};
+        std::vector<real_t> flux(mesh->num_faces());
+        for(const auto weight:mesh->face_flux_weights(native)) flux[weight.face]=3.0*weight.coefficient;
+        EXPECT_NEAR(mesh->restrict_face_flux(native,[&](uint64_t face){return flux[face];}),3.0,2e-15);
+    }
+}
+
+TEST(RegionProvidersTest, IndependentExtrusionRejectsSelfIntersectingBaseGeometry)
+{
+    auto topology=std::make_shared<const ExtrudedTopology>(4,Arr<Arr<unsigned>>{{0,1,2,3}},1);
+    EXPECT_THROW((ExtrudedGeometry(topology,{{0,0,0},{2,0,0},{0,1,0},{1,1,0}},{0,1})),std::invalid_argument);
+}
+TEST(MultiRegionMeshTest, ExplicitConstituentsKeepStaticMotionContract)
+{
+    MultiRegionMesh source({cartesian_region("source",{{{0,1},{0,1},{0,1}}})},{});
+    auto native=test::explicit_reference(source);
+    auto geometry=std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("explicit",native)},
+        std::vector<MultiRegionMesh::Interface>{});
+    auto mesh=std::make_shared<Handle>(geometry);
+    EXPECT_FALSE(geometry->supports_axial_motion());
+    EXPECT_THROW((PlanarALEMeshMotion<>(mesh)),std::invalid_argument);
 }

@@ -62,6 +62,7 @@ legacy physical assembly and compatibility solve state have distinct owners.
 | Legacy Cartesian | Pressure outlet, density 7, both gradients | Same |
 | Legacy generated cylinder and sphere | All families/choices | Same |
 | Skewed semi-structured extrusion | Explicit/implicit/hybrid diffusion | Rejected by existing serial-only mesh contract |
+| Compact MultiRegionMesh: Cartesian, mixed HEX/prism, coarse/fine, translated periodic and cylindrical | All families/choices; mixed-mesh explicit/implicit/hybrid diffusion | Two/four-rank compact MPI |
 | Gradient-scheme affine action and cache changes | LS/Gauss/LS, nonzero boundaries, density 13 | Same, including remote product rows |
 | Coupled multivector contract | Alpha/beta, NaNs, aliasing, selected views, maps, transpose rejection | Noncontiguous IDs and reversed rank ownership |
 
@@ -145,3 +146,26 @@ including slower Debug applications. The earlier failed pilot remains marked
 failed. This completes the current coupled solver/backend qualification;
 scalar face-based operators and broader device/performance work remain outside
 this coupled delivery.
+
+## Region-mesh merge follow-up (2026-09-10)
+
+After merging the coupled backends into `feature/mesh`, eight added parameterized
+tests passed on Cartesian and mixed HEX/prism region meshes. They reuse the
+production backend qualification harness, including four timesteps, changing
+timesteps, backend switching, independent continuity sums and numeric-cache
+statistics. Every composite timestep additionally checks that mesh cell-face
+connectivity and compatibility indexing remain unmaterialized.
+
+```sh
+cmake --build --preset GCC-Debug --target testCoupledSolverBackends -j 4
+ctest --preset GCC-Debug -R 'CoupledSolverBackendsTest\.SerialMultiRegion' --parallel 4
+```
+
+Observed: 8/8 passed in 3.87 seconds. This is serial region/backend integration
+coverage; the preceding dated solver totals remain the results of their original
+runs. Composite MPI and composite ALE remain unsupported.
+
+The later [region extensions](../region_mesh_extensions.md) enable compact
+composite MPI and common axial affine ALE. The initial merge-follow-up numbers
+above remain historical; current tests are named `MultiRegionCartesian`,
+`MultiRegionMixedNonOrthogonal` and `MultiRegionExtendedFamilies`.

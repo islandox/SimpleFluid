@@ -14,6 +14,7 @@
 #include "MeshHandle.hh"
 
 #include <array>
+#include <Teuchos_CommHelpers.hpp>
 
 namespace SimpleFluid
 {
@@ -25,14 +26,84 @@ namespace SimpleFluid
  * @param options Partition override and ghost-layer configuration.
  */
 template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(MultiRegionPtr mesh) : d_mesh(std::move(mesh))
+MeshHandle<Pack>::MeshHandle(MultiRegionPtr mesh) : MeshHandle(std::move(mesh), DistributionOptions{}) {}
+
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableMultiRegionPtr mesh) : MeshHandle(std::move(mesh),DistributionOptions{}) {}
+
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableMultiRegionPtr mesh, DistributionOptions options)
+    : MeshHandle(MultiRegionPtr(mesh),options)
 {
-    if (Tpetra::getDefaultComm()->getSize() != 1)
-        throw std::runtime_error("MultiRegionMesh supports serial communicators only.");
-    const auto& composite = std::get<MultiRegionPtr>(d_mesh);
-    if (!composite) throw std::invalid_argument("MeshHandle requires a live composite.");
-    composite->validate_static();
-    initialize_serial(*composite);
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MultiRegionPtr mesh, DistributionOptions options) : d_mesh(std::move(mesh))
+{
+    initialize_composite(std::get<MultiRegionPtr>(d_mesh), options);
+}
+
+/** @brief Partition compact global descriptors using arithmetic cell ownership and local Tpetra maps. */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::initialize_composite(MultiRegionPtr mesh, DistributionOptions options)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    int invalid = !mesh || options.partition.has_value() || options.partitions.has_value() || options.ghost_layers == 0;
+    int any_invalid = 0;
+    std::exception_ptr geometry_error;
+    try { if (mesh) mesh->validate_static(); }
+    catch (...) { invalid=1; geometry_error=std::current_exception(); }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &invalid, &any_invalid);
+    if (any_invalid)
+    {
+        if (geometry_error) std::rethrow_exception(geometry_error);
+        throw std::invalid_argument("Composite handles require live unchanged geometry, positive halos and communicator-defined ownership on every rank.");
+    }
+    if (comm->getSize() == 1) { initialize_serial(*mesh); return; }
+    const size_t rank = static_cast<size_t>(comm->getRank()), ranks = static_cast<size_t>(comm->getSize());
+    const size_t cells = mesh->num_cells();
+    if (cells > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max())
+        || mesh->num_faces() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max())
+        || mesh->num_nodes() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()))
+        throw std::overflow_error("Composite global entity IDs exceed the Tpetra ordinal type.");
+    const auto begin = (cells / ranks) * rank + std::min(cells % ranks, rank);
+    const auto count = cells / ranks + (rank < cells % ranks ? 1 : 0);
+    const auto end = begin + count;
+    std::vector<size_t> owned(count); std::iota(owned.begin(), owned.end(), begin);
+    std::vector<size_t> ghosts, frontier = owned;
+    std::unordered_set<size_t> seen(owned.begin(), owned.end());
+    for (size_t layer = 0; layer < options.ghost_layers && !frontier.empty(); ++layer)
+    {
+        std::vector<size_t> next;
+        for (const auto c : frontier) for (const auto f : mesh->cell_faces(c))
+        {
+            const auto other = mesh->opposite_cell(f, c);
+            if (other != MultiRegion::invalid_cell_id() && seen.insert(other).second)
+            { ghosts.push_back(other); next.push_back(other); }
+        }
+        frontier = std::move(next);
+    }
+    std::sort(ghosts.begin(), ghosts.end());
+    initialize_cells(std::move(owned), std::move(ghosts));
+    std::unordered_set<size_t> faces, nodes;
+    for (const auto c : d_indexer.cell_global_ids())
+    {
+        for (const auto f : mesh->cell_faces(c)) faces.insert(f);
+        for (const auto n : mesh->cell_nodes(c)) nodes.insert(n);
+    }
+    std::vector<size_t> owned_faces, overlap_faces;
+    for (const auto f : faces)
+    {
+        const auto owner = mesh->owner_cell(f);
+        (owner >= begin && owner < end ? owned_faces : overlap_faces).push_back(f);
+    }
+    std::sort(owned_faces.begin(), owned_faces.end()); std::sort(overlap_faces.begin(), overlap_faces.end());
+    initialize_faces(std::move(owned_faces), std::move(overlap_faces));
+    std::vector<size_t> local_nodes(nodes.begin(), nodes.end()); std::sort(local_nodes.begin(), local_nodes.end());
+    d_indexer.set_nodes(checked_global_ids(std::move(local_nodes)));
+    initialize_boundary_batches(*mesh);
+    create_maps(comm);
 }
 
 template<TpetraTypePack Pack>
@@ -704,6 +775,19 @@ template<class MeshType>
 void MeshHandle<Pack>::initialize_boundary_batches(
     const MeshType& mesh)
 {
+    if constexpr (std::same_as<MeshType, MultiRegion>)
+    {
+        for (size_t f = 0; f < num_faces(); ++f)
+        {
+            const auto local = checked_local(f);
+            const int id = mesh.boundary_id(geometry_face_lid(local));
+            if (id == invalid_boundary_id) continue;
+            d_boundary_names.emplace(id, mesh.boundary_batch_name(id));
+            auto& batch = d_boundary_batches[id]; batch.id = id; batch.face_lids.push_back(local);
+        }
+        return;
+    }
+
     auto materialize_batch =
         [&](int batch_id, auto&& source_faces)
     {
@@ -777,7 +861,7 @@ void MeshHandle<Pack>::export_vtu(const std::string& filename) const
             }
             else if constexpr (std::is_same_v<mesh_type, MultiRegion>)
             {
-                write_vtu(filename, mesh.vtu_topology());
+                write_vtu(filename, composite_vtu_topology(mesh));
             }
             else
             {
@@ -791,6 +875,15 @@ void MeshHandle<Pack>::export_vtu(const std::string& filename) const
  *
  * @return Immutable topology in the same owned-cell order used by fields.
  */
+template<TpetraTypePack Pack>
+VTUWriter::TopologyHandle MeshHandle<Pack>::composite_vtu_topology(const MultiRegion& mesh) const
+{
+    return mesh.vtu_topology({this, 0, num_owned_cells(), [](const void* source, size_t, size_t cell) -> uint64_t
+    {
+        return static_cast<const MeshHandle*>(source)->geometry_cell_lid(checked_local(cell));
+    }});
+}
+
 template<TpetraTypePack Pack>
 VTUWriter::TopologyHandle MeshHandle<Pack>::vtu_topology() const
 {
@@ -812,7 +905,7 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::vtu_topology() const
             }
             else if constexpr (std::is_same_v<mesh_type, MultiRegion>)
             {
-                return mesh.vtu_topology();
+                return composite_vtu_topology(mesh);
             }
             else
             {

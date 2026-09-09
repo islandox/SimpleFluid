@@ -172,7 +172,7 @@ public:
         distances.reserve(cell_face_ids.size());
         for (const auto face_id : cell_face_ids)
         {
-            distances.push_back(cell_to_face_distance(face_id, cell_id));
+            distances.push_back(derived().cell_to_face_distance(face_id, cell_id));
         }
         return distances;
     }

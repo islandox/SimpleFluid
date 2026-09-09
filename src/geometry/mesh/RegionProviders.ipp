@@ -17,7 +17,8 @@ inline uint64_t cartesian_cell_node(const OrthogonalIndexer& indexer, size_t cel
     constexpr unsigned corners[8][3] = {{0,0,0},{1,0,0},{1,1,0},{0,1,0},
                                       {0,0,1},{1,0,1},{1,1,1},{0,1,1}};
     const auto c = indexer.cell_id(cell);
-    return indexer.node_ordinal({c.i + corners[corner][0], c.j + corners[corner][1], c.k + corners[corner][2]});
+    return indexer.node_ordinal({(c.i+corners[corner][0])%indexer.num_nodes_per_dim[0],
+        (c.j+corners[corner][1])%indexer.num_nodes_per_dim[1],(c.k+corners[corner][2])%indexer.num_nodes_per_dim[2]});
 }
 inline uint64_t cartesian_face_node(const OrthogonalIndexer& indexer, size_t face, size_t corner)
 {
@@ -27,6 +28,7 @@ inline uint64_t cartesian_face_node(const OrthogonalIndexer& indexer, size_t fac
     size_t tangent = 0;
     for (size_t axis = 0; axis < 3; ++axis)
         if (axis != f.orientation) n[axis] += corners[corner][tangent++];
+    for(size_t a=0;a<3;++a) n[a]%=indexer.num_nodes_per_dim[a];
     return indexer.node_ordinal({n[0], n[1], n[2]});
 }
 } // namespace region_detail
@@ -41,7 +43,7 @@ EntityRange<uint64_t> NativeRegionProvider<Native>::cell_nodes(size_t c) const
     return {this, c, count, [](const void* source, size_t c, size_t i) -> ID
     {
         const auto& m = *static_cast<const NativeRegionProvider*>(source)->d_mesh;
-        if constexpr (std::same_as<Native, OrthogonalCartesian3D>)
+        if constexpr (std::same_as<Native, OrthogonalCartesian3D> || std::same_as<Native, OrthogonalCylindrial3D>)
             return region_detail::cartesian_cell_node(m.indexer(), c, i);
         else if constexpr (std::same_as<Native, SemiStructuredXY_Z>)
         {
@@ -66,7 +68,7 @@ EntityRange<uint64_t> NativeRegionProvider<Native>::face_nodes(size_t f) const
     return {this, f, count, [](const void* source, size_t f, size_t i) -> ID
     {
         const auto& m = *static_cast<const NativeRegionProvider*>(source)->d_mesh;
-        if constexpr (std::same_as<Native, OrthogonalCartesian3D>)
+        if constexpr (std::same_as<Native, OrthogonalCartesian3D> || std::same_as<Native, OrthogonalCylindrial3D>)
             return region_detail::cartesian_face_node(m.indexer(), f, i);
         else if constexpr (std::same_as<Native, SemiStructuredXY_Z>)
         {
@@ -82,7 +84,7 @@ EntityRange<uint64_t> NativeRegionProvider<Native>::face_nodes(size_t f) const
 template<class Native>
 MeshUtils::CellType NativeRegionProvider<Native>::cell_type(size_t c) const
 {
-    if constexpr (std::same_as<Native, OrthogonalCartesian3D>) return MeshUtils::CellType::HEXAHEDRON;
+    if constexpr (std::same_as<Native, OrthogonalCartesian3D> || std::same_as<Native, OrthogonalCylindrial3D>) return MeshUtils::CellType::HEXAHEDRON;
     else if constexpr (std::same_as<Native, UnstructuredMesh>) return d_mesh->cell_type(c);
     else
     {

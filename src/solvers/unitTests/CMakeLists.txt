@@ -293,3 +293,11 @@ simplefluid_add_mpi_test(
     ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CoupledBackendsAdvanceCombinedRansRadiolysisAndFeedback:TurbulentBoussinesqSolverTest.AdvancesWallTreatmentClosurePairingsThroughSegregatedAndCoupledSolvers"
     LABELS "mpi;pressure_velocity;composite;turbulence;radiolysis"
     TIMEOUT 180)
+
+foreach(_region_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME MultiRegionFlow_${_region_procs}procs TARGET testCoupledSolverBackends
+        PROCS ${_region_procs} ARGS "--gtest_filter=*MultiRegion*" LABELS "mpi;multi_region;pressure_velocity" TIMEOUT 300)
+    simplefluid_add_mpi_test(NAME MultiRegionSolverALE_${_region_procs}procs TARGET testBoussinesqPlanarALE
+        PROCS ${_region_procs} ARGS "--gtest_filter=BoussinesqPlanarALESupportMatrixTest.AcceptsCompositeAxialMotion"
+        LABELS "mpi;multi_region;ale;pressure_velocity" TIMEOUT 180)
+endforeach()

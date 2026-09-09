@@ -203,8 +203,11 @@ MeshQualityMetrics evaluate_mesh_quality(
             const auto cell_centroid = mesh.cell_centroid(cell);
             for (const auto face : mesh.faces(cell))
             {
-                const auto displacement =
-                    mesh.face_centroid(face) - cell_centroid;
+                const auto displacement = [&]
+                {
+                    if constexpr (requires { mesh.face_center_vector(face,cell); }) return mesh.face_center_vector(face,cell);
+                    else return mesh.face_centroid(face)-cell_centroid;
+                }();
                 const auto normal =
                     mesh.face_normal_outward(face, cell);
                 const auto normal_distance =
@@ -287,7 +290,7 @@ MeshQualityMetrics evaluate_mesh_quality(
                 continue;
             }
 
-            const auto neighbor_centroid = mesh.cell_centroid(neighbor);
+            const auto neighbor_centroid = mesh.cell_centroid(owner) + mesh.cell_center_vector(face,owner);
             const auto connector =
                 neighbor_centroid - owner_centroid;
             const auto connector_norm = connector.norm();

@@ -72,3 +72,62 @@ inline SP<Meshes::UnstructuredMesh> explicit_reference(const Meshes::MultiRegion
     return std::make_shared<U>(nodes, cells, boundaries);
 }
 } // namespace SimpleFluid::test
+
+namespace SimpleFluid::test
+{
+inline SP<Meshes::MultiRegionMesh> coarse_fine_regions(real_t fine_upper_y=1.0)
+{
+    using namespace Meshes;
+    auto coarse=cartesian_region("coarse",{{{0,1},{0,1},{0,0.5,1}}});
+    auto fine=cartesian_region("fine",{{{1,2},{0,0.5,fine_upper_y},{0,0.5,1}}});
+    NonconformingInterface interface{0,1,1,0,{}};
+    for(size_t c=0;c<coarse.layout().faces;++c)
+        if(coarse.topology().boundary_id(c)==1)
+        {
+            CoarseFineFaceMapping mapping{c,{}};
+            for(size_t f=0;f<fine.layout().faces;++f)
+                if(fine.topology().boundary_id(f)==0
+                    && std::abs(fine.geometry().face_centroid(f).z-coarse.geometry().face_centroid(c).z)<1e-12)
+                    mapping.fine_faces.push_back(f);
+            interface.faces.push_back(std::move(mapping));
+        }
+    return std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{std::move(coarse),std::move(fine)},
+        std::vector<MultiRegionMesh::Interface>{std::move(interface)});
+}
+}
+
+namespace SimpleFluid::test
+{
+inline SP<Meshes::MultiRegionMesh> periodic_regions()
+{
+    using namespace Meshes;
+    StructuredPatchInterface periodic{{0,0},{1,1}};
+    periodic.periodic_translation=MeshUtils::Vec3{2,0,0};
+    return std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{
+        cartesian_region("left",{{{0,0.5,1},{0,0.5,1},{0,0.5,1}}}),
+        cartesian_region("right",{{{1,1.5,2},{0,0.5,1},{0,0.5,1}}})},
+        std::vector<MultiRegionMesh::Interface>{StructuredPatchInterface{{0,1},{1,0}},periodic});
+}
+inline SP<Meshes::MultiRegionMesh> cylindrical_regions()
+{
+    using namespace Meshes;
+    const real_t pi=std::acos(-1.0);
+    auto first=std::make_shared<OrthogonalCylindrial3D>(Vec3D<ArrReal>{{{1,1.5,2},{0,pi/4,pi/2,3*pi/4,pi},{0,0.5,1}}});
+    auto second=std::make_shared<OrthogonalCylindrial3D>(Vec3D<ArrReal>{{{1,1.5,2},{pi,5*pi/4,3*pi/2,7*pi/4,2*pi},{0,0.5,1}}});
+    StructuredPatchInterface closure{{0,2},{1,3}}; closure.periodic_translation=MeshUtils::Vec3{};
+    return std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("first",first),native_region("second",second)},
+        std::vector<MultiRegionMesh::Interface>{StructuredPatchInterface{{0,3},{1,2}},closure});
+}
+inline SP<Meshes::MultiRegionMesh> independent_extruded_regions()
+{
+    using namespace Meshes;
+    auto topology=std::make_shared<const ExtrudedTopology>(3,Arr<Arr<unsigned>>{{0,1,2}},2,
+        Arr<SemiStructMeshTopo::BoundaryEdge>{{0,1,"bottom"},{1,2,"join"},{2,0,"left"}});
+    auto a=extruded_region("a",topology,{{0,0,0},{1,0,0},{0,1,0}},{0,0.5,1});
+    auto b=extruded_region("b",topology,{{1,1,0},{0,1,0},{1,0,0}},{0,0.5,1});
+    int boundary=-1; for(auto id:topology->boundary_batch_ids()) if(topology->boundary_batch_name(id)=="join") boundary=id;
+    ExplicitConformingInterface interface{0,1,boundary,boundary,{}};
+    for(size_t f=0;f<a.layout().faces;++f) if(topology->boundary_id(f)==boundary) interface.faces.emplace_back(f,f);
+    return std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{a,b},std::vector<MultiRegionMesh::Interface>{interface});
+}
+}

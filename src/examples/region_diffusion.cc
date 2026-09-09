@@ -10,6 +10,7 @@
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include <Tpetra_Core.hpp>
+#include <Teuchos_CommHelpers.hpp>
 #include <iostream>
 #include <iomanip>
 
@@ -18,6 +19,7 @@ int main(int argc, char** argv)
     Tpetra::ScopeGuard guard(&argc, &argv);
     using namespace SimpleFluid;
     using namespace Meshes;
+    const auto comm=Tpetra::getDefaultComm();
     try
     {
         auto composite = std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{
@@ -37,17 +39,24 @@ int main(int argc, char** argv)
         if (!solver.solve(system.matrix, *system.rhs, solution, options)) return 2;
         const auto values = solution.getData();
         real_t error = 0, exterior_flux = 0;
-        for (size_t c=0;c<mesh->num_cells();++c) error=std::max(error,std::abs(values[c]-mesh->cell_centroid(c).x));
+        for (size_t c=0;c<mesh->num_owned_cells();++c) error=std::max(error,std::abs(values[c]-mesh->cell_centroid(c).x));
         for (const auto& [b,batch]:mesh->boundary_batches())
             for (auto f:batch.face_lids)
             {
+                if(!mesh->is_owned_face(f)) continue;
                 const auto c=mesh->owner_cell(f);
                 exterior_flux += mesh->face_area(f)*(values[c]-mesh->face_centroid(f).x)/mesh->cell_to_face_distance(f,c);
             }
+        real_t global_error=0,global_flux=0;
+        Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&error,&global_error);
+        Teuchos::reduceAll(*comm,Teuchos::REDUCE_SUM,1,&exterior_flux,&global_flux);
+        error=global_error; exterior_flux=global_flux;
         const auto report=mesh->storage_report();
-        std::cout << std::setprecision(12) << "cells=" << mesh->num_cells() << " faces=" << mesh->num_faces()
+        if(comm->getRank()==0)
+        std::cout << std::setprecision(12) << "cells=" << composite->num_cells() << " faces=" << composite->num_faces()
+            << " mpi_ranks=" << comm->getSize()
             << " max_error=" << error << " net_outward_diffusive_flux=" << exterior_flux
-            << "\ntopology_bytes=" << report.topology << " geometry_bytes=" << report.geometry
+            << "\nrank0_topology_bytes=" << report.topology << " geometry_bytes=" << report.geometry
             << " interface_bytes=" << report.interfaces << " indexing_bytes=" << report.indexing
             << " boundary_bytes=" << report.boundaries << " compatibility_bytes=" << report.compatibility
             << " measured_mesh_bytes=" << report.measured_bytes() << " map_id_payload_estimate=" << report.required_maps_estimate << '\n';
@@ -57,13 +66,44 @@ int main(int argc, char** argv)
             +output->cell_types.capacity()*sizeof(uint8_t);
         VTUWriter writer(output);
         writer.add_scalar_cell_data("phi", {values.begin(),values.end()});
-        VTUWriter::Int64Data region_ids;
-        for(size_t c=0;c<mesh->num_cells();++c) region_ids.push_back(composite->native_cell(c).first);
+        VTUWriter::Int64Data region_ids,cell_ids;
+        for(size_t c=0;c<mesh->num_owned_cells();++c)
+        {
+            const auto id=mesh->cell_geometry_global_id(c);
+            region_ids.push_back(composite->native_cell(id).first); cell_ids.push_back(id);
+        }
         writer.add_int64_cell_data("topology_region",std::move(region_ids));
+        writer.add_int64_cell_data("cell_gid",std::move(cell_ids));
         const std::string filename=argc>1?argv[1]:"region_diffusion.vtu";
-        writer.write(filename);
-        std::cout << "output_topology_bytes=" << output_bytes << " output=" << filename << '\n';
-        return error < 1e-10 && std::abs(exterior_flux)<1e-10 && mesh->connectivity_storage_bytes()==0 ? 0 : 3;
+        const auto piece=VTUWriter::rank_piece_filename(filename,comm->getRank(),comm->getSize());
+        int failed=0,any_failed=0;
+        std::exception_ptr output_error;
+        try { writer.write(piece); } catch(...) { failed=1; output_error=std::current_exception(); }
+        Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&failed,&any_failed);
+        if(any_failed)
+        {
+            if(output_error) std::rethrow_exception(output_error);
+            throw std::runtime_error("A rank could not write its region VTU piece.");
+        }
+        if(comm->getSize()>1 && comm->getRank()==0)
+        {
+            std::vector<std::string> pieces;
+            for(int rank=0;rank<comm->getSize();++rank) pieces.push_back(VTUWriter::rank_piece_filename(filename,rank,comm->getSize()));
+            try { writer.write_parallel_index(VTUWriter::parallel_index_filename(filename),pieces); }
+            catch(...) { failed=1; output_error=std::current_exception(); }
+        }
+        Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&failed,&any_failed);
+        if(any_failed)
+        {
+            if(output_error) std::rethrow_exception(output_error);
+            throw std::runtime_error("Could not publish the region PVTU index.");
+        }
+        if(comm->getRank()==0)
+            std::cout << "rank0_output_topology_bytes=" << output_bytes << " output="
+                << (comm->getSize()>1?VTUWriter::parallel_index_filename(filename):filename) << '\n';
+        int materialized=mesh->connectivity_storage_bytes()!=0;
+        Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&materialized,&any_failed);
+        return error < 1e-10 && std::abs(exterior_flux)<1e-10 && any_failed==0 ? 0 : 3;
     }
     catch(const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

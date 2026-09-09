@@ -70,7 +70,7 @@ auto stored_pressure_face_geometry(const MeshType& mesh)
             const auto weights = stored_interior_face_linear_weights(mesh, face_lid, entry.owner, entry.neighbor);
             entry.owner_weight = weights.first;
             entry.neighbor_weight = weights.second;
-            const auto center_delta = mesh.cell_centroid(neighbor_id) - mesh.cell_centroid(owner_id);
+            const auto center_delta = mesh.cell_center_vector(face_id,owner_id);
             entry.distance_squared = center_delta.dot(center_delta);
             entry.center_projection = entry.area_vector.dot(center_delta);
         }

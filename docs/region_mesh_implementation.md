@@ -81,8 +81,9 @@ rollback assertions remain intact. New scalar fixtures synchronize owned values
 into the `FieldStored` overlap before calling the existing mapped operators.
 
 Large benchmarks, the full unrelated test suite, and another compiler/configuration
-matrix are outside this run. No matrix-free integration was added because the
-tracked checkout contains no such FVM implementation.
+matrix were outside the initial run. No matrix-free integration was added in
+that pre-merge checkout; the later block-composite coupled backend is covered
+by the follow-up below.
 
 ## Final observed results (2026-09-09)
 
@@ -134,3 +135,52 @@ Construction/query/assembly times for 1,024 cells were respectively
 0.01546/0.00818/0.10192 seconds for materialized compatibility. These are single
 small Debug observations; no speedup, RSS threshold, expected percentage saving
 or convergence-order claim is made.
+
+## Merge follow-up (2026-09-10)
+
+The follow-up started from clean `feature/mesh` at `af3128d`, after the region
+implementation in `e339ec3` and the merge from `develop`. That merge added the
+block-composite coupled operator and cached/streamed workspace policies, so the
+initial audit's absence of that backend no longer describes the current tree.
+
+Eight added parameterized cases in `testCoupledSolverBackends` cover Cartesian
+and mixed HEX/prism region meshes using the existing qualification harness.
+They test all four solver families and backend/workspace combinations, varying
+timesteps, backend switching, both pressure gradients and mixed-mesh
+explicit/implicit/hybrid non-orthogonal treatment. Field/flux parity, continuity,
+production cache counters and zero mesh-connectivity materialization are checked
+after each step. The existing solver implementation required no changes.
+
+Focused commands and observed results:
+
+```sh
+cmake --preset GCC-ninja-multi
+cmake --build --preset GCC-Debug --target testCoupledSolverBackends testMultiRegionMesh testMultiRegionOperators testMultiRegionFlow region_diffusion -j 4
+ctest --preset GCC-Debug -R 'CoupledSolverBackendsTest\.SerialMultiRegion' --parallel 4
+ctest --preset GCC-Debug -R '^(RegionProvidersTest|MultiRegionMeshTest|MultiRegionOperatorsTest|MultiRegionFlowTest)\.|^(region_diffusion_smoke|simplefluid_elf_export_boundary)$' --parallel 4
+```
+
+The focused build succeeded; the two test commands passed 8/8 in 3.87 seconds
+and 27/27 in 3.57 seconds, respectively. Historical validation totals above
+remain scoped to the original runs. Composite MPI, composite ALE and independent
+extruded geometry providers remain future work.
+
+The complete configured GCC Debug target set was then rebuilt successfully:
+
+```sh
+cmake --build --preset GCC-Debug -j 4
+ctest --preset GCC-Debug -R '^(MultiRegionMeshSerialOnly|PartitionedMeshHandleCommunicator)_2procs$'
+git diff --check
+```
+
+Both MPI registrations passed with host networking (2/2, 0.34 seconds).
+The serial checks and MPI registrations total 37 passing focused registrations;
+the full test suite and other build configurations were not rerun. No commit or
+push was made for this follow-up.
+
+## Subsequent region extensions
+
+The later MPI, axial affine ALE, coarse/fine, cylindrical/periodic and independent
+extruded-provider work is recorded in [region_mesh_extensions.md](region_mesh_extensions.md).
+Its current support matrix supersedes the initial serial/static limitations;
+all dated measurements and earlier commands above remain historical records.

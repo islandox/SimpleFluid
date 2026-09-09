@@ -32,6 +32,8 @@ class PlanarALEGeometryAccess
 private:
     template<class Mesh> static bool motion_available(const Mesh& mesh) noexcept
     {
+        if constexpr (requires { mesh.supports_axial_motion(); })
+            if (!mesh.supports_axial_motion()) return false;
         return mesh.d_geometry_state.motion_owner == nullptr;
     }
 
@@ -75,6 +77,11 @@ private:
         mesh.replace_axial_edges_fixed_topology(std::move(edges));
     }
 
+    static void replace_axial_edges(MultiRegionMesh& mesh, Arr<real_t> edges)
+    {
+        mesh.replace_axial_edges_fixed_topology(std::move(edges));
+    }
+
     static void replace_axial_edges(SemiStructuredXY_Z& mesh, Arr<real_t> edges)
     {
         mesh.replace_axial_edges_fixed_topology(std::move(edges));
@@ -105,7 +112,10 @@ struct PlanarALEMeshMotionOptions
  * Cartesian meshes support any Cartesian axis. Cylindrical and
  * SemiStructuredXY_Z meshes support only their axial Z direction. Structured
  * Cartesian/cylindrical handles retain their existing MPI partition and maps;
- * SemiStructuredXY_Z retains its established serial-only contract.
+ * SemiStructuredXY_Z retains its established single-region serial-only contract.
+ * MultiRegionMesh supports a common affine Z map in serial/MPI, retaining frozen
+ * child providers. Buffered/nonaxial composite motion and changing axial periodic
+ * lengths are rejected.
  *
  * This class supplies geometry/GCL primitives only. It does not alter finite-
  * volume transport, pressure coupling, or free-surface boundary conditions.
@@ -157,7 +167,8 @@ private:
         Unsupported = 0,
         Cartesian = 1,
         Cylindrical = 2,
-        SemiStructured = 3
+        SemiStructured = 3,
+        CompositeAffine = 4
     };
 
     enum class TransactionAction : int

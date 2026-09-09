@@ -1,7 +1,7 @@
 /**
  * @file MultiRegionMesh.hh
  * @author islandox
- * @brief Static conforming composition without flattening native interiors.
+ * @brief Compact distributed region composition with canonical interfaces and controlled axial motion.
  * @version 0.1
  * @date 2026-09-09
  * @copyright Copyright (c) 2026
@@ -9,6 +9,8 @@
 #pragma once
 
 #include "geometry/mesh/RegionProviders.hh"
+#include "geometry/mesh/ConservativeInterface.hh"
+#include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include "io/VTUWriter.hh"
 #include <optional>
 #include <variant>
@@ -24,7 +26,7 @@ struct RegionFace
 };
 
 /**
- * @brief Rectangular subset of a Cartesian exterior patch, parametrized by two logical axes.
+ * @brief Rectangular subset of a structured exterior patch, parametrized by two logical axes.
  *
  * boundary is 2*normal_axis + upper_side. begin/extent use the increasing
  * native tangential axes. Zero extents select the whole patch. axes permutes
@@ -46,6 +48,8 @@ struct StructuredPatchInterface
     StructuredPatch first, second;
     std::array<unsigned, 2> permutation{0, 1};
     std::array<bool, 2> reversed{};
+    /** Explicit periodic identification: first-face point + translation = second-face point. */
+    std::optional<MeshUtils::Vec3> periodic_translation;
     std::array<size_t, 2> map(std::array<size_t, 2> p) const;
     std::array<size_t, 2> inverse(std::array<size_t, 2> p) const;
     void validate_mapping() const;
@@ -67,14 +71,16 @@ struct InterfaceTolerance
 };
 
 /**
- * @brief One serial FVM mesh with procedural region interiors and canonical seam faces.
+ * @brief One FVM domain with procedural interiors, collective compact descriptions and canonical seam faces.
  *
  * Each interface keeps its first face, oriented out of that face's native
  * owner, and removes its second face from logical iteration and field storage.
- * Regions retain providers, never initialized MeshHandles. Topology and all
- * geometry are static; a changed native child causes a clear exception through
- * the existing geometry-epoch observation path. Nodes are region-qualified
- * for output, while cells/faces have compact contiguous logical ordinals.
+ * Regions retain providers, never initialized MeshHandles. Child topology and
+ * geometry stay frozen; the existing planar ALE controller can change a common
+ * composite axial affine map. Changed children fail through the geometry-epoch
+ * observation path. Construction is collective on the default communicator;
+ * MeshHandle supplies local ownership/maps. Explicit global regions are serial.
+ * Nodes are region-qualified, while cells/faces have contiguous logical ordinals.
  */
 class MultiRegionMesh : public MeshBase<MultiRegionMesh, UnstructuredMeshIndexTypes>
 {
@@ -83,8 +89,8 @@ public:
     using Indexer = UnstructuredMesh::Indexer;
     using ID = uint64_t;
     using Region = std::variant<CartesianRegion, NativeIsoRegion<OrthogonalCartesian3D>,
-        NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>>;
-    using Interface = std::variant<StructuredPatchInterface, ExplicitConformingInterface>;
+        NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>, NativeIsoRegion<OrthogonalCylindrial3D>, ExtrudedRegion>;
+    using Interface = std::variant<StructuredPatchInterface, ExplicitConformingInterface, NonconformingInterface>;
     enum class BoundaryNamePolicy { NamespaceRegions, MergeMatchingNames };
     static constexpr ID invalid_cell_id() noexcept { return UnstructuredMesh::invalid_ordinal; }
 
@@ -101,14 +107,33 @@ public:
     const RegionLayout& region_layout(size_t r) const;
     const std::string& region_name(size_t r) const;
     ID canonical_face(RegionFace f) const;
+    EntityRange<ID> logical_faces(RegionFace native) const;
+    EntityRange<FaceFluxWeight> face_flux_weights(RegionFace native) const;
+    /** @brief Sum canonical integrated fluxes in a native face's outward orientation. */
+    template<class Values> real_t restrict_face_flux(RegionFace native, Values&& value) const
+    {
+        real_t sum=0;
+        for(const auto weight:face_flux_weights(native)) sum+=(weight.coefficient>0?1.0:-1.0)*value(weight.face);
+        return sum;
+    }
     RegionFace native_face(ID f) const;
     std::pair<size_t, ID> native_cell(ID c) const;
     ID composite_cell(size_t r, ID c) const;
     ID patch_face(const StructuredPatch& p, std::array<size_t, 2> coordinate) const;
     void validate_static() const;
-    std::uint64_t geometry_epoch() const { validate_static(); return 0; }
+    std::uint64_t geometry_epoch() const { validate_static(); return d_geometry_state.epoch; }
+    const ArrReal& axial_edges() const noexcept { return d_axial_edges; }
+    bool supports_axial_motion() const noexcept;
+    Vec3 cell_center_vector(ID face,ID cell) const;
+    Vec3 face_center_vector(ID face,ID cell) const;
+    real_t cell_to_face_distance(ID face,ID cell) const { return face_center_vector(face,cell).norm(); }
+    real_t face_cell_center_distance(ID face) const
+    { return is_exterior_face(face)?0.0:cell_center_vector(face,owner_cell(face)).norm(); }
     MeshStorageReport storage_report() const;
     VTUWriter::TopologyHandle vtu_topology() const;
+    VTUWriter::TopologyHandle vtu_topology(const EntityRange<ID>& owned_cells) const;
+    /** @brief Exact compact geometry/topology configuration, excluding process-local pointer identities. */
+    std::string configuration_signature() const;
     MeshUtils::CellType cell_type(ID c) const;
     EntityRange<ID> cell_nodes(ID c) const;
     EntityRange<ID> face_nodes(ID f) const;
@@ -123,6 +148,11 @@ public:
 
 private:
     friend Base;
+    friend class PlanarALEGeometryAccess;
+    void replace_axial_edges_fixed_topology(ArrReal edges);
+    Vec3 transformed_point(Vec3 point) const;
+    Vec3 transformed_area_vector(Vec3 vector) const;
+    real_t axial_scale() const noexcept;
     struct Boundary { size_t region; int native_id; int id; std::string name; };
     // One sorted list per explicit slave patch. Regular patches use no face lists.
     struct ExplicitLookup
@@ -166,17 +196,27 @@ private:
     size_t patch_count_before(const StructuredPatch& p, ID face) const;
     size_t removed_before(size_t r, ID face) const;
     std::optional<RegionFace> partner(RegionFace f, bool first) const;
+    struct RefinedFaceView { size_t region; std::span<const ID> faces; };
+    std::optional<RefinedFaceView> refinement(RegionFace f) const;
+    ID encode_native_face(RegionFace f) const;
+    RegionFace decode_native_face(ID key) const;
+    InterfaceFacePolygon interface_polygon(RegionFace f) const;
+    size_t interface_uses(RegionFace f) const;
     bool stitched(RegionFace f) const;
-    void validate_pair(RegionFace a, RegionFace b) const;
+    void validate_pair(RegionFace a, RegionFace b, std::optional<Vec3> translation = {}) const;
+    Vec3 periodic_translation(ID face) const;
     void validate_regions() const;
+    void initialize_regions(InterfaceTolerance tolerance, BoundaryNamePolicy names);
 
     std::vector<Region> d_regions;
     std::vector<Interface> d_interfaces;
     std::vector<ExplicitLookup> d_explicit;
-    std::vector<ID> d_cells, d_faces, d_nodes;
+    std::vector<ID> d_cells, d_faces, d_nodes, d_native_faces;
     std::vector<Boundary> d_boundaries;
     InterfaceTolerance d_tolerance;
     Indexer d_indexer;
+    ArrReal d_reference_axial_edges, d_axial_edges;
+    GeometryEpochState d_geometry_state;
 };
 static_assert(MeshClass<MultiRegionMesh>);
 } // namespace SimpleFluid::Meshes

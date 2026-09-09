@@ -789,12 +789,14 @@ submerged steam; the inventory is never silently discarded.
 | **BLAS** | Low-level vector/matrix operations |
 | **GTest** | C++ unit testing framework |
 
-## Compact conforming region meshes
+## Compact region meshes
 
-Static serial `MultiRegionMesh` composes Cartesian, straight-extruded and native
-unstructured regions through the existing `MeshHandle`/FVM path. Implicit
-cell-face traversal uses allocation-free ranges; regular interfaces store
-descriptors and share one canonical face per pair. See [region mesh contracts,
+`MultiRegionMesh` composes Cartesian, cylindrical, straight-extruded and native
+unstructured regions through the existing `MeshHandle`/FVM path. Compact implicit
+regions support MPI ownership, axial affine ALE, conforming/coarse-fine seams,
+and translated periodic patches. Explicit unstructured constituents remain
+serial-only in composites. Implicit traversal uses allocation-free ranges;
+regular interfaces retain descriptor-sized correspondence. See [region mesh contracts,
 example and storage accounting](docs/region_meshes.md).
 
 ## License

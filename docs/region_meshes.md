@@ -1,179 +1,230 @@
 # Compact region meshes
 
-`Meshes::MultiRegionMesh` is a static, serial FVM mesh assembled from conforming
-regions. `MeshHandle`, `FieldStored`, diffusion/transport assembly, gradient
-reconstruction, Rhie–Chow interpolation and the existing pressure–velocity
-solvers use its canonical cell/face identities. There is no separate physics or
-solver stack. No matrix-free FVM operator is present in this checkout.
+`Meshes::MultiRegionMesh` presents one logical finite-volume domain through
+`MeshHandle`, `FieldStored` and the existing FVM/solver stack. It supports compact
+MPI ownership, controlled composite axial ALE, conforming and nested coarse/fine
+interfaces, cylindrical regions, explicit translated periodic patches, and
+independent Cartesian/extruded geometry. Topology regions, materials and MPI
+partitions are separate concepts.
 
 ## Providers and ownership
 
-`TopologyProvider` describes ordinal incidence, node loops, cell types and the
-owner-outward face convention. `GeometryProvider` supplies physical metrics and
-an exact compatible ordinal layout. `IsoRegion<T,G>` retains shared const
-providers with a unique region name. Compatibility checks include counts,
-indexing extents, mesh family, and explicit/factored template identity.
-Callers supply compatible numbering; there is no isomorphism discovery.
+`TopologyProvider` supplies ordinal incidence, node loops, cell types and the
+owner-outward convention. `GeometryProvider` supplies physical metrics in a
+compatible ordinal layout. `IsoRegion<T,G>` retains const providers, a region
+name, and exact identity/layout/revision snapshots. Counts, indexing extents,
+mesh family, periodic dimensions and explicit/factored template identities must
+match. Callers supply compatible numbering; no isomorphism discovery occurs.
 
-`RectilinearTopology` observes an immutable shared `OrthoMeshTopo`.
-`RectilinearGeometry` owns only three coordinate arrays and an arithmetic
-indexer. Different geometries can share the same topology. Geometry parameters
-are never expanded into cell/face metric arrays. `native_region()` wraps an
-existing Cartesian, `SemiStructuredXY_Z`, or `UnstructuredMesh` in a zero-copy
-adapter retaining its exact native object. Extruded incidence and boundary
-queries use base connectivity plus axial indices; metrics retain existing
-base-plane and axis caches. An explicit adapter observes the original arrays.
-The current independent geometry construction example is rectilinear; native
-extruded/explicit adapters require identical native template identity.
+`RectilinearTopology` shares an orthogonal template. `RectilinearGeometry` owns
+three coordinate arrays and computes metrics on demand. `ExtrudedTopology`
+owns an immutable `SemiStructMeshTopo` base template, with incidence factored
+through layers. `ExtrudedGeometry` retains that template but owns independent
+XY coordinates and axial edges. It caches base-cell and base-edge metrics once;
+it never expands them through layers. Both geometry types can share one topology
+with other independently located/scaled regions. Composite extrusion cells are
+currently triangles or strictly convex quadrilaterals in the base plane (WEDGE_6/HEX_8).
 
-Topology regions are independent of material labels, field values, equation
-coefficients, and MPI ownership. Changing material does not require a new
-region. Provider/range observations require their owning region or mesh to stay
-alive. Computed entity IDs and metrics are returned by value, never by reference
-to scratch storage. Ranges carry independent query state and support nested
-queries and random access.
+`native_region()` also provides zero-copy adapters for Cartesian, cylindrical,
+`SemiStructuredXY_Z` and `UnstructuredMesh` objects. A native adapter retains the
+exact object. Native explicit/factored topology and geometry adapters must refer
+to the same template; the independent extrusion API removes that restriction by
+sharing an explicit immutable template object.
 
-Composite geometry is immutable. Every native child's identity, layout and revision is
-checked against its own construction snapshot, including through the existing
-`mesh_geometry_epoch()` cache seam. Replacing or moving native geometry now
-advances its geometry revision, so an external mutable alias cannot keep a
-composite cache apparently current. This strengthens raw replacement detection;
-controlled single-region ALE still uses `PlanarALEMeshMotion`. Composite handles
-retain no mutable backend and reject stale constituents rather than refreshing
-a partially changed composite. Rebuild the composite, fields and operators
-after changing constituents. Child epochs are never reduced with `max()`.
+Provider and range owners must remain alive while observations are used. Metrics
+and computed IDs return by value; ranges carry independent query state and
+support nested/random-access traversal without mutable scratch. Sharing topology
+does not share coordinates, materials, fields or equation coefficients.
 
-## Interfaces and canonical identities
+## Canonical conforming interfaces
 
-`StructuredPatchInterface` joins rectangular Cartesian exterior patches.
-`StructuredPatch` stores the region, native boundary ID, tangential begin/extents,
-axis order and reversals. Boundary ID is `2*normal_axis + upper_side`.
-Zero extents select the remaining extent of a whole native patch. The interface
-maps its first parameter domain to its second with a signed permutation;
-`map()` and `inverse()` check bounds and shape. A parameter permutation does
-not rotate physical vectors or tensors. Regular correspondence occupies a
-fixed-size descriptor, with no per-face pairing table.
+`StructuredPatchInterface` joins coordinate-normal rectangular Cartesian or
+cylindrical exterior patches. `StructuredPatch` stores region, boundary ID,
+tangential begin/extents, axis order and reversals. Boundary ID is
+`2*normal_axis + upper_side`; cylindrical logical axes are R/theta/Z. Zero
+extents select the remaining whole-patch extent. `map()`/`inverse()` validate
+bounds and signed permutations. Correspondence remains descriptor-sized.
 
-`ExplicitConformingInterface` supplies complete one-to-one native ordinal pairs
-for two declared boundary patches. It supports irregular/mixed connections,
-including a HEX_8 face joined to a triangular-prism side. It stores the input
-pairs plus two sorted lookup orders, all proportional to interface size.
-Duplicate faces, missing pairs, interior faces, noncoincident shapes and
-subdivisions are rejected before the mesh is available for fields.
+`ExplicitConformingInterface` supplies a complete one-to-one list for two named
+exterior patches. It supports mixed volume-cell types with matching faces,
+including HEX_8/prism-side connections. It retains the pairs and sorted lookup
+orders, proportional to interface size.
 
-Default tolerances are an absolute length of `1e-12` in coordinate units and a
-relative tolerance of `1e-10`. Position checks scale with face size (the larger
-of square-root area and vertex distance from centroid); area checks use area
-and absolute-length times face size. Unit outward normals must be opposite to
-the relative tolerance. Cyclic/reversed vertex-loop matching checks edges and
-shape in addition to areas/centroids. No inconsistent geometry is averaged.
+A conforming pair retains the first native face and its outward normal. Its
+native owner becomes the logical owner and the second native owner becomes the
+neighbor. Both cells reference one face-field degree of freedom; the second face
+is absent from logical iteration. A shared integrated flux contributes `+Q` to
+the owner and `-Q` to the neighbor. No physical BC acts on a seam.
 
-Each stitched pair retains the first native face's geometry and orientation.
-Its native owner is the composite owner; the second face's native owner is the
-composite neighbor. Both cells reference the same logical face and the same
-face-field degree of freedom. A positive integrated flux contributes `+Q` to the
-owner and `-Q` to the neighbor. Volume-normalized divergence therefore conserves
-its volume-weighted sum. A seam has no physical boundary condition.
+Interfaces reject invalid/exterior IDs, incomplete or duplicate mappings,
+multiple stitching, mismatched area/centroid/orientation, noncoincident vertex
+loops, and unsupported subdivisions. Default tolerances are `1e-12` in coordinate
+units and `1e-10` relative. Position tolerance scales with face diameter; area
+checks use relative area plus absolute-length times face size. Unit normals must
+be opposite within the relative tolerance. Inconsistent geometry is never
+averaged.
 
-Cell IDs use region prefixes. Face IDs use prefix counts with arithmetic
-rank/select through removed rectangular ranges, or sorted explicit removals.
-There is no cell-to-region array or face-to-region hash table. Nodes remain
-region-qualified for visualization, including duplicated coordinates at seams.
-Default physical names are `region/native_patch`; intentional name merging
-requires `BoundaryNamePolicy::MergeMatchingNames`. Namespaced string collisions
-(including ambiguous separators or repeated native names) are rejected. Connected regions form one
-pressure problem. Disconnected composites and disconnected native constituents
-are rejected in this milestone.
+## Nonconforming coarse/fine interfaces
 
-## Storage and traversal
+`NonconformingInterface` declares coarse/fine region and boundary IDs and a list
+of `CoarseFineFaceMapping {coarse_face, fine_faces}`. The declared mappings must
+cover both complete boundary patches. Every coarse polygon must be tiled by
+convex planar fine polygons with opposite outward normals. Projected polygon
+clipping checks containment and pairwise overlap, and summed areas check gaps.
+Polygon areas and centroids must agree with native geometry.
 
-`MeshHandle::faces()` returns `EntityRange`, a sized/indexable range with no
-allocation or mutable scratch. Native structured and extruded paths never build
-CSR cell-face offsets or expanded face lists, including construction and FVM
-execution. Unstructured incidence is borrowed from native stored connectivity.
-`materialize_cell_faces()` explicitly allocates compatibility CSR;
-`materialized_faces()` is the separately named span accessor. Ordinary field,
-operator and solver paths do not request it. The legacy `indexer()` accessor
-explicitly requests compatibility lookup tables; ordinary serial handles use
-arithmetic IDs, and distributed handles reuse their Tpetra maps after setup.
-MPI construction still uses transient native indexing tables while establishing
-existing ownership/maps. It never expands implicit cell-face connectivity.
+Each fine face becomes the canonical interior face, oriented out of its fine
+cell, with the coarse cell as neighbor. The original coarse face is removed;
+the coarse cell's computed face range visits every covering fine face. This
+creates no cell-face CSR or dense neighbor replacement. The existing gradient,
+diffusion, transport, pressure correction and coupled assembly consume the
+actual subface centroids, areas and adjacent cells.
 
-Physical boundary batches in `MeshHandle` remain stored for the existing BC
-API. Native extruded boundary batches are factored by base edges and layer
-indices. Arbitrary native cell reordering is explicit and allocates permutation
-or index tables; it no longer rebuilds implicit connectivity. Arbitrary
-composite reordering is rejected. `visit_regions()` provides a batch dispatch
-seam for later native-region kernels. Current generic FVM queries still perform
-runtime dispatch and range resolution; this milestone does not claim a speedup.
+`logical_faces(native_face)` returns all logical subfaces. `canonical_face()`
+rejects a subdivided coarse face because it has multiple degrees of freedom.
+`face_flux_weights()` supplies signed area fractions, normalized by total
+canonical subface area, to prolong a uniformly distributed native integrated
+flux even when geometry agreement is only within matching tolerance. `restrict_face_flux()` sums canonical
+integrated fluxes with the native outward sign. Area fractions are not applied
+again during restriction. Interface storage is O(number of declared subfaces).
 
-`storage_report()` reports allocated vector capacities and object sizes for
-native/shared topology, geometry, interface descriptors, indexing/permutations,
-compatibility connectivity, and boundary batches. Shared native topology is
-counted once by identity. Allocator metadata, shared-pointer control blocks,
-string allocations and container nodes/buckets are excluded from the measured
-subtotal. Explicit index-tree storage is separately estimated from payload and
-three pointers per node. Required-map estimates report an ID-payload equivalent;
-Tpetra may encode contiguous IDs arithmetically and has additional opaque
-allocations. These estimates are not RSS measurements or full solver memory.
-Fields, sparse matrices, histories, Krylov vectors and preconditioners remain
-O(N).
+This supports nested whole-face refinement. Arbitrary mortar/AMI intersection,
+fine faces crossing several coarse faces, nonconvex polygons and curved-face
+refinement are rejected. Planar faces of cylindrical regions use the same
+geometric checks; curved radial/annular faces are not approximated as polygons
+to bypass them.
 
-VTU connectivity is constructed only on output request and may be held by the
-existing output cache. It is not a persistent solve requirement. Output carries
-cell values in handle order and a `topology_region` ordinal; region names follow
-construction order. The example reports temporary topology capacities separately
-from solve storage. Writer field arrays and serialization buffers are additional
-output-only allocations.
+## Cylindrical and periodic composition
 
-## Example, tests and benchmark
+Cylindrical adapters preserve native analytic metrics and R/theta/Z indexing.
+Their positive-inner-radius restriction remains. Composite angular cell widths
+must be below pi so linear HEX VTU cells remain nondegenerate. Native cylindrical
+periodic indexing is retained, including node wrapping; open sectors may also
+be joined into a ring with conforming angular patches.
+
+An explicitly engaged `StructuredPatchInterface::periodic_translation` declares
+`first point + translation = second point`. Zero translation can identify a
+physical angular closure. Translated/self-region patch pairs require distinct
+incident cells. All surface validation still runs in the translated frame.
+No vector/tensor rotation is inferred from a logical index permutation.
+
+`face_center_vector()` and `cell_center_vector()` use the incident cell's
+periodic image. Reconstruction, diffusion distances, mesh-quality checks and
+Rhie–Chow geometry use those vectors. Periodic faces share one canonical signed
+flux and receive no physical boundary condition. Rotated periodic field
+transformations and time-dependent translations are outside this support.
+Native cylindrical discretization/quadrature is preserved; matching a native
+cylinder is not a new physical-accuracy claim.
+
+## MPI ownership and output
+
+On an MPI communicator, construct the same compact region/interface description
+on every rank. Construction validates local inputs collectively and compares an
+exact serialized compact description, excluding process-local pointers. A
+changed constituent is rejected collectively when constructing a handle.
+No maps are published after a failed preflight.
+
+Raw `MultiRegionMesh` counts/IDs describe the global logical domain. `MeshHandle`
+partitions contiguous canonical cell-ordinal ranges using communicator rank and
+size. A rank can own several regions, and a region can span several ranks. The
+handle builds local owned/ghost IDs and face maps, with one face owner selected
+by its canonical owner cell. Halo construction follows canonical adjacency,
+including coarse/fine and periodic seams. Positive ghost depth defaults to one;
+manual rank/count overrides are rejected for composites.
+
+Global compact axis/base/interface descriptions are replicated. Expanded 3D
+geometry, connectivity, fields and operators are not replicated as a substitute
+for distribution. Global explicit `UnstructuredMesh` constituents are therefore
+rejected in multi-rank composites; existing single-region partitioned-unstructured
+MPI remains supported. The direct `SemiStructuredXY_Z` handle keeps its serial
+contract; wrap it in a composite to use compact MPI. Distributed explicit region packets and arbitrary
+region-aware load balancing are later work.
+
+Physical names default to `region/native_patch`; collisions are rejected.
+Intentional name merging requires `BoundaryNamePolicy::MergeMatchingNames`.
+Connected regions form one pressure problem. Disconnected constituents/domains
+remain rejected. Region-qualified node IDs are distinct from canonical face IDs.
+
+VTU topology is generated only when output is requested. Each MPI piece contains
+owned cells in field order and only referenced output nodes. Cell values and
+`topology_region` labels retain their association. Temporary node lookups and
+connectivity are output-only; no persistent `UnstructuredMesh` conversion occurs.
+The existing output cache may retain requested topology between writes.
+
+## Controlled composite ALE
+
+A mutable `MeshHandle` around a mutable composite can be passed to the existing
+`PlanarALEMeshMotion`. It supplies common affine Z stretching/contraction about
+the global lower plane on implicit Cartesian/cylindrical/extruded constituents.
+Explicit unstructured constituents retain static composite support: general
+warped-face geometry is not covered by the axial metric transformation.
+Composite X/Y motion, buffered deformation starting
+above that plane and changing a Z-periodic length are rejected. Fixed XY
+translations and physical angular closures commute with this axial motion.
+
+The composite owns its affine geometry parameters and `GeometryEpochState`.
+It transforms volumes, centroids, area vectors and node coordinates while child
+providers stay immutable. The existing exclusive motion lease, trial/accept/
+rollback, exact swept flux, GCL and quality checks remain authoritative. Every
+trial and rollback advances the composite epoch observed by all alias handles;
+existing numeric caches must refresh. Exact child snapshots are still checked,
+never reduced with `max(epoch)`.
+
+Motion operations and distributed field/solver operations are collective.
+Constituent replacement/mutation is outside the frozen-child contract: rebuild
+the composite and its fields/operators after changing children. The supported
+motion path changes only composite parameters, consistently on all ranks.
+
+Tests exercise old/new-volume scalar transport, constant preservation, expansion
+and contraction, rollback after quality rejection, read-only aliases and motion
+ownership. Solver-integrated Boussinesq heating tests reuse the existing mass,
+volume, continuity and moving-top checks for PISO and every coupled
+backend/workspace combination in serial and MPI. No new physics is introduced.
+
+## Storage, verification and commands
+
+`MeshHandle::faces()` is an allocation-free sized/indexable range. Implicit
+regions never eagerly create per-cell offsets or expanded face lists.
+`materialize_cell_faces()` and `materialized_faces()` are explicit CSR/span
+compatibility operations. `indexer()` explicitly requests compatibility tables;
+normal serial IDs are arithmetic and distributed lookup reuses Tpetra maps.
+Arbitrary composite cell reordering remains rejected.
+
+`storage_report()` separates topology, geometry, interfaces, indexing,
+compatibility, boundary batches and objects. It counts shared topology once and
+reports vector capacities. Allocator metadata, shared-pointer control blocks,
+string heaps and unordered-container nodes/buckets are excluded. Index-tree and
+map ID-payload estimates are separate from measured capacities; none is total
+RSS. Fields, histories, sparse blocks, Krylov vectors and preconditioners remain
+O(N). Output topology and writer buffers are additional temporary storage.
+
+The coupled solver supports assembled and block-composite operators with cached
+or streamed product workspaces. Block-composite runs retain scalar sparse blocks
+without building a monolithic coupled CRS matrix. This algebraic representation
+is independent of geometric mesh composition; scalar face-based matrix-free
+transport remains separate work.
 
 ```sh
 cmake --preset GCC-ninja-multi
-cmake --build --preset GCC-Debug --target region_diffusion testMultiRegionMesh testMultiRegionOperators testMultiRegionFlow region_mesh_scaling
-ctest --preset GCC-Debug -R '^(RegionProvidersTest|MultiRegionMeshTest|MultiRegionOperatorsTest|MultiRegionFlowTest)\.|^region_diffusion_smoke$'
+cmake --build --preset GCC-Debug --target testMultiRegionMesh testMultiRegionMeshMultiRank testMultiRegionOperators testMultiRegionTransportMultiRank testMultiRegionALE testCoupledSolverBackends testBoussinesqPlanarALE region_diffusion -j 4
+ctest --preset GCC-Debug -R '^(RegionProvidersTest|MultiRegionMeshTest|MultiRegionOperatorsTest|MultiRegionALETest|MultiRegionFlowTest)\.|CoupledSolverBackendsTest\.MultiRegion|BoussinesqPlanarALESupportMatrixTest\.AcceptsCompositeAxialMotion' --parallel 4
+ctest --preset GCC-Debug -R '^(MultiRegionMesh|MultiRegionTransport|MultiRegionALE|MultiRegionFlow|MultiRegionSolverALE)_(2|4)procs$'
 build/gcc/bin/Debug/region_diffusion /tmp/region_diffusion.vtu
+mpiexec -n 4 build/gcc/bin/Debug/region_diffusion /tmp/region_diffusion.vtu
 build/gcc/bin/Debug/region_mesh_scaling 8
-ctest --preset GCC-Debug -R '^MultiRegionMeshSerialOnly_2procs$'
 ```
 
-The example solves unit diffusion with analytic `phi=x` and Dirichlet data on
-remaining physical boundaries, reporting maximum error and total outward
-boundary flux. Tests use least-squares linear reconstruction, assembled
-diffusion, backward-Euler/upwind transport and the existing non-orthogonal
-correction. Linear exactness tolerances are `2e-12` for reconstruction and
-`2e-10` for a converged diffusion solution; they do not assert convergence order
-or bitwise identity. Mixed-mesh and pressure–velocity comparisons match physical
-centroids instead of assuming face ordering.
+Run MPI tests with normal host networking when PMIx cannot open sandbox
+interfaces. The serial diffusion example solves `phi=x` on two Cartesian blocks
+and reports error, conservation and storage. The opt-in scaling benchmark retains
+native compact, composite compact and explicitly materialized compatibility
+paths. No wall-time/RSS threshold or percentage saving is asserted.
 
-The opt-in CSV benchmark doubles the axis resolution through its argument
-(default 8, maximum 256). It compares a single native Cartesian block, equivalent
-compact regions, and the native block with explicitly materialized compatibility
-connectivity/indexing. It reports construction, traversal and assembled diffusion
-time, capacities, estimates, and a checksum. No wall-time or RSS threshold is a
-unit-test gate. Materialized mode uses spans for its timed traversal; operator
-assembly uses the common range API in all three modes. Large cases are never
-launched by CTest.
-
-## Deliberate limitations and later milestones
-
-Composite support is serial, static, conforming and limited to Cartesian,
-straight extruded triangles/quads and native HEX_8/WEDGE_6 unstructured regions.
-Single-region cylindrical/periodic and MPI/ALE paths retain their established
-scope; cylindrical and periodic composition are unavailable. General polygonal
-native extrusion still supports arbitrary cell-face counts, but composite VTU
-and cell-type support currently require triangular or quadrilateral bases.
-
-Later composite MPI must support several regions per rank and a region split
-across ranks, with unique canonical face ownership, halos, distributed field
-ordering and conservative seam flux tests. Multi-rank construction currently
-fails consistently before map setup or communication. Later composite ALE
-requires exact child-revision transactions, interface coincidence preservation,
-GCL, cache refresh and rollback tests. Nonconforming/mortar/AMI, overset,
-automatic extraction, refinement/remeshing, rotated periodic transformations and
-new intermaterial laws remain separate work. Unsupported combinations never
-flatten silently or run as disconnected subproblems.
-
-`MeshHandle::faces()` now returns a value range instead of a span, and the
-handle/provider object layouts have changed. Rebuild downstream C++ consumers;
-the export-symbol regression does not certify class-layout ABI compatibility.
+Linear reconstruction tests use tolerances around `2e-12`; diffusion solutions
+use `2e-10`–`3e-10`. Coupled field/flux comparisons use `2e-8`, with integrated
+cell continuity below `1e-8`. These establish discrete consistency and
+conservation, not convergence order or experimental physical validation. See
+[the extension record](region_mesh_extensions.md) for observed results and
+[the original implementation record](region_mesh_implementation.md) for dated
+initial measurements. Rebuild downstream C++ consumers after interface/layout
+changes; symbol export checks do not certify class-layout ABI compatibility.

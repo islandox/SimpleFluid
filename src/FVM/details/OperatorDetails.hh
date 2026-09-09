@@ -289,8 +289,12 @@ template<class MeshType, class FaceID, class CellID>
 auto cell_to_face_displacement(
     const MeshType& mesh, FaceID face_id, CellID cell_id)
 {
-    const auto raw =
-        mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+    const auto raw = [&]
+    {
+        if constexpr (requires { mesh.face_center_vector(face_id,cell_id); })
+            return mesh.face_center_vector(face_id,cell_id);
+        else return mesh.face_centroid(face_id)-mesh.cell_centroid(cell_id);
+    }();
     const auto outward = mesh.face_normal_outward(face_id, cell_id);
     if (raw.dot(outward) >= real_t{})
     {
@@ -543,7 +547,7 @@ inline auto interior_diffusion_coefficient(
     const auto face_id = query_face_id(mesh, face_lid);
     const auto cell_id = query_cell_id(mesh, cell_lid);
     const auto other_id = query_cell_id(mesh, other_lid);
-    const auto d = mesh.cell_centroid(other_id) - mesh.cell_centroid(cell_id);
+    const auto d = mesh.cell_center_vector(face_id,cell_id);
     const auto d2 = d.dot(d);
     if (d2 <= scalar_type{0})
     {

@@ -183,14 +183,25 @@ verification items below mean the foundation as a whole is not yet complete.
 - [x] Add assembled FVM/flow regressions, diffusion example, VTU region metadata,
       and an opt-in capacity/timing benchmark. Validation is recorded in
       `docs/region_mesh_implementation.md`; no new physical-validation claim.
-- [ ] Composite MPI: multiple regions per rank and split regions, unique seam
-      ownership, halo traversal, field ordering, and conservative multi-rank tests.
-- [ ] Nonconforming interfaces: explicit conservative transfer operators and
-      subdivision/coverage rejection, with manufactured conservation tests.
-- [ ] Composite ALE: synchronized interface geometry, exact child revisions,
-      GCL and cache refresh, conservative transport, and forced rollback tests.
-- [ ] Independent extruded geometry providers and wider composite cell/output
-      types, with compatible-template and analytic-geometry tests.
+- [x] Verify the merged coupled block-composite backend on Cartesian and mixed
+      HEX/prism regions, including all operator/workspace choices, both pressure
+      gradients, backend switching and zero mesh-connectivity materialization.
+- [x] Compact implicit-region MPI: multiple regions per rank, split regions,
+      unique canonical face ownership, halos, owned-cell output and conservative
+      two/four-rank tests. Explicit global constituents remain rejected.
+- [x] Nested planar coarse/fine interfaces with coverage/overlap validation,
+      canonical subfaces and signed conservative flux transfer.
+- [x] Composite common axial affine ALE using existing GCL, epoch, lease,
+      cache refresh and rollback machinery, including solver-integrated tests.
+- [x] Cylindrical composition, physical angular closure and explicit translated
+      periodic patches with image-correct geometry and fluxes.
+- [x] Independent extruded geometry providers sharing immutable base topology,
+      with analytic geometry, native parity and serial/MPI solver tests.
+- [ ] Distributed explicit region packets and region-aware load balancing.
+- [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
+      wider polygonal volume/output types and rotated periodic field transforms.
+- [ ] Nonaffine composite motion and moving periodic lengths: require consistent
+      shared interface geometry, exact GCL and full transactional solver tests.
 
 ### Two-equation RANS turbulence
 

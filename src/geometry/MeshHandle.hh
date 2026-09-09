@@ -112,6 +112,7 @@ public:
     using Unstructured = Meshes::UnstructuredMesh;
     using MultiRegion = Meshes::MultiRegionMesh;
     using MultiRegionPtr = SP<const MultiRegion>;
+    using MutableMultiRegionPtr = SP<MultiRegion>;
     using STKAdapter = Meshes::STKMeshAdapter<Pack>;
     using unstructured_indexer_type =
         Unstructured::local_global_indexer_t<
@@ -137,7 +138,7 @@ public:
                                               MutableCylindricalPtr,
                                               MutableSemiStructuredPtr,
                                               MutableUnstructuredPtr,
-                                              MutableSTKAdapterPtr>;
+                                              MutableSTKAdapterPtr, MutableMultiRegionPtr>;
 
     /** @brief Locally visible faces belonging to one boundary batch. */
     struct BoundaryFaceBatch
@@ -156,8 +157,12 @@ public:
 
     static constexpr int invalid_boundary_id = -1;
 
-    /** @brief Observe a validated static serial composite; mutation is unavailable. */
+    /** @brief Observe a validated composite and build communicator-local ownership/maps. */
     explicit MeshHandle(MultiRegionPtr mesh);
+    /** @brief Retain the composite for controlled common axial ALE. */
+    explicit MeshHandle(MutableMultiRegionPtr mesh);
+    explicit MeshHandle(MultiRegionPtr mesh, DistributionOptions options);
+    explicit MeshHandle(MutableMultiRegionPtr mesh, DistributionOptions options);
 
     /** @brief Build a distributed handle for a Cartesian mesh. */
     explicit MeshHandle(CartesianPtr mesh,
@@ -653,6 +658,7 @@ public:
     Vec3 face_area_vector_outward(local_ordinal_type face_lid,
                                   local_ordinal_type cell_lid) const;
     real_t face_cell_center_distance(local_ordinal_type face_lid) const;
+    Vec3 face_center_vector(local_ordinal_type face_lid, local_ordinal_type cell_lid) const;
     Vec3 cell_center_vector(local_ordinal_type face_lid,
                             local_ordinal_type cell_lid) const;
     real_t cell_to_face_distance(local_ordinal_type face_lid,
@@ -913,6 +919,8 @@ private:
         SP<const MeshType> mesh, DistributionOptions options);
 
     SIMPLEFLUID_LOCAL void initialize_semi_structured(SemiStructuredPtr mesh);
+    SIMPLEFLUID_LOCAL void initialize_composite(MultiRegionPtr mesh, DistributionOptions options);
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle composite_vtu_topology(const MultiRegion& mesh) const;
 
     SIMPLEFLUID_LOCAL void initialize_unstructured(UnstructuredPtr mesh);
 

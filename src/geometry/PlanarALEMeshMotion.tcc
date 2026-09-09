@@ -68,7 +68,7 @@ PlanarALEMeshMotion<Pack>::PlanarALEMeshMotion(SP<mesh_type> mesh, PlanarALEMesh
     const auto axis_is_valid = axis >= static_cast<int>(Dimension::X) && axis <= static_cast<int>(Dimension::Z);
     const auto family_axis_is_valid =
         d_family == Family::Cartesian ||
-        ((d_family == Family::Cylindrical || d_family == Family::SemiStructured) && d_options.axis == Dimension::Z);
+        ((d_family == Family::Cylindrical || d_family == Family::SemiStructured || d_family == Family::CompositeAffine) && d_options.axis == Dimension::Z);
     if (d_family != Family::Unsupported && axis_is_valid && family_axis_is_valid)
     {
         d_reference_axis_edges = current_axis_edges();
@@ -85,6 +85,9 @@ PlanarALEMeshMotion<Pack>::PlanarALEMeshMotion(SP<mesh_type> mesh, PlanarALEMesh
             break;
         case Family::SemiStructured:
             d_family_name = "SemiStructuredXY_Z";
+            break;
+        case Family::CompositeAffine:
+            d_family_name = "MultiRegionMesh";
             break;
         case Family::Unsupported:
             throw std::logic_error("Planar ALE construction reached an unsupported mesh family.");
@@ -149,6 +152,8 @@ template<TpetraTypePack Pack> auto PlanarALEMeshMotion<Pack>::detect_family() co
             {
                 return Family::SemiStructured;
             }
+            else if constexpr (std::same_as<mesh_type, typename PlanarALEMeshMotion::mesh_type::MultiRegion>)
+                return Family::CompositeAffine;
             else
             {
                 return Family::Unsupported;
@@ -179,6 +184,8 @@ template<TpetraTypePack Pack> ArrReal PlanarALEMeshMotion<Pack>::current_axis_ed
             {
                 return mesh.z_edges();
             }
+            else if constexpr (std::same_as<concrete_type, typename mesh_type::MultiRegion>)
+                return mesh.axial_edges();
             else
             {
                 throw std::invalid_argument("PlanarALEMeshMotion does not support this mesh family.");
@@ -203,6 +210,10 @@ template<TpetraTypePack Pack> std::array<ArrReal, 3> PlanarALEMeshMotion<Pack>::
                 result[static_cast<size_t>(Dimension::Z)] = mesh.z_edges();
                 return result;
             }
+            else if constexpr (std::same_as<concrete_type, typename mesh_type::MultiRegion>)
+            {
+                std::array<ArrReal,3> result; result[2]=mesh.axial_edges(); return result;
+            }
             else
             {
                 return {};
@@ -218,7 +229,8 @@ template<TpetraTypePack Pack> bool PlanarALEMeshMotion<Pack>::geometry_motion_av
             using concrete_type = std::remove_cvref_t<Mesh>;
             if constexpr (std::same_as<concrete_type, typename mesh_type::Cartesian> ||
                           std::same_as<concrete_type, typename mesh_type::Cylindrical> ||
-                          std::same_as<concrete_type, typename mesh_type::SemiStructured>)
+                          std::same_as<concrete_type, typename mesh_type::SemiStructured> ||
+                          std::same_as<concrete_type, typename mesh_type::MultiRegion>)
             {
                 return Meshes::PlanarALEGeometryAccess::motion_available(mesh);
             }
@@ -237,7 +249,8 @@ template<TpetraTypePack Pack> bool PlanarALEMeshMotion<Pack>::geometry_motion_ow
             using concrete_type = std::remove_cvref_t<Mesh>;
             if constexpr (std::same_as<concrete_type, typename mesh_type::Cartesian> ||
                           std::same_as<concrete_type, typename mesh_type::Cylindrical> ||
-                          std::same_as<concrete_type, typename mesh_type::SemiStructured>)
+                          std::same_as<concrete_type, typename mesh_type::SemiStructured> ||
+                          std::same_as<concrete_type, typename mesh_type::MultiRegion>)
             {
                 return Meshes::PlanarALEGeometryAccess::motion_owned_by(mesh, this);
             }
@@ -256,7 +269,8 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::claim_geometry_mot
             using concrete_type = std::remove_cvref_t<Mesh>;
             if constexpr (std::same_as<concrete_type, typename mesh_type::Cartesian> ||
                           std::same_as<concrete_type, typename mesh_type::Cylindrical> ||
-                          std::same_as<concrete_type, typename mesh_type::SemiStructured>)
+                          std::same_as<concrete_type, typename mesh_type::SemiStructured> ||
+                          std::same_as<concrete_type, typename mesh_type::MultiRegion>)
             {
                 Meshes::PlanarALEGeometryAccess::claim_motion(mesh, this);
             }
@@ -281,7 +295,8 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::release_geometry_m
                 using concrete_type = std::remove_cvref_t<Mesh>;
                 if constexpr (std::same_as<concrete_type, typename mesh_type::Cartesian> ||
                               std::same_as<concrete_type, typename mesh_type::Cylindrical> ||
-                              std::same_as<concrete_type, typename mesh_type::SemiStructured>)
+                              std::same_as<concrete_type, typename mesh_type::SemiStructured> ||
+                              std::same_as<concrete_type, typename mesh_type::MultiRegion>)
                 {
                     Meshes::PlanarALEGeometryAccess::release_motion(mesh, this);
                 }
@@ -306,7 +321,8 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::replace_axis_edges
                     mesh, static_cast<size_t>(d_options.axis), std::move(edges));
             }
             else if constexpr (std::same_as<concrete_type, typename mesh_type::Cylindrical> ||
-                               std::same_as<concrete_type, typename mesh_type::SemiStructured>)
+                               std::same_as<concrete_type, typename mesh_type::SemiStructured> ||
+                          std::same_as<concrete_type, typename mesh_type::MultiRegion>)
             {
                 Meshes::PlanarALEGeometryAccess::require_motion_owner(mesh, this);
                 Meshes::PlanarALEGeometryAccess::replace_axial_edges(mesh, std::move(edges));
@@ -314,7 +330,7 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::replace_axis_edges
             else
             {
                 throw std::invalid_argument("PlanarALEMeshMotion supports only Cartesian, cylindrical, "
-                                            "and semi-structured extruded geometry.");
+                                            "semi-structured extrusions, and composite axial affine geometry.");
             }
         });
 }
@@ -399,6 +415,8 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
 
     const auto reference_bottom = d_reference_axis_edges.empty() ? real_t{} : d_reference_axis_edges.front();
     const auto reference_top = d_reference_axis_edges.empty() ? real_t{} : d_reference_axis_edges.back();
+    if (d_family == Family::CompositeAffine && d_options.deformation_start_elevation
+        && *d_options.deformation_start_elevation != reference_bottom) local_valid = 0;
     const auto deformation_start = d_options.deformation_start_elevation.value_or(reference_bottom);
     local_valid = local_valid && std::isfinite(deformation_start) && deformation_start >= reference_bottom &&
                   deformation_start < reference_top;
@@ -475,7 +493,8 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
     {
         throw std::invalid_argument("PlanarALEMeshMotion requires valid options and a mutable "
                                     "Cartesian mesh, axial cylindrical mesh, or serial axial "
-                                    "SemiStructuredXY_Z mesh on every rank.");
+                                    "SemiStructuredXY_Z mesh, or a composite axial affine mesh on every rank. "
+                                    "Composite motion requires full-height Z deformation and a fixed axial periodic length.");
     }
     if (minimum_integer_state != maximum_integer_state || minimum_extra_presence != maximum_extra_presence ||
         !option_values_match || !geometry_edge_counts_match || !geometry_edge_values_match || !epoch_matches)

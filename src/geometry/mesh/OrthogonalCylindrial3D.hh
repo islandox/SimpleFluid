@@ -99,6 +99,18 @@ public:
     const Indexer& indexer() const noexcept { return d_indexer; }
     const OrthoMeshTopo& topology() const noexcept { return d_topology; }
 
+    size_t topology_storage_bytes() const noexcept { return d_topology.storage_bytes(); }
+    size_t geometry_storage_bytes() const noexcept
+    {
+        size_t bytes=d_cell_Dr2.capacity()*sizeof(real_t);
+        for(size_t a=0;a<3;++a)
+        {
+            bytes+=(d_cell_edges[a].capacity()+d_cell_midpoints[a].capacity()+d_cell_widths[a].capacity())*sizeof(real_t);
+            for(size_t b=0;b<3;++b) bytes+=d_face_area_magnitudes[a][b].capacity()*sizeof(real_t);
+        }
+        return bytes;
+    }
+
     /** @brief Revision shared by all handles observing this geometry. */
     std::uint64_t geometry_epoch() const noexcept { return d_geometry_state.epoch; }
 

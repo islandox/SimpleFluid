@@ -130,3 +130,51 @@ TEST(MultiRegionOperatorsTest, CachedOperatorsRejectNativeConstituentReplacement
     *native=OrthogonalCartesian3D(Vec3D<ArrReal>{{{0,1,3},{0,1},{0,1}}});
     EXPECT_THROW(FVM::cell_gradient(scalar,gradient,cache),std::logic_error);
 }
+
+TEST(MultiRegionOperatorsTest, NonconformingDiffusionPreservesLinearManufacturedField)
+{
+    SP<const Handle> mesh=std::make_shared<Handle>(test::coarse_fine_regions());
+    Scalar old(mesh,"linear"); Flux flux(mesh,0.0,"flux");
+    for(size_t c=0;c<mesh->num_owned_cells();++c) old.set_owned_value(c,linear(mesh->cell_centroid(c)));
+    old.sync_ghosts();
+    auto boundary=[&](int b,size_t i){return linear(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i]));};
+    auto condition=[&](int b,size_t i){return BoundaryCondition{BoundaryConditionType::Dirichlet,boundary(b,i)};};
+    for(auto treatment:{FVM::NonOrthogonalTreatment::Explicit,FVM::NonOrthogonalTreatment::Implicit,FVM::NonOrthogonalTreatment::Hybrid})
+    {
+        auto system=FVM::non_orthogonal_transport_system<Pack>(old,flux,0.2,0.5,condition,boundary,
+            [](int){return 0.0;},treatment,&old);
+        const auto values=solve(system,mesh);
+        for(size_t c=0;c<mesh->num_cells();++c) EXPECT_NEAR(values[c],linear(mesh->cell_centroid(c)),3e-10);
+    }
+    expect_compact(*mesh);
+}
+
+TEST(MultiRegionOperatorsTest, ExtendedProvidersAndPeriodicImagesPreserveAxialDiffusion)
+{
+    for(const auto& geometry:{test::periodic_regions(),test::cylindrical_regions(),test::independent_extruded_regions()})
+    {
+        SP<const Handle> mesh=std::make_shared<Handle>(geometry);
+        auto boundary=[&](int b,size_t i){return mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i]).z;};
+        auto condition=[&](int b,size_t i){return BoundaryCondition{BoundaryConditionType::Dirichlet,boundary(b,i)};};
+        const auto system=FVM::diffusion_system<Pack>(*mesh,1.0,condition,[](int){return 0.0;});
+        const auto values=solve(system,mesh);
+        for(size_t c=0;c<mesh->num_cells();++c) EXPECT_NEAR(values[c],mesh->cell_centroid(c).z,2e-10);
+        expect_compact(*mesh);
+    }
+}
+TEST(MultiRegionOperatorsTest, TranslatedPeriodicConstantFluxBalancesEveryCell)
+{
+    SP<const Handle> mesh=std::make_shared<Handle>(test::periodic_regions());
+    Flux flux(mesh,"flux");
+    for(size_t f=0;f<mesh->num_faces();++f) flux.set_owned_value(f,mesh->face_area_vector(f).x);
+    flux.sync_ghosts();
+    const auto div=FVM::cell_divergence_from_fluxes(*mesh,flux);
+    for(const auto value:div) EXPECT_NEAR(value,0,1e-13);
+    Scalar scalar(mesh,"transverse"); VectorCellFieldStored<Pack> gradient(mesh,"gradient");
+    for(size_t c=0;c<mesh->num_cells();++c) { const auto x=mesh->cell_centroid(c); scalar.set_owned_value(c,x.y+2*x.z); }
+    scalar.sync_ghosts();
+    auto boundary=[&](int b,size_t i){const auto x=mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i]); return x.y+2*x.z;};
+    auto condition=[&](int b,size_t i){return BoundaryCondition{BoundaryConditionType::Dirichlet,boundary(b,i)};};
+    FVM::cell_gradient(scalar,condition,boundary,gradient);
+    for(size_t c=0;c<mesh->num_cells();++c) EXPECT_NEAR((gradient.value(c)-MeshUtils::Vec3{0,1,2}).norm(),0,2e-12);
+}

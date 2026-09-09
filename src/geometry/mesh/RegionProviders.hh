@@ -10,6 +10,7 @@
 
 #include "geometry/mesh/EntityRange.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
 
@@ -40,11 +41,12 @@ struct MeshStorageReport
 /** @brief Ordinal layout and orientation compatibility; explicit templates require identical identity. */
 struct RegionLayout
 {
-    enum class Family { Rectilinear, Extruded, Explicit };
+    enum class Family { Rectilinear, Extruded, Explicit, Cylindrical };
     Family family;
     size_t cells, faces, nodes;
     std::array<size_t, 3> extents;
     const void* template_identity = nullptr;
+    std::array<bool,3> periodic{};
     bool operator==(const RegionLayout&) const = default;
 };
 
@@ -114,6 +116,7 @@ class RectilinearGeometry
 public:
     using Vec3 = MeshUtils::Vec3;
     explicit RectilinearGeometry(Vec3D<ArrReal> edges);
+    const Vec3D<ArrReal>& cell_edges() const noexcept { return d_edges; }
     RegionLayout layout() const;
     real_t cell_volume(size_t c) const;
     Vec3 cell_centroid(size_t c) const;
@@ -147,11 +150,12 @@ public:
     }
     RegionLayout layout() const
     {
-        if constexpr (std::same_as<Native, OrthogonalCartesian3D>)
+        if constexpr (std::same_as<Native, OrthogonalCartesian3D> || std::same_as<Native, OrthogonalCylindrial3D>)
         {
             const auto& n = d_mesh->indexer().num_cells_per_dim;
-            return {RegionLayout::Family::Rectilinear, d_mesh->num_cells(), d_mesh->num_faces(),
-                d_mesh->num_nodes(), {n[0], n[1], n[2]}};
+            const auto& p=d_mesh->indexer().periodic_dimensions;
+            return {std::same_as<Native,OrthogonalCartesian3D>?RegionLayout::Family::Rectilinear:RegionLayout::Family::Cylindrical,
+                d_mesh->num_cells(),d_mesh->num_faces(),d_mesh->num_nodes(),{n[0],n[1],n[2]},nullptr,{p[0],p[1],p[2]}};
         }
         else if constexpr (std::same_as<Native, SemiStructuredXY_Z>)
         {
