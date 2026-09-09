@@ -13,6 +13,7 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
+#include "utils/CompensatedSum.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -487,7 +488,7 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
     {
         throw std::invalid_argument("Radiolytic integral volume span must use mesh-local cell order.");
     }
-    long double local_integral{};
+    detail::CompensatedSum<> local_integral;
     const auto values = field.owned_read_view();
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -498,7 +499,7 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
                                 : static_cast<scalar_type>(cell_volumes[owned]);
         local_integral += static_cast<long double>(values(owned, 0)) * volume;
     }
-    return global_sum(static_cast<scalar_type>(local_integral));
+    return global_sum(static_cast<scalar_type>(local_integral.value()));
 }
 
 /** @brief Reduce the five independent transport inventories together. */
@@ -513,9 +514,9 @@ auto RadiolyticGasModel<Pack, MeshType>::population_integrals(
         d_large_moles.owned_read_view(), d_micro_number.owned_read_view(), d_large_number.owned_read_view()};
     std::array<scalar_type, 5> local{}, global{};
     // The transport guard resolves changes at tens of scalar epsilons.
-    // Accumulate before rounding to the MPI scalar so cell count and changed
+    // Compensate before rounding to the MPI scalar so cell count and changed
     // spatial distributions do not create an apparent inventory increase.
-    std::array<long double, 5> accumulated{};
+    std::array<detail::CompensatedSum<>, 5> accumulated{};
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto volume = cell_volumes.empty()
@@ -525,7 +526,7 @@ auto RadiolyticGasModel<Pack, MeshType>::population_integrals(
             accumulated[column] += static_cast<long double>(values[column](owned, 0)) * volume;
     }
     for (size_t column = 0; column < local.size(); ++column)
-        local[column] = static_cast<scalar_type>(accumulated[column]);
+        local[column] = static_cast<scalar_type>(accumulated[column].value());
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
         static_cast<int>(local.size()), local.data(), global.data());
     return global;

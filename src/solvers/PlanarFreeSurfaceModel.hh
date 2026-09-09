@@ -13,6 +13,7 @@
 #include "geometry/Mesh.hh"
 #include "geometry/MeshQuality.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "utils/CompensatedSum.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -740,10 +741,11 @@ public:
         }
         requireCollectivelyValidDensity(local_invalid);
 
-        // Accumulate extensive quantities before rounding to the MPI scalar.
+        // Compensate local sums before rounding to the MPI scalar; long double
+        // alone provides no extra precision on Apple Arm64.
         // Large cell counts otherwise inject a spurious volume source into ALE.
-        long double local_reference_mass = {};
-        long double local_mesh_volume = {};
+        detail::CompensatedSum<> local_reference_mass = {};
+        detail::CompensatedSum<> local_mesh_volume = {};
         for (size_t owned = 0; owned < count; ++owned)
         {
             const auto cell = static_cast<local_ordinal_type>(owned);
@@ -757,8 +759,8 @@ public:
             local_mesh_volume += cell_volume;
         }
         requireCollectivelyValidDensity(local_invalid);
-        const auto reference_mass = globalSum(static_cast<scalar_type>(local_reference_mass));
-        const auto mesh_volume = globalSum(static_cast<scalar_type>(local_mesh_volume));
+        const auto reference_mass = globalSum(static_cast<scalar_type>(local_reference_mass.value()));
+        const auto mesh_volume = globalSum(static_cast<scalar_type>(local_mesh_volume.value()));
         if (!(reference_mass > scalar_type{}) || !(mesh_volume > scalar_type{}))
         {
             throw std::invalid_argument("LiquidMassInventory requires positive global mesh volume and reference mass.");
@@ -1087,11 +1089,11 @@ public:
         // consumer requests mesh-local values from the preview field.
         d_trial_cell_mass_inventory.sync_ghosts();
 
-        long double local_mass_before{};
-        long double local_evaporated{};
-        long double local_condensed{};
-        long double local_mass_after{};
-        long double local_liquid_volume{};
+        detail::CompensatedSum<> local_mass_before{};
+        detail::CompensatedSum<> local_evaporated{};
+        detail::CompensatedSum<> local_condensed{};
+        detail::CompensatedSum<> local_mass_after{};
+        detail::CompensatedSum<> local_liquid_volume{};
         local_invalid_value = 0;
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -1121,9 +1123,9 @@ public:
         {
             throw std::runtime_error("Cellwise liquid-mass transport produced a non-finite or negative inventory.");
         }
-        const std::array<scalar_type, 5> local_totals{static_cast<scalar_type>(local_mass_before),
-            static_cast<scalar_type>(local_evaporated), static_cast<scalar_type>(local_condensed),
-            static_cast<scalar_type>(local_mass_after), static_cast<scalar_type>(local_liquid_volume)};
+        const std::array<scalar_type, 5> local_totals{static_cast<scalar_type>(local_mass_before.value()),
+            static_cast<scalar_type>(local_evaporated.value()), static_cast<scalar_type>(local_condensed.value()),
+            static_cast<scalar_type>(local_mass_after.value()), static_cast<scalar_type>(local_liquid_volume.value())};
         std::array<scalar_type, 5> global_totals{};
         Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, static_cast<int>(local_totals.size()),
             local_totals.data(), global_totals.data());
@@ -1362,7 +1364,7 @@ private:
     {
         if (d_options.mode == LiquidVolumeMode::CellMassInventory)
         {
-            long double local_liquid_volume{};
+            detail::CompensatedSum<> local_liquid_volume{};
             for (size_t owned = 0; owned < d_reference_mass_fraction.size(); ++owned)
             {
                 const auto cell = static_cast<local_ordinal_type>(owned);
@@ -1371,19 +1373,19 @@ private:
                 const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
                 local_liquid_volume += mass_density / density * volume;
             }
-            d_diagnostics.liquid_volume = globalSum(static_cast<scalar_type>(local_liquid_volume));
+            d_diagnostics.liquid_volume = globalSum(static_cast<scalar_type>(local_liquid_volume.value()));
             d_diagnostics.mass_weighted_specific_volume = d_diagnostics.total_mass > scalar_type{}
                                                               ? d_diagnostics.liquid_volume / d_diagnostics.total_mass
                                                               : scalar_type{};
             return;
         }
-        long double local_specific_volume = {};
+        detail::CompensatedSum<> local_specific_volume = {};
         for (size_t owned = 0; owned < d_reference_mass_fraction.size(); ++owned)
         {
             const auto density = d_pure_liquid_density.value(static_cast<local_ordinal_type>(owned));
             local_specific_volume += d_reference_mass_fraction[owned] / density;
         }
-        d_diagnostics.mass_weighted_specific_volume = globalSum(static_cast<scalar_type>(local_specific_volume));
+        d_diagnostics.mass_weighted_specific_volume = globalSum(static_cast<scalar_type>(local_specific_volume.value()));
         d_diagnostics.liquid_volume = d_diagnostics.total_mass * d_diagnostics.mass_weighted_specific_volume;
     }
 
