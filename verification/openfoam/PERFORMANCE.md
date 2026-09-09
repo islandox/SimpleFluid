@@ -1,5 +1,9 @@
 # Repeating the verification performance measurements
 
+The bottom-heated convection case now uses SST. Both compared binaries must
+implement the same SST case contract; the historical laminar timings below
+are not a performance baseline for the additional turbulence equations.
+
 `run_performance.py` compares two existing SimpleFluid builds using the same
 complete physical fixtures and solver policies. Select the cases explicitly;
 the script does not build either executable or prepare OpenFOAM. It retains

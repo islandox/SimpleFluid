@@ -121,7 +121,7 @@ def merge_outputs(directory: Path, ranks: int, started: float) -> dict:
                     raise ComparisonError(f"inconsistent CSV columns: {source}")
                 header = reader.fieldnames
                 parts.append(list(reader))
-        if name in ("fields.csv", "profiles.csv"):
+        if name in ("fields.csv", "profiles.csv", "turbulence.csv"):
             rows = [row for part in parts for row in part]
             rows.sort(key=lambda row: (float(row["time_s"]), int(row["sample"])))
             if len({(float(row["time_s"]), row["sample"]) for row in rows}) != len(rows):

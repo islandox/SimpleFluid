@@ -18,9 +18,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numbers>
+#include <sstream>
 #include <stdexcept>
 
 namespace SimpleFluid
@@ -485,7 +487,7 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
     {
         throw std::invalid_argument("Radiolytic integral volume span must use mesh-local cell order.");
     }
-    scalar_type local_integral{};
+    long double local_integral{};
     const auto values = field.owned_read_view();
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -494,9 +496,9 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
         const auto volume = cell_volumes.empty()
                                 ? static_cast<scalar_type>(d_mesh->cell_volume(cell_lid))
                                 : static_cast<scalar_type>(cell_volumes[owned]);
-        local_integral += values(owned, 0) * volume;
+        local_integral += static_cast<long double>(values(owned, 0)) * volume;
     }
-    return global_sum(local_integral);
+    return global_sum(static_cast<scalar_type>(local_integral));
 }
 
 /** @brief Reduce the five independent transport inventories together. */
@@ -510,14 +512,20 @@ auto RadiolyticGasModel<Pack, MeshType>::population_integrals(
         d_dissolved_hydrogen_inventory.owned_read_view(), d_micro_moles.owned_read_view(),
         d_large_moles.owned_read_view(), d_micro_number.owned_read_view(), d_large_number.owned_read_view()};
     std::array<scalar_type, 5> local{}, global{};
+    // The transport guard resolves changes at tens of scalar epsilons.
+    // Accumulate before rounding to the MPI scalar so cell count and changed
+    // spatial distributions do not create an apparent inventory increase.
+    std::array<long double, 5> accumulated{};
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto volume = cell_volumes.empty()
             ? static_cast<scalar_type>(d_mesh->cell_volume(static_cast<local_ordinal_type>(owned)))
             : static_cast<scalar_type>(cell_volumes[owned]);
         for (size_t column = 0; column < values.size(); ++column)
-            local[column] += values[column](owned, 0) * volume;
+            accumulated[column] += static_cast<long double>(values[column](owned, 0)) * volume;
     }
+    for (size_t column = 0; column < local.size(); ++column)
+        local[column] = static_cast<scalar_type>(accumulated[column]);
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
         static_cast<int>(local.size()), local.data(), global.data());
     return global;
@@ -1739,10 +1747,12 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         // Both operands already came from the same all-reduce on every rank.
         if (local_material_increase != 0)
         {
-            throw std::runtime_error(
-                "Radiolytic escape transport increased the global "
-              + std::string(inventory_name)
-              + " inventory beyond roundoff.");
+            std::ostringstream message;
+            message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                    << "Radiolytic escape transport increased the global " << inventory_name
+                    << " inventory beyond roundoff: before=" << before << ", after=" << after
+                    << ", increase=" << -decrement << ", roundoff=" << roundoff << '.';
+            throw std::runtime_error(message.str());
         }
         // Preserve every positive loss exactly, even when it is small beside
         // a large retained inventory.  Only a negative roundoff artifact is

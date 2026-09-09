@@ -103,3 +103,8 @@ acceptance checks passed.
 For a selected non-default mesh, pass the retained run manifest rather than
 the checked-in default manifest. Explicit `mesh_edges_m` are checked against
 the output geometry before plotting; ALE permits its measured axial stretch.
+
+For the SST convection case, `plot_sst_fields.py` additionally plots k, omega,
+eddy viscosity and wall-adjacent y+ from `turbulence.csv`. The physical field
+gallery is unchanged. The SST gallery includes its own matched CSV and error
+statistics, with zero-reference y+ errors undefined in interior cells.

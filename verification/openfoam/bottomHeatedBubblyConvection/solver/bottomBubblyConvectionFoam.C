@@ -1,6 +1,7 @@
-// Independent laminar momentum/pressure, energy, and dilute H2-moment reference.
+// Independent Menter-1994 SST momentum/pressure, energy, and dilute H2 moments.
 #include "fvCFD.H"
 #include "StructuredCaseMesh.H"
+#include "ReferenceSST.H"
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -38,6 +39,15 @@ int main(int argc, char* argv[])
         dimensionedScalar(dimless/dimVolume,Zero),scalarPatchTypes);
     volScalarField alpha(IOobject("alpha",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),mesh,
         dimensionedScalar(dimless,Zero),scalarPatchTypes);
+    ReferenceSST sst(mesh,properties);
+    wordList transportPatchTypes=scalarPatchTypes;
+    forAll(transportPatchTypes,patch)
+        if(mesh.boundary()[patch].name()=="xmin"||mesh.boundary()[patch].name()=="xmax"||mesh.boundary()[patch].name()=="zmin")
+            transportPatchTypes[patch]="fixedValue";
+    volScalarField nuEff(IOobject("nuEff",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::NO_WRITE),mesh,nu,transportPatchTypes);
+    volScalarField kEff(IOobject("kEff",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::NO_WRITE),mesh,conductivity,transportPatchTypes);
+    volScalarField rho(IOobject("rho",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::NO_WRITE),mesh,
+        dimensionedScalar(dimDensity,rho0),scalarPatchTypes);
     volScalarField rhoCp(IOobject("rhoCp",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::NO_WRITE),mesh,
         dimensionedScalar(dimEnergy/dimVolume/dimTemperature,rho0*cp),scalarPatchTypes);
     volScalarField q(IOobject("q",runTime.timeName(),mesh,IOobject::NO_READ,IOobject::AUTO_WRITE),mesh,
@@ -63,11 +73,16 @@ int main(int argc, char* argv[])
     std::ofstream fields((runTime.path()/"fields.csv").c_str()),history((runTime.path()/"history.csv").c_str());
     fields.exceptions(std::ios::badbit|std::ios::failbit);history.exceptions(std::ios::badbit|std::ios::failbit);
     fields<<std::setprecision(17)<<"time_s,sample,x_lower_m,x_upper_m,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
-    history<<std::setprecision(17)<<"time_s,sample,temperature_max_K,temperature_mean_K,alpha_max,speed_max_m_s,uz_min_m_s,uz_max_m_s,hydrogen_mol,produced_mol,escaped_mol,hydrogen_balance_mol,heat_power_W,continuity_per_s,thermal_step_residual_J,wall_heat_loss_W\n";
+    history<<std::setprecision(17)<<"time_s,sample,temperature_max_K,temperature_mean_K,alpha_max,speed_max_m_s,uz_min_m_s,uz_max_m_s,hydrogen_mol,produced_mol,escaped_mol,hydrogen_balance_mol,heat_power_W,continuity_per_s,thermal_step_residual_J,wall_heat_loss_W,k_mean_m2_s2,omega_mean_1_s,nut_max_m2_s,wall_yplus_max\n";
+    std::ofstream turbulentFields((runTime.path()/"turbulence.csv").c_str()),wallHistory((runTime.path()/"wall_resolution.csv").c_str());
+    turbulentFields.exceptions(std::ios::badbit|std::ios::failbit);wallHistory.exceptions(std::ios::badbit|std::ios::failbit);
+    turbulentFields<<std::setprecision(17)<<"time_s,sample,k_m2_s2,omega_1_s,nut_m2_s,wall_distance_m,wall_yplus\n";
+    wallHistory<<std::setprecision(17)<<"step,time_s,wall_yplus_max\n";
     auto check=[&](bool valid,const char* message){if(!valid)FatalErrorInFunction<<message<<exit(FatalError);};
     auto write=[&](label step)
     {
         scalar tmax=T0,tmean=0,amax=0,umax=0,uzmin=0,uzmax=0;
+        const scalar yplusMax=sst.wallYPlus(U);
         forAll(T,cell)
         {
             const vector c=mesh.C()[cell];const label ix=grid.interval(grid.x,c.x()),iz=grid.interval(grid.z,c.z());
@@ -75,8 +90,15 @@ int main(int argc, char* argv[])
             umax=max(umax,mag(U[cell]));uzmin=min(uzmin,U[cell].z());uzmax=max(uzmax,U[cell].z());
             check(std::isfinite(T[cell])&&T[cell]>290&&T[cell]<320&&std::isfinite(mag(U[cell]))&&alpha[cell]>=0&&alpha[cell]<0.02,
                 "Outside dilute reference-water envelope");
-            if(grid.interval(grid.y,c.y())==grid.ny()/2) fields<<runTime.value()<<','<<iz*nx+ix<<','<<grid.x[ix]<<','<<grid.x[ix+1]<<','<<grid.z[iz]<<','<<grid.z[iz+1]<<','
+            check(std::isfinite(sst.kinetic[cell])&&sst.kinetic[cell]>=par("sst_k_min")&&std::isfinite(sst.omega[cell])
+                  &&sst.omega[cell]>=par("sst_omega_min")&&std::isfinite(sst.nut[cell])&&sst.nut[cell]>=0,"Invalid SST state");
+            if(grid.interval(grid.y,c.y())==grid.ny()/2)
+            {
+                turbulentFields<<runTime.value()<<","<<iz*nx+ix<<","<<sst.kinetic[cell]<<","<<sst.omega[cell]<<","<<sst.nut[cell]
+                    <<","<<sst.distance[cell]<<","<<sst.yplus[cell]<<"\n";
+                fields<<runTime.value()<<','<<iz*nx+ix<<','<<grid.x[ix]<<','<<grid.x[ix+1]<<','<<grid.z[iz]<<','<<grid.z[iz+1]<<','
                   <<T[cell]<<','<<rho0*(1-beta*(T[cell]-T0))<<','<<alpha[cell]<<','<<U[cell].x()<<','<<U[cell].y()<<','<<U[cell].z()<<'\n';
+            }
         }
         reduce(tmax,maxOp<scalar>());reduce(tmean,sumOp<scalar>());reduce(amax,maxOp<scalar>());
         reduce(umax,maxOp<scalar>());reduce(uzmin,minOp<scalar>());reduce(uzmax,maxOp<scalar>());
@@ -85,7 +107,8 @@ int main(int argc, char* argv[])
         check(mag(balance)<1e-13*volumeScale&&continuity<1e-6,"Hydrogen/continuity gate failed");
         check(mag(thermalResidual)<1e-6*volumeScale,"Discrete thermal step budget failed");
         history<<runTime.value()<<",global,"<<tmax<<','<<tmean<<','<<amax<<','<<umax<<','<<uzmin<<','<<uzmax<<','
-               <<inventory<<','<<produced<<','<<escaped<<','<<balance<<','<<power<<','<<continuity<<','<<thermalResidual<<','<<wallHeatLoss<<'\n';
+               <<inventory<<','<<produced<<','<<escaped<<','<<balance<<','<<power<<','<<continuity<<','<<thermalResidual<<','<<wallHeatLoss<<','<<gSum(sst.kinetic.primitiveField()*mesh.V())/volume
+               <<','<<gSum(sst.omega.primitiveField()*mesh.V())/volume<<','<<gMax(sst.nut.primitiveField())<<','<<yplusMax<<'\n';
         Info<<"step="<<step<<" t="<<runTime.value()<<" Tmax="<<tmax<<" alpha="<<amax<<" Umax="<<umax<<" uz=["<<uzmin<<','<<uzmax<<']'<<nl;
         if(step==nominalSteps)check(tmax-T0>0.05&&amax>1e-6&&uzmin< -1e-5&&uzmax>1e-5,"No heated bubbly plume and return flow");
     };
@@ -99,12 +122,18 @@ int main(int argc, char* argv[])
         check(mag(runTime.value()-step*dt)<1e-10,"Time schedule mismatch");
         forAll(T,cell)
         {
-            const scalar rho=rho0*(1-beta*(T[cell]-T0))*(1-alpha[cell])+rhoGas*alpha[cell];
-            rhoCp[cell]=rho*cp;
-            buoyancy[cell]=vector(0,0,-par("gravity")*(rho-rho0)/rho0);
+            rho[cell]=rho0*(1-beta*(T[cell]-T0))*(1-alpha[cell])+rhoGas*alpha[cell];
+            rhoCp[cell]=rho[cell]*cp;
+            buoyancy[cell]=vector(0,0,-par("gravity")*(rho[cell]-rho0)/rho0);
         }
-        rhoCp.correctBoundaryConditions();buoyancy.correctBoundaryConditions();
-        fvVectorMatrix UEqn(fvm::ddt(U)+fvm::div(phi,U)-fvm::laplacian(nu,U)==buoyancy);
+        rho.correctBoundaryConditions();rhoCp.correctBoundaryConditions();buoyancy.correctBoundaryConditions();
+        nuEff=nu+sst.nut;nuEff.correctBoundaryConditions();
+        surfaceVectorField transposeTraction(fvc::interpolate(nuEff)*(mesh.Sf()&fvc::interpolate(dev2(Foam::T(fvc::grad(U))))));
+        forAll(mesh.boundary(),patch)
+            if(!mesh.boundary()[patch].coupled() && (mesh.boundary()[patch].name()=="ymin"||mesh.boundary()[patch].name()=="ymax"||mesh.boundary()[patch].name()=="zmax"))
+                transposeTraction.boundaryFieldRef()[patch]=vector::zero;
+        fvVectorMatrix UEqn(fvm::ddt(U)+fvm::div(phi,U)-fvm::laplacian(nuEff,U)
+            ==buoyancy+fvc::surfaceIntegrate(transposeTraction)-(2.0/3.0)*fvc::grad(sst.kinetic));
         solve(UEqn == -fvc::grad(p));
         for(label corrector=0;corrector<3;++corrector)
         {
@@ -117,15 +146,20 @@ int main(int argc, char* argv[])
             phi=phiHbyA-pEqn.flux();
             U=HbyA-rAU*fvc::grad(p);U.correctBoundaryConditions();
         }
+        sst.advance(U,phi,rho);
+        const scalar yplusMax=sst.wallYPlus(U);
+        wallHistory<<step<<","<<runTime.value()<<","<<yplusMax<<"\n";wallHistory.flush();
+        check(std::isfinite(yplusMax)&&yplusMax<=par("sst_yplus_limit"),"Resolved SST wall y+ exceeds target; refine shared mesh");
+        kEff=conductivity+rhoCp*sst.nut/par("sst_prandtl");kEff.correctBoundaryConditions();
         const scalarField oldT(T.primitiveField());
         const surfaceScalarField capacityFlux(fvc::flux(phi,rhoCp));
-        solve(rhoCp*fvm::ddt(T)+fvm::div(capacityFlux,T)-fvm::laplacian(conductivity,T)==q);
+        solve(rhoCp*fvm::ddt(T)+fvm::div(capacityFlux,T)-fvm::laplacian(kEff,T)==q);
         T.correctBoundaryConditions();
         scalar localThermalResidual=sum(rhoCp.primitiveField()*(T.primitiveField()-oldT)*mesh.V());
         scalar localWallHeat=0;
         forAll(T.boundaryField(),patch)
             if(!mesh.boundary()[patch].coupled())
-                localWallHeat-=k*sum(T.boundaryField()[patch].snGrad()*mesh.magSf().boundaryField()[patch]);
+                localWallHeat-=sum(kEff.boundaryField()[patch]*T.boundaryField()[patch].snGrad()*mesh.magSf().boundaryField()[patch]);
         localThermalResidual+=dt*localWallHeat;
         wallHeatLoss=returnReduce(localWallHeat,sumOp<scalar>());
         reduce(localThermalResidual,sumOp<scalar>());
@@ -169,7 +203,7 @@ int main(int argc, char* argv[])
         moles.correctBoundaryConditions();number.correctBoundaryConditions();alpha.correctBoundaryConditions();
         if(step%stride==0||step==steps)write(step);
     }
-    fields.flush();history.flush();
+    fields.flush();history.flush();turbulentFields.flush();
     const scalar loopWall=std::chrono::duration<double>(std::chrono::steady_clock::now()-loopStart).count();
     const scalar loopCpu=double(std::clock()-cpuStart)/CLOCKS_PER_SEC;
     std::ofstream timings((runTime.path()/"timing.json").c_str());

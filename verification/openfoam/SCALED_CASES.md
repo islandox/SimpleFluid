@@ -1,5 +1,9 @@
 # Tenfold domains with retained cell widths
 
+The convection results below were measured before SST was enabled. Current
+convection uses [Menter-1994 SST and resolved walls](bottomHeatedBubblyConvection/SST.md);
+those earlier laminar results do not validate the new model.
+
 The default domains are enlarged by ten in x, y and z. Original wall-layer
 counts, first-cell heights, stack thicknesses and core spacings are retained;
 extra core cells fill the larger domains. Wall layers are not repeated inside
