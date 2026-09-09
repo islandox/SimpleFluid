@@ -497,5 +497,80 @@ TEST(CoupledBlockOperatorTest, NumericUpdatesMatchFreshAssemblyAtScale)
         }
 }
 
+TEST_P(CompositeMeshTest, GradientSchemeRefreshPreservesAffineFluxBalance)
+{
+    const auto mesh = make_mesh(GetParam());
+    VectorCellFieldStored<Pack> u(mesh, vec3<double>{}, "u");
+    ScalarCellFieldStored<Pack> p(mesh, 0., "p");
+    ScalarFaceFieldStored<Pack> flux(mesh, 0., "phi");
+    BoundaryConditionSet boundaries;
+    for (const auto& [batch, faces] : mesh->boundary_batches())
+    {
+        const auto name = mesh->boundary_batch_name(batch);
+        boundaries.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+        boundaries.pressure[name] = {BoundaryConditionType::Neumann, 2.};
+    }
+    boundaries.velocity["zmax"] = {BoundaryConditionType::Neumann, {}};
+    boundaries.pressure["zmax"] = {BoundaryConditionType::Dirichlet, 17.};
+    const auto boundary = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Handle> face_workspace(mesh);
+    IncompressibleMomentumEquation<Pack, Handle> equation(mesh);
+    const VolumeContinuityTarget<Pack, Handle> target(mesh);
+    constexpr double density = 13.;
+    for (const auto backend : {Backend::Assembled, Backend::BlockComposite})
+        for (const auto policy : {CoupledWorkspacePolicy::CachedProducts, CoupledWorkspacePolicy::StreamedProducts})
+        {
+            Solver solver(mesh);
+            TimeStepperOptions options;
+            options.coupled_operator_backend = backend;
+            options.coupled_workspace_policy = policy;
+            Solver::system_type old;
+            std::unique_ptr<MV> trial, previous_action;
+            for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear,
+                     FVM::CellGradientScheme::LeastSquares})
+            {
+                options.pressure_gradient_scheme = scheme;
+                const auto system =
+                    solver.assemble(equation, u, p, flux, boundary, boundaries, options, target, density);
+                if (!trial)
+                {
+                    trial = std::make_unique<MV>(system.map, 1);
+                    previous_action = std::make_unique<MV>(system.map, 1);
+                    trial->putScalar(0.);
+                    for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+                    {
+                        const auto gid = mesh->owned_cell_map()->getGlobalElement(static_cast<LO>(cell));
+                        const auto q = std::sin(.3 * (gid + 1));
+                        trial->replaceLocalValue(4 * cell + 3, 0, q);
+                        p.set_owned_value(static_cast<LO>(cell), density * q);
+                    }
+                    p.sync_ghosts();
+                }
+                if (!old.linear_operator.is_null())
+                {
+                    MV retained(system.map, 1);
+                    old.linear_operator->apply(*trial, retained);
+                    expect_near(retained, *previous_action);
+                }
+                MV residual(system.map, 1);
+                system.linear_operator->apply(*trial, *previous_action);
+                residual.assign(*previous_action);
+                residual.update(-1., *system.rhs, 1.);
+                FVM::pressure_weighted_face_fluxes(
+                    u, p, options.time_step / density, boundary, boundaries.pressure, face_workspace, flux, scheme);
+                const auto face_data = flux.owned_read_view();
+                const auto rows = residual.getLocalViewHost(Tpetra::Access::ReadOnly);
+                for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+                {
+                    const auto balance = FVM::cell_flux_balance<Pack>(*mesh, flux, face_data, static_cast<LO>(cell));
+                    EXPECT_NEAR(rows(4 * cell + 3, 0), balance,
+                        512 * std::numeric_limits<double>::epsilon() * std::max(1., std::abs(balance)));
+                }
+                old = system;
+            }
+            EXPECT_EQ(solver.cache_statistics().static_geometry_builds, 3U);
+        }
+}
+
 INSTANTIATE_TEST_SUITE_P(Native, CompositeMeshTest, testing::Values(0, 1, 2));
 } // namespace

@@ -275,3 +275,21 @@ foreach(_composite_procs IN ITEMS 2 4)
       LABELS "mpi;pressure_velocity;composite"
       TIMEOUT 180)
 endforeach()
+
+foreach(_backend_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+      NAME CoupledSolverBackends_${_backend_procs}procs
+      TARGET testCoupledSolverBackends
+      PROCS ${_backend_procs}
+      ARGS "--gtest_filter=-*SerialSemiStructured*"
+      LABELS "mpi;pressure_velocity;composite;solver_backends"
+      TIMEOUT 300)
+endforeach()
+
+simplefluid_add_mpi_test(
+    NAME CoupledBackendsCombinedPhysics_2procs
+    TARGET testTurbulentBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CoupledBackendsAdvanceCombinedRansReactionSourceAndFeedback:TurbulentBoussinesqSolverTest.AdvancesWallTreatmentClosurePairingsThroughSegregatedAndCoupledSolvers"
+    LABELS "mpi;pressure_velocity;composite;turbulence;reaction_source"
+    TIMEOUT 180)
