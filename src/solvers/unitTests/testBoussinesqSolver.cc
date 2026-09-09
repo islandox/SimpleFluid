@@ -1498,7 +1498,9 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
         SimpleFluid::CoupledPressureVelocityCacheStatistics statistics;
     };
 
-    auto run = [](SimpleFluid::CoupledRebuildPolicy policy)
+    auto run = [](SimpleFluid::CoupledRebuildPolicy policy,
+                   SimpleFluid::CoupledOperatorBackend backend = SimpleFluid::CoupledOperatorBackend::Assembled,
+                   SimpleFluid::CoupledWorkspacePolicy workspace = SimpleFluid::CoupledWorkspacePolicy::CachedProducts)
     {
         auto mesh = make_box_mesh();
         SimpleFluid::BoundaryConditionSet boundaries;
@@ -1520,6 +1522,8 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
         SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
 
         SimpleFluid::TimeStepperOptions time_options;
+        time_options.coupled_operator_backend = backend;
+        time_options.coupled_workspace_policy = workspace;
         time_options.time_step = 1.0e-2;
         time_options.kinematic_viscosity = 1.0e-2;
         time_options.thermal_expansion = 1.0;
@@ -1562,6 +1566,23 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
         EXPECT_NEAR(cached.velocity[cell].y, rebuilt.velocity[cell].y, 1.0e-12);
         EXPECT_NEAR(cached.velocity[cell].z, rebuilt.velocity[cell].z, 1.0e-12);
         EXPECT_NEAR(cached.pressure[cell], rebuilt.pressure[cell], 1.0e-12);
+    }
+
+    for (const auto workspace :
+        {SimpleFluid::CoupledWorkspacePolicy::CachedProducts, SimpleFluid::CoupledWorkspacePolicy::StreamedProducts})
+    {
+        const auto composite = run(SimpleFluid::CoupledRebuildPolicy::OnOperatorGraphChange,
+            SimpleFluid::CoupledOperatorBackend::BlockComposite, workspace);
+        for (size_t cell = 0; cell < cached.velocity.size(); ++cell)
+        {
+            EXPECT_NEAR(cached.velocity[cell].x, composite.velocity[cell].x, 1.0e-12);
+            EXPECT_NEAR(cached.velocity[cell].y, composite.velocity[cell].y, 1.0e-12);
+            EXPECT_NEAR(cached.velocity[cell].z, composite.velocity[cell].z, 1.0e-12);
+            EXPECT_NEAR(cached.pressure[cell], composite.pressure[cell], 1.0e-12);
+        }
+        EXPECT_EQ(composite.statistics.coupled_matrix_builds, 0U);
+        EXPECT_EQ(composite.statistics.composite_operator_builds, 1U);
+        EXPECT_EQ(composite.statistics.preconditioner_numeric_reuses, 1U);
     }
 
     EXPECT_EQ(cached.statistics.coupled_map_builds, 1U);
