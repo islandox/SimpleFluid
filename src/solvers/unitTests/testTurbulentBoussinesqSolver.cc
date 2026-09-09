@@ -9,6 +9,7 @@
  *
  */
 
+#include "solvers/unitTests/CoupledBackendTestSupport.hh"
 #include <gtest/gtest.h>
 
 #include "geometry/YPlusBoundaryLayerController.hh"
@@ -296,10 +297,12 @@ void expect_global_hydrogen_balance(const Radiolysis& radiolysis, double hydroge
 }
 
 /** @brief Exercise the combined turbulent-radiolysis acceptance path. */
-void exercise_combined_rans_radiolysis(const SimpleFluid::SP<MeshType>& mesh)
+void exercise_combined_rans_radiolysis(const SimpleFluid::SP<MeshType>& mesh,
+    SimpleFluid::PressureVelocityCoupling coupling = SimpleFluid::PressureVelocityCoupling::PISO,
+    SimpleFluid::test::CoupledBackendSelection selection = {})
 {
     constexpr double time_step = 1.0e-4;
-    auto time_options = stable_time_options(SimpleFluid::PressureVelocityCoupling::PISO);
+    auto time_options = SimpleFluid::test::with_coupled_backend(stable_time_options(coupling), selection);
     time_options.time_step = time_step;
     time_options.steps = 2;
     time_options.reference_temperature = 300.0;
@@ -638,30 +641,35 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesTurbulenceThroughSegregatedAndCouple
     for (const auto coupling :
         {SimpleFluid::PressureVelocityCoupling::PISO, SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
     {
-        SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)));
-        auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
-        SimpleFluid::LinearSolverOptions linear_options;
-        linear_options.tolerance = 1.0e-11;
-        linear_options.max_iterations = 300;
-        SimpleFluid::BoussinesqSolver<Pack> solver(
-            mesh, slip_box_boundaries(), stable_time_options(coupling), linear_options);
-        initialize_shear(solver);
-
-        auto& model = solver.configure_turbulence(standard_k_epsilon_options());
-        const auto molecular_viscosity = std::as_const(solver).material_properties().dynamic_viscosity.value(0);
-        solver.step();
-
-        ASSERT_EQ(solver.step_index(), 1);
-        ASSERT_EQ(solver.find_turbulence_model(), &model);
-        EXPECT_TRUE(solver.last_step_statistics().converged);
-        EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
-        EXPECT_DOUBLE_EQ(std::as_const(solver).material_properties().dynamic_viscosity.value(0), molecular_viscosity);
-        expect_positive_turbulence_fields(model);
-        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        for (const auto selection : SimpleFluid::test::backends_for(coupling))
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
-            EXPECT_NEAR(model.effective_dynamic_viscosity().value(cell_lid),
-                molecular_viscosity + model.turbulent_kinematic_viscosity().value(cell_lid), 1.0e-12);
+            SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+            SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)));
+            auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
+            SimpleFluid::LinearSolverOptions linear_options;
+            linear_options.tolerance = 1.0e-11;
+            linear_options.max_iterations = 300;
+            SimpleFluid::BoussinesqSolver<Pack> solver(mesh, slip_box_boundaries(),
+                SimpleFluid::test::with_coupled_backend(stable_time_options(coupling), selection), linear_options);
+            initialize_shear(solver);
+
+            auto& model = solver.configure_turbulence(standard_k_epsilon_options());
+            const auto molecular_viscosity = std::as_const(solver).material_properties().dynamic_viscosity.value(0);
+            solver.step();
+
+            ASSERT_EQ(solver.step_index(), 1);
+            ASSERT_EQ(solver.find_turbulence_model(), &model);
+            EXPECT_TRUE(solver.last_step_statistics().converged);
+            EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
+            EXPECT_DOUBLE_EQ(
+                std::as_const(solver).material_properties().dynamic_viscosity.value(0), molecular_viscosity);
+            expect_positive_turbulence_fields(model);
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+                EXPECT_NEAR(model.effective_dynamic_viscosity().value(cell_lid),
+                    molecular_viscosity + model.turbulent_kinematic_viscosity().value(cell_lid), 1.0e-12);
+            }
         }
     }
 }
@@ -674,41 +682,45 @@ TEST(TurbulentBoussinesqSolverTest, PassesDirectBuoyancyContextThroughSegregated
     for (const auto coupling :
         {SimpleFluid::PressureVelocityCoupling::PISO, SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
     {
-        SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)));
-        auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
-        auto time_options = stable_time_options(coupling);
-        time_options.time_step = 1.0e-4;
-        time_options.thermal_expansion = 1.0e-2;
-        time_options.gravity_x = -1.0;
-        SimpleFluid::LinearSolverOptions linear_options;
-        linear_options.tolerance = 1.0e-11;
-        linear_options.max_iterations = 400;
-        SimpleFluid::BoussinesqSolver<Pack> solver(mesh, buoyant_box_boundaries(), time_options, linear_options);
-        solver.initialize_heated_box(2.0, 0.0);
-
-        auto options = standard_k_epsilon_options();
-        options.buoyancy_model = SimpleFluid::TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
-        auto& model = solver.configure_turbulence(options);
-        ASSERT_NE(model.buoyancy_production(), nullptr);
-        ASSERT_NO_THROW(solver.step());
-        ASSERT_TRUE(solver.last_step_statistics().converged);
-
-        const auto* production = model.buoyancy_production();
-        ASSERT_NE(production, nullptr);
-        EXPECT_EQ(model.output_fields().at("buoyancy_production"), production);
-        double minimum_production = 0.0;
-        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        for (const auto selection : SimpleFluid::test::backends_for(coupling))
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
-            const auto value = production->value(cell_lid);
-            EXPECT_TRUE(std::isfinite(value));
-            EXPECT_LE(value, 0.0);
-            minimum_production = std::min(minimum_production, value);
+            SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+            SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)));
+            auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
+            auto time_options = SimpleFluid::test::with_coupled_backend(stable_time_options(coupling), selection);
+            time_options.time_step = 1.0e-4;
+            time_options.thermal_expansion = 1.0e-2;
+            time_options.gravity_x = -1.0;
+            SimpleFluid::LinearSolverOptions linear_options;
+            linear_options.tolerance = 1.0e-11;
+            linear_options.max_iterations = 400;
+            SimpleFluid::BoussinesqSolver<Pack> solver(mesh, buoyant_box_boundaries(), time_options, linear_options);
+            solver.initialize_heated_box(2.0, 0.0);
+
+            auto options = standard_k_epsilon_options();
+            options.buoyancy_model = SimpleFluid::TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+            auto& model = solver.configure_turbulence(options);
+            ASSERT_NE(model.buoyancy_production(), nullptr);
+            ASSERT_NO_THROW(solver.step());
+            ASSERT_TRUE(solver.last_step_statistics().converged);
+
+            const auto* production = model.buoyancy_production();
+            ASSERT_NE(production, nullptr);
+            EXPECT_EQ(model.output_fields().at("buoyancy_production"), production);
+            double minimum_production = 0.0;
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+                const auto value = production->value(cell_lid);
+                EXPECT_TRUE(std::isfinite(value));
+                EXPECT_LE(value, 0.0);
+                minimum_production = std::min(minimum_production, value);
+            }
+            double global_minimum_production = 0.0;
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &minimum_production,
+                &global_minimum_production);
+            EXPECT_LT(global_minimum_production, 0.0);
         }
-        double global_minimum_production = 0.0;
-        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &minimum_production,
-            &global_minimum_production);
-        EXPECT_LT(global_minimum_production, 0.0);
     }
 }
 
@@ -776,68 +788,72 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesWallTreatmentClosurePairingsThroughS
     for (const auto coupling :
         {SimpleFluid::PressureVelocityCoupling::PISO, SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
     {
-        for (const auto wall_case : wall_cases)
+        for (const auto selection : SimpleFluid::test::backends_for(coupling))
         {
-            SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)) +
-                         ", wall=" + std::string(SimpleFluid::to_string(wall_case.treatment)));
-            auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
-            auto time_options = stable_time_options(coupling);
-            time_options.time_step = 1.0e-5;
-            SimpleFluid::LinearSolverOptions linear_options;
-            linear_options.tolerance = 1.0e-10;
-            linear_options.max_iterations = 400;
-            SimpleFluid::BoussinesqSolver<Pack> solver(
-                mesh, single_wall_box_boundaries(), time_options, linear_options);
-            initialize_shear(solver);
-
-            SimpleFluid::TurbulenceModelOptions options;
-            options.model = wall_case.model;
-            options.initial_turbulent_kinetic_energy = 0.1;
-            options.initial_dissipation_rate = 0.009;
-            options.initial_specific_dissipation_rate = 2.0;
-            options.min_turbulent_kinetic_energy = 1.0e-10;
-            options.min_dissipation_rate = 1.0e-10;
-            options.min_specific_dissipation_rate = 1.0e-10;
-            options.wall_treatment = wall_case.treatment;
-            options.wall_options.boundary_names = {"xmin"};
-            if (wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega)
-                options.initial_wall_distance = 0.5;
-
-            auto& model = solver.configure_turbulence(options);
-            EXPECT_NO_THROW(solver.step());
-            EXPECT_TRUE(solver.last_step_statistics().converged);
-            EXPECT_EQ(solver.step_index(), 1);
-            ASSERT_NE(model.wall_y_plus(), nullptr);
-            ASSERT_NE(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
-            ASSERT_NE(model.effective_thermal_conductivity_boundary_cache(), nullptr);
-            const auto& wall_statistics = model.wall_y_plus_statistics();
-            ASSERT_EQ(wall_statistics.size(), 1U);
-            EXPECT_EQ(wall_statistics.front().boundary_name, "xmin");
-            EXPECT_EQ(wall_statistics.front().global_face_count, 4U);
-            EXPECT_GT(wall_statistics.front().maximum, 0.0);
-            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+            for (const auto wall_case : wall_cases)
             {
-                const auto lid = static_cast<MeshType::local_ordinal_type>(owned);
-                EXPECT_TRUE(std::isfinite(model.turbulent_kinetic_energy().value(lid)));
-                EXPECT_GT(model.turbulent_kinetic_energy().value(lid), 0.0);
-                const auto* secondary = wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega
-                                            ? model.specific_dissipation_rate()
-                                            : model.dissipation_rate();
-                ASSERT_NE(secondary, nullptr);
-                EXPECT_TRUE(std::isfinite(secondary->value(lid)));
-                EXPECT_GT(secondary->value(lid), 0.0);
-            }
-            if (wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega)
-            {
-                SimpleFluid::YPlusBoundaryLayerControllerOptions controller_options;
-                controller_options.target_y_plus = 0.5 * wall_statistics.front().maximum;
-                controller_options.adaptation_exponent = 1.0;
-                controller_options.minimum_height_ratio = 0.1;
-                controller_options.relative_tolerance = 0.0;
-                const SimpleFluid::YPlusBoundaryLayerController controller(controller_options);
-                const auto update = controller.update_layer_specs({{"xmin", 4, 0.5, 1.2}}, wall_statistics);
-                ASSERT_EQ(update.layer_specs.size(), 1U);
-                EXPECT_NEAR(update.layer_specs.front().first_cell_height, 0.25, 1.0e-14);
+                SCOPED_TRACE("coupling=" + std::to_string(static_cast<int>(coupling)) +
+                             ", wall=" + std::string(SimpleFluid::to_string(wall_case.treatment)));
+                auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
+                auto time_options = SimpleFluid::test::with_coupled_backend(stable_time_options(coupling), selection);
+                time_options.time_step = 1.0e-5;
+                SimpleFluid::LinearSolverOptions linear_options;
+                linear_options.tolerance = 1.0e-10;
+                linear_options.max_iterations = 400;
+                SimpleFluid::BoussinesqSolver<Pack> solver(
+                    mesh, single_wall_box_boundaries(), time_options, linear_options);
+                initialize_shear(solver);
+
+                SimpleFluid::TurbulenceModelOptions options;
+                options.model = wall_case.model;
+                options.initial_turbulent_kinetic_energy = 0.1;
+                options.initial_dissipation_rate = 0.009;
+                options.initial_specific_dissipation_rate = 2.0;
+                options.min_turbulent_kinetic_energy = 1.0e-10;
+                options.min_dissipation_rate = 1.0e-10;
+                options.min_specific_dissipation_rate = 1.0e-10;
+                options.wall_treatment = wall_case.treatment;
+                options.wall_options.boundary_names = {"xmin"};
+                if (wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega)
+                    options.initial_wall_distance = 0.5;
+
+                auto& model = solver.configure_turbulence(options);
+                EXPECT_NO_THROW(solver.step());
+                EXPECT_TRUE(solver.last_step_statistics().converged);
+                EXPECT_EQ(solver.step_index(), 1);
+                ASSERT_NE(model.wall_y_plus(), nullptr);
+                ASSERT_NE(model.effective_dynamic_viscosity_boundary_cache(), nullptr);
+                ASSERT_NE(model.effective_thermal_conductivity_boundary_cache(), nullptr);
+                const auto& wall_statistics = model.wall_y_plus_statistics();
+                ASSERT_EQ(wall_statistics.size(), 1U);
+                EXPECT_EQ(wall_statistics.front().boundary_name, "xmin");
+                EXPECT_EQ(wall_statistics.front().global_face_count, 4U);
+                EXPECT_GT(wall_statistics.front().maximum, 0.0);
+                for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                {
+                    const auto lid = static_cast<MeshType::local_ordinal_type>(owned);
+                    EXPECT_TRUE(std::isfinite(model.turbulent_kinetic_energy().value(lid)));
+                    EXPECT_GT(model.turbulent_kinetic_energy().value(lid), 0.0);
+                    const auto* secondary = wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega
+                                                ? model.specific_dissipation_rate()
+                                                : model.dissipation_rate();
+                    ASSERT_NE(secondary, nullptr);
+                    EXPECT_TRUE(std::isfinite(secondary->value(lid)));
+                    EXPECT_GT(secondary->value(lid), 0.0);
+                }
+                if (wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega)
+                {
+                    SimpleFluid::YPlusBoundaryLayerControllerOptions controller_options;
+                    controller_options.target_y_plus = 0.5 * wall_statistics.front().maximum;
+                    controller_options.adaptation_exponent = 1.0;
+                    controller_options.minimum_height_ratio = 0.1;
+                    controller_options.relative_tolerance = 0.0;
+                    const SimpleFluid::YPlusBoundaryLayerController controller(controller_options);
+                    const auto update = controller.update_layer_specs({{"xmin", 4, 0.5, 1.2}}, wall_statistics);
+                    ASSERT_EQ(update.layer_specs.size(), 1U);
+                    EXPECT_NEAR(update.layer_specs.front().first_cell_height, 0.25, 1.0e-14);
+                }
             }
         }
     }
@@ -898,4 +914,17 @@ TEST(TurbulentBoussinesqSolverTest, CouplesShearedRansShengTransportFissionAndDe
         GTEST_SKIP() << "This acceptance test requires exactly two MPI ranks.";
     }
     exercise_combined_rans_radiolysis(mesh);
+}
+
+TEST(TurbulentBoussinesqSolverTest, CoupledBackendsAdvanceCombinedRansRadiolysisAndFeedback)
+{
+    const auto ranks = Tpetra::getDefaultComm()->getSize();
+    if (ranks != 1 && ranks != 2)
+        GTEST_SKIP() << "This physical fixture supports one or two ranks.";
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(3, 3, 2));
+    for (const auto selection : SimpleFluid::test::coupled_backend_selections)
+    {
+        SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+        exercise_combined_rans_radiolysis(mesh, SimpleFluid::PressureVelocityCoupling::CoupledKrylov, selection);
+    }
 }

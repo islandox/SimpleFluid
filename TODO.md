@@ -298,6 +298,18 @@ The timing ceiling is a smoke-regression guard, not a claim of comparable
 performance across different machines. Release scaling and profiling remain
 manual measurement workflows.
 
+- [x] Add opt-in coupled block application without monolithic CRS allocation,
+      with retained-generation ownership and serial/two-/four-rank algebra tests.
+- [x] Add independent streamed distributed-product assembly retaining final
+      stabilization/Schur matrices; record small separate-process memory results.
+- [x] Qualify coupled backend choices across current solver classes, native/legacy
+      mesh paths and supported ALE motion; align interpolation and pressure-gradient
+      reconstruction, and refresh MueLu numeric state during reuse.
+- [ ] Add native scalar face-based orthogonal diffusion and frozen upwind/BE
+      transport, with independent operator/diagonal/preconditioner inputs.
+- [ ] Qualify coupled memory/performance at larger converged sizes and on
+      accelerator builds; separate preconditioner/Krylov allocation accounting.
+
 #### Phase 9 acceptance criteria
 
 - [x] Benchmarks can be run from CTest or a documented command.

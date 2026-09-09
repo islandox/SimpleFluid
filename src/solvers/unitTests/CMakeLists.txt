@@ -266,3 +266,30 @@ simplefluid_add_mpi_test(
     ARGS "--gtest_filter=VolumeContinuityModelTest.CollectivelyRejectsRankDivergentGlobalAndOptionalInputs"
     LABELS "mpi;ale;continuity;validation"
     TIMEOUT 120)
+
+foreach(_composite_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+      NAME CoupledBlockOperator_${_composite_procs}procs
+      TARGET testCoupledBlockOperator
+      PROCS ${_composite_procs}
+      LABELS "mpi;pressure_velocity;composite"
+      TIMEOUT 180)
+endforeach()
+
+foreach(_backend_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+      NAME CoupledSolverBackends_${_backend_procs}procs
+      TARGET testCoupledSolverBackends
+      PROCS ${_backend_procs}
+      ARGS "--gtest_filter=-*SerialSemiStructured*"
+      LABELS "mpi;pressure_velocity;composite;solver_backends"
+      TIMEOUT 300)
+endforeach()
+
+simplefluid_add_mpi_test(
+    NAME CoupledBackendsCombinedPhysics_2procs
+    TARGET testTurbulentBoussinesqSolver
+    PROCS 2
+    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CoupledBackendsAdvanceCombinedRansRadiolysisAndFeedback:TurbulentBoussinesqSolverTest.AdvancesWallTreatmentClosurePairingsThroughSegregatedAndCoupledSolvers"
+    LABELS "mpi;pressure_velocity;composite;turbulence;radiolysis"
+    TIMEOUT 180)

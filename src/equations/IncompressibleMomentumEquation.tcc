@@ -230,6 +230,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
             && type != BoundaryConditionType::Neumann;
     };
 
+    detach_protected_numeric_generation();
     const auto requires_non_orthogonal_graph =
         options.non_orthogonal_treatment
             != FVM::NonOrthogonalTreatment::Explicit;
@@ -566,6 +567,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
             && type != BoundaryConditionType::Neumann;
     };
 
+    detach_protected_numeric_generation();
     const auto requires_non_orthogonal_graph =
         options.non_orthogonal_treatment
             != FVM::NonOrthogonalTreatment::Explicit;

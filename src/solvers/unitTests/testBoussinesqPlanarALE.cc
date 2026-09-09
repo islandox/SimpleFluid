@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "solvers/unitTests/CoupledBackendTestSupport.hh"
 
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
@@ -189,14 +190,20 @@ struct ConfiguredCase
 ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_correctors, bool include_gas = false,
     double bubble_slip_velocity = 0.0, bool zero_gas_tolerance = false,
     SimpleFluid::RadiolyticPressureMode pressure_mode = SimpleFluid::RadiolyticPressureMode::Constant,
-    bool use_celata_slip = false)
+    bool use_celata_slip = false,
+    SimpleFluid::CoupledOperatorBackend backend = SimpleFluid::CoupledOperatorBackend::Assembled,
+    SimpleFluid::CoupledWorkspacePolicy workspace = SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+    SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares)
 {
     auto mesh = make_column();
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
     linear_options.max_iterations = 500;
-    auto solver =
-        std::make_unique<Solver>(mesh, planar_boundaries(), time_options(coupling), linear_options, physical_options());
+    auto options = time_options(coupling);
+    options.coupled_operator_backend = backend;
+    options.coupled_workspace_policy = workspace;
+    options.pressure_gradient_scheme = gradient;
+    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), options, linear_options, physical_options());
 
     solver->configure_material_feedback(material_feedback_options());
     auto* heat_source = &solver->add_temperature_source("planar_ale_heat", power_density);
@@ -679,6 +686,35 @@ TEST_P(BoussinesqPlanarALECouplingTest, CourantUsesMeshRelativeTransportFluxWith
 
 INSTANTIATE_TEST_SUITE_P(PlanarALECouplingModes, BoussinesqPlanarALECouplingTest,
     testing::Values(Coupling::SIMPLE, Coupling::PISO, Coupling::PIMPLE, Coupling::CoupledKrylov), coupling_name);
+
+TEST(BoussinesqPlanarALETest, CompositeCoupledHeatingAndRollback)
+{
+    for (const auto selection : SimpleFluid::test::coupled_backend_selections)
+        for (const auto gradient :
+            {SimpleFluid::FVM::CellGradientScheme::LeastSquares, SimpleFluid::FVM::CellGradientScheme::GaussLinear})
+        {
+            SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+            SCOPED_TRACE(static_cast<int>(gradient));
+            auto state = make_case(Coupling::CoupledKrylov, 1.0e-4, 8, false, 0., false,
+                SimpleFluid::RadiolyticPressureMode::Constant, false, selection.backend, selection.workspace, gradient);
+            ASSERT_NO_THROW(state.solver->step());
+            const auto& diagnostics = state.solver->planar_ale_diagnostics();
+            EXPECT_GT(diagnostics.volume_source.global_material_source, 0.);
+            EXPECT_LE(diagnostics.continuity.maximum, 3.0e-10);
+            EXPECT_NEAR(diagnostics.liquid_mass_residual, 0., 1.0e-12);
+            EXPECT_NEAR(global_mesh_volume(*state.mesh), state.solver->free_surface_diagnostics().pool_volume, 2.0e-12);
+            expect_zero_relative_top_flux(state);
+
+            auto rejected = make_case(Coupling::CoupledKrylov, 1.0, 2, false, 0., false,
+                SimpleFluid::RadiolyticPressureMode::Constant, false, selection.backend, selection.workspace, gradient);
+            const auto volume = global_mesh_volume(*rejected.mesh);
+            const auto top = top_elevation(*rejected.mesh);
+            EXPECT_THROW(rejected.solver->step(), std::runtime_error);
+            EXPECT_EQ(rejected.solver->step_index(), 0);
+            EXPECT_DOUBLE_EQ(global_mesh_volume(*rejected.mesh), volume);
+            EXPECT_DOUBLE_EQ(top_elevation(*rejected.mesh), top);
+        }
+}
 
 TEST(BoussinesqPlanarALETest, UniformHeatingMovesTopAndClosesConservativeBalances)
 {
@@ -1410,14 +1446,19 @@ struct MatrixConfiguredCase
     MatrixCase definition;
 };
 
-MatrixConfiguredCase configure_matrix_case(const MatrixCase& test_case, double power_density)
+MatrixConfiguredCase configure_matrix_case(const MatrixCase& test_case, double power_density,
+    Coupling coupling = Coupling::PISO, SimpleFluid::test::CoupledBackendSelection selection = {},
+    SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares)
 {
     auto mesh = make_matrix_mesh(test_case);
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
     linear_options.max_iterations = 500;
-    auto solver = std::make_unique<Solver>(mesh, matrix_boundaries(*mesh, test_case.moving_boundary),
-        matrix_time_options(test_case.axis), linear_options, physical_options());
+    auto options = SimpleFluid::test::with_coupled_backend(matrix_time_options(test_case.axis), selection);
+    options.pressure_velocity_coupling = coupling;
+    options.pressure_gradient_scheme = gradient;
+    auto solver = std::make_unique<Solver>(
+        mesh, matrix_boundaries(*mesh, test_case.moving_boundary), options, linear_options, physical_options());
     solver->configure_material_feedback(material_feedback_options());
     solver->add_temperature_source("matrix_uniform_heat", power_density);
 
@@ -1514,7 +1555,9 @@ void expect_matrix_top_kinematics(const MatrixConfiguredCase& state, double old_
     EXPECT_EQ(any_relative_not_exactly_zero, 0);
 }
 
-void exercise_supported_matrix_case(const MatrixCase& test_case)
+void exercise_supported_matrix_case(const MatrixCase& test_case, Coupling coupling = Coupling::PISO,
+    SimpleFluid::test::CoupledBackendSelection selection = {},
+    SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares)
 {
     if (test_case.family == MatrixMeshFamily::SemiStructured && Tpetra::getDefaultComm()->getSize() != 1)
     {
@@ -1524,7 +1567,7 @@ void exercise_supported_matrix_case(const MatrixCase& test_case)
 
     constexpr double power_density = 1.0e-3;
     constexpr double time_step = 1.0e-2;
-    auto state = configure_matrix_case(test_case, power_density);
+    auto state = configure_matrix_case(test_case, power_density, coupling, selection, gradient);
     const auto old_epoch = state.mesh->geometry_epoch();
     const auto old_surface = boundary_elevation(*state.mesh, test_case);
     const auto old_volume = global_mesh_volume(*state.mesh);
@@ -1559,6 +1602,39 @@ void exercise_supported_matrix_case(const MatrixCase& test_case)
     EXPECT_LE(diagnostics.continuity.maximum, 5.0e-10);
     EXPECT_LE(state.solver->last_volume_continuity_residuals().maximum, 5.0e-10);
     expect_matrix_top_kinematics(state, old_surface, time_step);
+}
+
+TEST(BoussinesqPlanarALESupportMatrixTest, CoupledBackendsCoverSupportedMotionAxes)
+{
+    const MatrixCase cases[] = {{MatrixMeshFamily::Cartesian, SimpleFluid::Dimension::X, "xmax", 1.},
+        {MatrixMeshFamily::Cartesian, SimpleFluid::Dimension::Y, "ymax", 1.},
+        {MatrixMeshFamily::Cartesian, SimpleFluid::Dimension::Z, "zmax", 1.},
+        {MatrixMeshFamily::Cylindrical, SimpleFluid::Dimension::Z, "zmax", .75 * std::numbers::pi}};
+    for (const auto& definition : cases)
+        for (const auto selection : SimpleFluid::test::coupled_backend_selections)
+            for (const auto gradient :
+                {SimpleFluid::FVM::CellGradientScheme::LeastSquares, SimpleFluid::FVM::CellGradientScheme::GaussLinear})
+            {
+                SCOPED_TRACE(static_cast<int>(definition.family));
+                SCOPED_TRACE(static_cast<int>(definition.axis));
+                SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+                SCOPED_TRACE(static_cast<int>(gradient));
+                exercise_supported_matrix_case(definition, Coupling::CoupledKrylov, selection, gradient);
+            }
+}
+
+TEST(BoussinesqPlanarALESupportMatrixTest, CoupledBackendsCoverSerialSemiStructuredMotion)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "SemiStructuredXY_Z is serial-only.";
+    for (const auto selection : SimpleFluid::test::coupled_backend_selections)
+        for (const auto gradient :
+            {SimpleFluid::FVM::CellGradientScheme::LeastSquares, SimpleFluid::FVM::CellGradientScheme::GaussLinear})
+        {
+            SCOPED_TRACE(SimpleFluid::test::backend_name(selection));
+            exercise_supported_matrix_case({MatrixMeshFamily::SemiStructured, SimpleFluid::Dimension::Z, "zmax", 1.},
+                Coupling::CoupledKrylov, selection, gradient);
+        }
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsCartesianMotionAndGravityAlongX)

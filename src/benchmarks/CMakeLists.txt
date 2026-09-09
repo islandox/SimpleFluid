@@ -100,3 +100,14 @@ add_executable(region_mesh_scaling region_mesh_scaling.cc)
 target_link_libraries(region_mesh_scaling PRIVATE SimpleFluid::Solvers)
 simplefluid_exe_reuse_precompiled_header(region_mesh_scaling)
 simplefluid_exclude_from_pgo_sources(region_mesh_scaling.cc)
+
+# Opt-in memory benchmark: built only by explicitly requesting this target.
+# Deliberately not registered in default CTest or run with two backends in-process.
+add_executable(coupled_operator_memory EXCLUDE_FROM_ALL coupled_operator_memory.cc)
+target_link_libraries(coupled_operator_memory PRIVATE SimpleFluid::Solvers)
+simplefluid_exe_reuse_precompiled_header(coupled_operator_memory)
+target_compile_definitions(coupled_operator_memory PRIVATE
+    SIMPLEFLUID_GIT_COMMIT="${SIMPLEFLUID_GIT_COMMIT_VALUE}"
+    SIMPLEFLUID_GIT_DIRTY="${SIMPLEFLUID_GIT_DIRTY_VALUE}"
+    SIMPLEFLUID_BUILD_TYPE="$<CONFIG>"
+    SIMPLEFLUID_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")

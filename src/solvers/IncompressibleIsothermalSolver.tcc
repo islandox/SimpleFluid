@@ -256,11 +256,14 @@ auto IncompressibleIsothermalSolver<Pack>::assemble_coupled_system() -> coupled_
     const auto* turbulence = find_turbulence_model();
     const auto& dynamic_viscosity = turbulence != nullptr ? turbulence->effective_dynamic_viscosity()
                                                           : stored_material_properties().dynamic_viscosity;
+    const typename base_type::continuity_target_type zero_target(d_mesh);
+    const auto* target = this->volume_continuity_target();
     return isothermal_coupled_pressure_velocity_solver().assemble(isothermal_momentum_equation(), velocity(),
         pressure(), old_face_fluxes(), isothermal_velocity_boundary_cache(), d_problem.boundary_conditions(),
         d_problem.time_options(), d_reference_density, &dynamic_viscosity,
         turbulence != nullptr ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
-        turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr);
+        turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr,
+        target != nullptr ? *target : zero_target);
 }
 
 /** @brief Advance pressure, velocity, and optional turbulence one step. */
