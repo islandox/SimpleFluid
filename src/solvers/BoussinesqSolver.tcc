@@ -3195,9 +3195,11 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::assemble_coupled_syst
         }
         throw std::logic_error("planarALE coupled assembly requires an active volume-continuity target.");
     }
+    const continuity_target_type zero_target(d_mesh);
+    const auto* target = volume_continuity_target();
     return boussinesq_coupled_pressure_velocity_solver().assemble(boussinesq_momentum_equation(), velocity(),
         pressure(), temperature(), old_face_fluxes(), boussinesq_velocity_boundary_cache(),
-        d_problem.boundary_conditions(), d_problem.time_options(),
+        d_problem.boundary_conditions(), d_problem.time_options(), target != nullptr ? *target : zero_target,
         physical_transport_enabled() ? &stored_material_properties() : nullptr, d_model_options.reference_density,
         d_model_options.density_feedback_enabled,
         turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,

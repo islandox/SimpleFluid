@@ -1167,14 +1167,16 @@ template<TpetraTypePack Pack> auto FluidSolver<Pack>::assemble_coupled_system() 
                 pressure(), old_face_fluxes(), native_velocity_boundary_cache(), d_problem.boundary_conditions(),
                 d_problem.time_options(), *target, pressure_reference_density());
         }
+        const continuity_target_type zero_target(d_mesh);
         return native_coupled_pressure_velocity_solver().assemble(native_momentum_equation(), velocity(), pressure(),
             old_face_fluxes(), native_velocity_boundary_cache(), d_problem.boundary_conditions(),
-            d_problem.time_options(), pressure_reference_density());
+            d_problem.time_options(), zero_target, pressure_reference_density());
     }
     sync_primary_fields_to_legacy();
+    const VolumeContinuityTarget<Pack, legacy_mesh_type> zero_target(d_legacy_mesh);
     return coupled_pressure_velocity_solver().assemble(momentum_equation(), legacy_velocity(), legacy_pressure(),
         legacy_old_face_fluxes(), velocity_boundary_cache(), d_problem.boundary_conditions(), d_problem.time_options(),
-        pressure_reference_density());
+        zero_target, pressure_reference_density());
 }
 
 /**

@@ -14,8 +14,8 @@ The coupled map interleaves `(ux,uy,uz,q)` for each owned cell GID, using
 matrix is shared with the momentum equation cache and Ifpack2 preconditioner.
 The assembled coupled matrix duplicates its values three times plus G, D,
 and C. G and D are three separate scalar matrices. C contains the direct
-pressure diffusion plus `dt * sum(D_i * H_i)`, where H is the boundary-aware
-least-squares gradient. H, affine gradient constants, and gradient stencils
+pressure diffusion plus `dt * sum(D_i * H_i)`, where H is the configured boundary-aware
+least-squares or Gauss-linear gradient. H, affine gradient constants, and gradient stencils
 live in the static geometry cache; they are distinct from G.
 
 Cached setup retains three D*H products, three inverse-momentum-diagonal
@@ -52,7 +52,7 @@ permissive behavior. Exact fixed boundary flux and ALE block assembly are
 unchanged.
 
 Geometry epochs invalidate numerical state. Static reconstruction additionally
-checks pressure boundary types/values and reference density. Numeric assembly
+checks pressure boundary types/values, reference density and gradient scheme. Numeric assembly
 refreshes timestep, material/flux and target data; graph reuse checks momentum
 graph and pressure-boundary signature. Fixed-flux changes clear the cache.
 
@@ -238,4 +238,5 @@ above and in the benchmark report are historical, not results for this fix.
 four operator/workspace combinations at 512 cells. It passes in serial and on
 two/four ranks. The focused CTest gate passed 22 tests including ELF exports;
 seven selected MPI registrations passed, including physical and ALE regressions.
-Broader supported-solver/backend qualification continues separately.
+The broader supported-solver/backend qualification and subsequent continuity fixes
+are recorded in [the solver validation report](coupled_solver_backend_validation.md).

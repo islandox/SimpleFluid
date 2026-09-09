@@ -15,6 +15,11 @@ released before normal updates. This is an assembly/linear-solve benchmark,
 not a time-accurate physical benchmark. No reference matrix is assembled in
 composite processes. Benchmark processes run sequentially after builds/tests.
 
+The subsequent `6033af4` correction refreshes MueLu numeric state with `RP`
+reuse. The `full`-reuse timings and failed pilot here are historical. See
+[the current solver qualification](../../architecture/coupled_solver_backend_validation.md)
+for the corrected convergence tests and expanded solver/mesh coverage.
+
 ## Serial measurements
 
 CRS payload is observed unique graph/value view storage after setup. It excludes

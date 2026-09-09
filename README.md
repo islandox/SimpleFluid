@@ -139,7 +139,12 @@ without constructing the monolithic matrix. Independently,
 sparse products component by component. Both choices preserve the assembled
 momentum/Schur preconditioners. See the [architecture, supported scope and
 measured tradeoffs](docs/architecture/coupled_operator_backends.md).
-These options do not implement scalar matrix-free transport.
+These options do not implement scalar matrix-free transport. The
+[supported-solver validation report](docs/architecture/coupled_solver_backend_validation.md)
+covers all four coupled choices, both pressure-gradient schemes, mesh families,
+physical-model regressions, and constrained ALE. Coupled MueLu reuse refreshes
+numeric state, and timestepper continuity assembly uses the same interpolation
+as final Rhie–Chow flux reconstruction.
 
 ### Segregated Linear Solves
 

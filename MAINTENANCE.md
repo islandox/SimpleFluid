@@ -449,6 +449,15 @@ protected. Do not replace this with unconditional block copies or a raw
 matrix reference-count assumption. Public block handles remain mutable for
 source compatibility; callers must not mutate them during a solve.
 
+Production coupled timesteppers must use the explicit `VolumeContinuityTarget`
+overloads even for a zero target: they select the distance weights also used
+by final face-flux reconstruction. The historical direct zero-target overload
+intentionally preserves arithmetic interpolation for compatibility. Include
+`pressure_gradient_scheme` in reconstruction invalidation; C must use the
+same least-squares or Gauss-linear H and affine boundary constants as the final
+Rhie–Chow flux. MueLu `full` reuse retains stale smoothers/coarse matrices;
+use `RP` when Schur values change so numeric state is refreshed.
+
 `StreamedProducts` directly accumulates distributed products into the final C
 and Schur matrices. Apply diagonal regularization after duplicate compression
 and full component accumulation. Keep Tpetra remote-row multiplication; field

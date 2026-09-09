@@ -267,6 +267,69 @@ auto pressure_gradient_stencils(const MeshType& mesh, const BoundaryConditionMap
     return stencils;
 }
 
+/** Linear/affine coefficients of the existing boundary-aware Gauss gradient. */
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_SOLVERS_LOCAL auto gauss_pressure_gradient_stencils(
+    const MeshType& mesh, const BoundaryConditionMap& boundaries, typename Pack::scalar_type reference_density)
+    -> std::vector<AffinePressureGradientStencil<Pack, MeshType>>
+{
+    using LO = typename Pack::local_ordinal_type;
+    using Scalar = typename Pack::scalar_type;
+    const auto locations = FVM::detail::boundary_face_locations(mesh);
+    std::vector<AffinePressureGradientStencil<Pack, MeshType>> stencils(mesh.num_owned_cells());
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<LO>(owned);
+        std::unordered_map<LO, typename MeshType::Vec3> coefficients;
+        typename MeshType::Vec3 constant{};
+        const auto inverse_volume = Scalar{1} / mesh.cell_volume(cell);
+        for (const auto face : mesh.faces(cell))
+        {
+            const auto area = mesh.face_area_vector_outward(face, cell) * inverse_volume;
+            if (mesh.is_interior_face(face))
+            {
+                const auto other = mesh.opposite_or_periodic_neighbor_cell(face, cell);
+                // Gauss reconstruction uses cell-to-face distances, including
+                // its equal-weight fallback, in both legacy and stored fields.
+                const auto distance = mesh.cell_to_face_distance(face, cell);
+                const auto other_distance = mesh.cell_to_face_distance(face, other);
+                const auto total = distance + other_distance;
+                const auto cell_weight = total > Scalar{} ? other_distance / total : Scalar{.5};
+                const auto other_weight = total > Scalar{} ? distance / total : Scalar{.5};
+                FVM::detail::add_gradient_coefficient<MeshType>(coefficients, cell, area * cell_weight);
+                FVM::detail::add_gradient_coefficient<MeshType>(coefficients, other, area * other_weight);
+                continue;
+            }
+            BoundaryCondition condition{};
+            if (mesh.is_boundary_face(face))
+            {
+                const auto location = locations.at(static_cast<size_t>(face));
+                if (location.active)
+                {
+                    const auto found = boundaries.find(mesh.boundary_batch_name(location.batch_id));
+                    if (found != boundaries.end())
+                        condition = found->second;
+                }
+            }
+            if (condition.type == BoundaryConditionType::Dirichlet)
+                constant = constant + area * (condition.value / reference_density);
+            else if (condition.type == BoundaryConditionType::Neumann)
+            {
+                FVM::detail::add_gradient_coefficient<MeshType>(coefficients, cell, area);
+                constant = constant + area * (condition.value / reference_density *
+                                                 FVM::detail::boundary_normal_distance(mesh, face, cell));
+            }
+            else
+                throw std::invalid_argument(
+                    "Coupled Gauss pressure gradient requires Dirichlet or Neumann boundaries.");
+        }
+        for (const auto& [cell_lid, coefficient] : coefficients)
+            stencils[owned].entries.push_back({cell_lid, coefficient});
+        stencils[owned].constant = constant;
+    }
+    return stencils;
+}
+
 template<TpetraTypePack Pack>
 Teuchos::RCP<typename Pack::matrix_type> scaled_gradient_matrix(const typename Pack::matrix_type& gradient,
     const typename Pack::vector_type& inverse_diagonal, Teuchos::RCP<typename Pack::matrix_type> cached_matrix)
@@ -1375,6 +1438,12 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::prepare_numeric_generation(
     if (minimum != maximum)
         throw std::invalid_argument("Rank-divergent coupled workspace policy.");
     static_cast<void>(to_string(options.coupled_workspace_policy));
+    const int gradient_scheme = static_cast<int>(options.pressure_gradient_scheme);
+    Teuchos::reduceAll(*d_coupled_map->getComm(), Teuchos::REDUCE_MIN, 1, &gradient_scheme, &minimum);
+    Teuchos::reduceAll(*d_coupled_map->getComm(), Teuchos::REDUCE_MAX, 1, &gradient_scheme, &maximum);
+    if (minimum != maximum || (options.pressure_gradient_scheme != FVM::CellGradientScheme::LeastSquares &&
+                                  options.pressure_gradient_scheme != FVM::CellGradientScheme::GaussLinear))
+        throw std::invalid_argument("Invalid or rank-divergent coupled pressure gradient scheme.");
     const auto selection = std::pair{options.coupled_operator_backend, options.coupled_workspace_policy};
     if (d_logged_backends != selection)
     {
@@ -1395,7 +1464,8 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::prepare_numeric_generation(
     if (!retained && d_cached_system.numeric_lease)
         d_cached_system.numeric_lease->protected_generation = false;
     if (!d_cached_system.linear_operator.is_null() &&
-        options.coupled_operator_backend != d_cached_system.operator_backend)
+        (options.coupled_operator_backend != d_cached_system.operator_backend ||
+            options.pressure_gradient_scheme != d_static_geometry.gradient_scheme))
         invalidate_cache();
     static_cast<void>(equation);
 }
@@ -1483,6 +1553,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     const auto reuse_static_geometry =
         d_rebuild_policy == CoupledRebuildPolicy::OnOperatorGraphChange && !d_static_geometry.empty() &&
         d_static_geometry.reference_density == reference_density &&
+        d_static_geometry.gradient_scheme == time_options.pressure_gradient_scheme &&
         same_pressure_boundaries(d_static_geometry.pressure_boundaries, boundary_conditions.pressure);
     if (reuse_static_geometry)
     {
@@ -1494,8 +1565,12 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         StaticGeometryCache rebuilt;
         rebuilt.pressure_boundaries = boundary_conditions.pressure;
         rebuilt.reference_density = reference_density;
+        rebuilt.gradient_scheme = time_options.pressure_gradient_scheme;
         rebuilt.stencils =
-            detail::pressure_gradient_stencils<Pack>(*d_mesh, boundary_conditions.pressure, reference_density);
+            time_options.pressure_gradient_scheme == FVM::CellGradientScheme::GaussLinear
+                ? detail::gauss_pressure_gradient_stencils<Pack>(
+                      *d_mesh, boundary_conditions.pressure, reference_density)
+                : detail::pressure_gradient_stencils<Pack>(*d_mesh, boundary_conditions.pressure, reference_density);
         for (size_t component = 0; component < 3; ++component)
         {
             rebuilt.gradient_operators[component] =
