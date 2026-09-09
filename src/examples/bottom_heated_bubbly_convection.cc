@@ -1,7 +1,7 @@
 /** Bottom-localized heat and H2 production with solved buoyant circulation. */
 #include "IF97ReferenceWater.hh"
-#include "VerificationMesh.hh"
 #include "VerificationLinearSolvers.hh"
+#include "VerificationMesh.hh"
 #include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
@@ -86,6 +86,7 @@ int run(int argc, char** argv)
     const int nx = static_cast<int>(x.size() - 1), nz = static_cast<int>(z.size() - 1);
     const double width = p("width"), height = p("height"), depth = p("depth"), dt = p("dt");
     const double beta = reference.thermal_expansion;
+    const double volume_scale = width * height * depth / 8e-7;
     const int total_steps = static_cast<int>(std::llround(p("end_time") / dt));
     const int steps = requested_steps ? requested_steps : total_steps;
     const int stride = static_cast<int>(std::llround(p("write_interval") / dt));
@@ -152,7 +153,7 @@ int run(int argc, char** argv)
     auto& fission = solver.add_fission_power_source();
     fission.initialize_from_power_density(power);
     const double expected_power = source_scale * p("power_density") * (width / 3) * (height / 8) * depth;
-    require(std::abs(fission.integrated_power() - expected_power) < 1e-12,
+    require(std::abs(fission.integrated_power() - expected_power) < 1e-12 * volume_scale,
         "Mesh must align with source boundaries and preserve integrated heating");
     SimpleFluid::RadiolyticGasOptions gas;
     gas.mode = SimpleFluid::RadiolyticGasMode::Sheng2024TwoPopulation;
@@ -174,7 +175,7 @@ int run(int argc, char** argv)
     gas.micro_to_large_conversion_coefficient = 0;
     gas.max_source_alpha_rate = 1;
     gas.max_subcycles = 1;
-    gas.transport_solver_tolerance=p("gas_transport_tolerance");
+    gas.transport_solver_tolerance = p("gas_transport_tolerance");
     gas.min_radius = 1e-12;
     gas.max_radius = 1e-3;
     gas.free_surface_patches = {"zmax"};
@@ -193,7 +194,9 @@ int run(int argc, char** argv)
     history
         << std::setprecision(17)
         << "time_s,sample,temperature_max_K,temperature_mean_K,alpha_max,speed_max_m_s,uz_min_m_s,uz_max_m_s,hydrogen_"
-           "mol,produced_mol,escaped_mol,hydrogen_balance_mol,heat_power_W,continuity_per_s,thermal_step_residual_J\n";
+           "mol,produced_mol,escaped_mol,hydrogen_balance_mol,heat_power_W,continuity_per_s,thermal_step_residual_J,"
+           "wall_heat_loss_W\n";
+    double wall_heat_loss = 0;
     double thermal_residual = 0, maximum_speed = 0, maximum_temperature = water.temperature, alpha_max = 0, uzmin = 0,
            uzmax = 0;
     auto write = [&](int step)
@@ -209,8 +212,8 @@ int run(int argc, char** argv)
             const auto u = solver.velocity().value(id);
             const auto T = solver.temperature().value(id), a = bubbles->alpha_g().value(id);
             const double speed = std::sqrt(u.dot(u));
-            local_valid = local_valid && std::isfinite(T) && T > 290 && T < 320 && std::isfinite(speed) && a >= 0 &&
-                          a < 0.02;
+            local_valid =
+                local_valid && std::isfinite(T) && T > 290 && T < 320 && std::isfinite(speed) && a >= 0 && a < 0.02;
             maximum_temperature = std::max(maximum_temperature, T);
             maximum_speed = std::max(maximum_speed, speed);
             alpha_max = std::max(alpha_max, a);
@@ -223,9 +226,11 @@ int run(int argc, char** argv)
                     (mesh->owner_cell(face) == id ? 1 : -1) * solver.pressure_corrected_face_fluxes().local_value(face);
             max_div = std::max(max_div, std::abs(divergence) / mesh->cell_volume(id));
             const auto ix = grid.interval(x, c.x), iz = grid.interval(z, c.z);
-            fields << solver.time() << ',' << iz * nx + ix << ',' << x[ix] << ',' << x[ix + 1] << ',' << z[iz] << ','
-                   << z[iz + 1] << ',' << T << ',' << water.density * (1 - beta * (T - water.temperature)) << ',' << a
-                   << ',' << u.x << ',' << u.y << ',' << u.z << '\n';
+            const auto iy = grid.interval(grid.y, c.y);
+            if (iy == grid.ny() / 2)
+                fields << solver.time() << ',' << iz * nx + ix << ',' << x[ix] << ',' << x[ix + 1] << ',' << z[iz]
+                       << ',' << z[iz + 1] << ',' << T << ',' << water.density * (1 - beta * (T - water.temperature))
+                       << ',' << a << ',' << u.x << ',' << u.y << ',' << u.z << '\n';
         }
         parallel.require(local_valid, "Convection left the dilute, reference-water operating envelope");
         mean_temperature = parallel.sum(mean_temperature);
@@ -239,15 +244,17 @@ int run(int argc, char** argv)
         const double produced = bubbles->cumulative_hydrogen_produced();
         const double escaped = bubbles->cumulative_submerged_bubble_hydrogen_escaped();
         const double balance = inventory + escaped - produced;
-        require(std::abs(balance) < 1e-13 && max_div < 1e-6, "Hydrogen or incompressible continuity gate failed");
-        require(std::abs(thermal_residual) < 1e-6, "Discrete heat-source/conduction step budget failed");
+        require(std::abs(balance) < 1e-13 * volume_scale && max_div < 1e-6,
+            "Hydrogen or incompressible continuity gate failed");
+        require(std::abs(thermal_residual) < 1e-6 * volume_scale, "Discrete heat-source/conduction step budget failed");
         history << solver.time() << ",global," << maximum_temperature << ',' << mean_temperature << ',' << alpha_max
                 << ',' << maximum_speed << ',' << uzmin << ',' << uzmax << ',' << inventory << ',' << produced << ','
                 << escaped << ',' << balance << ',' << fission.integrated_power() << ',' << max_div << ','
-                << thermal_residual << '\n';
+                << thermal_residual << ',' << wall_heat_loss << '\n';
         if (parallel.rank() == 0)
             std::cout << "step=" << step << " t=" << solver.time() << " Tmax=" << maximum_temperature
-                      << " alpha=" << alpha_max << " Umax=" << maximum_speed << " uz=[" << uzmin << ',' << uzmax << "]\n";
+                      << " alpha=" << alpha_max << " Umax=" << maximum_speed << " uz=[" << uzmin << ',' << uzmax
+                      << "]\n";
     };
     write(0);
     mesh->owned_cell_map()->getComm()->barrier();
@@ -261,15 +268,19 @@ int run(int argc, char** argv)
             old_temperature[cell] = solver.temperature().value(id);
             capacity[cell] = solver.material_properties().density.value(id) * water.specific_heat_capacity;
         }
-        try { solver.step(); }
-        catch(const std::exception& error)
+        try
         {
-            throw std::runtime_error("Step "+std::to_string(step)+": "+error.what());
+            solver.step();
         }
-        linear_history.write(step, solver.time(), solver.last_step_statistics(),
-            bubbles->last_statistics().transport_linear);
+        catch (const std::exception& error)
+        {
+            throw std::runtime_error("Step " + std::to_string(step) + ": " + error.what());
+        }
+        linear_history.write(
+            step, solver.time(), solver.last_step_statistics(), bubbles->last_statistics().transport_linear);
         require(std::abs(solver.time() - step * dt) < 1e-10, "Accepted physical time mismatch");
         double local_thermal_residual = 0;
+        double local_wall_heat = 0;
         for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
         {
             const auto id = static_cast<Pack::local_ordinal_type>(cell);
@@ -281,11 +292,16 @@ int run(int argc, char** argv)
                     continue;
                 const auto f = mesh->face_centroid(face);
                 if (std::abs(f.x) < 1e-12 || std::abs(f.x - width) < 1e-12 || std::abs(f.z - height) < 1e-12)
-                    local_thermal_residual += dt * water.thermal_conductivity * mesh->face_area(face) *
-                                        (T - water.temperature) / mesh->cell_to_face_distance(face, id);
+                {
+                    const double rate = water.thermal_conductivity * mesh->face_area(face) * (T - water.temperature) /
+                                        mesh->cell_to_face_distance(face, id);
+                    local_thermal_residual += dt * rate;
+                    local_wall_heat += rate;
+                }
             }
         }
         thermal_residual = parallel.sum(local_thermal_residual) - fission.integrated_power() * dt;
+        wall_heat_loss = parallel.sum(local_wall_heat);
         if (step % stride == 0 || step == steps)
             write(step);
     }

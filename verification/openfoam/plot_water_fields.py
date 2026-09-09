@@ -163,10 +163,14 @@ def render(manifest: dict, reference: dict, actual: dict, differences: dict,
         middle = manifest["spatial_output"]["width_m"]/2
         samples = [sample for sample in samples
                    if reference[0,sample]["x_lower_m"] <= middle < reference[0,sample]["x_upper_m"]]
+    slice_bounds=manifest['spatial_output'].get('y_slice_bounds_m')
+    slice_note=(f'Central y cell plane: {slice_bounds[0]:.5g}–{slice_bounds[1]:.5g} m. ' if slice_bounds else '')
     title = f"{manifest['case']} / {manifest['mode']} — "
     title += {"distribution": "field distributions", "relative": "relative errors (%)",
               "absolute": "absolute errors"}[mode]
     title += " / full history" if history else f" / t = {times[-1]:g} s"
+    if manifest.get('validation_scope'):
+        title += " / partial check"
     panels = 2 if mode == "distribution" else 1
     height = 170 + panels * 410
     svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="{height}" viewBox="0 0 1760 {height}">',
@@ -181,7 +185,7 @@ def render(manifest: dict, reference: dict, actual: dict, differences: dict,
     svg.append(text(35, 68, scope, 16))
     svg.append(text(35, 94, "History: central x column; sample-centred time bins, no time interpolation."
                     if history and planar_grid else "History: sample-centred time bins, no time interpolation; height follows each mesh."
-                    if history else "Native Cartesian x–z cell sections; uniform through y. Solved velocities shown by arrows."
+                    if history else slice_note+"Native x–z section; velocity components shown by arrows."
                     if planar_grid else "Native Cartesian x–z cell sections; one cell across x, uniform through y.", 15))
     selected = list(range(len(times))) if history else [len(times)-1]
     edges = [times[0], *[(a+b)/2 for a, b in zip(times, times[1:])], times[-1]]
@@ -303,7 +307,7 @@ def render_mesh(manifest: dict, reference: dict) -> str:
     elements.extend([text(left+size/2,top+size+50,'x (m)',16,'middle'),
                      '<g transform="rotate(-90 22 355)">'+text(22,355,'z (m)',16,'middle')+'</g>'])
     dx=[b-a for a,b in zip(x,x[1:])];dz=[b-a for a,b in zip(z,z[1:])]
-    notes=[f'{len(x)-1} × 1 × {len(z)-1} cells',f'Total: {len(cells)}',
+    notes=[f"{len(x)-1} × {len(declared.get('y',[0,1]))-1} × {len(z)-1} cells",f"Total: {manifest.get('mesh_statistics',{}).get('cells',len(cells))}",f'Slice cells: {len(cells)}',
            f'First Δx: {dx[0]:.6g} m',f'First Δz: {dz[0]:.6g} m',
            f'Min Δx: {min(dx):.6g} m',f'Min Δz: {min(dz):.6g} m',
            'No geometry interpolation.']
@@ -317,6 +321,8 @@ def generate(manifest: dict, reference: dict, actual: dict, output: Path, format
     differences = {key: errors(reference[key], actual[key]) for key in reference}
     statistics = {"case": manifest["case"], "mode": manifest["mode"], "status": "diagnostic",
                   "matched_cells": len(reference), "fields": {}}
+    if manifest.get('validation_scope'):
+        statistics['validation_scope'] = manifest['validation_scope']
     for field, (label, unit, floor) in FIELDS.items():
         records = [value[field] for value in differences.values()]
         relative = [r["relative_error_percent"] for r in records if r["relative_error_percent"] is not None]
@@ -345,6 +351,7 @@ def generate(manifest: dict, reference: dict, actual: dict, output: Path, format
     gallery = ["<!doctype html><html><head><meta charset='utf-8'><title>Water verification fields</title>",
                "<style>body{font:16px sans-serif;margin:2em;color:#17212b}img{width:100%;max-width:1600px}p{max-width:1100px}</style></head><body>",
                f"<h1>{html.escape(manifest['case'])} / {html.escape(manifest['mode'])}</h1>",
+               f"<p>{html.escape(manifest.get('validation_scope', 'Complete declared output history.'))}</p>",
                "<p>Matched cell data, not interpolated fields. Relative errors at or below the reference floors are undefined (gray), including zero/zero. Velocity errors use the full vector difference.</p>",
                "<p>Bubble carrier velocity is prescribed. ALE gas fraction is identically zero (liquid-only case); its velocity reference is affine mesh kinematics, not an OpenFOAM momentum solution. The velocity figures are diagnostic.</p>",
                "<p><a href='matched_fields.csv'>Matched values and errors (CSV)</a> · <a href='statistics.json'>Statistics and denominator floors</a></p>"]

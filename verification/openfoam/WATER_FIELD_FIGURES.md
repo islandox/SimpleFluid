@@ -1,6 +1,6 @@
 # Water-case distribution and error figures
 
-Both case `run_comparison.sh` launchers render the fields after the numerical
+The case `run_comparison.sh` launchers render the fields after the numerical
 comparison succeeds. The run's `figures/index.html` gallery links SVG figures,
 matched CSV data, and error statistics. PNG and PDF copies are also written
 when `rsvg-convert` (librsvg) is installed. This uses the existing verification
@@ -19,8 +19,10 @@ volume fraction, and liquid velocity magnitude.
 | `history_distribution` | Both solvers' full time–height field histories |
 | `history_relative` | Relative errors across the full matched history |
 
-These are actual column-cell outputs. Each case has one cell across x and y;
-the x–z figure displays those cells at their physical z extents. Histories use
+These are actual cells from the central-y plane of the solved 3-D mesh.
+The enlarged cases have ten y layers; the manifest records the selected layer
+and its physical bounds. Global histories include every layer. The x–z figure
+displays the selected cells at their physical x/z extents. Histories use
 normalized height `z/L(t)` to follow the moving ALE cells. Time bins are centred
 on actual output times and do not interpolate intermediate physical states.
 The steady gallery includes the approach to equilibrium and its final state.
@@ -28,7 +30,7 @@ The steady gallery includes the approach to equilibrium and its final state.
 The `bottomHeatedBubblyConvection` case additionally exports x bounds for a
 resolved x–z grid. Both sides solve liquid momentum; its arrows and vector
 errors compare solved flow fields. Histories display the central x column,
-while the matched CSV and statistics retain every cell and time. Its localized
+while the matched CSV and statistics retain every sampled-plane cell and time. Its localized
 source produces spatial temperature, density, gas-fraction, and velocity
 variations; neither velocity nor gas fraction is prescribed to a uniform field.
 
@@ -50,7 +52,8 @@ variations; neither velocity nor gas fraction is prescribed to a uniform field.
   not an additional momentum acceptance gate. Actual SimpleFluid velocities
   are never replaced by mesh velocities.
 
-The existing numerical comparison and conservation criteria are unchanged.
+The case manifests define geometry-scaled extensive tolerances and unchanged
+intensive field criteria.
 The plotter additionally requires complete time/cell coverage, finite fields,
 positive temperature/density, bounded gas fraction, contiguous column cells,
 matching physical cell extents, and fresh output in the launchers.

@@ -9,13 +9,16 @@
 
 int main(int argc, char* argv[])
 {
+    Foam::argList::addOption("steps","N","Run only N steps for a partial smoke check");
     #include "setRootCase.H"
     #include "createTime.H"
     #include "createMesh.H"
     const StructuredCaseMesh grid(mesh);
     IOdictionary properties(IOobject("verificationProperties",runTime.constant(),mesh,IOobject::MUST_READ,IOobject::NO_WRITE));
     auto par=[&](const word& key){return readScalar(properties.lookup(key));};
-    const label nx=grid.nx(),steps=label(std::llround(par("end_time")/par("dt")));
+    const label nx=grid.nx(),nominalSteps=label(std::llround(par("end_time")/par("dt")));
+    const label steps=args.getOrDefault<label>("steps",nominalSteps);
+    if(steps<1||steps>nominalSteps)FatalErrorInFunction<<"Invalid smoke step limit"<<exit(FatalError);
     const label stride=label(std::llround(par("write_interval")/par("dt")));
     const scalar width=par("width"),height=par("height"),dt=par("dt");
     const scalar rho0=par("density_kg_m3"),cp=par("specific_heat_capacity_J_kg_K"),mu=par("dynamic_viscosity_Pa_s");
@@ -46,20 +49,21 @@ int main(int argc, char* argv[])
         const vector c=mesh.C()[cell];
         if(c.x()>width/3 && c.x()<2*width/3 && c.z()<height/8) q[cell]=par("power_density");
     }
+    const scalar volumeScale=width*height*par("depth")/8e-7;
     const scalar power=gSum(q.primitiveField()*mesh.V());
-    if(mag(power-par("power_density")*(width/3)*(height/8)*par("depth"))>1e-12)
+    if(mag(power-par("power_density")*(width/3)*(height/8)*par("depth"))>1e-12*volumeScale)
         FatalErrorInFunction<<"Shared mesh must preserve source extent and power"<<exit(FatalError);
     const scalar volume=gSum(mesh.V().field());
     const label outlet=mesh.boundaryMesh().findPatchID("zmax");
     label referenceCell=-1;
     forAll(mesh.C(),cell)
-        if(grid.interval(grid.x,mesh.C()[cell].x())==0&&grid.interval(grid.z,mesh.C()[cell].z())==0)
+        if(grid.interval(grid.x,mesh.C()[cell].x())==0&&grid.interval(grid.z,mesh.C()[cell].z())==0&&grid.interval(grid.y,mesh.C()[cell].y())==0)
             referenceCell=cell;
-    scalar produced=0,escaped=0,thermalResidual=0;
+    scalar produced=0,escaped=0,thermalResidual=0,wallHeatLoss=0;
     std::ofstream fields((runTime.path()/"fields.csv").c_str()),history((runTime.path()/"history.csv").c_str());
     fields.exceptions(std::ios::badbit|std::ios::failbit);history.exceptions(std::ios::badbit|std::ios::failbit);
     fields<<std::setprecision(17)<<"time_s,sample,x_lower_m,x_upper_m,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
-    history<<std::setprecision(17)<<"time_s,sample,temperature_max_K,temperature_mean_K,alpha_max,speed_max_m_s,uz_min_m_s,uz_max_m_s,hydrogen_mol,produced_mol,escaped_mol,hydrogen_balance_mol,heat_power_W,continuity_per_s,thermal_step_residual_J\n";
+    history<<std::setprecision(17)<<"time_s,sample,temperature_max_K,temperature_mean_K,alpha_max,speed_max_m_s,uz_min_m_s,uz_max_m_s,hydrogen_mol,produced_mol,escaped_mol,hydrogen_balance_mol,heat_power_W,continuity_per_s,thermal_step_residual_J,wall_heat_loss_W\n";
     auto check=[&](bool valid,const char* message){if(!valid)FatalErrorInFunction<<message<<exit(FatalError);};
     auto write=[&](label step)
     {
@@ -71,19 +75,19 @@ int main(int argc, char* argv[])
             umax=max(umax,mag(U[cell]));uzmin=min(uzmin,U[cell].z());uzmax=max(uzmax,U[cell].z());
             check(std::isfinite(T[cell])&&T[cell]>290&&T[cell]<320&&std::isfinite(mag(U[cell]))&&alpha[cell]>=0&&alpha[cell]<0.02,
                 "Outside dilute reference-water envelope");
-            fields<<runTime.value()<<','<<iz*nx+ix<<','<<grid.x[ix]<<','<<grid.x[ix+1]<<','<<grid.z[iz]<<','<<grid.z[iz+1]<<','
+            if(grid.interval(grid.y,c.y())==grid.ny()/2) fields<<runTime.value()<<','<<iz*nx+ix<<','<<grid.x[ix]<<','<<grid.x[ix+1]<<','<<grid.z[iz]<<','<<grid.z[iz+1]<<','
                   <<T[cell]<<','<<rho0*(1-beta*(T[cell]-T0))<<','<<alpha[cell]<<','<<U[cell].x()<<','<<U[cell].y()<<','<<U[cell].z()<<'\n';
         }
         reduce(tmax,maxOp<scalar>());reduce(tmean,sumOp<scalar>());reduce(amax,maxOp<scalar>());
         reduce(umax,maxOp<scalar>());reduce(uzmin,minOp<scalar>());reduce(uzmax,maxOp<scalar>());
         const scalar inventory=gSum(moles.primitiveField()*mesh.V()),balance=inventory+escaped-produced;
         const scalar continuity=gMax(mag(fvc::div(phi)().primitiveField()));
-        check(mag(balance)<1e-13&&continuity<1e-6,"Hydrogen/continuity gate failed");
-        check(mag(thermalResidual)<1e-6,"Discrete thermal step budget failed");
+        check(mag(balance)<1e-13*volumeScale&&continuity<1e-6,"Hydrogen/continuity gate failed");
+        check(mag(thermalResidual)<1e-6*volumeScale,"Discrete thermal step budget failed");
         history<<runTime.value()<<",global,"<<tmax<<','<<tmean<<','<<amax<<','<<umax<<','<<uzmin<<','<<uzmax<<','
-               <<inventory<<','<<produced<<','<<escaped<<','<<balance<<','<<power<<','<<continuity<<','<<thermalResidual<<'\n';
+               <<inventory<<','<<produced<<','<<escaped<<','<<balance<<','<<power<<','<<continuity<<','<<thermalResidual<<','<<wallHeatLoss<<'\n';
         Info<<"step="<<step<<" t="<<runTime.value()<<" Tmax="<<tmax<<" alpha="<<amax<<" Umax="<<umax<<" uz=["<<uzmin<<','<<uzmax<<']'<<nl;
-        if(step==steps)check(tmax-T0>0.05&&amax>1e-6&&uzmin< -1e-5&&uzmax>1e-5,"No heated bubbly plume and return flow");
+        if(step==nominalSteps)check(tmax-T0>0.05&&amax>1e-6&&uzmin< -1e-5&&uzmax>1e-5,"No heated bubbly plume and return flow");
     };
     write(0);
     Pstream::barrier(Pstream::worldComm);
@@ -118,9 +122,12 @@ int main(int argc, char* argv[])
         solve(rhoCp*fvm::ddt(T)+fvm::div(capacityFlux,T)-fvm::laplacian(conductivity,T)==q);
         T.correctBoundaryConditions();
         scalar localThermalResidual=sum(rhoCp.primitiveField()*(T.primitiveField()-oldT)*mesh.V());
+        scalar localWallHeat=0;
         forAll(T.boundaryField(),patch)
             if(!mesh.boundary()[patch].coupled())
-                localThermalResidual-=dt*k*sum(T.boundaryField()[patch].snGrad()*mesh.magSf().boundaryField()[patch]);
+                localWallHeat-=k*sum(T.boundaryField()[patch].snGrad()*mesh.magSf().boundaryField()[patch]);
+        localThermalResidual+=dt*localWallHeat;
+        wallHeatLoss=returnReduce(localWallHeat,sumOp<scalar>());
         reduce(localThermalResidual,sumOp<scalar>());
         thermalResidual=localThermalResidual-power*dt;
         surfaceScalarField bubblePhi(phi+(mesh.Sf()&dimensionedVector("slip",dimVelocity,vector(0,0,par("slip_velocity")))));
@@ -169,5 +176,6 @@ int main(int argc, char* argv[])
     timings<<std::setprecision(17)<<"{\"rank\":"<<Pstream::myProcNo()<<",\"ranks\":"<<Pstream::nProcs()
            <<",\"local_cells\":"<<mesh.nCells()<<",\"loop_wall_s\":"<<loopWall<<",\"loop_cpu_s\":"<<loopCpu<<"}\n";
     U.write();T.write();alpha.write();p.write();
+    if(steps<nominalSteps)Info<<"Partial smoke: "<<steps<<" of "<<nominalSteps<<" steps; not a complete comparison"<<nl;
     return 0;
 }

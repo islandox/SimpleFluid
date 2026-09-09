@@ -6,7 +6,13 @@ the script does not build either executable or prepare OpenFOAM. It retains
 commands, binary hashes, shared input snapshots, MPI bindings, per-rank timing,
 CSV outputs, and comparisons in a new output directory.
 
-The opt-in `recommended` policy uses these fixture-specific settings:
+The default meshes have since been enlarged tenfold in each dimension while
+retaining cell widths; see [current mesh sizes](BOUNDARY_LAYER_MESHES.md).
+The following policy was measured on the original scale-1 fixtures and has
+not been requalified for the enlarged defaults. The runner snapshots current
+inputs; rerunning it now measures the larger problems and can take much longer.
+
+The opt-in `recommended` policy uses these historical fixture-specific settings:
 
 | Fixture | Default ranks | Solver override |
 | --- | ---: | --- |

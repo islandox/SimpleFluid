@@ -12,6 +12,7 @@
 
 int main(int argc, char *argv[])
 {
+    Foam::argList::addOption("steps","N","Run only N steps for a partial smoke check");
     #include "setRootCase.H"
     #include "createTime.H"
     #include "createMesh.H"
@@ -35,10 +36,13 @@ int main(int argc, char *argv[])
     const scalar source = mode == "steady" ? parameter("power_density") * parameter("yield_mol_per_j")
         * parameter("release_efficiency") : 0.0;
     const scalar initial = parameter(mode + "_initial_moles");
-    const label cells = grid.nz();
+    const label cells = grid.cells();
     const scalar volume = height * sqr(width);
+    const scalar volumeScale=volume;
     const scalar end = parameter(mode + "_end_time");
-    const label steps = label(std::llround(end / dt));
+    const label nominalSteps = label(std::llround(end / dt));
+    const label steps=args.getOrDefault<label>("steps",nominalSteps);
+    if(steps<1||steps>nominalSteps)FatalErrorInFunction<<"Invalid smoke step limit"<<exit(FatalError);
     const label writeSteps = label(std::llround(parameter(mode + "_write_interval") / dt));
     if (returnReduce(mesh.nCells(), sumOp<label>()) != cells || writeSteps < 1 || mag(runTime.deltaTValue() - dt) > 1e-14)
         FatalErrorInFunction << "Unmatched mesh/time parameters" << exit(FatalError);
@@ -67,7 +71,7 @@ int main(int argc, char *argv[])
     if (returnReduce(!profiles.good() || !history.good() || !fields.good(), orOp<bool>()))
         FatalErrorInFunction << "Cannot create verification CSV files" << exit(FatalError);
     fields << std::setprecision(17)
-        << "time_s,sample,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
+        << "time_s,sample,x_lower_m,x_upper_m,z_lower_m,z_upper_m,temperature_K,density_kg_m3,alpha_g,ux_m_s,uy_m_s,uz_m_s\n";
     profiles << std::setprecision(17)
         << "time_s,sample,z_m,micro_moles_mol_m3,micro_number_m3,alpha_g,temperature_K,absolute_pressure_Pa,density_kg_m3,"
            "specific_heat_capacity_J_kg_K,dynamic_viscosity_Pa_s,thermal_conductivity_W_m_K,"
@@ -83,15 +87,19 @@ int main(int argc, char *argv[])
         const scalar balance = inventory + escaped - initial*volume - produced;
         const scalar numberBalance = (number + escapedNumber - (initial*volume + produced)/molesPerBubble)
             / ((initial*volume + produced)/molesPerBubble);
-        if (!std::isfinite(balance) || mag(balance) > 2e-13 || mag(numberBalance) > 2e-8)
+        if (!std::isfinite(balance) || mag(balance) > 2e-13*volumeScale || mag(numberBalance) > 2e-8)
             FatalErrorInFunction << "Conservation gate failed" << exit(FatalError);
         forAll(microMoles, cell)
         {
-            const scalar z = mesh.C()[cell].z();
+            const auto c=mesh.C()[cell];
+            const label ix=grid.interval(grid.x,c.x()),iy=grid.interval(grid.y,c.y());
+            if(iy!=grid.ny()/2)continue;
+            const scalar z = c.z();
             const label sample=grid.interval(grid.z,z);
-            fields << time << ',' << sample << ',' << grid.z[sample] << ',' << grid.z[sample+1] << ','
+            fields << time << ',' << sample*grid.nx()+ix << ',' << grid.x[ix] << ',' << grid.x[ix+1] << ',' << grid.z[sample] << ',' << grid.z[sample+1] << ','
                    << temperature << ',' << rho << ',' << microNumber[cell]*bubbleVolume
                    << ",0,0," << parameter("carrier_velocity") << '\n';
+            if(ix!=grid.nx()/2)continue;
             profiles << time << ',' << sample << ',' << z << ',' << microMoles[cell] << ','
                      << microNumber[cell] << ',' << microNumber[cell]*bubbleVolume << ','
                      << temperature << ',' << absolutePressure << ',' << rho << ',' << cp << ','
@@ -108,7 +116,7 @@ int main(int argc, char *argv[])
     for (label step = 1; step <= steps; ++step)
     {
         ++runTime;
-        if (mag(runTime.value()-step*dt) > 1e-11)
+        if (mag(runTime.value()-step*dt) > 1e-11*max(scalar(1),end))
             FatalErrorInFunction << "Physical time does not match fixed step schedule" << exit(FatalError);
         const scalarField previous(microMoles.primitiveField());
         solve(fvm::ddt(microMoles) + fvm::div(phi, microMoles));
@@ -122,16 +130,16 @@ int main(int argc, char *argv[])
         microNumber.primitiveFieldRef() += source*dt/molesPerBubble;
         produced += source*dt*volume;
         maximumChange = gMax(mag(microMoles.primitiveField() - previous));
-        if (maximumChange < 1e-12 && mag(lastEscape/dt-source*volume) < 2e-11)
+        if (maximumChange < 1e-12 && mag(lastEscape/dt-source*volume) < 2e-11*volumeScale)
             ++steadyConsecutiveSteps;
         else steadyConsecutiveSteps = 0;
         const scalar minimumMoles = gMin(microMoles.primitiveField());
         const scalar minimumNumber = gMin(microNumber.primitiveField());
         if (minimumMoles < 0 || minimumNumber < 0)
             FatalErrorInFunction << "Negative microbubble moment" << exit(FatalError);
-        if (step % writeSteps == 0) writeCsv(step*dt);
+        if (step % writeSteps == 0 || step==steps) writeCsv(step*dt);
     }
-    if (mode == "steady")
+    if (steps==nominalSteps && mode == "steady")
     {
         if (steadyConsecutiveSteps < 5)
             FatalErrorInFunction << "Steady convergence/outlet balance failed" << exit(FatalError);
@@ -139,14 +147,15 @@ int main(int argc, char *argv[])
         forAll(microMoles, cell)
         {
             const scalar exact = source*mesh.C()[cell].z()/speed;
-            const scalar dz=mesh.V()[cell]/sqr(width);
+            const label iz=grid.interval(grid.z,mesh.C()[cell].z());
+            const scalar dz=grid.z[iz+1]-grid.z[iz];
             const scalar truncation = source*(0.5*dz/speed+dt);
             continuumPassed = continuumPassed && mag(microMoles[cell]-exact) <= truncation*1.01+1e-12;
         }
         if (!returnReduce(continuumPassed, andOp<bool>()))
             FatalErrorInFunction << "Steady continuum profile failed" << exit(FatalError);
     }
-    else
+    else if(steps==nominalSteps)
     {
         scalar l1 = 0;
         forAll(microMoles, cell)
@@ -155,10 +164,11 @@ int main(int argc, char *argv[])
             const scalar dz=grid.z[sample+1]-grid.z[sample];
             const scalar upper=grid.z[sample+1];
             const scalar exact = initial*std::clamp((upper-speed*end)/dz, scalar(0), scalar(1));
-            l1 += mag(microMoles[cell]-exact)*dz/(initial*height);
+            l1 += mag(microMoles[cell]-exact)*mesh.V()[cell]/(initial*volume);
         }
         reduce(l1, sumOp<scalar>());
-        if (l1 > 0.12 || escaped < 0.4*initial*volume || escaped > 0.6*initial*volume)
+        const scalar fraction=min(scalar(1),speed*end/height);
+        if (l1 > 0.12/height || escaped < 0.8*fraction*initial*volume || escaped > min(scalar(1),1.2*fraction)*initial*volume)
             FatalErrorInFunction << "Transient translating-front/escape gate failed" << exit(FatalError);
     }
     profiles.flush(); history.flush(); fields.flush();
@@ -172,5 +182,6 @@ int main(int argc, char *argv[])
     if (returnReduce(!profiles.good() || !history.good() || !fields.good() || !performance.good(), orOp<bool>()))
         FatalErrorInFunction << "CSV write failed" << exit(FatalError);
     Info << mode << " dispersed microbubble reference passed" << endl;
+    if(steps<nominalSteps)Info<<"Partial smoke: "<<steps<<" of "<<nominalSteps<<" steps; not a complete comparison"<<nl;
     return 0;
 }

@@ -24,7 +24,7 @@ def measure(run):
     manifest=json.loads((run/'manifest.json').read_text())
     if manifest['case']!='bottomHeatedBubblyConvection':raise ValueError('Expected convection case')
     edges=manifest['mesh_edges_m'];width=edges['x'][-1];height=edges['z'][-1];depth=edges['y'][-1]
-    result={'cells':len(manifest['spatial_output']['cell_samples']),'run':str(run),'solvers':{}}
+    result={'cells':manifest['mesh_statistics']['cells'],'slice_cells':len(manifest['spatial_output']['cell_samples']),'run':str(run),'solvers':{}}
     props={}
     for line in (run/'openfoam/constant/verificationProperties').read_text().splitlines():
         words=line.rstrip(';').split()
@@ -33,7 +33,7 @@ def measure(run):
             except ValueError:pass
     for solver in ['simplefluid','openfoam']:
         end,rows=final_fields(run/solver/'fields.csv')
-        if len(rows)!=result['cells']:raise ValueError('Incomplete final spatial output')
+        if len(rows)!=result['slice_cells']:raise ValueError('Incomplete final spatial output')
         wall_heat=mean_temperature=0
         for r in rows:
             dx=r['x_upper_m']-r['x_lower_m'];dz=r['z_upper_m']-r['z_lower_m']
@@ -43,6 +43,10 @@ def measure(run):
                 wall_heat+=props['thermal_conductivity_W_m_K']*depth*dz*delta/(dx/2)
             if abs(r['z_upper_m']-height)<1e-12:
                 wall_heat+=props['thermal_conductivity_W_m_K']*depth*dx*delta/(dz/2)
+        with (run/solver/'history.csv').open() as stream:history=list(csv.DictReader(stream))[-1]
+        mean_temperature=float(history['temperature_mean_K'])
+        if 'wall_heat_loss_W' in history:wall_heat=float(history['wall_heat_loss_W'])
+        elif len(edges['y'])>2:raise ValueError('3D wall heat loss requires the global wall_heat_loss_W history column')
         result['time_s']=end
         result['solvers'][solver]={'temperature_rise_K':max(r['temperature_K'] for r in rows)-props['temperature_K'],
             'mean_temperature_rise_K':mean_temperature-props['temperature_K'],

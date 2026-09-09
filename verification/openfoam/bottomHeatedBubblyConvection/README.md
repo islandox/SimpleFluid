@@ -10,27 +10,28 @@ fixtures with a resolved buoyant plume and downward return flow.
 
 | Input | Shared value |
 | --- | --- |
-| Domain | 20 mm wide × 20 mm tall, extruded 2 mm in y |
-| Mesh | 28 × 1 × 36 graded Cartesian cells; 6 layers at each x/z wall, growth 1.25 |
+| Domain | 200 mm wide × 200 mm tall, 20 mm in y |
+| Mesh | 244 × 10 × 324 = 790,560 graded Cartesian cells; 6 layers at each x/z wall, growth 1.25 |
 | Initial state | Rest, 300 K, zero gas inventory |
 | Water | IF97 reference at 300 K and 101325 Pa absolute; constant cp, mu, k and reference beta |
 | Gravity | 9.81 m/s² downward in z |
 | Source region | Middle third of the width, lowest eighth of the height |
-| Heat deposition | 4 MW/m³ in the source region; 0.133333 W integrated |
-| H2 production | 2e-7 mol/J × deposited power; 2.666667e-8 mol/s integrated |
+| Heat deposition | 4 MW/m³ in the source region; 133.333333 W integrated |
+| H2 production | 2e-7 mol/J × deposited power; 2.666667e-5 mol/s integrated |
 | Bubble slip | Prescribed 5 mm/s upward relative to the solved liquid flux |
 | Thermal boundaries | Side and top temperatures fixed at 300 K; bottom and y faces adiabatic |
 | Liquid boundaries | No-slip side/bottom walls; impermeable slip top and y faces |
 | Gas boundary | Escape only through the top; no incoming bubbles |
 | Time | Backward Euler, dt=0.02 s, 0–20 s; output every 2 s |
 
-The y direction represents a two-dimensional slice; front/back wall friction
-is absent. The source is a volumetric heater/radiolysis surrogate inside the
+The mesh has ten y layers at the original 2 mm spacing. Uniform initial
+conditions and sources with slip/adiabatic front/back boundaries retain a
+nominally planar flow; front/back wall friction is absent. The source is a volumetric heater/radiolysis surrogate inside the
 lowest cells, not a resolved gas nozzle. Cold walls provide heat removal.
 The 20-second run is a **developing transient**, not a claim of thermal steady
 state. The earlier steady verification cases remain available separately.
-The source bounds are cell faces on both the default 1008-cell grid and the
-2080-cell finer grid. See [boundary-layer meshes](../BOUNDARY_LAYER_MESHES.md)
+The source bounds are cell faces on both the default 790,560-cell grid and the
+1,761,760-cell finer grid. See [boundary-layer meshes](../BOUNDARY_LAYER_MESHES.md)
 for spacings, regeneration, and the shared-mesh override. Water and source
 properties remain identical when the grid changes.
 
@@ -63,7 +64,7 @@ The nucleation model's required positive solute parameter is 1 mol/m³; the
 material closure remains a dilute reference-water approximation, not a
 validated uranyl-solution property or radiation-chemistry model. Absolute
 bubble pressure is fixed at 101325 Pa; this small cavity omits its approximately
-196 Pa hydrostatic variation in the gas EOS.
+1955 Pa hydrostatic variation in the gas EOS.
 
 The OpenFOAM reference uses its finite-volume PISO momentum/pressure solve;
 it does not prescribe velocity or import SimpleFluid flow fields. Both
@@ -76,18 +77,18 @@ From the repository root:
 
 ```sh
 cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON
-SIMPLEFLUID_BUILD_CONFIG=Debug \
+SIMPLEFLUID_BUILD_CONFIG=Release \
   verification/openfoam/bottomHeatedBubblyConvection/run_comparison.sh \
   build/verification/bottom-convection
 ```
 
 The launcher creates a fresh run directory, builds a local OpenFOAM reference,
 checks its mesh, runs both solvers, compares complete matched histories, and
-renders a `figures/index.html` gallery. `fields.csv` retains all x–z cells,
+renders a `figures/index.html` gallery. `fields.csv` retains the central-y plane of x–z cells,
 physical bounds, temperature, liquid density, gas fraction, and solved velocity
 components. Figures show two-dimensional distributions and error fields;
-time–height figures show the central x column. Matched CSV data contain every
-cell. SVG is always generated, with PNG/PDF when `rsvg-convert` is available.
+time–height figures show the central x column. Matched field CSV data contain every cell in that plane. All global histories
+and conservation checks use the complete 3-D domain. SVG is always generated, with PNG/PDF when `rsvg-convert` is available.
 
 `history.csv` records temperature extrema/mean, gas holdup, maximum speed,
 upward/downward velocity, inventories, integrated source, continuity, and a
@@ -100,14 +101,17 @@ launcher still exits nonzero.
 
 Each executable independently requires a heated bubbly plume **and downward
 return flow**, finite/bounded fields (`290<T<320 K`, `alpha_g<0.02`), hydrogen
-closure below 1e-13 mol, continuity below 1e-6 s⁻¹, and a thermal step residual
-below 1e-6 J. The thermal residual uses the actual frozen transport capacity,
+closure below 1e-10 mol, continuity below 1e-6 s⁻¹, and a thermal step residual
+below 1e-3 J. The thermal residual uses the actual frozen transport capacity,
 temperature increment, source energy, and outward wall conduction; it does
 not claim conservation of an unsupported nonlinear mixture enthalpy.
 
 The focused `bottom_convection_zero_source` CTest disables both sources and
-requires the water to remain cold, gas-free, and stationary. Standalone
+uses the explicit scale-1 inputs and requires the water to remain cold,
+gas-free, and stationary. Standalone
 SimpleFluid options `--steps N` and `--source-scale S` support such controls;
+OpenFOAM supports `-steps N` for startup checks. Shortened runs are explicitly
+partial and cannot satisfy the full comparison manifest;
 paired comparisons always use the shared defaults.
 
 Both executables support distributed MPI solves. SimpleFluid partitions the
@@ -122,7 +126,8 @@ The per-rank `timing.json` records elapsed and process CPU time for the time
 loop, including its diagnostics and CSV output, after mesh and solver setup.
 
 The opt-in [performance runner](../PERFORMANCE.md) selects two ranks,
-pressure PCG/DIC, and transport BiCGStab/SGS for this 1,008-cell fixture.
+pressure PCG/DIC, and transport BiCGStab/SGS based on historical measurements of the scale-1 1,008-cell fixture. Those
+recommendations have not been retuned for the enlarged default.
 All physical and linear tolerances remain unchanged. Explicit `--ranks` and
 `--policy` arguments override those experiment settings. The ordinary paired
 comparison launcher above retains its serial execution and solver defaults.

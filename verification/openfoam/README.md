@@ -4,6 +4,13 @@ These workflows run matched SimpleFluid and OpenFOAM cases and compare their
 outputs. Each case documents its equations, physical parameters, boundaries,
 time discretization, acceptance tolerances, and model limitations.
 
+The default water-case domains are ten times larger in x, y and z, with
+original cell widths retained. See [mesh sizes and scaling](BOUNDARY_LAYER_MESHES.md)
+and [focused validation](SCALED_CASES.md)
+for the new 40,400-cell bubble, 8,400-cell ALE and 790,560-cell convection
+fixtures. Historical performance and convergence tables describe scale-1
+inputs and do not establish performance or mesh independence at the new size.
+
 ## Linear solver experiments
 
 The three water verification executables accept optional solver overrides.
@@ -71,8 +78,7 @@ partition of a chain needs at most one stage per rank, while interleaved
 ownership can require a stage per row. Each apply performs one forward and
 one reverse halo exchange between stages. This is a dependency-ordered
 preconditioner; MPI support does not imply efficient scaling for every mesh.
-The small comparison executables below retain their separate serial fixture
-restriction. Distributed DIC itself is tested through Tpetra/Belos solves and
+The comparison executables below support MPI and coordinate-based owned output. Distributed DIC itself is tested through Tpetra/Belos solves and
 the production pressure-projection path on multiple ranks.
 
 ## Dispersed bubbles and planar ALE
