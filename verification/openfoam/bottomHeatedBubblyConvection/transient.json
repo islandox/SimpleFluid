@@ -73,6 +73,21 @@
       "units": "W",
       "absolute_tolerance": 0.001,
       "relative_tolerance": 0.15
+    },
+    "k_mean_m2_s2": {
+      "units": "m^2/s^2",
+      "absolute_tolerance": 1e-12,
+      "relative_tolerance": 0.1
+    },
+    "omega_mean_1_s": {
+      "units": "1/s",
+      "absolute_tolerance": 1e-06,
+      "relative_tolerance": 0.1
+    },
+    "nut_max_m2_s": {
+      "units": "m^2/s",
+      "absolute_tolerance": 1e-10,
+      "relative_tolerance": 0.1
     }
   },
   "conservation": {
@@ -84,6 +99,9 @@
     },
     "thermal_step_residual_J": {
       "absolute_tolerance": 0.001
+    },
+    "wall_yplus_max": {
+      "absolute_tolerance": 1
     }
   },
   "spatial_output": {
@@ -79778,5 +79796,21 @@
     }
   },
   "tolerance_reference_volume_m3": 0.0008,
-  "tolerance_reference_height_m": 0.2
+  "tolerance_reference_height_m": 0.2,
+  "turbulence": {
+    "model": "Menter-1994 SST k-omega",
+    "wall_treatment": "ResolvedLowReSST",
+    "wall_patches": [
+      "xmin",
+      "xmax",
+      "zmin"
+    ],
+    "wall_yplus_limit": 1,
+    "omega_wall": "60 nu/(beta1 d_face^2), Dirichlet face value",
+    "initial_k_m2_s2": 1e-08,
+    "initial_omega_1_s": "max(1,6 nu/(beta1 d_nearest^2))",
+    "Prt": 0.9,
+    "buoyancy": "-nut/(Prt rho0) g dot grad(rho_mixture)",
+    "bubble_dispersion": "none; mean liquid advection plus prescribed slip"
+  }
 }

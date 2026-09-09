@@ -3,6 +3,8 @@
 This case develops **liquid circulation from rest**, driven by a localized
 bottom heat and hydrogen source. Both SimpleFluid and the independent
 OpenFOAM application solve momentum, pressure, temperature, and gas transport.
+It now uses matched Menter-1994 SST with resolved low-Re wall conditions;
+see the [SST equations, wall treatment and validation contract](SST.md).
 It complements the earlier prescribed-flow and uniform-ALE conservation
 fixtures with a resolved buoyant plume and downward return flow.
 
@@ -44,13 +46,13 @@ buoyancy through `rho_mix = (1-alpha_g) rho_l + alpha_g rho_H2`, with a fixed
 ideal-hydrogen reference density `rho_H2 = p_abs M_H2/(R T0)`. Neither steam
 density nor an independent gas momentum equation is used.
 
-The liquid equations use constant reference-density inertia, `nu=mu/rho0`,
+The liquid equations use constant reference-density inertia, molecular `nu=mu/rho0`,
 incompressible continuity, and acceleration `g (rho_mix-rho0)/rho0`. Momentum
 is solved before temperature; then bubble transport and production advance,
 and material feedback is refreshed for the next step. Temperature uses the
 production fixed-grid contract: current frozen `C=rho_mix cp` in storage and
-upwind capacity flux, physical conductivity, and the localized heat source.
-OpenFOAM assembles `C*fvm::ddt(T) + fvm::div(phi_C,T) - fvm::laplacian(k,T)`;
+upwind capacity flux, physical conductivity, and the localized heat source, with SST turbulent conductivity added.
+OpenFOAM assembles `C*fvm::ddt(T) + fvm::div(phi_C,T) - fvm::laplacian(k_eff,T)`;
 `phi_C` uses upwind C, matching SimpleFluid. This is not nonlinear IF97
 enthalpy transport or a phase-resolved energy model.
 
@@ -68,8 +70,11 @@ bubble pressure is fixed at 101325 Pa; this small cavity omits its approximately
 
 The OpenFOAM reference uses its finite-volume PISO momentum/pressure solve;
 it does not prescribe velocity or import SimpleFluid flow fields. Both
-solvers start with exactly zero liquid velocity. Neither solves turbulence,
-interphase drag/lift, bubble-induced turbulence, or interface motion.
+solvers start with zero mean liquid velocity and a documented small turbulence
+seed. Both advance SST k/omega, eddy viscosity and turbulent heat diffusion,
+including density-gradient buoyancy production. Interphase drag/lift,
+turbulent bubble dispersion, bubble-induced turbulence and interface motion
+remain outside this model.
 
 ## Run and outputs
 
@@ -92,7 +97,8 @@ and conservation checks use the complete 3-D domain. SVG is always generated, wi
 
 `history.csv` records temperature extrema/mean, gas holdup, maximum speed,
 upward/downward velocity, inventories, integrated source, continuity, and a
-discrete per-step thermal budget. `transient.json` declares comparison limits
+discrete per-step thermal budget with SST effective conductivity. It also
+records k, omega, nut and wall y+; each step must have maximum wall y+ <= 1. `transient.json` declares comparison limits
 for this coarse fixture. Differences in the PISO implementations and
 collocated velocity reconstruction can remain; the field error figures expose
 them. These are numerical comparisons, not experimental or grid-converged
@@ -107,7 +113,7 @@ temperature increment, source energy, and outward wall conduction; it does
 not claim conservation of an unsupported nonlinear mixture enthalpy.
 
 The focused `bottom_convection_zero_source` CTest disables both sources and
-uses the explicit scale-1 inputs and requires the water to remain cold,
+uses the explicit scale-1 inputs and starts turbulence at its positive floor and requires the water to remain cold,
 gas-free, and stationary. Standalone
 SimpleFluid options `--steps N` and `--source-scale S` support such controls;
 OpenFOAM supports `-steps N` for startup checks. Shortened runs are explicitly

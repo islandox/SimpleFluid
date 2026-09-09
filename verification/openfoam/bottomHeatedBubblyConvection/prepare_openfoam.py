@@ -14,17 +14,19 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--mesh',type=Path,default=Path(__file__).with_name('mesh.dat'))
+    parser.add_argument('--properties',type=Path,default=Path(__file__).with_name('reference.properties'))
+    parser.add_argument('--water-properties',type=Path,default=Path(__file__).resolve().parent.parent/'reference_water.properties')
     args=parser.parse_args()
     case=Path(__file__).resolve().parent
     props={}
-    for raw in (case/'reference.properties').read_text().splitlines():
+    for raw in args.properties.read_text().splitlines():
         words=raw.split('#',1)[0].split()
         if not words: continue
         if len(words)!=2 or words[0] in props: raise ValueError('Malformed or duplicate case parameter')
         value=float(words[1])
         if not math.isfinite(value): raise ValueError('Nonfinite case parameter')
         props[words[0]]=value
-    water=read_reference_water(case.parent/'reference_water.properties')
+    water=read_reference_water(args.water_properties)
     if props.keys() & water.keys(): raise ValueError('Case parameters cannot override the water snapshot')
     props.update(water)
     out=args.output
@@ -54,8 +56,10 @@ fluxRequired {default no; p;}
     (out/'system/fvSolution').write_text(header('fvSolution')+'''
 solvers
 {
- p {solver PCG; preconditioner DIC; tolerance 1e-12; relTol 0; maxIter 2000;}
- "(U|T)" {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-12; relTol 0; maxIter 2000;}
+ p {solver GAMG; smoother DICGaussSeidel; tolerance 1e-12; relTol 0; maxIter 2000;}
+ U {solver smoothSolver; smoother symGaussSeidel; tolerance 1e-12; relTol 0; maxIter 2000;}
+ T {solver PBiCGStab; preconditioner DILU; tolerance 1e-12; relTol 0; maxIter 2000;}
+ "(kSST|omegaSST)" {solver PBiCGStab; preconditioner DILU; tolerance 1e-11; relTol 0; maxIter 1000;}
  "(moles|number)" {solver smoothSolver; smoother symGaussSeidel; tolerance GAS_TRANSPORT_TOLERANCE; relTol 0; maxIter 2000;}
 }
 '''.replace('GAS_TRANSPORT_TOLERANCE',str(props['gas_transport_tolerance'])))

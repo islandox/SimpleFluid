@@ -1767,6 +1767,39 @@ TEST(RadiolyticGasModelTest, DissolvedBoundaryOutflowIsSeparateFromBubbleEscape)
     EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-14);
 }
 
+/** @brief Many cells must not turn summation error into apparent bubble creation. */
+TEST(RadiolyticGasModelTest, LargeCartesianTransportInventoryIsStable)
+{
+    SimpleFluid::ArrReal x, y, z;
+    for (int i = 0; i <= 20; ++i) x.push_back(0.2 * i / 20);
+    for (int i = 0; i <= 10; ++i) y.push_back(0.02 * i / 10);
+    for (int i = 0; i <= 80; ++i) z.push_back(0.2 * i / 80);
+    auto geometry = std::make_shared<ALEMeshType::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, y, z}});
+    auto mesh = std::make_shared<ALEMeshType>(std::move(geometry));
+    auto options = ale_escape_options();
+    options.free_surface_patches.clear();
+    options.initial_dissolved_hydrogen = 0;
+    options.initial_large_number_density = options.initial_large_moles = 0;
+    options.initial_micro_number_density = 1.2345678912345e15;
+    options.initial_micro_moles = 3.141592653589793e-5;
+    options.constant_slip_velocity = 0.005;
+    options.transport_solver_tolerance = 1e-14;
+    ALERadiolyticModelType model(mesh, options);
+    ALEFieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure");
+    ALEFieldType power(mesh, 0.0, "power");
+    ALEVelocityFieldType velocity(mesh, ALEMeshType::Vec3{}, "velocity");
+    ALEFaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_ale_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+    const double expected = options.initial_micro_moles * 0.2 * 0.02 * 0.2;
+    const double roundoff = 64 * std::numeric_limits<double>::epsilon() * expected;
+    EXPECT_NEAR(model.global_microbubble_hydrogen_moles(), expected, roundoff);
+    ASSERT_NO_THROW(model.advance(0.02, 0.02, temperature, pressure, velocity, flux, material, &power));
+    EXPECT_NEAR(model.global_microbubble_hydrogen_moles(), expected, roundoff);
+    EXPECT_LE(model.last_statistics().hydrogen_escaped, roundoff);
+}
+
 /** @brief Positive escape below the old relative cutoff remains observable. */
 TEST(RadiolyticGasModelTest, SmallPositiveEscapeIsNotDiscarded)
 {

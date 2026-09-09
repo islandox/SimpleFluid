@@ -22,4 +22,8 @@ python3 "$case_dir/../plot_water_fields.py" --manifest "$run/manifest.json" \
     --openfoam "$run/openfoam/fields.csv" --simplefluid "$run/simplefluid/fields.csv" \
     --not-before "$started" --output-directory "$run/figures"
 printf 'Comparison: %s/comparison.json\nFigures: %s/figures/index.html\n' "$run" "$run"
+
+python3 "$case_dir/../plot_sst_fields.py" --manifest "$run/manifest.json" \
+    --openfoam-directory "$run/openfoam" --simplefluid-directory "$run/simplefluid" \
+    --not-before "$started" --output-directory "$run/sst-figures"
 exit "$comparison_status"

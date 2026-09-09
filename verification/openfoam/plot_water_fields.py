@@ -105,9 +105,9 @@ def load_fields(manifest: dict, openfoam: Path, simplefluid: Path,
     return datasets
 
 
-def errors(reference: dict, actual: dict) -> dict:
+def errors(reference: dict, actual: dict, fields: dict = FIELDS) -> dict:
     result = {}
-    for key, (_, _, floor) in FIELDS.items():
+    for key, (_, _, floor) in fields.items():
         delta = actual[key] - reference[key]
         absolute = abs(delta)
         relative = relative_error(reference[key], actual[key], floor)
@@ -139,15 +139,15 @@ def rectangle(x: float, y: float, width: float, height: float, fill: str) -> str
     return f'<rect x="{x}" y="{y}" width="{width}" height="{height}" fill="{fill}" shape-rendering="crispEdges"/>'
 
 
-def limits(values: list[float], field: str, mode: str) -> tuple[float, float]:
+def limits(values: list[float], field: str, mode: str, fields: dict = FIELDS) -> tuple[float, float]:
     if mode == "relative":
         bound = max([1e-12, *(abs(value) for value in values)])
         return (0, bound) if field == "speed_m_s" else (-bound, bound)
     if mode == "absolute":
-        return 0, max([FIELDS[field][2], *values])
+        return 0, max([fields[field][2], *values])
     lower, upper = min(values), max(values)
-    if field in ("alpha_g", "speed_m_s"):
-        return 0, max(upper, FIELDS[field][2])
+    if field in ("alpha_g", "speed_m_s", "k_m2_s2", "omega_1_s", "nut_m2_s", "wall_yplus"):
+        return 0, max(upper, fields[field][2])
     if upper - lower <= 1e-10 * max(abs(lower), abs(upper), 1):
         margin = max(abs(lower), 1) * 1e-5
         return lower - margin, upper + margin
@@ -155,7 +155,7 @@ def limits(values: list[float], field: str, mode: str) -> tuple[float, float]:
 
 
 def render(manifest: dict, reference: dict, actual: dict, differences: dict,
-           mode: str, history: bool) -> str:
+           mode: str, history: bool, fields: dict = FIELDS) -> str:
     times = manifest["expected_times_s"]
     samples = manifest["spatial_output"]["cell_samples"]
     planar_grid = manifest["spatial_output"].get("layout") == "xz"
@@ -182,21 +182,21 @@ def render(manifest: dict, reference: dict, actual: dict, differences: dict,
     scope = ("Prescribed liquid velocity; isothermal water; transported bubble fraction."
              if bubble else "Bottom heat and H2 source; both solvers solve buoyant circulation from rest; cooled side/top walls."
              if convection else "Liquid only: gas fraction = 0. Velocity: solved SimpleFluid cells vs affine OpenFOAM kinematic reference.")
-    svg.append(text(35, 68, scope, 16))
+    svg.append(text(35, 68, manifest.get("field_context", scope), 16))
     svg.append(text(35, 94, "History: central x column; sample-centred time bins, no time interpolation."
                     if history and planar_grid else "History: sample-centred time bins, no time interpolation; height follows each mesh."
                     if history else slice_note+"Native x–z section; velocity components shown by arrows."
                     if planar_grid else "Native Cartesian x–z cell sections; one cell across x, uniform through y.", 15))
     selected = list(range(len(times))) if history else [len(times)-1]
     edges = [times[0], *[(a+b)/2 for a, b in zip(times, times[1:])], times[-1]]
-    for field_index, (field, (label, unit, _)) in enumerate(FIELDS.items()):
+    for field_index, (field, (label, unit, _)) in enumerate(fields.items()):
         keys = [(index, sample) for index in selected for sample in samples]
         if mode == "distribution":
             values = [rows[key][field] for rows in (reference, actual) for key in keys]
         else:
             name = "relative_error_percent" if mode == "relative" else "absolute_error"
             values = [differences[key][field][name] for key in keys if differences[key][field][name] is not None]
-        bounds = limits(values, field, mode)
+        bounds = limits(values, field, mode, fields)
         palette = (DIVERGING[2:] if field == "speed_m_s" else DIVERGING) if mode == "relative" else VIRIDIS
         for row_index in range(panels):
             rows = reference if row_index == 0 else actual
@@ -223,7 +223,7 @@ def render(manifest: dict, reference: dict, actual: dict, differences: dict,
                     svg.append(rectangle(left+x0/x_max*width, top+(1-hi/y_max)*plot_height,
                         (x1-x0)/x_max*width+0.02, (hi-lo)/y_max*plot_height+0.02, color(value, bounds, palette)))
             if mode == "distribution" and field == "speed_m_s" and not history:
-                scale = max(bounds[1], FIELDS[field][2])
+                scale = max(bounds[1], fields[field][2])
                 if planar_grid:
                     centers_x=sorted({(rows[selected[-1],s]["x_lower_m"]+rows[selected[-1],s]["x_upper_m"])/2 for s in samples})
                     centers_z=sorted({(rows[selected[-1],s]["z_lower_m"]+rows[selected[-1],s]["z_upper_m"])/2 for s in samples})
@@ -238,7 +238,7 @@ def render(manifest: dict, reference: dict, actual: dict, differences: dict,
                         center_z=(cell["z_lower_m"]+cell["z_upper_m"])/2
                         if center_x not in selected_x or center_z not in selected_z:
                             continue
-                    if cell["speed_m_s"] <= FIELDS[field][2]:
+                    if cell["speed_m_s"] <= fields[field][2]:
                         continue
                     cx = left+(cell["x_lower_m"]+cell["x_upper_m"])/2/x_max*width if planar_grid else left+width/2
                     cy = top+(1-(cell["z_lower_m"]+cell["z_upper_m"])/2/y_max)*plot_height
@@ -269,7 +269,7 @@ def render(manifest: dict, reference: dict, actual: dict, differences: dict,
             svg.append(text(left+width, bar_top+31, f"{bounds[1]:.6g}", 13, "end"))
             if mode == "relative":
                 masked = sum(differences[key][field][name] is None for key in keys)
-                svg.append(text(left, bar_top+52, f"Gray: undefined ({masked}/{len(keys)}); floor {FIELDS[field][2]:g}", 12))
+                svg.append(text(left, bar_top+52, f"Gray: undefined ({masked}/{len(keys)}); floor {fields[field][2]:g}", 12))
     footer = ("Relative error: 100(SF−OF)/|OF|; velocity: 100||U_SF−U_OF||/||U_OF||. Values at/below the stated reference floor are undefined."
               if mode == "relative" else "Resolved laminar thermal/gas buoyancy; prescribed bubble slip. This is a developing transient, not a steady-state claim." if convection
               else "Liquid velocity comparison is diagnostic; the OpenFOAM ALE reference does not solve momentum." if not bubble
@@ -316,14 +316,15 @@ def render_mesh(manifest: dict, reference: dict) -> str:
     return '\n'.join(elements)
 
 
-def generate(manifest: dict, reference: dict, actual: dict, output: Path, formats: list[str]) -> dict:
+def generate(manifest: dict, reference: dict, actual: dict, output: Path, formats: list[str],
+             fields: dict = FIELDS) -> dict:
     output.mkdir(parents=True, exist_ok=True)
-    differences = {key: errors(reference[key], actual[key]) for key in reference}
+    differences = {key: errors(reference[key], actual[key], fields) for key in reference}
     statistics = {"case": manifest["case"], "mode": manifest["mode"], "status": "diagnostic",
                   "matched_cells": len(reference), "fields": {}}
     if manifest.get('validation_scope'):
         statistics['validation_scope'] = manifest['validation_scope']
-    for field, (label, unit, floor) in FIELDS.items():
+    for field, (label, unit, floor) in fields.items():
         records = [value[field] for value in differences.values()]
         relative = [r["relative_error_percent"] for r in records if r["relative_error_percent"] is not None]
         statistics["fields"][field] = {"label": label, "units": unit, "reference_floor": floor,
@@ -334,9 +335,9 @@ def generate(manifest: dict, reference: dict, actual: dict, output: Path, format
     for key in sorted(reference):
         record = {"time_s": reference[key]["time_s"], "sample": key[1]}
         for solver, rows in (("openfoam", reference), ("simplefluid", actual)):
-            columns = [*COLUMNS, "speed_m_s"] + (["x_lower_m", "x_upper_m"] if "x_lower_m" in rows[key] else [])
+            columns = list(dict.fromkeys([*COLUMNS, "speed_m_s", *fields])) + (["x_lower_m", "x_upper_m"] if "x_lower_m" in rows[key] else [])
             record.update({f"{solver}_{column}": rows[key][column] for column in columns})
-        for field in FIELDS:
+        for field in fields:
             record.update({f"{field}_{metric}": value for metric, value in differences[key][field].items()})
         records.append(record)
     with (output/"matched_fields.csv").open("w", newline="") as stream:
@@ -353,14 +354,15 @@ def generate(manifest: dict, reference: dict, actual: dict, output: Path, format
                f"<h1>{html.escape(manifest['case'])} / {html.escape(manifest['mode'])}</h1>",
                f"<p>{html.escape(manifest.get('validation_scope', 'Complete declared output history.'))}</p>",
                "<p>Matched cell data, not interpolated fields. Relative errors at or below the reference floors are undefined (gray), including zero/zero. Velocity errors use the full vector difference.</p>",
-               "<p>Bubble carrier velocity is prescribed. ALE gas fraction is identically zero (liquid-only case); its velocity reference is affine mesh kinematics, not an OpenFOAM momentum solution. The velocity figures are diagnostic.</p>",
+               (f"<p>{html.escape(manifest.get('field_context', 'SST field diagnostics; wall y+ is zero in interior cells.'))}</p>" if fields != FIELDS else
+                "<p>Bubble carrier velocity is prescribed. ALE gas fraction is identically zero (liquid-only case); its velocity reference is affine mesh kinematics, not an OpenFOAM momentum solution. The velocity figures are diagnostic.</p>"),
                "<p><a href='matched_fields.csv'>Matched values and errors (CSV)</a> · <a href='statistics.json'>Statistics and denominator floors</a></p>"]
     if manifest["case"] == "bottomHeatedBubblyConvection":
         gallery[4] = "<p>Both solvers advance momentum, pressure, temperature and dilute gas transport. Bottom-localized heat and gas sources drive convection from rest. Histories show the central x column; all cells are retained in CSV.</p>"
     for mode, history in plots:
         stem = ("history_" if history else "") + mode
         svg = output/f"{stem}.svg"
-        svg.write_text(render_mesh(manifest,reference) if mode=='mesh' else render(manifest, reference, actual, differences, mode, history), encoding="utf-8")
+        svg.write_text(render_mesh(manifest,reference) if mode=='mesh' else render(manifest, reference, actual, differences, mode, history, fields), encoding="utf-8")
         for fmt in formats:
             if fmt != "svg":
                 subprocess.run([converter, "--format", fmt, "--output", str(output/f"{stem}.{fmt}"), str(svg)], check=True)
