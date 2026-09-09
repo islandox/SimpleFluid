@@ -1094,7 +1094,6 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
     d_cached_pressure_graph_signature.clear();
     d_preconditioner = Teuchos::null;
     d_belos_solver = Teuchos::null;
-    d_last_belos_matrix = nullptr;
     d_solution = Teuchos::null;
 }
 
@@ -1412,12 +1411,10 @@ bool CoupledPressureVelocitySolver<Pack, MeshType>::has_external_generation() co
 {
     if (d_cached_system.linear_operator.is_null())
         return false;
-    // The assembled matrix and linear_operator are aliases. Belos additionally
-    // retains one dormant iteration owner after setProblem(null).
+    // The assembled matrix and linear_operator are aliases. solve() releases
+    // the operator from its Belos problem before returning.
     const int aliases = d_cached_system.matrix.is_null() ? 1 : 2;
-    const int dormant =
-        !d_belos_solver.is_null() && d_last_belos_matrix == d_cached_system.linear_operator.getRawPtr() ? 1 : 0;
-    return d_cached_system.linear_operator.strong_count() > aliases + dormant;
+    return d_cached_system.linear_operator.strong_count() > aliases;
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -2114,7 +2111,6 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
         ++d_cache_statistics.belos_solver_reuses;
     }
     const auto converged = d_belos_solver->solve() == Belos::Converged;
-    d_last_belos_matrix = matrix.getRawPtr();
     const auto iterations = d_belos_solver->getNumIters();
     const auto achieved_tolerance = d_belos_solver->achievedTol();
     d_cache_statistics.preconditioner_scratch_allocations +=
@@ -2176,6 +2172,10 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
     }
     d_mesh->sync_periodic_boundaries(velocity);
     d_mesh->sync_periodic_boundaries(pressure);
+    // Some Belos versions retain the last LinearProblem in a dormant iteration.
+    // Explicitly release its operator so generation ownership does not depend
+    // on the linked Trilinos version's internal reference count.
+    problem->setOperator(Teuchos::null);
     d_belos_solver->setProblem(Teuchos::null);
 
     using std::sqrt;
