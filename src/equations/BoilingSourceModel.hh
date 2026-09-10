@@ -19,6 +19,8 @@
 #include <Teuchos_CommHelpers.hpp>
 
 #include <algorithm>
+#include <array>
+#include <memory>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -191,6 +193,59 @@ public:
     using void_model_type = ScalarVoidFractionModel<Pack, mesh_type>;
     using diagnostics_type = BoilingPhaseChangeDiagnostics<scalar_type>;
 
+    /** Includes source fields, steam ledger and an in-progress phase change. */
+    class StateSnapshot
+    {
+        friend class BoilingSourceModel;
+        const BoilingSourceModel* owner=nullptr;
+        std::shared_ptr<const int> configuration;
+        std::uint64_t epoch{};
+        std::array<std::vector<scalar_type>,6> fields;
+        std::array<scalar_type,9> ledger{};
+        std::vector<scalar_type> collapse_rate, release_scratch;
+        bool completion_pending{};
+        diagnostics_type diagnostics;
+    };
+
+    StateSnapshot snapshot() const
+    {
+        StateSnapshot saved;
+        saved.owner=this; saved.configuration=d_snapshot_configuration; saved.epoch=mesh_geometry_epoch(*d_mesh);
+        const std::array fields{&d_source_alpha_boil,&d_latent_heat_sink,&d_condensation_latent_heat_release,
+            &d_condensation_mass_rate,&d_phase_change_mass_rate,&d_rejected_vapor_mass_rate};
+        for(size_t f=0;f<fields.size();++f)
+            for(size_t i=0;i<d_mesh->num_owned_cells();++i) saved.fields[f].push_back(fields[f]->value(i));
+        saved.ledger={d_submerged_steam_mass,d_cumulative_accepted_evaporation_mass,d_cumulative_condensed_liquid_mass,
+            d_pending_time_step,d_pending_void_volume_before,d_pending_reserved_void_volume,d_pending_accepted_void_volume,
+            d_pending_collapse_volume,d_pending_submerged_steam_mass_before};
+        saved.collapse_rate=d_pending_collapse_rate; saved.release_scratch=d_condensation_release_scratch;
+        saved.completion_pending=d_completion_pending; saved.diagnostics=d_last_phase_change_diagnostics;
+        return saved;
+    }
+
+    void restore(const StateSnapshot& saved)
+    {
+        collective_detail::collective_local_validation(*d_mesh,"Boiling snapshot restore",[&]
+        {
+            if(saved.owner!=this || saved.configuration!=d_snapshot_configuration || saved.epoch!=mesh_geometry_epoch(*d_mesh))
+                throw std::invalid_argument("Boiling snapshot is foreign or stale.");
+        });
+        auto collapse=saved.collapse_rate, release=saved.release_scratch;
+        const std::array fields{&d_source_alpha_boil,&d_latent_heat_sink,&d_condensation_latent_heat_release,
+            &d_condensation_mass_rate,&d_phase_change_mass_rate,&d_rejected_vapor_mass_rate};
+        for(size_t f=0;f<fields.size();++f)
+        {
+            for(size_t i=0;i<d_mesh->num_owned_cells();++i) fields[f]->set_owned_value(i,saved.fields[f][i]);
+            fields[f]->sync_ghosts();
+        }
+        const std::array ledger{&d_submerged_steam_mass,&d_cumulative_accepted_evaporation_mass,&d_cumulative_condensed_liquid_mass,
+            &d_pending_time_step,&d_pending_void_volume_before,&d_pending_reserved_void_volume,&d_pending_accepted_void_volume,
+            &d_pending_collapse_volume,&d_pending_submerged_steam_mass_before};
+        for(size_t i=0;i<ledger.size();++i) *ledger[i]=saved.ledger[i];
+        d_pending_collapse_rate=std::move(collapse); d_condensation_release_scratch=std::move(release);
+        d_completion_pending=saved.completion_pending; d_last_phase_change_diagnostics=saved.diagnostics;
+    }
+
     /**
      * @brief Construct a boiling model on a mesh with optional configuration.
      */
@@ -216,6 +271,7 @@ public:
     void configure(const BoilingSourceOptions& options)
     {
         validate_boiling_source_options(options);
+        d_snapshot_configuration=std::make_shared<const int>(0);
         d_options = options;
         d_source_alpha_boil.put_scalar(0.0);
         d_latent_heat_sink.put_scalar(0.0);
@@ -906,6 +962,7 @@ private:
         }
     }
 
+    std::shared_ptr<const int> d_snapshot_configuration;
     SP<const mesh_type> d_mesh;
     BoilingSourceOptions d_options;
     field_type d_source_alpha_boil;
