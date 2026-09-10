@@ -14,6 +14,7 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/VectorLaplacian.hh"
+#include "FVM/MomentCorrectedGaussGradient.hh"
 #include "fields/TensorCellField.hh"
 
 #include <algorithm>
@@ -80,79 +81,93 @@ auto& current_gauss_geometry(Cache& cache)
     return gauss;
 }
 
-template<class ScalarField,
-         class BoundaryConditionProvider,
-         class BoundaryValueProvider,
-         class VectorField,
-         class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const ScalarField& field,
-    BoundaryConditionProvider boundary_condition,
-    BoundaryValueProvider boundary_value,
-    VectorField& gradient,
-    GradientCache& cache)
+template<class Field>
+concept ScalarReconstructionField = std::is_arithmetic_v<std::remove_cvref_t<decltype(
+    std::declval<const Field&>().value(typename Field::local_ordinal_type{}))>>;
+
+template<class Field>
+using GaussGeometry = FVM::TransportGeometryCache<std::remove_cvref_t<decltype(std::declval<const Field&>().mesh())>>;
+
+template<ScalarReconstructionField ScalarField, class BoundaryConditionProvider, class BoundaryValueProvider,
+         class VectorField, class GradientCache>
+    requires std::invocable<BoundaryConditionProvider,int,size_t> && std::invocable<BoundaryValueProvider,int,size_t>
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const ScalarField& field,
+    BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
+    VectorField& gradient, GradientCache& cache, const GaussGeometry<ScalarField>* geometry = nullptr)
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(
-            field, boundary_condition, boundary_value, gradient, current_gauss_geometry(cache));
+        if (geometry)
+            FVM::moment_corrected_gauss_cell_gradient<1>(
+                field, boundary_condition, boundary_value, gradient, *geometry);
+        else
+            FVM::gauss_linear_cell_gradient(
+                field, boundary_condition, boundary_value, gradient, current_gauss_geometry(cache));
         return;
     }
-    FVM::cell_gradient(
-        field, boundary_condition, boundary_value, gradient, std::get<0>(cache));
+    FVM::cell_gradient(field, boundary_condition, boundary_value, gradient, std::get<0>(cache));
 }
 
-template<class ScalarField, class VectorField, class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const ScalarField& field,
-    const BoundaryConditionMap& boundary_conditions,
-    VectorField& gradient,
-    GradientCache& cache)
+template<ScalarReconstructionField ScalarField, class VectorField, class GradientCache>
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const ScalarField& field,
+    const BoundaryConditionMap& conditions, VectorField& gradient, GradientCache& cache,
+    const GaussGeometry<ScalarField>* geometry = nullptr)
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(
-            field, boundary_conditions, gradient, current_gauss_geometry(cache));
+        if (geometry)
+        {
+            auto condition = [&](int batch, size_t)
+            {
+                auto found = conditions.find(field.mesh().boundary_batch_name(batch));
+                return found == conditions.end() ? BoundaryCondition{} : found->second;
+            };
+            reconstruct_gradient(scheme, field, condition,
+                [&](int batch, size_t index) { return condition(batch, index).value; },
+                gradient, cache, geometry);
+        }
+        else
+            FVM::gauss_linear_cell_gradient(field, conditions, gradient, current_gauss_geometry(cache));
         return;
     }
-    FVM::cell_gradient(
-        field, boundary_conditions, gradient, std::get<0>(cache));
+    FVM::cell_gradient(field, conditions, gradient, std::get<0>(cache));
 }
 
-template<class ScalarField, class VectorField, class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const ScalarField& field,
-    VectorField& gradient,
-    GradientCache& cache)
+template<ScalarReconstructionField ScalarField, class VectorField, class GradientCache>
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const ScalarField& field,
+    VectorField& gradient, GradientCache& cache, const GaussGeometry<ScalarField>* geometry = nullptr)
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(field, gradient, current_gauss_geometry(cache));
+        if (geometry)
+            reconstruct_gradient(scheme, field, [](int, size_t) { return BoundaryCondition{}; },
+                [](int, size_t) { return real_t{}; }, gradient, cache, geometry);
+        else
+            FVM::gauss_linear_cell_gradient(field, gradient, current_gauss_geometry(cache));
         return;
     }
     FVM::cell_gradient(field, gradient, std::get<0>(cache));
 }
 
-template<class VectorField, class BoundaryValueProvider,
-         class TensorField, class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const VectorField& field,
-    BoundaryValueProvider boundary_value,
-    TensorField& gradient,
-    GradientCache& cache)
+template<class VectorField, class BoundaryValueProvider, class TensorField, class GradientCache>
+    requires (!ScalarReconstructionField<VectorField>)
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const VectorField& field,
+    BoundaryValueProvider boundary_value, TensorField& gradient, GradientCache& cache,
+    const GaussGeometry<VectorField>* geometry = nullptr,
+    std::function<BoundaryConditionType(int,size_t)> boundary_type = {})
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(
-            field, boundary_value, gradient, current_gauss_geometry(cache));
+        if (geometry)
+            FVM::moment_corrected_gauss_cell_gradient<3>(field,
+                [&](int batch, size_t index)
+                { return boundary_type ? boundary_type(batch, index) : BoundaryConditionType::Dirichlet; },
+                boundary_value, gradient, *geometry);
+        else
+            FVM::gauss_linear_cell_gradient(field, boundary_value, gradient, current_gauss_geometry(cache));
         return;
     }
-    FVM::cell_gradient(
-        field, boundary_value, gradient, std::get<0>(cache));
+    FVM::cell_gradient(field, boundary_value, gradient, std::get<0>(cache));
 }
 
 } // namespace turbulence_detail
@@ -216,7 +231,8 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
                     [](const auto& entry) { return entry.second.type == BoundaryConditionType::Slip; }))
                 {
                     const auto locations = geometry.boundary_locations();
-                    slip_gradient = std::make_unique<FVM::CellGradientCache<Pack, mesh_type>>(mesh,
+                    slip_gradient = std::make_unique<turbulence_detail::GradientCache<Pack, mesh_type>>(
+                        std::in_place_index<0>, mesh,
                         [mesh, locations, velocity_conditions](local_ordinal_type face, local_ordinal_type cell)
                         {
                             const auto& location = locations.at(face);
@@ -235,7 +251,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
                     candidate_fields[i] = std::make_unique<field_type>(mesh, scalar_type{}, names[i]);
                 }
         }
-        std::unique_ptr<FVM::CellGradientCache<Pack, mesh_type>> slip_gradient;
+        std::unique_ptr<turbulence_detail::GradientCache<Pack, mesh_type>> slip_gradient;
         FVM::TransportGeometryCache<mesh_type> geometry;
         velocity_field_type laplacian;
         std::vector<real_t> delta;
@@ -1143,7 +1159,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
             turbulence_detail::reconstruct_gradient(
                 options.gradient_scheme,
                 candidate->k, k_condition, k_value,
-                candidate->k_gradient, candidate->gradient_cache);
+                candidate->k_gradient, candidate->gradient_cache, candidate->sas ? &candidate->sas->geometry : nullptr);
             if (candidate->menter_family)
             {
                 auto secondary_condition = [&](int batch_id, size_t in_batch_id)
@@ -1169,7 +1185,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                     candidate->secondary, secondary_condition,
                     secondary_value,
                     candidate->secondary_gradient,
-                    candidate->gradient_cache);
+                    candidate->gradient_cache, candidate->sas ? &candidate->sas->geometry : nullptr);
             }
         });
     candidate->k_gradient.sync_ghosts();
@@ -1229,7 +1245,9 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                     candidate->wall_velocity,
                     initial_boundary_velocity,
                     candidate->velocity_gradient,
-                    candidate->sas && candidate->sas->slip_gradient ? *candidate->sas->slip_gradient : candidate->gradient_cache);
+                    candidate->sas && candidate->sas->slip_gradient ? *candidate->sas->slip_gradient : candidate->gradient_cache,
+                    candidate->sas ? &candidate->sas->geometry : nullptr,
+                    [&](int batch,size_t){return configured_velocity_boundary_cache.type.at(batch);});
                 const auto& closure =
                     std::get<SSTKOmegaEquation>(
                         candidate->closure);
@@ -1863,7 +1881,7 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
                 d_options.gradient_scheme,
                 state.candidate_k, k_condition, k_value,
                 state.candidate_k_gradient,
-                state.gradient_cache);
+                state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
 
             if (state.menter_family)
             {
@@ -1899,7 +1917,7 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
                     state.candidate_secondary,
                     secondary_condition, secondary_value,
                     state.candidate_secondary_gradient,
-                    state.gradient_cache);
+                    state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
             }
         });
     state.candidate_k_gradient.sync_ghosts();
@@ -2172,7 +2190,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         turbulence_detail::reconstruct_gradient(
             d_options.gradient_scheme,
             k_field, k_condition, k_value, k_gradient,
-            state.gradient_cache);
+            state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
         if (state.menter_family)
         {
             auto secondary_condition = [&](int batch_id, size_t in_batch_id)
@@ -2197,7 +2215,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                 d_options.gradient_scheme,
                 secondary_field, secondary_condition,
                 secondary_value, secondary_gradient,
-                state.gradient_cache);
+                state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
         }
     };
     auto sync_scalar_gradients = [&](velocity_field_type& k_gradient,
@@ -2217,7 +2235,9 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                 d_options.gradient_scheme,
                 derivative_velocity, boundary_velocity,
                 state.candidate_velocity_gradient,
-                state.sas && state.sas->slip_gradient ? *state.sas->slip_gradient : state.gradient_cache);
+                state.sas && state.sas->slip_gradient ? *state.sas->slip_gradient : state.gradient_cache,
+                state.sas ? &state.sas->geometry : nullptr,
+                [&](int batch,size_t){return velocity_boundary_cache.type.at(batch);});
             update_scalar_gradients(state.k, state.secondary,
                                     state.candidate_k_gradient,
                                     state.candidate_secondary_gradient,
@@ -2229,7 +2249,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                     turbulence_detail::reconstruct_gradient(
                         d_options.gradient_scheme,
                         material.density, state.buoyancy_gradient,
-                        state.gradient_cache);
+                        state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
                 }
                 else
                 {
@@ -2239,7 +2259,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                         *buoyancy_context
                              ->temperature_boundary_conditions,
                         state.buoyancy_gradient,
-                        state.gradient_cache);
+                        state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
                 }
             }
         });

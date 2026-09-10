@@ -270,7 +270,8 @@ mistaken for foundation or Phase 9 completion.
       serial/MPI affine, curved-source and transient tests.
 - [x] Qualify native Cartesian periodic SAS and legacy translational pairs,
       including wrapped derivatives, flux geometry and output images.
-- [ ] Qualify Gauss-linear SAS paths.
+- [x] Qualify Gauss-linear SAS with coordinate-moment consistency correction
+      on native/legacy, curved, skewed, slip and periodic paths.
 - [ ] Extend rollback-safe SAS support to additional multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.

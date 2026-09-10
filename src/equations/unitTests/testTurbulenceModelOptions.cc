@@ -622,13 +622,15 @@ TEST(TurbulenceModelOptionsTest, SASParserValidationAndWallPolicy)
     db.set("turbulence_model", std::string("SSTKOmegaSAS"));
     db.set("turbulence_sas_enabled", false);
     db.set("turbulence_sas_diagnostics", true);
+    db.set("turbulence_gradient_scheme", std::string("gaussLinear"));
     db.set("turbulence_sas_cs", .12);
     db.set("turbulence_sas_cap_time_fraction", .2);
     auto options = SimpleFluid::turbulence_model_options_from_database(db);
     auto active = options;
     active.sas.enabled = true;
     active.gradient_scheme = SimpleFluid::FVM::CellGradientScheme::GaussLinear;
-    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(active), std::invalid_argument);
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(active));
+    EXPECT_EQ(options.gradient_scheme, SimpleFluid::FVM::CellGradientScheme::GaussLinear);
     EXPECT_FALSE(options.sas.enabled);
     EXPECT_TRUE(options.sas.diagnostics);
     EXPECT_DOUBLE_EQ(options.sas.cs, .12);

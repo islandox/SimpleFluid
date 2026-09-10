@@ -152,3 +152,33 @@ TEST(SASSupportedPathsTest, PeriodicNativeFlowAdvancesWithNonzeroSource)
     solver.velocity().sync_ghosts();
     expect_active_bounded_step(solver); expect_active_bounded_step(solver);
 }
+
+TEST(SASSupportedPathsTest, GaussLinearSASAdvancesWithSlipAndRestarts)
+{
+    auto mesh=box_mesh(); auto bc=closed_boundaries(*mesh);
+    bc.velocity["zmin"].type=BoundaryConditionType::Slip;
+    bc.velocity["zmax"].type=BoundaryConditionType::Slip;
+    auto options=sas_options(); options.gradient_scheme=FVM::CellGradientScheme::GaussLinear;
+    IncompressibleIsothermalSolver<Pack> solver(mesh,bc,transient_options());
+    auto& model=solver.configure_turbulence(options); initialize_circulation(solver);
+    expect_active_bounded_step(solver);
+    auto saved=model.snapshot(); const auto q=model.sas_statistics().max_source;
+    expect_active_bounded_step(solver); model.restore(saved);
+    EXPECT_DOUBLE_EQ(model.sas_statistics().max_source,q);
+}
+
+TEST(SASSupportedPathsTest, GaussLinearSASCouplesSignedBoussinesqProduction)
+{
+    auto mesh=box_mesh(); auto time=transient_options();
+    time.thermal_expansion=.001; time.gravity_z=-9.81;
+    BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),time);
+    solver.initialize_linear_temperature({0,0,1},2,1);
+    auto options=sas_options(); options.gradient_scheme=FVM::CellGradientScheme::GaussLinear;
+    options.buoyancy_model=TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+    const auto& model=solver.configure_turbulence(options); initialize_circulation(solver);
+    expect_active_bounded_step(solver);
+    double local=0,global=0;
+    for(size_t i=0;i<mesh->num_owned_cells();++i) local+=std::abs(model.output_fields().at("buoyancy_production")->value(i));
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&global);
+    EXPECT_GT(global,1e-6);
+}
