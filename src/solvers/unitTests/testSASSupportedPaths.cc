@@ -354,3 +354,27 @@ TEST(SASSupportedPathsTest, RadiolysisAndHydrogenLedgersRollBackWithSAS)
         });
     }
 }
+
+TEST(SASSupportedPathsTest, BoilingSourcesAndPendingStateRollBackWithSAS)
+{
+    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    BoilingSourceOptions options; options.enable_bulk_boiling=true; options.enable_wall_boiling=true;
+    options.saturation_temperature=299.; options.latent_heat=1000.; options.gas_density=1.;
+    options.wall_heat_flux=1.; options.wall_evaporation_fraction=.2; options.wall_boiling_patches={"zmin"};
+    auto& boiling=solver.configure_boiling_source(options);
+    expect_active_bounded_step(solver);
+    const auto phase=boiling.last_phase_change_diagnostics();
+    EXPECT_GT(phase.accepted_evaporation_mass,0);
+    double local=0,total=0;
+    for(size_t i=0;i<mesh->num_owned_cells();++i) local+=boiling.latent_heat_sink().value(i)*mesh->cell_volume(i)*.001;
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&total);
+    EXPECT_NEAR(total,phase.accepted_evaporation_mass*options.latent_heat,1e-13);
+    expect_late_multiphysics_rollback(solver,[&]
+    {
+        EXPECT_DOUBLE_EQ(boiling.last_phase_change_diagnostics().accepted_evaporation_mass,phase.accepted_evaporation_mass);
+        EXPECT_FALSE(boiling.phase_change_completion_pending());
+    });
+    const auto stale=boiling.snapshot(); boiling.configure(options);
+    EXPECT_ANY_THROW(boiling.restore(stale));
+}

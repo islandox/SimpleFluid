@@ -247,9 +247,9 @@ the RANS/SAS equations remain full-cell rather than phase weighted. Active SAS
 also supports existing precursor reaction/advection/diffusion, with complete
 concentration, inventory, source and diagnostic snapshots. Ideal and Sheng
 two-population radiolysis snapshots cover
-transport histories, slip fluxes, populations and hydrogen ledgers. Remaining
-boiling/free-surface combinations await their complete
-transaction integration.
+transport histories, slip fluxes, populations and hydrogen ledgers. Bulk/wall
+boiling also restores its source fields, steam/condensate ledger and pending
+phase-change state. Fixed-grid free-surface integration remains to be qualified.
 The existing laminar-only planar-ALE restriction remains. This does not add
 conservative ALE turbulence, bubble-induced turbulence, interphase momentum,
 boiling, transition, or a new turbulent heat-flux closure.

@@ -210,3 +210,23 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths tes
 ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Radiolysis' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^SASRadiolysis_2procs$' --output-on-failure
 ```
+
+## Boiling
+
+The existing bulk/wall boiling model now snapshots all six source fields,
+steam/condensate and cumulative ledgers, pending phase-change scalars/vectors,
+completion flag and diagnostics. Its configuration/geometry identity guards
+restoration. SAS enables this model with scalar void while preserving existing
+latent-heat and source ownership and the prohibition on simultaneous Sheng
+radiolysis and boiling.
+
+The test checks nonzero SAS and boiling, volume-integrated latent-energy/source
+consistency, restoration of pending state and diagnostics after a later
+rejection, retry and stale-snapshot rejection. The serial selection passes
+13 tests with one expected MPI-only skip; the dedicated MPI registration passes.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testPhase13PlusModels
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Boiling|^BoilingSourceModelTest' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASBoiling_2procs$' --output-on-failure
+```
