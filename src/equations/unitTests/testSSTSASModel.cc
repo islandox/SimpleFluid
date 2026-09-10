@@ -3,6 +3,7 @@
 #include "equations/CollectiveValidation.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/VectorLaplacian.hh"
+#include "FVM/MomentCorrectedGaussGradient.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -61,16 +62,17 @@ template<class M> MaterialPropertyFields<Pack, M> material(SP<const M> mesh, dou
     return {mesh, o, TimeStepperOptions{}};
 }
 
-template<class M> void model_contract(SP<const M> mesh)
+template<class M> void model_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGradientScheme::LeastSquares)
 {
     using Traits = MeshFieldTraits<Pack, M>;
     using Model = TurbulenceModel<Pack, M>;
+    auto configuration=[&](bool enabled=true) { auto result=options(enabled); result.gradient_scheme=scheme; return result; };
     auto mat = material(mesh);
     auto bc = prescribed_boundaries(*mesh);
     Model sas(mesh, bc), parent(mesh, bc), disabled(mesh, bc);
-    auto config = options();
+    auto config = configuration();
     sas.configure(config, mat, 1);
-    disabled.configure(options(false), mat, 1);
+    disabled.configure(configuration(false), mat, 1);
     config.model = TurbulenceModelType::SSTKOmega;
     parent.configure(config, mat, 1);
     typename Traits::vector_cell_type u(mesh, "velocity");
@@ -138,7 +140,7 @@ template<class M> void model_contract(SP<const M> mesh)
     sas.restore_transported_state(sas.turbulent_kinetic_energy(), *sas.specific_dissipation_rate(),
         sas.turbulent_kinematic_viscosity(), u, mat, 1);
     EXPECT_FALSE(sas.sas_statistics().valid);
-    auto no_diagnostics = options(); no_diagnostics.sas.diagnostics = false;
+    auto no_diagnostics = configuration(); no_diagnostics.sas.diagnostics = false;
     sas.configure(no_diagnostics, mat, 1);
     EXPECT_EQ(sas.output_fields().size(), 6U);
     ASSERT_TRUE(advance(sas).converged);
@@ -206,7 +208,7 @@ TEST(SSTSASModelTest, OneCellSourceUnitsVolumeAndDensity)
         }
 }
 
-template<class M> void derivative_contract(SP<const M> mesh)
+template<class M> void derivative_contract(SP<const M> mesh, bool gauss=false)
 {
     using Traits = MeshFieldTraits<Pack, M>;
     typename Traits::vector_cell_type u(mesh, "u"), lap(mesh, "lap"), kg(mesh, "kg");
@@ -232,13 +234,16 @@ template<class M> void derivative_contract(SP<const M> mesh)
         }
         u.sync_ghosts(); scalar.sync_ghosts();
         auto boundary_value = [&](int b, size_t i) { return value(mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i])); };
-        FVM::cell_gradient(u, boundary_value, gradient, gradient_cache); gradient.sync_ghosts();
+        if (gauss) FVM::moment_corrected_gauss_cell_gradient<3>(u,boundary_type,boundary_value,gradient,geometry);
+        else FVM::cell_gradient(u, boundary_value, gradient, gradient_cache);
+        gradient.sync_ghosts();
         collective_detail::collective_local_validation(*mesh, "Manufactured vector Laplacian", [&]
         { FVM::unit_vector_laplacian(u, gradient, lap, geometry, boundary_value, boundary_type); });
         auto scalar_bc = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Dirichlet, 0}; };
         auto scalar_value = [&](int b, size_t i)
         { const auto p=mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i]); return 4+p.x+2*p.y-p.z; };
-        FVM::cell_gradient(scalar, scalar_bc, scalar_value, kg, gradient_cache);
+        if (gauss) FVM::moment_corrected_gauss_cell_gradient<1>(scalar,scalar_bc,scalar_value,kg,geometry);
+        else FVM::cell_gradient(scalar, scalar_bc, scalar_value, kg, gradient_cache);
         for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
         {
             const auto v = lap.value(i); EXPECT_LT(std::hypot(v.x, v.y, v.z), 2e-11);
@@ -250,7 +255,9 @@ template<class M> void derivative_contract(SP<const M> mesh)
     for (size_t i = 0; i < mesh->num_owned_cells(); ++i) u.set_owned_value(i, value(mesh->cell_centroid(i)));
     u.sync_ghosts();
     auto boundary_value = [&](int b, size_t i) { return value(mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i])); };
-    FVM::cell_gradient(u, boundary_value, gradient, gradient_cache); gradient.sync_ghosts();
+    if (gauss) FVM::moment_corrected_gauss_cell_gradient<3>(u,boundary_type,boundary_value,gradient,geometry);
+        else FVM::cell_gradient(u, boundary_value, gradient, gradient_cache);
+        gradient.sync_ghosts();
     collective_detail::collective_local_validation(*mesh, "Quadratic vector Laplacian", [&]
     { FVM::unit_vector_laplacian(u, gradient, lap, geometry, boundary_value, boundary_type); });
     // Orthogonal interior cells have exact quadratic differences. Boundary flux is first order.
@@ -416,7 +423,7 @@ SP<const Native> cylindrical_mesh(size_t n, bool closed)
     return std::make_shared<Native>(std::make_shared<Meshes::OrthogonalCylindrial3D>(Vec3D<ArrReal>{{radial,theta,axial}}));
 }
 
-template<class M> double quadratic_laplacian_error(SP<const M> mesh)
+template<class M> double quadratic_laplacian_error(SP<const M> mesh, bool gauss=false)
 {
     using Traits=MeshFieldTraits<Pack,M>;
     typename Traits::vector_cell_type u(mesh,"quadratic_u"), lap(mesh,"quadratic_lap");
@@ -427,7 +434,9 @@ template<class M> double quadratic_laplacian_error(SP<const M> mesh)
     auto boundary=[&](int b,size_t i) { return value(mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i])); };
     FVM::CellGradientCache<Pack,M> gradient_cache(mesh);
     FVM::TransportGeometryCache<M> geometry(*mesh);
-    FVM::cell_gradient(u,boundary,grad,gradient_cache); grad.sync_ghosts();
+    if (gauss) FVM::moment_corrected_gauss_cell_gradient<3>(u,[](int,size_t){return BoundaryConditionType::Dirichlet;},boundary,grad,geometry);
+    else FVM::cell_gradient(u,boundary,grad,gradient_cache);
+    grad.sync_ghosts();
     collective_detail::collective_local_validation(*mesh,"Manufactured SAS curvature",[&]
     { FVM::unit_vector_laplacian(u,grad,lap,geometry,boundary,[](int,size_t) { return BoundaryConditionType::Dirichlet; }); });
     std::array<double,2> local{},total{};
@@ -492,14 +501,14 @@ TEST(SSTSASDerivativesTest, SemiStructuredSkewedExtrusion)
 
 namespace
 {
-template<class M> void slip_derivative_contract(SP<const M> mesh)
+template<class M> void slip_derivative_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGradientScheme::LeastSquares)
 {
     using Traits=MeshFieldTraits<Pack,M>;
     auto bc=prescribed_boundaries(*mesh); bc.velocity["zmin"]={BoundaryConditionType::Slip,{}};
     auto mat=material(mesh);
     for (int mode=0; mode<3; ++mode)
     {
-        TurbulenceModel<Pack,M> model(mesh,bc); model.configure(options(),mat,1);
+        TurbulenceModel<Pack,M> model(mesh,bc); auto config=options(); config.gradient_scheme=scheme; model.configure(config,mat,1);
         typename Traits::vector_cell_type u(mesh,"slip_u");
         typename Traits::scalar_face_type phi(mesh,0.,"slip_phi");
         auto value=[mode](auto p)->vec3<double>
@@ -538,7 +547,7 @@ SP<const Native> periodic_mesh(size_t n)
         Vec3D<ArrReal>{{x,{0.,.5,1.},{0.,.5,1.}}},Vec3D<bool>{true,true,true}));
 }
 
-template<class M> double periodic_laplacian_error(SP<const M> mesh)
+template<class M> double periodic_laplacian_error(SP<const M> mesh, bool gauss=false)
 {
     using Traits=MeshFieldTraits<Pack,M>;
     typename Traits::vector_cell_type u(mesh,"periodic_u"),lap(mesh,"periodic_lap"),kg(mesh,"periodic_kg");
@@ -558,8 +567,13 @@ template<class M> double periodic_laplacian_error(SP<const M> mesh)
         const auto x=mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i]).x;
         return vec3<double>{3.,std::sin(wave*x),-2*std::sin(wave*x)};
     };
-    FVM::cell_gradient(u,boundary,grad,gc); grad.sync_ghosts();
-    FVM::cell_gradient(k,kg,gc);
+    if (gauss)
+    {
+        FVM::moment_corrected_gauss_cell_gradient<3>(u,[](int,size_t){return BoundaryConditionType::Dirichlet;},boundary,grad,geometry);
+        FVM::moment_corrected_gauss_cell_gradient<1>(k,[](int,size_t){return BoundaryCondition{};},[](int,size_t){return real_t{};},kg,geometry);
+    }
+    else { FVM::cell_gradient(u,boundary,grad,gc); FVM::cell_gradient(k,kg,gc); }
+    grad.sync_ghosts();
     FVM::unit_vector_laplacian(u,grad,lap,geometry,boundary,[](int,size_t){return BoundaryConditionType::Dirichlet;});
     double local=0,global=0;
     for (size_t i=0;i<mesh->num_owned_cells();++i)
@@ -622,4 +636,23 @@ TEST(SSTSASDerivativesTest, LegacyPairedPeriodicImages)
     bc.velocity["xmax"].type=BoundaryConditionType::Periodic;
     auto mat=material<Legacy>(mesh); TurbulenceModel<Pack> model(mesh,bc);
     EXPECT_NO_THROW(model.configure(options(),mat,1));
+}
+
+TEST(SSTSASDerivativesTest, GaussLinearCoordinateMomentsPreserveGeometryInvariants)
+{
+    const auto scheme=FVM::CellGradientScheme::GaussLinear;
+    EXPECT_LT(periodic_laplacian_error(periodic_mesh(16),true),.3*periodic_laplacian_error(periodic_mesh(8),true));
+    auto box=native_mesh();
+    derivative_contract(box,true); model_contract(box,scheme); slip_derivative_contract(box,scheme);
+    derivative_contract<Legacy>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25)),true);
+    auto cylinder=cylindrical_mesh(4,true);
+    derivative_contract(cylinder,true); model_contract(cylinder,scheme);
+    EXPECT_LT(quadratic_laplacian_error(cylindrical_mesh(8,true),true),.8*quadratic_laplacian_error(cylinder,true));
+    if(Tpetra::getDefaultComm()->getSize()==1)
+    {
+        auto semi=semi_structured_mesh(4);
+        derivative_contract(semi,true); model_contract(semi,scheme);
+        EXPECT_LT(quadratic_laplacian_error(semi_structured_mesh(8),true),.8*quadratic_laplacian_error(semi,true));
+        slip_derivative_contract<Legacy>(test::make_skewed_prism_mesh<Pack>(),scheme);
+    }
 }
