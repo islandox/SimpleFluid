@@ -284,6 +284,9 @@ runs:
           test -e "$HDF5_PREFIX/lib/libhdf5.dylib"
           TRILINOS_CMAKE_PREFIX_PATH="$HDF5_PREFIX;$NETCDF_PREFIX;$BREW_PREFIX"
           TRILINOS_PLATFORM_OPTIONS+=(
+            # Share Teuchos type information and explicit instantiations
+            # between SimpleFluid's library and its test executables.
+            -D BUILD_SHARED_LIBS=ON
             -D CMAKE_PREFIX_PATH="$TRILINOS_CMAKE_PREFIX_PATH"
             -D CMAKE_OSX_ARCHITECTURES=arm64
             -D TPL_HDF5_INCLUDE_DIRS="$HDF5_PREFIX/include"

@@ -4,7 +4,7 @@ name: CMake on multiple platforms
 
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop", "github_CI" ]
   pull_request:
     branches: [ "main" ]
 
@@ -43,7 +43,7 @@ jobs:
             cpp_compiler: clang++
             fortran_compiler: mpifort
             cmake_platform_options: -DCMAKE_OSX_ARCHITECTURES=arm64
-            cache_suffix: v7
+            cache_suffix: v8
         exclude:
           - os: macos-26
             compiler_id: GCC
