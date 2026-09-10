@@ -240,8 +240,10 @@ source fields, so a later temperature rejection restores the preceding SAS
 record. Initial solver scope is fixed-grid single-phase isothermal or
 Boussinesq flow, including the parent signed buoyancy source and resolved SST
 wall policy. The existing high-Re k-epsilon wall policy remains incompatible.
-Active SAS currently rejects phase/inventory/free-surface/material-feedback
-models in Boussinesq; these require their own complete transaction integration.
+Material feedback is included in the SAS transaction, restoring its mirrors
+as well as material and turbulence fields on failure. Active SAS currently
+rejects other phase/inventory/free-surface models pending their complete
+transaction integration.
 The existing laminar-only planar-ALE restriction remains. This does not add
 conservative ALE turbulence, bubble-induced turbulence, interphase momentum,
 boiling, transition, or a new turbulent heat-flux closure.

@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <functional>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -70,6 +71,11 @@ public:
     template<class Field> void capture(Field& field)
     {
         actions.emplace_back([snapshot = FieldStateSnapshot(field), &field] { snapshot.restore(field); });
+    }
+    template<class Model> void capture_model(Model& model)
+    {
+        auto saved = std::make_shared<typename Model::StateSnapshot>(model.snapshot());
+        actions.emplace_back([saved = std::move(saved), &model] { model.restore(*saved); });
     }
     void add(std::function<void()> action) { actions.push_back(std::move(action)); }
     void restore() const { for (const auto& action : actions) action(); }

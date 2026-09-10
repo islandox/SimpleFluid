@@ -182,3 +182,75 @@ TEST(SASSupportedPathsTest, GaussLinearSASCouplesSignedBoussinesqProduction)
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&global);
     EXPECT_GT(global,1e-6);
 }
+
+namespace
+{
+struct SavedSASFields
+{
+    using Field=ScalarCellFieldStored<Pack>;
+    std::map<const Field*,std::vector<double>> values;
+    template<class Solver> explicit SavedSASFields(const Solver& solver)
+    {
+        capture(solver.temperature()); capture(solver.pressure());
+        const auto& m=solver.material_properties();
+        capture(m.density); capture(m.dynamic_viscosity); capture(m.specific_heat_capacity); capture(m.thermal_conductivity);
+        auto model=[&](const auto* p) { if(p) for(const auto& [name,field]:p->output_fields()) capture(*field); };
+        model(solver.find_turbulence_model()); model(solver.find_material_feedback_model());
+        model(solver.find_scalar_void_fraction_model()); model(solver.find_precursor_model());
+        model(solver.find_radiolytic_gas_model()); model(solver.find_boiling_source_model());
+    }
+    void capture(const Field& field)
+    {
+        auto& saved=values[&field];
+        for(size_t i=0;i<field.num_owned_cells();++i) saved.push_back(field.value(i));
+    }
+    void expect_restored() const
+    {
+        for(const auto& [field,saved]:values)
+            for(size_t i=0;i<saved.size();++i) EXPECT_DOUBLE_EQ(field->value(i),saved[i]);
+    }
+};
+
+// Feedback runs after temperature, radiolysis and precursors. Inputs remain finite
+// until this final feedback stage; overflow rejects the trial after upstream work.
+void expect_late_multiphysics_rollback(BoussinesqSolver<Pack>& solver)
+{
+    solver.temperature().put_scalar(300.); solver.temperature().sync_ghosts();
+    MaterialFeedbackOptions original;
+    if(auto* feedback=solver.find_material_feedback_model()) original=feedback->options();
+    else { original.reference_dynamic_viscosity=.001; solver.configure_material_feedback(original); }
+    auto reject=original;
+    reject.density_mode=DensityFeedbackMode::BoussinesqTemperatureOnly;
+    reject.reference_density=1.; reject.reference_temperature=300.; reject.thermal_expansion=1e308;
+    solver.configure_material_feedback(reject);
+    const SavedSASFields saved(solver);
+    const auto time=solver.time(); const auto step=solver.step_index();
+    const auto source=solver.find_turbulence_model()->sas_statistics().max_source;
+    solver.add_temperature_source("sas_rejection_cooling",-2000.);
+    EXPECT_ANY_THROW(solver.step());
+    saved.expect_restored();
+    EXPECT_DOUBLE_EQ(solver.time(),time); EXPECT_EQ(solver.step_index(),step);
+    EXPECT_DOUBLE_EQ(solver.find_turbulence_model()->sas_statistics().max_source,source);
+    solver.remove_temperature_source("sas_rejection_cooling");
+    solver.configure_material_feedback(original);
+    expect_active_bounded_step(solver);
+}
+}
+
+TEST(SASSupportedPathsTest, MaterialFeedbackPublishesAndRollsBackWithSAS)
+{
+    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    MaterialFeedbackOptions feedback;
+    feedback.density_mode=DensityFeedbackMode::BoussinesqTemperatureOnly;
+    feedback.reference_density=1.2; feedback.reference_temperature=300;
+    feedback.thermal_expansion=.01; feedback.reference_dynamic_viscosity=.002;
+    solver.configure_material_feedback(feedback);
+    expect_active_bounded_step(solver);
+    for(size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        EXPECT_NEAR(solver.material_properties().density.value(i),1.2,1e-12);
+        EXPECT_DOUBLE_EQ(solver.material_properties().dynamic_viscosity.value(i),.002);
+    }
+    expect_late_multiphysics_rollback(solver);
+}

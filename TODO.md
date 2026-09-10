@@ -272,7 +272,8 @@ mistaken for foundation or Phase 9 completion.
       including wrapped derivatives, flux geometry and output images.
 - [x] Qualify Gauss-linear SAS with coordinate-moment consistency correction
       on native/legacy, curved, skewed, slip and periodic paths.
-- [ ] Extend rollback-safe SAS support to additional multiphysics configurations.
+- [x] Add rollback-safe SAS material feedback.
+- [ ] Extend rollback-safe SAS support to remaining multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.
 - [ ] Perform qualified whole-flow external comparisons with explicit parent-SST
