@@ -176,6 +176,12 @@ public:
         return d_mesh->neighbor_cell(id);
     }
 
+    /** @brief Preserve the wrapped displacement of paired periodic faces. */
+    Vec3 cell_center_vector(face_id_t face, cell_id_t cell) const
+    {
+        return d_mesh->cell_center_vector(face, cell);
+    }
+
     scalar_type face_area(face_id_t id) const
     {
         return d_mesh->face_area(id);

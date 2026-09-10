@@ -268,7 +268,9 @@ mistaken for foundation or Phase 9 completion.
 - [x] Qualify serial SemiStructuredXY_Z SAS on skewed triangular extrusions.
 - [x] Qualify mixed slip SAS boundaries with normal-foot reconstruction and
       serial/MPI affine, curved-source and transient tests.
-- [ ] Qualify periodic and Gauss-linear SAS paths.
+- [x] Qualify native Cartesian periodic SAS and legacy translational pairs,
+      including wrapped derivatives, flux geometry and output images.
+- [ ] Qualify Gauss-linear SAS paths.
 - [ ] Extend rollback-safe SAS support to additional multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.

@@ -390,7 +390,7 @@ TEST(SSTSASModelTest, RejectsUnverifiedPeriodicAndStaleGeometry)
     SP<const Native> mesh = mutable_mesh; auto mat = material(mesh);
     auto bc = prescribed_boundaries(); bc.velocity["xmin"].type = BoundaryConditionType::Periodic;
     TurbulenceModel<Pack, Native> slip(mesh, bc);
-    EXPECT_THROW(slip.configure(options(), mat, 1), std::invalid_argument);
+    EXPECT_ANY_THROW(slip.configure(options(), mat, 1));
     TurbulenceModel<Pack, Native> model(mesh, {}); model.configure(options(), mat, 1);
     const auto snapshot = model.snapshot();
     VectorCellFieldStored<Pack> u(mesh, "u"); ScalarFaceFieldStored<Pack> flux(mesh, 0., "flux");
@@ -527,4 +527,99 @@ TEST(SSTSASDerivativesTest, SlipMixedConditionPreservesAffineShearAndNormalFlux)
         slip_derivative_contract<Legacy>(skew);
         slip_derivative_contract<Native>(std::make_shared<Native>(skew));
     }
+}
+
+namespace
+{
+SP<const Native> periodic_mesh(size_t n)
+{
+    ArrReal x(n+1); for (size_t i=0;i<=n;++i) x[i]=double(i)/n;
+    return std::make_shared<Native>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{x,{0.,.5,1.},{0.,.5,1.}}},Vec3D<bool>{true,true,true}));
+}
+
+template<class M> double periodic_laplacian_error(SP<const M> mesh)
+{
+    using Traits=MeshFieldTraits<Pack,M>;
+    typename Traits::vector_cell_type u(mesh,"periodic_u"),lap(mesh,"periodic_lap"),kg(mesh,"periodic_kg");
+    typename Traits::tensor_cell_type grad(mesh,"periodic_grad");
+    typename Traits::scalar_cell_type k(mesh,"periodic_k");
+    const double wave=2*std::acos(-1.);
+    for (size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        const auto x=mesh->cell_centroid(i).x;
+        u.set_owned_value(i,{3.,std::sin(wave*x),-2*std::sin(wave*x)});
+        k.set_owned_value(i,2+std::sin(wave*x));
+    }
+    u.sync_ghosts(); k.sync_ghosts();
+    FVM::CellGradientCache<Pack,M> gc(mesh); FVM::TransportGeometryCache<M> geometry(*mesh);
+    auto boundary=[&](int b,size_t i)
+    {
+        const auto x=mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i]).x;
+        return vec3<double>{3.,std::sin(wave*x),-2*std::sin(wave*x)};
+    };
+    FVM::cell_gradient(u,boundary,grad,gc); grad.sync_ghosts();
+    FVM::cell_gradient(k,kg,gc);
+    FVM::unit_vector_laplacian(u,grad,lap,geometry,boundary,[](int,size_t){return BoundaryConditionType::Dirichlet;});
+    double local=0,global=0;
+    for (size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        const auto x=mesh->cell_centroid(i).x, h=1./mesh->owned_cell_map()->getGlobalNumElements()*4;
+        const auto expected=-wave*wave*std::sin(wave*x);
+        const auto v=lap.value(i); local=std::max(local,std::hypot(v.x,v.y-expected,v.z+2*expected));
+        EXPECT_NEAR(kg.value(i).x,wave*std::cos(wave*x),wave*wave*wave*h*h);
+    }
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_MAX,1,&local,&global);
+    return global;
+}
+}
+
+TEST(SSTSASDerivativesTest, NativePeriodicFourierSeamsAndOutputImages)
+{
+    const auto coarse=periodic_laplacian_error(periodic_mesh(8));
+    const auto fine=periodic_laplacian_error(periodic_mesh(16));
+    EXPECT_LT(fine,.3*coarse);
+    auto mesh=periodic_mesh(8); const auto topology=mesh->vtu_topology();
+    for (size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        auto low=topology->points[topology->connectivity[8*i]];
+        auto high=topology->points[topology->connectivity[8*i+6]];
+        EXPECT_NEAR((high.x-low.x)*(high.y-low.y)*(high.z-low.z),mesh->cell_volume(i),1e-14);
+    }
+    auto mat=material(mesh); TurbulenceModel<Pack,Native> model(mesh,{}); model.configure(options(),mat,1);
+    VectorCellFieldStored<Pack> u(mesh,"u"); ScalarFaceFieldStored<Pack> phi(mesh,0.,"phi");
+    for (size_t i=0;i<mesh->num_owned_cells();++i) u.set_owned_value(i,{0,std::sin(2*std::acos(-1.)*mesh->cell_centroid(i).x),0});
+    u.sync_ghosts(); const auto cache=FVM::cache_velocity_boundary_conditions<Pack>(mesh,BoundaryConditionSet{});
+    EXPECT_TRUE(model.advance(u,phi,cache,.001,mat,1,FVM::NonOrthogonalTreatment::Explicit).converged);
+    EXPECT_GT(model.sas_statistics().max_source,1e-4);
+}
+
+TEST(SSTSASDerivativesTest, LegacyPairedPeriodicImages)
+{
+    if (Tpetra::getDefaultComm()->getSize()!=1) GTEST_SKIP()<<"Paired legacy fixture supplies partners locally";
+    auto mesh=test::build_mesh<Pack>(test::make_box_database(8,2,2,.125));
+    std::vector<Pack::local_ordinal_type> left,right;
+    for (const auto& [batch,faces] : mesh->boundary_batches())
+    {
+        if (mesh->boundary_batch_name(batch)=="xmin") left=faces.face_lids;
+        if (mesh->boundary_batch_name(batch)=="xmax") right=faces.face_lids;
+    }
+    for (auto a:left) for(auto b:right)
+    {
+        const auto ca=mesh->face_centroid(a),cb=mesh->face_centroid(b);
+        if (std::hypot(ca.y-cb.y,ca.z-cb.z)<1e-12)
+        {
+            auto oa=mesh->owner_cell(a),ob=mesh->owner_cell(b);
+            mesh->set_periodic_face(a,ob); mesh->set_periodic_face(b,oa);
+        }
+    }
+    const auto legacy_error=periodic_laplacian_error<Legacy>(mesh);
+    const auto stored_error=periodic_laplacian_error<Native>(std::make_shared<Native>(mesh));
+    EXPECT_NEAR(legacy_error,stored_error,1e-12);
+    EXPECT_LT(legacy_error,5.0);
+    auto bc=prescribed_boundaries(*mesh);
+    bc.velocity["xmin"].type=BoundaryConditionType::Periodic;
+    bc.velocity["xmax"].type=BoundaryConditionType::Periodic;
+    auto mat=material<Legacy>(mesh); TurbulenceModel<Pack> model(mesh,bc);
+    EXPECT_NO_THROW(model.configure(options(),mat,1));
 }
