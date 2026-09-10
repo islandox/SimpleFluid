@@ -11,6 +11,7 @@
 #pragma once
 
 #include "FVM/TransportSystem.hh"
+#include "equations/CollectiveValidation.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/DatabaseOptionReader.hh"
 #include "dataclass/typedefs.hh"
@@ -195,6 +196,55 @@ public:
     using face_flux_field_type = typename field_traits::scalar_face_type;
     using diagnostics_type = PrecursorInventoryDiagnostics<scalar_type>;
 
+    /** Complete accepted precursor state, tied to one configuration and geometry. */
+    class StateSnapshot
+    {
+        friend class DelayedNeutronPrecursorModel;
+        const DelayedNeutronPrecursorModel* owner = nullptr;
+        std::shared_ptr<const int> configuration;
+        std::uint64_t epoch{};
+        std::array<std::vector<std::vector<scalar_type>>,3> values;
+        std::vector<diagnostics_type> diagnostics;
+        bool inventory_initialized{};
+    };
+
+    StateSnapshot snapshot() const
+    {
+        StateSnapshot saved;
+        saved.owner=this; saved.configuration=d_snapshot_configuration;
+        saved.epoch=mesh_geometry_epoch(*d_mesh);
+        const std::array groups{&d_fields,&d_inventories,&d_sources};
+        for(size_t kind=0;kind<groups.size();++kind)
+            for(const auto& field:*groups[kind])
+            {
+                auto& values=saved.values[kind].emplace_back();
+                for(size_t i=0;i<d_mesh->num_owned_cells();++i) values.push_back(field->value(i));
+            }
+        saved.diagnostics=d_last_inventory_diagnostics;
+        saved.inventory_initialized=d_inventory_initialized;
+        return saved;
+    }
+
+    void restore(const StateSnapshot& saved)
+    {
+        collective_detail::collective_local_validation(*d_mesh,"Precursor snapshot restore",[&]
+        {
+            if(saved.owner!=this || saved.configuration!=d_snapshot_configuration || saved.epoch!=mesh_geometry_epoch(*d_mesh))
+                throw std::invalid_argument("Precursor snapshot is foreign or stale.");
+        });
+        const std::array groups{&d_fields,&d_inventories,&d_sources};
+        for(size_t kind=0;kind<groups.size();++kind)
+            for(size_t group=0;group<groups[kind]->size();++group)
+            {
+                auto& field=*groups[kind]->at(group);
+                for(size_t i=0;i<d_mesh->num_owned_cells();++i) field.set_owned_value(i,saved.values[kind][group][i]);
+                field.sync_ghosts();
+            }
+        d_last_inventory_diagnostics=saved.diagnostics;
+        d_inventory_initialized=saved.inventory_initialized;
+        d_transport_solver.reset();
+    }
+
     /**
      * @brief Construct a precursor model on a mesh.
      * @note Construction validates options collectively on the mesh
@@ -222,6 +272,7 @@ public:
     {
         validate_collective_configuration(options);
         validate_delayed_neutron_precursor_options(options);
+        d_snapshot_configuration=std::make_shared<const int>(0);
         d_options = options;
         d_fields.clear();
         d_inventories.clear();
@@ -1058,6 +1109,7 @@ private:
         return values;
     }
 
+    std::shared_ptr<const int> d_snapshot_configuration;
     SP<const mesh_type> d_mesh;
     std::optional<FVM::TransportGeometryCache<mesh_type>>
         d_transport_geometry_cache;
