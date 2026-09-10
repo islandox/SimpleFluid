@@ -1044,9 +1044,8 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                 d_mesh->visit([](const auto& mesh)
                 {
                     using Concrete = std::decay_t<decltype(mesh)>;
-                    if constexpr (std::is_same_v<Concrete, typename mesh_type::Cylindrical>
-                                  || std::is_same_v<Concrete, typename mesh_type::SemiStructured>)
-                        throw std::invalid_argument("Active SAS has no verified cylindrical or SemiStructuredXY_Z vector Laplacian; use Cartesian or planar polyhedral geometry.");
+                    if constexpr (std::is_same_v<Concrete, typename mesh_type::SemiStructured>)
+                        throw std::invalid_argument("Active SAS has no verified SemiStructuredXY_Z vector Laplacian.");
                 });
             for (const auto& [name, condition] : d_velocity_boundary_conditions)
                 if (condition.type == BoundaryConditionType::Slip || condition.type == BoundaryConditionType::Periodic)

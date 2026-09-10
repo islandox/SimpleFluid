@@ -301,3 +301,10 @@ foreach(_region_procs IN ITEMS 2 4)
         PROCS ${_region_procs} ARGS "--gtest_filter=BoussinesqPlanarALESupportMatrixTest.AcceptsCompositeAxialMotion"
         LABELS "mpi;multi_region;ale;pressure_velocity" TIMEOUT 180)
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME SASSupportedPaths_2procs
+    TARGET testSASSupportedPaths
+    PROCS 2
+    LABELS "mpi;turbulence;sas;small_fixture"
+    TIMEOUT 120)

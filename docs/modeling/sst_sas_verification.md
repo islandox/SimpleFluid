@@ -1,5 +1,8 @@
 # SST-SAS implementation verification — 2026-09-10
 
+This is the initial implementation record. Subsequent support extensions are
+tracked in [sst_sas_extensions.md](sst_sas_extensions.md).
+
 This record applies to the uncommitted SST-SAS implementation on
 `feature/turbulence`, starting from
 `812fc63518df3918ea46c0876440d1a7d49ed3c8`. The starting working tree was clean.
