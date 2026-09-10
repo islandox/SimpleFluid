@@ -382,13 +382,13 @@ TEST(SSTSASDerivativesTest, NativePartitionedUnstructuredSkewedFaces)
     model_contract(mesh);
 }
 
-TEST(SSTSASModelTest, RejectsUnverifiedSlipAndStaleGeometry)
+TEST(SSTSASModelTest, RejectsUnverifiedPeriodicAndStaleGeometry)
 {
     auto cartesian = std::make_shared<Meshes::OrthogonalCartesian3D>(Vec3D<ArrReal>{{
         {0., .25, .5, .75, 1.}, {0., .25, .5, .75, 1.}, {0., .25, .5, .75, 1.}}});
     auto mutable_mesh = std::make_shared<Native>(cartesian);
     SP<const Native> mesh = mutable_mesh; auto mat = material(mesh);
-    auto bc = prescribed_boundaries(); bc.velocity["xmin"].type = BoundaryConditionType::Slip;
+    auto bc = prescribed_boundaries(); bc.velocity["xmin"].type = BoundaryConditionType::Periodic;
     TurbulenceModel<Pack, Native> slip(mesh, bc);
     EXPECT_THROW(slip.configure(options(), mat, 1), std::invalid_argument);
     TurbulenceModel<Pack, Native> model(mesh, {}); model.configure(options(), mat, 1);
@@ -488,4 +488,43 @@ TEST(SSTSASDerivativesTest, SemiStructuredSkewedExtrusion)
     std::cout<<"SAS semi-structured L1="<<coarse<<" -> "<<fine<<'\n';
     EXPECT_LT(fine,.8*coarse);
     model_contract(mesh);
+}
+
+namespace
+{
+template<class M> void slip_derivative_contract(SP<const M> mesh)
+{
+    using Traits=MeshFieldTraits<Pack,M>;
+    auto bc=prescribed_boundaries(*mesh); bc.velocity["zmin"]={BoundaryConditionType::Slip,{}};
+    auto mat=material(mesh);
+    for (int mode=0; mode<3; ++mode)
+    {
+        TurbulenceModel<Pack,M> model(mesh,bc); model.configure(options(),mat,1);
+        typename Traits::vector_cell_type u(mesh,"slip_u");
+        typename Traits::scalar_face_type phi(mesh,0.,"slip_phi");
+        auto value=[mode](auto p)->vec3<double>
+        { return mode==0 ? vec3<double>{p.y+3,0,0} : mode==1 ? vec3<double>{0,0,p.z} : vec3<double>{p.y*p.y,0,0}; };
+        for (size_t i=0; i<mesh->num_owned_cells(); ++i) u.set_owned_value(i,value(mesh->cell_centroid(i)));
+        u.sync_ghosts();
+        auto cache=FVM::cache_velocity_boundary_conditions<Pack>(mesh,bc);
+        for (const auto& [batch,faces] : mesh->boundary_batches())
+            for (size_t i=0; i<faces.face_lids.size(); ++i)
+                cache.value.at(batch)[i]=value(mesh->face_centroid(faces.face_lids[i]));
+        EXPECT_TRUE(model.advance(u,phi,cache,.001,mat,1,FVM::NonOrthogonalTreatment::Explicit).converged);
+        if (mode<2) EXPECT_LT(model.sas_statistics().max_source,1e-20);
+        else EXPECT_GT(model.sas_statistics().max_source,1e-4);
+    }
+}
+}
+
+TEST(SSTSASDerivativesTest, SlipMixedConditionPreservesAffineShearAndNormalFlux)
+{
+    slip_derivative_contract(native_mesh());
+    slip_derivative_contract<Legacy>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25)));
+    if (Tpetra::getDefaultComm()->getSize()==1)
+    {
+        auto skew=test::make_skewed_prism_mesh<Pack>();
+        slip_derivative_contract<Legacy>(skew);
+        slip_derivative_contract<Native>(std::make_shared<Native>(skew));
+    }
 }

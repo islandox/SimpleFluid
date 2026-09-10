@@ -141,8 +141,13 @@ in [the extension report](sst_sas_extensions.md).
 
 Native `SemiStructuredXY_Z` uses the same planar-face operator directly, with
 its existing serial-only ownership contract. Skewed triangular extrusions have
-manufactured derivative/refinement and transient solver coverage. Slip and
-periodic velocity conditions remain rejected pending their separate extensions. A cylindrical full
+manufactured derivative/refinement and transient solver coverage. Slip uses
+zero normal face velocity and zero normal derivative of tangential velocity.
+Its Laplacian boundary flux is the normal projection only. A SAS-only cached
+normal-foot reconstruction enforces this mixed condition even on skewed faces;
+changing slip-patch membership requires reconfiguration. Ordinary SST and
+source-disabled SAS retain their existing reconstruction. Periodic velocity
+conditions remain rejected pending their separate extension. A cylindrical full
 annulus has connected interior angular faces, not a boundary-value periodic
 patch. Source-disabled SAS retains the established parent paths.
 
@@ -150,7 +155,7 @@ Supported active derivative paths are planar HEX_8/WEDGE_6 polyhedral legacy
 meshes, native Cartesian, cylindrical and serial semi-structured handles, native planar unstructured handles (with the
 existing partitioned adapter in MPI), and handles of existing STK meshes.
 Native execution does not construct a legacy mesh. Prescribed velocity/no-slip
-and homogeneous Neumann outlet conditions are supported. Prescribed face
+homogeneous Neumann outlet and mixed slip conditions are supported. Prescribed face
 values and non-orthogonal corrections are honored. Quadratic orthogonal
 interior differences are exact; the existing two-point Dirichlet boundary flux
 has first-order boundary error. The manufactured skewed-prism refinement

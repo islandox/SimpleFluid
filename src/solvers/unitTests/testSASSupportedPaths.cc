@@ -65,18 +65,24 @@ TEST(SASSupportedPathsTest, CylindricalCartesianComponentsAdvanceTransientSwirl)
     for (size_t i=0; i<theta.size(); ++i) theta[i]=2*std::numbers::pi*i/16;
     SP<const Handle> mesh=std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCylindrial3D>(
         Vec3D<ArrReal>{{{1.,1.25,1.5,1.75,2.},theta,{0.,.25,.5,.75,1.}}}));
-    IncompressibleIsothermalSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-    solver.configure_turbulence(sas_options());
-    for (size_t i=0; i<mesh->num_owned_cells(); ++i)
+    for (bool slip : {false,true})
     {
-        const auto p=mesh->cell_centroid(i);
-        const auto amplitude=std::sin(std::numbers::pi*(std::hypot(p.x,p.y)-1))
-                             *std::sin(std::numbers::pi*p.z);
-        solver.velocity().set_owned_value(i,{-p.y*amplitude,p.x*amplitude,0});
+        auto boundaries=closed_boundaries(*mesh);
+        if (slip)
+            for (auto& [name,condition] : boundaries.velocity) condition.type=BoundaryConditionType::Slip;
+        IncompressibleIsothermalSolver<Pack> solver(mesh,boundaries,transient_options());
+        solver.configure_turbulence(sas_options());
+        for (size_t i=0; i<mesh->num_owned_cells(); ++i)
+        {
+            const auto p=mesh->cell_centroid(i);
+            const auto amplitude=std::sin(std::numbers::pi*(std::hypot(p.x,p.y)-1))
+                                 *std::sin(std::numbers::pi*p.z);
+            solver.velocity().set_owned_value(i,{-p.y*amplitude,p.x*amplitude,0});
+        }
+        solver.velocity().sync_ghosts();
+        expect_active_bounded_step(solver);
+        expect_active_bounded_step(solver);
     }
-    solver.velocity().sync_ghosts();
-    expect_active_bounded_step(solver);
-    expect_active_bounded_step(solver);
 }
 
 TEST(SASSupportedPathsTest, SemiStructuredPrismsAdvanceWithoutLegacyMesh)
@@ -98,4 +104,35 @@ TEST(SASSupportedPathsTest, SemiStructuredPrismsAdvanceWithoutLegacyMesh)
     solver.velocity().sync_ghosts();
     expect_active_bounded_step(solver);
     expect_active_bounded_step(solver);
+}
+
+namespace
+{
+SP<const Handle> box_mesh()
+{
+    return std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{{0.,.25,.5,.75,1.},{0.,.25,.5,.75,1.},{0.,.25,.5,.75,1.}}}));
+}
+
+template<class Solver> void initialize_circulation(Solver& solver)
+{
+    const auto& mesh=solver.velocity().mesh();
+    for (size_t i=0; i<mesh.num_owned_cells(); ++i)
+    {
+        const auto p=mesh.cell_centroid(i); const auto pi=std::numbers::pi;
+        solver.velocity().set_owned_value(i,{std::sin(pi*p.x)*std::sin(pi*p.x)*std::sin(2*pi*p.y),
+            -std::sin(2*pi*p.x)*std::sin(pi*p.y)*std::sin(pi*p.y),0});
+    }
+    solver.velocity().sync_ghosts();
+}
+}
+
+TEST(SASSupportedPathsTest, SlipWallsAdvanceWithNonzeroSourceAndContinuity)
+{
+    auto mesh=box_mesh(); auto bc=closed_boundaries(*mesh);
+    bc.velocity["zmin"]={BoundaryConditionType::Slip,{}};
+    bc.velocity["zmax"]={BoundaryConditionType::Slip,{}};
+    IncompressibleIsothermalSolver<Pack> solver(mesh,bc,transient_options());
+    solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    expect_active_bounded_step(solver); expect_active_bounded_step(solver);
 }
