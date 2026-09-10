@@ -92,10 +92,13 @@ int main(int argc, char** argv)
     const auto comm = Tpetra::getDefaultComm();
     try
     {
-        if (argc != 6)
+        if (argc != 6 && argc != 7)
             throw std::invalid_argument("usage: region_scaling_benchmark native|composite|materialized|flattened "
-                "axis_cells regions traversal_and_apply_repeats output.vtu");
+                "axis_cells regions traversal_and_apply_repeats output.vtu [auto|reference]");
         const std::string mode = argv[1];
+        const std::string assembly = argc == 7 ? argv[6] : "auto";
+        if (assembly != "auto" && assembly != "reference")
+            throw std::invalid_argument("assembly must be auto or reference");
         const size_t n = positive_integer(argv[2]), regions = positive_integer(argv[3]), repeats = positive_integer(argv[4]);
         if (mode != "native" && mode != "composite" && mode != "materialized" && mode != "flattened")
             throw std::invalid_argument("unknown mesh baseline");
@@ -112,6 +115,7 @@ int main(int argc, char** argv)
             std::cout << "{\"type\":\"metadata\",\"commit\":\"" << SIMPLEFLUID_GIT_COMMIT
                 << "\",\"dirty\":" << SIMPLEFLUID_GIT_DIRTY << ",\"build\":\"" << SIMPLEFLUID_BUILD_TYPE
                 << "\",\"compiler\":\"" << SIMPLEFLUID_COMPILER << "\",\"mode\":\"" << mode
+                << "\",\"assembly\":\"" << assembly
                 << "\",\"axis_cells\":" << n << ",\"global_cells\":" << n*n*n << ",\"regions_requested\":" << regions
                 << ",\"representation_regions\":" << ((mode == "composite" || mode == "materialized") ? regions : 1)
                 << ",\"ranks\":" << comm->getSize() << ",\"repeats\":" << repeats
@@ -224,7 +228,10 @@ int main(int argc, char** argv)
         { return BoundaryCondition{BoundaryConditionType::Dirichlet,
             analytic(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i]))}; };
         start = begin();
-        const auto system = FVM::diffusion_system<Pack>(*mesh, 1., condition, [](int) { return 0.; });
+        const auto source = [](int) { return 0.; };
+        const auto system = assembly == "reference"
+            ? FVM::detail::diffusion_system_reference_impl<Pack>(*mesh, 1., condition, source)
+            : FVM::diffusion_system<Pack>(*mesh, 1., condition, source);
         checkpoint("assembly", elapsed(start));
 
         Pack::vector_type x(mesh->owned_cell_map(), true), y(mesh->owned_cell_map(), true);

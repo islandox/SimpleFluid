@@ -5,6 +5,7 @@
 #pragma once
 
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/ResolvedDiffusionGeometry.hh"
 #include "dataclass/TpetraTypes.hh"
 
 #include <Teuchos_Array.hpp>
@@ -12,6 +13,8 @@
 
 #include <cstddef>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 namespace SimpleFluid::FVM
 {
@@ -27,7 +30,7 @@ namespace SimpleFluid::FVM::detail
 
 /** @brief Assemble scalar orthogonal diffusion for any mapped mesh. */
 template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
-DiffusionSystem<Pack> diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
+DiffusionSystem<Pack> diffusion_system_reference_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
     const auto execution = acquire_mesh_execution(mesh);
@@ -116,6 +119,103 @@ DiffusionSystem<Pack> diffusion_system_impl(const MeshType& mesh, typename Pack:
 
     matrix->fillComplete();
     return {matrix, rhs};
+}
+
+/** @brief Assemble scalar diffusion with typed region traversal and resolved face metrics. */
+template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
+DiffusionSystem<Pack> region_diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
+    BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
+{
+    const auto execution = acquire_mesh_execution(mesh);
+    using matrix_type = typename Pack::matrix_type;
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+
+    if (diffusivity < scalar_type{})
+        throw std::invalid_argument("diffusion_system requires non-negative diffusivity.");
+
+    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
+    Teuchos::Array<local_ordinal_type> columns;
+    Teuchos::Array<scalar_type> values;
+    columns.reserve(32);
+    values.reserve(32);
+
+    // Preserve owned-row and native face ordering, including fine subfaces.
+    // Only the temporary resolved face changes; field IDs and CRS assembly do not.
+    mesh.visit_owned_region_cells([&](local_ordinal_type cell_lid, auto canonical_cell,
+                                     auto native_cell, const auto& region)
+    {
+        columns.clear();
+        values.clear();
+        scalar_type diagonal{};
+        region.visit_cell_faces(native_cell, [&](const auto& face)
+        {
+            if (!face.interior()) return;
+            const auto canonical_other = face.opposite_cell(canonical_cell);
+            const auto other_lid = mesh.region_cell_local_id(canonical_other);
+            if (other_lid == mesh.invalid_local_id())
+                throw std::logic_error("Region diffusion requires the adjacent cell in the existing halo.");
+            const ResolvedDiffusionGeometry<std::remove_cvref_t<decltype(face)>, typename MeshType::scalar_type>
+                geometry(face);
+            const auto coefficient = interior_diffusion_coefficient(
+                geometry, face.face, canonical_cell, canonical_other, diffusivity);
+            diagonal += coefficient;
+            columns.push_back(other_lid);
+            values.push_back(-coefficient);
+        });
+        columns.push_back(cell_lid);
+        values.push_back(diagonal);
+        matrix->insertLocalValues(cell_lid, columns(), values());
+        rhs->replaceLocalValue(cell_lid,
+            static_cast<scalar_type>(region.cell_volume(native_cell)) * right_hand_source(cell_lid));
+    });
+
+    // Retain the reference's ascending visible-face callback and update order.
+    const auto locations = boundary_face_locations(mesh);
+    for (size_t f = 0; f < locations.size(); ++f)
+    {
+        const auto& location = locations[f];
+        if (!location.active) continue;
+        const auto face_lid = static_cast<local_ordinal_type>(f);
+        if (!mesh.is_owned_face(face_lid)) continue;
+        const auto face = mesh.resolve_region_face(face_lid);
+        if (face.interior()) continue;
+        const auto owner_lid = mesh.region_cell_local_id(face.owner);
+        const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+        if (condition.type == BoundaryConditionType::Dirichlet)
+        {
+            const ResolvedDiffusionGeometry<std::remove_cvref_t<decltype(face)>, typename MeshType::scalar_type>
+                geometry(face);
+            const auto coefficient = boundary_diffusion_coefficient(geometry, face.face, face.owner, diffusivity);
+            if (coefficient > scalar_type{})
+            {
+                auto column = owner_lid;
+                matrix->sumIntoLocalValues(owner_lid,
+                    Teuchos::arrayView(&column, 1), Teuchos::arrayView(&coefficient, 1));
+                rhs->sumIntoLocalValue(owner_lid, coefficient * condition.value);
+            }
+        }
+        else if (condition.type == BoundaryConditionType::Neumann)
+            rhs->sumIntoLocalValue(owner_lid, diffusivity * condition.value * static_cast<scalar_type>(face.area()));
+        else if (condition.type == BoundaryConditionType::Robin)
+            throw std::runtime_error("Robin boundary conditions are not yet implemented in diffusion_system.");
+    }
+    matrix->fillComplete();
+    return {matrix, rhs};
+}
+
+/** @brief Select region execution when available, retaining the existing generic reference. */
+template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
+DiffusionSystem<Pack> diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
+    BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
+{
+    if constexpr (requires { mesh.supports_region_execution(); })
+        if (mesh.supports_region_execution())
+            return region_diffusion_system_impl<Pack>(mesh, diffusivity,
+                std::move(boundary_condition), std::move(right_hand_source));
+    return diffusion_system_reference_impl<Pack>(mesh, diffusivity,
+        std::move(boundary_condition), std::move(right_hand_source));
 }
 
 /** @brief Assemble vector orthogonal diffusion for any mapped mesh. */

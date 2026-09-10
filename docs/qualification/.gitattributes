@@ -1,0 +1,7 @@
+# Unified patches retain one space on blank context lines.
+region_production/*/source.diff whitespace=-blank-at-eol
+# Preserve the exact generator output and its recorded hashes.
+region_production/after/CMakeCache.txt whitespace=-blank-at-eof
+region_production/region_repeats/CMakeCache.txt whitespace=-blank-at-eof
+region_production/large/CMakeCache.txt whitespace=-blank-at-eof
+region_production/validation/gcc-focused-LastTest.log whitespace=-blank-at-eof

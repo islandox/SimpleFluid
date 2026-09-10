@@ -202,6 +202,12 @@ verification items below mean the foundation as a whole is not yet complete.
 - [x] Nonlinear/coarse-fine, periodic-through-seam and decomposition-invariance
       qualification; diagnostic N/R/P baselines with peak RSS. See
       `docs/region_execution.md` and `docs/region_scaling.md` for measured scope.
+- [x] Converge lagged MPI gradients in the actual implicit steady diffusion
+      helper; require a fresh full-equation residual before success, retaining
+      native/mapped paths and the original native overload symbols.
+- [x] Resolved-face and transformed region-native scalar diffusion assembly,
+      with a generic reference and motion/periodic/coarse-fine parity checks.
+- [x] Remove per-cell exact-reserve allocation from explicit compatibility CSR.
 - [ ] Distributed explicit region packets and region-aware load balancing.
 - [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
       wider polygonal volume/output types and rotated periodic field transforms.

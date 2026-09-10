@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
+import platform
 import re
 import subprocess
 
@@ -68,11 +70,39 @@ def main() -> int:
         parser.error("--absolute-tolerance must be finite and positive")
     executable = args.executable.resolve(strict=True)
     args.output.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[1]
+    def digest(path: Path) -> str:
+        checksum = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                checksum.update(chunk)
+        return checksum.hexdigest()
+    metadata = {
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "source_commit": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+        "source_status": subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True).strip(),
+        "executable": str(executable), "executable_sha256": digest(executable),
+        "host": platform.node(), "platform": platform.platform(),
+        "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+        "environment": {key: value for key, value in os.environ.items()
+                        if key in ("OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES", "KOKKOS_NUM_THREADS")
+                        or key.startswith("OMPI_MCA_")},
+        "commands": {}, "project_shared_libraries": {}, "build_configuration": {},
+    }
+    for directory in (executable.parent.parent / "lib", executable.parent.parent.parent / "lib" / executable.parent.name):
+        for library in directory.glob("*SimpleFluid*"):
+            if library.is_file() and any(suffix in library.name for suffix in (".so", ".dylib", ".dll")):
+                metadata["project_shared_libraries"][str(library.resolve())] = digest(library)
+    for name in ("CMakeCache.txt", "compile_commands.json"):
+        path = executable.parent.parent.parent / name
+        if path.is_file():
+            metadata["build_configuration"][str(path)] = digest(path)
     results = {}
     for rank in ranks:
         command = [str(executable), "--gtest_color=no"]
         if rank > 1:
             command = [args.mpiexec, "-n", str(rank), *command]
+        metadata["commands"][rank] = command
         print(f"Running region accuracy at {rank} rank(s)", flush=True)
         log = args.output / f"accuracy_{rank}ranks.log"
         try:
@@ -98,16 +128,21 @@ def main() -> int:
                         f"Serial/{rank}-rank mismatch: {key} {field}, difference={difference:g}, "
                         f"tolerance={args.absolute_tolerance:g}; logs are in {args.output}")
     report = {
+        **metadata,
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "executable": str(executable),
-        "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "ranks": ranks,
         "absolute_tolerance": args.absolute_tolerance,
         "diagnostics": results,
         "comparisons": comparisons,
     }
+    report["executed_artifacts_unchanged"] = (
+        digest(executable) == metadata["executable_sha256"]
+        and all(digest(Path(name)) == checksum
+                for name, checksum in metadata["project_shared_libraries"].items()))
     report_path = args.output / "accuracy.json"
     report_path.write_text(json.dumps(report, indent=2) + "\n")
+    if not report["executed_artifacts_unchanged"]:
+        raise RuntimeError("Executable or project shared library changed during accuracy qualification")
     maximum = max((entry["difference"] for entry in comparisons), default=0.0)
     print(f"Region accuracy passed; maximum serial/MPI diagnostic difference={maximum:.3g}; {report_path}")
     return 0

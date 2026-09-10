@@ -410,6 +410,18 @@ MultiRegionMesh::ExecutionView::ExecutionView(const MultiRegionMesh* mesh)
     d_current = this;
 }
 MultiRegionMesh::ExecutionView::~ExecutionView() { d_current = d_previous; }
+MultiRegionMesh::ResolvedFace MultiRegionMesh::ExecutionView::resolve_face(ID face) const
+{
+    if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
+    return d_mesh->resolve_retained_face(d_mesh->native_face(face));
+}
+MultiRegionMesh::ResolvedFace MultiRegionMesh::resolve_retained_face(RegionFace face) const
+{
+    return std::visit([&](const auto& region)
+    {
+        return resolve_native_face(face.region, region, face.face, region.topology().neighbor_cell(face.face));
+    }, d_regions[face.region]);
+}
 void MultiRegionMesh::validate_query() const
 {
     if (!executing_on_this_thread()) validate_static();
@@ -960,7 +972,10 @@ bool MultiRegionMesh::supports_axial_motion() const noexcept
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(ID f) const
 {
-    const auto n=native_face(f);
+    return periodic_translation(native_face(f));
+}
+MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(RegionFace n) const
+{
     for(const auto [i, first] : structured_interface_sides(n))
     {
         const auto& s=std::get<StructuredPatchInterface>(d_interfaces[i]);

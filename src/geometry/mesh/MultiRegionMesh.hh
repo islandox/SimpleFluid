@@ -95,6 +95,122 @@ public:
     static constexpr ID invalid_cell_id() noexcept { return UnstructuredMesh::invalid_ordinal; }
 
     /**
+     * @brief Operation-local canonical incidence and transformed geometry snapshot.
+     *
+     * The centroid members retain physical coordinates. Displacements include
+     * the incident periodic image; kernels must use those rather than subtract
+     * the centroids themselves. No provider pointers or connectivity arrays
+     * are retained.
+     */
+    struct ResolvedFace
+    {
+        ID face = 0, owner = invalid_cell_id(), neighbor = invalid_cell_id();
+        Vec3 area_vector{}, centroid{}, owner_centroid{}, neighbor_centroid{};
+        Vec3 owner_to_neighbor{}, neighbor_to_owner{}, owner_to_face{}, neighbor_to_face{};
+        bool interior() const noexcept { return neighbor != invalid_cell_id(); }
+        real_t area() const { return area_vector.norm(); }
+        Vec3 normal() const { return area_vector / area(); }
+        ID opposite_cell(ID cell) const
+        {
+            if (cell == owner) return neighbor;
+            if (interior() && cell == neighbor) return owner;
+            throw std::invalid_argument("Cell is not incident to resolved composite face.");
+        }
+        Vec3 face_normal_outward(ID cell) const
+        {
+            const auto other = opposite_cell(cell);
+            (void)other;
+            return cell == owner ? normal() : normal() * -1.0;
+        }
+        // Keep the checked MeshBase normal-times-area arithmetic order.
+        Vec3 face_area_vector_outward(ID cell) const { return face_normal_outward(cell) * area(); }
+        Vec3 face_center_vector(ID cell) const
+        {
+            const auto other = opposite_cell(cell);
+            (void)other;
+            return cell == owner ? owner_to_face : neighbor_to_face;
+        }
+        Vec3 cell_center_vector(ID cell) const
+        {
+            if (opposite_cell(cell) == invalid_cell_id())
+                throw std::invalid_argument("Exterior face has no adjacent cell.");
+            return cell == owner ? owner_to_neighbor : neighbor_to_owner;
+        }
+    };
+
+    class ExecutionView;
+    /** @brief Typed region geometry borrowed for the enclosing execution callback. */
+    template<class R> class RegionGeometryView
+    {
+    public:
+        RegionGeometryView(const RegionGeometryView&) = delete;
+        RegionGeometryView& operator=(const RegionGeometryView&) = delete;
+        const RegionLayout& layout() const noexcept { return d_region.layout(); }
+        real_t cell_volume(ID cell) const
+        {
+            check_cell(cell);
+            return d_mesh.axial_scale() * d_region.geometry().cell_volume(cell);
+        }
+        Vec3 cell_centroid(ID cell) const
+        {
+            check_cell(cell);
+            return d_mesh.transformed_point(d_region.geometry().cell_centroid(cell));
+        }
+        /** @brief Traverse native incidence once, preserving canonical logical face order. */
+        template<class Visitor> void visit_cell_faces(ID cell, Visitor&& visitor) const
+        {
+            check_cell(cell);
+            const auto visit = [&](ID face)
+            {
+                const auto adjacent = d_region.topology().neighbor_cell(face);
+                if (adjacent != invalid_cell_id())
+                {
+                    visitor(d_mesh.resolve_native_face(d_index, d_region, face, adjacent));
+                    return;
+                }
+                const RegionFace native{d_index, face};
+                if (const auto refined = d_mesh.refinement(native))
+                {
+                    // The retained fine faces are already known native identities.
+                    for (const auto fine : refined->faces)
+                        visitor(d_mesh.resolve_retained_face({refined->region, fine}));
+                }
+                else if (const auto retained = d_mesh.partner(native, false))
+                    visitor(d_mesh.resolve_retained_face(*retained));
+                else
+                    visitor(d_mesh.resolve_native_face(d_index, d_region, face, adjacent));
+            };
+            const auto& topology = d_region.topology();
+            if constexpr (requires { topology.native(); })
+            {
+                const auto& native = topology.native();
+                // Do not use the provider's ordinal range here: its element
+                // accessor would recreate the native range for every entry.
+                for (const auto face : native.cell_faces(native.cell_id(cell)))
+                    visit(native.face_local_id(face));
+            }
+            else if constexpr (requires { topology.native_topology().cell_faces(topology.indexer().cell_id(cell)); })
+            {
+                for (const auto face : topology.native_topology().cell_faces(topology.indexer().cell_id(cell)))
+                    visit(topology.indexer().face_ordinal(face));
+            }
+            else
+                for (const auto face : topology.cell_faces(cell)) visit(face);
+        }
+    private:
+        friend class ExecutionView;
+        RegionGeometryView(const MultiRegionMesh& mesh, size_t index, const R& region)
+            : d_mesh(mesh), d_index(index), d_region(region) {}
+        void check_cell(ID cell) const
+        {
+            if (cell >= layout().cells) throw std::out_of_range("Native cell out of bounds.");
+        }
+        const MultiRegionMesh& d_mesh;
+        size_t d_index;
+        const R& d_region;
+    };
+
+    /**
      * @brief Validate once and pin constituent geometry for an existing kernel.
      *
      * Queries through this mesh (including MeshHandle aliases) keep bounds
@@ -120,6 +236,24 @@ public:
             for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
                 std::visit([&](const auto& region) { visitor(r, d_mesh->d_cells[r], region); }, d_mesh->d_regions[r]);
         }
+        /**
+         * @brief Dispatch once per region with composite motion and periodic images.
+         *
+         * Geometry views borrow this execution lease, are thread-affine, and
+         * must only be used within the callback. Resolved faces are value
+         * snapshots and do not extend the lease or follow later mesh motion.
+         */
+        template<class Visitor> void visit_region_geometry(Visitor&& visitor) const
+        {
+            if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
+            for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
+                std::visit([&](const auto& region)
+                {
+                    const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh, r, region);
+                    visitor(r, d_mesh->d_cells[r], geometry);
+                }, d_mesh->d_regions[r]);
+        }
+        ResolvedFace resolve_face(ID face) const;
     private:
         friend MultiRegionMesh;
         static thread_local const ExecutionView* d_current;
@@ -261,6 +395,43 @@ private:
     bool stitched(RegionFace f) const;
     void validate_pair(RegionFace a, RegionFace b, std::optional<Vec3> translation = {}) const;
     Vec3 periodic_translation(ID face) const;
+    Vec3 periodic_translation(RegionFace native) const;
+    ResolvedFace resolve_retained_face(RegionFace native) const;
+    template<class R> ResolvedFace resolve_native_face(size_t r, const R& region, ID face, ID adjacent) const
+    {
+        ResolvedFace resolved;
+        resolved.face = d_faces[r] + face - removed_before(r, face);
+        const auto owner = region.topology().owner_cell(face);
+        resolved.owner = d_cells[r] + owner;
+        const auto& geometry = region.geometry();
+        resolved.area_vector = transformed_area_vector(geometry.face_area_vector(face));
+        resolved.centroid = transformed_point(geometry.face_centroid(face));
+        resolved.owner_centroid = transformed_point(geometry.cell_centroid(owner));
+        Vec3 shift{};
+        if (adjacent != invalid_cell_id())
+        {
+            resolved.neighbor = d_cells[r] + adjacent;
+            resolved.neighbor_centroid = transformed_point(geometry.cell_centroid(adjacent));
+        }
+        else if (const auto other = partner({r, face}, true))
+        {
+            std::visit([&](const auto& neighbor_region)
+            {
+                const auto cell = neighbor_region.topology().owner_cell(other->face);
+                resolved.neighbor = d_cells[other->region] + cell;
+                resolved.neighbor_centroid = transformed_point(neighbor_region.geometry().cell_centroid(cell));
+            }, d_regions[other->region]);
+            shift = periodic_translation(RegionFace{r, face});
+        }
+        resolved.owner_to_face = resolved.centroid - resolved.owner_centroid;
+        if (resolved.interior())
+        {
+            resolved.owner_to_neighbor = resolved.neighbor_centroid - resolved.owner_centroid + shift * -1.0;
+            resolved.neighbor_to_owner = resolved.owner_centroid - resolved.neighbor_centroid + shift * 1.0;
+            resolved.neighbor_to_face = resolved.centroid + shift - resolved.neighbor_centroid;
+        }
+        return resolved;
+    }
     void validate_regions() const;
     void initialize_regions(InterfaceTolerance tolerance, BoundaryNamePolicy names);
 

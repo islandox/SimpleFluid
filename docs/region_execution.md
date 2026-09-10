@@ -41,6 +41,24 @@ that already know their region access to arithmetic native indexing. These are
 motion. Region visitation is not a substitute for that transform in moving-mesh
 kernels.
 
+The next production step adds `execution.visit_region_geometry(visitor)`. Its
+typed region view applies the composite affine transform and resolves incident
+periodic images. `visit_cell_faces()` walks native incidence once, expanding
+coarse faces in the existing canonical fine-face order. Each callback receives
+an operation-local `ResolvedFace` value with canonical incidence and the metrics
+needed by numerical kernels. `execution.resolve_face(id)` provides the same
+snapshot when only a canonical face is available, with one native decode.
+Snapshots do not follow subsequent motion or extend the execution lease.
+
+Scalar `FVM::diffusion_system()` now uses this traversal for composite handles
+whose owned cells retain canonical order. The existing field maps, ghost IDs,
+two-point coefficient formulas, CRS insertion order and boundary callback order
+are retained. Reordered and other native/legacy handles use the generic path.
+The generic scalar kernel remains available as an internal reference for parity
+tests and same-binary performance comparisons. No global resolved-face or
+connectivity table is stored. See [region_production.md](region_production.md)
+for the production-path comparisons and durable reports.
+
 ## Compact indexing and construction
 
 Each region has seven interface-directory spans: six structured boundary

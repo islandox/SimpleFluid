@@ -1,5 +1,10 @@
 # Region execution scaling qualification
 
+The subsequent [production diffusion qualification](region_production.md)
+compares production dispatch against the retained ordinal-query reference in
+the same binary and repairs the compatibility materialization allocation
+pattern. Measurements below remain the September 10 historical snapshot.
+
 `region_scaling_benchmark` retains the native geometry, `MultiRegionMesh`,
 `MeshHandle`, FVM diffusion assembly, and Belos solver paths. It is opt-in and has
 no timing or memory threshold in CTest. Each process runs exactly one baseline,

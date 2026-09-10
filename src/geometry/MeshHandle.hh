@@ -449,6 +449,57 @@ public:
         return Meshes::MultiRegionMesh::ExecutionView(composite ? composite->get() : nullptr);
     }
 
+    /** @brief Whether owned cells retain the contiguous canonical region order. */
+    bool supports_region_execution() const noexcept
+    {
+        return std::holds_alternative<MultiRegionPtr>(d_mesh)
+            && !d_cells_reordered && d_cell_geometry_lids.empty();
+    }
+
+    /**
+     * @brief Visit owned cells through one typed, transformed provider dispatch per region.
+     *
+     * The visitor receives (field LID, canonical cell ID, native cell ID,
+     * region geometry view). Geometry and topology are borrowed under a read
+     * lease for the callback's duration. Reordered handles retain their generic
+     * query path; no geometry-to-field permutation is created here.
+     */
+    template<class Visitor> void visit_owned_region_cells(Visitor&& visitor) const
+    {
+        if (!supports_region_execution())
+            throw std::logic_error("Region execution requires canonical composite cell order.");
+        const auto& composite = *std::get<MultiRegionPtr>(d_mesh);
+        const auto execution = composite.acquire_execution_view();
+        const auto count = num_owned_cells();
+        if (!count) return;
+        const auto begin = static_cast<MultiRegion::ID>(geometry_cell_lid(0));
+        const auto end = begin + count;
+        execution.visit_region_geometry([&](size_t, MultiRegion::ID offset, const auto& geometry)
+        {
+            const auto first = std::max(begin, offset);
+            const auto last = std::min(end, offset + geometry.layout().cells);
+            for (auto cell = first; cell < last; ++cell)
+                visitor(checked_local(cell - begin), cell, cell - offset, geometry);
+        });
+    }
+
+    /** @brief Translate a resolved canonical cell into the existing owned/ghost field map. */
+    local_ordinal_type region_cell_local_id(MultiRegion::ID cell) const
+    {
+        if (!std::holds_alternative<MultiRegionPtr>(d_mesh))
+            throw std::logic_error("Resolved region cells require a composite mesh.");
+        return geometry_to_local_cell(cell);
+    }
+
+    /** @brief Resolve one visible canonical face into an operation-local geometry snapshot. */
+    auto resolve_region_face(local_ordinal_type face) const
+    {
+        const auto* composite = std::get_if<MultiRegionPtr>(&d_mesh);
+        if (!composite) throw std::logic_error("Resolved region faces require a composite mesh.");
+        const auto execution = (*composite)->acquire_execution_view();
+        return execution.resolve_face(geometry_face_lid(face));
+    }
+
     /**
      * @brief Monotone revision of the fixed-topology geometry.
      *

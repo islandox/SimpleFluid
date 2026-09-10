@@ -72,6 +72,12 @@ simplefluid_configure_test_executable(testOrthogonalDiffusionProfile)
 
 foreach(_region_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(
+        NAME RegionMaterialization_${_region_procs}procs
+        TARGET testRegionMaterialization
+        PROCS ${_region_procs}
+        LABELS "mpi;multi_region;compatibility"
+        TIMEOUT 120)
+    simplefluid_add_mpi_test(
         NAME MultiRegionMesh_${_region_procs}procs
         TARGET testMultiRegionMeshMultiRank
         PROCS ${_region_procs}

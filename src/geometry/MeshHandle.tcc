@@ -745,8 +745,10 @@ void MeshHandle<Pack>::initialize_cell_faces()
                 const auto& geometry_faces =
                     mesh.faces(mesh.cell_id(
                         static_cast<size_t>(geometry_lid)));
-                d_cell_face_lids.reserve(
-                    d_cell_face_lids.size() + geometry_faces.size());
+                // Retain vector's amortized growth. Reserving only the next
+                // cell's entries here repeatedly copies the complete prefix;
+                // logical coarse/fine faces also rule out assuming six faces
+                // per cell for the allocation.
                 for (const auto geometry_face : geometry_faces)
                 {
                     const auto face_geometry_lid =
