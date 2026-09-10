@@ -40,3 +40,21 @@ ctest --test-dir build/gcc -C Debug -R '^SASSupportedPaths_2procs$' --output-on-
 MPI registrations run with host network access. The SAS component selection
 contains 18 passing serial registrations; the explicit MPI registration also
 passes. The cylindrical solver registration passes in serial and on two ranks.
+
+## Semi-structured geometry
+
+`SemiStructuredXY_Z` now runs SAS directly through its native handle/fields.
+No legacy mesh or extra derivative approximation is introduced. Skewed
+triangular extrusions pass affine/vector/scalar derivative checks, quadratic
+curvature refinement, nonzero transport, disabled-source equality, restart and
+rollback tests. A native isothermal prism case accepts two steps with nonzero
+SAS and controlled continuity. The two focused serial registrations passed:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^(SSTSASDerivativesTest.SemiStructured|SASSupportedPathsTest.SemiStructured)' --output-on-failure
+```
+
+The underlying handle remains serial-only for this mesh family, so these
+geometry-specific bodies skip under MPI. This extension does not change mesh
+ownership or qualify arbitrary extrusion thickness as a 3D resolution scale.

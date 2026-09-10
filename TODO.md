@@ -265,7 +265,8 @@ mistaken for foundation or Phase 9 completion.
 - [x] Add a small isothermal transient activation example without IF97.
 - [x] Qualify native cylindrical SAS with Cartesian vector components and
       integrated radial-face normals, including serial/MPI transient swirl.
-- [ ] Qualify SemiStructuredXY_Z, slip, periodic and Gauss-linear SAS paths.
+- [x] Qualify serial SemiStructuredXY_Z SAS on skewed triangular extrusions.
+- [ ] Qualify slip, periodic and Gauss-linear SAS paths.
 - [ ] Extend rollback-safe SAS support to additional multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.
