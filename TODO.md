@@ -263,8 +263,9 @@ mistaken for foundation or Phase 9 completion.
 - [x] Add pointwise reference, derivative, source-weighting, disabled-equivalence,
       wall/configuration, native/legacy and serial/MPI transaction checks.
 - [x] Add a small isothermal transient activation example without IF97.
-- [ ] Qualify cylindrical, SemiStructuredXY_Z, slip, periodic and Gauss-linear
-      SAS derivative paths.
+- [x] Qualify native cylindrical SAS with Cartesian vector components and
+      integrated radial-face normals, including serial/MPI transient swirl.
+- [ ] Qualify SemiStructuredXY_Z, slip, periodic and Gauss-linear SAS paths.
 - [ ] Extend rollback-safe SAS support to additional multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.

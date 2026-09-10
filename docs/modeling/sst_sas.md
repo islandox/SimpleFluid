@@ -130,15 +130,22 @@ diagnostic fields are reused. The existing transport caches and graphs are
 unchanged. A changed geometry epoch fails explicitly; this fixed-grid feature
 does not refresh or accept moving-grid histories.
 
-The new derivative operates on global Cartesian vector components. Native
-cylindrical geometry also stores global Cartesian vectors, but its curved-face
-representation has not received SAS derivative qualification. It is rejected;
-no cylindrical-component metric terms have been guessed or added. Native
-`SemiStructuredXY_Z`, slip and periodic velocity conditions are also rejected
-for active SAS. Source-disabled SAS uses the established parent paths.
+The derivative operates on global Cartesian vector components, including native
+cylindrical sectors and closed annuli. For a radial curved face the SAS flux
+uses the surface integral of the normal: the mesh midpoint-normal/arc-area
+product is multiplied by `sin(dtheta/2)/(dtheta/2)`. This closes the area-vector
+sum and preserves affine and rigid-rotation zero curvature. It adds no
+cylindrical-component metric terms and does not alter the parent transport
+operators. Manufactured refinement and transient swirl evidence are recorded
+in [the extension report](sst_sas_extensions.md).
+
+Native `SemiStructuredXY_Z`, slip and periodic velocity conditions remain
+rejected for active SAS pending their separate extensions. A cylindrical full
+annulus has connected interior angular faces, not a boundary-value periodic
+patch. Source-disabled SAS retains the established parent paths.
 
 Supported active derivative paths are planar HEX_8/WEDGE_6 polyhedral legacy
-meshes, native Cartesian handles, native planar unstructured handles (with the
+meshes, native Cartesian and cylindrical handles, native planar unstructured handles (with the
 existing partitioned adapter in MPI), and handles of existing STK meshes.
 Native execution does not construct a legacy mesh. Prescribed velocity/no-slip
 and homogeneous Neumann outlet conditions are supported. Prescribed face

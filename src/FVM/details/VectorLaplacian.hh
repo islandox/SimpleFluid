@@ -5,6 +5,33 @@
 
 namespace SimpleFluid::FVM
 {
+namespace detail
+{
+/** Surface integral of the outward normal, in the stored Cartesian basis. */
+template<class MeshType>
+auto laplacian_face_area(const MeshType& mesh, typename MeshType::local_ordinal_type face,
+    typename MeshType::local_ordinal_type cell) -> typename MeshType::Vec3
+{
+    auto area = mesh.face_area_vector_outward(face, cell);
+    if constexpr (requires { typename MeshType::CylindricalPtr; })
+    {
+        if (const auto* cylindrical = std::get_if<typename MeshType::CylindricalPtr>(&mesh.variant()))
+        {
+            const auto id = (*cylindrical)->face_id(mesh.face_global_id(face));
+            if (id.orientation == MeshType::Cylindrical::R_FACE)
+            {
+                const auto& theta = (*cylindrical)->cell_edges()[MeshType::Cylindrical::THETA];
+                const auto half_angle = (theta[id.j + 1] - theta[id.j]) / 2;
+                // Radial faces are curved: integral(n dA) uses the chord,
+                // whereas the mesh's scalar area uses the arc length.
+                area = area * (std::sin(half_angle) / half_angle);
+            }
+        }
+    }
+    return area;
+}
+} // namespace detail
+
 /**
  * Evaluate div(grad(U)) in the stored global Cartesian component basis.
  * Inputs and supplied gradient must have synchronized overlap values. This
@@ -63,7 +90,7 @@ void unit_vector_laplacian(const VectorField& velocity, const TensorField& gradi
             }
             else
                 continue;
-            const auto area = mesh.face_area_vector_outward(f, cell);
+            const auto area = detail::laplacian_face_area(mesh, f, cell);
             const auto d2 = direction.dot(direction);
             const auto projection = area.dot(direction);
             if (!std::isfinite(d2) || d2 <= 0 || !std::isfinite(projection) || projection <= 0)

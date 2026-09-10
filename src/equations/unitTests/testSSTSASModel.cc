@@ -45,6 +45,14 @@ BoundaryConditionSet prescribed_boundaries()
     return bc;
 }
 
+template<class M> BoundaryConditionSet prescribed_boundaries(const M& mesh)
+{
+    BoundaryConditionSet result;
+    for (const auto& [batch, faces] : mesh.boundary_batches())
+        result.velocity[mesh.boundary_batch_name(batch)] = {BoundaryConditionType::Dirichlet, {}};
+    return result;
+}
+
 template<class M> MaterialPropertyFields<Pack, M> material(SP<const M> mesh, double rho = 1)
 {
     BoussinesqModelOptions o;
@@ -58,7 +66,7 @@ template<class M> void model_contract(SP<const M> mesh)
     using Traits = MeshFieldTraits<Pack, M>;
     using Model = TurbulenceModel<Pack, M>;
     auto mat = material(mesh);
-    auto bc = prescribed_boundaries();
+    auto bc = prescribed_boundaries(*mesh);
     Model sas(mesh, bc), parent(mesh, bc), disabled(mesh, bc);
     auto config = options();
     sas.configure(config, mat, 1);
@@ -374,7 +382,7 @@ TEST(SSTSASDerivativesTest, NativePartitionedUnstructuredSkewedFaces)
     model_contract(mesh);
 }
 
-TEST(SSTSASModelTest, RejectsUnverifiedCylindricalSlipAndStaleGeometry)
+TEST(SSTSASModelTest, RejectsUnverifiedSlipAndStaleGeometry)
 {
     auto cartesian = std::make_shared<Meshes::OrthogonalCartesian3D>(Vec3D<ArrReal>{{
         {0., .25, .5, .75, 1.}, {0., .25, .5, .75, 1.}, {0., .25, .5, .75, 1.}}});
@@ -394,9 +402,56 @@ TEST(SSTSASModelTest, RejectsUnverifiedCylindricalSlipAndStaleGeometry)
     EXPECT_FALSE(model.sas_statistics().valid);
     motion.rollback_trial();
 
-    SP<const Native> cylinder = std::make_shared<Native>(std::make_shared<Meshes::OrthogonalCylindrial3D>(
-        Vec3D<ArrReal>{{{1.,1.5,2.}, {0.,1.,2.}, {0.,.5,1.}}}));
-    auto cm = material(cylinder); TurbulenceModel<Pack, Native> unsupported(cylinder, {});
-    EXPECT_THROW(unsupported.configure(options(), cm, 1), std::invalid_argument);
-    EXPECT_NO_THROW(unsupported.configure(options(false), cm, 1));
+
+}
+
+namespace
+{
+SP<const Native> cylindrical_mesh(size_t n, bool closed)
+{
+    ArrReal radial(n+1), axial(n+1), theta(4*n+1);
+    for (size_t i=0; i<=n; ++i) { radial[i]=1.+double(i)/n; axial[i]=double(i)/n; }
+    const double span=closed ? 2*std::acos(-1.) : 1.5;
+    for (size_t i=0; i<theta.size(); ++i) theta[i]=span*i/(theta.size()-1);
+    return std::make_shared<Native>(std::make_shared<Meshes::OrthogonalCylindrial3D>(Vec3D<ArrReal>{{radial,theta,axial}}));
+}
+
+template<class M> double quadratic_laplacian_error(SP<const M> mesh)
+{
+    using Traits=MeshFieldTraits<Pack,M>;
+    typename Traits::vector_cell_type u(mesh,"quadratic_u"), lap(mesh,"quadratic_lap");
+    typename Traits::tensor_cell_type grad(mesh,"quadratic_grad");
+    auto value=[](auto p)->vec3<double> { return {p.y*p.y,2*p.z*p.z,-3*p.x*p.x}; };
+    for (size_t i=0; i<mesh->num_owned_cells(); ++i) u.set_owned_value(i,value(mesh->cell_centroid(i)));
+    u.sync_ghosts();
+    auto boundary=[&](int b,size_t i) { return value(mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i])); };
+    FVM::CellGradientCache<Pack,M> gradient_cache(mesh);
+    FVM::TransportGeometryCache<M> geometry(*mesh);
+    FVM::cell_gradient(u,boundary,grad,gradient_cache); grad.sync_ghosts();
+    collective_detail::collective_local_validation(*mesh,"Manufactured SAS curvature",[&]
+    { FVM::unit_vector_laplacian(u,grad,lap,geometry,boundary,[](int,size_t) { return BoundaryConditionType::Dirichlet; }); });
+    std::array<double,2> local{},total{};
+    for (size_t i=0; i<mesh->num_owned_cells(); ++i)
+    {
+        const auto v=lap.value(i); const auto volume=mesh->cell_volume(i);
+        local[0]+=volume*std::hypot(v.x-2,v.y-4,v.z+6); local[1]+=volume;
+    }
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,2,local.data(),total.data());
+    return total[0]/total[1];
+}
+}
+
+TEST(SSTSASDerivativesTest, CylindricalSectorsAndClosedAnnuli)
+{
+    for (bool closed : {false,true})
+    {
+        auto mesh=cylindrical_mesh(4,closed);
+        ASSERT_FALSE(mesh->legacy_mesh());
+        derivative_contract(mesh); // Uniform, affine, rotation and scalar gradient checks.
+        const auto coarse=quadratic_laplacian_error(mesh);
+        const auto fine=quadratic_laplacian_error(cylindrical_mesh(8,closed));
+        std::cout<<"SAS cylindrical closed="<<closed<<" L1="<<coarse<<" -> "<<fine<<'\n';
+        EXPECT_LT(fine,.8*coarse);
+        model_contract(mesh); // Nonzero source, disabled equivalence, snapshots and restart.
+    }
 }
