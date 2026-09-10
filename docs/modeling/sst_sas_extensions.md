@@ -156,3 +156,18 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths
 ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.MaterialFeedback' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^SASMaterialFeedback_2procs$' --output-on-failure
 ```
+
+## Scalar void fraction
+
+The existing void diffusion/collapse path is enabled with SAS, using its
+snapshot to restore alpha_g, alpha_l and the explicit source mirror. The test
+checks the global collapse balance, bounded complementary fractions, mixture
+density feedback, nonzero SAS and late-rejection restoration/retry. It does
+not add gas momentum, phase-weighted RANS, or a new void-advection scheme.
+The focused serial and dedicated two-rank registrations pass:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.ScalarVoid' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASScalarVoid_2procs$' --output-on-failure
+```
