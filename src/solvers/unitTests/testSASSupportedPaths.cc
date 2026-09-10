@@ -198,6 +198,15 @@ struct SavedSASFields
         model(solver.find_turbulence_model()); model(solver.find_material_feedback_model());
         model(solver.find_scalar_void_fraction_model()); model(solver.find_precursor_model());
         model(solver.find_radiolytic_gas_model()); model(solver.find_boiling_source_model());
+        if(solver.find_free_surface_model())
+        {
+            capture(solver.clear_level()); capture(solver.pool_level());
+            capture(solver.headspace_pressure()); capture(solver.pool_occupancy());
+        }
+        if(const auto* inventory=solver.find_liquid_mass_inventory())
+        {
+            capture(inventory->pureLiquidDensity()); capture(inventory->cellMassInventory());
+        }
     }
     void capture(const Field& field)
     {
@@ -310,6 +319,26 @@ TEST(SASSupportedPathsTest, PrecursorInventoryAndDiagnosticsRollBackWithSAS)
     EXPECT_ANY_THROW(precursors.restore(stale));
 }
 
+namespace
+{
+RadiolyticGasOptions seeded_radiolysis_options(RadiolyticGasMode mode)
+{
+    RadiolyticGasOptions options; options.mode=mode; options.max_source_alpha_rate=1.;
+    options.hydrogen_yield_mol_per_j=2e-7; options.reference_pressure=1e5;
+    // Unit-density fixture has molecular nu=.001; D=1e-5 gives admissible Sc=100.
+    options.henry_coefficient=1e-5; options.surface_tension=.07; options.hydrogen_diffusivity=1e-5;
+    options.uranium_concentration_mol_per_m3=1000; options.hydrogen_yield_molecules_per_100_ev=1.8;
+    options.dissolved_transport=RadiolyticTransportMode::Advective;
+    options.rise_velocity_mode=BubbleRiseVelocityMode::ConstantSlip; options.constant_slip_velocity=.05;
+    options.initial_dissolved_hydrogen=1e-5; options.initial_micro_number_density=1e10;
+    options.initial_micro_moles=1e-5; options.initial_large_number_density=1e8; options.initial_large_moles=5e-6;
+    options.microbubble_lifetime=1e30; options.large_bubble_dissolution_time=1e30;
+    options.micro_to_large_conversion_coefficient=0; options.min_radius=1e-12; options.max_radius=1e-3;
+    options.min_population=1e-40; options.max_population=1e40;
+    return options;
+}
+}
+
 TEST(SASSupportedPathsTest, RadiolysisAndHydrogenLedgersRollBackWithSAS)
 {
     for(auto mode:{RadiolyticGasMode::IdealGasSource,RadiolyticGasMode::Sheng2024TwoPopulation})
@@ -318,18 +347,7 @@ TEST(SASSupportedPathsTest, RadiolysisAndHydrogenLedgersRollBackWithSAS)
         solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
         FissionPowerSourceOptions power; power.profile=FissionPowerProfile::Constant; power.power_density=1.;
         solver.configure_fission_power_source(power);
-        RadiolyticGasOptions options; options.mode=mode; options.max_source_alpha_rate=1.;
-        options.hydrogen_yield_mol_per_j=2e-7; options.reference_pressure=1e5;
-        // Unit-density fixture has molecular nu=.001; D=1e-5 gives admissible Sc=100.
-        options.henry_coefficient=1e-5; options.surface_tension=.07; options.hydrogen_diffusivity=1e-5;
-        options.uranium_concentration_mol_per_m3=1000; options.hydrogen_yield_molecules_per_100_ev=1.8;
-        options.dissolved_transport=RadiolyticTransportMode::Advective;
-        options.rise_velocity_mode=BubbleRiseVelocityMode::ConstantSlip; options.constant_slip_velocity=.05;
-        options.initial_dissolved_hydrogen=1e-5; options.initial_micro_number_density=1e10;
-        options.initial_micro_moles=1e-5; options.initial_large_number_density=1e8; options.initial_large_moles=5e-6;
-        options.microbubble_lifetime=1e30; options.large_bubble_dissolution_time=1e30;
-        options.micro_to_large_conversion_coefficient=0; options.min_radius=1e-12; options.max_radius=1e-3;
-        options.min_population=1e-40; options.max_population=1e40;
+        auto options=seeded_radiolysis_options(mode);
         auto& gas=solver.configure_radiolytic_gas(options);
         expect_active_bounded_step(solver);
         if(mode==RadiolyticGasMode::Sheng2024TwoPopulation)
@@ -377,4 +395,125 @@ TEST(SASSupportedPathsTest, BoilingSourcesAndPendingStateRollBackWithSAS)
     });
     const auto stale=boiling.snapshot(); boiling.configure(options);
     EXPECT_ANY_THROW(boiling.restore(stale));
+}
+
+namespace
+{
+FreeSurfaceOptions fixed_surface_options()
+{
+    FreeSurfaceOptions result;
+    result.enabled=true; result.mode=FreeSurfaceMode::PlanarVolumeBudget;
+    result.initial_liquid_volume=.5;
+    result.vessel.bottom_elevation=0; result.vessel.top_elevation=1;
+    result.vessel.cross_section_area=1; result.vessel.total_internal_volume=1;
+    result.liquid_mass.mode=LiquidVolumeMode::CellMassInventory;
+    result.headspace.mode=HeadspaceMode::Vented;
+    result.headspace.initial_temperature=300; result.headspace.total_internal_volume=1;
+    return result;
+}
+}
+
+TEST(SASSupportedPathsTest, FixedFreeSurfaceRestoresBoilingInventoryHistoryAndRetry)
+{
+    for(auto inventory_mode:{LiquidVolumeMode::GlobalConstantMass,LiquidVolumeMode::CellMassInventory})
+    {
+        auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+        solver.initialize_heated_box(301,301); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+        BoilingSourceOptions boiling; boiling.enable_bulk_boiling=true;
+        boiling.saturation_temperature=300; boiling.latent_heat=1000; boiling.gas_density=.01;
+        auto& phase=solver.configure_boiling_source(boiling);
+        auto options=fixed_surface_options(); options.liquid_mass.mode=inventory_mode;
+        options.headspace.temperature_mode=HeadspaceTemperatureMode::Prescribed;
+        options.headspace.prescribed_temperature_times={0.,.0015};
+        options.headspace.prescribed_temperature_values={300.,300.};
+        ASSERT_NE(solver.configure_free_surface(options),nullptr);
+        const auto mass_before=solver.liquid_mass_inventory().totalMass();
+        expect_active_bounded_step(solver);
+        const auto mass=solver.liquid_mass_inventory().totalMass();
+        EXPECT_GT(phase.last_phase_change_diagnostics().accepted_evaporation_mass,0);
+        EXPECT_NEAR(mass,mass_before-phase.last_phase_change_diagnostics().accepted_evaporation_mass,1e-12);
+        const auto history=solver.free_surface_history().size();
+        const auto surface=solver.free_surface_diagnostics();
+        const auto steam=phase.global_submerged_steam_mass();
+        const auto q=solver.find_turbulence_model()->sas_statistics().max_source;
+        const SavedSASFields saved(solver);
+        EXPECT_ANY_THROW(solver.step()); // Headspace history ends after the next physical time.
+        saved.expect_restored();
+        EXPECT_DOUBLE_EQ(solver.time(),.001); EXPECT_EQ(solver.step_index(),1);
+        EXPECT_EQ(solver.free_surface_history().size(),history);
+        EXPECT_DOUBLE_EQ(solver.liquid_mass_inventory().totalMass(),mass);
+        EXPECT_DOUBLE_EQ(solver.free_surface_diagnostics().pool_level,surface.pool_level);
+        EXPECT_DOUBLE_EQ(phase.global_submerged_steam_mass(),steam);
+        EXPECT_DOUBLE_EQ(solver.find_turbulence_model()->sas_statistics().max_source,q);
+        solver.set_time_step(.00025); expect_active_bounded_step(solver);
+        EXPECT_EQ(solver.free_surface_history().size(),history+1);
+    }
+}
+
+TEST(SASSupportedPathsTest, LazyFreeSurfaceInitializationRemainsOwnedAfterRejection)
+{
+    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    solver.temperature().put_scalar(300.); solver.temperature().sync_ghosts();
+    auto options=fixed_surface_options(); options.liquid_mass.initial_liquid_mass=.5;
+    ASSERT_NE(solver.configure_free_surface(options),nullptr);
+    ASSERT_FALSE(solver.find_free_surface_model()->initialized());
+    bool inconsistent_density=true;
+    solver.set_material_updater([&](const auto&,auto& material){material.density.put_scalar(inconsistent_density ? 2. : 1.);});
+    EXPECT_ANY_THROW(solver.step());
+    ASSERT_NE(solver.find_free_surface_model(),nullptr);
+    EXPECT_FALSE(solver.find_free_surface_model()->initialized());
+    EXPECT_FALSE(solver.liquid_mass_inventory().initialized());
+    EXPECT_TRUE(solver.free_surface_history().empty());
+    inconsistent_density=false;
+    solver.add_temperature_source("late_overflow_one",std::numeric_limits<double>::max());
+    solver.add_temperature_source("late_overflow_two",std::numeric_limits<double>::max());
+    EXPECT_ANY_THROW(solver.step()); // Successful lazy initialization must also roll back.
+    ASSERT_NE(solver.find_free_surface_model(),nullptr);
+    EXPECT_FALSE(solver.find_free_surface_model()->initialized());
+    EXPECT_TRUE(solver.free_surface_history().empty());
+    EXPECT_FALSE(solver.find_turbulence_model()->sas_statistics().valid);
+    solver.remove_temperature_source("late_overflow_one"); solver.remove_temperature_source("late_overflow_two");
+    expect_active_bounded_step(solver);
+    EXPECT_TRUE(solver.find_free_surface_model()->initialized());
+    EXPECT_EQ(solver.free_surface_history().size(),2U);
+}
+
+TEST(SASSupportedPathsTest, FixedFreeSurfaceRadiolysisRestoresClosedHeadspaceAndEscape)
+{
+    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto gas_options=seeded_radiolysis_options(RadiolyticGasMode::Sheng2024TwoPopulation);
+    gas_options.free_surface_patches={"zmax"};
+    auto& gas=solver.configure_radiolytic_gas(gas_options);
+    solver.add_fission_power_source().initialize_constant(1.);
+    auto options=fixed_surface_options(); options.headspace.mode=HeadspaceMode::Closed;
+    options.coupling.maximum_absolute_pressure=2e5;
+    options.headspace.temperature_mode=HeadspaceTemperatureMode::Prescribed;
+    options.headspace.prescribed_temperature_times={0.,.0015};
+    options.headspace.prescribed_temperature_values={300.,300.};
+    ASSERT_NE(solver.configure_free_surface(options),nullptr);
+    expect_active_bounded_step(solver);
+    const SavedSASFields saved(solver);
+    const auto headspace=solver.free_surface_diagnostics().headspace.pressure;
+    const auto history=solver.free_surface_history().size();
+    const auto escape=gas.last_statistics().cumulative_hydrogen_escaped;
+    EXPECT_GT(escape,0);
+    EXPECT_ANY_THROW(solver.step());
+    saved.expect_restored();
+    EXPECT_DOUBLE_EQ(gas.last_statistics().cumulative_hydrogen_escaped,escape);
+    EXPECT_DOUBLE_EQ(solver.free_surface_diagnostics().headspace.pressure,headspace);
+    EXPECT_EQ(solver.free_surface_history().size(),history);
+    solver.set_time_step(.00025); expect_active_bounded_step(solver);
+}
+
+TEST(SASSupportedPathsTest, FixedFreeSurfaceStillRejectsSASALE)
+{
+    auto mesh=std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{{0.,.5,1.},{0.,.5,1.},{0.,.5,1.}}}));
+    auto time=transient_options();
+    BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),time,{},BoussinesqModelOptions::legacy_defaults(time));
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options());
+    auto options=fixed_surface_options(); options.mode=FreeSurfaceMode::PlanarALE; options.ale.top_boundary="zmax";
+    EXPECT_ANY_THROW(solver.configure_free_surface(options));
 }
