@@ -37,6 +37,7 @@ template<class MeshType> struct TransportAssemblyGeometry
 template<class MeshType>
 TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& mesh)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using geometry_type = TransportAssemblyGeometry<MeshType>;
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     geometry_type result;

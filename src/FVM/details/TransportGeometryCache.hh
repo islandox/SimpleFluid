@@ -33,6 +33,7 @@ template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(con
 
 template<class MeshType> void TransportGeometryCache<MeshType>::refresh()
 {
+    const auto execution = acquire_mesh_execution(*d_mesh);
     auto interior = detail::least_squares_gradient_stencils(*d_mesh);
     auto locations = detail::boundary_face_locations(*d_mesh);
     auto boundary = detail::boundary_aware_gradient_geometry(*d_mesh, locations);

@@ -37,6 +37,34 @@ Focused native regressions cover unstructured geometry, operators,
 faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
 partitioned-unstructured coverage.
 
+### Compact region composition
+
+`MultiRegionMesh` is a compact serial/MPI backend of `MeshHandle`. Preserve its
+canonical seam-face identity and owner-oriented flux across every field and
+operator path. Native region providers retain geometry without copying it;
+child identity/layout/revision checks must run through the existing epoch
+cache seam. Do not treat an unchanged maximum child epoch as an unchanged
+composite. Topology region identity is separate from material membership and
+MPI ownership. Distributed composites replicate only compact axis/base/interface
+descriptions and construct rank-local field maps. Global explicit constituents
+are rejected. Coarse/fine seams keep canonical fine faces; coarse cells traverse
+all covering subfaces, and integrated flux restriction uses signs without
+multiplying by area fractions again. Periodic geometry must use incident-cell
+image vectors in both reconstruction and Rhie--Chow stabilization.
+
+Composite `PlanarALEMeshMotion` changes a common affine Z map while child
+providers stay frozen. Keep its existing lease, epoch, GCL, numeric-cache refresh
+and rollback contract. Reject buffered/nonaxial composite deformation and a
+changing axial periodic length rather than relaxing conservation checks.
+
+Normal `MeshHandle::faces()` queries return independent sized/indexable ranges.
+Do not reintroduce implicit cell-face CSR while building fields, graphs, or
+solvers. `materialize_cell_faces()` is an explicit compatibility operation.
+Serial IDs are arithmetic and distributed lookup reuses required Tpetra maps;
+`indexer()` remains an opt-in compatibility allocation. Arbitrary native
+reordering is explicit and retains its permutation; composite reordering is
+currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
+
 ### Liquid-mass inventory transactions
 
 `LiquidMassInventory` defaults to the global `globalConstantMass` approximation.

@@ -123,6 +123,10 @@ set(SIMPLEFLUID_MESH_SOURCES
     geometry/mesh/SemiStructMeshTopo.cc
     geometry/mesh/SemiStructuredXY_Z.cc
     geometry/mesh/UnstructuredMesh.cc
+    geometry/mesh/RegionProviders.cc
+    geometry/mesh/ConservativeInterface.cc
+    geometry/mesh/ExtrudedRegionProviders.cc
+    geometry/mesh/MultiRegionMesh.cc
     io/VTUWriter.cc
     parallel/MeshPartitioner.cc
 )
@@ -669,4 +673,21 @@ if(BUILD_TESTING)
   set_tests_properties(pitz_daily_steady_smoke PROPERTIES
       LABELS integration
       TIMEOUT 60)
+endif()
+
+add_executable(region_diffusion examples/region_diffusion.cc)
+target_link_libraries(region_diffusion PRIVATE SimpleFluid::Solvers)
+simplefluid_exe_reuse_precompiled_header(region_diffusion)
+simplefluid_exclude_from_pgo_sources(examples/region_diffusion.cc)
+if(BUILD_TESTING)
+    add_test(NAME region_diffusion_smoke COMMAND region_diffusion "${CMAKE_CURRENT_BINARY_DIR}/region_diffusion_$<CONFIG>.vtu")
+    set_tests_properties(region_diffusion_smoke PROPERTIES LABELS "multi_region;example" TIMEOUT 120)
+endif()
+
+if(BUILD_TESTING)
+    foreach(_region_procs IN ITEMS 2 4)
+        simplefluid_add_mpi_test(NAME region_diffusion_${_region_procs}procs TARGET region_diffusion
+            PROCS ${_region_procs} ARGS "${CMAKE_CURRENT_BINARY_DIR}/region_diffusion_${_region_procs}_$<CONFIG>.vtu"
+            LABELS "mpi;multi_region;example" TIMEOUT 120)
+    endforeach()
 endif()

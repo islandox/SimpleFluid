@@ -272,6 +272,7 @@ void stored_gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshTyp
 
     require_same_stored_mesh(field, gradients, "gauss_linear_cell_gradient");
     const auto& mesh = field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto boundary_locations = boundary_face_locations(mesh);
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -335,6 +336,7 @@ void stored_gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshTyp
 
     require_same_stored_mesh(field, gradients, "gauss_linear_cell_gradient");
     const auto& mesh = field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto boundary_locations = boundary_face_locations(mesh);
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {

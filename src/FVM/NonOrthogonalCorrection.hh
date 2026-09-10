@@ -300,20 +300,34 @@ bool solve_explicit_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pa
  * @brief Solve scalar diffusion using the selected non-orthogonal treatment.
  *
  * For `explicit`, @p nNonOrthogonalCorrectors has the same meaning as in
- * solve_explicit_non_orthogonal_diffusion(). For `implicit`, one fully
- * implicit solve is performed. For `hybrid`, an initial half-implicit solve
+ * solve_explicit_non_orthogonal_diffusion(). For `implicit`, lagged remote
+ * gradients are iterated up to correction_options.max_iterations. Success
+ * requires the global relative update and a freshly rebuilt full-equation
+ * residual to satisfy correction_options; a problem without nonzero partition
+ * corrections retains a single solve and only needs the residual check.
+ * For `hybrid`, an initial half-implicit solve
  * is followed by @p nNonOrthogonalCorrectors correction solves that put the
  * remaining half of the tangential term on the RHS.
  *
- * @return `true` if every linear solve converged; otherwise `false`.
- * @throws std::invalid_argument if @p solution uses another mesh, the
- *         corrector count is negative, or @p treatment is invalid.
+ * @return For Implicit, `true` only when the corrected equation converges.
+ *         Returns `false` on linear failure or correction-limit exhaustion.
+ *         Explicit/Hybrid retain their fixed-sweep linear-convergence status.
+ *         On failure, solution retains the last iterate with synchronized ghosts.
+ * @throws std::invalid_argument collectively if a mesh/option input is invalid
+ *         or ranks disagree on solver controls, treatment, or diffusivity.
  */
 template<TpetraTypePack Pack>
 bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
     CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
     const LinearSolverOptions& linear_options = {});
+
+/** @brief Steady solve with explicit implicit-correction convergence controls. */
+template<TpetraTypePack Pack>
+bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
+    CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
+    const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options);
 
 /**
  * @brief Solve a scalar diffusion equation with zero source and explicit
@@ -343,6 +357,13 @@ bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scala
     ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
     NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {});
 
+/** @brief Zero-source steady solve with explicit implicit-correction convergence controls. */
+template<TpetraTypePack Pack>
+bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
+    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options,
+    const NonOrthogonalConvergenceOptions& correction_options);
+
 /**
  * @brief Assemble steady non-orthogonal diffusion on a mapped mesh.
  *
@@ -360,27 +381,35 @@ DiffusionSystem<Pack> non_orthogonal_diffusion_system(const MeshType& mesh, type
 
 /**
  * @brief Solve steady non-orthogonal diffusion on a mapped FieldStored mesh.
+ *
+ * Implicit converges lagged partition gradients with correction_options and
+ * checks the freshly rebuilt full-equation residual before success. Explicit
+ * and Hybrid retain nNonOrthogonalCorrectors fixed sweeps and report linear
+ * convergence only. A false return retains the last synchronized iterate.
+ * Invalid or rank-divergent controls are rejected collectively before assembly.
  */
 template<TpetraTypePack Pack, class MeshType>
 bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
     ScalarCellFieldStored<Pack, MeshType>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
-    const LinearSolverOptions& linear_options = {})
+    const LinearSolverOptions& linear_options = {}, const NonOrthogonalConvergenceOptions& correction_options = {})
 {
     return detail::solve_stored_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition),
-        std::move(right_hand_source), solution, treatment, nNonOrthogonalCorrectors, linear_options);
+        std::move(right_hand_source), solution, treatment, nNonOrthogonalCorrectors, linear_options, correction_options);
 }
 
 /** @brief Solve zero-source mapped steady non-orthogonal diffusion. */
 template<TpetraTypePack Pack, class MeshType>
 bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellFieldStored<Pack, MeshType>& solution,
-    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {})
+    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {},
+    const NonOrthogonalConvergenceOptions& correction_options = {})
 {
     auto zero_source = [](typename Pack::local_ordinal_type) -> typename Pack::scalar_type
     { return typename Pack::scalar_type{}; };
     return solve_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition),
-        ScalarCellValueProvider<Pack>{zero_source}, solution, treatment, nNonOrthogonalCorrectors, linear_options);
+        ScalarCellValueProvider<Pack>{zero_source}, solution, treatment, nNonOrthogonalCorrectors, linear_options,
+        correction_options);
 }
 
 } // namespace SimpleFluid::FVM

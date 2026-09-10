@@ -388,7 +388,8 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
     const auto& legacy_faces = legacy->faces(0);
     EXPECT_EQ(handle_faces.size(), legacy_faces.size());
     ASSERT_FALSE(handle_faces.empty());
-    EXPECT_EQ(handle_faces.data(), &legacy_faces[0]);
+    EXPECT_TRUE(std::ranges::equal(handle_faces, legacy_faces));
+    EXPECT_EQ(handle.connectivity_storage_bytes(), 0U);
 
     // The historical indexer API remains available, but is no longer needed
     // by normal legacy geometry and field access.
@@ -402,7 +403,7 @@ TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
  * @brief Verifies repeated connectivity requests reuse the materialized
  * cell-to-face cache when available.
  */
-TEST(MeshHandleTest, ReusesMaterializedCellFaceConnectivity)
+TEST(MeshHandleTest, ComputesCellFaceRangesWithoutMaterialization)
 {
     const auto mesh = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
@@ -411,13 +412,12 @@ TEST(MeshHandleTest, ReusesMaterializedCellFaceConnectivity)
             {0.0, 1.0}}});
     const Handle handle(mesh);
 
-    static_assert(std::is_same_v<
-        decltype(handle.faces(0)),
-        std::span<const Handle::local_ordinal_type>>);
+    static_assert(std::ranges::random_access_range<decltype(handle.faces(0))>);
 
     const auto first = handle.faces(0);
     const auto second = handle.faces(0);
-    EXPECT_EQ(first.data(), second.data());
+    EXPECT_EQ(handle.connectivity_storage_bytes(), 0U);
+    EXPECT_FALSE(handle.has_materialized_indexer());
     EXPECT_EQ(first.size(), 6U);
     EXPECT_TRUE(std::ranges::equal(first, second));
 #ifdef CHECK_BOUNDS_ENABLED
@@ -521,4 +521,38 @@ TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
     std::filesystem::remove(cylindrical_file);
     std::filesystem::remove(semi_structured_file);
     std::filesystem::remove(unstructured_file);
+}
+
+TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
+{
+    auto cylinder=std::make_shared<Cylindrical>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+        {1,2,3},{0,std::numbers::pi,2*std::numbers::pi},{0,1,2}}});
+    Handle periodic(cylinder);
+    for(size_t c=0;c<periodic.num_cells();++c)
+    {
+        const auto native=cylinder->cell_faces(cylinder->cell_id(c));
+        const auto range=periodic.faces(c);
+        const auto other=periodic.faces((c+1)%periodic.num_cells());
+        ASSERT_EQ(range.size(),native.size());
+        for(size_t i=0;i<range.size();++i) EXPECT_EQ(periodic.face_global_id(range[i]),cylinder->face_local_id(native[i]));
+        EXPECT_EQ(other.size(),6U);
+    }
+    auto cart=std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0,1,2,3,4,5,6},{0,1,2},{0,1,2}}});
+    Handle partition(cart,{.ghost_layers=1,.partition=0,.partitions=2});
+    bool absent_remote_neighbor=false;
+    for(size_t c=0;c<partition.num_cells();++c)
+    {
+        const auto native=cart->cell_faces(cart->cell_id(partition.cell_global_id(c)));
+        const auto range=partition.faces(c);
+        ASSERT_EQ(range.size(),native.size());
+        for(size_t i=0;i<range.size();++i)
+        {
+            EXPECT_EQ(partition.face_global_id(range[i]),cart->face_local_id(native[i]));
+            if(partition.neighbor_cell(range[i])==Handle::invalid_local_id() && !partition.is_geometry_exterior_face(range[i]))
+            { absent_remote_neighbor=true; EXPECT_FALSE(partition.is_boundary_face(range[i])); }
+        }
+    }
+    EXPECT_TRUE(absent_remote_neighbor);
+    EXPECT_EQ(partition.connectivity_storage_bytes(),0U);
+    EXPECT_FALSE(partition.has_materialized_indexer());
 }

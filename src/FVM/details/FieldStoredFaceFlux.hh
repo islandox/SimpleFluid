@@ -55,6 +55,7 @@ auto stored_slip_face_velocity(const VectorCellFieldStored<Pack, MeshType>& velo
     typename Pack::local_ordinal_type face_lid) -> typename VectorCellFieldStored<Pack, MeshType>::value_type
 {
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto face_id = query_face_id(mesh, face_lid);
     const auto owner_id = mesh.owner_cell(face_id);
     const auto owner_lid = packed_cell_local_id(mesh, owner_id);
@@ -78,6 +79,7 @@ void assemble_stored_face_velocities(const VectorCellFieldStored<Pack, MeshType>
     }
 
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     face_velocity.put_value(vec_type{});
     const auto boundary_locations = boundary_face_locations(mesh);
     for (size_t face = 0; face < mesh.num_faces(); ++face)
@@ -132,6 +134,7 @@ void stored_normal_face_fluxes(
 
     require_same_face_flux_mesh(face_velocity, fluxes, "normal_face_fluxes");
     const auto& mesh = face_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     fluxes.put_value(scalar_type{});
     for (size_t face = 0; face < mesh.num_faces(); ++face)
     {
@@ -162,6 +165,7 @@ void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshTy
     }
 
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     fluxes.put_value(scalar_type{});
     const auto boundary_locations = boundary_face_locations(mesh);
     for (size_t face = 0; face < mesh.num_faces(); ++face)
@@ -222,6 +226,7 @@ void stored_mesh_relative_face_fluxes(
     using scalar_type = typename Pack::scalar_type;
 
     const auto& mesh = absolute_fluxes.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const std::array<int, 2> local_output_error{
         absolute_fluxes.mesh_ptr().get() != relative_fluxes.mesh_ptr().get() ? 1 : 0,
         &absolute_fluxes == &relative_fluxes ? 1 : 0};

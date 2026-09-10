@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "geometry/GeometryExecutionGuard.hh"
+
 #include "geometry/mesh/OrthogonalIndexer.hh"
 #include "geometry/mesh/StructuredBatchView.hh"
 
@@ -32,7 +34,7 @@ namespace SimpleFluid::Meshes
  * `std::ranges::views::cartesian_product` views, avoiding materialized
  * storage for the structured topology.
  */
-class OrthoMeshTopo
+class OrthoMeshTopo : public GeometryExecutionGuard
 {
 public:
     using Indexer = OrthogonalIndexer;
@@ -62,6 +64,16 @@ public:
                   bool periodic_i, bool periodic_j, bool periodic_k,
                   BoundaryNames boundary_names);
 
+    size_t storage_bytes() const noexcept
+    {
+        size_t bytes = sizeof(*this);
+        for (size_t a = 0; a < 3; ++a)
+        {
+            bytes += d_neighbors_per_dim[a].capacity() * sizeof(DimensionNeighbors);
+            bytes += d_face_cells_per_dim[a].capacity() * sizeof(FaceCells);
+        }
+        return bytes;
+    }
     const Indexer& indexer() const noexcept { return d_indexer; }
 
     CellID owner_cell(FaceID face_id) const noexcept;

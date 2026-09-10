@@ -519,6 +519,7 @@ TransportSystem<Pack> stored_scalar_transport_system(const ScalarCellFieldStored
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_values.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto validation_state = reduce_stored_validation_state<Pack>(
         mesh, std::array<int, 3>{old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ? 1 : 0,
                   !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
@@ -705,6 +706,7 @@ void add_stored_scalar_explicit_non_orthogonal_correction(const ScalarCellFieldS
         correction_field.mesh_ptr(), "stored_scalar_non_orthogonal_gradient");
     evaluate_stored_scalar_gradients(correction_field, stencils, gradients);
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -759,6 +761,7 @@ TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_values.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto weights = validate_stored_non_orthogonal_selection<Pack>(
         mesh, treatment, correction_field, "non_orthogonal_transport_system");
     int invalid_geometry_cache = 0;
@@ -962,6 +965,7 @@ TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
 template<class MeshType>
 bool stored_transport_has_non_orthogonal_faces(const MeshType& mesh)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -1014,6 +1018,7 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
         correction_field.mesh_ptr(), "stored_variable_scalar_non_orthogonal_gradient");
     evaluate_stored_scalar_gradients(correction_field, stencils, gradients);
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto gradient_values = gradients.local_read_view();
     const auto gradient_value = [&](local_ordinal_type cell_lid)
     {
@@ -1089,6 +1094,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_values.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto older_field_state =
         older_values == nullptr
             ? 0
@@ -1850,6 +1856,7 @@ void add_stored_explicit_non_orthogonal_correction(const VectorCellFieldStored<P
         correction_field.mesh_ptr(), "stored_vector_non_orthogonal_gradient");
     evaluate_stored_vector_gradients(correction_field, stencils, gradients);
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -1912,6 +1919,7 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
     constexpr size_t components = 3;
 
     const auto& mesh = old_values.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const std::array<int, 2> local_ale_state{
         ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
     const auto ale_state =
@@ -2155,6 +2163,7 @@ void add_stored_variable_explicit_non_orthogonal_correction(
         correction_field.mesh_ptr(), "stored_variable_vector_non_orthogonal_gradient");
     evaluate_stored_vector_gradients(correction_field, stencils, gradients);
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -2233,6 +2242,7 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
     const auto viscosity_data = dynamic_viscosity.local_read_view();
     const auto rhs_data = rhs.getLocalViewHost(Tpetra::Access::ReadWrite);
     const auto& mesh = old_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -2332,6 +2342,7 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     constexpr size_t components = 3;
 
     const auto& mesh = old_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const std::array<int, 2> local_ale_state{
         ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
     const auto ale_state =

@@ -1357,7 +1357,8 @@ enum class MatrixMeshFamily
 {
     Cartesian,
     Cylindrical,
-    SemiStructured
+    SemiStructured,
+    Composite
 };
 
 struct MatrixCase
@@ -1382,6 +1383,13 @@ SimpleFluid::SP<Handle> make_matrix_mesh(const MatrixCase& test_case)
             return std::make_shared<Handle>(
                 std::make_shared<SimpleFluid::Meshes::OrthogonalCylindrial3D>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{
                     {{1.0, 2.0}, {0.0, 0.5 * std::numbers::pi}, {0.0, 0.5, 1.0}}}));
+        case MatrixMeshFamily::Composite:
+            return std::make_shared<Handle>(std::make_shared<SimpleFluid::Meshes::MultiRegionMesh>(
+                std::vector<SimpleFluid::Meshes::MultiRegionMesh::Region>{
+                    SimpleFluid::Meshes::cartesian_region("left",{{{0,0.5},{0,1},{0,0.5,1}}}),
+                    SimpleFluid::Meshes::cartesian_region("right",{{{0.5,1},{0,1},{0,0.5,1}}})},
+                std::vector<SimpleFluid::Meshes::MultiRegionMesh::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0,1},{1,0}}},
+                SimpleFluid::Meshes::InterfaceTolerance{}, SimpleFluid::Meshes::MultiRegionMesh::BoundaryNamePolicy::MergeMatchingNames));
         case MatrixMeshFamily::SemiStructured:
             return std::make_shared<Handle>(std::make_shared<SimpleFluid::Meshes::SemiStructuredXY_Z>(
                 SimpleFluid::Arr<SimpleFluid::Meshes::SemiStructuredXY_Z::Vec3>{
@@ -1635,6 +1643,13 @@ TEST(BoussinesqPlanarALESupportMatrixTest, CoupledBackendsCoverSerialSemiStructu
             exercise_supported_matrix_case({MatrixMeshFamily::SemiStructured, SimpleFluid::Dimension::Z, "zmax", 1.},
                 Coupling::CoupledKrylov, selection, gradient);
         }
+}
+
+TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsCompositeAxialMotion)
+{
+    for (const auto coupling : {Coupling::PISO, Coupling::CoupledKrylov})
+        for (const auto selection : SimpleFluid::test::backends_for(coupling))
+            exercise_supported_matrix_case({MatrixMeshFamily::Composite,SimpleFluid::Dimension::Z,"zmax",1.0},coupling,selection);
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsCartesianMotionAndGravityAlongX)
