@@ -1059,7 +1059,11 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
         {
             for (const auto& [name, condition] : d_velocity_boundary_conditions)
                 if (condition.type == BoundaryConditionType::Periodic)
-                    throw std::invalid_argument("Active SAS does not yet support periodic velocity boundaries.");
+                    for (const auto& [batch, faces] : d_mesh->boundary_batches())
+                        if (d_mesh->boundary_batch_name(batch) == name)
+                            for (const auto face : faces.face_lids)
+                                if (!d_mesh->is_interior_face(face))
+                                    throw std::invalid_argument("SAS periodic patches require paired/connected mesh topology before configuration.");
         });
     auto candidate = std::make_unique<State>(d_mesh, d_boundary_conditions,
                                              d_velocity_boundary_conditions, options);

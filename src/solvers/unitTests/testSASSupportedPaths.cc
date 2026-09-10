@@ -136,3 +136,19 @@ TEST(SASSupportedPathsTest, SlipWallsAdvanceWithNonzeroSourceAndContinuity)
     solver.configure_turbulence(sas_options()); initialize_circulation(solver);
     expect_active_bounded_step(solver); expect_active_bounded_step(solver);
 }
+
+TEST(SASSupportedPathsTest, PeriodicNativeFlowAdvancesWithNonzeroSource)
+{
+    ArrReal edges(9); for(size_t i=0;i<edges.size();++i) edges[i]=double(i)/8;
+    SP<const Handle> mesh=std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{edges,edges,edges}},Vec3D<bool>{true,true,true}));
+    IncompressibleIsothermalSolver<Pack> solver(mesh,{},transient_options());
+    solver.configure_turbulence(sas_options());
+    for(size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        const auto p=mesh->cell_centroid(i);
+        solver.velocity().set_owned_value(i,{std::sin(2*std::numbers::pi*p.y),std::sin(2*std::numbers::pi*p.z),std::sin(2*std::numbers::pi*p.x)});
+    }
+    solver.velocity().sync_ghosts();
+    expect_active_bounded_step(solver); expect_active_bounded_step(solver);
+}

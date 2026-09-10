@@ -548,8 +548,7 @@ inline auto interior_diffusion_coefficient(
 
     const auto face_id = query_face_id(mesh, face_lid);
     const auto cell_id = query_cell_id(mesh, cell_lid);
-    const auto other_id = query_cell_id(mesh, other_lid);
-    const auto d = mesh.cell_center_vector(face_id,cell_id);
+    const auto d = mesh.cell_center_vector(face_id, cell_id);
     const auto d2 = d.dot(d);
     if (d2 <= scalar_type{0})
     {

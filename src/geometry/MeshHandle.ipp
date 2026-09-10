@@ -275,6 +275,12 @@ MeshHandle<Pack>::cell_to_face_distance(
     local_ordinal_type face_lid,
     local_ordinal_type cell_lid) const
 {
+    if (const auto legacy=legacy_mesh())
+        return legacy->cell_to_face_distance(static_cast<local_ordinal_type>(geometry_face_lid(face_lid)),
+                                             static_cast<local_ordinal_type>(geometry_cell_lid(cell_lid)));
+    if (const auto* cartesian=std::get_if<CartesianPtr>(&d_mesh))
+        return (*cartesian)->cell_to_face_distance((*cartesian)->face_id(geometry_face_lid(face_lid)),
+                                                   (*cartesian)->cell_id(geometry_cell_lid(cell_lid)));
     return face_center_vector(face_lid,cell_lid).norm();
 }
 
@@ -439,6 +445,12 @@ MeshHandle<Pack>::cell_center_vector(
     local_ordinal_type face_lid,
     local_ordinal_type cell_lid) const -> Vec3
 {
+    if (const auto legacy=legacy_mesh())
+        return legacy->cell_center_vector(static_cast<local_ordinal_type>(geometry_face_lid(face_lid)),
+                                          static_cast<local_ordinal_type>(geometry_cell_lid(cell_lid)));
+    if (const auto* cartesian=std::get_if<CartesianPtr>(&d_mesh))
+        return (*cartesian)->cell_center_vector((*cartesian)->face_id(geometry_face_lid(face_lid)),
+                                                (*cartesian)->cell_id(geometry_cell_lid(cell_lid)));
     const auto other = opposite_cell(face_lid, cell_lid);
     if (other == invalid_local_id())
     {

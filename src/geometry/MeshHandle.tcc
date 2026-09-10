@@ -1096,6 +1096,26 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::orthogonal_vtu_topology(
         {{1, 1, 1}},
         {{0, 1, 1}}
     }};
+    if constexpr (std::is_same_v<MeshType, Cartesian>)
+    {
+        const auto& indexer = mesh.indexer();
+        if (std::any_of(indexer.periodic_dimensions.begin(), indexer.periodic_dimensions.end(), [](bool p) { return p; }))
+        {
+            // Periodic topological vertices have distinct physical endpoint images.
+            const auto& edges = mesh.cell_edges();
+            VTUWriter::VectorData points;
+            for (auto z : edges[2]) for (auto y : edges[1]) for (auto x : edges[0]) points.push_back({x,y,z});
+            for (size_t lid=0; lid<num_owned_cells(); ++lid)
+            {
+                const auto cell=mesh.cell_id(static_cast<size_t>(geometry_cell_lid(checked_local(lid))));
+                for (const auto& corner : corners)
+                    connectivity.push_back((cell.i+corner[0])+edges[0].size()
+                        *((cell.j+corner[1])+edges[1].size()*(cell.k+corner[2])));
+                offsets.push_back(connectivity.size()); cell_types.push_back(12);
+            }
+            return VTUWriter::make_topology(std::move(points),std::move(connectivity),std::move(offsets),std::move(cell_types));
+        }
+    }
     const auto& indexer = mesh.indexer();
     for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
