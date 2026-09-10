@@ -9,6 +9,7 @@
  *
  */
 
+#include "solvers/FieldStateTransaction.hh"
 #include "BoussinesqSolver.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -4287,6 +4288,34 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         }
         return;
     }
+    AcceptedStateRollback sas_rollback;
+    auto* sas_model = find_turbulence_model();
+    const bool active_sas = sas_model && sas_model->type() == TurbulenceModelType::SSTKOmegaSAS
+                            && sas_model->options().sas.enabled;
+    if (sas_model) sas_model->validate_time_mode(d_problem.time_options().physical_time);
+    if (active_sas)
+    {
+        if (d_radiolytic_gas_model || d_boiling_source_model || d_scalar_void_fraction_model
+            || d_material_feedback_model || d_precursor_model || d_free_surface_model)
+            throw std::invalid_argument("Active SAS currently supports fixed-grid single-phase Boussinesq flow without phase, inventory, or material-feedback models.");
+        sas_rollback.capture(temperature());
+        for (const auto& [name, source] : stored_temperature_sources().entries())
+            sas_rollback.capture(source->field());
+        sas_rollback.capture(pressure());
+        sas_rollback.capture(this->pressure_correction());
+        sas_rollback.capture(velocity());
+        sas_rollback.capture(predictor_pressure_gradient());
+        sas_rollback.capture(this->predictor_velocity());
+        sas_rollback.capture(old_face_fluxes());
+        sas_rollback.capture(projected_face_fluxes());
+        sas_rollback.add([this, residuals = pressure_velocity_residuals(), volume = this->d_last_volume_continuity_residuals]
+                        { pressure_velocity_residuals() = residuals; this->d_last_volume_continuity_residuals = volume; });
+        sas_rollback.add([this, saved = stored_material_properties().snapshot()]
+                        { stored_material_properties().restore(saved); });
+        sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        sas_rollback.add([this, time = this->d_time, step = this->d_step_index, statistics = d_last_step_statistics]
+                        { this->d_time = time; this->d_step_index = step; d_last_step_statistics = statistics; });
+    }
     begin_step();
     const bool free_surface_active = d_free_surface_model != nullptr;
     try
@@ -4324,6 +4353,11 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     }
     catch (...)
     {
+        if (active_sas)
+        {
+            sas_rollback.restore();
+            if (uses_legacy_backend()) { this->sync_primary_fields_to_legacy(); sync_temperature_to_legacy(); }
+        }
         if (free_surface_active)
         {
             d_free_surface_step_failed = true;

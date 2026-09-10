@@ -928,3 +928,101 @@ TEST(TurbulentBoussinesqSolverTest, CoupledBackendsAdvanceCombinedRansRadiolysis
         exercise_combined_rans_radiolysis(mesh, SimpleFluid::PressureVelocityCoupling::CoupledKrylov, selection);
     }
 }
+
+TEST(TurbulentBoussinesqSolverTest, SASActivatesAndRestoresAfterDownstreamFailure)
+{
+    using namespace SimpleFluid;
+    auto legacy = test::build_mesh<Pack>(test::make_box_database(4,4,4,.25));
+    BoundaryConditionSet bc;
+    for (auto name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+        bc.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+    auto time = stable_time_options(PressureVelocityCoupling::PIMPLE);
+    time.n_outer_correctors = 2; time.n_pressure_correctors = 2;
+    time.thermal_expansion = .001; time.gravity_z = -9.81;
+    BoussinesqSolver<Pack> solver(legacy, bc, time);
+    solver.initialize_linear_temperature({0,0,1}, 2, 1);
+    TurbulenceModelOptions options;
+    options.model = TurbulenceModelType::SSTKOmegaSAS;
+    options.initial_turbulent_kinetic_energy = .2;
+    options.initial_specific_dissipation_rate = 2;
+    options.initial_wall_distance = .25;
+    options.sas.diagnostics = true;
+    options.buoyancy_model = TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+    auto& model = solver.configure_turbulence(options);
+    const auto& mesh = solver.velocity().mesh();
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+    {
+        const auto p = mesh.cell_centroid(i);
+        const auto pi = std::numbers::pi;
+        solver.velocity().set_owned_value(i, {std::sin(pi*p.x)*std::sin(pi*p.x)*std::sin(2*pi*p.y),
+            -std::sin(2*pi*p.x)*std::sin(pi*p.y)*std::sin(pi*p.y), 0});
+    }
+    solver.velocity().sync_ghosts();
+    ASSERT_NO_THROW(solver.step());
+    ASSERT_GT(model.sas_statistics().max_source, .01);
+    double local_buoyancy = 0, total_buoyancy = 0;
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+        local_buoyancy += std::abs(model.output_fields().at("buoyancy_production")->value(i));
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_buoyancy, &total_buoyancy);
+    EXPECT_GT(total_buoyancy, 1e-6);
+    EXPECT_LT(solver.last_pressure_velocity_residuals().continuity, 1e-6);
+    const auto saved_stats = model.sas_statistics();
+    const auto saved_continuity = solver.last_pressure_velocity_residuals().continuity;
+    const auto saved_time = solver.time();
+    std::vector<double> saved_k, saved_q;
+    std::vector<typename BoussinesqSolver<Pack>::vec_type> saved_u;
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+    {
+        saved_k.push_back(model.turbulent_kinetic_energy().value(i));
+        saved_q.push_back(model.output_fields().at("sas_Q_applied")->value(i));
+        saved_u.push_back(solver.velocity().value(i));
+    }
+    // Each source passes the pre-step finite-value validation; their sum first
+    // overflows in temperature assembly, which follows both turbulence solves.
+    solver.add_temperature_source("overflow_one", std::numeric_limits<double>::max());
+    solver.add_temperature_source("overflow_two", std::numeric_limits<double>::max());
+    EXPECT_ANY_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_DOUBLE_EQ(solver.time(), saved_time);
+    EXPECT_DOUBLE_EQ(solver.last_pressure_velocity_residuals().continuity, saved_continuity);
+    EXPECT_DOUBLE_EQ(model.sas_statistics().max_source, saved_stats.max_source);
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+    {
+        EXPECT_DOUBLE_EQ(model.turbulent_kinetic_energy().value(i), saved_k[i]);
+        EXPECT_DOUBLE_EQ(model.output_fields().at("sas_Q_applied")->value(i), saved_q[i]);
+        EXPECT_DOUBLE_EQ(solver.velocity().value(i).x, saved_u[i].x);
+        EXPECT_DOUBLE_EQ(solver.velocity().value(i).y, saved_u[i].y);
+    }
+    solver.remove_temperature_source("overflow_one");
+    solver.remove_temperature_source("overflow_two");
+    ASSERT_NO_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 2);
+}
+
+TEST(TurbulentBoussinesqSolverTest, SASRejectsPseudoTimeAndAdvancesTurbulenceOncePerPhysicalStep)
+{
+    using namespace SimpleFluid;
+    auto legacy = test::build_mesh<Pack>(test::make_box_database(4,4,4,.25));
+    auto time = stable_time_options(PressureVelocityCoupling::PIMPLE);
+    time.n_outer_correctors = 3;
+    TurbulenceModelOptions config;
+    config.model = TurbulenceModelType::SSTKOmegaSAS;
+    config.initial_turbulent_kinetic_energy = .2; config.initial_specific_dissipation_rate = 2;
+    config.initial_wall_distance = .25;
+    for (bool physical : {false, true})
+    {
+        time.physical_time = physical;
+        BoussinesqSolver<Pack> solver(legacy, {}, time);
+        solver.initialize_heated_box(1,1);
+        auto& model = solver.configure_turbulence(config);
+        if (!physical)
+        {
+            EXPECT_ANY_THROW(solver.step());
+            EXPECT_EQ(solver.step_index(), 0);
+            continue;
+        }
+        ASSERT_NO_THROW(solver.step());
+        for (size_t i = 0; i < model.turbulent_kinetic_energy().num_owned_cells(); ++i)
+            EXPECT_NEAR(model.turbulent_kinetic_energy().value(i), .2/(1+time.time_step*.09*2), 1e-13);
+    }
+}

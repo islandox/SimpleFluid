@@ -125,3 +125,10 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;turbulence;buoyancy"
     TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME SSTSAS_2procs
+    TARGET testSSTSASModel
+    PROCS 2
+    LABELS "mpi;turbulence;sas;small_fixture"
+    TIMEOUT 120)

@@ -1268,6 +1268,7 @@ int main(int argc, char** argv)
                 "SIMPLEFLUID_SHIRI_STEADY_REJECTION_SAFETY",
                 0.9);
 
+        turbulence.validate_time_mode(false);
         SimpleFluid::AdaptiveSteadyStateController controller(
             steady_options, time_step);
         SimpleFluid::SteadyStateFieldMonitor<Pack> monitor(

@@ -691,3 +691,14 @@ if(BUILD_TESTING)
             LABELS "mpi;multi_region;example" TIMEOUT 120)
     endforeach()
 endif()
+
+add_executable(sst_sas_activation examples/sst_sas_activation.cc)
+target_link_libraries(sst_sas_activation PRIVATE SimpleFluid::Solvers)
+simplefluid_exe_reuse_precompiled_header(sst_sas_activation)
+if(BUILD_TESTING)
+  add_test(NAME sst_sas_activation_small COMMAND sst_sas_activation)
+  set_tests_properties(sst_sas_activation_small PROPERTIES
+    LABELS "verification;turbulence;sas;small_fixture" TIMEOUT 60)
+  simplefluid_add_mpi_test(NAME SSTSASActivation_2procs TARGET sst_sas_activation
+    PROCS 2 LABELS "mpi;turbulence;sas;small_fixture" TIMEOUT 60)
+endif()

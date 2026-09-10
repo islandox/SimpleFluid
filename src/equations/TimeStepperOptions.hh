@@ -49,6 +49,9 @@ struct TimeStepperOptions
     CoupledOperatorBackend coupled_operator_backend = CoupledOperatorBackend::Assembled;
     CoupledWorkspacePolicy coupled_workspace_policy = CoupledWorkspacePolicy::CachedProducts;
 
+    /** False for pseudo-transient steady searches; active SAS requires true. */
+    bool physical_time = true;
+
     vec3<real_t> gravity_vector() const noexcept
     {
         return {gravity_x, gravity_y, gravity_z};

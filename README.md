@@ -256,6 +256,13 @@ The principal database selectors are `turbulence_model`, `wall_treatment`,
 `wall_boundaries`. Automatic distance always includes every configured no-slip
 velocity patch; explicit names augment that set and must also be no-slip.
 
+The opt-in `SSTKOmegaSAS` selection adds a SAS omega source to the existing
+**SST-1994** parent. See [the mathematical contract, configuration and supported
+scope](docs/modeling/sst_sas.md) and [verification evidence](docs/modeling/sst_sas_verification.md).
+The `sst_sas_activation` example is a small, isothermal transient source check
+with optional diagnostics. Source implementation and solver regression do not
+establish physically validated scale-resolving turbulence.
+
 ### Turbulent Bubble-Flow Scope
 
 `BoussinesqSolver` can configure a RANS closure and

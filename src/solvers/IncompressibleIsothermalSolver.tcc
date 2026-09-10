@@ -9,6 +9,7 @@
  *
  */
 
+#include "solvers/FieldStateTransaction.hh"
 #include "IncompressibleIsothermalSolver.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -269,21 +270,55 @@ auto IncompressibleIsothermalSolver<Pack>::assemble_coupled_system() -> coupled_
 /** @brief Advance pressure, velocity, and optional turbulence one step. */
 template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
 {
-    begin_step();
-    if (auto* turbulence = find_turbulence_model())
+    AcceptedStateRollback sas_rollback;
+    auto* sas_model = find_turbulence_model();
+    const bool active_sas = sas_model && sas_model->type() == TurbulenceModelType::SSTKOmegaSAS
+                            && sas_model->options().sas.enabled;
+    if (sas_model) sas_model->validate_time_mode(d_problem.time_options().physical_time);
+    if (active_sas)
     {
-        turbulence->refresh_effective_properties(stored_material_properties(), d_reference_density);
+        sas_rollback.capture(pressure());
+        sas_rollback.capture(this->pressure_correction());
+        sas_rollback.capture(velocity());
+        sas_rollback.capture(predictor_pressure_gradient());
+        sas_rollback.capture(this->predictor_velocity());
+        sas_rollback.capture(old_face_fluxes());
+        sas_rollback.capture(projected_face_fluxes());
+        sas_rollback.add([this, residuals = pressure_velocity_residuals(), volume = this->d_last_volume_continuity_residuals]
+                        { pressure_velocity_residuals() = residuals; this->d_last_volume_continuity_residuals = volume; });
+        sas_rollback.add([this, saved = stored_material_properties().snapshot()]
+                        { stored_material_properties().restore(saved); });
+        sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        sas_rollback.add([this, time = this->d_time, step = this->d_step_index, statistics = d_last_step_statistics]
+                        { this->d_time = time; this->d_step_index = step; d_last_step_statistics = statistics; });
     }
+    try
+    {
+        begin_step();
+        if (auto* turbulence = find_turbulence_model())
+        {
+            turbulence->refresh_effective_properties(stored_material_properties(), d_reference_density);
+        }
 
-    solve_pressure_velocity_coupling();
-    if (auto* turbulence = find_turbulence_model())
-    {
-        const auto statistics = turbulence->advance(velocity(), projected_face_fluxes(),
-            isothermal_velocity_boundary_cache(), d_problem.time_options().time_step, stored_material_properties(),
-            d_reference_density, d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options());
-        d_last_step_statistics.add(statistics);
+        solve_pressure_velocity_coupling();
+        if (auto* turbulence = find_turbulence_model())
+        {
+            const auto statistics = turbulence->advance(velocity(), projected_face_fluxes(),
+                isothermal_velocity_boundary_cache(), d_problem.time_options().time_step, stored_material_properties(),
+                d_reference_density, d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options());
+            d_last_step_statistics.add(statistics);
+        }
+        finish_step();
     }
-    finish_step();
+    catch (...)
+    {
+        if (active_sas)
+        {
+            sas_rollback.restore();
+            if (uses_legacy_backend()) this->sync_primary_fields_to_legacy();
+        }
+        throw;
+    }
 }
 
 /** @brief Build a writer containing requested isothermal solution fields. */

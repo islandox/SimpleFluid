@@ -21,6 +21,7 @@
 #include "equations/turbulence/RNGKEpsilonEquation.hh"
 #include "equations/turbulence/RealizableKEpsilonEquation.hh"
 #include "equations/turbulence/SSTKOmegaEquation.hh"
+#include "equations/turbulence/SSTSASSource.hh"
 #include "equations/turbulence/StandardKEpsilonEquation.hh"
 #include "equations/turbulence/StandardKOmegaEquation.hh"
 #include "equations/turbulence/TurbulenceScalarTransportEquation.hh"

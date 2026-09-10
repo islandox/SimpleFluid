@@ -44,6 +44,8 @@ std::string_view to_string(TurbulenceModelType model) noexcept
         return "BSLKOmega";
     case TurbulenceModelType::SSTKOmega:
         return "SSTKOmega";
+    case TurbulenceModelType::SSTKOmegaSAS:
+        return "SSTKOmegaSAS";
     }
     return "unknown";
 }
@@ -70,6 +72,8 @@ TurbulenceModelType parse_turbulence_model_type(const std::string& value)
         return TurbulenceModelType::BSLKOmega;
     if (value == "SSTKOmega" || value == "sstKOmega")
         return TurbulenceModelType::SSTKOmega;
+    if (value == "SSTKOmegaSAS")
+        return TurbulenceModelType::SSTKOmegaSAS;
     throw std::invalid_argument("Unknown turbulence model '" + value + "'.");
 }
 
@@ -149,6 +153,28 @@ TurbulenceBuoyancyModel parse_turbulence_buoyancy_model(
  */
 void validate_turbulence_model_options(const TurbulenceModelOptions& options)
 {
+    if (to_string(options.model) == "unknown")
+        throw std::invalid_argument("Unknown turbulence model enumeration.");
+    const SSTSASSource source(options.sas);
+    if (options.model == TurbulenceModelType::SSTKOmegaSAS)
+    {
+        if (options.sas.enabled && options.gradient_scheme != FVM::CellGradientScheme::LeastSquares)
+            throw std::invalid_argument("Active SAS requires the verified least-squares gradient path.");
+        auto parent = SSTKOmegaEquation::Coefficients{};
+        if (options.wall_treatment == TurbulenceWallTreatmentType::ResolvedLowReSST)
+        {
+            parent.beta_1 = options.wall_options.sst_beta_1;
+            parent.kappa = options.wall_options.kappa;
+        }
+        const SSTKOmegaEquation closure(parent);
+        for (const auto f1 : {0.0, 1.0})
+        {
+            const auto blend = closure.blended_coefficients(f1);
+            SSTSASInputs input{.state = {1, 1}, .beta_star = parent.beta_star,
+                              .beta = blend.beta, .gamma = blend.gamma, .kappa = parent.kappa};
+            static_cast<void>(source.evaluate(input));
+        }
+    }
     switch (options.gradient_scheme)
     {
         case FVM::CellGradientScheme::LeastSquares:
@@ -210,7 +236,7 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
     }
     const auto menter_model =
         options.model == TurbulenceModelType::BSLKOmega
-        || options.model == TurbulenceModelType::SSTKOmega;
+        || is_sst_model(options.model);
     if (!menter_model && !options.wall_distance_boundaries.empty())
     {
         throw std::invalid_argument(
@@ -250,7 +276,7 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
         }
         break;
     case TurbulenceWallTreatmentType::ResolvedLowReSST:
-        if (options.model != TurbulenceModelType::SSTKOmega)
+        if (!is_sst_model(options.model))
         {
             throw std::invalid_argument(
                 "resolvedLowReSST wall treatment requires the SST k-omega model.");
@@ -451,6 +477,15 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
     options.wall_options.sst_omega_wall_coefficient = reader.value_or<real_t>(
         "wall_sst_omega_face_coefficient",
         options.wall_options.sst_omega_wall_coefficient);
+    options.sas.enabled = reader.value_or<bool>("turbulence_sas_enabled", options.sas.enabled);
+    options.sas.diagnostics = reader.value_or<bool>("turbulence_sas_diagnostics", options.sas.diagnostics);
+    options.sas.zeta2 = reader.value_or<real_t>("turbulence_sas_zeta2", options.sas.zeta2);
+    options.sas.sigma_phi = reader.value_or<real_t>("turbulence_sas_sigma_phi", options.sas.sigma_phi);
+    options.sas.c = reader.value_or<real_t>("turbulence_sas_c", options.sas.c);
+    options.sas.cs = reader.value_or<real_t>("turbulence_sas_cs", options.sas.cs);
+    options.sas.delta_multiplier = reader.value_or<real_t>("turbulence_sas_delta_multiplier", options.sas.delta_multiplier);
+    options.sas.time_limiter = reader.value_or<bool>("turbulence_sas_time_limiter", options.sas.time_limiter);
+    options.sas.cap_time_fraction = reader.value_or<real_t>("turbulence_sas_cap_time_fraction", options.sas.cap_time_fraction);
     validate_turbulence_model_options(options);
     return options;
 }
