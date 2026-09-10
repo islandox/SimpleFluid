@@ -158,8 +158,6 @@ void validate_turbulence_model_options(const TurbulenceModelOptions& options)
     const SSTSASSource source(options.sas);
     if (options.model == TurbulenceModelType::SSTKOmegaSAS)
     {
-        if (options.sas.enabled && options.gradient_scheme != FVM::CellGradientScheme::LeastSquares)
-            throw std::invalid_argument("Active SAS requires the verified least-squares gradient path.");
         auto parent = SSTKOmegaEquation::Coefficients{};
         if (options.wall_treatment == TurbulenceWallTreatmentType::ResolvedLowReSST)
         {
@@ -353,6 +351,10 @@ TurbulenceModelOptions turbulence_model_options_from_database(const Database& da
     const detail::DatabaseOptionReader reader(database, "Turbulence model");
     options.model = parse_turbulence_model_type(
         reader.value_or<std::string>("turbulence_model", "laminar"));
+    const auto gradient = reader.value_or<std::string>("turbulence_gradient_scheme", "leastSquares");
+    if (gradient == "leastSquares") options.gradient_scheme = FVM::CellGradientScheme::LeastSquares;
+    else if (gradient == "gaussLinear") options.gradient_scheme = FVM::CellGradientScheme::GaussLinear;
+    else throw std::invalid_argument("Unknown turbulence_gradient_scheme '" + gradient + "'.");
     options.initial_turbulent_kinetic_energy = reader.value_or<real_t>(
         "initial_turbulent_kinetic_energy", options.initial_turbulent_kinetic_energy);
     options.initial_dissipation_rate = reader.value_or<real_t>(

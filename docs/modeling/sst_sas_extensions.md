@@ -113,3 +113,29 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSu
 ctest --test-dir build/gcc -C Debug -R 'Periodic|OrthogonalCartesian3DTest|StoredPressureFaceFluxCacheTest' -E '_[24]procs' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs|StoredPressureFaceFluxCache_2procs)$' --output-on-failure
 ```
+
+## Gauss-linear discretization
+
+The new `turbulence_gradient_scheme` database key accepts `leastSquares`
+(default) and `gaussLinear`, matching the typed option. Active SAS uses a
+linearity-preserving Gauss-linear coordinate-moment correction. It normalizes
+by volume and solves a dimensionless, pivoted 3x3 system locally; it rejects
+singular moments, respects mixed slip/Neumann constraints and uses integrated
+curved-face area vectors and wrapped periodic displacements. Constant offsets
+cancel before reconstruction. This is a documented SAS numerical policy,
+not a claim of equality with an uncorrected OpenFOAM Gauss gradient. Ordinary
+SST and source-disabled SAS retain their previous reconstruction paths.
+
+Manufactured affine gradients/curvature and quadratic refinement cover native
+and legacy boxes, skewed prisms, cylindrical annuli, semi-structured extrusions
+and periodic Fourier fields. Runtime checks cover disabled-source equivalence,
+restart/diagnostics, slip flow and signed Boussinesq production with a nonzero
+SAS source. The Gauss/option selection initially passed 20 serial registrations;
+final selection passes 21 serial registrations, and both MPI registrations
+pass, including the added periodic and buoyancy checks:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths testTurbulenceModelOptions
+ctest --test-dir build/gcc -C Debug -R '(SSTSAS|SASSupportedPaths).*Gauss|TurbulenceModelOptionsTest' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs)$' --output-on-failure
+```

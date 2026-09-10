@@ -119,9 +119,18 @@ partition ghosts. This is the full explicit non-orthogonal correction, not a
 second first-derivative reconstruction, Laplacian of speed, full Hessian norm,
 or variable-viscosity momentum diffusion.
 
-The model reuses its existing velocity/k/omega least-squares gradient machinery.
-Active SAS initially requires the verified least-squares path; the parent
-Gauss-linear option remains available with the source disabled. SAS imports the current
+`turbulence_gradient_scheme` selects `leastSquares` (default) or `gaussLinear`.
+Active SAS uses the existing least-squares path or a coordinate-moment-corrected
+Gauss-linear reconstruction for velocity, k, omega and buoyancy gradients.
+For Gauss, face values are linearly interpolated, and `M grad(phi)=b` with
+`M=sum(S_f d_f^T)/V` and `b=sum(S_f (phi_f-phi_P))/V`; d_f is the corresponding
+interpolated center displacement, prescribed-face displacement or normal-foot
+constraint. Curved-face normals use the same integrated area as the Laplacian.
+This gives constant/affine preservation on skewed and curved cells; singular
+moments are errors. This explicitly chosen SAS policy differs from an
+uncorrected `Gauss linear` gradient. Ordinary SST and source-disabled SAS keep
+their established gradient implementation; SST coefficients/formulation and
+transport time/convection schemes are unchanged. SAS imports the current
 owned velocity into existing candidate velocity storage before its stencil,
 and synchronizes the velocity-gradient ghosts. The Laplacian result and filter
 width are read only on owned cells and need no halo. Geometry is kept in a
