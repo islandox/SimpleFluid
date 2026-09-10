@@ -4296,8 +4296,9 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     if (active_sas)
     {
         if (d_radiolytic_gas_model || d_boiling_source_model || d_scalar_void_fraction_model
-            || d_material_feedback_model || d_precursor_model || d_free_surface_model)
-            throw std::invalid_argument("Active SAS currently supports fixed-grid single-phase Boussinesq flow without phase, inventory, or material-feedback models.");
+            || d_precursor_model || d_free_surface_model)
+            throw std::invalid_argument("Active SAS phase/inventory coupling is not yet enabled for this model.");
+        if (d_material_feedback_model) sas_rollback.capture_model(*d_material_feedback_model);
         sas_rollback.capture(temperature());
         for (const auto& [name, source] : stored_temperature_sources().entries())
             sas_rollback.capture(source->field());
