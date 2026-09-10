@@ -42,7 +42,8 @@ constexpr std::array canonical_models{
     ModelCase{"realizableKEpsilon", TurbulenceModelType::RealizableKEpsilon},
     ModelCase{"standardKOmega", TurbulenceModelType::StandardKOmega},
     ModelCase{"BSLKOmega", TurbulenceModelType::BSLKOmega, true},
-    ModelCase{"SSTKOmega", TurbulenceModelType::SSTKOmega, true}};
+    ModelCase{"SSTKOmega", TurbulenceModelType::SSTKOmega, true},
+    ModelCase{"SSTKOmegaSAS", TurbulenceModelType::SSTKOmegaSAS, true}};
 
 /** @brief Verifies parsing and formatting of canonical turbulence-model names. */
 TEST(TurbulenceModelOptionsTest, ParsesAndFormatsCanonicalNames)
@@ -614,3 +615,32 @@ TEST(TurbulenceModelOptionsTest, WallTreatmentRequiresCompatibleClosureAndExplic
 }
 
 } // namespace
+
+TEST(TurbulenceModelOptionsTest, SASParserValidationAndWallPolicy)
+{
+    SimpleFluid::Database db;
+    db.set("turbulence_model", std::string("SSTKOmegaSAS"));
+    db.set("turbulence_sas_enabled", false);
+    db.set("turbulence_sas_diagnostics", true);
+    db.set("turbulence_sas_cs", .12);
+    db.set("turbulence_sas_cap_time_fraction", .2);
+    auto options = SimpleFluid::turbulence_model_options_from_database(db);
+    auto active = options;
+    active.sas.enabled = true;
+    active.gradient_scheme = SimpleFluid::FVM::CellGradientScheme::GaussLinear;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(active), std::invalid_argument);
+    EXPECT_FALSE(options.sas.enabled);
+    EXPECT_TRUE(options.sas.diagnostics);
+    EXPECT_DOUBLE_EQ(options.sas.cs, .12);
+    EXPECT_DOUBLE_EQ(options.sas.cap_time_fraction, .2);
+    options.wall_treatment = SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReSST;
+    options.wall_options.boundary_names = {"wall"};
+    EXPECT_NO_THROW(SimpleFluid::validate_turbulence_model_options(options));
+    options.wall_treatment = SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon;
+    EXPECT_THROW(SimpleFluid::validate_turbulence_model_options(options), std::invalid_argument);
+    db.set("turbulence_sas_cs", 0.);
+    EXPECT_THROW(SimpleFluid::turbulence_model_options_from_database(db), std::invalid_argument);
+    db.set("turbulence_sas_cs", .11);
+    db.set("turbulence_sas_enabled", std::string("false"));
+    EXPECT_THROW(SimpleFluid::turbulence_model_options_from_database(db), std::invalid_argument);
+}
