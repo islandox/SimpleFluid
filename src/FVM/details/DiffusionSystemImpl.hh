@@ -30,6 +30,7 @@ template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, c
 DiffusionSystem<Pack> diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -122,6 +123,7 @@ template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, c
 VectorDiffusionSystem<Pack> vector_diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;

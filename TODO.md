@@ -197,6 +197,11 @@ verification items below mean the foundation as a whole is not yet complete.
       periodic patches with image-correct geometry and fluxes.
 - [x] Independent extruded geometry providers sharing immutable base topology,
       with analytic geometry, native parity and serial/MPI solver tests.
+- [x] Validated execution views, geometry read leases, per-region interface
+      directories and Cartesian/extruded descriptor validation without volume sweeps.
+- [x] Nonlinear/coarse-fine, periodic-through-seam and decomposition-invariance
+      qualification; diagnostic N/R/P baselines with peak RSS. See
+      `docs/region_execution.md` and `docs/region_scaling.md` for measured scope.
 - [ ] Distributed explicit region packets and region-aware load balancing.
 - [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
       wider polygonal volume/output types and rotated periodic field transforms.

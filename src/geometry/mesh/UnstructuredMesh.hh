@@ -13,6 +13,7 @@
 
 #include "geometry/mesh/MeshBase.hh"
 #include "geometry/GeometryEpoch.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 
 #include <limits>
 #include <string>
@@ -38,7 +39,7 @@ using UnstructuredMeshIndexTypes = MeshIndexTypes<
  * batches supplied by node set.
  */
 class UnstructuredMesh
-    : public MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>
+    : public GeometryExecutionGuard, public MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>
 {
 public:
     using Base = MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>;

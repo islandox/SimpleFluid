@@ -417,6 +417,7 @@ void validate_face_flux_inputs(
     const VelocityBoundaryCache<Pack>* boundary_cache)
 {
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (boundary_cache != nullptr && boundary_cache->value.size() != mesh.boundary_batches().size())
     {
         throw std::invalid_argument("face_fluxes received the wrong boundary-cache size.");
@@ -486,6 +487,7 @@ auto slip_face_velocity(const VectorCellField<Pack>& velocity,
     -> typename VectorCellField<Pack>::vec_type
 {
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto owner = mesh.owner_cell(face_lid);
     const auto cell_velocity = velocity.local_value(owner);
     const auto& normal = mesh.face_normal_outward(face_lid, owner);
@@ -512,6 +514,7 @@ void load_boundary_face_velocity(
     if (boundary_cache == nullptr) return;
 
     const auto& mesh = face_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     for (auto [batch_id, boundary_batch] : mesh.boundary_batches())
     {
         if (boundary_batch.face_lids.empty())
@@ -567,6 +570,7 @@ void assemble_face_velocities(const VectorCellField<Pack>& velocity,
     validate_face_flux_inputs(velocity, boundary_cache);
     validate_face_velocity_output(velocity, face_velocity);
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     face_velocity.put_scalar(typename Mesh<Pack>::Vec3{});
 
     for (size_t face = 0; face < mesh.num_faces(); ++face)
@@ -620,6 +624,7 @@ void assemble_normal_face_fluxes(
     }
 
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     fluxes.put_scalar(scalar_type{});
     const auto velocity_values = velocity.local_read_view();
     auto flux_values = fluxes.owned_write_view();
@@ -763,6 +768,7 @@ void normal_face_fluxes(
 {
     detail::validate_normal_flux_inputs(face_velocity, fluxes);
     const auto& mesh = face_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     fluxes.put_scalar(typename Pack::scalar_type{});
 
     for (size_t face = 0; face < mesh.num_faces(); ++face)
@@ -970,6 +976,7 @@ void pressure_weighted_face_fluxes_impl(
     }
 
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     auto& pressure_gradient = precomputed_pressure_gradient == nullptr
       ? workspace.pressure_gradient()
       : *precomputed_pressure_gradient;

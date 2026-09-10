@@ -12,6 +12,7 @@
 #pragma once
 
 #include "geometry/GeometryEpoch.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 #include "geometry/mesh/MeshBase.hh"
 #include "geometry/mesh/SemiStructMeshTopo.hh"
 
@@ -33,7 +34,7 @@ class PlanarALEGeometryAccess;
  * and the directed edge follows that owner's counter-clockwise loop.
  */
 class SemiStructuredXY_Z
-    : public MeshBase<SemiStructuredXY_Z, SemiStructuredMeshIndexTypes>
+    : public GeometryExecutionGuard, public MeshBase<SemiStructuredXY_Z, SemiStructuredMeshIndexTypes>
 {
 public:
     using Indexer = SemiStructuredIndexer;

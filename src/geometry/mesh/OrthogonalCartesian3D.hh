@@ -13,6 +13,7 @@
 
 #include "OrthogonalIndexer.hh"
 #include "geometry/GeometryEpoch.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 #include "geometry/mesh/MeshBase.hh"
 #include "geometry/mesh/OrthoMeshTopo.hh"
 
@@ -34,7 +35,7 @@ class PlanarALEGeometryAccess;
  * neighbor. On exterior faces the normal points out of the domain.
  */
 class OrthogonalCartesian3D
-    : public MeshBase<OrthogonalCartesian3D, OrthogonalMeshIndexTypes>
+    : public GeometryExecutionGuard, public MeshBase<OrthogonalCartesian3D, OrthogonalMeshIndexTypes>
 {
 public:
     using Indexer = OrthogonalIndexer;

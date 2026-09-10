@@ -134,6 +134,7 @@ void add_stored_explicit_diffusion_correction(const ScalarCellFieldStored<Pack, 
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (diffusivity <= scalar_type{} || correction_weight == scalar_type{})
     {
         return;

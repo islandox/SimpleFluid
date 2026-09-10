@@ -13,6 +13,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME RegionExecution_2procs
+    TARGET testRegionExecution
+    PROCS 2
+    ARGS "--gtest_filter=RegionExecutionMultiRankTest.*"
+    LABELS "mpi;multi_region;execution;ale"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME WallYPlusStatistics_2procs
     TARGET testYPlusBoundaryLayerController
     PROCS 2

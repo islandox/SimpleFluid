@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "geometry/GeometryExecutionGuard.hh"
+
 #include "geometry/mesh/OrthogonalIndexer.hh"
 #include "geometry/mesh/StructuredBatchView.hh"
 
@@ -32,7 +34,7 @@ namespace SimpleFluid::Meshes
  * `std::ranges::views::cartesian_product` views, avoiding materialized
  * storage for the structured topology.
  */
-class OrthoMeshTopo
+class OrthoMeshTopo : public GeometryExecutionGuard
 {
 public:
     using Indexer = OrthogonalIndexer;

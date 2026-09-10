@@ -442,6 +442,13 @@ public:
         return d_mutable_mesh.has_value();
     }
 
+    /** @brief Pin and validate composite geometry for a bulk operation; native paths are unchanged. */
+    [[nodiscard]] Meshes::MultiRegionMesh::ExecutionView acquire_execution_view() const
+    {
+        const auto* composite = std::get_if<MultiRegionPtr>(&d_mesh);
+        return Meshes::MultiRegionMesh::ExecutionView(composite ? composite->get() : nullptr);
+    }
+
     /**
      * @brief Monotone revision of the fixed-topology geometry.
      *

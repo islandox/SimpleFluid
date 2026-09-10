@@ -82,7 +82,7 @@ struct InterfaceTolerance
  * MeshHandle supplies local ownership/maps. Explicit global regions are serial.
  * Nodes are region-qualified, while cells/faces have contiguous logical ordinals.
  */
-class MultiRegionMesh : public MeshBase<MultiRegionMesh, UnstructuredMeshIndexTypes>
+class MultiRegionMesh : public GeometryExecutionGuard, public MeshBase<MultiRegionMesh, UnstructuredMeshIndexTypes>
 {
 public:
     using Base = MeshBase<MultiRegionMesh, UnstructuredMeshIndexTypes>;
@@ -94,6 +94,41 @@ public:
     enum class BoundaryNamePolicy { NamespaceRegions, MergeMatchingNames };
     static constexpr ID invalid_cell_id() noexcept { return UnstructuredMesh::invalid_ordinal; }
 
+    /**
+     * @brief Validate once and pin constituent geometry for an existing kernel.
+     *
+     * Queries through this mesh (including MeshHandle aliases) keep bounds
+     * checks but avoid whole-composite validation on this thread while the
+     * view lives. Public queries outside a view remain fully checked. Views
+     * borrow the mesh, are thread-affine, and must be destroyed in scope order.
+     * Nested operations reuse an enclosing view of the same mesh. Geometry
+     * motion and constituent/provider replacement are rejected before mutation.
+     */
+    class ExecutionView
+    {
+    public:
+        explicit ExecutionView(const MultiRegionMesh* mesh);
+        ExecutionView(const ExecutionView&) = delete;
+        ExecutionView& operator=(const ExecutionView&) = delete;
+        ExecutionView(ExecutionView&&) = delete;
+        ExecutionView& operator=(ExecutionView&&) = delete;
+        ~ExecutionView();
+        /** @brief Visit raw constituent coordinates; composite affine motion is applied by canonical mesh queries. */
+        template<class Visitor> void visit_regions(Visitor&& visitor) const
+        {
+            if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
+            for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
+                std::visit([&](const auto& region) { visitor(r, d_mesh->d_cells[r], region); }, d_mesh->d_regions[r]);
+        }
+    private:
+        friend MultiRegionMesh;
+        static thread_local const ExecutionView* d_current;
+        const MultiRegionMesh* d_mesh;
+        const ExecutionView* d_previous;
+        std::vector<GeometryExecutionGuard::ReadLease> d_leases;
+    };
+    [[nodiscard]] ExecutionView acquire_execution_view() const { return ExecutionView(this); }
+
     MultiRegionMesh(std::vector<Region> regions, std::vector<Interface> interfaces,
         InterfaceTolerance tolerance = {}, BoundaryNamePolicy names = BoundaryNamePolicy::NamespaceRegions);
     MultiRegionMesh(const MultiRegionMesh&) = delete;
@@ -104,6 +139,13 @@ public:
     const Indexer& indexer() const { return d_indexer; }
     const std::vector<Region>& regions() const { return d_regions; }
     const std::vector<Interface>& interfaces() const { return d_interfaces; }
+    /** @brief Descriptor counts for storage/scaling diagnostics; a self seam has two sides. */
+    size_t region_interface_side_count(size_t r) const
+    {
+        const auto& offsets = d_region_interfaces.at(r).offsets;
+        return offsets.back() - offsets.front();
+    }
+    ID removed_native_face_count(size_t r) const { return d_region_interfaces.at(r).removed_faces; }
     const RegionLayout& region_layout(size_t r) const;
     const std::string& region_name(size_t r) const;
     ID canonical_face(RegionFace f) const;
@@ -121,7 +163,7 @@ public:
     ID composite_cell(size_t r, ID c) const;
     ID patch_face(const StructuredPatch& p, std::array<size_t, 2> coordinate) const;
     void validate_static() const;
-    std::uint64_t geometry_epoch() const { validate_static(); return d_geometry_state.epoch; }
+    std::uint64_t geometry_epoch() const { validate_query(); return d_geometry_state.epoch; }
     const ArrReal& axial_edges() const noexcept { return d_axial_edges; }
     bool supports_axial_motion() const noexcept;
     Vec3 cell_center_vector(ID face,ID cell) const;
@@ -138,12 +180,11 @@ public:
     EntityRange<ID> cell_nodes(ID c) const;
     EntityRange<ID> face_nodes(ID f) const;
 
-    /** @brief Dispatch once per region for future batched native kernels. */
+    /** @brief Dispatch once per region under a validated geometry read lease. */
     template<class Visitor> void visit_regions(Visitor&& visitor) const
     {
-        validate_static();
-        for (size_t r = 0; r < d_regions.size(); ++r)
-            std::visit([&](const auto& region) { visitor(r, d_cells[r], region); }, d_regions[r]);
+        auto execution = acquire_execution_view();
+        execution.visit_regions(std::forward<Visitor>(visitor));
     }
 
 private:
@@ -159,6 +200,18 @@ private:
     {
         std::vector<std::pair<ID, ID>> first_to_second, second_to_first;
     };
+    // Two side descriptors per interface. Structured sides are grouped by
+    // native boundary 0..5; only irregular correspondence uses bucket 6.
+    struct InterfaceSide { size_t interface; bool first; };
+    struct RegionInterfaceDirectory
+    {
+        std::array<size_t, 8> offsets{};
+        ID removed_faces = 0;
+        size_t boundary_begin = 0, boundary_end = 0;
+    };
+    void initialize_interface_directory();
+    std::span<const InterfaceSide> interface_sides(size_t region, size_t bucket) const;
+    std::span<const InterfaceSide> structured_interface_sides(RegionFace face) const;
     const Region& region(size_t r) const { return d_regions.at(r); }
     template<class F> decltype(auto) topology(size_t r, F&& f) const
     {
@@ -169,6 +222,8 @@ private:
         return std::visit([&](const auto& region) -> decltype(auto) { return f(region.geometry()); }, region(r));
     }
     void check_cell_id(ID c) const;
+    bool executing_on_this_thread() const noexcept;
+    void validate_query() const;
     void check_face_id(ID f) const;
     void check_node_id(ID n) const;
     bool is_owned_cell_impl(ID) const { return true; }
@@ -192,6 +247,7 @@ private:
     std::vector<int> boundary_batch_ids_impl() const;
     int num_boundary_batches_impl() const noexcept;
     void normalize(StructuredPatch& patch) const;
+    std::optional<size_t> structured_boundary_size(size_t region, int boundary) const;
     std::optional<std::array<size_t, 2>> patch_coordinate(const StructuredPatch& p, ID face) const;
     size_t patch_count_before(const StructuredPatch& p, ID face) const;
     size_t removed_before(size_t r, ID face) const;
@@ -211,6 +267,8 @@ private:
     std::vector<Region> d_regions;
     std::vector<Interface> d_interfaces;
     std::vector<ExplicitLookup> d_explicit;
+    std::vector<RegionInterfaceDirectory> d_region_interfaces;
+    std::vector<InterfaceSide> d_interface_sides;
     std::vector<ID> d_cells, d_faces, d_nodes, d_native_faces;
     std::vector<Boundary> d_boundaries;
     InterfaceTolerance d_tolerance;

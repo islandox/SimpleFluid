@@ -508,12 +508,19 @@ template<TpetraTypePack Pack>
 void PlanarALEMeshMotion<Pack>::validate_collective_trial(real_t surface_elevation, real_t time_step) const
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
+    int execution_held = 0;
+    d_mesh->visit([&](const auto& mesh)
+    {
+        if constexpr (requires { mesh.require_geometry_writable(); })
+            try { mesh.require_geometry_writable(); }
+            catch (const std::logic_error&) { execution_held = 1; }
+    });
     const auto current_epoch = d_mesh->geometry_epoch();
     const auto current_geometry = geometry_edge_coordinates();
     const auto expected_geometry = candidate_geometry_edges(d_accepted_surface_elevation);
     const auto proposed_edges = candidate_axis_edges(surface_elevation);
 
-    int local_invalid = d_trial_active || !geometry_motion_owned() || current_epoch != d_expected_geometry_epoch ||
+    int local_invalid = execution_held || d_trial_active || !geometry_motion_owned() || current_epoch != d_expected_geometry_epoch ||
                                 current_geometry != expected_geometry || !std::isfinite(surface_elevation) ||
                                 !std::isfinite(time_step) || time_step <= 0.0 ||
                                 proposed_edges.size() != d_reference_axis_edges.size() ||
@@ -559,6 +566,13 @@ template<TpetraTypePack Pack>
 void PlanarALEMeshMotion<Pack>::validate_collective_transaction(TransactionAction action) const
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
+    int execution_held = 0;
+    d_mesh->visit([&](const auto& mesh)
+    {
+        if constexpr (requires { mesh.require_geometry_writable(); })
+            try { mesh.require_geometry_writable(); }
+            catch (const std::logic_error&) { execution_held = 1; }
+    });
     const int active = d_trial_active ? 1 : 0;
     const auto active_matches = planar_ale_detail::collectively_equal(*communicator, active);
     const auto epoch = static_cast<unsigned long long>(d_mesh->geometry_epoch());
@@ -566,7 +580,7 @@ void PlanarALEMeshMotion<Pack>::validate_collective_transaction(TransactionActio
     const auto action_value = static_cast<int>(action);
     const auto action_matches = planar_ale_detail::collectively_equal(*communicator, action_value);
     const auto current_geometry = geometry_edge_coordinates();
-    const int local_invalid = !d_trial_active || !geometry_motion_owned() ||
+    const int local_invalid = execution_held || !d_trial_active || !geometry_motion_owned() ||
                                       d_mesh->geometry_epoch() != d_expected_geometry_epoch ||
                                       current_geometry != d_trial_geometry_edges
                                   ? 1

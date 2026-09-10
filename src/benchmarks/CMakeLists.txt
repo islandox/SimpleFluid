@@ -101,6 +101,18 @@ target_link_libraries(region_mesh_scaling PRIVATE SimpleFluid::Solvers)
 simplefluid_exe_reuse_precompiled_header(region_mesh_scaling)
 simplefluid_exclude_from_pgo_sources(region_mesh_scaling.cc)
 
+# One mesh representation per process: peak RSS must not inherit another mode.
+# Diagnostic only; timings and memory are deliberately not CTest thresholds.
+add_executable(region_scaling_benchmark EXCLUDE_FROM_ALL region_scaling_benchmark.cc)
+target_link_libraries(region_scaling_benchmark PRIVATE SimpleFluid::BenchmarkSupport)
+simplefluid_exe_reuse_precompiled_header(region_scaling_benchmark)
+target_compile_definitions(region_scaling_benchmark PRIVATE
+    SIMPLEFLUID_GIT_COMMIT="${SIMPLEFLUID_GIT_COMMIT_VALUE}"
+    SIMPLEFLUID_GIT_DIRTY="${SIMPLEFLUID_GIT_DIRTY_VALUE}"
+    SIMPLEFLUID_BUILD_TYPE="$<CONFIG>"
+    SIMPLEFLUID_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+simplefluid_exclude_from_pgo_sources(region_scaling_benchmark.cc)
+
 # Opt-in memory benchmark: built only by explicitly requesting this target.
 # Deliberately not registered in default CTest or run with two backends in-process.
 add_executable(coupled_operator_memory EXCLUDE_FROM_ALL coupled_operator_memory.cc)

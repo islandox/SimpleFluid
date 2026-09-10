@@ -81,7 +81,7 @@ concept GeometryProvider = requires(const G& g, size_t c, size_t f, size_t n)
 };
 
 /** @brief Procedural HEX_8 topology backed by a shared immutable orthogonal template. */
-class RectilinearTopology
+class RectilinearTopology : public GeometryExecutionGuard
 {
 public:
     using index_type_pack = UnstructuredMeshIndexTypes;
@@ -98,6 +98,7 @@ public:
     auto boundary_batch_ids() const { return d_topology->boundary_batch_ids(); }
     const std::string& boundary_batch_name(int b) const { return d_topology->boundary_batch_name(b); }
     const OrthogonalIndexer& indexer() const { return d_topology->indexer(); }
+    const OrthoMeshTopo& native_topology() const { return *d_topology; }
     const void* storage_identity() const { return d_topology.get(); }
     MeshStorageReport storage_report() const;
 private:
@@ -136,7 +137,7 @@ private:
 
 /** @brief Zero-copy ordinal topology/geometry adapter retaining the exact native object. */
 template<class Native>
-class NativeRegionProvider
+class NativeRegionProvider : public GeometryExecutionGuard
 {
 public:
     using index_type_pack = UnstructuredMeshIndexTypes;

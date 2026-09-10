@@ -99,6 +99,15 @@ void MultiRegionMesh::normalize(StructuredPatch& p) const
         if (p.extent[i] > n - p.begin[i]) throw std::out_of_range("Structured patch extent out of bounds.");
     }
 }
+std::optional<size_t> MultiRegionMesh::structured_boundary_size(size_t r, int boundary) const
+{
+    const auto& layout = region_layout(r);
+    if ((layout.family != RegionLayout::Family::Rectilinear && layout.family != RegionLayout::Family::Cylindrical)
+        || boundary < 0 || boundary >= 6) return {};
+    if (layout.periodic[boundary/2]) return size_t{0};
+    const auto axes = tangent_axes(boundary);
+    return layout.extents[axes[0]] * layout.extents[axes[1]];
+}
 ID MultiRegionMesh::patch_face(const StructuredPatch& p, std::array<size_t, 2> coordinate) const
 {
     const auto shape = parameter_shape(p);
@@ -148,44 +157,117 @@ size_t MultiRegionMesh::patch_count_before(const StructuredPatch& p, ID face) co
     const auto remaining = delta - rows * stride_slow;
     return rows * p.extent[fast] + std::min<size_t>(p.extent[fast], remaining / stride_fast + (remaining % stride_fast != 0));
 }
+void MultiRegionMesh::initialize_interface_directory()
+{
+    d_region_interfaces.resize(d_regions.size());
+    const auto visit_sides = [&](auto&& visitor)
+    {
+        for (size_t i = 0; i < d_interfaces.size(); ++i)
+            if (const auto* s = std::get_if<StructuredPatchInterface>(&d_interfaces[i]))
+            {
+                visitor(i, true, s->first.region, static_cast<size_t>(s->first.boundary));
+                visitor(i, false, s->second.region, static_cast<size_t>(s->second.boundary));
+            }
+            else if (const auto* e = std::get_if<ExplicitConformingInterface>(&d_interfaces[i]))
+            {
+                visitor(i, true, e->first_region, size_t{6});
+                visitor(i, false, e->second_region, size_t{6});
+            }
+            else
+            {
+                const auto& n = std::get<NonconformingInterface>(d_interfaces[i]);
+                visitor(i, true, n.fine_region, size_t{6});
+                visitor(i, false, n.coarse_region, size_t{6});
+            }
+    };
+    visit_sides([&](size_t i, bool first, size_t r, size_t bucket)
+    {
+        auto& directory = d_region_interfaces[r];
+        ++directory.offsets[bucket];
+        if (!first)
+        {
+            const auto* s = std::get_if<StructuredPatchInterface>(&d_interfaces[i]);
+            const auto removed = s ? s->second.extent[0] * s->second.extent[1]
+                : d_explicit[i].second_to_first.size();
+            directory.removed_faces = checked_add(directory.removed_faces, removed);
+        }
+    });
+    size_t offset = 0;
+    for (auto& directory : d_region_interfaces)
+    {
+        for (size_t bucket = 0; bucket < 7; ++bucket)
+        {
+            const auto count = directory.offsets[bucket];
+            directory.offsets[bucket] = offset;
+            offset += count;
+        }
+        directory.offsets.back() = offset;
+    }
+    d_interface_sides.resize(offset);
+    // The cursor is temporary descriptor-sized construction storage.
+    std::vector<std::array<size_t, 8>> cursor;
+    cursor.reserve(d_region_interfaces.size());
+    for (const auto& directory : d_region_interfaces) cursor.push_back(directory.offsets);
+    visit_sides([&](size_t i, bool first, size_t r, size_t bucket)
+    {
+        d_interface_sides[cursor[r][bucket]++] = {i, first};
+    });
+}
+std::span<const MultiRegionMesh::InterfaceSide> MultiRegionMesh::interface_sides(size_t r, size_t bucket) const
+{
+    const auto& offsets = d_region_interfaces.at(r).offsets;
+    return std::span<const InterfaceSide>(d_interface_sides).subspan(offsets[bucket], offsets[bucket+1]-offsets[bucket]);
+}
+std::span<const MultiRegionMesh::InterfaceSide> MultiRegionMesh::structured_interface_sides(RegionFace face) const
+{
+    const auto& layout = region_layout(face.region);
+    if ((layout.family != RegionLayout::Family::Rectilinear && layout.family != RegionLayout::Family::Cylindrical)
+        || face.face >= layout.faces) return {};
+    const auto native = rectilinear_indexer(layout).face_id(face.face);
+    if (layout.periodic[native.orientation]) return {};
+    const std::array<size_t, 3> coordinate{native.i, native.j, native.k};
+    const auto normal = coordinate[native.orientation];
+    if (normal != 0 && normal != layout.extents[native.orientation]) return {};
+    return interface_sides(face.region, 2 * native.orientation + (normal != 0));
+}
 size_t MultiRegionMesh::removed_before(size_t r, ID face) const
 {
+    const auto& directory = d_region_interfaces.at(r);
+    if (!directory.removed_faces) return 0;
     size_t count=0;
-    for(size_t i=0;i<d_interfaces.size();++i)
+    for (size_t side = directory.offsets.front(); side < directory.offsets.back(); ++side)
     {
+        const auto [i, first] = d_interface_sides[side];
+        if (first) continue;
         if(const auto* s=std::get_if<StructuredPatchInterface>(&d_interfaces[i]))
-        { if(s->second.region==r) count+=patch_count_before(s->second,face); }
+            count+=patch_count_before(s->second,face);
         else
         {
-            const bool removed=std::holds_alternative<ExplicitConformingInterface>(d_interfaces[i])
-                ? std::get<ExplicitConformingInterface>(d_interfaces[i]).second_region==r
-                : std::get<NonconformingInterface>(d_interfaces[i]).coarse_region==r;
-            if(removed)
-            {
-                const auto& pairs=d_explicit[i].second_to_first;
-                count+=std::lower_bound(pairs.begin(),pairs.end(),face,[](const auto& p,ID f){return p.first<f;})-pairs.begin();
-            }
+            const auto& pairs=d_explicit[i].second_to_first;
+            count+=std::lower_bound(pairs.begin(),pairs.end(),face,[](const auto& p,ID f){return p.first<f;})-pairs.begin();
         }
     }
     return count;
 }
 std::optional<RegionFace> MultiRegionMesh::partner(RegionFace f, bool first) const
 {
-    for (size_t i = 0; i < d_interfaces.size(); ++i)
+    for (const auto side : structured_interface_sides(f))
     {
-        if (const auto* s = std::get_if<StructuredPatchInterface>(&d_interfaces[i]))
+        if (side.first != first) continue;
+        const auto& s = std::get<StructuredPatchInterface>(d_interfaces[side.interface]);
+        const auto& p = first ? s.first : s.second;
+        if (const auto coordinate = patch_coordinate(p, f.face))
         {
-            const auto& p = first ? s->first : s->second;
-            if (p.region != f.region) continue;
-            if (const auto coordinate = patch_coordinate(p, f.face))
-            {
-                const auto& other = first ? s->second : s->first;
-                return RegionFace{other.region, patch_face(other, first ? s->map(*coordinate) : s->inverse(*coordinate))};
-            }
+            const auto& other = first ? s.second : s.first;
+            return RegionFace{other.region, patch_face(other, first ? s.map(*coordinate) : s.inverse(*coordinate))};
         }
-        else if (const auto* refined=std::get_if<NonconformingInterface>(&d_interfaces[i]))
+    }
+    for (const auto [i, side_first] : interface_sides(f.region, 6))
+    {
+        if (side_first != first) continue;
+        if (const auto* refined=std::get_if<NonconformingInterface>(&d_interfaces[i]))
         {
-            if (!first || refined->fine_region!=f.region) continue;
+            if (!first) continue;
             const auto& pairs=d_explicit[i].first_to_second;
             const auto it=std::lower_bound(pairs.begin(),pairs.end(),f.face,[](const auto& p,ID f){return p.first<f;});
             if(it!=pairs.end() && it->first==f.face) return RegionFace{refined->coarse_region,it->second};
@@ -193,7 +275,6 @@ std::optional<RegionFace> MultiRegionMesh::partner(RegionFace f, bool first) con
         else
         {
             const auto& e = std::get<ExplicitConformingInterface>(d_interfaces[i]);
-            if ((first ? e.first_region : e.second_region) != f.region) continue;
             const auto& pairs = first ? d_explicit[i].first_to_second : d_explicit[i].second_to_first;
             const auto it = std::lower_bound(pairs.begin(), pairs.end(), f.face,
                 [](const auto& pair, ID face) { return pair.first < face; });
@@ -206,8 +287,8 @@ std::optional<RegionFace> MultiRegionMesh::partner(RegionFace f, bool first) con
 bool MultiRegionMesh::stitched(RegionFace f) const { return refinement(f).has_value() || partner(f,true).has_value() || partner(f,false).has_value(); }
 std::optional<MultiRegionMesh::RefinedFaceView> MultiRegionMesh::refinement(RegionFace f) const
 {
-    for(size_t i=0;i<d_interfaces.size();++i)
-        if(const auto* n=std::get_if<NonconformingInterface>(&d_interfaces[i]); n && n->coarse_region==f.region)
+    for(const auto [i, first] : interface_sides(f.region, 6))
+        if(const auto* n=std::get_if<NonconformingInterface>(&d_interfaces[i]); n && !first)
         {
             const auto& pairs=d_explicit[i].second_to_first;
             const auto it=std::lower_bound(pairs.begin(),pairs.end(),f.face,[](const auto& p,ID f){return p.first<f;});
@@ -273,6 +354,7 @@ RegionFace MultiRegionMesh::native_face(ID f) const
     if (f >= num_faces()) throw std::out_of_range("Composite face out of bounds.");
     const size_t r = std::upper_bound(d_faces.begin(), d_faces.end(), f) - d_faces.begin() - 1;
     const ID ordinal = f - d_faces[r];
+    if (!d_region_interfaces[r].removed_faces) return {r, ordinal};
     ID lo = ordinal, hi = region_layout(r).faces;
     // Rank/select through removed rectangular ranges or sorted irregular IDs.
     while (lo < hi)
@@ -298,9 +380,43 @@ void MultiRegionMesh::validate_static() const
 {
     for (const auto& r : d_regions) std::visit([](const auto& r) { r.validate_static(); }, r);
 }
-void MultiRegionMesh::check_cell_id(ID c) const { validate_static(); if (c >= num_cells()) throw std::out_of_range("Composite cell out of bounds."); }
-void MultiRegionMesh::check_face_id(ID f) const { validate_static(); if (f >= num_faces()) throw std::out_of_range("Composite face out of bounds."); }
-void MultiRegionMesh::check_node_id(ID n) const { validate_static(); if (n >= num_nodes()) throw std::out_of_range("Composite node out of bounds."); }
+thread_local const MultiRegionMesh::ExecutionView* MultiRegionMesh::ExecutionView::d_current = nullptr;
+bool MultiRegionMesh::executing_on_this_thread() const noexcept
+{
+    for (auto* view = ExecutionView::d_current; view; view = view->d_previous)
+        if (view->d_mesh == this) return true;
+    return false;
+}
+MultiRegionMesh::ExecutionView::ExecutionView(const MultiRegionMesh* mesh)
+    : d_mesh(mesh), d_previous(d_current)
+{
+    if (mesh && !mesh->executing_on_this_thread())
+    {
+        d_leases.reserve(1 + 4 * mesh->d_regions.size());
+        d_leases.push_back(mesh->acquire_geometry_read());
+        const auto lock = [&](const auto& provider)
+        {
+            if constexpr (requires { provider.acquire_geometry_read(); })
+                d_leases.push_back(provider.acquire_geometry_read());
+            if constexpr (requires { provider.native(); })
+                d_leases.push_back(provider.native().acquire_geometry_read());
+            if constexpr (requires { provider.native_topology().acquire_geometry_read(); })
+                d_leases.push_back(provider.native_topology().acquire_geometry_read());
+        };
+        for (const auto& region : mesh->d_regions)
+            std::visit([&](const auto& r) { lock(r.topology()); lock(r.geometry()); }, region);
+        mesh->validate_static();
+    }
+    d_current = this;
+}
+MultiRegionMesh::ExecutionView::~ExecutionView() { d_current = d_previous; }
+void MultiRegionMesh::validate_query() const
+{
+    if (!executing_on_this_thread()) validate_static();
+}
+void MultiRegionMesh::check_cell_id(ID c) const { validate_query(); if (c >= num_cells()) throw std::out_of_range("Composite cell out of bounds."); }
+void MultiRegionMesh::check_face_id(ID f) const { validate_query(); if (f >= num_faces()) throw std::out_of_range("Composite face out of bounds."); }
+void MultiRegionMesh::check_node_id(ID n) const { validate_query(); if (n >= num_nodes()) throw std::out_of_range("Composite node out of bounds."); }
 real_t MultiRegionMesh::cell_volume_impl(ID c) const
 {
     const auto [r, id] = native_cell(c); return axial_scale() * geometry(r, [&](const auto& g) { return g.cell_volume(id); });
@@ -317,7 +433,7 @@ EntityRange<ID> MultiRegionMesh::cell_faces_impl(ID c) const
         count+=logical_faces({r,f}).size();
     return {this,c,count,[](const void* source,size_t c,size_t i)->ID
     {
-        const auto& m=*static_cast<const MultiRegionMesh*>(source); m.validate_static();
+        const auto& m=*static_cast<const MultiRegionMesh*>(source); m.validate_query();
         const auto [r,id]=m.native_cell(c);
         for(const auto f:m.topology(r,[&](const auto& t){return t.cell_faces(id);}))
         {
@@ -367,7 +483,9 @@ int MultiRegionMesh::boundary_id_impl(ID f) const
     const auto n = native_face(f);
     const auto id = topology(n.region, [&](const auto& t) { return t.boundary_id(n.face); });
     if (id == invalid_boundary_id || partner(n, true)) return invalid_boundary_id;
-    for (const auto& b : d_boundaries) if (b.region == n.region && b.native_id == id) return b.id;
+    const auto& directory = d_region_interfaces[n.region];
+    for (size_t i = directory.boundary_begin; i < directory.boundary_end; ++i)
+        if (d_boundaries[i].native_id == id) return d_boundaries[i].id;
     return invalid_boundary_id;
 }
 const std::string& MultiRegionMesh::boundary_batch_name_impl(int b) const
@@ -482,16 +600,86 @@ void MultiRegionMesh::validate_regions() const
                                 throw std::invalid_argument("Composite cylindrical cells require angular widths below pi for nondegenerate HEX output.");
                     }
             });
-        for (ID c = 0; c < l.cells; ++c)
+        const auto validate_volume = [](real_t volume)
         {
-            const auto v = geometry(r, [&](const auto& g) { return g.cell_volume(c); });
-            if (!(v > 0) || !std::isfinite(v)) throw std::invalid_argument("Region cell volume must be finite and positive.");
-            const auto center=geometry(r,[&](const auto& g){return g.cell_centroid(c);});
+            if (!(volume > 0) || !std::isfinite(volume))
+                throw std::invalid_argument("Region cell volume must be finite and positive.");
+        };
+        const auto validate_center = [](Vec3 center)
+        {
             if(!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z))
                 throw std::invalid_argument("Region cell centroid must be finite.");
+        };
+        const auto validate_type = [&](ID c)
+        {
             if (topology(r, [&](const auto& t) { return t.cell_type(c); }) == MeshUtils::CellType::INVALID)
                 throw std::invalid_argument("Composite regions currently support HEX_8 and triangular prisms.");
-        }
+        };
+        // Positive tensor-product widths make the actual minimum/maximum
+        // volume cells sufficient, including floating-point under/overflow.
+        // Sample centers through the provider to preserve its native arithmetic.
+        geometry(r, [&](const auto& g)
+        {
+            const auto& source = [&]() -> const auto&
+            {
+                if constexpr (requires { g.native(); }) return g.native();
+                else return g;
+            }();
+            using Source = std::remove_cvref_t<decltype(source)>;
+            if constexpr (std::same_as<Source, RectilinearGeometry> || std::same_as<Source, OrthogonalCartesian3D>)
+            {
+                const auto& edges = source.cell_edges();
+                std::array<unsigned, 3> minimum{}, maximum{};
+                const auto indexer = rectilinear_indexer(l);
+                for (size_t axis = 0; axis < 3; ++axis)
+                {
+                    real_t smallest = std::numeric_limits<real_t>::infinity(), largest = 0;
+                    for (size_t i = 0; i < l.extents[axis]; ++i)
+                    {
+                        const auto width = edges[axis][i+1] - edges[axis][i];
+                        if (!std::isfinite(edges[axis][i]) || !std::isfinite(edges[axis][i+1])
+                            || !(width > 0) || !std::isfinite(width))
+                            throw std::invalid_argument("Region coordinate widths must be finite and positive.");
+                        if (width < smallest) { smallest = width; minimum[axis] = static_cast<unsigned>(i); }
+                        if (width > largest) { largest = width; maximum[axis] = static_cast<unsigned>(i); }
+                        std::array<unsigned, 3> cell{}; cell[axis] = static_cast<unsigned>(i);
+                        validate_center(g.cell_centroid(indexer.cell_ordinal({cell[0], cell[1], cell[2]})));
+                    }
+                }
+                validate_volume(g.cell_volume(indexer.cell_ordinal({minimum[0], minimum[1], minimum[2]})));
+                validate_volume(g.cell_volume(indexer.cell_ordinal({maximum[0], maximum[1], maximum[2]})));
+                validate_type(0);
+            }
+            else if constexpr (std::same_as<Source, ExtrudedGeometry> || std::same_as<Source, SemiStructuredXY_Z>)
+            {
+                const auto& edges = source.z_edges();
+                size_t minimum = 0, maximum = 0;
+                real_t smallest = std::numeric_limits<real_t>::infinity(), largest = 0;
+                for (size_t k = 0; k < l.extents[2]; ++k)
+                {
+                    const auto width = edges[k+1] - edges[k];
+                    if (!std::isfinite(edges[k]) || !std::isfinite(edges[k+1]) || !(width > 0) || !std::isfinite(width))
+                        throw std::invalid_argument("Region coordinate widths must be finite and positive.");
+                    if (width < smallest) { smallest = width; minimum = k; }
+                    if (width > largest) { largest = width; maximum = k; }
+                    validate_center(g.cell_centroid(k*l.extents[0]));
+                }
+                for (ID base = 0; base < l.extents[0]; ++base)
+                {
+                    validate_volume(g.cell_volume(minimum*l.extents[0]+base));
+                    validate_volume(g.cell_volume(maximum*l.extents[0]+base));
+                    validate_center(g.cell_centroid(base));
+                    validate_type(base);
+                }
+            }
+            else
+                for (ID c = 0; c < l.cells; ++c)
+                {
+                    validate_volume(g.cell_volume(c));
+                    validate_center(g.cell_centroid(c));
+                    validate_type(c);
+                }
+        });
         // Rectilinear templates are connected by construction. Validate explicit
         // and base-plane adjacency without expanding layered cell connectivity.
         if (l.family != RegionLayout::Family::Rectilinear && l.family != RegionLayout::Family::Cylindrical)
@@ -564,6 +752,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
     {
         const auto ids=topology(r,[&](const auto& t){return t.boundary_batch_ids();});
         if(std::find(ids.begin(),ids.end(),boundary)==ids.end()) throw std::invalid_argument("Unknown interface boundary patch.");
+        if (const auto count = structured_boundary_size(r, boundary)) return *count;
         size_t count=0;
         for(ID f=0;f<region_layout(r).faces;++f) count+=topology(r,[&](const auto& t){return t.boundary_id(f);})==boundary;
         return count;
@@ -624,6 +813,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
     }
     for(size_t r=1;r<d_regions.size();++r)
         if(root(r)!=root(0)) throw std::invalid_argument("Disconnected composite fluid domains are unsupported.");
+    initialize_interface_directory();
     const auto unique_face=[&](RegionFace f)
     {
         if(interface_uses(f)!=1) throw std::invalid_argument("A native face is stitched more than once.");
@@ -668,16 +858,36 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
     {
         const auto& l = region_layout(r);
         d_cells.push_back(checked_add(d_cells.back(), l.cells));
-        d_faces.push_back(checked_add(d_faces.back(), l.faces - removed_before(r, l.faces)));
+        d_faces.push_back(checked_add(d_faces.back(), l.faces - d_region_interfaces[r].removed_faces));
         d_nodes.push_back(checked_add(d_nodes.back(), l.nodes));
         d_native_faces.push_back(checked_add(d_native_faces.back(), l.faces));
         auto ids = topology(r, [&](const auto& t) { return t.boundary_batch_ids(); });
         std::sort(ids.begin(), ids.end());
+        d_region_interfaces[r].boundary_begin = d_boundaries.size();
         for (const auto b : ids)
         {
             bool has_exterior = false;
-            for (ID f = 0; f < l.faces && !has_exterior; ++f)
-                has_exterior = topology(r, [&](const auto& t) { return t.boundary_id(f); }) == b && !stitched({r, f});
+            if (const auto count = structured_boundary_size(r, b))
+            {
+                size_t joined = 0;
+                for (const auto [i, first] : interface_sides(r, static_cast<size_t>(b)))
+                {
+                    const auto& s = std::get<StructuredPatchInterface>(d_interfaces[i]);
+                    const auto& patch = first ? s.first : s.second;
+                    joined += patch.extent[0] * patch.extent[1];
+                }
+                for (const auto [i, first] : interface_sides(r, 6))
+                {
+                    const auto& pairs = first ? d_explicit[i].first_to_second : d_explicit[i].second_to_first;
+                    if (!pairs.empty() && topology(r, [&](const auto& t) { return t.boundary_id(pairs.front().first); }) == b)
+                        joined += pairs.size();
+                }
+                // Unique-face and interface-coverage checks have already run.
+                has_exterior = joined < *count;
+            }
+            else
+                for (ID f = 0; f < l.faces && !has_exterior; ++f)
+                    has_exterior = topology(r, [&](const auto& t) { return t.boundary_id(f); }) == b && !stitched({r, f});
             if (!has_exterior) continue;
             auto name = topology(r, [&](const auto& t) { return std::string(t.boundary_batch_name(b)); });
             int id = next_boundary;
@@ -696,6 +906,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
             }
             d_boundaries.push_back({r, b, id, std::move(name)});
         }
+        d_region_interfaces[r].boundary_end = d_boundaries.size();
     }
     d_num_cells = d_num_local_cells = d_num_owned_cells = d_cells.back();
     d_num_faces = d_num_owned_faces = d_faces.back(); d_num_nodes = d_nodes.back();
@@ -728,22 +939,13 @@ size_t MultiRegionMesh::interface_uses(RegionFace f) const
         const auto it=std::lower_bound(pairs.begin(),pairs.end(),f.face,[](const auto& p,ID face){return p.first<face;});
         return it!=pairs.end() && it->first==f.face;
     };
-    for(size_t i=0;i<d_interfaces.size();++i)
+    for(const auto [i, first] : structured_interface_sides(f))
     {
-        if(const auto* s=std::get_if<StructuredPatchInterface>(&d_interfaces[i]))
-            for(const auto& p:{s->first,s->second}) uses+=p.region==f.region && patch_coordinate(p,f.face).has_value();
-        else if(const auto* e=std::get_if<ExplicitConformingInterface>(&d_interfaces[i]))
-        {
-            if(e->first_region==f.region) uses+=contains(d_explicit[i].first_to_second);
-            if(e->second_region==f.region) uses+=contains(d_explicit[i].second_to_first);
-        }
-        else
-        {
-            const auto& n=std::get<NonconformingInterface>(d_interfaces[i]);
-            if(n.fine_region==f.region) uses+=contains(d_explicit[i].first_to_second);
-            if(n.coarse_region==f.region) uses+=contains(d_explicit[i].second_to_first);
-        }
+        const auto& s=std::get<StructuredPatchInterface>(d_interfaces[i]);
+        uses+=patch_coordinate(first?s.first:s.second,f.face).has_value();
     }
+    for(const auto [i, first] : interface_sides(f.region, 6))
+        uses+=contains(first?d_explicit[i].first_to_second:d_explicit[i].second_to_first);
     return uses;
 }
 
@@ -759,10 +961,12 @@ bool MultiRegionMesh::supports_axial_motion() const noexcept
 MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(ID f) const
 {
     const auto n=native_face(f);
-    for(const auto& interface:d_interfaces)
-        if(const auto* s=std::get_if<StructuredPatchInterface>(&interface); s && s->periodic_translation
-            && s->first.region==n.region && patch_coordinate(s->first,n.face))
-        { auto shift=*s->periodic_translation; shift.z*=axial_scale(); return shift; }
+    for(const auto [i, first] : structured_interface_sides(n))
+    {
+        const auto& s=std::get<StructuredPatchInterface>(d_interfaces[i]);
+        if(first && s.periodic_translation && patch_coordinate(s.first,n.face))
+        { auto shift=*s.periodic_translation; shift.z*=axial_scale(); return shift; }
+    }
     return {};
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::face_center_vector(ID f,ID c) const
@@ -795,6 +999,7 @@ MultiRegionMesh::Vec3 MultiRegionMesh::transformed_area_vector(Vec3 v) const
 }
 void MultiRegionMesh::replace_axial_edges_fixed_topology(ArrReal edges)
 {
+    require_geometry_writable();
     validate_static();
     if (edges.size()!=2 || !std::isfinite(edges[0]) || !std::isfinite(edges[1]) || !(edges[1]>edges[0]))
         throw std::invalid_argument("Composite planar ALE requires a finite positive affine axial interval.");
@@ -808,6 +1013,8 @@ MeshStorageReport MultiRegionMesh::storage_report() const
     result.geometry = (d_reference_axial_edges.capacity() + d_axial_edges.capacity()) * sizeof(real_t);
     result.objects = sizeof(*this) + d_regions.capacity() * sizeof(Region);
     result.indexing = (d_cells.capacity() + d_faces.capacity() + d_nodes.capacity() + d_native_faces.capacity()) * sizeof(ID);
+    result.indexing += d_region_interfaces.capacity() * sizeof(RegionInterfaceDirectory)
+        + d_interface_sides.capacity() * sizeof(InterfaceSide);
     result.interfaces = d_interfaces.capacity() * sizeof(Interface) + d_explicit.capacity() * sizeof(ExplicitLookup);
     for (size_t i = 0; i < d_interfaces.size(); ++i)
     {
@@ -904,7 +1111,7 @@ VTUWriter::TopologyHandle MultiRegionMesh::vtu_topology() const
 
 VTUWriter::TopologyHandle MultiRegionMesh::vtu_topology(const EntityRange<ID>& owned_cells) const
 {
-    validate_static();
+    const auto execution = acquire_execution_view();
     VTUWriter::VectorData points; VTUWriter::Int64Data connectivity, offsets; VTUWriter::UInt8Data types;
     std::unordered_map<ID, global_index_t> local_nodes;
     offsets.reserve(owned_cells.size()); types.reserve(owned_cells.size());

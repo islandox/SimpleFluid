@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "geometry/GeometryExecutionGuard.hh"
+
 #include "equations/BoundaryConditions.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
 #include "geometry/MeshUtils.hh"
@@ -718,6 +720,7 @@ template<class MeshType>
 std::vector<LeastSquaresGradientStencil<MeshType>>
 least_squares_gradient_stencils(const MeshType& mesh)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using local_ordinal_type = typename MeshType::local_ordinal_type;
 
     std::vector<LeastSquaresGradientStencil<MeshType>> stencils(
@@ -855,6 +858,7 @@ template<class MeshType>
 std::vector<BoundaryFaceLocation<MeshType>>
 boundary_face_locations(const MeshType& mesh)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     std::vector<BoundaryFaceLocation<MeshType>> locations(mesh.num_faces());
 
     if constexpr (std::ranges::range<
@@ -970,6 +974,7 @@ boundary_aware_gradient_geometry(
     const MeshType& mesh,
     const std::vector<BoundaryFaceLocation<MeshType>>& boundary_locations)
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     using vec_type = typename MeshType::Vec3;
 

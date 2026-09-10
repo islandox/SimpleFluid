@@ -7,6 +7,10 @@ interfaces, cylindrical regions, explicit translated periodic patches, and
 independent Cartesian/extruded geometry. Topology regions, materials and MPI
 partitions are separate concepts.
 
+Bulk execution, per-region interface indexing, provider-aware validation and
+analytical/scaling qualification are described in
+[region_execution.md](region_execution.md) and [region_scaling.md](region_scaling.md).
+
 ## Providers and ownership
 
 `TopologyProvider` supplies ordinal incidence, node loops, cell types and the

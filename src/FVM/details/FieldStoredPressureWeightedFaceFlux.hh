@@ -40,6 +40,7 @@ template<TpetraTypePack Pack, class MeshType>
 auto stored_pressure_face_geometry(const MeshType& mesh)
     -> std::vector<StoredPressureFaceGeometry<Pack>>
 {
+    const auto execution = acquire_mesh_execution(mesh);
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
     std::vector<StoredPressureFaceGeometry<Pack>> result;
@@ -192,6 +193,7 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
     pressure_gradient.sync_ghosts();
 
     const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     const auto& boundary_locations = workspace.boundary_locations();
     {
         // Release host views before importing the final owned fluxes below.

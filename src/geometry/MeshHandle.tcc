@@ -60,6 +60,7 @@ void MeshHandle<Pack>::initialize_composite(MultiRegionPtr mesh, DistributionOpt
         if (geometry_error) std::rethrow_exception(geometry_error);
         throw std::invalid_argument("Composite handles require live unchanged geometry, positive halos and communicator-defined ownership on every rank.");
     }
+    const auto execution = mesh->acquire_execution_view();
     if (comm->getSize() == 1) { initialize_serial(*mesh); return; }
     const size_t rank = static_cast<size_t>(comm->getRank()), ranks = static_cast<size_t>(comm->getSize());
     const size_t cells = mesh->num_cells();
@@ -726,6 +727,7 @@ void MeshHandle<Pack>::materialize_legacy_indexer() const
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_cell_faces()
 {
+    const auto execution = acquire_execution_view();
     d_cell_face_offsets.clear();
     d_cell_face_lids.clear();
     d_cell_face_offsets.reserve(num_local_cells() + 1);
@@ -945,6 +947,7 @@ std::string MeshHandle<Pack>::local_output_filename(
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
 {
+    const auto execution = acquire_execution_view();
     VTUWriter::Int64Data cell_ids;
     VTUWriter::ScalarData cell_volumes;
     VTUWriter::VectorData cell_centroids;

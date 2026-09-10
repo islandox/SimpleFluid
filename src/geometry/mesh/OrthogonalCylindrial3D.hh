@@ -13,6 +13,7 @@
 
 #include "OrthogonalIndexer.hh"
 #include "geometry/GeometryEpoch.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 #include "geometry/mesh/MeshBase.hh"
 #include "geometry/mesh/OrthoMeshTopo.hh"
 
@@ -36,7 +37,7 @@ class PlanarALEGeometryAccess;
  * direction and omits the two angular boundary batches.
  */
 class OrthogonalCylindrial3D
-    : public MeshBase<OrthogonalCylindrial3D, OrthogonalMeshIndexTypes>
+    : public GeometryExecutionGuard, public MeshBase<OrthogonalCylindrial3D, OrthogonalMeshIndexTypes>
 {
 public:
     using Indexer = OrthogonalIndexer;
