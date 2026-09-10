@@ -99,6 +99,28 @@ public:
     static_assert(std::same_as<face_id_t, global_face_id_t>);
     static_assert(std::same_as<node_id_t, global_node_id_t>);
 
+    /** @brief Measured vector capacities; excludes ordered-tree allocations. */
+    size_t vector_storage_bytes() const noexcept
+    {
+        auto bytes = [](const auto& e)
+        {
+            return e.local_ids.capacity() * sizeof(typename std::decay_t<decltype(e.local_ids)>::value_type)
+                + e.global_ids.capacity() * sizeof(typename std::decay_t<decltype(e.global_ids)>::value_type)
+                + e.global_ordinals.capacity() * sizeof(global_ordinal_type);
+        };
+        return bytes(d_cells) + bytes(d_faces) + bytes(d_nodes);
+    }
+    /** @brief Tree-node estimate: payload and three pointers; allocator metadata excluded. */
+    size_t lookup_storage_estimate() const noexcept
+    {
+        auto bytes = [](const auto& e)
+        {
+            return e.ordinal_by_local_id.size() * (sizeof(typename std::decay_t<decltype(e.ordinal_by_local_id)>::value_type) + 3 * sizeof(void*))
+                + e.ordinal_by_global_id.size() * (sizeof(typename std::decay_t<decltype(e.ordinal_by_global_id)>::value_type) + 3 * sizeof(void*))
+                + e.local_by_global_ordinal.size() * (sizeof(typename std::decay_t<decltype(e.local_by_global_ordinal)>::value_type) + 3 * sizeof(void*));
+        };
+        return bytes(d_cells) + bytes(d_faces) + bytes(d_nodes);
+    }
     LocalGlobalIndexer() = default;
 
     LocalGlobalIndexer(

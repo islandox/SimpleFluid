@@ -186,6 +186,7 @@ OrthogonalCylindrial3D::OrthogonalCylindrial3D(
  */
 void OrthogonalCylindrial3D::replace_axial_edges_fixed_topology(Arr<real_t> edges)
 {
+    require_geometry_writable();
     if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
     {
         throw std::overflow_error("OrthogonalCylindrial3D geometry epoch overflow.");

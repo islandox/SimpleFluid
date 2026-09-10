@@ -789,6 +789,16 @@ submerged steam; the inventory is never silently discarded.
 | **BLAS** | Low-level vector/matrix operations |
 | **GTest** | C++ unit testing framework |
 
+## Compact region meshes
+
+`MultiRegionMesh` composes Cartesian, cylindrical, straight-extruded and native
+unstructured regions through the existing `MeshHandle`/FVM path. Compact implicit
+regions support MPI ownership, axial affine ALE, conforming/coarse-fine seams,
+and translated periodic patches. Explicit unstructured constituents remain
+serial-only in composites. Implicit traversal uses allocation-free ranges;
+regular interfaces retain descriptor-sized correspondence. See [region mesh contracts,
+example and storage accounting](docs/region_meshes.md).
+
 ## License
 
 This project is distributed under the MIT License.

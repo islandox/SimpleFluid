@@ -118,26 +118,40 @@ SemiStructMeshTopo::SemiStructMeshTopo(
  * equivalent), and the side faces inherited from the base 2D topology.
  *
  * @param id Cell identifier.
- * @return Vector of FaceID entries for all bounding faces.
+ * @return Independent indexed view of all bounding face IDs.
  */
-std::vector<SemiStructMeshTopo::FaceID>
+EntityRange<SemiStructMeshTopo::FaceID>
 SemiStructMeshTopo::cell_faces(CellID id) const
 {
-    const auto& side_faces = d_cell_side_faces[id.ij];
-    std::vector<FaceID> faces;
-    faces.reserve(side_faces.size() + 2);
+    return {this, d_indexer.cell_ordinal(id), d_cell_side_faces.at(id.ij).size() + 2,
+        [](const void* source, size_t cell, size_t face) -> FaceID
+        {
+            const auto& topo = *static_cast<const SemiStructMeshTopo*>(source);
+            const auto id = topo.indexer().cell_id(cell);
+            if (face == 0) return {id.ij, id.k, Indexer::AXIAL};
+            if (face == 1)
+            {
+                const auto upper = topo.indexer().axial_periodic
+                    ? (id.k + 1) % topo.indexer().num_layers : id.k + 1;
+                return {id.ij, upper, Indexer::AXIAL};
+            }
+            return {topo.cell_side_faces(id.ij)[face - 2], id.k, Indexer::SIDE};
+        }};
+}
 
-    const auto upper_k =
-        d_indexer.axial_periodic && id.k + 1 == d_indexer.num_layers
-      ? 0
-      : id.k + 1;
-    faces.push_back({id.ij, id.k, Indexer::AXIAL});
-    faces.push_back({id.ij, upper_k, Indexer::AXIAL});
-    for (const auto side_face : side_faces)
-    {
-        faces.push_back({side_face, id.k, Indexer::SIDE});
-    }
-    return faces;
+EntityRange<SemiStructMeshTopo::CellID>
+SemiStructMeshTopo::interior_cell_batch() const
+{
+    const auto layers = d_indexer.axial_periodic ? d_indexer.num_layers
+        : (d_indexer.num_layers > 2 ? d_indexer.num_layers - 2 : 0);
+    return {this, 0, d_interior_base_cells.size() * layers,
+        [](const void* source, size_t, size_t ordinal) -> CellID
+        {
+            const auto& topo = *static_cast<const SemiStructMeshTopo*>(source);
+            const auto base_count = topo.d_interior_base_cells.size();
+            return {topo.d_interior_base_cells[ordinal % base_count],
+                static_cast<Ordinal>(ordinal / base_count + (topo.indexer().axial_periodic ? 0 : 1))};
+        }};
 }
 
 /**
@@ -239,18 +253,22 @@ SemiStructMeshTopo::boundary_batch_name(int batch_id) const
  * @brief Return the face list for a boundary batch.
  *
  * @param batch_id Boundary batch ID.
- * @return Const reference to the boundary face batch.
+ * @return Boundary batch with an independent base/layer face view.
  * @throws std::out_of_range if @p batch_id is not registered.
  */
-const SemiStructMeshTopo::BoundaryBatch&
+SemiStructMeshTopo::BoundaryBatch
 SemiStructMeshTopo::boundary_face_batch(int batch_id) const
 {
-    const auto iter = d_boundary_batches.find(batch_id);
-    if (iter == d_boundary_batches.end())
-    {
-        throw std::out_of_range("Requested boundary batch is not found.");
-    }
-    return iter->second;
+    const auto& base = d_boundary_base_faces.at(batch_id);
+    const size_t count = batch_id < 2 ? d_indexer.num_cells_per_layer : base.size() * d_indexer.num_layers;
+    return {batch_id, {this, static_cast<size_t>(batch_id), count,
+        [](const void* source, size_t batch, size_t i) -> FaceID
+        {
+            const auto& t = *static_cast<const SemiStructMeshTopo*>(source);
+            if (batch < 2) return {static_cast<Ordinal>(i), batch == 0 ? 0U : t.indexer().num_layers, Indexer::AXIAL};
+            const auto& base = t.d_boundary_base_faces.at(static_cast<int>(batch));
+            return {base[i / t.indexer().num_layers], static_cast<Ordinal>(i % t.indexer().num_layers), Indexer::SIDE};
+        }}};
 }
 
 /**
@@ -261,8 +279,8 @@ SemiStructMeshTopo::boundary_face_batch(int batch_id) const
 std::vector<int> SemiStructMeshTopo::boundary_batch_ids() const
 {
     std::vector<int> ids;
-    ids.reserve(d_boundary_batches.size());
-    for (const auto& [id, batch] : d_boundary_batches)
+    ids.reserve(d_boundary_base_faces.size());
+    for (const auto& [id, batch] : d_boundary_base_faces)
     {
         (void)batch;
         ids.push_back(id);
@@ -277,7 +295,7 @@ std::vector<int> SemiStructMeshTopo::boundary_batch_ids() const
  */
 int SemiStructMeshTopo::num_boundary_batches() const noexcept
 {
-    return static_cast<int>(d_boundary_batches.size());
+    return static_cast<int>(d_boundary_base_faces.size());
 }
 
 /** @brief Precompute owner and neighbor cells for axial and side faces. */
@@ -379,23 +397,10 @@ void SemiStructMeshTopo::initialize_cell_adjacency()
         }
     }
 
-    d_interior_cell_batch.reserve(d_indexer.total_cells());
-    for (Ordinal layer = 0; layer < layers; ++layer)
+    for (Ordinal cell = 0; cell < d_indexer.num_cells_per_layer; ++cell)
     {
-        if (d_axial_neighbors[layer].num != 2)
-        {
-            continue;
-        }
-        for (Ordinal cell = 0;
-             cell < d_indexer.num_cells_per_layer;
-             ++cell)
-        {
-            if (d_base_neighbor_cells[cell].size()
-                == d_cell_side_faces[cell].size())
-            {
-                d_interior_cell_batch.push_back({cell, layer});
-            }
-        }
+        if (d_base_neighbor_cells[cell].size() == d_cell_side_faces[cell].size())
+            d_interior_base_cells.push_back(cell);
     }
 }
 
@@ -549,49 +554,11 @@ void SemiStructMeshTopo::build_base_topology(
 /** @brief Materialize axial and side boundary-face batches for all layers. */
 void SemiStructMeshTopo::initialize_boundary_batches()
 {
-    for (const auto& [batch_id, name] : d_boundary_names)
-    {
-        static_cast<void>(name);
-        if (d_indexer.axial_periodic
-            && (batch_id == 0 || batch_id == 1))
-        {
-            continue;
-        }
-        d_boundary_batches.emplace(
-            batch_id,
-            BoundaryBatch{batch_id, {}});
-    }
-
-    if (!d_indexer.axial_periodic)
-    {
-        for (Ordinal cell = 0;
-             cell < d_indexer.num_cells_per_layer;
-             ++cell)
-        {
-            d_boundary_batches.at(0).face_lids.push_back(
-                {cell, 0, Indexer::AXIAL});
-            d_boundary_batches.at(1).face_lids.push_back(
-                {cell, d_indexer.num_layers, Indexer::AXIAL});
-        }
-    }
-
-    for (Ordinal side_face = 0;
-         side_face < d_side_faces.size();
-         ++side_face)
-    {
-        const auto batch_id = d_side_faces[side_face].boundary_id;
-        if (batch_id == invalid_boundary_id)
-        {
-            continue;
-        }
-        for (Ordinal layer = 0;
-             layer < d_indexer.num_layers;
-             ++layer)
-        {
-            d_boundary_batches.at(batch_id).face_lids.push_back(
-                {side_face, layer, Indexer::SIDE});
-        }
-    }
+    for (const auto& [id, name] : d_boundary_names)
+        if (!d_indexer.axial_periodic || id > 1) d_boundary_base_faces.emplace(id, Arr<Ordinal>{});
+    for (Ordinal f = 0; f < d_side_faces.size(); ++f)
+        if (d_side_faces[f].boundary_id != invalid_boundary_id)
+            d_boundary_base_faces.at(d_side_faces[f].boundary_id).push_back(f);
 }
 
 } // namespace SimpleFluid::Meshes

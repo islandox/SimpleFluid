@@ -12,6 +12,8 @@
 #pragma once
 
 #include "geometry/mesh/MeshBase.hh"
+#include "geometry/GeometryEpoch.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 
 #include <limits>
 #include <string>
@@ -37,7 +39,7 @@ using UnstructuredMeshIndexTypes = MeshIndexTypes<
  * batches supplied by node set.
  */
 class UnstructuredMesh
-    : public MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>
+    : public GeometryExecutionGuard, public MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>
 {
 public:
     using Base = MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>;
@@ -141,10 +143,20 @@ public:
         size_t num_owned_faces);
 
     UnstructuredMesh(const UnstructuredMesh&) = default;
-    UnstructuredMesh(UnstructuredMesh&&) noexcept = default;
+    UnstructuredMesh(UnstructuredMesh&&) = default;
     UnstructuredMesh& operator=(const UnstructuredMesh&) = delete;
-    UnstructuredMesh& operator=(UnstructuredMesh&& other) noexcept;
+    UnstructuredMesh& operator=(UnstructuredMesh&& other);
 
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry_state.epoch; }
+    size_t topology_storage_bytes() const noexcept
+    {
+        size_t bytes = d_cells.capacity() * sizeof(CellInfo) + d_faces.capacity() * sizeof(FaceInfo);
+        for (const auto& c : d_cells) bytes += c.node_ids.capacity() * sizeof(NodeID) + c.face_ids.capacity() * sizeof(FaceID);
+        for (const auto& f : d_faces) bytes += f.node_ids.capacity() * sizeof(NodeID);
+        for (const auto& [id, batch] : d_boundary_batches) bytes += batch.face_lids.capacity() * sizeof(FaceID);
+        return bytes - cached_geometry_bytes();
+    }
+    size_t geometry_storage_bytes() const noexcept { return d_nodes.capacity() * sizeof(Vec3) + cached_geometry_bytes(); }
     const Indexer& indexer() const noexcept { return d_indexer; }
     const Arr<Vec3>& nodes() const noexcept { return d_nodes; }
     const BoundaryNames& boundary_names() const noexcept
@@ -226,6 +238,12 @@ private:
     void compute_face_geometry();
     void update_counts();
 
+    size_t cached_geometry_bytes() const noexcept
+    {
+        return d_cells.capacity() * (sizeof(Vec3) + sizeof(real_t))
+            + d_faces.capacity() * (2 * sizeof(Vec3) + sizeof(real_t));
+    }
+    GeometryEpochState d_geometry_state;
     Arr<Vec3> d_nodes;
     Arr<CellInfo> d_cells;
     Arr<FaceInfo> d_faces;

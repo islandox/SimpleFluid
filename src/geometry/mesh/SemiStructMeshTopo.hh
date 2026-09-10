@@ -12,6 +12,7 @@
 #pragma once
 
 #include "dataclass/typedefs.hh"
+#include "geometry/mesh/EntityRange.hh"
 #include "geometry/mesh/BoundaryFaceBatch.hh"
 #include "geometry/mesh/SemiStructuredIndexer.hh"
 
@@ -40,7 +41,7 @@ public:
     using Ordinal = Indexer::Ordinal;
     using CellID = Indexer::CellID;
     using FaceID = Indexer::FaceID;
-    using BoundaryBatch = BoundaryFaceBatch<FaceID>;
+    struct BoundaryBatch { int id = -1; EntityRange<FaceID> face_lids; };
     using BoundaryBatchMap = std::unordered_map<int, BoundaryBatch>;
     using BoundaryNames = std::unordered_map<int, std::string>;
     using CellBatch = std::vector<CellID>;
@@ -75,6 +76,19 @@ public:
         const Arr<BoundaryEdge>& boundary_edges = {},
         bool axial_periodic = false);
 
+    size_t storage_bytes() const noexcept
+    {
+        size_t bytes = sizeof(*this) + d_side_faces.capacity() * sizeof(SideFace)
+            + d_cell_side_faces.capacity() * sizeof(Arr<Ordinal>)
+            + d_base_neighbor_cells.capacity() * sizeof(Arr<Ordinal>)
+            + d_axial_neighbors.capacity() * sizeof(AxialNeighbors)
+            + d_interior_base_cells.capacity() * sizeof(Ordinal);
+        for (const auto& row : d_cell_side_faces) bytes += row.capacity() * sizeof(Ordinal);
+        for (const auto& row : d_base_neighbor_cells) bytes += row.capacity() * sizeof(Ordinal);
+        for (const auto& row : d_face_cells_per_orientation) bytes += row.capacity() * sizeof(FaceCells);
+        for (const auto& [id, faces] : d_boundary_base_faces) bytes += faces.capacity() * sizeof(Ordinal);
+        return bytes;
+    }
     const Indexer& indexer() const noexcept { return d_indexer; }
     const Arr<SideFace>& side_faces() const noexcept
     {
@@ -89,13 +103,10 @@ public:
         return d_cell_side_faces.at(base_cell_id);
     }
 
-    std::vector<FaceID> cell_faces(CellID cell_id) const;
+    EntityRange<FaceID> cell_faces(CellID cell_id) const;
     CellID owner_cell(FaceID face_id) const noexcept;
     CellID neighbor_cell(FaceID face_id) const noexcept;
-    const CellBatch& interior_cell_batch() const noexcept
-    {
-        return d_interior_cell_batch;
-    }
+    EntityRange<CellID> interior_cell_batch() const;
     NeighborCells neighbor_cells(CellID cell_id) const
     {
         const auto& axial_neighbors = d_axial_neighbors[cell_id.k];
@@ -118,10 +129,12 @@ public:
     bool is_boundary_face(FaceID face_id) const noexcept;
     int boundary_id(FaceID face_id) const noexcept;
     const std::string& boundary_batch_name(int batch_id) const;
-    const BoundaryBatch& boundary_face_batch(int batch_id) const;
-    const BoundaryBatchMap& boundary_batches() const noexcept
+    BoundaryBatch boundary_face_batch(int batch_id) const;
+    BoundaryBatchMap boundary_batches() const
     {
-        return d_boundary_batches;
+        BoundaryBatchMap result;
+        for (const auto& [id, faces] : d_boundary_base_faces) result.emplace(id, boundary_face_batch(id));
+        return result;
     }
     std::vector<int> boundary_batch_ids() const;
     int num_boundary_batches() const noexcept;
@@ -153,11 +166,11 @@ private:
     Arr<SideFace> d_side_faces;
     Arr<Arr<Ordinal>> d_cell_side_faces;
     std::array<Arr<FaceCells>, 2> d_face_cells_per_orientation;
-    CellBatch d_interior_cell_batch;
+    Arr<Ordinal> d_interior_base_cells;
     Arr<Arr<Ordinal>> d_base_neighbor_cells;
     Arr<AxialNeighbors> d_axial_neighbors;
     BoundaryNames d_boundary_names;
-    BoundaryBatchMap d_boundary_batches;
+    std::unordered_map<int, Arr<Ordinal>> d_boundary_base_faces;
 };
 
 } // namespace SimpleFluid::Meshes

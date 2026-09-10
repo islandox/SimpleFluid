@@ -125,6 +125,7 @@ public:
     /** @brief Rebuild geometry-dependent weights at the current mesh epoch. */
     void refresh()
     {
+        const auto execution = acquire_mesh_execution(*d_mesh);
         auto locations = detail::boundary_face_locations(*d_mesh);
         auto interior = build_geometry(*d_mesh, locations, false);
         auto boundary = build_geometry(*d_mesh, locations, true);
@@ -198,6 +199,7 @@ private:
         const std::vector<boundary_location_type>& boundary_locations,
         bool include_boundary_samples)
     {
+        const auto execution = acquire_mesh_execution(mesh);
         std::vector<CellGeometry> geometry(mesh.num_owned_cells());
         for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
         {
