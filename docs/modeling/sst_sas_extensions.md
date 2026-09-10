@@ -230,3 +230,27 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths tes
 ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Boiling|^BoilingSourceModelTest' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^SASBoiling_2procs$' --output-on-failure
 ```
+
+## Fixed-grid free surface and liquid inventories
+
+The SAS transaction now owns snapshots of the existing planar-volume-budget
+and liquid-mass models, their published fields, accepted history cursor,
+occupancy error and failure flag. Both global-constant-mass and cell-mass
+policies are covered. A failed lazy initialization keeps its configured owners
+alive for rollback instead of destroying objects referenced by snapshots.
+A later failure also removes initialization/history publication; a corrected
+input can retry. Non-SAS failure behavior is preserved.
+
+Regressions cover boiling with a vented budget and both mass policies,
+two-population escape with a closed headspace, invalid and successful-but-later-
+rejected lazy initialization, source/ledger/history restoration and retry with
+a smaller physical timestep. Prescribed headspace history provides a failure
+after upstream physics has advanced. The initial pressure bracket stays within
+the existing bubble-EOS validity domain. Planar ALE remains laminar-only; no
+moving-grid turbulence histories or new interface/phase closure is added.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testBoussinesqFreeSurface testBoussinesqPlanarALE
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.*FreeSurface' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASFreeSurface_2procs$' --output-on-failure
+```

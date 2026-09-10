@@ -237,8 +237,9 @@ The isothermal and Boussinesq solvers capture an accepted-state transaction
 when SAS is active, including flow fields, material fields, turbulence and
 public step/continuity diagnostics. Boussinesq also captures temperature and
 source fields, so a later temperature rejection restores the preceding SAS
-record. Initial solver scope is fixed-grid single-phase isothermal or
-Boussinesq flow, including the parent signed buoyancy source and resolved SST
+record. Solver scope is fixed-grid physical-time isothermal or Boussinesq
+flow and its existing compatible optional models, including signed buoyancy
+production and resolved SST
 wall policy. The existing high-Re k-epsilon wall policy remains incompatible.
 Material feedback is included in the SAS transaction, restoring its mirrors
 as well as material and turbulence fields on failure. Scalar void diffusion
@@ -249,10 +250,16 @@ concentration, inventory, source and diagnostic snapshots. Ideal and Sheng
 two-population radiolysis snapshots cover
 transport histories, slip fluxes, populations and hydrogen ledgers. Bulk/wall
 boiling also restores its source fields, steam/condensate ledger and pending
-phase-change state. Fixed-grid free-surface integration remains to be qualified.
+phase-change state. Fixed-grid planar volume budgets capture the free-surface
+and liquid-mass owners, output fields, accepted history and failure state.
+Both global-constant-mass and cell-mass policies participate. Lazy initialization
+retains model ownership during a trial, so initialization and subsequent
+failures can restore and retry. Existing incompatible physics combinations
+(such as Sheng plus boiling, or closed-headspace fixed-temperature boiling)
+remain rejected.
 The existing laminar-only planar-ALE restriction remains. This does not add
 conservative ALE turbulence, bubble-induced turbulence, interphase momentum,
-boiling, transition, or a new turbulent heat-flux closure.
+transition, or new boiling/turbulent heat-flux closures.
 
 ## Reproduction and evidence
 

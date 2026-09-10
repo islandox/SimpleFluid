@@ -575,7 +575,8 @@ private:
     void clear_ale_pressure_boundary() noexcept;
     SIMPLEFLUID_SOLVERS_LOCAL
     void initialize_free_surface_if_needed(
-        bool allow_default_fields = false, bool dependencies_already_refreshed = false);
+        bool allow_default_fields = false, bool dependencies_already_refreshed = false,
+        bool preserve_on_failure = false);
     SIMPLEFLUID_SOLVERS_LOCAL
     void advance_free_surface(scalar_type time_step);
     struct FreeSurfaceAccountingPreview

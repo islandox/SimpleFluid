@@ -260,7 +260,10 @@ The opt-in `SSTKOmegaSAS` selection adds a SAS omega source to the existing
 **SST-1994** parent. See [the mathematical contract, configuration and supported
 scope](docs/modeling/sst_sas.md) and [verification evidence](docs/modeling/sst_sas_verification.md).
 The `sst_sas_activation` example is a small, isothermal transient source check
-with optional diagnostics. Source implementation and solver regression do not
+with optional diagnostics. The [tested support extensions](docs/modeling/sst_sas_extensions.md)
+cover cylindrical and serial semi-structured meshes, mixed slip and translational
+periodicity, corrected Gauss-linear gradients, and accepted-state transactions
+for compatible fixed-grid multiphysics models. Source implementation and solver regression do not
 establish physically validated scale-resolving turbulence.
 
 ### Turbulent Bubble-Flow Scope

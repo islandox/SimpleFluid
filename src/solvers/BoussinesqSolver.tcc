@@ -2706,7 +2706,7 @@ auto BoussinesqSolver<Pack>::make_free_surface_update(
 /** @brief Initialize a configured free-surface after fields are usable. */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
-    bool allow_default_fields, bool dependencies_already_refreshed)
+    bool allow_default_fields, bool dependencies_already_refreshed, bool preserve_on_failure)
 {
     if (!d_free_surface_model || d_free_surface_model->initialized() ||
         (!d_primary_fields_initialized && !allow_default_fields))
@@ -2779,7 +2779,7 @@ void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
     }
     catch (...)
     {
-        remove_free_surface_model();
+        if (!preserve_on_failure) remove_free_surface_model();
         throw;
     }
 }
@@ -4295,13 +4295,22 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     if (sas_model) sas_model->validate_time_mode(d_problem.time_options().physical_time);
     if (active_sas)
     {
-        if (d_free_surface_model)
-            throw std::invalid_argument("Active SAS phase/inventory coupling is not yet enabled for this model.");
         if (d_material_feedback_model) sas_rollback.capture_model(*d_material_feedback_model);
         if (d_scalar_void_fraction_model) sas_rollback.capture_model(*d_scalar_void_fraction_model);
         if (d_precursor_model) sas_rollback.capture_model(*d_precursor_model);
         if (d_radiolytic_gas_model) sas_rollback.capture_model(*d_radiolytic_gas_model);
         if (d_boiling_source_model) sas_rollback.capture_model(*d_boiling_source_model);
+        if (d_free_surface_model) sas_rollback.capture_model(*d_free_surface_model);
+        if (d_liquid_mass_inventory) sas_rollback.capture_model(*d_liquid_mass_inventory);
+        for (auto* field : {d_clear_level.get(), d_pool_level.get(), d_headspace_pressure.get(), d_pool_occupancy.get()})
+            if (field) sas_rollback.capture(*field);
+        sas_rollback.add([this, history_size=d_free_surface_history.size(),
+            occupancy_error=d_pool_occupancy_volume_error, failed=d_free_surface_step_failed]
+        {
+            d_free_surface_history.resize(history_size);
+            d_pool_occupancy_volume_error=occupancy_error;
+            d_free_surface_step_failed=failed;
+        });
         sas_rollback.capture(temperature());
         for (const auto& [name, source] : stored_temperature_sources().entries())
             sas_rollback.capture(source->field());
@@ -4332,7 +4341,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         {
             refresh_physical_models();
         }
-        initialize_free_surface_if_needed(true, d_physical_model_enabled);
+        initialize_free_surface_if_needed(true, d_physical_model_enabled, active_sas);
         if (auto* turbulence = find_turbulence_model())
         {
             turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
@@ -4362,7 +4371,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
             sas_rollback.restore();
             if (uses_legacy_backend()) { this->sync_primary_fields_to_legacy(); sync_temperature_to_legacy(); }
         }
-        if (free_surface_active)
+        if (free_surface_active && !active_sas)
         {
             d_free_surface_step_failed = true;
         }

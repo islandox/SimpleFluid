@@ -277,7 +277,8 @@ mistaken for foundation or Phase 9 completion.
 - [x] Add rollback-safe SAS precursor inventories and balance diagnostics.
 - [x] Add rollback-safe SAS ideal/two-population radiolysis and hydrogen ledgers.
 - [x] Add rollback-safe SAS bulk/wall boiling and phase-change state.
-- [ ] Extend rollback-safe SAS support to remaining multiphysics configurations.
+- [x] Add rollback-safe fixed-grid SAS free-surface/liquid-mass budgets,
+      including lazy initialization and accepted history.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.
 - [ ] Perform qualified whole-flow external comparisons with explicit parent-SST
