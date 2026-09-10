@@ -139,13 +139,15 @@ cylindrical-component metric terms and does not alter the parent transport
 operators. Manufactured refinement and transient swirl evidence are recorded
 in [the extension report](sst_sas_extensions.md).
 
-Native `SemiStructuredXY_Z`, slip and periodic velocity conditions remain
-rejected for active SAS pending their separate extensions. A cylindrical full
+Native `SemiStructuredXY_Z` uses the same planar-face operator directly, with
+its existing serial-only ownership contract. Skewed triangular extrusions have
+manufactured derivative/refinement and transient solver coverage. Slip and
+periodic velocity conditions remain rejected pending their separate extensions. A cylindrical full
 annulus has connected interior angular faces, not a boundary-value periodic
 patch. Source-disabled SAS retains the established parent paths.
 
 Supported active derivative paths are planar HEX_8/WEDGE_6 polyhedral legacy
-meshes, native Cartesian and cylindrical handles, native planar unstructured handles (with the
+meshes, native Cartesian, cylindrical and serial semi-structured handles, native planar unstructured handles (with the
 existing partitioned adapter in MPI), and handles of existing STK meshes.
 Native execution does not construct a legacy mesh. Prescribed velocity/no-slip
 and homogeneous Neumann outlet conditions are supported. Prescribed face
