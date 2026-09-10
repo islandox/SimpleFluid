@@ -275,6 +275,7 @@ mistaken for foundation or Phase 9 completion.
 - [x] Add rollback-safe SAS material feedback.
 - [x] Add rollback-safe SAS scalar void diffusion/collapse and mixture feedback.
 - [x] Add rollback-safe SAS precursor inventories and balance diagnostics.
+- [x] Add rollback-safe SAS ideal/two-population radiolysis and hydrogen ledgers.
 - [ ] Extend rollback-safe SAS support to remaining multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.

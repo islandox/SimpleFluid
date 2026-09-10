@@ -309,3 +309,48 @@ TEST(SASSupportedPathsTest, PrecursorInventoryAndDiagnosticsRollBackWithSAS)
     const auto stale=precursors.snapshot(); precursors.configure(options);
     EXPECT_ANY_THROW(precursors.restore(stale));
 }
+
+TEST(SASSupportedPathsTest, RadiolysisAndHydrogenLedgersRollBackWithSAS)
+{
+    for(auto mode:{RadiolyticGasMode::IdealGasSource,RadiolyticGasMode::Sheng2024TwoPopulation})
+    {
+        auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+        solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+        FissionPowerSourceOptions power; power.profile=FissionPowerProfile::Constant; power.power_density=1.;
+        solver.configure_fission_power_source(power);
+        RadiolyticGasOptions options; options.mode=mode; options.max_source_alpha_rate=1.;
+        options.hydrogen_yield_mol_per_j=2e-7; options.reference_pressure=1e5;
+        // Unit-density fixture has molecular nu=.001; D=1e-5 gives admissible Sc=100.
+        options.henry_coefficient=1e-5; options.surface_tension=.07; options.hydrogen_diffusivity=1e-5;
+        options.uranium_concentration_mol_per_m3=1000; options.hydrogen_yield_molecules_per_100_ev=1.8;
+        options.dissolved_transport=RadiolyticTransportMode::Advective;
+        options.rise_velocity_mode=BubbleRiseVelocityMode::ConstantSlip; options.constant_slip_velocity=.05;
+        options.initial_dissolved_hydrogen=1e-5; options.initial_micro_number_density=1e10;
+        options.initial_micro_moles=1e-5; options.initial_large_number_density=1e8; options.initial_large_moles=5e-6;
+        options.microbubble_lifetime=1e30; options.large_bubble_dissolution_time=1e30;
+        options.micro_to_large_conversion_coefficient=0; options.min_radius=1e-12; options.max_radius=1e-3;
+        options.min_population=1e-40; options.max_population=1e40;
+        auto& gas=solver.configure_radiolytic_gas(options);
+        expect_active_bounded_step(solver);
+        if(mode==RadiolyticGasMode::Sheng2024TwoPopulation)
+        {
+            EXPECT_GT(gas.last_statistics().hydrogen_produced,0);
+            EXPECT_NEAR(gas.last_statistics().inventory_error,0,1e-14);
+        }
+        else
+        {
+            double local=0,global=0;
+            for(size_t i=0;i<mesh->num_owned_cells();++i) local+=solver.find_scalar_void_fraction_model()->alpha_g().value(i);
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&global);
+            EXPECT_GT(global,0);
+        }
+        const auto statistics=gas.last_statistics();
+        const auto inventory=gas.global_submerged_hydrogen_moles();
+        expect_late_multiphysics_rollback(solver,[&]
+        {
+            EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after,statistics.hydrogen_after);
+            EXPECT_DOUBLE_EQ(gas.last_statistics().cumulative_hydrogen_produced,statistics.cumulative_hydrogen_produced);
+            EXPECT_DOUBLE_EQ(gas.global_submerged_hydrogen_moles(),inventory);
+        });
+    }
+}

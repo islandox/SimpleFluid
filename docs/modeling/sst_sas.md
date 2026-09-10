@@ -245,8 +245,10 @@ as well as material and turbulence fields on failure. Scalar void diffusion
 and collapse also participate, including alpha_g, alpha_l and source mirrors;
 the RANS/SAS equations remain full-cell rather than phase weighted. Active SAS
 also supports existing precursor reaction/advection/diffusion, with complete
-concentration, inventory, source and diagnostic snapshots. It currently rejects
-remaining radiolysis/boiling/free-surface combinations pending their complete
+concentration, inventory, source and diagnostic snapshots. Ideal and Sheng
+two-population radiolysis snapshots cover
+transport histories, slip fluxes, populations and hydrogen ledgers. Remaining
+boiling/free-surface combinations await their complete
 transaction integration.
 The existing laminar-only planar-ALE restriction remains. This does not add
 conservative ALE turbulence, bubble-induced turbulence, interphase momentum,
