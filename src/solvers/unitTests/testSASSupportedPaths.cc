@@ -254,3 +254,31 @@ TEST(SASSupportedPathsTest, MaterialFeedbackPublishesAndRollsBackWithSAS)
     }
     expect_late_multiphysics_rollback(solver);
 }
+
+TEST(SASSupportedPathsTest, ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSAS)
+{
+    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    ScalarVoidFractionOptions options; options.initial_alpha=.2; options.alpha_collapse_time=.1; options.alpha_diffusivity=.01;
+    auto& phase=solver.configure_scalar_void_fraction(options);
+    ScalarCellFieldStored<Pack> initial(mesh,"initial_void");
+    for(size_t i=0;i<mesh->num_owned_cells();++i) initial.set_owned_value(i,.2+.05*mesh->cell_centroid(i).x);
+    initial.sync_ghosts(); phase.initialize_from(initial);
+    MaterialFeedbackOptions feedback; feedback.density_mode=DensityFeedbackMode::Mixture;
+    feedback.liquid_density=1; feedback.gas_density=.1; feedback.reference_dynamic_viscosity=.001;
+    solver.configure_material_feedback(feedback);
+    double before=0,after=0;
+    for(size_t i=0;i<mesh->num_owned_cells();++i) before+=phase.alpha_g().value(i)*mesh->cell_volume(i);
+    expect_active_bounded_step(solver);
+    for(size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        const auto alpha=phase.alpha_g().value(i);
+        after+=alpha*mesh->cell_volume(i);
+        EXPECT_NEAR(phase.alpha_l().value(i),1-alpha,1e-14);
+        EXPECT_NEAR(solver.material_properties().density.value(i),1-.9*alpha,1e-13);
+    }
+    std::array<double,2> local{before,after},total{};
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,2,local.data(),total.data());
+    EXPECT_NEAR(total[1],total[0]*(1-.001/.1),1e-11);
+    expect_late_multiphysics_rollback(solver);
+}
