@@ -191,3 +191,22 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths tes
 ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Precursor|^DelayedNeutronPrecursorModelTest' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^SASPrecursors_2procs$' --output-on-failure
 ```
+
+## Radiolysis
+
+SAS now includes the existing radiolytic snapshot: dissolved/population
+inventories, pressure/history state, carrier/slip fluxes and cumulative
+hydrogen ledgers. Ideal-gas void production and Sheng two-population transport
+both run with nonzero SAS. The serial and dedicated MPI registrations pass.
+The test checks hydrogen production/conservation,
+restoration after post-temperature feedback rejection, and successful retry.
+The unit-density fixture selects nu/D=100 inside the existing Hughmark domain;
+no model validity gate or conservation tolerance was relaxed. This remains
+weak single-continuum coupling, not a bubble-induced turbulence or interphase
+momentum closure.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testRadiolyticGasModel
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Radiolysis' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASRadiolysis_2procs$' --output-on-failure
+```
