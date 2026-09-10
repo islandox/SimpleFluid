@@ -3,6 +3,7 @@
 #pragma once
 
 #include <stdexcept>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -60,6 +61,20 @@ private:
     const Field* d_field = nullptr;
     std::vector<local_ordinal_type> d_local_ids;
     std::vector<value_type> d_values;
+};
+
+/** Snapshot actions are captured only for an explicitly enabled transaction. */
+class AcceptedStateRollback
+{
+public:
+    template<class Field> void capture(Field& field)
+    {
+        actions.emplace_back([snapshot = FieldStateSnapshot(field), &field] { snapshot.restore(field); });
+    }
+    void add(std::function<void()> action) { actions.push_back(std::move(action)); }
+    void restore() const { for (const auto& action : actions) action(); }
+private:
+    std::vector<std::function<void()>> actions;
 };
 
 } // namespace SimpleFluid

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "geometry/YPlusBoundaryLayerController.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
@@ -26,6 +27,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <string>
 #include <utility>
@@ -928,3 +930,206 @@ TEST(TurbulentBoussinesqSolverTest, CoupledBackendsAdvanceCombinedRansRadiolysis
         exercise_combined_rans_radiolysis(mesh, SimpleFluid::PressureVelocityCoupling::CoupledKrylov, selection);
     }
 }
+
+TEST(TurbulentBoussinesqSolverTest, SASActivatesAndRestoresAfterDownstreamFailure)
+{
+    using namespace SimpleFluid;
+    auto legacy = test::build_mesh<Pack>(test::make_box_database(4,4,4,.25));
+    BoundaryConditionSet bc;
+    for (auto name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+        bc.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+    auto time = stable_time_options(PressureVelocityCoupling::PIMPLE);
+    time.n_outer_correctors = 2; time.n_pressure_correctors = 2;
+    time.thermal_expansion = .001; time.gravity_z = -9.81;
+    BoussinesqSolver<Pack> solver(legacy, bc, time);
+    solver.initialize_linear_temperature({0,0,1}, 2, 1);
+    TurbulenceModelOptions options;
+    options.model = TurbulenceModelType::SSTKOmegaSAS;
+    options.initial_turbulent_kinetic_energy = .2;
+    options.initial_specific_dissipation_rate = 2;
+    options.initial_wall_distance = .25;
+    options.sas.diagnostics = true;
+    options.buoyancy_model = TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
+    auto& model = solver.configure_turbulence(options);
+    const auto& mesh = solver.velocity().mesh();
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+    {
+        const auto p = mesh.cell_centroid(i);
+        const auto pi = std::numbers::pi;
+        solver.velocity().set_owned_value(i, {std::sin(pi*p.x)*std::sin(pi*p.x)*std::sin(2*pi*p.y),
+            -std::sin(2*pi*p.x)*std::sin(pi*p.y)*std::sin(pi*p.y), 0});
+    }
+    solver.velocity().sync_ghosts();
+    ASSERT_NO_THROW(solver.step());
+    ASSERT_GT(model.sas_statistics().max_source, .01);
+    double local_buoyancy = 0, total_buoyancy = 0;
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+        local_buoyancy += std::abs(model.output_fields().at("buoyancy_production")->value(i));
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_buoyancy, &total_buoyancy);
+    EXPECT_GT(total_buoyancy, 1e-6);
+    EXPECT_LT(solver.last_pressure_velocity_residuals().continuity, 1e-6);
+    const auto saved_stats = model.sas_statistics();
+    const auto saved_continuity = solver.last_pressure_velocity_residuals().continuity;
+    const auto saved_time = solver.time();
+    std::vector<double> saved_k, saved_q;
+    std::vector<typename BoussinesqSolver<Pack>::vec_type> saved_u;
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+    {
+        saved_k.push_back(model.turbulent_kinetic_energy().value(i));
+        saved_q.push_back(model.output_fields().at("sas_Q_applied")->value(i));
+        saved_u.push_back(solver.velocity().value(i));
+    }
+    // Each source passes the pre-step finite-value validation; their sum first
+    // overflows in temperature assembly, which follows both turbulence solves.
+    solver.add_temperature_source("overflow_one", std::numeric_limits<double>::max());
+    solver.add_temperature_source("overflow_two", std::numeric_limits<double>::max());
+    EXPECT_ANY_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_DOUBLE_EQ(solver.time(), saved_time);
+    EXPECT_DOUBLE_EQ(solver.last_pressure_velocity_residuals().continuity, saved_continuity);
+    EXPECT_DOUBLE_EQ(model.sas_statistics().max_source, saved_stats.max_source);
+    for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
+    {
+        EXPECT_DOUBLE_EQ(model.turbulent_kinetic_energy().value(i), saved_k[i]);
+        EXPECT_DOUBLE_EQ(model.output_fields().at("sas_Q_applied")->value(i), saved_q[i]);
+        EXPECT_DOUBLE_EQ(solver.velocity().value(i).x, saved_u[i].x);
+        EXPECT_DOUBLE_EQ(solver.velocity().value(i).y, saved_u[i].y);
+    }
+    solver.remove_temperature_source("overflow_one");
+    solver.remove_temperature_source("overflow_two");
+    ASSERT_NO_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 2);
+}
+
+TEST(TurbulentBoussinesqSolverTest, SASRejectsPseudoTimeAndAdvancesTurbulenceOncePerPhysicalStep)
+{
+    using namespace SimpleFluid;
+    auto legacy = test::build_mesh<Pack>(test::make_box_database(4,4,4,.25));
+    auto time = stable_time_options(PressureVelocityCoupling::PIMPLE);
+    time.n_outer_correctors = 3;
+    TurbulenceModelOptions config;
+    config.model = TurbulenceModelType::SSTKOmegaSAS;
+    config.initial_turbulent_kinetic_energy = .2; config.initial_specific_dissipation_rate = 2;
+    config.initial_wall_distance = .25;
+    for (bool physical : {false, true})
+    {
+        time.physical_time = physical;
+        BoussinesqSolver<Pack> solver(legacy, {}, time);
+        solver.initialize_heated_box(1,1);
+        auto& model = solver.configure_turbulence(config);
+        if (!physical)
+        {
+            EXPECT_ANY_THROW(solver.step());
+            EXPECT_EQ(solver.step_index(), 0);
+            continue;
+        }
+        ASSERT_NO_THROW(solver.step());
+        for (size_t i = 0; i < model.turbulent_kinetic_energy().num_owned_cells(); ++i)
+            EXPECT_NEAR(model.turbulent_kinetic_energy().value(i), .2/(1+time.time_step*.09*2), 1e-13);
+    }
+}
+
+#ifdef SIMPLEFLUID_ENABLE_NOX
+TEST(TurbulentBoussinesqSolverTest, SASRejectsCoupledNonlinearBeforeMutatingAcceptedState)
+{
+    using namespace SimpleFluid;
+    SP<const MeshHandle<Pack>> mesh = std::make_shared<MeshHandle<Pack>>(
+        std::make_shared<Meshes::OrthogonalCartesian3D>(
+            Vec3D<ArrReal>{{{0., .5, 1.}, {0., .5, 1.}, {0., .5, 1.}}}));
+    BoundaryConditionSet boundaries;
+    for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+    {
+        boundaries.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+        boundaries.pressure[name] = {BoundaryConditionType::Neumann, 0.};
+        boundaries.temperature[name] = {BoundaryConditionType::Neumann, 0.};
+    }
+    auto time = stable_time_options(PressureVelocityCoupling::CoupledNonlinear);
+    time.nonlinear.linear_backend = LinearSolverBackend::Gmres;
+    LinearSolverOptions linear;
+    linear.tolerance = 1.e-11;
+    linear.max_iterations = 250;
+    BoussinesqModelOptions material;
+    material.reference_density = material.density = 1.;
+    material.dynamic_viscosity = .01;
+    BoussinesqSolver<Pack> solver(mesh, boundaries, time, linear, material);
+    solver.initialize_heated_box(1., 1.);
+    solver.add_temperature_source("heat", .1);
+    int material_updates = 0;
+    solver.set_material_updater([&](const auto&, auto&) { ++material_updates; });
+
+    TurbulenceModelOptions options;
+    options.model = TurbulenceModelType::SSTKOmegaSAS;
+    options.initial_turbulent_kinetic_energy = .2;
+    options.initial_specific_dissipation_rate = 2.;
+    options.initial_wall_distance = .25;
+    options.sas.diagnostics = true;
+    options.sas.enabled = false;
+    solver.configure_turbulence(options);
+    ASSERT_NO_THROW(solver.step());
+    ASSERT_EQ(solver.step_index(), 1);
+    ASSERT_EQ(material_updates, 1);
+    ASSERT_TRUE(solver.last_nonlinear_result().converged);
+    ASSERT_GT(solver.last_step_statistics().linear_solves, 0);
+
+    options.sas.enabled = true;
+    solver.configure_turbulence(options);
+    const auto field_values = [](const auto& field)
+    {
+        const auto values = field.owned_data().getLocalViewHost(Tpetra::Access::ReadOnly);
+        std::vector<double> result;
+        for (size_t row = 0; row < values.extent(0); ++row)
+            for (size_t component = 0; component < values.extent(1); ++component)
+                result.push_back(values(row, component));
+        return result;
+    };
+    const auto accepted_fields = [&]
+    {
+        std::vector<std::vector<double>> result{field_values(solver.velocity()),
+            field_values(solver.pressure()), field_values(solver.temperature()),
+            field_values(solver.pressure_corrected_face_fluxes()),
+            field_values(solver.material_properties().density),
+            field_values(solver.material_properties().dynamic_viscosity)};
+        for (const auto& [name, field] : solver.find_turbulence_model()->output_fields())
+            result.push_back(field_values(*field));
+        return result;
+    };
+    const auto saved_fields = accepted_fields();
+    const auto saved_time = solver.time();
+    const auto saved_statistics = solver.last_step_statistics();
+    const auto saved_nonlinear = solver.last_nonlinear_result();
+    try
+    {
+        solver.step();
+        FAIL() << "Active SAS must reject coupled nonlinear stepping.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("active SST-SAS"), std::string::npos);
+    }
+    EXPECT_EQ(accepted_fields(), saved_fields);
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_DOUBLE_EQ(solver.time(), saved_time);
+    EXPECT_EQ(material_updates, 1);
+    const auto& statistics = solver.last_step_statistics();
+    EXPECT_EQ(statistics.converged, saved_statistics.converged);
+    EXPECT_EQ(statistics.nonlinear_iterations, saved_statistics.nonlinear_iterations);
+    EXPECT_EQ(statistics.linear_solves, saved_statistics.linear_solves);
+    EXPECT_EQ(statistics.krylov_iterations, saved_statistics.krylov_iterations);
+    EXPECT_DOUBLE_EQ(statistics.achieved_tolerance, saved_statistics.achieved_tolerance);
+    EXPECT_DOUBLE_EQ(statistics.momentum, saved_statistics.momentum);
+    EXPECT_DOUBLE_EQ(statistics.pressure, saved_statistics.pressure);
+    EXPECT_DOUBLE_EQ(statistics.temperature, saved_statistics.temperature);
+    EXPECT_DOUBLE_EQ(statistics.continuity, saved_statistics.continuity);
+    EXPECT_EQ(solver.last_nonlinear_result().converged, saved_nonlinear.converged);
+    EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations, saved_nonlinear.residual_evaluations);
+    EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds, saved_nonlinear.total_seconds);
+
+    options.sas.enabled = false;
+    solver.configure_turbulence(options);
+    ASSERT_NO_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 2);
+    EXPECT_DOUBLE_EQ(solver.time(), 2 * time.time_step);
+    EXPECT_EQ(material_updates, 2);
+    EXPECT_TRUE(solver.last_nonlinear_result().converged);
+}
+#endif

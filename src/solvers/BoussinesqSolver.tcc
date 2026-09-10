@@ -9,6 +9,7 @@
  *
  */
 
+#include "solvers/FieldStateTransaction.hh"
 #include "BoussinesqSolver.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
 
@@ -3172,8 +3173,11 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::pressure_reference_de
 
 template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::supports_coupled_nonlinear() const noexcept
 {
+    const auto* turbulence = find_turbulence_model();
+    const bool active_sas = turbulence && turbulence->type() == TurbulenceModelType::SSTKOmegaSAS &&
+        turbulence->options().sas.enabled;
     return typeid(*this) == typeid(BoussinesqSolver<Pack>) && d_physical_model_enabled &&
-        !d_free_surface_model && !d_boiling_source_model && !d_precursor_model;
+        !d_free_surface_model && !d_boiling_source_model && !d_precursor_model && !active_sas;
 }
 
 template<TpetraTypePack Pack>
@@ -4313,6 +4317,34 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         }
         return;
     }
+    AcceptedStateRollback sas_rollback;
+    auto* sas_model = find_turbulence_model();
+    const bool active_sas = sas_model && sas_model->type() == TurbulenceModelType::SSTKOmegaSAS
+                            && sas_model->options().sas.enabled;
+    if (sas_model) sas_model->validate_time_mode(d_problem.time_options().physical_time);
+    if (active_sas)
+    {
+        if (d_radiolytic_gas_model || d_boiling_source_model || d_scalar_void_fraction_model
+            || d_material_feedback_model || d_precursor_model || d_free_surface_model)
+            throw std::invalid_argument("Active SAS currently supports fixed-grid single-phase Boussinesq flow without phase, inventory, or material-feedback models.");
+        sas_rollback.capture(temperature());
+        for (const auto& [name, source] : stored_temperature_sources().entries())
+            sas_rollback.capture(source->field());
+        sas_rollback.capture(pressure());
+        sas_rollback.capture(this->pressure_correction());
+        sas_rollback.capture(velocity());
+        sas_rollback.capture(predictor_pressure_gradient());
+        sas_rollback.capture(this->predictor_velocity());
+        sas_rollback.capture(old_face_fluxes());
+        sas_rollback.capture(projected_face_fluxes());
+        sas_rollback.add([this, residuals = pressure_velocity_residuals(), volume = this->d_last_volume_continuity_residuals]
+                        { pressure_velocity_residuals() = residuals; this->d_last_volume_continuity_residuals = volume; });
+        sas_rollback.add([this, saved = stored_material_properties().snapshot()]
+                        { stored_material_properties().restore(saved); });
+        sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        sas_rollback.add([this, time = this->d_time, step = this->d_step_index, statistics = d_last_step_statistics]
+                        { this->d_time = time; this->d_step_index = step; d_last_step_statistics = statistics; });
+    }
     const bool nonlinear_flow =
         d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear;
     // Preserve accepted reports and primary ghosts until the private flow
@@ -4382,6 +4414,11 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
                 d_scalar_void_fraction_model->restore(*nonlinear_void_snapshot);
             if (auto* turbulence = find_turbulence_model())
                 turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
+        }
+        if (active_sas)
+        {
+            sas_rollback.restore();
+            if (uses_legacy_backend()) { this->sync_primary_fields_to_legacy(); sync_temperature_to_legacy(); }
         }
         if (free_surface_active || (nonlinear_flow && flow_accepted))
         {

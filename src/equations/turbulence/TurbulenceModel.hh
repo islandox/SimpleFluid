@@ -19,6 +19,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/turbulence/TurbulenceEquations.hh"
+#include "equations/turbulence/SSTSASSource.hh"
 #include "equations/turbulence/TurbulenceScalarTransportEquation.hh"
 #include "equations/turbulence/TurbulenceWallTreatment.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -45,8 +46,14 @@ enum class TurbulenceModelType
     RealizableKEpsilon,
     StandardKOmega,     ///< Standard k-omega closure.
     BSLKOmega,          ///< Baseline blended k-omega closure.
-    SSTKOmega           ///< Shear-stress-transport k-omega closure.
+    SSTKOmega,          ///< Original SST-1994 closure.
+    SSTKOmegaSAS       ///< SST-1994 with the optional SAS omega source.
 };
+
+constexpr bool is_sst_model(TurbulenceModelType model) noexcept
+{
+    return model == TurbulenceModelType::SSTKOmega || model == TurbulenceModelType::SSTKOmegaSAS;
+}
 
 /** @brief Return the canonical database name of a turbulence closure. */
 SIMPLEFLUID_EQUATIONS_EXPORT std::string_view
@@ -56,7 +63,7 @@ to_string(TurbulenceModelType model) noexcept;
  * @brief Parse a turbulence model name.
  *
  * Accepted spellings are `laminar`, `standardKEpsilon`, `RNGKEpsilon`,
- * `realizableKEpsilon`, `standardKOmega`, `BSLKOmega`, and `SSTKOmega`.
+ * `realizableKEpsilon`, `standardKOmega`, `BSLKOmega`, `SSTKOmega`, and `SSTKOmegaSAS`.
  */
 SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModelType
 parse_turbulence_model_type(const std::string& value);
@@ -130,6 +137,7 @@ struct TurbulenceModelOptions
         TurbulenceWallTreatmentType::None;
     /** Wall patches/constants; overlapping closure constants are coordinated. */
     TurbulenceWallTreatmentOptions wall_options;
+    SSTSASOptions sas;
 };
 
 /** @brief Validate a turbulence configuration before allocating model state. */
@@ -198,6 +206,7 @@ template <TpetraTypePack Pack = DefaultTpetraTypes,
           class MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModel
 {
+    struct SnapshotData;
 public:
     using mesh_type = MeshType;
     using field_traits = MeshFieldTraits<Pack, mesh_type>;
@@ -246,6 +255,17 @@ public:
     TurbulenceModelType type() const noexcept;
     const TurbulenceModelOptions& options() const noexcept;
 
+    /** Opaque accepted-state snapshot, tied to this model configuration. */
+    class StateSnapshot
+    {
+        friend class TurbulenceModel;
+        std::shared_ptr<SnapshotData> data;
+    };
+    StateSnapshot snapshot() const;
+    void restore(const StateSnapshot& snapshot);
+    const SSTSASStatistics& sas_statistics() const;
+    void validate_time_mode(bool physical_time) const;
+
     /**
      * @brief Advance k and epsilon/omega using the projected volumetric face flux.
      *
@@ -260,7 +280,8 @@ public:
                                scalar_type reference_density, FVM::NonOrthogonalTreatment treatment,
                                const LinearSolverOptions& linear_options = {},
                                const TurbulenceBuoyancyContext<Pack, mesh_type>*
-                                   buoyancy_context = nullptr);
+                                   buoyancy_context = nullptr,
+                               bool physical_time = true);
 
     /** Rebuild mu_eff and lambda_eff from current molecular and turbulent fields. */
     void refresh_effective_properties(const material_type& material, scalar_type reference_density);

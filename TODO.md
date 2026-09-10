@@ -255,6 +255,28 @@ mistaken for foundation or Phase 9 completion.
 - [x] Document that the current RANS variables use single-continuum, full-cell
       transport rather than phase-volume-fraction-weighted equations.
 
+#### SST-1994 plus SAS source extension
+
+- [x] Implement opt-in `SSTKOmegaSAS` without changing ordinary SST-1994.
+- [x] Add bounded local algebra, physical-time cap, explicit omega source,
+      unit-coefficient vector Laplacian, lazy work fields and accepted diagnostics.
+- [x] Add pointwise reference, derivative, source-weighting, disabled-equivalence,
+      wall/configuration, native/legacy and serial/MPI transaction checks.
+- [x] Add a small isothermal transient activation example without IF97.
+- [ ] Qualify cylindrical, SemiStructuredXY_Z, slip, periodic and Gauss-linear
+      SAS derivative paths.
+- [ ] Extend rollback-safe SAS support to additional multiphysics configurations.
+- [ ] Establish spatial/temporal resolution and sustained three-dimensional
+      scale-resolution evidence beyond source activation.
+- [ ] Perform qualified whole-flow external comparisons with explicit parent-SST
+      and discretization differences, then quantitative physical validation.
+
+The [SAS model document](docs/modeling/sst_sas.md) and
+[verification record](docs/modeling/sst_sas_verification.md) distinguish
+implemented, component-tested, solver-regression-tested, externally compared
+and physically validated status. The parent closure and pending pitzDaily gates
+are unchanged.
+
 #### Remaining work and acceptance
 
 - [ ] Establish a converged pitzDaily reference configuration and checked-in
