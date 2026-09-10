@@ -139,3 +139,20 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSu
 ctest --test-dir build/gcc -C Debug -R '(SSTSAS|SASSupportedPaths).*Gauss|TurbulenceModelOptionsTest' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs)$' --output-on-failure
 ```
+
+## Material feedback
+
+SAS now supports the existing temperature/constant material-feedback model.
+Its accepted mirrors are captured with the model's snapshot API in addition
+to the existing material, flow and turbulence snapshots. No feedback closure
+or turbulence transport weighting changes. The regression demonstrates changed
+density/viscosity and nonzero SAS, then induces overflow only in post-temperature
+feedback. All published model/material/turbulence fields and time restore,
+and the corrected input can retry successfully. The focused serial test and
+its dedicated two-rank registration both pass.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.MaterialFeedback' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASMaterialFeedback_2procs$' --output-on-failure
+```
