@@ -39,7 +39,8 @@ auto laplacian_face_area(const MeshType& mesh, typename MeshType::local_ordinal_
  * The explicit full correction uses the same face decomposition as transport,
  * irrespective of how a transport solve splits that correction implicitly.
  * BoundaryValue supplies Dirichlet face values; BoundaryType identifies
- * homogeneous Neumann outlets. Slip and unmapped periodic faces are rejected.
+ * homogeneous Neumann outlets. Slip is mixed normal-Dirichlet/tangential-Neumann;
+ * unmapped periodic faces are rejected.
  */
 template<class VectorField, class TensorField, class MeshType, class BoundaryValue, class BoundaryType>
 void unit_vector_laplacian(const VectorField& velocity, const TensorField& gradient,
@@ -81,6 +82,20 @@ void unit_vector_laplacian(const VectorField& velocity, const TensorField& gradi
                 const auto type = boundary_type(loc.batch_id, loc.in_batch_id);
                 if (type == BoundaryConditionType::Neumann)
                     continue; // Established velocity transport accepts homogeneous Neumann only.
+                if (type == BoundaryConditionType::Slip)
+                {
+                    // Mixed vector condition at the normal projection of the cell:
+                    // U_n=0, dU_t/dn=0. Tangential diffusion is exactly zero.
+                    const auto normal = mesh.face_normal_outward(f, cell);
+                    const auto distance = detail::boundary_normal_distance(mesh, f, cell);
+                    if (!std::isfinite(distance) || distance <= 0)
+                        throw std::invalid_argument("Slip Laplacian requires a positive normal distance.");
+                    long double un = 0;
+                    for (size_t i = 0; i < 3; ++i) un += u(cell, i) * normal.component(i);
+                    const auto area = detail::laplacian_face_area(mesh, f, cell).dot(normal);
+                    for (size_t i = 0; i < 3; ++i) sum[i] -= normal.component(i) * un * area / distance;
+                    continue;
+                }
                 if (type != BoundaryConditionType::Dirichlet && type != BoundaryConditionType::NoSlip)
                     throw std::invalid_argument("SAS vector Laplacian supports prescribed velocity/no-slip and homogeneous Neumann boundaries only.");
                 direction = mesh.face_centroid(f) - mesh.cell_centroid(cell);

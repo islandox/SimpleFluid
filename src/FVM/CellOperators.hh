@@ -87,10 +87,17 @@ public:
      * @param mesh Shared mesh whose lifetime and geometry the cache retains.
      * @throws std::invalid_argument if @p mesh is null.
      */
+    using boundary_direction_provider_type = std::function<vec_type(local_ordinal_type, local_ordinal_type)>;
+
     explicit CellGradientCache(SP<const mesh_type> mesh)
-        : d_mesh(require_mesh(std::move(mesh))), d_boundary_locations(detail::boundary_face_locations(*d_mesh)),
-          d_interior_geometry(build_geometry(*d_mesh, d_boundary_locations, false)),
-          d_boundary_geometry(build_geometry(*d_mesh, d_boundary_locations, true)),
+        : CellGradientCache(std::move(mesh), {}) {}
+
+    /** Optional displacement override for mixed vector boundary constraints. */
+    CellGradientCache(SP<const mesh_type> mesh, boundary_direction_provider_type boundary_direction)
+        : d_mesh(require_mesh(std::move(mesh))), d_boundary_direction(std::move(boundary_direction)),
+          d_boundary_locations(detail::boundary_face_locations(*d_mesh)),
+          d_interior_geometry(build_geometry(*d_mesh, d_boundary_locations, false, d_boundary_direction)),
+          d_boundary_geometry(build_geometry(*d_mesh, d_boundary_locations, true, d_boundary_direction)),
           d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
     {
     }
@@ -127,8 +134,8 @@ public:
     {
         const auto execution = acquire_mesh_execution(*d_mesh);
         auto locations = detail::boundary_face_locations(*d_mesh);
-        auto interior = build_geometry(*d_mesh, locations, false);
-        auto boundary = build_geometry(*d_mesh, locations, true);
+        auto interior = build_geometry(*d_mesh, locations, false, d_boundary_direction);
+        auto boundary = build_geometry(*d_mesh, locations, true, d_boundary_direction);
         d_boundary_locations = std::move(locations);
         d_interior_geometry = std::move(interior);
         d_boundary_geometry = std::move(boundary);
@@ -197,7 +204,7 @@ private:
     static std::vector<CellGeometry> build_geometry(
         const mesh_type& mesh,
         const std::vector<boundary_location_type>& boundary_locations,
-        bool include_boundary_samples)
+        bool include_boundary_samples, const boundary_direction_provider_type& boundary_direction)
     {
         const auto execution = acquire_mesh_execution(mesh);
         std::vector<CellGeometry> geometry(mesh.num_owned_cells());
@@ -249,9 +256,8 @@ private:
                         static_cast<size_t>(face_lid));
                     if (location.active)
                     {
-                        add_direction(
-                            mesh.face_centroid(face_lid)
-                            - mesh.cell_centroid(cell_lid));
+                        add_direction(boundary_direction ? boundary_direction(face_lid, cell_lid)
+                            : mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
                     }
                 }
             }
@@ -292,9 +298,8 @@ private:
                 {
                     continue;
                 }
-                const auto direction =
-                    mesh.face_centroid(face_lid)
-                    - mesh.cell_centroid(cell_lid);
+                const auto direction = boundary_direction ? boundary_direction(face_lid, cell_lid)
+                    : mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
                 cell_geometry.boundary_samples.push_back({
                     location,
                     apply_inverse(inverse, direction),
@@ -307,6 +312,7 @@ private:
     }
 
     SP<const mesh_type> d_mesh;
+    boundary_direction_provider_type d_boundary_direction;
     std::vector<boundary_location_type> d_boundary_locations;
     std::vector<CellGeometry> d_interior_geometry;
     std::vector<CellGeometry> d_boundary_geometry;

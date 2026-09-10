@@ -175,7 +175,8 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
             });
             return std::move(*result);
         }
-        SASWorkspace(SP<const mesh_type> mesh, const SSTSASOptions& options)
+        SASWorkspace(SP<const mesh_type> mesh, const SSTSASOptions& options,
+                     const VectorBoundaryConditionMap& velocity_conditions)
             : geometry(checked_geometry(*mesh)), laplacian(mesh, "sas_velocity_laplacian"),
               delta(mesh->num_owned_cells())
         {
@@ -184,6 +185,21 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
             {
                 for (size_t i = 0; i < delta.size(); ++i)
                     delta[i] = source.filter_width(geometry.assembly_geometry().volumes[i]);
+                if (std::any_of(velocity_conditions.begin(), velocity_conditions.end(),
+                    [](const auto& entry) { return entry.second.type == BoundaryConditionType::Slip; }))
+                {
+                    const auto locations = geometry.boundary_locations();
+                    slip_gradient = std::make_unique<FVM::CellGradientCache<Pack, mesh_type>>(mesh,
+                        [mesh, locations, velocity_conditions](local_ordinal_type face, local_ordinal_type cell)
+                        {
+                            const auto& location = locations.at(face);
+                            const auto found = velocity_conditions.find(mesh->boundary_batch_name(location.batch_id));
+                            if (found != velocity_conditions.end() && found->second.type == BoundaryConditionType::Slip)
+                                return mesh->face_normal_outward(face, cell)
+                                    * FVM::detail::boundary_normal_distance(*mesh, face, cell);
+                            return mesh->face_centroid(face) - mesh->cell_centroid(cell);
+                        });
+                }
             });
             if (options.diagnostics)
                 for (size_t i = 0; i < names.size(); ++i)
@@ -192,6 +208,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
                     candidate_fields[i] = std::make_unique<field_type>(mesh, scalar_type{}, names[i]);
                 }
         }
+        std::unique_ptr<FVM::CellGradientCache<Pack, mesh_type>> slip_gradient;
         FVM::TransportGeometryCache<mesh_type> geometry;
         velocity_field_type laplacian;
         std::vector<real_t> delta;
@@ -272,7 +289,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
                                                   : boundary_conditions.specific_dissipation_rate)
     {
         if (options.model == TurbulenceModelType::SSTKOmegaSAS && options.sas.enabled)
-            sas = std::make_unique<SASWorkspace>(mesh, options.sas);
+            sas = std::make_unique<SASWorkspace>(mesh, options.sas, velocity_boundary_conditions);
         const auto initial_k = options.initial_turbulent_kinetic_energy;
         const auto initial_secondary = epsilon_family ? options.initial_dissipation_rate
                                                       : options.initial_specific_dissipation_rate;
@@ -1041,8 +1058,8 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
         collective_detail::collective_local_validation(*d_mesh, "SAS supported geometry and boundaries", [&]
         {
             for (const auto& [name, condition] : d_velocity_boundary_conditions)
-                if (condition.type == BoundaryConditionType::Slip || condition.type == BoundaryConditionType::Periodic)
-                    throw std::invalid_argument("Active SAS does not yet support slip or periodic velocity boundaries.");
+                if (condition.type == BoundaryConditionType::Periodic)
+                    throw std::invalid_argument("Active SAS does not yet support periodic velocity boundaries.");
         });
     auto candidate = std::make_unique<State>(d_mesh, d_boundary_conditions,
                                              d_velocity_boundary_conditions, options);
@@ -1181,7 +1198,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                     candidate->wall_velocity,
                     initial_boundary_velocity,
                     candidate->velocity_gradient,
-                    candidate->gradient_cache);
+                    candidate->sas && candidate->sas->slip_gradient ? *candidate->sas->slip_gradient : candidate->gradient_cache);
                 const auto& closure =
                     std::get<SSTKOmegaEquation>(
                         candidate->closure);
@@ -1980,6 +1997,15 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         *d_mesh, "Turbulence advance input validation",
         [&]
         {
+            if (state.sas)
+                for (const auto& [batch, faces] : d_mesh->boundary_batches())
+                {
+                    const auto configured = d_velocity_boundary_conditions.find(d_mesh->boundary_batch_name(batch));
+                    const bool slip = configured != d_velocity_boundary_conditions.end()
+                        && configured->second.type == BoundaryConditionType::Slip;
+                    if (slip != (velocity_boundary_cache.type.at(batch) == BoundaryConditionType::Slip))
+                        throw std::invalid_argument("Changing SAS slip boundary membership requires reconfiguration.");
+                }
             if (&velocity.mesh() != d_mesh.get() || &projected_face_fluxes.mesh() != d_mesh.get() ||
                 velocity_boundary_cache.mesh.get() != d_mesh.get())
             {
@@ -2160,7 +2186,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                 d_options.gradient_scheme,
                 derivative_velocity, boundary_velocity,
                 state.candidate_velocity_gradient,
-                state.gradient_cache);
+                state.sas && state.sas->slip_gradient ? *state.sas->slip_gradient : state.gradient_cache);
             update_scalar_gradients(state.k, state.secondary,
                                     state.candidate_k_gradient,
                                     state.candidate_secondary_gradient,

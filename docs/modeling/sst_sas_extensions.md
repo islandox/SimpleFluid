@@ -58,3 +58,27 @@ ctest --test-dir build/gcc -C Debug -R '^(SSTSASDerivativesTest.SemiStructured|S
 The underlying handle remains serial-only for this mesh family, so these
 geometry-specific bodies skip under MPI. This extension does not change mesh
 ownership or qualify arbitrary extrusion thickness as a 3D resolution scale.
+
+## Slip boundaries
+
+The SAS derivative now enforces `U_n=0` and `dU_t/dn=0`. The normal boundary
+flux is retained; tangential diffusion is zero. `CellGradientCache` has an
+optional cached boundary-displacement provider, preserving its original
+constructor and default arithmetic. Active SAS creates the additional cache
+only for configured slip patches, using the normal foot rather than treating
+the projected owner velocity as a full Dirichlet value at a skewed centroid.
+The provider survives cache refresh. Ordinary SST/source-disabled SAS do not
+select this new reconstruction; the analytic parent SST closure is unchanged.
+
+The slip tests protect affine tangential shear and normal-velocity gradients
+on native/legacy boxes and skewed prisms, so neither treating slip as no-slip
+nor dropping its whole vector flux can pass. Quadratic fields activate SAS.
+Cartesian slip and cylindrical no-slip/slip transient cases check bounded
+fields and continuity. GCC builds and the 27-registration serial selection
+pass; MPI runs use the existing two SAS registrations:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths testCellGradientCache
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS.*Test\.|SASSupportedPathsTest\.|CellGradientCacheTest\.)' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs)$' --output-on-failure
+```
