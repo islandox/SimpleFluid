@@ -274,6 +274,7 @@ mistaken for foundation or Phase 9 completion.
       on native/legacy, curved, skewed, slip and periodic paths.
 - [x] Add rollback-safe SAS material feedback.
 - [x] Add rollback-safe SAS scalar void diffusion/collapse and mixture feedback.
+- [x] Add rollback-safe SAS precursor inventories and balance diagnostics.
 - [ ] Extend rollback-safe SAS support to remaining multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.

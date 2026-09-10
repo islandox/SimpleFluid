@@ -171,3 +171,23 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths
 ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.ScalarVoid' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^SASScalarVoid_2procs$' --output-on-failure
 ```
+
+## Delayed-neutron precursors
+
+The precursor model now snapshots all concentration, mixture-volume inventory,
+source, initialization and balance-diagnostic state. Snapshots reject foreign
+configurations/geometry and invalidate retained Krylov state on restoration.
+SAS permits the existing precursor reaction/advection/diffusion path and adds
+that snapshot to the accepted-step transaction. Turbulence itself remains
+full-cell; precursor inventories retain their existing alpha_l C definition.
+
+The regression checks the exact integrated reaction balance with transport,
+nonzero SAS, late-failure field/diagnostic restoration, retry and stale-snapshot
+rejection. The SAS/precursor serial selection passed 11 tests with three
+expected MPI-only skips; the dedicated two-rank registration passed.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testPhase13PlusModels
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Precursor|^DelayedNeutronPrecursorModelTest' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASPrecursors_2procs$' --output-on-failure
+```

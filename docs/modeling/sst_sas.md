@@ -244,7 +244,9 @@ Material feedback is included in the SAS transaction, restoring its mirrors
 as well as material and turbulence fields on failure. Scalar void diffusion
 and collapse also participate, including alpha_g, alpha_l and source mirrors;
 the RANS/SAS equations remain full-cell rather than phase weighted. Active SAS
-currently rejects remaining phase/inventory/free-surface models pending their complete
+also supports existing precursor reaction/advection/diffusion, with complete
+concentration, inventory, source and diagnostic snapshots. It currently rejects
+remaining radiolysis/boiling/free-surface combinations pending their complete
 transaction integration.
 The existing laminar-only planar-ALE restriction remains. This does not add
 conservative ALE turbulence, bubble-induced turbulence, interphase momentum,

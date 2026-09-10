@@ -213,7 +213,7 @@ struct SavedSASFields
 
 // Feedback runs after temperature, radiolysis and precursors. Inputs remain finite
 // until this final feedback stage; overflow rejects the trial after upstream work.
-void expect_late_multiphysics_rollback(BoussinesqSolver<Pack>& solver)
+void expect_late_multiphysics_rollback(BoussinesqSolver<Pack>& solver, std::function<void()> after_restore={})
 {
     solver.temperature().put_scalar(300.); solver.temperature().sync_ghosts();
     MaterialFeedbackOptions original;
@@ -231,6 +231,7 @@ void expect_late_multiphysics_rollback(BoussinesqSolver<Pack>& solver)
     saved.expect_restored();
     EXPECT_DOUBLE_EQ(solver.time(),time); EXPECT_EQ(solver.step_index(),step);
     EXPECT_DOUBLE_EQ(solver.find_turbulence_model()->sas_statistics().max_source,source);
+    if(after_restore) after_restore();
     solver.remove_temperature_source("sas_rejection_cooling");
     solver.configure_material_feedback(original);
     expect_active_bounded_step(solver);
@@ -281,4 +282,30 @@ TEST(SASSupportedPathsTest, ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSA
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,2,local.data(),total.data());
     EXPECT_NEAR(total[1],total[0]*(1-.001/.1),1e-11);
     expect_late_multiphysics_rollback(solver);
+}
+
+TEST(SASSupportedPathsTest, PrecursorInventoryAndDiagnosticsRollBackWithSAS)
+{
+    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    ScalarVoidFractionOptions phase; phase.initial_alpha=.2;
+    solver.configure_scalar_void_fraction(phase);
+    DelayedNeutronPrecursorOptions options;
+    options.group_count=2; options.initial_concentrations={1,2}; options.decay_constants={.1,.2};
+    options.source_terms={.2,.1}; options.effective_diffusivity=.01;
+    auto& precursors=solver.configure_precursors(options);
+    expect_active_bounded_step(solver);
+    const auto before=precursors.last_inventory_diagnostics(0);
+    const double expected=.8*std::exp(-.1*.001)+.2*(-std::expm1(-.1*.001))/.1;
+    EXPECT_NEAR(before.inventory_after,expected,1e-11);
+    EXPECT_NEAR(before.balance_error,0,1e-11);
+    expect_late_multiphysics_rollback(solver,[&]
+    {
+        const auto& restored=precursors.last_inventory_diagnostics(0);
+        EXPECT_DOUBLE_EQ(restored.inventory_after,before.inventory_after);
+        EXPECT_DOUBLE_EQ(restored.source_added,before.source_added);
+        EXPECT_DOUBLE_EQ(restored.balance_error,before.balance_error);
+    });
+    const auto stale=precursors.snapshot(); precursors.configure(options);
+    EXPECT_ANY_THROW(precursors.restore(stale));
 }
