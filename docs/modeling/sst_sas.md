@@ -146,8 +146,16 @@ zero normal face velocity and zero normal derivative of tangential velocity.
 Its Laplacian boundary flux is the normal projection only. A SAS-only cached
 normal-foot reconstruction enforces this mixed condition even on skewed faces;
 changing slip-patch membership requires reconfiguration. Ordinary SST and
-source-disabled SAS retain their existing reconstruction. Periodic velocity
-conditions remain rejected pending their separate extension. A cylindrical full
+source-disabled SAS retain their existing reconstruction. Periodic Cartesian
+axes are selected with the native constructor
+`OrthogonalCartesian3D(edges, Vec3D<bool>{px, py, pz})`; each periodic axis
+requires at least two cells. Existing legacy translational face pairs also
+support SAS when both partners are available in the overlap and pairing is
+completed before fields/caches are configured. An unpaired periodic boundary
+condition is rejected collectively. Center vectors, face distances, diffusion
+and Rhie-Chow use the same periodic image. VTU retains physical endpoint
+images. Fully periodic SST cases still require an explicit wall-distance
+choice. Rotational sector pair transforms are not introduced. A cylindrical full
 annulus has connected interior angular faces, not a boundary-value periodic
 patch. Source-disabled SAS retains the established parent paths.
 

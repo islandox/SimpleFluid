@@ -501,7 +501,8 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
     auto& info = d_faces[static_cast<size_t>(face_lid)];
     const auto& owner_center = d_cells[static_cast<size_t>(info.owner)].center;
     const auto& paired_center = d_cells[static_cast<size_t>(paired_cell_lid)].center;
-    auto periodic_distance = (paired_center - owner_center).norm();
+    auto periodic_displacement = paired_center - owner_center;
+    auto periodic_distance = periodic_displacement.norm();
     auto periodic_neighbor_to_face_distance =
         periodic_distance > info.owner_to_face_distance
             ? periodic_distance - info.owner_to_face_distance
@@ -534,8 +535,8 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
                 candidate.owner == paired_cell_lid
                     ? candidate.owner_to_face_distance
                     : candidate.neighbor_to_face_distance;
-            periodic_distance =
-                info.owner_to_face_distance + paired_face_distance;
+            periodic_displacement = (info.center - owner_center) + (paired_center - candidate.center);
+            periodic_distance = periodic_displacement.norm();
             periodic_neighbor_to_face_distance =
                 paired_face_distance;
             break;
@@ -556,8 +557,7 @@ inline void Mesh<Pack>::set_periodic_face(local_ordinal_type face_lid,
             periodic_neighbor_to_face_distance;
         d_host_views.face_geometry.cell_center_distance[face_index] =
             periodic_distance;
-        d_host_views.face_geometry.owner_to_neighbor[face_index] =
-            paired_center - owner_center;
+        d_host_views.face_geometry.owner_to_neighbor[face_index] = periodic_displacement;
     }
     if (d_face_neighbor_device.extent(0) == d_faces.size())
     {

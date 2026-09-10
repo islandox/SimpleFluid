@@ -82,3 +82,34 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSu
 ctest --test-dir build/gcc -C Debug -R '^(SSTSAS.*Test\.|SASSupportedPathsTest\.|CellGradientCacheTest\.)' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs)$' --output-on-failure
 ```
+
+## Periodic topology and geometry
+
+Native Cartesian meshes now expose the indexer's existing periodic-axis and
+wrapped MPI ownership machinery. Connected face normals, cell-center vectors,
+face distances and VTU endpoint images follow that topology. Legacy
+translational face pairing now stores the neighbor image displacement;
+MeshHandle preserves it. Diffusion and Rhie-Chow both consume the wrapped
+vector, avoiding inconsistent projection coefficients at the seam. These are
+geometry corrections, not changes to SST coefficients or source algebra.
+
+Native Fourier-gradient/Laplacian refinement, legacy/native paired-image
+agreement, VTU cell-volume geometry and nonzero periodic transient SAS pass.
+The existing non-adjacent-cell query rejection is preserved. Unpaired periodic
+patches fail collectively; a peer rank receives the established propagated
+runtime error rather than the originating invalid_argument. The legacy
+fixture supplies its partners locally; native periodic meshes exercise MPI
+seam halos. Rotational sector transformations and one-cell periodic native
+axes are outside this API.
+
+The focused GCC serial selection passes 23 registrations and all three MPI
+registrations pass. A final ten-registration geometry/periodic subset also
+passes after retaining the original overflow and adjacency guards. Before the fix,
+the transient continuity check exposed unwrapped Rhie-Chow geometry; the
+original continuity tolerance was retained. Commands:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths testOrthogonalCartesian3D testFvmOperators testCellGradientCache testStoredPressureFaceFluxCache
+ctest --test-dir build/gcc -C Debug -R 'Periodic|OrthogonalCartesian3DTest|StoredPressureFaceFluxCacheTest' -E '_[24]procs' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs|StoredPressureFaceFluxCache_2procs)$' --output-on-failure
+```

@@ -86,8 +86,11 @@ int checked_index(size_t index)
  * @throws std::invalid_argument If any coordinate array is invalid.
  * @throws std::overflow_error If entity counts exceed supported ID ranges.
  */
+OrthogonalCartesian3D::OrthogonalCartesian3D(const Vec3D<Arr<real_t>>& cell_edges)
+    : OrthogonalCartesian3D(cell_edges, {}) {}
+
 OrthogonalCartesian3D::OrthogonalCartesian3D(
-    const Vec3D<Arr<real_t>>& cell_edges)
+    const Vec3D<Arr<real_t>>& cell_edges, Vec3D<bool> periodic_dimensions)
     : d_cell_edges(cell_edges)
 {
     validate_edges(d_cell_edges[X], "x");
@@ -99,7 +102,11 @@ OrthogonalCartesian3D::OrthogonalCartesian3D(
     const auto nz = d_cell_edges[Z].size() - 1;
     CHECK_PRODUCT_OVERFLOW(nx + 1, ny + 1, nz + 1);
 
-    d_indexer = Indexer(checked_index(nx), checked_index(ny), checked_index(nz));
+    for (size_t axis=0; axis<3; ++axis)
+        if (periodic_dimensions[axis] && d_cell_edges[axis].size()<3)
+            throw std::invalid_argument("Periodic Cartesian axes require at least two cells.");
+    d_indexer = Indexer(checked_index(nx), checked_index(ny), checked_index(nz),
+                        periodic_dimensions[0], periodic_dimensions[1], periodic_dimensions[2]);
 
     for (size_t dim = 0; dim < 3; ++dim)
     {
@@ -112,16 +119,11 @@ OrthogonalCartesian3D::OrthogonalCartesian3D(
     Base::d_num_local_cells = Base::d_num_cells;
     Base::d_num_owned_cells = Base::d_num_cells;
 
-    const auto x_faces = (nx + 1) * ny * nz;
-    const auto y_faces = nx * (ny + 1) * nz;
-    const auto z_faces = nx * ny * (nz + 1);
-
-    CHECK_SUM_OVERFLOW(x_faces, y_faces, z_faces);
-
-    Base::d_num_faces = x_faces + y_faces + z_faces;
+    CHECK_SUM_OVERFLOW(d_indexer.num_faces_per_orientation[0], d_indexer.num_faces_per_orientation[1],
+                       d_indexer.num_faces_per_orientation[2]);
+    Base::d_num_faces = d_indexer.total_faces();
     Base::d_num_owned_faces = Base::d_num_faces;
-
-    Base::d_num_nodes = (nx + 1) * (ny + 1) * (nz + 1);
+    Base::d_num_nodes = d_indexer.total_nodes();
 
     d_topology = OrthoMeshTopo(
         d_indexer,
