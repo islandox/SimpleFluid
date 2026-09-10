@@ -455,3 +455,37 @@ TEST(SSTSASDerivativesTest, CylindricalSectorsAndClosedAnnuli)
         model_contract(mesh); // Nonzero source, disabled equivalence, snapshots and restart.
     }
 }
+
+namespace
+{
+SP<const Native> semi_structured_mesh(size_t n)
+{
+    using Semi=Meshes::SemiStructuredXY_Z;
+    Arr<Semi::Vec3> nodes;
+    Arr<Arr<unsigned>> cells;
+    ArrReal z(n+1);
+    for (size_t j=0; j<=n; ++j)
+        for (size_t i=0; i<=n; ++i) nodes.push_back({(i+.3*j)/n,double(j)/n,0});
+    for (size_t j=0; j<n; ++j)
+        for (size_t i=0; i<n; ++i)
+        {
+            const auto a=static_cast<unsigned>(i+(n+1)*j), b=a+1, c=a+static_cast<unsigned>(n+1), d=c+1;
+            cells.push_back({a,b,d}); cells.push_back({a,d,c});
+        }
+    for (size_t i=0; i<=n; ++i) z[i]=double(i)/n;
+    return std::make_shared<Native>(std::make_shared<Semi>(nodes,cells,z));
+}
+}
+
+TEST(SSTSASDerivativesTest, SemiStructuredSkewedExtrusion)
+{
+    if (Tpetra::getDefaultComm()->getSize()!=1) GTEST_SKIP()<<"MeshHandle semi-structured ownership remains serial-only";
+    const auto mesh=semi_structured_mesh(4);
+    ASSERT_FALSE(mesh->legacy_mesh());
+    derivative_contract(mesh);
+    const auto coarse=quadratic_laplacian_error(mesh);
+    const auto fine=quadratic_laplacian_error(semi_structured_mesh(8));
+    std::cout<<"SAS semi-structured L1="<<coarse<<" -> "<<fine<<'\n';
+    EXPECT_LT(fine,.8*coarse);
+    model_contract(mesh);
+}

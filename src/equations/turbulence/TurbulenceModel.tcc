@@ -1040,13 +1040,6 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
     if (options.model == TurbulenceModelType::SSTKOmegaSAS && options.sas.enabled)
         collective_detail::collective_local_validation(*d_mesh, "SAS supported geometry and boundaries", [&]
         {
-            if constexpr (std::is_same_v<mesh_type, MeshHandle<Pack>>)
-                d_mesh->visit([](const auto& mesh)
-                {
-                    using Concrete = std::decay_t<decltype(mesh)>;
-                    if constexpr (std::is_same_v<Concrete, typename mesh_type::SemiStructured>)
-                        throw std::invalid_argument("Active SAS has no verified SemiStructuredXY_Z vector Laplacian.");
-                });
             for (const auto& [name, condition] : d_velocity_boundary_conditions)
                 if (condition.type == BoundaryConditionType::Slip || condition.type == BoundaryConditionType::Periodic)
                     throw std::invalid_argument("Active SAS does not yet support slip or periodic velocity boundaries.");

@@ -78,3 +78,24 @@ TEST(SASSupportedPathsTest, CylindricalCartesianComponentsAdvanceTransientSwirl)
     expect_active_bounded_step(solver);
     expect_active_bounded_step(solver);
 }
+
+TEST(SASSupportedPathsTest, SemiStructuredPrismsAdvanceWithoutLegacyMesh)
+{
+    if (Tpetra::getDefaultComm()->getSize()!=1) GTEST_SKIP()<<"Existing serial-only semi-structured backend";
+    using Semi=Meshes::SemiStructuredXY_Z;
+    auto geometry=std::make_shared<Semi>(
+        Arr<Semi::Vec3>{{0,0,0},{1,0,0},{1,1,0},{0,1,0},{.4,.4,0}},
+        Arr<Arr<unsigned>>{{0,1,4},{1,2,4},{2,3,4},{3,0,4}},ArrReal{0,.25,.5,.75,1});
+    SP<const Handle> mesh=std::make_shared<Handle>(geometry);
+    ASSERT_FALSE(mesh->legacy_mesh());
+    IncompressibleIsothermalSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    solver.configure_turbulence(sas_options());
+    for (size_t i=0; i<mesh->num_owned_cells(); ++i)
+    {
+        const auto p=mesh->cell_centroid(i);
+        solver.velocity().set_owned_value(i,{std::sin(std::numbers::pi*p.z)*p.y,0,0});
+    }
+    solver.velocity().sync_ghosts();
+    expect_active_bounded_step(solver);
+    expect_active_bounded_step(solver);
+}
