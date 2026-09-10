@@ -273,6 +273,7 @@ mistaken for foundation or Phase 9 completion.
 - [x] Qualify Gauss-linear SAS with coordinate-moment consistency correction
       on native/legacy, curved, skewed, slip and periodic paths.
 - [x] Add rollback-safe SAS material feedback.
+- [x] Add rollback-safe SAS scalar void diffusion/collapse and mixture feedback.
 - [ ] Extend rollback-safe SAS support to remaining multiphysics configurations.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.
