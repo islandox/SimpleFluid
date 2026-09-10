@@ -324,3 +324,7 @@ simplefluid_add_mpi_test(NAME SASPrecursors_2procs TARGET testSASSupportedPaths 
 simplefluid_add_mpi_test(NAME SASRadiolysis_2procs TARGET testSASSupportedPaths PROCS 2
     ARGS "--gtest_filter=SASSupportedPathsTest.RadiolysisAndHydrogenLedgersRollBackWithSAS"
     LABELS "mpi;turbulence;sas;radiolysis;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASBoiling_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.BoilingSourcesAndPendingStateRollBackWithSAS"
+    LABELS "mpi;turbulence;sas;boiling;small_fixture" TIMEOUT 120)
