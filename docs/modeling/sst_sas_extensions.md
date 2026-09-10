@@ -254,3 +254,80 @@ cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths tes
 ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.*FreeSurface' --output-on-failure
 ctest --test-dir build/gcc -C Debug -R '^SASFreeSurface_2procs$' --output-on-failure
 ```
+
+## Commit series and final verification
+
+| Support | Commit |
+| --- | --- |
+| Cylindrical sectors/annuli | `0707b28` |
+| Serial semi-structured extrusion | `b9e487d` |
+| Mixed slip boundaries | `6d803ad` |
+| Periodic topology, images and flux geometry | `362543b` |
+| Corrected Gauss-linear gradients | `7fad6d7` |
+| Material feedback | `e74a03b` |
+| Scalar void fraction | `23d2bc1` |
+| Precursor transport | `f9b9ea2` |
+| Ideal/two-population radiolysis | `d937d9e` |
+| Bulk/wall boiling | `65bfc8f` |
+| Fixed-grid free surface and liquid inventories | `e038b95` |
+
+The final numerical tree is `e038b95`; the verification record is committed
+separately. The source-policy Decimal reference still matches all six rows,
+and the small transient activation example still agrees between serial and
+two ranks with rtol=1e-9, atol=1e-11 (maximum applied source 522.89735022936
+s^-2). Both ELF export audits pass. Shared presets, the SST-1994 equation
+class and external OpenFOAM manifests/gates are unchanged.
+
+The final combined selections have no failures:
+
+| Toolchain | Serial registrations | Explicit MPI registrations |
+| --- | --- | --- |
+| GCC Debug | 314 passed, 15 expected skips (329 selected) | 15/15 passed |
+| LLVM/libc++ Debug | 314 passed, 15 expected skips (329 selected) | 15/15 passed |
+
+The serial skips are existing rank-count-specific tests. Serial-only geometry
+bodies also skip within MPI executables; this does not imply multi-rank
+semi-structured support. There were no unresolved build or test failures.
+
+The final build target selection was:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASSource testSSTSASModel testSASSupportedPaths testTurbulenceEquations testTurbulenceModel testTurbulenceModelOptions testTurbulenceModelMultiRank testTurbulenceScalarTransportEquation testTurbulenceWallTreatment testTurbulenceBuoyancy testTurbulentBoussinesqSolver testOrthogonalCartesian3D testMeshHandle testCellGradientCache testFvmOperators testStoredPressureFaceFluxCache testStoredTransportReuse testGeometryEpochCaches testPhase13PlusModels testRadiolyticGasModel testBoussinesqFreeSurface testBoussinesqPlanarALE sst_sas_activation
+cmake --build --preset LLVM-Debug --parallel 2 --target testSSTSASSource testSSTSASModel testSASSupportedPaths testTurbulenceEquations testTurbulenceModel testTurbulenceModelOptions testTurbulenceModelMultiRank testTurbulenceScalarTransportEquation testTurbulenceWallTreatment testTurbulenceBuoyancy testTurbulentBoussinesqSolver testOrthogonalCartesian3D testMeshHandle testCellGradientCache testFvmOperators testStoredPressureFaceFluxCache testStoredTransportReuse testGeometryEpochCaches testPhase13PlusModels testRadiolyticGasModel testBoussinesqFreeSurface testBoussinesqPlanarALE sst_sas_activation
+cmake --build --preset GCC-Debug --parallel 2 --target testIncompressibleIsothermalSolver testSteadyStateSearch testBoundaryConditions
+cmake --build --preset LLVM-Debug --parallel 2 --target testIncompressibleIsothermalSolver testSteadyStateSearch testBoundaryConditions
+```
+
+The last three targets were explicitly rebuilt after auditing every executable
+in the broad selection, preventing old test binaries from counting as final
+evidence. Serial selections use the following regex, separately with
+`--test-dir build/gcc` and `--test-dir build/llvm`, `-C Debug`,
+`-E '_[0-9]+procs'`, and `--output-on-failure`:
+
+```text
+SSTSAS.*Test\.|SASSupportedPathsTest\.|Turbulence|TurbulentBoussinesq|SSTKOmega|BSLKOmega|KEpsilon|StandardKOmega|OrthogonalCartesian3DTest|MeshHandleTest|CellGradientCacheTest|StoredPressureFaceFluxCacheTest|StoredTransportReuseTest|GeometryEpochCacheTest|BoussinesqFreeSurface|BoussinesqPlanarALE|DelayedNeutronPrecursorModelTest|BoilingSourceModelTest|MaterialFeedbackModelTest|ScalarVoidFractionModelTest|RadiolyticGasModelTest|FvmOperatorsTest.*Periodic|simplefluid_elf_export_boundary|sst_sas_activation_small
+```
+
+Both toolchains also run the same 15 explicit MPI registrations, with the
+working host-network launcher and the following `ctest -R` expression:
+
+```text
+^(SSTSAS_2procs|SASSupportedPaths_2procs|SSTSASActivation_2procs|SASMaterialFeedback_2procs|SASScalarVoid_2procs|SASPrecursors_2procs|SASRadiolysis_2procs|SASBoiling_2procs|SASFreeSurface_2procs|TurbulenceModel_2procs|TurbulenceBuoyancy_2procs|TurbulentBoussinesq_2procs|BoussinesqPlanarALE_2procs|StoredPressureFaceFluxCache_2procs|StoredTransportReuse_2procs)$
+```
+
+```sh
+python3 verification/sst_sas/pointwise_reference.py --check
+python3 verification/sst_sas/compare_serial_mpi.py build/gcc/bin/Debug/sst_sas_activation
+git diff --check
+```
+
+All 15 MPI registrations pass on both GCC and LLVM. Counts refer to CTest
+registrations, with overlapping coverage across selections. Semi-structured
+geometry remains serial-only under its existing mesh ownership contract.
+Periodic support is translational plus the existing closed cylindrical ring;
+rotational sector transforms and one-cell native periodic axes are not added.
+SAS remains fixed-grid and physical-time; planar ALE and pseudo-time SAS remain
+rejected. Existing incompatible physics pairings remain rejected. These are
+component/solver regressions, not physical turbulence validation. No full
+repository, Release, macOS, accelerator or long external flow assessment was
+run for this extension series.
