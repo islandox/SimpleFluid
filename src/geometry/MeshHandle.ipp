@@ -54,33 +54,38 @@ MeshHandle<Pack>::cell_centroid(local_ordinal_type cell_lid) const -> Vec3
         });
 }
 
-/// @brief Returns a span over the local-ids of the faces bounding the given cell.
-/// @param cell_lid  Local index of the query cell.
-/// @return A `std::span` over the local-ids of the bounding faces.
-/// @note Legacy meshes return a zero-copy view of their existing connectivity
-///       when face ordering is already owned-first.
+/// @brief Observe cell-face IDs without persistent connectivity or scratch storage.
+/// @param cell_lid Local cell ordinal, including supported halo cells.
+/// @return Independent sized/indexable range; the handle must remain alive.
 template<TpetraTypePack Pack>
-inline std::span<const typename MeshHandle<Pack>::local_ordinal_type>
-MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const
+inline auto MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const -> CellFaceRange
 {
     check_cell(cell_lid);
-    if (d_cell_face_offsets.empty())
+    const auto geometry = geometry_cell_lid(cell_lid);
+    const size_t count = visit([&](const auto& mesh) -> size_t
     {
-        if (const auto legacy = legacy_mesh())
+        const auto& native = mesh.faces(mesh.cell_id(static_cast<size_t>(geometry)));
+        size_t result = 0;
+        for (const auto face : native)
+            result += geometry_to_local_face(mesh.face_local_id(face)) != invalid_local_id();
+        return result;
+    });
+    return {this, static_cast<size_t>(cell_lid), count,
+        [](const void* source, size_t cell, size_t entry) -> local_ordinal_type
         {
-            const auto geometry_lid = geometry_cell_lid(cell_lid);
-            const auto& face_lids = legacy->faces(checked_local(
-                static_cast<size_t>(geometry_lid)));
-            return {
-                face_lids.empty() ? nullptr : &face_lids[0],
-                face_lids.size()};
-        }
-    }
-    const auto local = static_cast<size_t>(cell_lid);
-    const auto begin = d_cell_face_offsets[local];
-    const auto end   = d_cell_face_offsets[local + 1];
-    return std::span<const local_ordinal_type>(d_cell_face_lids)
-        .subspan(begin, end - begin);
+            const auto& handle = *static_cast<const MeshHandle*>(source);
+            const auto geometry = handle.geometry_cell_lid(checked_local(cell));
+            return handle.visit([&](const auto& mesh) -> local_ordinal_type
+            {
+                const auto& native = mesh.faces(mesh.cell_id(static_cast<size_t>(geometry)));
+                for (const auto face : native)
+                {
+                    const auto local = handle.geometry_to_local_face(mesh.face_local_id(face));
+                    if (local != invalid_local_id() && entry-- == 0) return local;
+                }
+                throw std::out_of_range("Cell-face range index out of bounds.");
+            });
+        }};
 }
 
 /// @}
@@ -270,7 +275,7 @@ MeshHandle<Pack>::cell_to_face_distance(
     local_ordinal_type face_lid,
     local_ordinal_type cell_lid) const
 {
-    return (face_centroid(face_lid) - cell_centroid(cell_lid)).norm();
+    return face_center_vector(face_lid,cell_lid).norm();
 }
 
 /// @brief Return whether the underlying geometry has no cell across a face.
@@ -366,11 +371,11 @@ MeshHandle<Pack>::opposite_cell(local_ordinal_type face_lid,
         "Cell is not adjacent to requested face.");
 }
 
-/// @brief Placeholder for periodic-boundary support.
+/// @brief Return the adjacent logical cell, including canonical periodic connections.
 /// @param face_lid  Local index of the query face.
 /// @param cell_lid  Local index of the adjacent cell.
 /// @return The opposite cell id (same as `opposite_cell`).
-/// @note Currently delegates to `opposite_cell` (non-periodic behaviour).
+/// @note Native/composite periodic connections are represented in logical adjacency.
 template<TpetraTypePack Pack>
 inline typename MeshHandle<Pack>::local_ordinal_type
 MeshHandle<Pack>::opposite_or_periodic_neighbor_cell(
@@ -419,8 +424,7 @@ MeshHandle<Pack>::face_cell_center_distance(
     {
         return 0.0;
     }
-    return (cell_centroid(neighbor)
-          - cell_centroid(owner_cell(face_lid))).norm();
+    return cell_center_vector(face_lid,owner_cell(face_lid)).norm();
 }
 
 /// @brief Vector from @p cell_lid centroid to the centroid of the opposite cell
@@ -441,7 +445,18 @@ MeshHandle<Pack>::cell_center_vector(
         throw std::invalid_argument(
             "Exterior face does not have an opposite cell.");
     }
+    if(const auto* composite=std::get_if<MultiRegionPtr>(&d_mesh))
+        return (*composite)->cell_center_vector(geometry_face_lid(face_lid),geometry_cell_lid(cell_lid));
     return cell_centroid(other) - cell_centroid(cell_lid);
+}
+
+/** @brief Cell-to-face displacement in the incident cell's periodic image. */
+template<TpetraTypePack Pack>
+inline auto MeshHandle<Pack>::face_center_vector(local_ordinal_type face,local_ordinal_type cell) const -> Vec3
+{
+    if(const auto* composite=std::get_if<MultiRegionPtr>(&d_mesh))
+        return (*composite)->face_center_vector(geometry_face_lid(face),geometry_cell_lid(cell));
+    return face_centroid(face)-cell_centroid(cell);
 }
 
 /// @}

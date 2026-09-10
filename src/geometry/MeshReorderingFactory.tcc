@@ -32,6 +32,8 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
         throw std::invalid_argument("MeshReorderingFactory requires a non-null mesh.");
     }
 
+    if (std::holds_alternative<typename mesh_type::MultiRegionPtr>(parent->d_mesh))
+        throw std::invalid_argument("Arbitrary cell reordering of compact MultiRegionMesh is unsupported.");
     const auto comm = parent->owned_cell_map()->getComm();
     std::vector<unsigned char> selected(parent->num_local_cells(), 0);
     {
@@ -151,6 +153,14 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     append_group(owned_count, selected.size(), true);
     append_group(owned_count, selected.size(), false);
 
+    // Arbitrary reordering explicitly opts into a stored permutation/indexer.
+    if (parent->d_serial_identity || parent->d_map_indexing)
+    {
+        static_cast<void>(parent->indexer());
+        parent->d_serial_identity = false;
+        parent->d_map_indexing = false;
+    }
+
     // Structured backends already route local-to-geometry lookup through the
     // existing local/global indexer. Explicit-storage backends historically
     // assumed identity cell ordinals and therefore need one composed
@@ -211,7 +221,7 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     // Preserve the legacy zero-copy cell-face path whenever the face order is
     // already identity. Other backends and the rare legacy face permutation
     // need their compact connectivity rows rebuilt in the new cell order.
-    if (!local_identity && (!reordered->is_stk() || !reordered->d_cell_face_offsets.empty()))
+    if (!local_identity && !reordered->d_cell_face_offsets.empty())
     {
         reordered->initialize_cell_faces();
     }

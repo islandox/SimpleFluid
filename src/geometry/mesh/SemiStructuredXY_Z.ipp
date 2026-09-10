@@ -78,7 +78,7 @@ inline auto SemiStructuredXY_Z::cell_centroid_impl(cell_id_t id) const
 }
 
 inline auto SemiStructuredXY_Z::cell_faces_impl(cell_id_t id) const
-    -> std::vector<face_id_t>
+    -> EntityRange<face_id_t>
 {
     return d_topology.cell_faces(id);
 }

@@ -284,13 +284,15 @@ UnstructuredMesh::UnstructuredMesh(
  * @return This mesh after assignment.
  */
 UnstructuredMesh& UnstructuredMesh::operator=(
-    UnstructuredMesh&& other) noexcept
+    UnstructuredMesh&& other)
 {
     if (this == &other)
     {
         return *this;
     }
 
+    GeometryExecutionGuard::operator=(std::move(other));
+    d_geometry_state = std::move(other.d_geometry_state);
     d_nodes = std::move(other.d_nodes);
     d_cells = std::move(other.d_cells);
     d_faces = std::move(other.d_faces);

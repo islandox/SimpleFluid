@@ -13,6 +13,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME RegionExecution_2procs
+    TARGET testRegionExecution
+    PROCS 2
+    ARGS "--gtest_filter=RegionExecutionMultiRankTest.*"
+    LABELS "mpi;multi_region;execution;ale"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME WallYPlusStatistics_2procs
     TARGET testYPlusBoundaryLayerController
     PROCS 2
@@ -61,3 +69,18 @@ target_link_libraries(testOrthogonalDiffusionProfile
 simplefluid_configure_test_executable(testOrthogonalDiffusionProfile)
 # This million-cell profiling executable is run manually with
 # --gtest_also_run_disabled_tests and is intentionally not registered with CTest.
+
+foreach(_region_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(
+        NAME RegionMaterialization_${_region_procs}procs
+        TARGET testRegionMaterialization
+        PROCS ${_region_procs}
+        LABELS "mpi;multi_region;compatibility"
+        TIMEOUT 120)
+    simplefluid_add_mpi_test(
+        NAME MultiRegionMesh_${_region_procs}procs
+        TARGET testMultiRegionMeshMultiRank
+        PROCS ${_region_procs}
+        LABELS "mpi;multi_region"
+        TIMEOUT 120)
+endforeach()

@@ -9,6 +9,7 @@
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/SteadyDiffusionConvergence.hh"
 #include "fields/FieldStored.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -134,6 +135,7 @@ void add_stored_explicit_diffusion_correction(const ScalarCellFieldStored<Pack, 
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (diffusivity <= scalar_type{} || correction_weight == scalar_type{})
     {
         return;
@@ -352,18 +354,12 @@ template<TpetraTypePack Pack, class MeshType>
 bool solve_stored_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
     ScalarCellFieldStored<Pack, MeshType>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
-    const LinearSolverOptions& linear_options)
+    const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options)
 {
     using scalar_type = typename Pack::scalar_type;
 
-    if (solution.mesh_ptr().get() != &mesh)
-    {
-        throw std::invalid_argument("solve_non_orthogonal_diffusion requires solution on the target mesh.");
-    }
-    if (nNonOrthogonalCorrectors < 0)
-    {
-        throw std::invalid_argument("nNonOrthogonalCorrectors cannot be negative.");
-    }
+    validate_steady_diffusion_controls<Pack>(mesh, diffusivity, solution.mesh_ptr().get() == &mesh,
+        treatment, nNonOrthogonalCorrectors, linear_options, correction_options);
 
     auto solve_system = [&](DiffusionSystem<Pack> system)
     {
@@ -376,8 +372,10 @@ bool solve_stored_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::
 
     if (treatment == NonOrthogonalTreatment::Implicit)
     {
-        return solve_system(stored_non_orthogonal_diffusion_system<Pack>(
-            mesh, diffusivity, boundary_condition, right_hand_source, treatment, &solution));
+        return solve_implicit_diffusion_corrections<Pack>(mesh, diffusivity, solution,
+            [&](const auto& correction) { return stored_non_orthogonal_diffusion_system<Pack>(
+                mesh, diffusivity, boundary_condition, right_hand_source, treatment, &correction); },
+            [&] { solution.sync_ghosts(); }, linear_options, correction_options);
     }
     if (treatment != NonOrthogonalTreatment::Explicit && treatment != NonOrthogonalTreatment::Hybrid)
     {

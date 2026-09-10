@@ -136,6 +136,7 @@ OrthogonalCartesian3D::OrthogonalCartesian3D(
  */
 void OrthogonalCartesian3D::replace_axis_edges_fixed_topology(size_t axis, Arr<real_t> edges)
 {
+    require_geometry_writable();
     if (d_geometry_state.epoch == std::numeric_limits<std::uint64_t>::max())
     {
         throw std::overflow_error("OrthogonalCartesian3D geometry epoch overflow.");

@@ -336,7 +336,8 @@ TEST(PlanarALEMeshMotionTest, DestructorDoesNotOverwriteExternallyReplacedGeomet
     motion.reset();
 
     EXPECT_EQ(geometry->cell_edges()[Cartesian::Z], (SimpleFluid::ArrReal{0.0, 1.5, 3.0}));
-    EXPECT_EQ(mesh->geometry_epoch(), 0U);
+    // Replacement advances the trial revision and invalidates every observer.
+    EXPECT_EQ(mesh->geometry_epoch(), 2U);
 }
 
 TEST(PlanarALEMeshMotionTest, RejectsConstUnsupportedAndNonAxialGeometry)
@@ -372,7 +373,8 @@ TEST(PlanarALEMeshMotionTest, DetectsRawGeometryMutationOutsideTheEpochContract)
 
     *geometry = Cartesian(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.1, 2.0}}});
     EXPECT_THROW(motion.begin_trial(2.5, 1.0), std::invalid_argument);
-    EXPECT_EQ(mesh->geometry_epoch(), 0U);
+    // Raw replacement still fails the controller lease, and now publishes a revision.
+    EXPECT_EQ(mesh->geometry_epoch(), 1U);
     EXPECT_FALSE(motion.has_active_trial());
 }
 

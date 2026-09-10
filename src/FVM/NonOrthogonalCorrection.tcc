@@ -1027,16 +1027,21 @@ bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scala
     CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
     const LinearSolverOptions& linear_options)
 {
+    return solve_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition),
+        std::move(right_hand_source), solution, treatment, nNonOrthogonalCorrectors, linear_options,
+        NonOrthogonalConvergenceOptions{});
+}
+
+template<TpetraTypePack Pack>
+bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
+    CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
+    const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options)
+{
     using scalar_type = typename Pack::scalar_type;
 
-    if (&solution.mesh() != &mesh)
-    {
-        throw std::invalid_argument("solve_non_orthogonal_diffusion requires solution on the target mesh.");
-    }
-    if (nNonOrthogonalCorrectors < 0)
-    {
-        throw std::invalid_argument("nNonOrthogonalCorrectors cannot be negative.");
-    }
+    detail::validate_steady_diffusion_controls<Pack>(mesh, diffusivity, &solution.mesh() == &mesh,
+        treatment, nNonOrthogonalCorrectors, linear_options, correction_options);
 
     if (treatment == NonOrthogonalTreatment::Explicit)
     {
@@ -1046,13 +1051,10 @@ bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scala
 
     if (treatment == NonOrthogonalTreatment::Implicit)
     {
-        auto system = fully_implicit_non_orthogonal_diffusion_system<Pack>(
-            mesh, diffusivity, boundary_condition, right_hand_source, &solution);
-        solution.owned_data().putScalar(0.0);
-        Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-        const auto converged = solve_linear_system<Pack>(matrix, *system.rhs, solution.owned_data(), linear_options);
-        mesh.sync_periodic_boundaries(solution);
-        return converged;
+        return detail::solve_implicit_diffusion_corrections<Pack>(mesh, diffusivity, solution,
+            [&](const auto& correction) { return fully_implicit_non_orthogonal_diffusion_system<Pack>(
+                mesh, diffusivity, boundary_condition, right_hand_source, &correction); },
+            [&] { mesh.sync_periodic_boundaries(solution); }, linear_options, correction_options);
     }
 
     if (treatment != NonOrthogonalTreatment::Hybrid)
@@ -1100,13 +1102,23 @@ bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scala
     ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
     NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options)
 {
+    return solve_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition), solution,
+        treatment, nNonOrthogonalCorrectors, linear_options, NonOrthogonalConvergenceOptions{});
+}
+
+template<TpetraTypePack Pack>
+bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
+    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options,
+    const NonOrthogonalConvergenceOptions& correction_options)
+{
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     auto zero_source = [](local_ordinal_type) -> scalar_type { return scalar_type{}; };
 
     return solve_non_orthogonal_diffusion<Pack>(mesh, diffusivity, boundary_condition, zero_source, solution, treatment,
-        nNonOrthogonalCorrectors, linear_options);
+        nNonOrthogonalCorrectors, linear_options, correction_options);
 }
 
 } // namespace SimpleFluid::FVM

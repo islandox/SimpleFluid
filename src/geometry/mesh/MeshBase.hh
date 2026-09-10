@@ -153,13 +153,13 @@ public:
         return derived().cell_centroid_impl(cell_id);
     }
 
-    auto cell_faces(cell_id_t cell_id) const
+    decltype(auto) cell_faces(cell_id_t cell_id) const
     {
         derived().check_cell_id(cell_id);
         return derived().cell_faces_impl(cell_id);
     }
 
-    auto faces(cell_id_t cell_id) const
+    decltype(auto) faces(cell_id_t cell_id) const
     {
         return cell_faces(cell_id);
     }
@@ -172,7 +172,7 @@ public:
         distances.reserve(cell_face_ids.size());
         for (const auto face_id : cell_face_ids)
         {
-            distances.push_back(cell_to_face_distance(face_id, cell_id));
+            distances.push_back(derived().cell_to_face_distance(face_id, cell_id));
         }
         return distances;
     }

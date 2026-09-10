@@ -172,6 +172,48 @@ verification items below mean the foundation as a whole is not yet complete.
 
 ---
 
+### Compact region composition
+
+- [x] Separate topology and geometry contracts with shared Cartesian topology
+      and independent coordinate providers.
+- [x] Add static conforming serial composition through `MeshHandle`, canonical
+      seam faces, explicit mixed HEX_8/prism-side interfaces, and namespaced BCs.
+- [x] Replace normal implicit cell-face materialization with independent ranges;
+      retain explicit compatibility CSR and preserve native ownership/halo queries.
+- [x] Add assembled FVM/flow regressions, diffusion example, VTU region metadata,
+      and an opt-in capacity/timing benchmark. Validation is recorded in
+      `docs/region_mesh_implementation.md`; no new physical-validation claim.
+- [x] Verify the merged coupled block-composite backend on Cartesian and mixed
+      HEX/prism regions, including all operator/workspace choices, both pressure
+      gradients, backend switching and zero mesh-connectivity materialization.
+- [x] Compact implicit-region MPI: multiple regions per rank, split regions,
+      unique canonical face ownership, halos, owned-cell output and conservative
+      two/four-rank tests. Explicit global constituents remain rejected.
+- [x] Nested planar coarse/fine interfaces with coverage/overlap validation,
+      canonical subfaces and signed conservative flux transfer.
+- [x] Composite common axial affine ALE using existing GCL, epoch, lease,
+      cache refresh and rollback machinery, including solver-integrated tests.
+- [x] Cylindrical composition, physical angular closure and explicit translated
+      periodic patches with image-correct geometry and fluxes.
+- [x] Independent extruded geometry providers sharing immutable base topology,
+      with analytic geometry, native parity and serial/MPI solver tests.
+- [x] Validated execution views, geometry read leases, per-region interface
+      directories and Cartesian/extruded descriptor validation without volume sweeps.
+- [x] Nonlinear/coarse-fine, periodic-through-seam and decomposition-invariance
+      qualification; diagnostic N/R/P baselines with peak RSS. See
+      `docs/region_execution.md` and `docs/region_scaling.md` for measured scope.
+- [x] Converge lagged MPI gradients in the actual implicit steady diffusion
+      helper; require a fresh full-equation residual before success, retaining
+      native/mapped paths and the original native overload symbols.
+- [x] Resolved-face and transformed region-native scalar diffusion assembly,
+      with a generic reference and motion/periodic/coarse-fine parity checks.
+- [x] Remove per-cell exact-reserve allocation from explicit compatibility CSR.
+- [ ] Distributed explicit region packets and region-aware load balancing.
+- [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
+      wider polygonal volume/output types and rotated periodic field transforms.
+- [ ] Nonaffine composite motion and moving periodic lengths: require consistent
+      shared interface geometry, exact GCL and full transactional solver tests.
+
 ### Two-equation RANS turbulence
 
 This program was added after the numbered multiphysics roadmap. It is tracked

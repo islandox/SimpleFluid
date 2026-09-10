@@ -4,6 +4,7 @@
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "solvers/BoussinesqSolver.hh"
@@ -150,6 +151,15 @@ Run advance(SP<const Mesh> mesh, BoundaryConditionSet boundaries, TimeStepperOpt
             solver.select(selections[step]);
         solver.set_time_step(options.time_step * (1. + .1 * step));
         solver.step();
+        if constexpr (std::is_same_v<Mesh, Handle>)
+        {
+            if (std::holds_alternative<Handle::MultiRegionPtr>(mesh->variant()))
+            {
+                EXPECT_EQ(mesh->connectivity_storage_bytes(), 0U);
+                EXPECT_FALSE(mesh->has_materialized_connectivity());
+                EXPECT_FALSE(mesh->has_materialized_indexer());
+            }
+        }
         EXPECT_EQ(solver.step_index(), step + 1);
         EXPECT_TRUE(solver.last_step_statistics().converged);
         EXPECT_LT(solver.last_volume_continuity_residuals().maximum, 1e-8);
@@ -328,6 +338,40 @@ TEST_P(CoupledSolverBackendsTest, SerialSemiStructuredNonOrthogonal)
     {
         SCOPED_TRACE(static_cast<int>(treatment));
         exercise(native_mesh(3), GetParam(), false, treatment);
+    }
+}
+/** Compare each backend/policy and in-place switching across Cartesian seams. */
+TEST_P(CoupledSolverBackendsTest, MultiRegionCartesian)
+{
+    SP<const Handle> mesh = std::make_shared<Handle>(test::two_regions());
+    for (const auto gradient : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
+    {
+        SCOPED_TRACE(static_cast<int>(gradient));
+        exercise(mesh, GetParam(), false, FVM::NonOrthogonalTreatment::Implicit, gradient);
+    }
+}
+
+/** Keep mixed HEX_8/prism-side incidence compact through non-orthogonal solves. */
+TEST_P(CoupledSolverBackendsTest, MultiRegionMixedNonOrthogonal)
+{
+    SP<const Handle> mesh = std::make_shared<Handle>(test::mixed_regions());
+    for (const auto treatment : {FVM::NonOrthogonalTreatment::Explicit, FVM::NonOrthogonalTreatment::Implicit,
+             FVM::NonOrthogonalTreatment::Hybrid})
+    {
+        SCOPED_TRACE(static_cast<int>(treatment));
+        for (const auto gradient : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
+        {
+            SCOPED_TRACE(static_cast<int>(gradient));
+            exercise(mesh, GetParam(), false, treatment, gradient);
+        }
+    }
+}
+TEST_P(CoupledSolverBackendsTest, MultiRegionExtendedFamilies)
+{
+    for(const auto& geometry:{test::coarse_fine_regions(),test::periodic_regions(),test::cylindrical_regions(),test::independent_extruded_regions()})
+    {
+        SP<const Handle> mesh=std::make_shared<Handle>(geometry);
+        exercise(mesh,GetParam(),false,FVM::NonOrthogonalTreatment::Implicit);
     }
 }
 INSTANTIATE_TEST_SUITE_P(SupportedSolvers, CoupledSolverBackendsTest,
