@@ -19,6 +19,7 @@
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/FluidSolver.hh"
 #include "solvers/unitTests/VelocityProfileCsv.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
@@ -221,10 +222,12 @@ double stabilized_continuity_norm(
  *
  * @param reynolds_number Target Reynolds number.
  * @param use_orthogonal_cartesian Whether to exercise the Cartesian backend.
+ * @param use_nox Select the native constant-viscosity nonlinear driver.
  */
 void verify_lid_driven_cavity(
     double reynolds_number,
-    bool use_orthogonal_cartesian = false)
+    bool use_orthogonal_cartesian = false,
+    bool use_nox = false)
 {
     const auto bcs = cavity_boundary_conditions();
 
@@ -245,12 +248,27 @@ void verify_lid_driven_cavity(
     linear_options.tolerance = 1.0e-11;
     linear_options.max_iterations = cavity_max_linear_iterations();
 
-    auto verify = [&](const auto& input_mesh)
+    if (use_nox)
     {
-        SimpleFluid::BoussinesqSolver<Pack> solver(
-            input_mesh, bcs, time_options, linear_options);
-        solver.initialize_heated_box(0.0, 0.0);
+        time_options.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::CoupledNonlinear;
+        if (const auto* value = std::getenv("SIMPLEFLUID_CAVITY_COUPLED_OPERATOR"); value && value[0])
+            time_options.coupled_operator_backend = SimpleFluid::coupled_operator_backend_from_string(value);
+        if (const auto* value = std::getenv("SIMPLEFLUID_CAVITY_COUPLED_WORKSPACE"); value && value[0])
+            time_options.coupled_workspace_policy = SimpleFluid::coupled_workspace_policy_from_string(value);
+    }
+
+    auto verify = [&](auto& solver)
+    {
         solver.run();
+        if (use_nox)
+        {
+            EXPECT_TRUE(solver.last_nonlinear_result().converged);
+            EXPECT_TRUE(solver.last_step_statistics().converged);
+            EXPECT_LE(solver.last_volume_continuity_residuals().maximum,
+                time_options.nonlinear.continuity_tolerance);
+            EXPECT_EQ(solver.step_index(), time_options.steps);
+            EXPECT_NEAR(solver.time(), time_options.steps * time_options.time_step, 1.0e-14);
+        }
         const auto mesh = solver.velocity().mesh_ptr();
 
         const auto cache =
@@ -324,8 +342,7 @@ void verify_lid_driven_cavity(
                 time_options.time_step, cache),
             1.0e-2);
 
-        if (reynolds_number == 1000.0
-            && !use_orthogonal_cartesian)
+        if (!use_orthogonal_cartesian || use_nox)
         {
             const auto* output_directory =
                 std::getenv("SIMPLEFLUID_PROFILE_OUTPUT_DIR");
@@ -346,15 +363,26 @@ void verify_lid_driven_cavity(
         }
     };
 
-    if (use_orthogonal_cartesian)
+    const auto cells = cavity_mesh_cells();
+    if (use_nox)
     {
-        const auto cells = cavity_mesh_cells();
-        verify(make_cartesian_cavity_mesh(cells, cells, 1));
+        SimpleFluid::FluidSolver<Pack> solver(make_cartesian_cavity_mesh(cells, cells, 1),
+            bcs, time_options, linear_options);
+        verify(solver);
+    }
+    else if (use_orthogonal_cartesian)
+    {
+        SimpleFluid::BoussinesqSolver<Pack> solver(make_cartesian_cavity_mesh(cells, cells, 1),
+            bcs, time_options, linear_options);
+        solver.initialize_heated_box(0.0, 0.0);
+        verify(solver);
     }
     else
     {
-        const auto cells = cavity_mesh_cells();
-        verify(make_box_mesh(cells, cells, 1));
+        SimpleFluid::BoussinesqSolver<Pack> solver(make_box_mesh(cells, cells, 1),
+            bcs, time_options, linear_options);
+        solver.initialize_heated_box(0.0, 0.0);
+        verify(solver);
     }
 }
 
@@ -532,6 +560,20 @@ TEST(VerificationCasesTest, LidDrivenCavityRe1000OrthogonalCartesian3D)
 {
     verify_lid_driven_cavity(1000.0, true);
 }
+
+#ifdef SIMPLEFLUID_ENABLE_NOX
+/** @brief Preserve the Re=100 cavity physics with the native nonlinear driver. */
+TEST(VerificationCasesTest, LidDrivenCavityRe100Nox)
+{
+    verify_lid_driven_cavity(100.0, true, true);
+}
+
+/** @brief Preserve the Re=1000 cavity physics with the native nonlinear driver. */
+TEST(VerificationCasesTest, LidDrivenCavityRe1000Nox)
+{
+    verify_lid_driven_cavity(1000.0, true, true);
+}
+#endif
 
 /** @brief Verify centerline sampling and comparison CSV serialization. */
 TEST(VerificationCasesTest, WritesSimpleFluidVelocityProfileCsv)

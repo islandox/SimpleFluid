@@ -44,6 +44,12 @@ SP<const NativeMesh> cavity_mesh(bool reverse_partitions = false)
         distribution);
 }
 
+SP<const NativeMesh> planar_cavity_mesh()
+{
+    return std::make_shared<NativeMesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{{0., .25, .5, .75, 1.}, {0., .3, .65, 1.}, {0., 1.}}}));
+}
+
 BoundaryConditionSet cavity_boundaries(const NativeMesh& mesh)
 {
     BoundaryConditionSet result;
@@ -356,6 +362,48 @@ TEST(CoupledNonlinearProblemTest, AnalyticJacobianMatchesDirectionalDifferencesF
     }
 }
 
+TEST(CoupledNonlinearProblemTest, PlanarSlipJacobianMatchesDirectionsAndTrialsPreserveAcceptedState)
+{
+    for (auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+    {
+        SCOPED_TRACE(static_cast<int>(backend));
+        State state(planar_cavity_mesh());
+        state.boundaries.velocity["zmin"] = {BoundaryConditionType::Slip, {}};
+        state.boundaries.velocity["zmax"] = {BoundaryConditionType::Slip, {}};
+        state.time.coupled_operator_backend = backend;
+        auto problem = state.problem();
+        const auto callbacks = problem->callbacks();
+        auto x = problem->pack_initial();
+        const auto accepted_u = values(state.velocity.owned_data());
+        const auto accepted_p = values(state.pressure.owned_data());
+        const auto accepted_flux = values(state.flux.owned_data());
+        Vector direction(callbacks.map), analytic(callbacks.map), first(callbacks.map), repeat(callbacks.map);
+        // Include nonzero z components: projecting both the trial and its
+        // direction must remove the normal flux on the one-layer slip faces.
+        set_direction(direction);
+        ASSERT_TRUE(callbacks.residual(*x, first));
+        const auto linearization = callbacks.linearize(*x);
+        linearization.jacobian->apply(direction, analytic);
+        for (const double epsilon : {1.e-4, 1.e-5})
+        {
+            SCOPED_TRACE(epsilon);
+            Vector plus(*x, Teuchos::Copy), minus(*x, Teuchos::Copy), fp(callbacks.map), fm(callbacks.map);
+            plus.update(epsilon, direction, 1.);
+            minus.update(-epsilon, direction, 1.);
+            ASSERT_TRUE(callbacks.residual(plus, fp));
+            ASSERT_TRUE(callbacks.residual(minus, fm));
+            fp.update(-1., fm, 1.);
+            fp.scale(.5 / epsilon);
+            EXPECT_LT(difference(fp, analytic) / analytic.norm2(), 2.e-6);
+        }
+        ASSERT_TRUE(callbacks.residual(*x, repeat));
+        EXPECT_LT(difference(first, repeat), 1.e-14);
+        EXPECT_EQ(values(state.velocity.owned_data()), accepted_u);
+        EXPECT_EQ(values(state.pressure.owned_data()), accepted_p);
+        EXPECT_EQ(values(state.flux.owned_data()), accepted_flux);
+    }
+}
+
 TEST(CoupledNonlinearProblemTest, PicardMatchesNewtonAtRestButOmitsConvectiveDerivatives)
 {
     State state;
@@ -527,6 +575,25 @@ TEST(CoupledNonlinearProblemTest, RejectsUnsupportedPressureOutletAndVelocityExt
     EXPECT_THROW(state.problem(), std::invalid_argument);
     state.boundaries.pressure["xmax"] = {BoundaryConditionType::Neumann, 0.};
     state.boundaries.velocity["xmax"] = {BoundaryConditionType::Neumann, {}};
+    EXPECT_THROW(state.problem(), std::invalid_argument);
+}
+
+TEST(CoupledNonlinearProblemTest, RejectsObliqueSlipEvenOnAnOrthogonalMesh)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "The rotated SemiStructuredXY_Z fixture supports serial distribution only.";
+    // Two orthogonal square prisms rotated 45 degrees in XY. Prescribed
+    // velocity remains supported, but oblique Slip is outside the contract.
+    auto mesh = std::make_shared<Meshes::SemiStructuredXY_Z>(
+        Arr<MeshUtils::Vec3>{{0., 0., 0.}, {1., 1., 0.}, {2., 2., 0.}, {-1., 1., 0.}, {0., 2., 0.}, {1., 3., 0.}},
+        Arr<Arr<unsigned>>{{0, 1, 4, 3}, {1, 2, 5, 4}}, ArrReal{0., 1.},
+        Arr<Meshes::SemiStructuredXY_Z::BoundaryEdge>{{0, 1, "ymin"}, {1, 2, "ymin"}, {2, 5, "xmax"},
+            {5, 4, "ymax"}, {4, 3, "ymax"}, {3, 0, "xmin"}});
+    State state(std::make_shared<NativeMesh>(mesh));
+    // A stationary prescribed wall avoids the rotated lid's net inflow.
+    state.boundaries.velocity["ymax"] = {BoundaryConditionType::NoSlip, {}};
+    EXPECT_NO_THROW(state.problem());
+    state.boundaries.velocity["xmin"] = {BoundaryConditionType::Slip, {}};
     EXPECT_THROW(state.problem(), std::invalid_argument);
 }
 
@@ -775,6 +842,56 @@ TEST(CoupledNonlinearSolverTest, NewtonAndPicardConvergeToSameConservativeSoluti
             EXPECT_NE(values(*x), before);
             problem->commit(*x, state.velocity, state.pressure, state.flux);
             expect_physical_continuity(state, *problem, 1.e-9);
+            const auto current = values(*x);
+            if (reference.empty())
+                reference = current;
+            else
+            {
+                ASSERT_EQ(reference.size(), current.size());
+                for (size_t i = 0; i < current.size(); ++i)
+                    EXPECT_NEAR(current[i], reference[i], 1.e-7);
+            }
+        }
+}
+
+TEST(CoupledNonlinearSolverTest, PlanarSlipCavityConvergesWithExactlyZeroNormalBoundaryFlux)
+{
+    std::vector<double> reference;
+    for (auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+        for (auto method : {CoupledLinearization::AnalyticNewton, CoupledLinearization::Picard})
+        {
+            SCOPED_TRACE(static_cast<int>(backend));
+            SCOPED_TRACE(static_cast<int>(method));
+            State state(planar_cavity_mesh());
+            state.boundaries.velocity["zmin"] = {BoundaryConditionType::Slip, {}};
+            state.boundaries.velocity["zmax"] = {BoundaryConditionType::Slip, {}};
+            state.time.coupled_operator_backend = backend;
+            state.nonlinear.linearization = method;
+            auto problem = state.problem();
+            auto x = problem->pack_initial();
+            const auto accepted_u = values(state.velocity.owned_data());
+            const auto accepted_p = values(state.pressure.owned_data());
+            const auto accepted_flux = values(state.flux.owned_data());
+            const auto result = solve_nox(problem->callbacks(), *x, state.nonlinear, state.linear);
+            ASSERT_TRUE(result.converged) << result.reason;
+            EXPECT_EQ(values(state.velocity.owned_data()), accepted_u);
+            EXPECT_EQ(values(state.pressure.owned_data()), accepted_p);
+            EXPECT_EQ(values(state.flux.owned_data()), accepted_flux);
+            problem->commit(*x, state.velocity, state.pressure, state.flux);
+            expect_physical_continuity(state, *problem, 1.e-9);
+            const auto flux = state.flux.local_read_view();
+            size_t slip_faces = 0;
+            for (size_t cell = 0; cell < state.mesh->num_owned_cells(); ++cell)
+            {
+                const auto lid = static_cast<LO>(cell);
+                for (const auto face : state.mesh->faces(lid))
+                    if (state.mesh->is_boundary_face(face) && state.mesh->face_normal_outward(face, lid).z != 0.)
+                    {
+                        ++slip_faces;
+                        EXPECT_DOUBLE_EQ(flux(face, 0), 0.);
+                    }
+            }
+            EXPECT_EQ(slip_faces, 2 * state.mesh->num_owned_cells());
             const auto current = values(*x);
             if (reference.empty())
                 reference = current;
