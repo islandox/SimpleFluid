@@ -2,8 +2,8 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/FaceFlux.hh"
-#include "equations/IncompressibleMomentumEquation.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
+#include "equations/IncompressibleMomentumEquation.hh"
 #include "geometry/GeometryEpoch.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
 #include "solvers/NoxNonlinearSolver.hh"
@@ -151,16 +151,12 @@ struct FrozenGeometry
     std::vector<std::vector<RowFace>> rows;
     BoundaryConditionSet homogeneous_boundaries;
     NativeVelocityBoundaryCache homogeneous_velocity;
-    double density;
-    double time_step;
     FVM::CellGradientScheme gradient_scheme;
     std::uint64_t epoch;
 
-    FrozenGeometry(SP<const MeshType> mesh_, const BoundaryConditionSet& boundaries, const TimeStepperOptions& options,
-        double density_)
-        : mesh(std::move(mesh_)), homogeneous_boundaries(boundaries), homogeneous_velocity(mesh), density(density_),
-          time_step(options.time_step), gradient_scheme(options.pressure_gradient_scheme),
-          epoch(mesh_geometry_epoch(*mesh))
+    FrozenGeometry(SP<const MeshType> mesh_, const BoundaryConditionSet& boundaries, const TimeStepperOptions& options)
+        : mesh(std::move(mesh_)), homogeneous_boundaries(boundaries), homogeneous_velocity(mesh),
+          gradient_scheme(options.pressure_gradient_scheme), epoch(mesh_geometry_epoch(*mesh))
     {
         for (auto& [name, condition] : homogeneous_boundaries.velocity)
             condition.value = {};
@@ -221,8 +217,8 @@ class AnalyticCoupledOperator final : public Operator
 {
 public:
     AnalyticCoupledOperator(std::shared_ptr<const FrozenGeometry> geometry, CoupledSolver::system_type base,
-        const Velocity& velocity, const Flux& flux)
-        : d_geometry(std::move(geometry)), d_base(std::move(base)),
+        const Velocity& velocity, const Flux& flux, double time_step)
+        : d_geometry(std::move(geometry)), d_base(std::move(base)), d_time_step(time_step),
           d_direction_velocity(d_geometry->mesh, "nonlinear_direction_velocity"),
           d_direction_pressure(d_geometry->mesh, "nonlinear_direction_pressure"),
           d_direction_flux(d_geometry->mesh, "nonlinear_direction_flux"), d_flux_workspace(d_geometry->mesh)
@@ -278,11 +274,11 @@ public:
         d_base.linear_operator->apply(input, *d_result);
         for (size_t column = 0; column < input.getNumVectors(); ++column)
         {
-            unpack(*input.getVector(column), d_geometry->density, d_direction_velocity, d_direction_pressure);
+            unpack(*input.getVector(column), d_base.reference_density, d_direction_velocity, d_direction_pressure);
             // The reconstruction is affine in (u,p). Homogeneous boundary data
             // remove its constant exactly, yielding analytic directional flux.
             FVM::pressure_weighted_face_fluxes(d_direction_velocity, d_direction_pressure,
-                d_geometry->time_step / d_geometry->density, d_geometry->homogeneous_velocity,
+                d_time_step / d_base.reference_density, d_geometry->homogeneous_velocity,
                 d_geometry->homogeneous_boundaries.pressure, d_flux_workspace, d_direction_flux,
                 d_geometry->gradient_scheme);
             const auto delta_phi = d_direction_flux.local_read_view();
@@ -305,6 +301,7 @@ public:
 private:
     std::shared_ptr<const FrozenGeometry> d_geometry;
     CoupledSolver::system_type d_base;
+    double d_time_step;
     std::vector<std::vector<Vec>> d_donors;
     mutable Velocity d_direction_velocity;
     mutable Pressure d_direction_pressure;
@@ -312,10 +309,100 @@ private:
     mutable FluxWorkspace d_flux_workspace;
     mutable Teuchos::RCP<MultiVector> d_result;
 };
+/** Storage is leased to one immutable timestep context at a time. */
+struct NativeNonlinearWorkspace
+{
+    SP<const MeshType> mesh;
+    Velocity accepted_velocity, trial_velocity;
+    Pressure initial_pressure, trial_pressure;
+    Flux trial_flux;
+    FluxWorkspace flux_workspace;
+    MomentumEquation static_equation, dynamic_equation;
+    CoupledSolver static_solver, dynamic_solver;
+    std::unique_ptr<BoussinesqEquation> static_physical, physical_equation;
+    std::unique_ptr<Problem::material_type> frozen_material;
+    std::unique_ptr<Pressure> frozen_temperature;
+    std::unique_ptr<Velocity> frozen_turbulent_gradient;
+    std::optional<Problem::boundary_cache_type> frozen_boundary_viscosity;
+    NativeVelocityBoundaryCache velocity_boundaries;
+    std::shared_ptr<FrozenGeometry> geometry;
+    BoundaryConditionSet geometry_boundaries;
+    size_t uses = 0;
+    bool ready = false;
+
+    explicit NativeNonlinearWorkspace(SP<const MeshType> selected)
+        : mesh(require_mesh(std::move(selected))), accepted_velocity(mesh, "nonlinear_accepted_velocity"),
+          trial_velocity(mesh, "nonlinear_trial_velocity"), initial_pressure(mesh, "nonlinear_initial_pressure"),
+          trial_pressure(mesh, "nonlinear_trial_pressure"), trial_flux(mesh, "nonlinear_trial_flux"),
+          flux_workspace(mesh), static_equation(mesh), dynamic_equation(mesh), static_solver(mesh),
+          dynamic_solver(mesh), velocity_boundaries(mesh)
+    {
+    }
+};
+
+bool same_flow_boundaries(const BoundaryConditionSet& a, const BoundaryConditionSet& b)
+{
+    const auto same = [](const auto& left, const auto& right)
+    {
+        if (left.size() != right.size())
+            return false;
+        for (const auto& [name, condition] : left)
+        {
+            const auto found = right.find(name);
+            if (found == right.end() || condition.type != found->second.type ||
+                condition.value != found->second.value ||
+                condition.robin_coefficient != found->second.robin_coefficient)
+                return false;
+        }
+        return true;
+    };
+    return same(a.velocity, b.velocity) && same(a.pressure, b.pressure);
+}
 } // namespace
+
+struct CoupledNonlinearWorkspace::Impl
+{
+    std::vector<std::shared_ptr<NativeNonlinearWorkspace>> slots;
+
+    std::shared_ptr<NativeNonlinearWorkspace> acquire(SP<const MeshType> mesh)
+    {
+        mesh = require_mesh(std::move(mesh));
+        const auto comm = mesh->owned_cell_map()->getComm();
+        // Ownership can differ by rank. Every recycle/eviction decision is collective.
+        for (size_t i = 0; i < slots.size();)
+        {
+            const int local_bad = slots[i].use_count() == 1 && !slots[i]->ready;
+            int bad = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_bad, &bad);
+            if (bad)
+                slots.erase(slots.begin() + i);
+            else
+                ++i;
+        }
+        for (const auto& slot : slots)
+        {
+            const int local_free = slot.use_count() == 1 && slot->mesh.get() == mesh.get();
+            int available = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_free, &available);
+            if (available)
+                return slot;
+        }
+        auto result = std::make_shared<NativeNonlinearWorkspace>(std::move(mesh));
+        // Two slots accommodate NOX's previous callbacks while preparing the
+        // next physical step. Additional externally retained contexts stay
+        // valid but do not grow the workspace-owned pool without bound.
+        if (slots.size() < 2)
+            slots.push_back(result);
+        return result;
+    }
+};
+
+CoupledNonlinearWorkspace::CoupledNonlinearWorkspace() : d_impl(std::make_unique<Impl>()) {}
+CoupledNonlinearWorkspace::~CoupledNonlinearWorkspace() = default;
 
 struct CoupledNonlinearProblem::Impl
 {
+    std::shared_ptr<NativeNonlinearWorkspace> workspace;
     SP<const mesh_type> mesh;
     BoundaryConditionSet boundaries;
     TimeStepperOptions time;
@@ -323,61 +410,82 @@ struct CoupledNonlinearProblem::Impl
     double density;
     double initial_pressure_gauge = 0;
     continuity_target_type target;
-    Velocity accepted_velocity;
-    Pressure initial_pressure;
-    Velocity trial_velocity;
-    Pressure trial_pressure;
-    Flux trial_flux;
-    FluxWorkspace flux_workspace;
-    NativeVelocityBoundaryCache velocity_boundaries;
-    MomentumEquation dynamic_equation;
-    std::unique_ptr<BoussinesqEquation> physical_equation;
-    std::unique_ptr<material_type> frozen_material;
-    std::unique_ptr<Pressure> frozen_temperature;
-    std::unique_ptr<Velocity> frozen_turbulent_gradient;
-    std::optional<boundary_cache_type> frozen_boundary_viscosity;
+    Velocity& accepted_velocity;
+    Pressure& initial_pressure;
+    Velocity& trial_velocity;
+    Pressure& trial_pressure;
+    Flux& trial_flux;
+    FluxWorkspace& flux_workspace;
+    NativeVelocityBoundaryCache& velocity_boundaries;
+    MomentumEquation& dynamic_equation;
+    std::unique_ptr<BoussinesqEquation>& physical_equation;
+    std::unique_ptr<material_type>& frozen_material;
+    std::unique_ptr<Pressure>& frozen_temperature;
+    std::unique_ptr<Velocity>& frozen_turbulent_gradient;
+    std::optional<boundary_cache_type>& frozen_boundary_viscosity;
     bool density_feedback = false;
-    CoupledSolver dynamic_solver;
+    bool physical_mode = false;
+    bool turbulent_gradient_enabled = false;
+    CoupledSolver& dynamic_solver;
     CoupledSolver::system_type static_system;
     std::shared_ptr<FrozenGeometry> geometry;
     Teuchos::RCP<Vector> state_scale;
     Teuchos::RCP<Vector> residual_scale;
     VolumeContinuityResiduals<double> last_continuity;
     CoupledNonlinearProblemStatistics counters;
+    CoupledPressureVelocityCacheStatistics static_before, dynamic_before;
+    Teuchos::RCP<const Operator> lagged_preconditioner;
+    Teuchos::RCP<Vector> evaluated_residual_state;
+    double evaluated_residual_norm = 0;
+    std::optional<double> previous_linearization_norm;
+    bool evaluated_residual_valid = false;
 
     Impl(SP<const mesh_type> mesh_, const Velocity& accepted, const Pressure& pressure,
         const BoundaryConditionSet& boundaries_, const TimeStepperOptions& time_,
         const NonlinearSolverOptions& nonlinear_, double density_, const continuity_target_type* target_,
-        const FrozenBoussinesqInput* physical)
-        : mesh(require_mesh(std::move(mesh_))), boundaries(boundaries_), time(time_), nonlinear(nonlinear_),
-          density(density_), target(target_ ? *target_ : continuity_target_type(mesh)),
-          accepted_velocity(mesh, "nonlinear_accepted_velocity"), initial_pressure(mesh, "nonlinear_initial_pressure"),
-          trial_velocity(mesh, "nonlinear_trial_velocity"), trial_pressure(mesh, "nonlinear_trial_pressure"),
-          trial_flux(mesh, "nonlinear_trial_flux"), flux_workspace(mesh), velocity_boundaries(mesh),
-          dynamic_equation(mesh), dynamic_solver(mesh)
+        const FrozenBoussinesqInput* physical, std::shared_ptr<NativeNonlinearWorkspace> storage)
+        : workspace(std::move(storage)), mesh(require_mesh(std::move(mesh_))), boundaries(boundaries_), time(time_),
+          nonlinear(nonlinear_), density(density_), target(target_ ? *target_ : continuity_target_type(mesh)),
+          accepted_velocity(workspace->accepted_velocity), initial_pressure(workspace->initial_pressure),
+          trial_velocity(workspace->trial_velocity), trial_pressure(workspace->trial_pressure),
+          trial_flux(workspace->trial_flux), flux_workspace(workspace->flux_workspace),
+          velocity_boundaries(workspace->velocity_boundaries), dynamic_equation(workspace->dynamic_equation),
+          physical_equation(workspace->physical_equation), frozen_material(workspace->frozen_material),
+          frozen_temperature(workspace->frozen_temperature),
+          frozen_turbulent_gradient(workspace->frozen_turbulent_gradient),
+          frozen_boundary_viscosity(workspace->frozen_boundary_viscosity), physical_mode(physical != nullptr),
+          turbulent_gradient_enabled(physical && physical->turbulent_kinetic_energy_gradient),
+          dynamic_solver(workspace->dynamic_solver)
     {
+        workspace->ready = false;
+        counters.workspace_builds = workspace->uses == 0;
+        counters.workspace_reuses = workspace->uses != 0;
+        ++workspace->uses;
+        static_before = workspace->static_solver.cache_statistics();
+        dynamic_before = dynamic_solver.cache_statistics();
         collective_require(*mesh, accepted.mesh_ptr().get() == mesh.get() && pressure.mesh_ptr().get() == mesh.get(),
             "CoupledNonlinearProblem requires accepted fields on its exact mesh.");
-        const std::array<int, 5> physical_flags{physical != nullptr,
-            physical && physical->density_feedback_enabled,
+        const std::array<int, 5> physical_flags{physical != nullptr, physical && physical->density_feedback_enabled,
             physical && physical->effective_dynamic_viscosity != nullptr,
             physical && physical->turbulent_kinetic_energy_gradient != nullptr,
             physical && physical->boundary_dynamic_viscosity != nullptr};
         std::array<int, 5> flags_min{}, flags_max{};
-        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5,
-            physical_flags.data(), flags_min.data());
-        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5,
-            physical_flags.data(), flags_max.data());
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5, physical_flags.data(), flags_min.data());
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5, physical_flags.data(), flags_max.data());
         collective_require(*mesh, flags_min == flags_max,
             "Coupled nonlinear physical momentum inputs must have rank-consistent presence and modes.");
-        const std::array<double, 9> parameters{density, time.time_step, time.kinematic_viscosity,
+        const std::array<double, 10> parameters{density, time.time_step, time.kinematic_viscosity,
             nonlinear.velocity_scale, nonlinear.pressure_scale, nonlinear.momentum_residual_scale,
-            nonlinear.continuity_residual_scale, nonlinear.absolute_tolerance, nonlinear.continuity_tolerance};
+            nonlinear.continuity_residual_scale, nonlinear.absolute_tolerance, nonlinear.continuity_tolerance,
+            nonlinear.preconditioner_stagnation_ratio};
         bool valid = true;
         for (size_t i = 0; i < parameters.size(); ++i)
             valid =
                 valid && std::isfinite(parameters[i]) && (i == 2 || i == 7 ? parameters[i] >= 0 : parameters[i] > 0);
-        std::array<double, 9> minimum{}, maximum{};
+        valid = valid && nonlinear.preconditioner_stagnation_ratio <= 1;
+        std::array<double, 10> minimum{}, maximum{};
         Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, static_cast<int>(parameters.size()),
             parameters.data(), minimum.data());
         Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, static_cast<int>(parameters.size()),
@@ -385,87 +493,125 @@ struct CoupledNonlinearProblem::Impl
         collective_require(*mesh, valid && minimum == maximum,
             "CoupledNonlinearProblem requires finite, positive, rank-consistent reference scales and timestep, "
             "and non-negative kinematic viscosity.");
-        const int linearization = static_cast<int>(nonlinear.linearization);
-        int minimum_linearization = 0, maximum_linearization = 0;
+        const std::array<int, 2> policies{static_cast<int>(nonlinear.linearization),
+            static_cast<int>(nonlinear.preconditioner_update)};
+        std::array<int, 2> minimum_policies{}, maximum_policies{};
         Teuchos::reduceAll(
-            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &linearization, &minimum_linearization);
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 2, policies.data(), minimum_policies.data());
         Teuchos::reduceAll(
-            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &linearization, &maximum_linearization);
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 2, policies.data(), maximum_policies.data());
         collective_require(*mesh,
-            minimum_linearization == maximum_linearization &&
+            minimum_policies == maximum_policies &&
                 (nonlinear.linearization == CoupledLinearization::Picard ||
-                    nonlinear.linearization == CoupledLinearization::AnalyticNewton),
-            "CoupledNonlinearProblem requires a supported, rank-consistent linearization.");
+                    nonlinear.linearization == CoupledLinearization::AnalyticNewton) &&
+                (nonlinear.preconditioner_update == CoupledPreconditionerUpdate::EveryLinearization ||
+                    nonlinear.preconditioner_update == CoupledPreconditionerUpdate::PerTimeStep),
+            "CoupledNonlinearProblem requires supported, rank-consistent linearization/preconditioner policies.");
         require_boundary_consistency(*mesh, boundaries);
 
         // Periodicity is mesh topology. Remove only explicit periodic markers;
         // a physical face carrying one is rejected by the local checks below.
-        const auto locations = FVM::detail::boundary_face_locations(*mesh);
-        bool valid_boundaries = true;
-        bool orthogonal = true;
-        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        const int local_geometry_reuse = workspace->geometry &&
+                                         workspace->geometry->epoch == mesh_geometry_epoch(*mesh) &&
+                                         workspace->geometry->gradient_scheme == time.pressure_gradient_scheme &&
+                                         same_flow_boundaries(workspace->geometry_boundaries, boundaries);
+        int geometry_reuse = 0;
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_geometry_reuse, &geometry_reuse);
+        if (!geometry_reuse)
         {
-            const auto lid = static_cast<LO>(cell);
-            const auto volume = mesh->cell_volume(lid);
-            orthogonal = orthogonal && std::isfinite(volume) && volume > 0;
-            for (const auto face : mesh->faces(lid))
+            const auto locations = FVM::detail::boundary_face_locations(*mesh);
+            bool valid_boundaries = true;
+            bool orthogonal = true;
+            for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
             {
-                const bool interior = mesh->is_interior_face(face);
-                const auto direction = interior ? mesh->cell_center_vector(face, lid)
-                                                : mesh->face_centroid(face) - mesh->cell_centroid(lid);
-                const auto area = mesh->face_area_vector_outward(face, lid);
-                const double area_squared = area.dot(area);
-                const double distance_squared = direction.dot(direction);
-                const double projection = area.dot(direction);
-                const auto tangent = distance_squared > 0 ? area - direction * (projection / distance_squared) : area;
-                orthogonal = orthogonal && std::isfinite(area_squared) && std::isfinite(distance_squared) &&
-                             area_squared > 0 && distance_squared > 0 && projection > 0 &&
-                             tangent.dot(tangent) <= 1.0e-24 * area_squared;
-                if (interior || !mesh->is_boundary_face(face))
-                    continue;
-                const auto location = locations.at(static_cast<size_t>(face));
-                if (!location.active)
+                const auto lid = static_cast<LO>(cell);
+                const auto volume = mesh->cell_volume(lid);
+                orthogonal = orthogonal && std::isfinite(volume) && volume > 0;
+                for (const auto face : mesh->faces(lid))
                 {
-                    valid_boundaries = false;
-                    continue;
+                    const bool interior = mesh->is_interior_face(face);
+                    const auto direction = interior ? mesh->cell_center_vector(face, lid)
+                                                    : mesh->face_centroid(face) - mesh->cell_centroid(lid);
+                    const auto area = mesh->face_area_vector_outward(face, lid);
+                    const double area_squared = area.dot(area);
+                    const double distance_squared = direction.dot(direction);
+                    const double projection = area.dot(direction);
+                    const auto tangent =
+                        distance_squared > 0 ? area - direction * (projection / distance_squared) : area;
+                    orthogonal = orthogonal && std::isfinite(area_squared) && std::isfinite(distance_squared) &&
+                                 area_squared > 0 && distance_squared > 0 && projection > 0 &&
+                                 tangent.dot(tangent) <= 1.0e-24 * area_squared;
+                    if (interior || !mesh->is_boundary_face(face))
+                        continue;
+                    const auto location = locations.at(static_cast<size_t>(face));
+                    if (!location.active)
+                    {
+                        valid_boundaries = false;
+                        continue;
+                    }
+                    const auto& name = mesh->boundary_batch_name(location.batch_id);
+                    const auto velocity = boundaries.velocity.find(name);
+                    const auto p = boundaries.pressure.find(name);
+                    // Native Slip projection has exactly zero normal velocity on
+                    // coordinate planes. It therefore contributes neither an
+                    // advective boundary term nor a trial-dependent continuity
+                    // source; native component diffusion also excludes Slip.
+                    // Require exact Cartesian normals rather than tolerances so
+                    // those cancellations hold for every trial and direction.
+                    const auto normal = mesh->face_normal_outward(face, lid);
+                    const bool axis_aligned = (std::abs(normal.x) == 1. && normal.y == 0. && normal.z == 0.) ||
+                                              (normal.x == 0. && std::abs(normal.y) == 1. && normal.z == 0.) ||
+                                              (normal.x == 0. && normal.y == 0. && std::abs(normal.z) == 1.);
+                    valid_boundaries =
+                        valid_boundaries && velocity != boundaries.velocity.end() &&
+                        (velocity->second.type == BoundaryConditionType::Dirichlet ||
+                            velocity->second.type == BoundaryConditionType::NoSlip ||
+                            (velocity->second.type == BoundaryConditionType::Slip && axis_aligned)) &&
+                        (p == boundaries.pressure.end() || p->second.type == BoundaryConditionType::Neumann);
                 }
-                const auto& name = mesh->boundary_batch_name(location.batch_id);
-                const auto velocity = boundaries.velocity.find(name);
-                const auto p = boundaries.pressure.find(name);
-                // Native Slip projection has exactly zero normal velocity on
-                // coordinate planes. It therefore contributes neither an
-                // advective boundary term nor a trial-dependent continuity
-                // source; native component diffusion also excludes Slip.
-                // Require exact Cartesian normals rather than tolerances so
-                // those cancellations hold for every trial and direction.
-                const auto normal = mesh->face_normal_outward(face, lid);
-                const bool axis_aligned =
-                    (std::abs(normal.x) == 1. && normal.y == 0. && normal.z == 0.) ||
-                    (normal.x == 0. && std::abs(normal.y) == 1. && normal.z == 0.) ||
-                    (normal.x == 0. && normal.y == 0. && std::abs(normal.z) == 1.);
-                valid_boundaries = valid_boundaries && velocity != boundaries.velocity.end() &&
-                                   (velocity->second.type == BoundaryConditionType::Dirichlet ||
-                                       velocity->second.type == BoundaryConditionType::NoSlip ||
-                                       (velocity->second.type == BoundaryConditionType::Slip && axis_aligned)) &&
-                                   (p == boundaries.pressure.end() || p->second.type == BoundaryConditionType::Neumann);
             }
+            for (const auto& [name, condition] : boundaries.velocity)
+                valid_boundaries = valid_boundaries && std::isfinite(condition.value.x) &&
+                                   std::isfinite(condition.value.y) && std::isfinite(condition.value.z) &&
+                                   (condition.type == BoundaryConditionType::Dirichlet ||
+                                       condition.type == BoundaryConditionType::NoSlip ||
+                                       condition.type == BoundaryConditionType::Slip ||
+                                       condition.type == BoundaryConditionType::Periodic);
+            for (const auto& [name, condition] : boundaries.pressure)
+                valid_boundaries = valid_boundaries && std::isfinite(condition.value) &&
+                                   (condition.type == BoundaryConditionType::Neumann ||
+                                       condition.type == BoundaryConditionType::Periodic);
+            collective_require(*mesh, orthogonal,
+                "CoupledNonlinearProblem currently requires fixed orthogonal finite-volume geometry.");
+            collective_require(*mesh, valid_boundaries,
+                "CoupledNonlinearProblem currently supports prescribed Dirichlet/NoSlip or axis-aligned Slip velocity "
+                "and Neumann pressure on physical boundaries, plus mesh periodic interfaces.");
+            std::erase_if(boundaries.velocity,
+                [](const auto& entry) { return entry.second.type == BoundaryConditionType::Periodic; });
+            std::erase_if(boundaries.pressure,
+                [](const auto& entry) { return entry.second.type == BoundaryConditionType::Periodic; });
+            if (workspace->geometry)
+            {
+                // Boundary-affine stencils also depend on configuration. Retire
+                // caches rather than mutating any externally held generation.
+                workspace->static_solver.clear_cache();
+                dynamic_solver.clear_cache();
+                workspace->static_equation.refresh_geometry();
+                dynamic_equation.refresh_geometry();
+                if (workspace->static_physical)
+                    workspace->static_physical->refresh_geometry();
+                if (physical_equation)
+                    physical_equation->refresh_geometry();
+            }
+            workspace->geometry = std::make_shared<FrozenGeometry>(mesh, boundaries, time);
+            workspace->geometry_boundaries = boundaries_;
+            velocity_boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+            ++counters.geometry_builds;
         }
-        for (const auto& [name, condition] : boundaries.velocity)
-            valid_boundaries = valid_boundaries && std::isfinite(condition.value.x) &&
-                               std::isfinite(condition.value.y) && std::isfinite(condition.value.z) &&
-                               (condition.type == BoundaryConditionType::Dirichlet ||
-                                   condition.type == BoundaryConditionType::NoSlip ||
-                                   condition.type == BoundaryConditionType::Slip ||
-                                   condition.type == BoundaryConditionType::Periodic);
-        for (const auto& [name, condition] : boundaries.pressure)
-            valid_boundaries =
-                valid_boundaries && std::isfinite(condition.value) &&
-                (condition.type == BoundaryConditionType::Neumann || condition.type == BoundaryConditionType::Periodic);
-        collective_require(
-            *mesh, orthogonal, "CoupledNonlinearProblem currently requires fixed orthogonal finite-volume geometry.");
-        collective_require(*mesh, valid_boundaries,
-            "CoupledNonlinearProblem currently supports prescribed Dirichlet/NoSlip or axis-aligned Slip velocity "
-            "and Neumann pressure on physical boundaries, plus mesh periodic interfaces.");
+        geometry = workspace->geometry;
+        // Match the geometry's normalized periodic-marker representation.
+        boundaries = workspace->geometry_boundaries;
         std::erase_if(boundaries.velocity,
             [](const auto& entry) { return entry.second.type == BoundaryConditionType::Periodic; });
         std::erase_if(boundaries.pressure,
@@ -475,68 +621,72 @@ struct CoupledNonlinearProblem::Impl
         initial_pressure.owned_data().update(1.0, pressure.owned_data(), 0.0);
         accepted_velocity.sync_ghosts();
         initial_pressure.sync_ghosts();
-        velocity_boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
         if (physical)
         {
             const auto gravity = time.gravity_vector();
-            const std::array<double, 5> physical_controls{gravity.x, gravity.y, gravity.z,
-                time.thermal_expansion, time.reference_temperature};
+            const std::array<double, 5> physical_controls{
+                gravity.x, gravity.y, gravity.z, time.thermal_expansion, time.reference_temperature};
             std::array<double, 5> controls_min{}, controls_max{};
-            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5,
-                physical_controls.data(), controls_min.data());
-            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5,
-                physical_controls.data(), controls_max.data());
-            collective_require(*mesh, controls_min == controls_max &&
-                std::all_of(physical_controls.begin(), physical_controls.end(), [](double x) { return std::isfinite(x); }),
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5, physical_controls.data(),
+                controls_min.data());
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5, physical_controls.data(),
+                controls_max.data());
+            collective_require(*mesh,
+                controls_min == controls_max && std::all_of(physical_controls.begin(), physical_controls.end(),
+                                                    [](double x) { return std::isfinite(x); }),
                 "Coupled nonlinear physical buoyancy controls must be finite and rank-consistent.");
-            const auto& viscosity = physical->effective_dynamic_viscosity
-                ? *physical->effective_dynamic_viscosity : physical->material.dynamic_viscosity;
-            collective_require(*mesh, physical->temperature.mesh_ptr().get() == mesh.get() &&
-                physical->material.density.mesh_ptr().get() == mesh.get() && viscosity.mesh_ptr().get() == mesh.get() &&
-                (!physical->turbulent_kinetic_energy_gradient ||
-                    physical->turbulent_kinetic_energy_gradient->mesh_ptr().get() == mesh.get()),
+            const auto& viscosity = physical->effective_dynamic_viscosity ? *physical->effective_dynamic_viscosity
+                                                                          : physical->material.dynamic_viscosity;
+            collective_require(*mesh,
+                physical->temperature.mesh_ptr().get() == mesh.get() &&
+                    physical->material.density.mesh_ptr().get() == mesh.get() &&
+                    viscosity.mesh_ptr().get() == mesh.get() &&
+                    (!physical->turbulent_kinetic_energy_gradient ||
+                        physical->turbulent_kinetic_energy_gradient->mesh_ptr().get() == mesh.get()),
                 "Coupled nonlinear physical momentum fields must use the exact context mesh.");
             const auto copy = [](auto& destination, const auto& source)
             {
                 destination.owned_data().update(1., source.owned_data(), 0.);
                 destination.sync_ghosts();
             };
-            frozen_material = std::make_unique<material_type>(mesh, BoussinesqModelOptions{}, time);
+            if (!frozen_material)
+                frozen_material = std::make_unique<material_type>(mesh, BoussinesqModelOptions{}, time);
             copy(frozen_material->density, physical->material.density);
             copy(frozen_material->dynamic_viscosity, viscosity);
-            frozen_temperature = std::make_unique<Pressure>(mesh, "nonlinear_frozen_temperature");
+            if (!frozen_temperature)
+                frozen_temperature = std::make_unique<Pressure>(mesh, "nonlinear_frozen_temperature");
             copy(*frozen_temperature, physical->temperature);
             bool valid_coefficients = true;
             const auto rho = frozen_material->density.local_read_view();
             const auto mu = frozen_material->dynamic_viscosity.local_read_view();
             for (size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
                 valid_coefficients = valid_coefficients && std::isfinite(rho(cell, 0)) && rho(cell, 0) > 0 &&
-                    std::isfinite(mu(cell, 0)) && mu(cell, 0) >= 0;
+                                     std::isfinite(mu(cell, 0)) && mu(cell, 0) >= 0;
             const bool finite_temperature = finite_vector(frozen_temperature->owned_data());
             collective_require(*mesh, valid_coefficients && finite_temperature,
-                "Coupled nonlinear physical momentum requires finite positive density, nonnegative viscosity, and temperature.");
+                "Coupled nonlinear physical momentum requires finite positive density, nonnegative viscosity, and "
+                "temperature.");
             if (physical->turbulent_kinetic_energy_gradient)
             {
-                frozen_turbulent_gradient = std::make_unique<Velocity>(mesh, "nonlinear_frozen_k_gradient");
+                if (!frozen_turbulent_gradient)
+                    frozen_turbulent_gradient = std::make_unique<Velocity>(mesh, "nonlinear_frozen_k_gradient");
                 copy(*frozen_turbulent_gradient, *physical->turbulent_kinetic_energy_gradient);
             }
             if (physical->boundary_dynamic_viscosity)
                 frozen_boundary_viscosity = *physical->boundary_dynamic_viscosity;
+            else
+                frozen_boundary_viscosity.reset();
             density_feedback = physical->density_feedback_enabled;
-            physical_equation = std::make_unique<BoussinesqEquation>(mesh);
+            if (!physical_equation)
+                physical_equation = std::make_unique<BoussinesqEquation>(mesh);
         }
-        geometry = std::make_shared<FrozenGeometry>(mesh, boundaries, time, density);
         // Zero convection gives the immutable affine BE/diffusion/pressure
-        // residual. Only this setup and linearize() assemble Schur products.
+        // residual. Its dedicated workspace never constructs Schur products.
         trial_flux.put_value(0.0);
-        MomentumEquation static_equation(mesh);
-        CoupledSolver static_solver(mesh);
-        // Separate equation caches keep the immutable residual generation
-        // independent of later frozen-flux preconditioner updates.
-        std::unique_ptr<BoussinesqEquation> static_physical;
-        if (physical_equation)
-            static_physical = std::make_unique<BoussinesqEquation>(mesh);
-        static_system = assemble(static_solver, static_equation, static_physical.get());
+        if (physical_mode && !workspace->static_physical)
+            workspace->static_physical = std::make_unique<BoussinesqEquation>(mesh);
+        static_system = assemble(workspace->static_solver, workspace->static_equation, workspace->static_physical.get(),
+            CoupledAssemblyPurpose::ResidualOnly);
         if (static_system.pressure_gauge_gid)
         {
             const auto gauge = mesh->owned_cell_map()->getLocalElement(*static_system.pressure_gauge_gid);
@@ -555,7 +705,6 @@ struct CoupledNonlinearProblem::Impl
         static_system.pressure_stabilization = Teuchos::null;
         static_system.schur = Teuchos::null;
         static_system.numeric_lease.reset();
-        static_solver.clear_cache();
         state_scale = Teuchos::rcp(new Vector(static_system.map, true));
         residual_scale = Teuchos::rcp(new Vector(static_system.map, true));
         {
@@ -579,19 +728,21 @@ struct CoupledNonlinearProblem::Impl
         }
         if (!finite_vector(*pack_initial()))
             throw std::invalid_argument("CoupledNonlinearProblem requires finite accepted velocity and pressure.");
+        workspace->ready = true;
     }
 
     CoupledSolver::system_type assemble(CoupledSolver& solver, MomentumEquation& equation,
-        BoussinesqEquation* selected_physical = nullptr)
+        BoussinesqEquation* selected_physical = nullptr,
+        CoupledAssemblyPurpose purpose = CoupledAssemblyPurpose::LinearSolve)
     {
-        if (physical_equation)
-            return solver.assemble(selected_physical ? *selected_physical : *physical_equation,
-                accepted_velocity, initial_pressure, *frozen_temperature,
-                trial_flux, velocity_boundaries, boundaries, time, target, frozen_material.get(), density,
-                density_feedback, nullptr, frozen_turbulent_gradient.get(),
-                frozen_boundary_viscosity ? &*frozen_boundary_viscosity : nullptr);
-        return solver.assemble(equation, accepted_velocity, initial_pressure, trial_flux,
-            velocity_boundaries, boundaries, time, target, density);
+        if (physical_mode)
+            return solver.assemble(selected_physical ? *selected_physical : *physical_equation, accepted_velocity,
+                initial_pressure, *frozen_temperature, trial_flux, velocity_boundaries, boundaries, time, target,
+                frozen_material.get(), density, density_feedback, nullptr,
+                turbulent_gradient_enabled ? frozen_turbulent_gradient.get() : nullptr,
+                frozen_boundary_viscosity ? &*frozen_boundary_viscosity : nullptr, nullptr, purpose);
+        return solver.assemble(equation, accepted_velocity, initial_pressure, trial_flux, velocity_boundaries,
+            boundaries, time, target, density, nullptr, purpose);
     }
 
     Teuchos::RCP<Vector> pack_initial() const
@@ -630,21 +781,8 @@ struct CoupledNonlinearProblem::Impl
         return finite_vector(trial_flux.owned_data());
     }
 
-    void measure_continuity()
+    void finish_continuity(const std::array<double, 2>& local, double local_maximum)
     {
-        const auto flux = trial_flux.local_read_view();
-        std::array<double, 2> local{};
-        double local_maximum = 0;
-        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
-        {
-            const auto lid = static_cast<LO>(cell);
-            const auto balance = FVM::cell_flux_balance<Pack>(*mesh, trial_flux, flux, lid);
-            const auto desired = target.integrated_rate(lid);
-            const auto residual = balance - desired;
-            local[0] += residual * residual;
-            local[1] += std::max(balance * balance, desired * desired);
-            local_maximum = std::max(local_maximum, std::abs(residual));
-        }
         std::array<double, 2> global{};
         Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 2, local.data(), global.data());
         Teuchos::reduceAll(
@@ -655,23 +793,53 @@ struct CoupledNonlinearProblem::Impl
             last_continuity.normalization > 0 ? last_continuity.l2 / last_continuity.normalization : last_continuity.l2;
     }
 
+    void measure_continuity()
+    {
+        const auto flux = trial_flux.local_read_view();
+        std::array<double, 2> local{};
+        double local_maximum = 0;
+        for (size_t cell = 0; cell < geometry->rows.size(); ++cell)
+        {
+            const auto lid = static_cast<LO>(cell);
+            double balance = 0;
+            for (const auto& face : geometry->rows[cell])
+                balance += face.orientation * flux(face.face, 0);
+            const auto desired = target.integrated_rate(lid);
+            const auto residual = balance - desired;
+            local[0] += residual * residual;
+            local[1] += std::max(balance * balance, desired * desired);
+            local_maximum = std::max(local_maximum, std::abs(residual));
+        }
+        finish_continuity(local, local_maximum);
+    }
+
     bool residual(const Vector& state, Vector& residual)
     {
         ++counters.residual_evaluations;
+        const bool lagging = nonlinear.preconditioner_update == CoupledPreconditionerUpdate::PerTimeStep;
+        if (lagging)
+            evaluated_residual_valid = false;
         collective_require(*mesh, residual.getMap()->isSameAs(*static_system.map),
             "Coupled nonlinear residual has an incompatible map.");
         if (!trial(state))
             return false;
         static_system.linear_operator->apply(state, residual);
         residual.update(-1, *static_system.rhs, 1);
+        std::array<double, 2> local{};
+        double local_maximum = 0;
         {
             const auto u = trial_velocity.local_read_view();
             const auto phi = trial_flux.local_read_view();
             auto values = residual.getLocalViewHost(Tpetra::Access::ReadWrite);
             for (size_t cell = 0; cell < geometry->rows.size(); ++cell)
+            {
+                double balance = 0;
                 for (const auto& face : geometry->rows[cell])
                 {
                     const double outward = face.orientation * phi(face.face, 0);
+                    // Cached rows preserve the public mesh's face order and
+                    // orientation. Accumulate continuity in the advection pass.
+                    balance += outward;
                     Vec donor;
                     if (outward < 0 && !face.interior)
                         donor = face.boundary_value;
@@ -683,11 +851,38 @@ struct CoupledNonlinearProblem::Impl
                     for (size_t component = 0; component < 3; ++component)
                         values(4 * cell + component, 0) += outward * donor.component(component);
                 }
+                const auto desired = target.integrated_rate(static_cast<LO>(cell));
+                const auto imbalance = balance - desired;
+                local[0] += imbalance * imbalance;
+                local[1] += std::max(balance * balance, desired * desired);
+                local_maximum = std::max(local_maximum, std::abs(imbalance));
+            }
         }
         if (!finite_vector(residual))
             return false;
-        measure_continuity();
-        return std::isfinite(last_continuity.l2) && std::isfinite(last_continuity.maximum);
+        finish_continuity(local, local_maximum);
+        const bool valid = std::isfinite(last_continuity.l2) && std::isfinite(last_continuity.maximum);
+        if (lagging && valid)
+        {
+            double local_squared_norm = 0, global_squared_norm = 0;
+            {
+                const auto values = residual.getLocalViewHost(Tpetra::Access::ReadOnly);
+                const auto scale = residual_scale->getLocalViewHost(Tpetra::Access::ReadOnly);
+                for (size_t row = 0; row < residual.getLocalLength(); ++row)
+                {
+                    const double scaled = values(row, 0) * scale(row, 0);
+                    local_squared_norm += scaled * scaled;
+                }
+            }
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1,
+                &local_squared_norm, &global_squared_norm);
+            evaluated_residual_norm = std::sqrt(global_squared_norm);
+            evaluated_residual_valid = std::isfinite(evaluated_residual_norm);
+            if (evaluated_residual_state.is_null())
+                evaluated_residual_state = Teuchos::rcp(new Vector(state.getMap()));
+            evaluated_residual_state->assign(state);
+        }
+        return valid;
     }
 
     NonlinearLinearization linearize(const Vector& state)
@@ -695,15 +890,49 @@ struct CoupledNonlinearProblem::Impl
         if (!trial(state))
             throw std::invalid_argument("Cannot linearize a non-finite coupled nonlinear state.");
         ++counters.linearizations;
-        auto system = assemble(dynamic_solver, dynamic_equation);
+        const bool lagging = nonlinear.preconditioner_update == CoupledPreconditionerUpdate::PerTimeStep;
+        bool refresh_preconditioner = true;
+        std::optional<double> current_norm;
+        if (lagging)
+        {
+            int local_match = evaluated_residual_valid && !evaluated_residual_state.is_null();
+            if (local_match)
+            {
+                const auto current = state.getLocalViewHost(Tpetra::Access::ReadOnly);
+                const auto evaluated = evaluated_residual_state->getLocalViewHost(Tpetra::Access::ReadOnly);
+                for (size_t row = 0; row < state.getLocalLength(); ++row)
+                    local_match = local_match && current(row, 0) == evaluated(row, 0);
+            }
+            int match = 0;
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_match, &match);
+            if (match)
+                current_norm = evaluated_residual_norm;
+            refresh_preconditioner = lagged_preconditioner.is_null() || !current_norm ||
+                                     !previous_linearization_norm ||
+                                     *current_norm >= nonlinear.preconditioner_stagnation_ratio *
+                                                          *previous_linearization_norm;
+            if (refresh_preconditioner)
+                lagged_preconditioner = Teuchos::null;
+        }
+        auto system = assemble(dynamic_solver, dynamic_equation, nullptr,
+            refresh_preconditioner ? CoupledAssemblyPurpose::LinearSolve : CoupledAssemblyPurpose::ResidualOnly);
         NonlinearLinearization result;
-        result.right_preconditioner = Teuchos::rcp(
-            new RetainedPreconditioner(dynamic_solver.right_preconditioner(system), system.linear_operator));
+        if (refresh_preconditioner)
+        {
+            result.right_preconditioner = Teuchos::rcp(
+                new RetainedPreconditioner(dynamic_solver.right_preconditioner(system), system.linear_operator));
+            if (lagging)
+                lagged_preconditioner = result.right_preconditioner;
+        }
+        else
+            result.right_preconditioner = lagged_preconditioner;
         if (nonlinear.linearization == CoupledLinearization::AnalyticNewton)
-            result.jacobian =
-                Teuchos::rcp(new AnalyticCoupledOperator(geometry, std::move(system), trial_velocity, trial_flux));
+            result.jacobian = Teuchos::rcp(
+                new AnalyticCoupledOperator(geometry, std::move(system), trial_velocity, trial_flux, time.time_step));
         else
             result.jacobian = system.linear_operator;
+        if (lagging)
+            previous_linearization_norm = current_norm;
         return result;
     }
 
@@ -744,9 +973,20 @@ CoupledNonlinearProblem::CoupledNonlinearProblem(SP<const mesh_type> mesh, const
     const field_type& physical_pressure, const BoundaryConditionSet& boundaries, const TimeStepperOptions& time_options,
     const NonlinearSolverOptions& nonlinear_options, double reference_density,
     const continuity_target_type* continuity_target, const FrozenBoussinesqInput* boussinesq)
-    : d_impl(std::make_shared<Impl>(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
-          nonlinear_options, reference_density, continuity_target, boussinesq))
+    : CoupledNonlinearProblem(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
+          nonlinear_options, reference_density, continuity_target, boussinesq, nullptr)
 {
+}
+
+CoupledNonlinearProblem::CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
+    const field_type& physical_pressure, const BoundaryConditionSet& boundaries, const TimeStepperOptions& time_options,
+    const NonlinearSolverOptions& nonlinear_options, double reference_density,
+    const continuity_target_type* continuity_target, const FrozenBoussinesqInput* boussinesq,
+    CoupledNonlinearWorkspace* workspace)
+{
+    auto storage = workspace ? workspace->d_impl->acquire(mesh) : std::make_shared<NativeNonlinearWorkspace>(mesh);
+    d_impl = std::make_shared<Impl>(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
+        nonlinear_options, reference_density, continuity_target, boussinesq, std::move(storage));
 }
 
 CoupledNonlinearProblem::~CoupledNonlinearProblem() = default;
@@ -774,7 +1014,20 @@ VolumeContinuityResiduals<double> CoupledNonlinearProblem::continuity() const
 }
 CoupledNonlinearProblemStatistics CoupledNonlinearProblem::statistics() const
 {
-    return d_impl->counters;
+    auto result = d_impl->counters;
+    const auto add =
+        [&](const CoupledPressureVelocityCacheStatistics& now, const CoupledPressureVelocityCacheStatistics& before)
+    {
+        result.operator_builds += now.coupled_matrix_builds + now.composite_operator_builds -
+                                  before.coupled_matrix_builds - before.composite_operator_builds;
+        result.graph_reuses += now.matrix_graph_reuses - before.matrix_graph_reuses;
+        result.schur_builds += now.schur_builds - before.schur_builds;
+        result.preconditioner_builds += now.preconditioner_builds - before.preconditioner_builds;
+        result.preconditioner_refreshes += now.preconditioner_numeric_reuses - before.preconditioner_numeric_reuses;
+    };
+    add(d_impl->workspace->static_solver.cache_statistics(), d_impl->static_before);
+    add(d_impl->dynamic_solver.cache_statistics(), d_impl->dynamic_before);
+    return result;
 }
 
 void CoupledNonlinearProblem::commit(

@@ -435,6 +435,8 @@ Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(const typenam
             ScopedCoupledProduct lifetime(statistics);
             matrix_type product(divergence[component]->getRowMap(), 32);
             Tpetra::MatrixMatrix::Multiply(*divergence[component], false, *scaled, false, product, true);
+            if (statistics != nullptr)
+                ++statistics->schur_product_builds;
             accumulate(product, scalar_type{-1});
         } // each product and its scaled gradient released before the next component
         accumulate(pressure_stabilization, scalar_type{1});
@@ -486,6 +488,8 @@ Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(const typenam
             product = Teuchos::rcp(new matrix_type(divergence[component]->getRowMap(), 32));
         }
         Tpetra::MatrixMatrix::Multiply(*divergence[component], false, *scaled, false, *product, true);
+        if (statistics != nullptr)
+            ++statistics->schur_product_builds;
         products_reused = products_reused && had_scaled && had_product;
     }
     if (reused_products != nullptr)
@@ -1119,7 +1123,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     const TimeStepperOptions& time_options, scalar_type reference_density) const
 {
     return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
-        time_options, reference_density, nullptr, nullptr, nullptr);
+        time_options, reference_density, CoupledAssemblyPurpose::LinearSolve);
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -1131,7 +1135,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     scalar_type reference_density, const FVM::ALEControlVolumeState* ale) const
 {
     return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
-        time_options, reference_density, nullptr, nullptr, nullptr, continuity_target, ale);
+        time_options, continuity_target, reference_density, ale, CoupledAssemblyPurpose::LinearSolve);
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -1142,6 +1146,90 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
     const velocity_field_type* turbulent_kinetic_energy_gradient,
     const boundary_cache_type* boundary_dynamic_viscosity) const
+{
+    return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, dynamic_viscosity_override, turbulent_kinetic_energy_gradient,
+        boundary_dynamic_viscosity, CoupledAssemblyPurpose::LinearSolve);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
+    const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
+    const continuity_target_type& continuity_target, const FVM::ALEControlVolumeState* ale) const
+{
+    return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, dynamic_viscosity_override, turbulent_kinetic_energy_gradient,
+        boundary_dynamic_viscosity, continuity_target, ale, CoupledAssemblyPurpose::LinearSolve);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+    const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+    const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+    const material_property_fields_type* material, scalar_type reference_density, bool density_feedback_enabled,
+    const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+    const boundary_cache_type* boundary_dynamic_viscosity) const
+{
+    return assemble(momentum_equation, velocity, pressure, temperature, face_fluxes, velocity_boundary_cache,
+        boundary_conditions, time_options, material, reference_density, density_feedback_enabled,
+        dynamic_viscosity_override, turbulent_kinetic_energy_gradient, boundary_dynamic_viscosity,
+        CoupledAssemblyPurpose::LinearSolve);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+    const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+    const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+    const continuity_target_type& continuity_target, const material_property_fields_type* material,
+    scalar_type reference_density, bool density_feedback_enabled, const field_type* dynamic_viscosity_override,
+    const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
+    const FVM::ALEControlVolumeState* ale) const
+{
+    return assemble(momentum_equation, velocity, pressure, temperature, face_fluxes, velocity_boundary_cache,
+        boundary_conditions, time_options, continuity_target, material, reference_density, density_feedback_enabled,
+        dynamic_viscosity_override, turbulent_kinetic_energy_gradient, boundary_dynamic_viscosity, ale,
+        CoupledAssemblyPurpose::LinearSolve);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, scalar_type reference_density, CoupledAssemblyPurpose purpose) const
+{
+    return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, nullptr, nullptr, nullptr, purpose);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, const continuity_target_type& continuity_target,
+    scalar_type reference_density, const FVM::ALEControlVolumeState* ale, CoupledAssemblyPurpose purpose) const
+{
+    return assemble(momentum_equation, velocity, pressure, face_fluxes, velocity_boundary_cache, boundary_conditions,
+        time_options, reference_density, nullptr, nullptr, nullptr, continuity_target, ale, purpose);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
+CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
+    const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+    const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
+    const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
+    CoupledAssemblyPurpose purpose) const
 {
     const continuity_target_type zero_target(d_mesh);
     // Historical entry points retain their permissive all-Neumann gauge
@@ -1163,7 +1251,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
                                     "field when boundary viscosity data is supplied.");
     }
 
-    prepare_numeric_generation(momentum_equation, time_options);
+    prepare_numeric_generation(momentum_equation, time_options, purpose);
     const auto* correction_field =
         time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
     auto turbulence_source = [&](local_ordinal_type cell_lid)
@@ -1191,7 +1279,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
             velocity, face_fluxes, velocity_boundary_cache, time_options, correction_field);
     }
     auto coupled = assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
-        time_options, reference_density, zero_target, false);
+        time_options, reference_density, zero_target, false, purpose);
     momentum_equation.protect_numeric_generation(coupled.numeric_lease);
     return coupled;
 }
@@ -1203,7 +1291,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& time_options, scalar_type reference_density, const field_type* dynamic_viscosity_override,
     const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
-    const continuity_target_type& continuity_target, const FVM::ALEControlVolumeState* ale) const
+    const continuity_target_type& continuity_target, const FVM::ALEControlVolumeState* ale,
+    CoupledAssemblyPurpose purpose) const
 {
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
@@ -1222,7 +1311,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
                                     "field when boundary viscosity data is supplied.");
     }
 
-    prepare_numeric_generation(momentum_equation, time_options);
+    prepare_numeric_generation(momentum_equation, time_options, purpose);
     const auto* correction_field =
         time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
     auto turbulence_source = [&](local_ordinal_type cell_lid)
@@ -1250,7 +1339,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
             velocity, face_fluxes, velocity_boundary_cache, time_options, correction_field, ale);
     }
     auto coupled = assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
-        time_options, reference_density, continuity_target, true);
+        time_options, reference_density, continuity_target, true, purpose);
     momentum_equation.protect_numeric_generation(coupled.numeric_lease);
     return coupled;
 }
@@ -1263,7 +1352,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
     const material_property_fields_type* material, scalar_type reference_density, bool density_feedback_enabled,
     const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
-    const boundary_cache_type* boundary_dynamic_viscosity) const
+    const boundary_cache_type* boundary_dynamic_viscosity, CoupledAssemblyPurpose purpose) const
 {
     const continuity_target_type zero_target(d_mesh);
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
@@ -1280,7 +1369,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
             *d_mesh, *turbulent_kinetic_energy_gradient, "CoupledPressureVelocitySolver");
     }
 
-    prepare_numeric_generation(momentum_equation, time_options);
+    prepare_numeric_generation(momentum_equation, time_options, purpose);
     const auto* correction_field =
         time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
     auto turbulence_source = [&](local_ordinal_type cell_lid) -> typename velocity_field_type::vec_type
@@ -1308,7 +1397,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     }
 
     auto coupled = assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
-        time_options, reference_density, zero_target, false);
+        time_options, reference_density, zero_target, false, purpose);
     momentum_equation.protect_numeric_generation(coupled.numeric_lease);
     return coupled;
 }
@@ -1322,7 +1411,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     const continuity_target_type& continuity_target, const material_property_fields_type* material,
     scalar_type reference_density, bool density_feedback_enabled, const field_type* dynamic_viscosity_override,
     const velocity_field_type* turbulent_kinetic_energy_gradient, const boundary_cache_type* boundary_dynamic_viscosity,
-    const FVM::ALEControlVolumeState* ale) const
+    const FVM::ALEControlVolumeState* ale, CoupledAssemblyPurpose purpose) const
 {
     EquationValidation::require_mesh_match(*d_mesh, velocity, "CoupledPressureVelocitySolver");
     EquationValidation::require_mesh_match(*d_mesh, pressure, "CoupledPressureVelocitySolver");
@@ -1338,7 +1427,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
             *d_mesh, *turbulent_kinetic_energy_gradient, "CoupledPressureVelocitySolver");
     }
 
-    prepare_numeric_generation(momentum_equation, time_options);
+    prepare_numeric_generation(momentum_equation, time_options, purpose);
     const auto* correction_field =
         time_options.non_orthogonal_treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &velocity;
     auto turbulence_source = [&](local_ordinal_type cell_lid) -> typename velocity_field_type::vec_type
@@ -1366,7 +1455,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     }
 
     auto coupled = assemble_coupled_system(momentum, velocity, pressure, velocity_boundary_cache, boundary_conditions,
-        time_options, reference_density, continuity_target, true);
+        time_options, reference_density, continuity_target, true, purpose);
     momentum_equation.protect_numeric_generation(coupled.numeric_lease);
     return coupled;
 }
@@ -1419,14 +1508,18 @@ bool CoupledPressureVelocitySolver<Pack, MeshType>::has_external_generation() co
 
 template<TpetraTypePack Pack, class MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::prepare_numeric_generation(
-    const momentum_equation_type& equation, const TimeStepperOptions& options) const
+    const momentum_equation_type& equation, const TimeStepperOptions& options, CoupledAssemblyPurpose purpose) const
 {
     // Validate before any momentum mutation, including ranks with no boundary.
-    const int requested = static_cast<int>(options.coupled_operator_backend);
+    const int requested[] = {static_cast<int>(options.coupled_operator_backend), static_cast<int>(purpose)};
+    int requested_minimum[2]{}, requested_maximum[2]{};
+    Teuchos::reduceAll(*d_coupled_map->getComm(), Teuchos::REDUCE_MIN, 2, requested, requested_minimum);
+    Teuchos::reduceAll(*d_coupled_map->getComm(), Teuchos::REDUCE_MAX, 2, requested, requested_maximum);
+    if (requested_minimum[1] != requested_maximum[1] ||
+        (purpose != CoupledAssemblyPurpose::LinearSolve && purpose != CoupledAssemblyPurpose::ResidualOnly))
+        throw std::invalid_argument("Invalid or rank-divergent coupled assembly purpose.");
     int minimum = 0, maximum = 0;
-    Teuchos::reduceAll(*d_coupled_map->getComm(), Teuchos::REDUCE_MIN, 1, &requested, &minimum);
-    Teuchos::reduceAll(*d_coupled_map->getComm(), Teuchos::REDUCE_MAX, 1, &requested, &maximum);
-    if (minimum != maximum)
+    if (requested_minimum[0] != requested_maximum[0])
         throw std::invalid_argument("Rank-divergent coupled operator backend.");
     static_cast<void>(to_string(options.coupled_operator_backend));
     const int workspace = static_cast<int>(options.coupled_workspace_policy);
@@ -1487,7 +1580,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     const velocity_field_type& velocity, const field_type& pressure,
     const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
     const TimeStepperOptions& time_options, scalar_type reference_density,
-    const continuity_target_type& continuity_target, bool enforce_global_compatibility) const
+    const continuity_target_type& continuity_target, bool enforce_global_compatibility,
+    CoupledAssemblyPurpose purpose) const
 {
     refresh_geometry_if_needed();
     continuity_target.validate(*d_mesh, "CoupledPressureVelocitySolver continuity target");
@@ -1981,9 +2075,14 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     }
 
     bool reused_schur_products = false;
-    auto schur = detail::build_schur_approximation<Pack>(*momentum.matrix, gradient, divergence,
-        *pressure_stabilization, pressure_gauge_gid, reuse_assembly_graph ? d_cached_system.schur : Teuchos::null,
-        &d_schur_workspace, &reused_schur_products, time_options.coupled_workspace_policy, &d_cache_statistics);
+    Teuchos::RCP<matrix_type> schur;
+    if (purpose == CoupledAssemblyPurpose::LinearSolve)
+    {
+        schur = detail::build_schur_approximation<Pack>(*momentum.matrix, gradient, divergence, *pressure_stabilization,
+            pressure_gauge_gid, reuse_assembly_graph ? d_cached_system.schur : Teuchos::null, &d_schur_workspace,
+            &reused_schur_products, time_options.coupled_workspace_policy, &d_cache_statistics);
+        ++d_cache_statistics.schur_builds;
+    }
     if (reuse_assembly_graph)
     {
         ++d_cache_statistics.matrix_graph_reuses;

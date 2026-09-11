@@ -18,10 +18,35 @@
 
 namespace SimpleFluid
 {
+/** Bounded pool of native geometry, equation, and solver storage. Active
+ * timestep contexts are never recycled; callers may retain old callbacks.
+ * One instance is collective on its mesh communicator and sequential-use.
+ */
+class SIMPLEFLUID_SOLVERS_EXPORT CoupledNonlinearWorkspace
+{
+public:
+    CoupledNonlinearWorkspace();
+    ~CoupledNonlinearWorkspace();
+    CoupledNonlinearWorkspace(const CoupledNonlinearWorkspace&) = delete;
+    CoupledNonlinearWorkspace& operator=(const CoupledNonlinearWorkspace&) = delete;
+private:
+    friend class CoupledNonlinearProblem;
+    struct Impl;
+    std::unique_ptr<Impl> d_impl;
+};
+
 struct CoupledNonlinearProblemStatistics
 {
     size_t residual_evaluations = 0;
     size_t linearizations = 0;
+    size_t workspace_builds = 0;
+    size_t workspace_reuses = 0;
+    size_t geometry_builds = 0;
+    size_t operator_builds = 0;
+    size_t graph_reuses = 0;
+    size_t schur_builds = 0;
+    size_t preconditioner_builds = 0;
+    size_t preconditioner_refreshes = 0;
 };
 
 /**
@@ -71,6 +96,12 @@ public:
         const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
         double reference_density, const continuity_target_type* continuity_target,
         const FrozenBoussinesqInput* boussinesq);
+    /** Lease reusable storage while keeping this timestep's history immutable. */
+    CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
+        const field_type& physical_pressure, const BoundaryConditionSet& boundaries,
+        const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
+        double reference_density, const continuity_target_type* continuity_target,
+        const FrozenBoussinesqInput* boussinesq, CoupledNonlinearWorkspace* workspace);
     ~CoupledNonlinearProblem();
 
     NonlinearCallbacks callbacks();

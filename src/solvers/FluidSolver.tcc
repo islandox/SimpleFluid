@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <stdexcept>
 #include <typeinfo>
 #include <vector>
@@ -1361,12 +1362,21 @@ bool FluidSolver<Pack>::supports_coupled_nonlinear() const noexcept
 }
 
 template<TpetraTypePack Pack>
+CoupledNonlinearWorkspace* FluidSolver<Pack>::coupled_nonlinear_workspace()
+{
+    constexpr auto name = "coupled_nonlinear_workspace";
+    if (!d_problem.contains(name))
+        return &d_problem.template emplace_object<CoupledNonlinearWorkspace>(name);
+    return &d_problem.template object<CoupledNonlinearWorkspace>(name);
+}
+
+template<TpetraTypePack Pack>
 std::unique_ptr<CoupledNonlinearProblem> FluidSolver<Pack>::make_coupled_nonlinear_problem()
 {
     if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
         return std::make_unique<CoupledNonlinearProblem>(d_mesh, velocity(), pressure(),
             d_problem.boundary_conditions(), d_problem.time_options(), d_problem.time_options().nonlinear,
-            pressure_reference_density(), volume_continuity_target());
+            pressure_reference_density(), volume_continuity_target(), nullptr, coupled_nonlinear_workspace());
     throw std::invalid_argument("coupledNonlinear requires the default Tpetra pack.");
 }
 
@@ -1378,15 +1388,20 @@ void FluidSolver<Pack>::solve_coupled_nonlinear()
     if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
     {
         const auto& time_options = d_problem.time_options();
+        const auto native_setup_start = std::chrono::steady_clock::now();
         auto owned_problem = make_coupled_nonlinear_problem();
         auto& problem = *owned_problem;
         auto callbacks = problem.callbacks();
         auto state = problem.pack_initial();
+        const double local_native_setup = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - native_setup_start).count();
         if (!d_nonlinear_solver)
             d_nonlinear_solver = std::make_unique<NOXNonlinearSolver>(callbacks);
         else
             d_nonlinear_solver->set_callbacks(callbacks);
         auto result = d_nonlinear_solver->solve(*state, time_options.nonlinear, d_problem.linear_options());
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+            1, &local_native_setup, &result.native_setup_seconds);
         if (!result.converged)
             throw std::runtime_error("FluidSolver coupled nonlinear solve failed: " + result.reason);
         typename Pack::vector_type final_residual(callbacks.map, true);
@@ -1445,6 +1460,21 @@ void FluidSolver<Pack>::solve_coupled_nonlinear()
         residuals.linear_iterations = result.krylov_iterations;
 
         problem.commit(*state, velocity(), pressure(), projected_face_fluxes());
+        const auto native = problem.statistics();
+        const std::array<unsigned long long, 8> local_native{native.workspace_builds,
+            native.workspace_reuses, native.geometry_builds, native.operator_builds, native.graph_reuses,
+            native.schur_builds, native.preconditioner_builds, native.preconditioner_refreshes};
+        std::array<unsigned long long, 8> global_native{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+            static_cast<int>(local_native.size()), local_native.data(), global_native.data());
+        result.native_workspace_builds = global_native[0];
+        result.native_workspace_reuses = global_native[1];
+        result.native_geometry_builds = global_native[2];
+        result.native_operator_builds = global_native[3];
+        result.native_graph_reuses = global_native[4];
+        result.native_schur_builds = global_native[5];
+        result.native_preconditioner_builds = global_native[6];
+        result.native_preconditioner_refreshes = global_native[7];
         d_last_step_statistics = statistics;
         pressure_velocity_residuals() = residuals;
         d_last_volume_continuity_residuals = continuity;

@@ -42,6 +42,16 @@ struct NonlinearCallbacks
 
 struct NonlinearSolveResult
 {
+    // Native timestep setup diagnostics; populated by the physical driver.
+    std::size_t native_workspace_builds = 0;
+    std::size_t native_workspace_reuses = 0;
+    std::size_t native_geometry_builds = 0;
+    std::size_t native_operator_builds = 0;
+    std::size_t native_graph_reuses = 0;
+    std::size_t native_schur_builds = 0;
+    std::size_t native_preconditioner_builds = 0;
+    std::size_t native_preconditioner_refreshes = 0;
+    double native_setup_seconds = 0.0;
     bool converged = false;
     int nonlinear_iterations = 0;
     int linear_solves = 0;
@@ -61,12 +71,14 @@ struct NonlinearSolveResult
     std::string reason;
 };
 
-/** Cumulative workspace creation counters for a reusable solver instance. */
+/** Cumulative workspace counters for a reusable solver instance. */
 struct NonlinearSolverCacheStatistics
 {
     std::size_t vector_cache_builds = 0;  // map-dependent native vector bundles
     std::size_t linear_solver_builds = 0; // Belos solver manager creations
     std::size_t linearization_generations = 0;
+    /** Completed generations released before the next linearization within a solve. */
+    std::size_t linearization_retirements = 0;
 };
 
 /** Owning, sequential-use nonlinear solver with private NOX/Thyra machinery.
