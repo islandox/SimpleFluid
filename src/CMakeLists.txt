@@ -3,6 +3,10 @@ set(SIMPLEFLUID_PUBLIC_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${Trilinos_TPL_INCLUDE_DIRS}
 )
+if(SIMPLEFLUID_ENABLE_NOX)
+    # Keep shared/executable PCH preprocessing consistent with their consumers.
+    add_compile_definitions(SIMPLEFLUID_ENABLE_NOX=1)
+endif()
 
 set(SIMPLEFLUID_EXTERNAL_LIBRARIES
     Trilinos::all_selected_libs
@@ -181,6 +185,8 @@ set(SIMPLEFLUID_EQUATION_SOURCES
 set(SIMPLEFLUID_SOLVER_SOURCES
     solvers/BoussinesqSolver.cc
     solvers/CoupledPressureVelocitySolver.cc
+    solvers/CoupledNonlinearProblem.cc
+    solvers/NoxNonlinearSolver.cc
     solvers/FluidSolver.cc
     solvers/IncompressibleIsothermalSolver.cc
     solvers/PlanarFreeSurfaceModel.cc
@@ -226,6 +232,9 @@ set_target_properties(SimpleFluidSolvers PROPERTIES
 target_compile_definitions(SimpleFluidSolvers PRIVATE
     SimpleFluidEquations_EXPORTS)
 target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)
+if(SIMPLEFLUID_ENABLE_NOX)
+    target_compile_definitions(SimpleFluidSolvers PUBLIC SIMPLEFLUID_ENABLE_NOX=1)
+endif()
 if(TARGET SimpleFluidClangLtoCompatibility)
     add_dependencies(
         SimpleFluidSolvers SimpleFluidClangLtoCompatibility)

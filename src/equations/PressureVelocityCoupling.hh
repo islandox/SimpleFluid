@@ -27,7 +27,8 @@ enum class PressureVelocityCoupling
     SIMPLE,        ///< Steady segregated SIMPLE iterations.
     PISO,          ///< Transient PISO pressure corrections.
     PIMPLE,        ///< Outer PIMPLE iterations with pressure corrections.
-    CoupledKrylov  ///< Monolithic coupled Krylov solve.
+    CoupledKrylov, ///< Monolithic coupled Krylov solve.
+    CoupledNonlinear ///< Nonlinear coupled solve with an optional backend.
 };
 
 /**
@@ -53,10 +54,14 @@ pressure_velocity_coupling_from_string(std::string_view value)
     {
         return PressureVelocityCoupling::CoupledKrylov;
     }
+    if (value == "coupledNonlinear" || value == "CoupledNonlinear" || value == "couplednonlinear")
+    {
+        return PressureVelocityCoupling::CoupledNonlinear;
+    }
 
     throw std::invalid_argument(
         "Unknown pressure-velocity coupling; expected SIMPLE, PISO, PIMPLE, "
-        "or coupledKrylov.");
+        "coupledKrylov, or coupledNonlinear.");
 }
 
 /**
@@ -72,6 +77,8 @@ to_string(PressureVelocityCoupling coupling)
         case PressureVelocityCoupling::PIMPLE: return "PIMPLE";
         case PressureVelocityCoupling::CoupledKrylov:
             return "coupledKrylov";
+        case PressureVelocityCoupling::CoupledNonlinear:
+            return "coupledNonlinear";
     }
 
     throw std::invalid_argument("Unknown PressureVelocityCoupling value.");

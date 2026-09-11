@@ -22,6 +22,7 @@
 #include "io/VTUWriter.hh"
 #include "problems/Problem.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
+#include "solvers/NoxNonlinearSolver.hh"
 #include "solvers/SolverProgress.hh"
 
 #include <cstdint>
@@ -107,6 +108,9 @@ public:
 
     scalar_type time() const noexcept { return d_time; }
     int step_index() const noexcept { return d_step_index; }
+
+    /** Diagnostics from the last accepted nonlinear physical step. */
+    const NonlinearSolveResult& last_nonlinear_result() const noexcept { return d_last_nonlinear_result; }
 
     /** @brief Whether this solver retained a mutable native runtime handle. */
     bool has_mutable_mesh_handle() const noexcept
@@ -235,6 +239,8 @@ protected:
     void begin_step();
     void finish_step();
     void solve_pressure_velocity_coupling();
+    /** Validate mode collectively before a driver mutates timestep state. */
+    void validate_pressure_velocity_selection() const;
 
     /** Apply bounded pressure-only correctors to a strict physical target gate. */
     continuity_residual_type refine_volume_continuity(int maximum_corrections, scalar_type maximum_residual);
@@ -330,8 +336,12 @@ protected:
     mutable std::uint64_t d_vtu_geometry_epoch = 0;
     std::optional<continuity_target_type> d_volume_continuity_target;
     continuity_residual_type d_last_volume_continuity_residuals;
+    NonlinearSolveResult d_last_nonlinear_result;
 
 private:
+    bool d_has_base_momentum_equation = false;
+    std::uint64_t d_nonlinear_geometry_epoch = 0;
+    std::unique_ptr<NOXNonlinearSolver> d_nonlinear_solver;
     SIMPLEFLUID_SOLVERS_LOCAL
     FluidSolver(SP<const mesh_type> mesh,
                 BoundaryConditionSet boundary_conditions,
@@ -356,6 +366,8 @@ private:
     run_pressure_correction(bool reuse_cached_predictor_flux);
     SIMPLEFLUID_SOLVERS_LOCAL
     void solve_coupled_krylov();
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void solve_coupled_nonlinear();
 };
 
 extern template class FluidSolver<DefaultTpetraTypes>;

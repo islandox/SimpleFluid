@@ -34,6 +34,13 @@ endforeach()
 target_sources(testBoussinesqSolver PRIVATE
   PressureGradientStencilTestSupport.cc)
 
+simplefluid_add_mpi_test(
+    NAME CoupledNonlinearSolver_2procs
+    TARGET testCoupledNonlinearSolver
+    PROCS 2
+    LABELS "mpi;nonlinear_solver;pressure_velocity"
+    TIMEOUT 180)
+
 add_executable(
   testRadiolyticGasModelMultiRank
   testRadiolyticGasModelMultiRank.cc)
