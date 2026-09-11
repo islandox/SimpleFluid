@@ -3,12 +3,14 @@
 #include "equations/TimeStepperOptions.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
+#include "examples/VerificationBackends.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -22,23 +24,29 @@ int main(int argc, char** argv)
     const auto comm = Tpetra::getDefaultComm();
     try
     {
-        if (argc != 3 && argc != 4)
+        if (argc < 3 || argc > 9)
             throw std::invalid_argument("usage: coupled_operator_memory assembled|block_composite cells_per_axis "
-                                        "[cached_products|streamed_products]");
+                                        "[cached_products|streamed_products] [native|isoregion] [regions] [output_dir] [z_cells] [max_iterations]");
         TimeStepperOptions options;
         options.coupled_operator_backend = coupled_operator_backend_from_string(argv[1]);
-        if (argc == 4)
+        if (argc >= 4)
             options.coupled_workspace_policy = coupled_workspace_policy_from_string(argv[3]);
         const int n = std::stoi(argv[2]);
-        if (n < 2 || n > 100)
-            throw std::invalid_argument("cells_per_axis must be in [2,100]");
+        const int nz = argc >= 8 ? std::stoi(argv[7]) : n;
+        if (n < 2 || n > 100 || nz < 2 || nz > 100)
+            throw std::invalid_argument("axis cell counts must be in [2,100]");
+        Verification::BackendControls mesh_controls;
+        if (argc >= 5) mesh_controls.parse("--mesh-backend", argv[4]);
+        if (argc >= 6) mesh_controls.parse("--regions", argv[5]);
+        const auto mesh_start = std::chrono::steady_clock::now();
         options.time_step = .01;
         options.non_orthogonal_treatment = FVM::NonOrthogonalTreatment::Explicit;
         Vec3D<ArrReal> edges;
         for (int c = 0; c < 3; ++c)
-            for (int k = 0; k <= n; ++k)
-                edges[c].push_back(double(k) / n);
-        SP<const Handle> mesh = std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(edges));
+            for (int k = 0; k <= (c == 2 ? nz : n); ++k)
+                edges[c].push_back(double(k) / (c == 2 ? nz : n));
+        SP<const Handle> mesh = Verification::make_backend_mesh<Pack>(
+            Verification::VerificationMesh{edges[0], edges[1], edges[2]}, mesh_controls);
         VectorCellFieldStored<Pack> u(mesh, vec3<double>{.1, .2, -.1}, "u");
         ScalarCellFieldStored<Pack> p(mesh, 0., "p");
         ScalarFaceFieldStored<Pack> flux(mesh, 0., "phi");
@@ -50,16 +58,31 @@ int main(int argc, char** argv)
         Solver solver(mesh);
         LinearSolverOptions linear;
         linear.tolerance = 1e-9;
-        linear.max_iterations = 400; // same restart / basis budget in every process
+        linear.max_iterations = argc >= 9 ? std::stoi(argv[8]) : 400;
+        if (linear.max_iterations < 1)
+            throw std::invalid_argument("max_iterations must be positive");
         auto now = [] { return std::chrono::steady_clock::now(); };
         auto seconds = [&](auto start) { return std::chrono::duration<double>(now() - start).count(); };
+        const auto mesh_fields_seconds = seconds(mesh_start);
+        std::ofstream fields;
+        if (argc >= 7)
+        {
+            std::filesystem::create_directories(argv[6]);
+            fields.exceptions(std::ios::badbit | std::ios::failbit);
+            fields.open(std::filesystem::path(argv[6]) / ("fields-rank" + std::to_string(comm->getRank()) + ".csv"));
+            fields << std::setprecision(17)
+                   << "generation,gid,x,y,z,ux,uy,uz,p,rhs_u,rhs_v,rhs_w,rhs_p,probe_u,probe_v,probe_w,probe_p\n";
+        }
         if (comm->getRank() == 0)
             std::cout << "{\"type\":\"metadata\",\"commit\":\"" << SIMPLEFLUID_GIT_COMMIT
                       << "\",\"dirty\":" << SIMPLEFLUID_GIT_DIRTY << ",\"compiler\":\"" << SIMPLEFLUID_COMPILER
                       << "\",\"build\":\"" << SIMPLEFLUID_BUILD_TYPE << "\",\"backend_requested\":\"" << argv[1]
                       << "\",\"backend_effective\":\"" << to_string(options.coupled_operator_backend)
                       << "\",\"workspace\":\"" << to_string(options.coupled_workspace_policy)
-                      << "\",\"ranks\":" << comm->getSize()
+                      << "\",\"mesh_backend\":\"" << mesh_controls.mesh_backend
+                      << "\",\"regions\":" << mesh_controls.regions
+                      << ",\"z_cells\":" << nz
+                      << ",\"ranks\":" << comm->getSize()
                       << ",\"global_cells\":" << mesh->owned_cell_map()->getGlobalNumElements()
                       << ",\"scalar_unknowns\":" << 4 * mesh->owned_cell_map()->getGlobalNumElements()
                       << ",\"tolerance\":" << linear.tolerance
@@ -83,9 +106,22 @@ int main(int argc, char** argv)
             long resident_pages = 0, virtual_pages = 0;
             std::ifstream("/proc/self/statm") >> virtual_pages >> resident_pages;
             const long long rss = resident_pages * sysconf(_SC_PAGESIZE), peak = usage.ru_maxrss * 1024LL;
+            long long pss = 0, private_dirty = 0, sum_pss = 0;
+            std::ifstream smaps("/proc/self/smaps_rollup");
+            for (std::string line; std::getline(smaps, line);)
+            {
+                if (line.starts_with("Pss:") || line.starts_with("Private_Dirty:"))
+                {
+                    std::istringstream value(line); std::string key; long long kib = 0;
+                    value >> key >> kib;
+                    if (key == "Pss:") pss = kib * 1024;
+                    else private_dirty = kib * 1024;
+                }
+            }
             long long maximum_peak = 0, simultaneous_sum = 0;
             Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &peak, &maximum_peak);
             Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &rss, &simultaneous_sum);
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &pss, &sum_pss);
             // Rank-ordered JSON lines, no vector/matrix gathering.
             for (int rank = 0; rank < comm->getSize(); ++rank)
             {
@@ -97,6 +133,10 @@ int main(int argc, char** argv)
                               << ",\"rss_bytes\":" << rss << ",\"peak_rss_bytes\":" << peak
                               << ",\"maximum_rank_peak_rss_bytes\":" << maximum_peak
                               << ",\"simultaneous_sum_rss_bytes\":" << simultaneous_sum
+                              << ",\"pss_bytes\":" << pss << ",\"simultaneous_sum_pss_bytes\":" << sum_pss
+                              << ",\"private_dirty_bytes\":" << private_dirty
+                              << ",\"mesh_connectivity_bytes\":" << mesh->connectivity_storage_bytes()
+                              << ",\"mesh_materialized_indexer\":" << (mesh->has_materialized_indexer() ? "true" : "false")
                               << ",\"live_matrices\":" << storage.live_matrices
                               << ",\"graph_view_bytes\":" << storage.graph_bytes
                               << ",\"value_view_bytes\":" << storage.value_bytes
@@ -107,17 +147,27 @@ int main(int argc, char** argv)
                 comm->barrier();
             }
         };
-        checkpoint("mesh_fields", 0, 0, 0, 0);
+        checkpoint("mesh_fields", mesh_fields_seconds, 0, 0, 0);
         auto start = now();
         auto system = solver.assemble(equation, u, p, flux, boundary, boundaries, options);
         checkpoint("operator_setup", seconds(start), 0, 0, 0);
         Pack::multi_vector_type x(system.map, 1), y(system.map, 1);
-        x.putScalar(1.0);
+        {
+            const auto values = x.getLocalViewHost(Tpetra::Access::OverwriteAll);
+            for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+            {
+                const auto point = mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(cell));
+                for (int component = 0; component < 4; ++component)
+                    values(4 * cell + component, 0) = .1 * (component + 1)
+                        + .01 * std::sin((component + 1) * point.x + 2 * point.y - point.z);
+            }
+        }
         system.linear_operator->apply(x, y); // consistently warm application workspace
         start = now();
         for (int k = 0; k < 20; ++k)
             system.linear_operator->apply(x, y);
         checkpoint("apply_average", seconds(start) / 20, 0, 0, 0);
+        int generation = 0;
         auto solve = [&](const char* label)
         {
             start = now();
@@ -134,9 +184,29 @@ int main(int argc, char** argv)
             }
             system.linear_operator->apply(solution, residual);
             residual.update(-1., *system.rhs, 1.);
-            checkpoint(label, elapsed, result.iterations, residual.norm2() / std::max(1e-300, system.rhs->norm2()),
-                result.continuity.l2);
-            if (!result.converged)
+            const auto true_residual = residual.norm2() / std::max(1e-300, system.rhs->norm2());
+            checkpoint(label, elapsed, result.iterations, true_residual, result.continuity.l2);
+            if (fields.is_open())
+            {
+                system.linear_operator->apply(x, y); // untimed action/RHS equivalence evidence
+                const auto rhs_values = system.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
+                const auto probe_values = y.getLocalViewHost(Tpetra::Access::ReadOnly);
+                for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+                {
+                    const auto id = static_cast<Pack::local_ordinal_type>(cell);
+                    const auto point = mesh->cell_centroid(id), value = u.value(id);
+                    fields << generation << ',' << mesh->owned_cell_map()->getGlobalElement(id) << ','
+                           << point.x << ',' << point.y << ',' << point.z << ','
+                           << value.x << ',' << value.y << ',' << value.z << ',' << p.value(id);
+                    for (int component = 0; component < 4; ++component)
+                        fields << ',' << rhs_values(4 * cell + component, 0);
+                    for (int component = 0; component < 4; ++component)
+                        fields << ',' << probe_values(4 * cell + component, 0);
+                    fields << '\n';
+                }
+            }
+            ++generation;
+            if (!result.converged || !std::isfinite(true_residual) || true_residual > linear.tolerance)
                 throw std::runtime_error("benchmark solve did not converge");
         };
         solve("first_solve_including_preconditioner");

@@ -138,6 +138,28 @@ All physical and linear tolerances remain unchanged. Explicit `--ranks` and
 `--policy` arguments override those experiment settings. The ordinary paired
 comparison launcher above retains its serial execution and solver defaults.
 
+The executable also accepts opt-in mesh and coupled-backend controls:
+
+```sh
+bottom_heated_bubbly_convection --mesh-backend isoregion --regions 2 \
+  --coupling coupled --coupled-operator block_composite \
+  --coupled-workspace streamed_products --mesh-file mesh.dat --output results
+```
+
+`--mesh-backend native|isoregion` defaults to `native`. IsoRegion partitions the
+given edge arrays into conforming Z regions and merges matching physical patch
+names; it preserves the mesh coordinates and boundary conditions. `--regions`
+defaults to one and must not exceed the number of Z cells; multiple regions
+require `isoregion`. Use identical options on every MPI rank.
+`--coupling piso|coupled` defaults to the original PISO selection. The operator
+choices `assembled|block_composite` and workspace choices
+`cached_products|streamed_products` require `--coupling coupled`. The composite
+operator avoids the monolithic coupled matrix while retaining scalar block and
+preconditioner matrices. It does not make the scalar transport solves matrix-free.
+Pressure-solver overrides describe the segregated pressure path; the coupled
+path uses its existing block GMRES/Schur solver. These controls do not change
+the case's physical or residual acceptance tolerances.
+
 ### Historical uniform-grid comparison (2026-09-08, GCC Debug / OpenFOAM v2606)
 
 Before boundary-layer refinement, the full 1000-step comparison passed its declared limits and all independent

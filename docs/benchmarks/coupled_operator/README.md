@@ -1,5 +1,32 @@
 # Coupled operator measurements (2026-09-09)
 
+The current benchmark additionally accepts optional mesh, output and size
+controls after its original arguments:
+
+```sh
+coupled_operator_memory assembled 21 cached_products native 1 output-native 24
+coupled_operator_memory block_composite 21 streamed_products isoregion 2 output-region 24
+```
+
+These examples use 10,584 cells (21×21×24). Use `45` and `48` for 97,200 cells.
+The optional final argument selects a common iteration budget (default 400),
+while the true-residual tolerance remains `1e-9`. The full positional form is
+`backend nx_and_ny [workspace] [native|isoregion] [regions] [output_dir] [nz] [max_iterations]`.
+Increasing Z beyond X/Y and choosing a Z cell count divisible by the MPI rank
+count makes native slab partitioning match canonical IsoRegion ownership.
+Physical patch names remain unchanged across the mesh
+representations.
+
+Per-rank CSVs retain coordinates, solution iterates, RHS and the action of a
+deterministic coordinate-based probe for each reached generation. Failed
+iterates are retained for diagnosis; they are not accepted solutions.
+Checkpoint JSON adds PSS, private-dirty memory and compact-mesh state. Sampled
+PSS is not a continuous peak measurement, and CRS payload is only part of
+process memory. The logged `block_size` is the requested Belos setting; the
+installed adaptive-block behavior can reduce it to the actual RHS count.
+
+The historical results below retain their original source/build scope.
+
 These are small reproducible CPU measurements of the dirty working tree based
 on `57fdfe3370f3d7a18c7e97485437675d79ec19c4`, GCC 16.2.1 Debug, Trilinos 17.2,
 Kokkos Serial. Each JSONL is a **separate process**, with identical closed-wall
