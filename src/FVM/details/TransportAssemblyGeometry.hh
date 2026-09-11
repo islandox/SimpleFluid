@@ -5,9 +5,12 @@
 #pragma once
 
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/ResolvedTransportGeometry.hh"
 
 #include <cstddef>
 #include <map>
+#include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -55,6 +58,36 @@ TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& 
             result.boundary_indices.emplace(std::pair{location.batch_id, location.in_batch_id}, face);
         }
     }
+    if constexpr (requires { mesh.supports_region_execution(); })
+    {
+        if (mesh.supports_region_execution())
+        {
+            mesh.visit_owned_region_cells([&](local_ordinal_type, auto canonical_cell,
+                                             auto native_cell, const auto& region)
+            {
+                result.volumes.push_back(region.cell_volume(native_cell));
+                region.visit_cell_faces(native_cell, [&](const auto& resolved)
+                {
+                    typename geometry_type::Face face;
+                    face.face_lid = mesh.region_face_local_id(resolved.face);
+                    face.interior = resolved.interior();
+                    face.owned_orientation = resolved.owner == canonical_cell;
+                    if (face.face_lid == mesh.invalid_local_id())
+                        throw std::logic_error("Region transport requires the incident face in the existing halo.");
+                    face.boundary = result.physical_boundary_faces[face.face_lid];
+                    if (face.interior)
+                    {
+                        face.other = mesh.region_cell_local_id(resolved.opposite_cell(canonical_cell));
+                        if (face.other == mesh.invalid_local_id())
+                            throw std::logic_error("Region transport requires the adjacent cell in the existing halo.");
+                    }
+                    result.faces.push_back(face);
+                });
+                result.face_offsets.push_back(result.faces.size());
+            });
+            return result;
+        }
+    }
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
@@ -75,6 +108,56 @@ TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& 
         result.face_offsets.push_back(result.faces.size());
     }
     return result;
+}
+
+/**
+ * @brief Visit the retained row topology with operation-local region metrics.
+ *
+ * Region traversal and the epoch-owned topology cache use the same native
+ * incidence order, including periodic and coarse/fine faces. Generic meshes
+ * keep their existing cached traversal. No face metrics survive the callback.
+ */
+template<class MeshType, class Visitor>
+void visit_transport_assembly_rows(const MeshType& mesh,
+    const TransportAssemblyGeometry<MeshType>& geometry, Visitor&& visitor)
+{
+    using local_ordinal_type = typename MeshType::local_ordinal_type;
+    if constexpr (requires { mesh.supports_region_execution(); })
+    {
+        if (mesh.supports_region_execution())
+        {
+            mesh.visit_owned_region_cells([&](local_ordinal_type cell, auto canonical_cell,
+                                             auto native_cell, const auto& region)
+            {
+                visitor(cell, geometry.volumes[cell], [&](auto&& visit_face)
+                {
+                    auto index = geometry.face_offsets[cell];
+                    const auto end = geometry.face_offsets[cell + 1];
+                    region.visit_cell_faces(native_cell, [&](const auto& resolved)
+                    {
+                        if (index == end)
+                            throw std::logic_error("Region transport geometry lost its cached incidence order.");
+                        const auto& face = geometry.faces[index++];
+                        const ResolvedTransportGeometry<MeshType, std::remove_cvref_t<decltype(resolved)>>
+                            metrics(resolved, cell, canonical_cell);
+                        visit_face(face, metrics);
+                    });
+                    if (index != end)
+                        throw std::logic_error("Region transport geometry lost its cached incidence order.");
+                });
+            });
+            return;
+        }
+    }
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        visitor(cell, geometry.volumes[owned], [&](auto&& visit_face)
+        {
+            for (size_t index = geometry.face_offsets[owned]; index < geometry.face_offsets[owned + 1]; ++index)
+                visit_face(geometry.faces[index], mesh);
+        });
+    }
 }
 
 } // namespace SimpleFluid::FVM::detail
