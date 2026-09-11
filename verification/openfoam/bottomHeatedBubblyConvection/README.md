@@ -185,6 +185,15 @@ write `nonlinear_solver_statistics.csv`, including per-step convergence,
 iteration and residual-evaluation counts, physical continuity, and backend
 timers. Timers include nested work and are not an additive phase breakdown.
 
+`--nonlinear-forcing-initial ETA` changes the initial inner-solve forcing
+tolerance (default `0.1`, allowed range `1e-6` to `0.5`) without changing the
+final nonlinear or physical acceptance gates. The opt-in
+`--nonlinear-preconditioner-update step` retains the first preconditioner in
+each physical step, refreshing it if residual progress stalls. The default
+`iteration` policy refreshes every linearization. Nonlinear CSVs also record
+native workspace/geometry/operator construction, graph reuse, Schur assembly,
+preconditioner construction/numeric refresh, and native setup time.
+
 `../run_coupled_nonlinear_performance.py` compares fresh two-rank OpenFOAM,
 PISO, coupled Krylov and NOX executions using prepared meshes and decomposed
 OpenFOAM fixtures. It records three alternating repetitions by default,

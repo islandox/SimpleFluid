@@ -3189,7 +3189,7 @@ std::unique_ptr<CoupledNonlinearProblem> BoussinesqSolver<Pack>::make_coupled_no
             turbulence ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr};
         return std::make_unique<CoupledNonlinearProblem>(d_mesh, velocity(), pressure(),
             d_problem.boundary_conditions(), d_problem.time_options(), d_problem.time_options().nonlinear,
-            pressure_reference_density(), volume_continuity_target(), &physical);
+            pressure_reference_density(), volume_continuity_target(), &physical, this->coupled_nonlinear_workspace());
     }
     throw std::invalid_argument("coupledNonlinear requires the default Tpetra pack.");
 }

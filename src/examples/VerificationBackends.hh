@@ -8,6 +8,7 @@
 #include "solvers/BelosLinearSolver.hh"
 
 #include <cctype>
+#include <cmath>
 #include <optional>
 #include <string_view>
 
@@ -24,6 +25,8 @@ struct BackendControls
     std::optional<LinearSolverBackend> nonlinear_linear_solver;
     std::optional<int> nonlinear_iterations;
     std::optional<int> nonlinear_restart;
+    std::optional<double> nonlinear_forcing_initial;
+    std::optional<CoupledPreconditionerUpdate> nonlinear_preconditioner_update;
 
     bool parse(std::string_view argument, std::string_view value)
     {
@@ -86,6 +89,23 @@ struct BackendControls
             else
                 nonlinear_restart = number;
         }
+        else if (argument == "--nonlinear-forcing-initial")
+        {
+            size_t consumed = 0;
+            const double number = std::stod(std::string(value), &consumed);
+            if (consumed != value.size() || !std::isfinite(number) || number <= 0.0 || number >= 1.0)
+                throw std::invalid_argument("--nonlinear-forcing-initial requires a finite value between zero and one");
+            nonlinear_forcing_initial = number;
+        }
+        else if (argument == "--nonlinear-preconditioner-update")
+        {
+            if (value == "iteration")
+                nonlinear_preconditioner_update = CoupledPreconditionerUpdate::EveryLinearization;
+            else if (value == "step")
+                nonlinear_preconditioner_update = CoupledPreconditionerUpdate::PerTimeStep;
+            else
+                throw std::invalid_argument("--nonlinear-preconditioner-update requires iteration or step");
+        }
         else
             return false;
         return true;
@@ -99,7 +119,8 @@ struct BackendControls
             options.pressure_velocity_coupling != PressureVelocityCoupling::CoupledKrylov &&
             options.pressure_velocity_coupling != PressureVelocityCoupling::CoupledNonlinear)
             throw std::invalid_argument("Coupled operator/workspace options require --coupling coupled or nox");
-        if ((nonlinear_method || nonlinear_linear_solver || nonlinear_iterations || nonlinear_restart) &&
+        if ((nonlinear_method || nonlinear_linear_solver || nonlinear_iterations || nonlinear_restart ||
+                nonlinear_forcing_initial || nonlinear_preconditioner_update) &&
             options.pressure_velocity_coupling != PressureVelocityCoupling::CoupledNonlinear)
             throw std::invalid_argument("Nonlinear options require --coupling nox");
         if (coupled_operator)
@@ -114,6 +135,15 @@ struct BackendControls
             options.nonlinear.maximum_iterations = *nonlinear_iterations;
         if (nonlinear_restart)
             options.nonlinear.krylov_restart = *nonlinear_restart;
+        if (nonlinear_forcing_initial)
+        {
+            if (*nonlinear_forcing_initial < options.nonlinear.forcing_minimum ||
+                *nonlinear_forcing_initial > options.nonlinear.forcing_maximum)
+                throw std::invalid_argument("--nonlinear-forcing-initial must be within the configured forcing bounds");
+            options.nonlinear.forcing_initial = *nonlinear_forcing_initial;
+        }
+        if (nonlinear_preconditioner_update)
+            options.nonlinear.preconditioner_update = *nonlinear_preconditioner_update;
     }
 };
 

@@ -397,7 +397,13 @@ foreach(simplefluid_exact_mesh_specialization_pattern
         "^SimpleFluid::PressureProjectionEquation<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::project[(].*SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
         2)
     simplefluid_require_exact_api(
-        "^SimpleFluid::CoupledPressureVelocitySolver<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble[(].*SimpleFluid::VolumeContinuityTarget<.*> const&.*[)] const$"
+        "^SimpleFluid::CoupledPressureVelocitySolver<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble[(].*SimpleFluid::VolumeContinuityTarget<.*> const&.*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
+        3)
+    # Keep the historical target overloads above independently anchored. The
+    # explicit-purpose overloads add residual-only assembly without replacing
+    # those exported entry points.
+    simplefluid_require_exact_api(
+        "^SimpleFluid::CoupledPressureVelocitySolver<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble[(].*SimpleFluid::VolumeContinuityTarget<.*> const&.*SimpleFluid::CoupledAssemblyPurpose[)] const$"
         3)
     foreach(simplefluid_fixed_flux_owner
             IN ITEMS PressureProjectionEquation CoupledPressureVelocitySolver)
