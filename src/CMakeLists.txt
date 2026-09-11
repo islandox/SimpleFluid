@@ -548,6 +548,12 @@ if(BUILD_TESTING)
   find_package(Python3 QUIET COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
     add_test(
+      NAME cavity_verification_launcher
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/cavityFlow/test_run_simplefluid.py")
+    set_tests_properties(cavity_verification_launcher PROPERTIES
+      LABELS "verification;integration" TIMEOUT 30)
+    add_test(
       NAME pitz_daily_profile_comparator_fixture
       COMMAND "${Python3_EXECUTABLE}"
               "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_compare_profiles.py")
