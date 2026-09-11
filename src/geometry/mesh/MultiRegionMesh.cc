@@ -139,27 +139,40 @@ std::optional<std::array<size_t, 2>> MultiRegionMesh::patch_coordinate(const Str
     }
     return result;
 }
-size_t MultiRegionMesh::patch_count_before(const StructuredPatch& p, ID face) const
+MultiRegionMesh::PatchFaceIndex MultiRegionMesh::patch_face_index(const StructuredPatch& p) const
 {
     auto natural = p;
     natural.axes = {0, 1}; natural.reversed = {};
     const auto origin = patch_face(natural, {0, 0});
-    if (face <= origin) return 0;
     const auto indexer = rectilinear_indexer(region_layout(p.region));
     const auto axes = tangent_axes(p.boundary);
     size_t fast = 0, slow = 1;
     if (indexer.face_strides[p.boundary / 2][axes[fast]] > indexer.face_strides[p.boundary / 2][axes[slow]]) std::swap(fast, slow);
     const auto stride_fast = indexer.face_strides[p.boundary / 2][axes[fast]];
     const auto stride_slow = indexer.face_strides[p.boundary / 2][axes[slow]];
-    const auto delta = face - origin;
-    const auto rows = std::min<size_t>(p.extent[slow], delta / stride_slow);
-    if (rows == p.extent[slow]) return p.extent[0] * p.extent[1];
-    const auto remaining = delta - rows * stride_slow;
-    return rows * p.extent[fast] + std::min<size_t>(p.extent[fast], remaining / stride_fast + (remaining % stride_fast != 0));
+    return {origin, origin + (p.extent[slow]-1) * stride_slow + (p.extent[fast]-1) * stride_fast + 1,
+        stride_fast, stride_slow, p.extent[fast], p.extent[slow], p.extent[0] * p.extent[1]};
+}
+size_t MultiRegionMesh::PatchFaceIndex::count_before(ID face) const noexcept
+{
+    if (face <= begin) return 0;
+    if (face >= end) return count;
+    const auto delta = face - begin;
+    const auto rows = std::min<size_t>(slow_extent, delta / slow_stride);
+    const auto remaining = delta - rows * slow_stride;
+    return rows * fast_extent + std::min<size_t>(fast_extent, remaining / fast_stride + (remaining % fast_stride != 0));
 }
 void MultiRegionMesh::initialize_interface_directory()
 {
     d_region_interfaces.resize(d_regions.size());
+    d_removed_patch_index.resize(d_interfaces.size());
+    std::vector<unsigned> removed_sides(d_regions.size());
+    for (size_t r = 0; r < d_regions.size(); ++r)
+    {
+        const auto family = region_layout(r).family;
+        d_region_interfaces[r].direct_selection = family == RegionLayout::Family::Rectilinear
+            || family == RegionLayout::Family::Cylindrical;
+    }
     const auto visit_sides = [&](auto&& visitor)
     {
         for (size_t i = 0; i < d_interfaces.size(); ++i)
@@ -190,6 +203,19 @@ void MultiRegionMesh::initialize_interface_directory()
             const auto removed = s ? s->second.extent[0] * s->second.extent[1]
                 : d_explicit[i].second_to_first.size();
             directory.removed_faces = checked_add(directory.removed_faces, removed);
+            if (s)
+            {
+                d_removed_patch_index[i] = patch_face_index(s->second);
+                const auto& patch = s->second;
+                const auto axes = tangent_axes(patch.boundary);
+                const auto& layout = region_layout(r);
+                const bool full = patch.begin == std::array<size_t, 2>{0, 0}
+                    && patch.extent[0] == layout.extents[axes[0]]
+                    && patch.extent[1] == layout.extents[axes[1]];
+                directory.direct_selection = directory.direct_selection && full;
+                if (full) removed_sides[r] |= 1U << patch.boundary;
+            }
+            else directory.direct_selection = false;
         }
     });
     size_t offset = 0;
@@ -212,6 +238,23 @@ void MultiRegionMesh::initialize_interface_directory()
     {
         d_interface_sides[cursor[r][bucket]++] = {i, first};
     });
+    for (size_t r = 0; r < d_regions.size(); ++r)
+    {
+        auto& directory = d_region_interfaces[r];
+        if (!directory.direct_selection) continue;
+        const auto indexer = rectilinear_indexer(region_layout(r));
+        ID retained_begin = 0;
+        for (size_t orientation = 0; orientation < 3; ++orientation)
+        {
+            const auto low = (removed_sides[r] >> (2 * orientation)) & 1U;
+            const auto high = (removed_sides[r] >> (2 * orientation + 1)) & 1U;
+            const size_t native_run = indexer.num_nodes_per_dim[orientation];
+            const size_t retained_run = native_run - low - high;
+            directory.selection[orientation] = {indexer.face_offsets[orientation], retained_begin,
+                native_run, retained_run, low};
+            retained_begin += indexer.num_faces_per_orientation[orientation] / native_run * retained_run;
+        }
+    }
 }
 std::span<const MultiRegionMesh::InterfaceSide> MultiRegionMesh::interface_sides(size_t r, size_t bucket) const
 {
@@ -234,13 +277,25 @@ size_t MultiRegionMesh::removed_before(size_t r, ID face) const
 {
     const auto& directory = d_region_interfaces.at(r);
     if (!directory.removed_faces) return 0;
+    if (directory.direct_selection)
+    {
+        const auto& selections = directory.selection;
+        const auto& selection = selections[face < selections[1].native_begin ? 0
+            : face < selections[2].native_begin ? 1 : 2];
+        const auto removed_per_run = selection.native_run - selection.retained_run;
+        if (!removed_per_run) return selection.native_begin - selection.retained_begin;
+        const auto local = face - selection.native_begin;
+        return selection.native_begin - selection.retained_begin
+            + (local / selection.native_run) * removed_per_run
+            + (selection.skip_low && local % selection.native_run != 0);
+    }
     size_t count=0;
     for (size_t side = directory.offsets.front(); side < directory.offsets.back(); ++side)
     {
         const auto [i, first] = d_interface_sides[side];
         if (first) continue;
-        if(const auto* s=std::get_if<StructuredPatchInterface>(&d_interfaces[i]))
-            count+=patch_count_before(s->second,face);
+        if(const auto& patch = d_removed_patch_index[i]; patch.count)
+            count += patch.count_before(face);
         else
         {
             const auto& pairs=d_explicit[i].second_to_first;
@@ -354,7 +409,20 @@ RegionFace MultiRegionMesh::native_face(ID f) const
     if (f >= num_faces()) throw std::out_of_range("Composite face out of bounds.");
     const size_t r = std::upper_bound(d_faces.begin(), d_faces.end(), f) - d_faces.begin() - 1;
     const ID ordinal = f - d_faces[r];
-    if (!d_region_interfaces[r].removed_faces) return {r, ordinal};
+    const auto& directory = d_region_interfaces[r];
+    if (!directory.removed_faces) return {r, ordinal};
+    if (directory.direct_selection)
+    {
+        const auto& selections = directory.selection;
+        const auto& selection = selections[ordinal < selections[1].retained_begin ? 0
+            : ordinal < selections[2].retained_begin ? 1 : 2];
+        const auto local = ordinal - selection.retained_begin;
+        const auto removed_per_run = selection.native_run - selection.retained_run;
+        if (!removed_per_run) return {r, selection.native_begin + local};
+        return {r, selection.native_begin + local
+            + (local / selection.retained_run) * removed_per_run
+            + selection.skip_low};
+    }
     ID lo = ordinal, hi = region_layout(r).faces;
     // Rank/select through removed rectangular ranges or sorted irregular IDs.
     while (lo < hi)
@@ -1029,7 +1097,8 @@ MeshStorageReport MultiRegionMesh::storage_report() const
     result.objects = sizeof(*this) + d_regions.capacity() * sizeof(Region);
     result.indexing = (d_cells.capacity() + d_faces.capacity() + d_nodes.capacity() + d_native_faces.capacity()) * sizeof(ID);
     result.indexing += d_region_interfaces.capacity() * sizeof(RegionInterfaceDirectory)
-        + d_interface_sides.capacity() * sizeof(InterfaceSide);
+        + d_interface_sides.capacity() * sizeof(InterfaceSide)
+        + d_removed_patch_index.capacity() * sizeof(PatchFaceIndex);
     result.interfaces = d_interfaces.capacity() * sizeof(Interface) + d_explicit.capacity() * sizeof(ExplicitLookup);
     for (size_t i = 0; i < d_interfaces.size(); ++i)
     {

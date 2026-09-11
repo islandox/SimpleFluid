@@ -53,6 +53,181 @@ void check_canonical_incidence(const MultiRegionMesh& mesh)
         EXPECT_EQ(incidence[f], mesh.is_exterior_face(f) ? 1U : 2U);
     }
 }
+
+// Independently mark removed native faces from the public interface descriptions;
+// canonical IDs must enumerate every remaining face in region/native-ID order.
+// This catches a mutually consistent but reordered rank/select implementation.
+void check_reference_face_order(const MultiRegionMesh& mesh)
+{
+    std::vector<std::vector<bool>> removed;
+    for (size_t r = 0; r < mesh.regions().size(); ++r)
+        removed.emplace_back(mesh.region_layout(r).faces, false);
+    for (const auto& interface : mesh.interfaces())
+        if (const auto* structured = std::get_if<StructuredPatchInterface>(&interface))
+        {
+            const auto& patch = structured->second;
+            const auto& layout = mesh.region_layout(patch.region);
+            const OrthogonalIndexer indexer(static_cast<unsigned>(layout.extents[0]),
+                static_cast<unsigned>(layout.extents[1]), static_cast<unsigned>(layout.extents[2]),
+                layout.periodic[0], layout.periodic[1], layout.periodic[2]);
+            for (size_t f = 0; f < layout.faces; ++f)
+            {
+                const auto face = indexer.face_id(f);
+                if (face.orientation != patch.boundary / 2) continue;
+                const std::array<size_t, 3> coordinate{face.i, face.j, face.k};
+                if (coordinate[face.orientation] != (patch.boundary % 2 ? layout.extents[face.orientation] : 0)) continue;
+                size_t tangent = 0;
+                bool in_patch = true;
+                for (size_t axis = 0; axis < 3; ++axis)
+                    if (axis != face.orientation)
+                    {
+                        in_patch = in_patch && coordinate[axis] >= patch.begin[tangent]
+                            && coordinate[axis] < patch.begin[tangent] + patch.extent[tangent];
+                        ++tangent;
+                    }
+                if (in_patch) removed[patch.region][f] = true;
+            }
+        }
+        else if (const auto* explicit_interface = std::get_if<ExplicitConformingInterface>(&interface))
+            for (const auto& pair : explicit_interface->faces) removed[explicit_interface->second_region][pair.second] = true;
+        else
+        {
+            const auto& refined = std::get<NonconformingInterface>(interface);
+            for (const auto& group : refined.faces) removed[refined.coarse_region][group.coarse_face] = true;
+        }
+    size_t canonical = 0;
+    for (size_t r = 0; r < removed.size(); ++r)
+        for (size_t native = 0; native < removed[r].size(); ++native)
+            if (!removed[r][native])
+            {
+                ASSERT_EQ(mesh.native_face(canonical), (RegionFace{r, native}));
+                ASSERT_EQ(mesh.canonical_face({r, native}), canonical);
+                ++canonical;
+            }
+    EXPECT_EQ(canonical, mesh.num_faces());
+    EXPECT_THROW(mesh.native_face(canonical), std::out_of_range);
+}
+
+Vec3D<ArrReal> unit_edges(const std::array<size_t, 3>& dimensions)
+{
+    Vec3D<ArrReal> edges;
+    for (size_t axis = 0; axis < 3; ++axis)
+        for (size_t i = 0; i <= dimensions[axis]; ++i)
+            edges[axis].push_back(real_t(i) / dimensions[axis]);
+    return edges;
+}
+
+SP<MultiRegionMesh> full_side_star(const std::array<size_t, 3>& dimensions, unsigned removed_sides)
+{
+    const auto edges = unit_edges(dimensions);
+    std::vector<MultiRegionMesh::Region> regions{cartesian_region("center", edges)};
+    std::vector<MultiRegionMesh::Interface> interfaces;
+    for (int boundary = 0; boundary < 6; ++boundary)
+        if (removed_sides & (1U << boundary))
+        {
+            auto adjacent = edges;
+            for (auto& coordinate : adjacent[boundary/2]) coordinate += boundary % 2 ? 1 : -1;
+            const auto r = regions.size();
+            regions.push_back(cartesian_region(std::to_string(r), adjacent));
+            interfaces.push_back(StructuredPatchInterface{{r, boundary^1}, {0, boundary}});
+        }
+    return std::make_shared<MultiRegionMesh>(std::move(regions), std::move(interfaces));
+}
+}
+
+TEST(RegionInterfaceIndexTest, FullSideSelectionMatchesReferenceForEverySideSubset)
+{
+    for (const std::array<size_t, 3> dimensions : {std::array<size_t, 3>{1,1,1}, {1,2,3}, {2,3,4}, {4,2,1}})
+        for (unsigned mask = 0; mask < 64; ++mask)
+        {
+            SCOPED_TRACE(testing::Message() << "dimensions=" << dimensions[0] << ',' << dimensions[1]
+                << ',' << dimensions[2] << " sides=" << mask);
+            check_reference_face_order(*full_side_star(dimensions, mask));
+        }
+    const auto small = full_side_star({1,1,1}, 63)->storage_report();
+    const auto large = full_side_star({8,9,10}, 63)->storage_report();
+    EXPECT_EQ(small.indexing, large.indexing);
+    EXPECT_EQ(small.interfaces, large.interfaces);
+    EXPECT_EQ(large.compatibility, 0U);
+}
+
+TEST(RegionInterfaceIndexTest, PatchParametrizationsPreserveFullAndPartialFaceOrder)
+{
+    const std::array<size_t, 3> dimensions{3,4,5};
+    const auto edges = unit_edges(dimensions);
+    for (int boundary = 0; boundary < 6; ++boundary)
+        for (const bool partial : {false, true})
+            for (unsigned mapping = 0; mapping < 64; ++mapping)
+            {
+                SCOPED_TRACE(testing::Message() << "boundary=" << boundary << " partial=" << partial << " mapping=" << mapping);
+                auto adjacent = edges;
+                for (auto& coordinate : adjacent[boundary/2]) coordinate += boundary % 2 ? 1 : -1;
+                StructuredPatchInterface seam{{1, boundary^1}, {0, boundary}};
+                if (partial)
+                {
+                    size_t tangent = 0;
+                    for (size_t axis = 0; axis < 3; ++axis)
+                        if (axis != static_cast<size_t>(boundary/2))
+                        {
+                            seam.second.begin[tangent] = 1;
+                            seam.second.extent[tangent] = dimensions[axis] - 2;
+                            adjacent[axis] = ArrReal(edges[axis].begin()+1, edges[axis].end()-1);
+                            ++tangent;
+                        }
+                }
+                if (mapping & 1U) seam.first.axes = {1,0};
+                if (mapping & 2U) seam.second.axes = {1,0};
+                seam.first.reversed = {(mapping & 4U) != 0, (mapping & 8U) != 0};
+                seam.second.reversed = {(mapping & 16U) != 0, (mapping & 32U) != 0};
+                for (size_t output = 0; output < 2; ++output)
+                {
+                    const auto input = seam.first.axes[0] == seam.second.axes[output] ? 0U : 1U;
+                    seam.permutation[output] = input;
+                    seam.reversed[output] = seam.first.reversed[input] != seam.second.reversed[output];
+                }
+                std::vector<MultiRegionMesh::Region> regions{cartesian_region("center", edges), cartesian_region("adjacent", adjacent)};
+                std::vector<MultiRegionMesh::Interface> interfaces{seam};
+                if (partial && mapping == 0)
+                {
+                    // A full side in another orientation must still contribute
+                    // to the cached partial-patch fallback's prefix counts.
+                    const int other_boundary = (boundary + 2) % 6;
+                    auto other_edges = edges;
+                    for (auto& coordinate : other_edges[other_boundary/2]) coordinate += other_boundary % 2 ? 1 : -1;
+                    regions.push_back(cartesian_region("other", other_edges));
+                    interfaces.push_back(StructuredPatchInterface{{2, other_boundary^1}, {0, other_boundary}});
+                }
+                MultiRegionMesh mesh(std::move(regions), std::move(interfaces));
+                check_reference_face_order(mesh);
+            }
+}
+
+TEST(RegionInterfaceIndexTest, SelfPeriodicSelectionCoversEveryOrientationAndNativePeriodicTangents)
+{
+    const auto edges = unit_edges({2,3,4});
+    for (size_t orientation = 0; orientation < 3; ++orientation)
+        for (const bool reverse_owner : {false, true})
+        {
+            StructuredPatchInterface seam{{0, static_cast<int>(2*orientation + reverse_owner)},
+                {0, static_cast<int>(2*orientation + !reverse_owner)}};
+            const real_t distance = reverse_owner ? -1 : 1;
+            seam.periodic_translation = MeshUtils::Vec3{orientation == 0 ? distance : 0,
+                orientation == 1 ? distance : 0, orientation == 2 ? distance : 0};
+            MultiRegionMesh mesh({cartesian_region("periodic", edges)}, {seam});
+            check_reference_face_order(mesh);
+        }
+
+    StructuredPatchInterface seam{{0,5}, {1,4}};
+    auto lower = edges;
+    for (auto& radius : lower[0]) radius += 1;
+    for (auto& theta : lower[1]) theta *= 2 * std::acos(-1.0);
+    auto upper = lower;
+    for (auto& z : upper[2]) z += 1;
+    auto lower_native = std::make_shared<OrthogonalCylindrial3D>(lower);
+    auto upper_native = std::make_shared<OrthogonalCylindrial3D>(upper);
+    MultiRegionMesh tangential_periodic({native_region("lower", lower_native), native_region("upper", upper_native)}, {seam});
+    check_reference_face_order(tangential_periodic);
+    check_reference_face_order(*test::cylindrical_regions());
 }
 
 TEST(RegionInterfaceIndexTest, ManyRegionsRetainOnlyIncidentSidesAndDirectOrdinals)
@@ -84,6 +259,7 @@ TEST(RegionInterfaceIndexTest, ManyRegionsRetainOnlyIncidentSidesAndDirectOrdina
     EXPECT_EQ(mesh->storage_report().interfaces, finer->storage_report().interfaces);
     EXPECT_EQ(finer->storage_report().compatibility, 0U);
     EXPECT_THROW(mesh->region_interface_side_count(regions), std::out_of_range);
+    check_reference_face_order(*mesh);
 }
 
 TEST(RegionInterfaceIndexTest, BoundaryBucketsCoverAllOrientations)
@@ -137,6 +313,7 @@ TEST(RegionInterfaceIndexTest, DisjointSubpatchesShareOneNativeBoundaryBucket)
                     mesh.canonical_face({0, mesh.patch_face(interface.second,{y,z})}));
     }
     check_canonical_incidence(mesh);
+    check_reference_face_order(mesh);
     EXPECT_THROW((MultiRegionMesh({left, lower, upper}, {low, high, right, low})), std::invalid_argument);
 }
 
@@ -149,6 +326,7 @@ TEST(RegionInterfaceIndexTest, IrregularDirectoryPreservesExplicitAndCoarseFineT
         EXPECT_EQ(explicit_mesh->canonical_face({explicit_interface.first_region, first}),
             explicit_mesh->canonical_face({explicit_interface.second_region, second}));
     check_canonical_incidence(*explicit_mesh);
+    check_reference_face_order(*explicit_mesh);
 
     const auto refined = test::coarse_fine_regions();
     const auto& interface = std::get<NonconformingInterface>(refined->interfaces()[0]);
@@ -170,6 +348,7 @@ TEST(RegionInterfaceIndexTest, IrregularDirectoryPreservesExplicitAndCoarseFineT
         EXPECT_THROW(refined->canonical_face(coarse), std::invalid_argument);
     }
     check_canonical_incidence(*refined);
+    check_reference_face_order(*refined);
 }
 
 TEST(RegionInterfaceIndexTest, SelfPeriodicSidesPreserveAdjacentImageDistances)

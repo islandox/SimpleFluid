@@ -491,6 +491,14 @@ public:
         return geometry_to_local_cell(cell);
     }
 
+    /** @brief Translate a resolved canonical face into the existing owned/ghost field map. */
+    local_ordinal_type region_face_local_id(MultiRegion::ID face) const
+    {
+        if (!std::holds_alternative<MultiRegionPtr>(d_mesh))
+            throw std::logic_error("Resolved region faces require a composite mesh.");
+        return geometry_to_local_face(face);
+    }
+
     /** @brief Resolve one visible canonical face into an operation-local geometry snapshot. */
     auto resolve_region_face(local_ordinal_type face) const
     {
