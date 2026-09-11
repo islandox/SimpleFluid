@@ -44,16 +44,25 @@ change does not introduce a separate input-file parser.
 
 The initial mode supports fixed orthogonal native finite-volume meshes,
 backward Euler, first-order upwind convection, constant nonnegative kinematic
-viscosity, prescribed Dirichlet/NoSlip velocity and Neumann pressure on
-physical boundaries, and mesh periodic interfaces. The selected native
-least-squares or Gauss-linear pressure reconstruction is retained.
+viscosity, prescribed Dirichlet/NoSlip or axis-aligned Slip velocity and
+Neumann pressure on physical boundaries, and mesh periodic interfaces. The
+selected native least-squares or Gauss-linear pressure reconstruction is retained.
 
 Built-in physical/material isothermal and Boussinesq solvers, custom momentum
-subclasses, legacy mesh drivers, pressure outlets, extrapolated/slip velocity
+subclasses, legacy mesh drivers, pressure outlets, extrapolated/oblique-slip velocity
 boundaries, nonorthogonal geometry, and moving-mesh contexts are unsupported.
 They are rejected rather than silently losing their momentum sources or
 stress terms. Temperature, turbulence, gas, material feedback, and ALE are
 future extensions requiring their own trial residual and state contracts.
+
+Axis-aligned slip faces retain the native kinematic momentum treatment and
+have identically zero normal flux for every trial and directional state.
+This supports the original one-layer Re=100 and Re=1000 cavity fixtures
+without changing their mesh or wall conditions. See the
+[cavity launcher](../../verification/openfoam/cavityFlow/README.md) for NOX
+selection and profile export. Oblique slip is rejected because its normal
+projection does not share this exact zero-flux property in floating-point
+arithmetic.
 
 The standalone `CoupledNonlinearProblem` also accepts a positive reference
 density and an immutable `VolumeContinuityTarget`. All-Neumann compatibility

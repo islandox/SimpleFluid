@@ -34,6 +34,20 @@ endforeach()
 target_sources(testBoussinesqSolver PRIVATE
   PressureGradientStencilTestSupport.cc)
 
+if(SIMPLEFLUID_ENABLE_NOX)
+  simplefluid_add_mpi_test(
+      NAME CavityNoxVerification_2procs
+      TARGET testVerificationCases
+      PROCS 2
+      ARGS "--gtest_filter=VerificationCasesTest.LidDrivenCavityRe100Nox:VerificationCasesTest.LidDrivenCavityRe1000Nox"
+      LABELS "verification;integration;mpi;nonlinear_solver"
+      TIMEOUT 180)
+  if(TEST CavityNoxVerification_2procs)
+    set_tests_properties(CavityNoxVerification_2procs PROPERTIES
+        ENVIRONMENT "SIMPLEFLUID_PROFILE_OUTPUT_DIR=")
+  endif()
+endif()
+
 simplefluid_add_mpi_test(
     NAME CoupledNonlinearSolver_2procs
     TARGET testCoupledNonlinearSolver

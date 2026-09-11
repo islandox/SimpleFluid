@@ -411,9 +411,21 @@ struct CoupledNonlinearProblem::Impl
                 const auto& name = mesh->boundary_batch_name(location.batch_id);
                 const auto velocity = boundaries.velocity.find(name);
                 const auto p = boundaries.pressure.find(name);
+                // Native Slip projection has exactly zero normal velocity on
+                // coordinate planes. It therefore contributes neither an
+                // advective boundary term nor a trial-dependent continuity
+                // source; native component diffusion also excludes Slip.
+                // Require exact Cartesian normals rather than tolerances so
+                // those cancellations hold for every trial and direction.
+                const auto normal = mesh->face_normal_outward(face, lid);
+                const bool axis_aligned =
+                    (std::abs(normal.x) == 1. && normal.y == 0. && normal.z == 0.) ||
+                    (normal.x == 0. && std::abs(normal.y) == 1. && normal.z == 0.) ||
+                    (normal.x == 0. && normal.y == 0. && std::abs(normal.z) == 1.);
                 valid_boundaries = valid_boundaries && velocity != boundaries.velocity.end() &&
                                    (velocity->second.type == BoundaryConditionType::Dirichlet ||
-                                       velocity->second.type == BoundaryConditionType::NoSlip) &&
+                                       velocity->second.type == BoundaryConditionType::NoSlip ||
+                                       (velocity->second.type == BoundaryConditionType::Slip && axis_aligned)) &&
                                    (p == boundaries.pressure.end() || p->second.type == BoundaryConditionType::Neumann);
             }
         }
@@ -422,6 +434,7 @@ struct CoupledNonlinearProblem::Impl
                                std::isfinite(condition.value.y) && std::isfinite(condition.value.z) &&
                                (condition.type == BoundaryConditionType::Dirichlet ||
                                    condition.type == BoundaryConditionType::NoSlip ||
+                                   condition.type == BoundaryConditionType::Slip ||
                                    condition.type == BoundaryConditionType::Periodic);
         for (const auto& [name, condition] : boundaries.pressure)
             valid_boundaries =
@@ -430,8 +443,8 @@ struct CoupledNonlinearProblem::Impl
         collective_require(
             *mesh, orthogonal, "CoupledNonlinearProblem currently requires fixed orthogonal finite-volume geometry.");
         collective_require(*mesh, valid_boundaries,
-            "CoupledNonlinearProblem currently supports prescribed Dirichlet/NoSlip velocity and Neumann pressure "
-            "on physical boundaries, plus mesh periodic interfaces.");
+            "CoupledNonlinearProblem currently supports prescribed Dirichlet/NoSlip or axis-aligned Slip velocity "
+            "and Neumann pressure on physical boundaries, plus mesh periodic interfaces.");
         std::erase_if(boundaries.velocity,
             [](const auto& entry) { return entry.second.type == BoundaryConditionType::Periodic; });
         std::erase_if(boundaries.pressure,

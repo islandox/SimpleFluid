@@ -25,7 +25,8 @@ struct CoupledNonlinearProblemStatistics
 /**
  * Fixed orthogonal-mesh, constant-viscosity backward-Euler momentum and
  * pressure problem. Physical boundaries prescribe velocity (including
- * NoSlip) and Neumann pressure; mesh periodic interfaces are supported.
+ * NoSlip) or use axis-aligned Slip, with Neumann pressure; mesh periodic
+ * interfaces are supported.
  * All histories and boundary values are copied at construction. Callbacks
  * own the private problem context and never write accepted solver fields.
  * Instances and retained Jacobian actions are sequential-use objects.
