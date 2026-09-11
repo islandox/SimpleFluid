@@ -22,6 +22,8 @@ option(SIMPLEFLUID_BUILD_DOCS
        "Enable the Doxygen API-documentation target" OFF)
 option(SIMPLEFLUID_ENABLE_IF97
        "Build the optional IAPWS-IF97 water material library" OFF)
+option(SIMPLEFLUID_ENABLE_NOX
+       "Build the optional NOX/Thyra coupled nonlinear solver" OFF)
 option(SIMPLEFLUID_ENABLE_LTO
        "Enable link-time optimization in Release and RelWithDebInfo" ON)
 include(CTest)
@@ -105,7 +107,7 @@ endif()
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -fno-omit-frame-pointer -DNDEBUG")
 set(CMAKE_C_FLAGS_RELWITHDEBINFO   "${CMAKE_C_FLAGS_RELWITHDEBINFO} -fno-omit-frame-pointer")
 
-find_package(Trilinos REQUIRED COMPONENTS
+set(SIMPLEFLUID_TRILINOS_COMPONENTS
     Kokkos
     Teuchos
     Tpetra
@@ -118,7 +120,41 @@ find_package(Trilinos REQUIRED COMPONENTS
     MueLu
     Zoltan2
 )
+if(SIMPLEFLUID_ENABLE_NOX)
+    list(APPEND SIMPLEFLUID_TRILINOS_COMPONENTS NOX ThyraCore ThyraTpetraAdapters)
+endif()
+find_package(Trilinos REQUIRED COMPONENTS ${SIMPLEFLUID_TRILINOS_COMPONENTS})
 find_package(MPI REQUIRED COMPONENTS CXX)
+if(SIMPLEFLUID_ENABLE_NOX)
+    include(CheckCXXSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_INCLUDES
+        ${Trilinos_INCLUDE_DIRS} ${Trilinos_TPL_INCLUDE_DIRS} ${MPI_CXX_INCLUDE_DIRS})
+    set(_simplefluid_previous_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+    # Recheck when the selected Trilinos installation changes in this tree.
+    unset(SIMPLEFLUID_TRILINOS_HAS_NOX_THYRA CACHE)
+    check_cxx_source_compiles([[
+        #include <NOX_Config.h>
+        #ifndef HAVE_NOX_THYRA
+        #error "NOX was built without Thyra support"
+        #endif
+        int main() { return 0; }
+    ]] SIMPLEFLUID_TRILINOS_HAS_NOX_THYRA)
+    if(_simplefluid_previous_try_compile_target_type)
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_simplefluid_previous_try_compile_target_type}")
+    else()
+        unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+    endif()
+    unset(_simplefluid_previous_try_compile_target_type)
+    cmake_pop_check_state()
+    if(NOT SIMPLEFLUID_TRILINOS_HAS_NOX_THYRA)
+        message(FATAL_ERROR
+            "SIMPLEFLUID_ENABLE_NOX requires NOX with Thyra support and Tpetra adapters "
+            "in the selected Trilinos installation.")
+    endif()
+endif()
 
 set(SIMPLEFLUID_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrecompiledHeaders.hh")
 

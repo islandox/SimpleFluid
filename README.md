@@ -42,6 +42,7 @@ quantitative bubbly-flow validation remain open.
 | Momentum equation (transient + convection + diffusion) | ✅ |
 | Pressure–velocity coupling (SIMPLE/PISO/PIMPLE) | ✅ |
 | Coupled Krylov solver (block Schur + MueLu AMG) | ✅ |
+| Optional NOX nonlinear velocity-pressure solver (native fixed orthogonal mesh, constant kinematic viscosity) | ✅ |
 | Rhie–Chow collocated stabilization | ✅ |
 | Verification suite (cavity smoke cases, Poiseuille, MMS) | ✅ |
 | External OpenFOAM profile-comparison workflow | ✅ |
@@ -127,6 +128,7 @@ Three non-orthogonal treatments, selectable at runtime:
 | `PISO` | One momentum predictor + multiple pressure corrections per step |
 | `PIMPLE` | Outer nonlinear loop with inner PISO corrections |
 | `coupledKrylov` | $\begin{bmatrix}A_u & G \\ D & C\end{bmatrix}$ system (including Rhie–Chow stabilization) with a block Schur preconditioner and MueLu AMG on the Schur complement |
+| `coupledNonlinear` | Optional NOX/Thyra nonlinear solve with analytic convection derivatives, native Schur preconditioning, and transactional acceptance; see [supported scope and configuration](docs/architecture/coupled_nonlinear_solver.md) |
 
 The coupled Krylov solver uses Belos **block GMRES** with an Ifpack2/MueLu
 block-preconditioning strategy for robust convergence on challenging meshes.

@@ -10,6 +10,7 @@
  */
 
 #include "FluidSolver.hh"
+#include "solvers/CoupledNonlinearProblem.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -17,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <typeinfo>
 #include <vector>
 
 namespace SimpleFluid
@@ -297,6 +299,8 @@ FluidSolver<Pack>::FluidSolver(
                 linear_options)
 {
     retain_mutable_mesh_handle(std::move(mutable_mesh));
+    d_has_base_momentum_equation = register_momentum_equation;
+    d_nonlinear_geometry_epoch = mesh_geometry_epoch(*d_mesh);
     if (d_legacy_mesh && d_mesh->has_reordered_cells())
     {
         throw std::invalid_argument(
@@ -1318,6 +1322,125 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
     sync_primary_fields_from_legacy();
 }
 
+/** Validate mode selection before rank-dependent control flow or mutation. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::validate_pressure_velocity_selection() const
+{
+    const int local_mode = static_cast<int>(d_problem.time_options().pressure_velocity_coupling);
+    int minimum = 0, maximum = 0;
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_mode, &minimum);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_mode, &maximum);
+    if (minimum != maximum || minimum < static_cast<int>(PressureVelocityCoupling::SIMPLE) ||
+        maximum > static_cast<int>(PressureVelocityCoupling::CoupledNonlinear))
+    {
+        throw std::invalid_argument("Invalid or rank-divergent pressure-velocity coupling mode.");
+    }
+    if (local_mode != static_cast<int>(PressureVelocityCoupling::CoupledNonlinear))
+        return;
+#ifndef SIMPLEFLUID_ENABLE_NOX
+    throw std::invalid_argument("coupledNonlinear requires SIMPLEFLUID_ENABLE_NOX=ON.");
+#else
+    const int local_unsupported = !d_has_base_momentum_equation || uses_legacy_backend() ||
+        typeid(*this) != typeid(FluidSolver<Pack>) ||
+        mesh_geometry_epoch(*d_mesh) != d_nonlinear_geometry_epoch ||
+        !std::same_as<Pack, DefaultTpetraTypes>;
+    int unsupported = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_unsupported, &unsupported);
+    if (unsupported)
+    {
+        throw std::invalid_argument("coupledNonlinear currently requires the native constant-viscosity "
+            "FluidSolver on unchanged geometry; material, thermal, turbulence, and legacy solver paths "
+            "are not supported.");
+    }
+#endif
+}
+
+/** Solve a private nonlinear timestep and publish only a qualified candidate. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::solve_coupled_nonlinear()
+{
+#ifdef SIMPLEFLUID_ENABLE_NOX
+    if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
+    {
+        const auto& time_options = d_problem.time_options();
+        CoupledNonlinearProblem problem(d_mesh, velocity(), pressure(), d_problem.boundary_conditions(),
+            time_options, time_options.nonlinear, pressure_reference_density(), volume_continuity_target());
+        auto callbacks = problem.callbacks();
+        auto state = problem.pack_initial();
+        if (!d_nonlinear_solver)
+            d_nonlinear_solver = std::make_unique<NOXNonlinearSolver>(callbacks);
+        else
+            d_nonlinear_solver->set_callbacks(callbacks);
+        auto result = d_nonlinear_solver->solve(*state, time_options.nonlinear, d_problem.linear_options());
+        if (!result.converged)
+            throw std::runtime_error("FluidSolver coupled nonlinear solve failed: " + result.reason);
+        typename Pack::vector_type final_residual(callbacks.map, true);
+        if (!callbacks.residual(*state, final_residual))
+            throw std::runtime_error("FluidSolver nonlinear final residual evaluation failed.");
+        ++result.residual_evaluations;
+        const auto continuity = problem.continuity();
+        if (!std::isfinite(continuity.maximum) || continuity.maximum > time_options.nonlinear.continuity_tolerance)
+            throw std::runtime_error("FluidSolver nonlinear candidate failed the physical continuity gate.");
+
+        // The supported pressure-Neumann problem fixes the minimum cell GID.
+        // Enforce that row absolutely; a large initial pressure must not loosen
+        // its gauge through the relative component residual criterion.
+        const auto gauge_gid = d_mesh->owned_cell_map()->getMinAllGlobalIndex();
+        scalar_type local_gauge_error{};
+        {
+            const auto solved = state->getLocalViewHost(Tpetra::Access::ReadOnly);
+            for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+                if (d_mesh->owned_cell_map()->getGlobalElement(static_cast<local_ordinal_type>(cell)) == gauge_gid)
+                    local_gauge_error = std::abs(solved(4 * cell + 3, 0)) / time_options.nonlinear.pressure_scale;
+        }
+        if (global_sum(local_gauge_error) > time_options.nonlinear.absolute_tolerance)
+            throw std::runtime_error("FluidSolver nonlinear candidate failed the pressure gauge gate.");
+
+        // Keep historical momentum diagnostics as a physical velocity update
+        // norm; equation residuals have separate nonlinear diagnostics.
+        scalar_type local_update_squared{};
+        {
+            const auto solved = state->getLocalViewHost(Tpetra::Access::ReadOnly);
+            const auto before = velocity().owned_read_view();
+            for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+            {
+                const auto lid = static_cast<local_ordinal_type>(cell);
+                for (int component = 0; component < 3; ++component)
+                {
+                    const auto difference = solved(4 * cell + component, 0) - before(lid, component);
+                    local_update_squared += difference * difference * d_mesh->cell_volume(lid);
+                }
+            }
+        }
+        const auto momentum_update = std::sqrt(global_sum(local_update_squared));
+        step_statistics_type statistics;
+        statistics.converged = true;
+        statistics.nonlinear_iterations = result.nonlinear_iterations;
+        statistics.linear_solves = result.linear_solves;
+        statistics.krylov_iterations = result.krylov_iterations;
+        statistics.achieved_tolerance = result.achieved_linear_tolerance;
+        statistics.momentum = momentum_update;
+        statistics.pressure = result.achieved_linear_tolerance;
+        statistics.continuity = continuity.l2;
+        residual_type residuals;
+        residuals.momentum = momentum_update;
+        residuals.pressure = result.achieved_linear_tolerance;
+        residuals.continuity = continuity.l2;
+        residuals.achieved_tolerance = result.achieved_linear_tolerance;
+        residuals.linear_iterations = result.krylov_iterations;
+
+        problem.commit(*state, velocity(), pressure(), projected_face_fluxes());
+        d_last_step_statistics = statistics;
+        pressure_velocity_residuals() = residuals;
+        d_last_volume_continuity_residuals = continuity;
+        d_last_nonlinear_result = std::move(result);
+        return;
+    }
+#endif
+    throw std::invalid_argument("coupledNonlinear requires the NOX-enabled default Tpetra pack.");
+}
+
 /**
  * @brief Execute the configured SIMPLE, PISO, PIMPLE, or coupled loop.
  *
@@ -1327,6 +1450,12 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_pressure_velocity_coupling()
 {
+    if (d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear)
+    {
+        validate_pressure_velocity_selection();
+        solve_coupled_nonlinear();
+        return;
+    }
     if (const auto* target = volume_continuity_target())
     {
         if (uses_legacy_backend())
@@ -1576,6 +1705,15 @@ auto FluidSolver<Pack>::courant_transport_face_fluxes() const -> const face_flux
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::step()
 {
+    validate_pressure_velocity_selection();
+    if (d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear)
+    {
+        // The nonlinear problem owns all trial fields. Do not reset accepted
+        // statistics or publish trial ghosts through begin_step().
+        solve_coupled_nonlinear();
+        finish_step();
+        return;
+    }
     begin_step();
     solve_pressure_velocity_coupling();
     finish_step();

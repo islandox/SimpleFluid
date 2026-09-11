@@ -269,6 +269,7 @@ auto IncompressibleIsothermalSolver<Pack>::assemble_coupled_system() -> coupled_
 /** @brief Advance pressure, velocity, and optional turbulence one step. */
 template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
 {
+    this->validate_pressure_velocity_selection();
     begin_step();
     if (auto* turbulence = find_turbulence_model())
     {

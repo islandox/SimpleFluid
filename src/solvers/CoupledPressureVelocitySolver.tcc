@@ -2023,6 +2023,39 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
 }
 
 template<TpetraTypePack Pack, class MeshType>
+auto CoupledPressureVelocitySolver<Pack, MeshType>::right_preconditioner(
+    const system_type& system, bool preserve_retained_generations) const
+    -> Teuchos::RCP<const operator_type>
+{
+    if (system.geometry_epoch != mesh_geometry_epoch(*d_mesh) ||
+        system.fixed_boundary_flux_revision != d_fixed_boundary_flux_revision ||
+        system.map.is_null() || !system.map->isSameAs(*d_coupled_map) ||
+        system.momentum.is_null() || system.schur.is_null())
+    {
+        throw std::invalid_argument("Cannot precondition an incompatible or stale coupled system.");
+    }
+    const int local_reuse_preconditioner = d_rebuild_policy == CoupledRebuildPolicy::OnOperatorGraphChange &&
+                                      !d_preconditioner.is_null() &&
+                                      (!preserve_retained_generations || d_preconditioner.strong_count() == 1) &&
+                                      d_preconditioner->is_compatible(system.momentum, system.gradient, system.schur);
+    int reuse_preconditioner = 0;
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN,
+        1, &local_reuse_preconditioner, &reuse_preconditioner);
+    if (reuse_preconditioner)
+    {
+        d_preconditioner->update(system.momentum, system.gradient, system.schur);
+        ++d_cache_statistics.preconditioner_numeric_reuses;
+    }
+    else
+    {
+        d_preconditioner = Teuchos::rcp(new preconditioner_type(
+            system.map, d_mesh->owned_cell_map(), system.momentum, system.gradient, system.schur));
+        ++d_cache_statistics.preconditioner_builds;
+    }
+    return d_preconditioner;
+}
+
+template<TpetraTypePack Pack, class MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::result_type
 CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, velocity_field_type& velocity,
     field_type& pressure, const LinearSolverOptions& options) const
@@ -2061,25 +2094,11 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
         solution->replaceGlobalValue(4 * cell_gid + 3, pressure.value(cell_lid) / system.reference_density);
     }
 
-    const auto reuse_preconditioner = d_rebuild_policy == CoupledRebuildPolicy::OnOperatorGraphChange &&
-                                      !d_preconditioner.is_null() &&
-                                      d_preconditioner->is_compatible(system.momentum, system.gradient, system.schur);
-    if (reuse_preconditioner)
-    {
-        d_preconditioner->update(system.momentum, system.gradient, system.schur);
-        ++d_cache_statistics.preconditioner_numeric_reuses;
-    }
-    else
-    {
-        d_preconditioner = Teuchos::rcp(new preconditioner_type(
-            system.map, d_mesh->owned_cell_map(), system.momentum, system.gradient, system.schur));
-        ++d_cache_statistics.preconditioner_builds;
-    }
+    const auto right_preconditioner = this->right_preconditioner(system, false);
     const auto scratch_allocations_before = d_preconditioner->scratch_allocations();
     Teuchos::RCP<const operator_type> matrix = system.linear_operator;
     if (matrix.is_null())
         matrix = system.matrix;
-    Teuchos::RCP<const operator_type> right_preconditioner = d_preconditioner;
     auto solution_mv = Teuchos::rcp_implicit_cast<multi_vector_type>(solution);
     auto rhs_mv = Teuchos::rcp_implicit_cast<const multi_vector_type>(system.rhs);
     auto problem = Teuchos::rcp(new problem_type(matrix, solution_mv, rhs_mv));

@@ -17,6 +17,7 @@
 #include "dataclass/vec3.hh"
 #include "equations/CoupledOperatorBackend.hh"
 #include "equations/PressureVelocityCoupling.hh"
+#include "solvers/NonlinearSolverOptions.hh"
 
 namespace SimpleFluid
 {
@@ -48,6 +49,7 @@ struct TimeStepperOptions
     int n_outer_correctors = 1;
     CoupledOperatorBackend coupled_operator_backend = CoupledOperatorBackend::Assembled;
     CoupledWorkspacePolicy coupled_workspace_policy = CoupledWorkspacePolicy::CachedProducts;
+    NonlinearSolverOptions nonlinear;
 
     vec3<real_t> gravity_vector() const noexcept
     {

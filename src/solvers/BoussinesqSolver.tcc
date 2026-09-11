@@ -4265,6 +4265,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
  */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
 {
+    this->validate_pressure_velocity_selection();
     validate_step_coupling();
     if (d_free_surface_model && d_free_surface_options.mode == FreeSurfaceMode::PlanarALE)
     {

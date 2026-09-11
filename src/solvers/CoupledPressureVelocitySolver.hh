@@ -524,6 +524,15 @@ public:
     result_type solve(const system_type& system, velocity_field_type& velocity, field_type& pressure,
         const LinearSolverOptions& options) const;
 
+    /** Prepare the native Schur inverse for a separate linear correction solve.
+     * Retained inverse instances are not refreshed in place by default. Retain
+     * the system's linear_operator too when assembling later generations, to
+     * protect its shared matrix blocks. The historical linear driver can opt
+     * out once its prior solve has completed.
+     */
+    Teuchos::RCP<const operator_type> right_preconditioner(
+        const system_type& system, bool preserve_retained_generations = true) const;
+
 private:
     SP<const mesh_type> d_mesh;
     CoupledRebuildPolicy d_rebuild_policy = CoupledRebuildPolicy::OnOperatorGraphChange;
