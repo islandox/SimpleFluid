@@ -337,11 +337,29 @@ private:
     // Two side descriptors per interface. Structured sides are grouped by
     // native boundary 0..5; only irregular correspondence uses bucket 6.
     struct InterfaceSide { size_t interface; bool first; };
+    // Natural native-ID order, independent of the interface parametrization.
+    // One descriptor per interface replaces rebuilding an indexer at each rank query.
+    struct PatchFaceIndex
+    {
+        ID begin = 0, end = 0;
+        size_t fast_stride = 0, slow_stride = 0;
+        size_t fast_extent = 0, slow_extent = 0, count = 0;
+        size_t count_before(ID face) const noexcept;
+    };
+    struct StructuredFaceSelection
+    {
+        ID native_begin = 0, retained_begin = 0;
+        size_t native_run = 0, retained_run = 0, skip_low = 0;
+    };
     struct RegionInterfaceDirectory
     {
         std::array<size_t, 8> offsets{};
         ID removed_faces = 0;
         size_t boundary_begin = 0, boundary_end = 0;
+        // Each orientation has normal-fastest runs. Removing complete exterior
+        // sides trims the same low/high entries from every run.
+        std::array<StructuredFaceSelection, 3> selection{};
+        bool direct_selection = false;
     };
     void initialize_interface_directory();
     std::span<const InterfaceSide> interface_sides(size_t region, size_t bucket) const;
@@ -383,7 +401,7 @@ private:
     void normalize(StructuredPatch& patch) const;
     std::optional<size_t> structured_boundary_size(size_t region, int boundary) const;
     std::optional<std::array<size_t, 2>> patch_coordinate(const StructuredPatch& p, ID face) const;
-    size_t patch_count_before(const StructuredPatch& p, ID face) const;
+    PatchFaceIndex patch_face_index(const StructuredPatch& p) const;
     size_t removed_before(size_t r, ID face) const;
     std::optional<RegionFace> partner(RegionFace f, bool first) const;
     struct RefinedFaceView { size_t region; std::span<const ID> faces; };
@@ -440,6 +458,7 @@ private:
     std::vector<ExplicitLookup> d_explicit;
     std::vector<RegionInterfaceDirectory> d_region_interfaces;
     std::vector<InterfaceSide> d_interface_sides;
+    std::vector<PatchFaceIndex> d_removed_patch_index;
     std::vector<ID> d_cells, d_faces, d_nodes, d_native_faces;
     std::vector<Boundary> d_boundaries;
     InterfaceTolerance d_tolerance;

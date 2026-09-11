@@ -6,12 +6,14 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/details/FieldStoredFaceFlux.hh"
+#include "FVM/details/ResolvedTransportGeometry.hh"
 #include "fields/FieldStored.hh"
 
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace SimpleFluid::FVM::detail
@@ -52,34 +54,60 @@ auto stored_pressure_face_geometry(const MeshType& mesh)
         {
             continue;
         }
+        const auto append = [&](local_ordinal_type owner, local_ordinal_type neighbor,
+                                bool interior, bool boundary, const auto& metrics)
+        {
+            StoredPressureFaceGeometry<Pack> entry;
+            entry.face = face_lid;
+            entry.owner = owner;
+            entry.owned_owner = static_cast<size_t>(entry.owner) < mesh.num_owned_cells();
+            entry.interior = interior;
+            entry.boundary = boundary;
+            entry.normal = metrics.face_normal(query_face_id(metrics, face_lid));
+            entry.owner_normal = metrics.face_normal_outward(
+                query_face_id(metrics, face_lid), query_cell_id(metrics, owner));
+            entry.area = static_cast<scalar_type>(metrics.face_area(query_face_id(metrics, face_lid)));
+            entry.area_vector = metrics.face_area_vector_outward(
+                query_face_id(metrics, face_lid), query_cell_id(metrics, owner));
+            if (entry.interior)
+            {
+                entry.neighbor = neighbor;
+                const auto weights = stored_interior_face_linear_weights(metrics, face_lid, owner, neighbor);
+                entry.owner_weight = weights.first;
+                entry.neighbor_weight = weights.second;
+                const auto center_delta = metrics.cell_center_vector(
+                    query_face_id(metrics, face_lid), query_cell_id(metrics, owner));
+                entry.distance_squared = center_delta.dot(center_delta);
+                entry.center_projection = entry.area_vector.dot(center_delta);
+            }
+            else if (entry.boundary && entry.owned_owner)
+            {
+                entry.boundary_diffusion = boundary_diffusion_coefficient(metrics, face_lid, owner, scalar_type{1});
+            }
+            result.push_back(entry);
+        };
+        if constexpr (requires { mesh.supports_region_execution(); })
+        {
+            if (mesh.supports_region_execution())
+            {
+                const auto resolved = mesh.resolve_region_face(face_lid);
+                const auto owner = mesh.region_cell_local_id(resolved.owner);
+                const auto neighbor = resolved.interior()
+                    ? mesh.region_cell_local_id(resolved.neighbor) : local_ordinal_type{};
+                const ResolvedTransportGeometry<MeshType, std::remove_cvref_t<decltype(resolved)>>
+                    metrics(resolved, owner, resolved.owner);
+                append(owner, neighbor, resolved.interior(),
+                    !resolved.interior() && mesh.is_boundary_face(face_lid), metrics);
+                continue;
+            }
+        }
         const auto face_id = query_face_id(mesh, face_lid);
         const auto owner_id = mesh.owner_cell(face_id);
-        StoredPressureFaceGeometry<Pack> entry;
-        entry.face = face_lid;
-        entry.owner = packed_cell_local_id(mesh, owner_id);
-        entry.owned_owner = static_cast<size_t>(entry.owner) < mesh.num_owned_cells();
-        entry.interior = mesh.is_interior_face(face_id);
-        entry.boundary = mesh.is_boundary_face(face_id);
-        entry.normal = mesh.face_normal(face_id);
-        entry.owner_normal = mesh.face_normal_outward(face_id, owner_id);
-        entry.area = static_cast<scalar_type>(mesh.face_area(face_id));
-        entry.area_vector = mesh.face_area_vector_outward(face_id, owner_id);
-        if (entry.interior)
-        {
-            const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
-            entry.neighbor = packed_cell_local_id(mesh, neighbor_id);
-            const auto weights = stored_interior_face_linear_weights(mesh, face_lid, entry.owner, entry.neighbor);
-            entry.owner_weight = weights.first;
-            entry.neighbor_weight = weights.second;
-            const auto center_delta = mesh.cell_center_vector(face_id,owner_id);
-            entry.distance_squared = center_delta.dot(center_delta);
-            entry.center_projection = entry.area_vector.dot(center_delta);
-        }
-        else if (entry.boundary && entry.owned_owner)
-        {
-            entry.boundary_diffusion = boundary_diffusion_coefficient(mesh, face_lid, entry.owner, scalar_type{1});
-        }
-        result.push_back(entry);
+        const auto interior = mesh.is_interior_face(face_id);
+        const auto neighbor = interior
+            ? packed_cell_local_id(mesh, mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id))
+            : local_ordinal_type{};
+        append(packed_cell_local_id(mesh, owner_id), neighbor, interior, mesh.is_boundary_face(face_id), mesh);
     }
     return result;
 }

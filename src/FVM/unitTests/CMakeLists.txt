@@ -78,3 +78,10 @@ foreach(_region_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME SteadyDiffusionConvergence_${_region_procs}procs TARGET testSteadyDiffusionConvergence
         PROCS ${_region_procs} LABELS "mpi;fvm;non_orthogonal;multi_region" TIMEOUT 120)
 endforeach()
+
+foreach(_gradient_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME StoredGradientViews_${_gradient_procs}procs TARGET testStoredGradientViews
+        PROCS ${_gradient_procs} LABELS "mpi;fvm;gradient;multi_region" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME RegionTransportAssembly_${_gradient_procs}procs TARGET testRegionTransportAssembly
+        PROCS ${_gradient_procs} LABELS "mpi;fvm;transport;multi_region" TIMEOUT 120)
+endforeach()
