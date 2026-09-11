@@ -864,11 +864,14 @@ NonlinearSolveResult NOXNonlinearSolver::solve(DefaultTpetraTypes::vector_type& 
     const auto started = WallClock::now();
     auto& impl = *d_impl;
     const auto& callbacks = impl.callbacks;
-    validate(callbacks, physical_x, nonlinear, linear);
+    auto correction_options = linear;
+    if (nonlinear.linear_backend)
+        correction_options.backend = *nonlinear.linear_backend;
+    validate(callbacks, physical_x, nonlinear, correction_options);
     auto context = impl.context;
     context->result = {};
     context->nonlinear = nonlinear;
-    context->linear = linear;
+    context->linear = correction_options;
     try
     {
         impl.prepare_vectors();
