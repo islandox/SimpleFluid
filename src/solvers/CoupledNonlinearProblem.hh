@@ -4,8 +4,10 @@
 #pragma once
 
 #include "SimpleFluidExport.hh"
+#include "FVM/BoundaryCache.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "equations/BoundaryConditions.hh"
+#include "equations/BoussinesqModel.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "equations/VolumeContinuityTarget.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -23,7 +25,8 @@ struct CoupledNonlinearProblemStatistics
 };
 
 /**
- * Fixed orthogonal-mesh, constant-viscosity backward-Euler momentum and
+ * Fixed orthogonal-mesh backward-Euler momentum with constant viscosity or
+ * frozen physical Boussinesq material/source coefficients, and a coupled
  * pressure problem. Physical boundaries prescribe velocity (including
  * NoSlip) or use axis-aligned Slip, with Neumann pressure; mesh periodic
  * interfaces are supported.
@@ -42,11 +45,32 @@ public:
     using face_flux_field_type = field_traits::scalar_face_type;
     using vector_type = pack_type::vector_type;
     using continuity_target_type = VolumeContinuityTarget<pack_type, mesh_type>;
+    using material_type = MaterialPropertyFields<pack_type, mesh_type>;
+    using boundary_cache_type = FVM::FieldStoredBoundaryCache<pack_type, mesh_type>;
+
+    /** Inputs are borrowed only during construction, then deeply copied.
+     * Physical diffusion, density/thermal buoyancy, turbulent pressure and
+     * accepted-velocity transpose stress retain the native split treatment.
+     */
+    struct FrozenBoussinesqInput
+    {
+        const field_type& temperature;
+        const material_type& material;
+        bool density_feedback_enabled = false;
+        const field_type* effective_dynamic_viscosity = nullptr;
+        const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr;
+        const boundary_cache_type* boundary_dynamic_viscosity = nullptr;
+    };
 
     CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
         const field_type& physical_pressure, const BoundaryConditionSet& boundaries,
         const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
         double reference_density = 1.0, const continuity_target_type* continuity_target = nullptr);
+    CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
+        const field_type& physical_pressure, const BoundaryConditionSet& boundaries,
+        const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
+        double reference_density, const continuity_target_type* continuity_target,
+        const FrozenBoussinesqInput* boussinesq);
     ~CoupledNonlinearProblem();
 
     NonlinearCallbacks callbacks();

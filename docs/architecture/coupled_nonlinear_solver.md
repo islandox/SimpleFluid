@@ -1,8 +1,10 @@
 # Coupled nonlinear velocity-pressure solver
 
 `PressureVelocityCoupling::CoupledNonlinear` selects the optional NOX backend.
-The first supported driver is the native, constant-kinematic-viscosity
-`FluidSolver<DefaultTpetraTypes>`. Existing SIMPLE, PISO, PIMPLE, and
+Supported drivers are the native constant-kinematic-viscosity
+`FluidSolver<DefaultTpetraTypes>` and physical `BoussinesqSolver<DefaultTpetraTypes>`
+with frozen thermal, material, turbulence, and gas state during the flow solve.
+Existing SIMPLE, PISO, PIMPLE, and
 `CoupledKrylov` modes retain their algorithms.
 
 ## Build and select
@@ -24,6 +26,7 @@ time.pressure_velocity_coupling =
 time.nonlinear.linearization =
     SimpleFluid::CoupledLinearization::AnalyticNewton;
 time.nonlinear.maximum_iterations = 20;
+time.nonlinear.linear_backend = SimpleFluid::LinearSolverBackend::Gmres;
 time.nonlinear.continuity_tolerance = 1e-10; // integrated cell imbalance, m^3/s
 time.coupled_operator_backend =
     SimpleFluid::CoupledOperatorBackend::BlockComposite;
@@ -48,12 +51,33 @@ viscosity, prescribed Dirichlet/NoSlip or axis-aligned Slip velocity and
 Neumann pressure on physical boundaries, and mesh periodic interfaces. The
 selected native least-squares or Gauss-linear pressure reconstruction is retained.
 
-Built-in physical/material isothermal and Boussinesq solvers, custom momentum
+Built-in physical/material isothermal solvers, custom momentum
 subclasses, legacy mesh drivers, pressure outlets, extrapolated/oblique-slip velocity
-boundaries, nonorthogonal geometry, and moving-mesh contexts are unsupported.
+boundaries, nonorthogonal geometry, free-surface, boiling and precursor models,
+and moving-mesh contexts are unsupported.
 They are rejected rather than silently losing their momentum sources or
-stress terms. Temperature, turbulence, gas, material feedback, and ALE are
-future extensions requiring their own trial residual and state contracts.
+stress terms. A monolithic nonlinear temperature/turbulence/gas solve and ALE
+require separate trial residual and state contracts.
+
+The physical Boussinesq extension copies accepted temperature, density,
+effective dynamic viscosity, turbulent kinetic-energy gradient, and boundary
+viscosity into the private step context. Its affine residual and Picard block
+operator use the existing physical Boussinesq assembly, including density or
+thermal buoyancy, turbulent pressure, and the native explicit deviatoric
+transpose-gradient stress. That stress remains evaluated from accepted velocity;
+this preserves the established split discretization. Material and turbulence
+coefficients remain fixed through all trial residuals and linearizations.
+Only advection and the pressure-weighted flow flux become nonlinear in `(u,p)`.
+
+The driver refreshes accepted-state properties and sources once before flow,
+then advances turbulence, heat, and gas in their existing order once after an
+accepted flow solution. NOX callbacks never invoke these updates. A rejected
+flow preserves primary fields, time, and accepted solver diagnostics and
+restores material, material-feedback, gas, and void-fraction snapshots.
+Source/property updater callbacks may have caller-owned side effects and are
+not replayed or undone by residual evaluations. A later failure in the native
+post-flow model updates prevents retrying the partially advanced driver; this
+extension does not claim an atomic transaction over every multiphysics model.
 
 Axis-aligned slip faces retain the native kinematic momentum treatment and
 have identically zero normal flux for every trial and directional state.
@@ -144,6 +168,10 @@ preconditioner transformed consistently with the model scales. It checks the
 explicit scaled correction residual `norm(Jhat*d + Fhat)/norm(Fhat)` against
 the requested forcing tolerance. `Rescue Bad Newton Solve` is disabled.
 `krylov_restart` is independent of the four physical components.
+`linear_backend` optionally selects GMRES or BiCGStab for nonlinear corrections
+while leaving the segregated scalar transport policy unchanged. An unset value
+inherits the supplied linear solver policy; PCG is rejected for this saddle-point
+correction system, and effective controls are checked collectively.
 
 Custom Armijo backtracking evaluates actual trial residuals. Invalid trials
 are rejected, and exhausted backtracking fails with no recovery step.
@@ -178,9 +206,15 @@ and preconditioner generations, pressure normalization, continuity targets,
 gauge-cell conservation, nonlinear method/operator equivalence, scaling,
 accepted-step advancement, rejected solves, unsupported scope, and collective
 input validation. The same test binary has a two-rank CTest registration.
+Physical Boussinesq tests additionally compare frozen-state residuals against
+native physical assembly with nonuniform density and viscosity, verify the
+analytic derivative and deep-copy isolation, check heat/model advancement once
+per accepted step, and exercise material/gas restoration and retry after a
+rejected nonlinear flow.
 
-Local validation on 2026-09-11 used GCC Debug and the selected Trilinos 17.2
-installation:
+The initial implementation was validated on 2026-09-11 using GCC Debug and
+the selected Trilinos 17.2 installation, before the physical Boussinesq
+extension. That historical matrix was:
 
 | Check | Result |
 | --- | --- |
@@ -196,6 +230,12 @@ tree is `build/gcc`; the independent disabled tree is `build/nox-disabled`.
 The two-rank run used host networking because the sandbox cannot provide
 the PMIx launcher sockets. No unrelated project-wide suite or performance
 campaign was run.
+
+The subsequent physical Boussinesq extension has a separate
+[Release validation and 10k/100k performance report](../benchmarks/coupled_nonlinear_20260911.md).
+It includes 35 nonlinear tests exercised across serial/MPI and matched physical
+convection runs; the initial matrix above is not a claim that every old check
+was repeated for the extension.
 
 The nonlinear equations differ from a single frozen-convection timestep.
 Compare converged nonlinear solutions against an equivalent residual and

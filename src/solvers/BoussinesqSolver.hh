@@ -506,6 +506,8 @@ private:
     BoussinesqMomentumEquation<Pack>& momentum_equation() override;
     LinearSolveSummary advance_momentum() override;
     coupled_system_type assemble_coupled_system() override;
+    bool supports_coupled_nonlinear() const noexcept override;
+    std::unique_ptr<CoupledNonlinearProblem> make_coupled_nonlinear_problem() override;
     scalar_type pressure_reference_density() const noexcept override;
     SIMPLEFLUID_SOLVERS_LOCAL
     material_type& stored_material_properties();

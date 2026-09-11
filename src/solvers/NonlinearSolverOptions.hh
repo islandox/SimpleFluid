@@ -1,7 +1,10 @@
 #pragma once
 
+#include <optional>
+
 namespace SimpleFluid
 {
+enum class LinearSolverBackend;
 
 enum class NonlinearBackend
 {
@@ -22,6 +25,8 @@ struct NonlinearSolverOptions
 {
     NonlinearBackend backend = NonlinearBackend::NOX;
     CoupledLinearization linearization = CoupledLinearization::AnalyticNewton;
+    /** Override only Newton corrections; scalar transport keeps its solver. */
+    std::optional<LinearSolverBackend> linear_backend;
     int maximum_iterations = 20;
     int maximum_backtracks = 12;
     int krylov_restart = 80;

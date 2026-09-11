@@ -10,6 +10,7 @@
  */
 
 #include "BoussinesqSolver.hh"
+#include "solvers/CoupledNonlinearProblem.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -3169,6 +3170,30 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::pressure_reference_de
     return d_model_options.reference_density;
 }
 
+template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::supports_coupled_nonlinear() const noexcept
+{
+    return typeid(*this) == typeid(BoussinesqSolver<Pack>) && d_physical_model_enabled &&
+        !d_free_surface_model && !d_boiling_source_model && !d_precursor_model;
+}
+
+template<TpetraTypePack Pack>
+std::unique_ptr<CoupledNonlinearProblem> BoussinesqSolver<Pack>::make_coupled_nonlinear_problem()
+{
+    if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
+    {
+        const auto* turbulence = find_turbulence_model();
+        const CoupledNonlinearProblem::FrozenBoussinesqInput physical{temperature(), stored_material_properties(),
+            d_model_options.density_feedback_enabled,
+            turbulence ? &turbulence->effective_dynamic_viscosity() : nullptr,
+            turbulence ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
+            turbulence ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr};
+        return std::make_unique<CoupledNonlinearProblem>(d_mesh, velocity(), pressure(),
+            d_problem.boundary_conditions(), d_problem.time_options(), d_problem.time_options().nonlinear,
+            pressure_reference_density(), volume_continuity_target(), &physical);
+    }
+    throw std::invalid_argument("coupledNonlinear requires the default Tpetra pack.");
+}
+
 /**
  * @brief Assemble the coupled Boussinesq velocity-pressure system.
  *
@@ -4288,7 +4313,27 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         }
         return;
     }
-    begin_step();
+    const bool nonlinear_flow =
+        d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear;
+    // Preserve accepted reports and primary ghosts until the private flow
+    // solve succeeds. Model refresh occurs once outside all NOX callbacks.
+    if (!nonlinear_flow)
+        begin_step();
+    std::optional<typename material_type::StateSnapshot> nonlinear_material_snapshot;
+    std::optional<typename material_feedback_model_type::StateSnapshot> nonlinear_feedback_snapshot;
+    std::optional<typename radiolytic_gas_model_type::StateSnapshot> nonlinear_gas_snapshot;
+    std::optional<typename scalar_void_fraction_model_type::StateSnapshot> nonlinear_void_snapshot;
+    if (nonlinear_flow)
+    {
+        nonlinear_material_snapshot.emplace(stored_material_properties().snapshot());
+        if (d_material_feedback_model)
+            nonlinear_feedback_snapshot.emplace(d_material_feedback_model->snapshot());
+        if (d_radiolytic_gas_model)
+            nonlinear_gas_snapshot.emplace(d_radiolytic_gas_model->snapshot());
+        if (d_scalar_void_fraction_model)
+            nonlinear_void_snapshot.emplace(d_scalar_void_fraction_model->snapshot());
+    }
+    bool flow_accepted = false;
     const bool free_surface_active = d_free_surface_model != nullptr;
     try
     {
@@ -4307,6 +4352,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         }
 
         solve_pressure_velocity_coupling();
+        flow_accepted = true;
         const auto time_step = d_problem.time_options().time_step;
         advance_turbulence(time_step);
         const auto sheng_after_temperature = advance_pre_temperature_models(time_step);
@@ -4325,7 +4371,19 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     }
     catch (...)
     {
-        if (free_surface_active)
+        if (nonlinear_flow && !flow_accepted)
+        {
+            stored_material_properties().restore(*nonlinear_material_snapshot);
+            if (nonlinear_feedback_snapshot)
+                d_material_feedback_model->restore(*nonlinear_feedback_snapshot);
+            if (nonlinear_gas_snapshot)
+                d_radiolytic_gas_model->restore(*nonlinear_gas_snapshot);
+            if (nonlinear_void_snapshot)
+                d_scalar_void_fraction_model->restore(*nonlinear_void_snapshot);
+            if (auto* turbulence = find_turbulence_model())
+                turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
+        }
+        if (free_surface_active || (nonlinear_flow && flow_accepted))
         {
             d_free_surface_step_failed = true;
         }

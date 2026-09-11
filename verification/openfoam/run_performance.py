@@ -87,9 +87,9 @@ def solver_arguments(case: str, inputs: Path, policy: str) -> list[str]:
     return command
 
 
-def merge_outputs(directory: Path, ranks: int, started: float) -> dict:
+def merge_outputs(directory: Path, ranks: int, started: float, prefix: str = "rank") -> dict:
     """Merge owned samples, checking repeated global diagnostics before dropping them."""
-    paths = [directory] if ranks == 1 else [directory / f"rank{i}" for i in range(ranks)]
+    paths = [directory] if ranks == 1 else [directory / f"{prefix}{i}" for i in range(ranks)]
     output = directory / "merged"
     output.mkdir()
     names = {path.name for path in paths[0].glob("*.csv")}

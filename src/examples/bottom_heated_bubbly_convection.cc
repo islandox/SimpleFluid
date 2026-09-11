@@ -1,8 +1,9 @@
 /** Bottom-localized heat and H2 production with solved buoyant circulation. */
 #include "IF97ReferenceWater.hh"
-#include "VerificationLinearSolvers.hh"
 #include "VerificationBackends.hh"
+#include "VerificationLinearSolvers.hh"
 #include "VerificationMesh.hh"
+#include "VerificationNonlinearSolvers.hh"
 #include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
@@ -228,6 +229,9 @@ int run(int argc, char** argv)
     auto* bubbles = solver.find_radiolytic_gas_model();
     linear_controls.apply_gas(*bubbles);
     SimpleFluid::Verification::LinearSolverHistory linear_history(output);
+    std::optional<SimpleFluid::Verification::NonlinearSolverHistory> nonlinear_history;
+    if (time.pressure_velocity_coupling == SimpleFluid::PressureVelocityCoupling::CoupledNonlinear)
+        nonlinear_history.emplace(output);
     std::filesystem::create_directories(output);
     std::ofstream fields(output / "fields.csv"), history(output / "history.csv"),
         turbulent_fields(output / "turbulence.csv");
@@ -348,6 +352,9 @@ int run(int argc, char** argv)
             step, solver.time(), solver.last_step_statistics(), bubbles->last_statistics().transport_linear);
         // Keep completed-step progress observable during long parallel runs.
         linear_history.flush();
+        if (nonlinear_history)
+            nonlinear_history->write(
+                step, solver.time(), solver.last_nonlinear_result(), solver.last_volume_continuity_residuals().maximum);
         double yplus_max = 0;
         for (const auto& patch : turbulence.wall_y_plus_statistics())
             yplus_max = std::max(yplus_max, patch.maximum);
