@@ -1,6 +1,7 @@
 /** Bottom-localized heat and H2 production with solved buoyant circulation. */
 #include "IF97ReferenceWater.hh"
 #include "VerificationLinearSolvers.hh"
+#include "VerificationBackends.hh"
 #include "VerificationMesh.hh"
 #include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -39,6 +40,7 @@ int run(int argc, char** argv)
     int requested_steps = 0;
     double source_scale = 1.0;
     SimpleFluid::Verification::LinearSolverControls linear_controls;
+    SimpleFluid::Verification::BackendControls backend_controls;
     for (int i = 1; i < argc; ++i)
     {
         const std::string arg = argv[i];
@@ -57,6 +59,8 @@ int run(int argc, char** argv)
         else if (arg == "--source-scale")
             source_scale = std::stod(value);
         else if (linear_controls.parse(arg, value))
+            continue;
+        else if (backend_controls.parse(arg, value))
             continue;
         else
             throw std::invalid_argument("Unknown argument " + arg);
@@ -96,8 +100,7 @@ int run(int argc, char** argv)
                 std::abs(x.back() - width) < 1e-12 && std::abs(z.back() - height) < 1e-12 &&
                 std::abs(grid.y.back() - depth) < 1e-12,
         "Shared mesh extents differ from physical case");
-    auto geometry = std::make_shared<Mesh::Cartesian>(grid.coordinates());
-    auto mesh = std::make_shared<Mesh>(std::move(geometry));
+    auto mesh = SimpleFluid::Verification::make_backend_mesh<Pack>(grid, backend_controls);
     const SimpleFluid::Verification::ParallelContext parallel(mesh->owned_cell_map()->getComm());
     output = parallel.output_directory(output);
     SimpleFluid::BoundaryConditionSet bc;
@@ -126,6 +129,7 @@ int run(int argc, char** argv)
     time.n_pressure_correctors = 3;
     time.n_outer_correctors = 1;
     time.coefficient_interpolation = SimpleFluid::FVM::FaceCoefficientInterpolation::Linear;
+    backend_controls.apply(time);
     SimpleFluid::LinearSolverOptions linear;
     linear.tolerance = 1e-11;
     linear.max_iterations = 1000;
