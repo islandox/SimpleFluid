@@ -1341,19 +1341,33 @@ void FluidSolver<Pack>::validate_pressure_velocity_selection() const
 #ifndef SIMPLEFLUID_ENABLE_NOX
     throw std::invalid_argument("coupledNonlinear requires SIMPLEFLUID_ENABLE_NOX=ON.");
 #else
-    const int local_unsupported = !d_has_base_momentum_equation || uses_legacy_backend() ||
-        typeid(*this) != typeid(FluidSolver<Pack>) ||
+    const int local_unsupported = !supports_coupled_nonlinear() || uses_legacy_backend() ||
         mesh_geometry_epoch(*d_mesh) != d_nonlinear_geometry_epoch ||
         !std::same_as<Pack, DefaultTpetraTypes>;
     int unsupported = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_unsupported, &unsupported);
     if (unsupported)
     {
-        throw std::invalid_argument("coupledNonlinear currently requires the native constant-viscosity "
-            "FluidSolver on unchanged geometry; material, thermal, turbulence, and legacy solver paths "
-            "are not supported.");
+        throw std::invalid_argument("coupledNonlinear requires an explicitly supported native driver on "
+            "unchanged geometry; custom momentum, legacy, and free-surface paths are not supported.");
     }
 #endif
+}
+
+template<TpetraTypePack Pack>
+bool FluidSolver<Pack>::supports_coupled_nonlinear() const noexcept
+{
+    return d_has_base_momentum_equation && typeid(*this) == typeid(FluidSolver<Pack>);
+}
+
+template<TpetraTypePack Pack>
+std::unique_ptr<CoupledNonlinearProblem> FluidSolver<Pack>::make_coupled_nonlinear_problem()
+{
+    if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
+        return std::make_unique<CoupledNonlinearProblem>(d_mesh, velocity(), pressure(),
+            d_problem.boundary_conditions(), d_problem.time_options(), d_problem.time_options().nonlinear,
+            pressure_reference_density(), volume_continuity_target());
+    throw std::invalid_argument("coupledNonlinear requires the default Tpetra pack.");
 }
 
 /** Solve a private nonlinear timestep and publish only a qualified candidate. */
@@ -1364,8 +1378,8 @@ void FluidSolver<Pack>::solve_coupled_nonlinear()
     if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
     {
         const auto& time_options = d_problem.time_options();
-        CoupledNonlinearProblem problem(d_mesh, velocity(), pressure(), d_problem.boundary_conditions(),
-            time_options, time_options.nonlinear, pressure_reference_density(), volume_continuity_target());
+        auto owned_problem = make_coupled_nonlinear_problem();
+        auto& problem = *owned_problem;
         auto callbacks = problem.callbacks();
         auto state = problem.pack_initial();
         if (!d_nonlinear_solver)

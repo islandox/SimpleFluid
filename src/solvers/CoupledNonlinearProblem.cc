@@ -3,6 +3,7 @@
 #include "FVM/CellOperators.hh"
 #include "FVM/FaceFlux.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
+#include "equations/BoussinesqMomentumEquation.hh"
 #include "geometry/GeometryEpoch.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
 #include "solvers/NoxNonlinearSolver.hh"
@@ -34,6 +35,7 @@ using NativeVelocityBoundaryCache = FVM::FieldStoredVelocityBoundaryCache<Pack, 
 using FluxWorkspace = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>;
 using CoupledSolver = CoupledPressureVelocitySolver<Pack, MeshType>;
 using MomentumEquation = IncompressibleMomentumEquation<Pack, MeshType>;
+using BoussinesqEquation = BoussinesqMomentumEquation<Pack, MeshType>;
 
 void collective_require(const MeshType& mesh, bool condition, const char* message)
 {
@@ -329,6 +331,12 @@ struct CoupledNonlinearProblem::Impl
     FluxWorkspace flux_workspace;
     NativeVelocityBoundaryCache velocity_boundaries;
     MomentumEquation dynamic_equation;
+    std::unique_ptr<BoussinesqEquation> physical_equation;
+    std::unique_ptr<material_type> frozen_material;
+    std::unique_ptr<Pressure> frozen_temperature;
+    std::unique_ptr<Velocity> frozen_turbulent_gradient;
+    std::optional<boundary_cache_type> frozen_boundary_viscosity;
+    bool density_feedback = false;
     CoupledSolver dynamic_solver;
     CoupledSolver::system_type static_system;
     std::shared_ptr<FrozenGeometry> geometry;
@@ -339,7 +347,8 @@ struct CoupledNonlinearProblem::Impl
 
     Impl(SP<const mesh_type> mesh_, const Velocity& accepted, const Pressure& pressure,
         const BoundaryConditionSet& boundaries_, const TimeStepperOptions& time_,
-        const NonlinearSolverOptions& nonlinear_, double density_, const continuity_target_type* target_)
+        const NonlinearSolverOptions& nonlinear_, double density_, const continuity_target_type* target_,
+        const FrozenBoussinesqInput* physical)
         : mesh(require_mesh(std::move(mesh_))), boundaries(boundaries_), time(time_), nonlinear(nonlinear_),
           density(density_), target(target_ ? *target_ : continuity_target_type(mesh)),
           accepted_velocity(mesh, "nonlinear_accepted_velocity"), initial_pressure(mesh, "nonlinear_initial_pressure"),
@@ -349,6 +358,18 @@ struct CoupledNonlinearProblem::Impl
     {
         collective_require(*mesh, accepted.mesh_ptr().get() == mesh.get() && pressure.mesh_ptr().get() == mesh.get(),
             "CoupledNonlinearProblem requires accepted fields on its exact mesh.");
+        const std::array<int, 5> physical_flags{physical != nullptr,
+            physical && physical->density_feedback_enabled,
+            physical && physical->effective_dynamic_viscosity != nullptr,
+            physical && physical->turbulent_kinetic_energy_gradient != nullptr,
+            physical && physical->boundary_dynamic_viscosity != nullptr};
+        std::array<int, 5> flags_min{}, flags_max{};
+        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5,
+            physical_flags.data(), flags_min.data());
+        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5,
+            physical_flags.data(), flags_max.data());
+        collective_require(*mesh, flags_min == flags_max,
+            "Coupled nonlinear physical momentum inputs must have rank-consistent presence and modes.");
         const std::array<double, 9> parameters{density, time.time_step, time.kinematic_viscosity,
             nonlinear.velocity_scale, nonlinear.pressure_scale, nonlinear.momentum_residual_scale,
             nonlinear.continuity_residual_scale, nonlinear.absolute_tolerance, nonlinear.continuity_tolerance};
@@ -455,14 +476,67 @@ struct CoupledNonlinearProblem::Impl
         accepted_velocity.sync_ghosts();
         initial_pressure.sync_ghosts();
         velocity_boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+        if (physical)
+        {
+            const auto gravity = time.gravity_vector();
+            const std::array<double, 5> physical_controls{gravity.x, gravity.y, gravity.z,
+                time.thermal_expansion, time.reference_temperature};
+            std::array<double, 5> controls_min{}, controls_max{};
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5,
+                physical_controls.data(), controls_min.data());
+            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5,
+                physical_controls.data(), controls_max.data());
+            collective_require(*mesh, controls_min == controls_max &&
+                std::all_of(physical_controls.begin(), physical_controls.end(), [](double x) { return std::isfinite(x); }),
+                "Coupled nonlinear physical buoyancy controls must be finite and rank-consistent.");
+            const auto& viscosity = physical->effective_dynamic_viscosity
+                ? *physical->effective_dynamic_viscosity : physical->material.dynamic_viscosity;
+            collective_require(*mesh, physical->temperature.mesh_ptr().get() == mesh.get() &&
+                physical->material.density.mesh_ptr().get() == mesh.get() && viscosity.mesh_ptr().get() == mesh.get() &&
+                (!physical->turbulent_kinetic_energy_gradient ||
+                    physical->turbulent_kinetic_energy_gradient->mesh_ptr().get() == mesh.get()),
+                "Coupled nonlinear physical momentum fields must use the exact context mesh.");
+            const auto copy = [](auto& destination, const auto& source)
+            {
+                destination.owned_data().update(1., source.owned_data(), 0.);
+                destination.sync_ghosts();
+            };
+            frozen_material = std::make_unique<material_type>(mesh, BoussinesqModelOptions{}, time);
+            copy(frozen_material->density, physical->material.density);
+            copy(frozen_material->dynamic_viscosity, viscosity);
+            frozen_temperature = std::make_unique<Pressure>(mesh, "nonlinear_frozen_temperature");
+            copy(*frozen_temperature, physical->temperature);
+            bool valid_coefficients = true;
+            const auto rho = frozen_material->density.local_read_view();
+            const auto mu = frozen_material->dynamic_viscosity.local_read_view();
+            for (size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
+                valid_coefficients = valid_coefficients && std::isfinite(rho(cell, 0)) && rho(cell, 0) > 0 &&
+                    std::isfinite(mu(cell, 0)) && mu(cell, 0) >= 0;
+            const bool finite_temperature = finite_vector(frozen_temperature->owned_data());
+            collective_require(*mesh, valid_coefficients && finite_temperature,
+                "Coupled nonlinear physical momentum requires finite positive density, nonnegative viscosity, and temperature.");
+            if (physical->turbulent_kinetic_energy_gradient)
+            {
+                frozen_turbulent_gradient = std::make_unique<Velocity>(mesh, "nonlinear_frozen_k_gradient");
+                copy(*frozen_turbulent_gradient, *physical->turbulent_kinetic_energy_gradient);
+            }
+            if (physical->boundary_dynamic_viscosity)
+                frozen_boundary_viscosity = *physical->boundary_dynamic_viscosity;
+            density_feedback = physical->density_feedback_enabled;
+            physical_equation = std::make_unique<BoussinesqEquation>(mesh);
+        }
         geometry = std::make_shared<FrozenGeometry>(mesh, boundaries, time, density);
         // Zero convection gives the immutable affine BE/diffusion/pressure
         // residual. Only this setup and linearize() assemble Schur products.
         trial_flux.put_value(0.0);
         MomentumEquation static_equation(mesh);
         CoupledSolver static_solver(mesh);
-        static_system = static_solver.assemble(static_equation, accepted_velocity, initial_pressure, trial_flux,
-            velocity_boundaries, boundaries, time, target, density);
+        // Separate equation caches keep the immutable residual generation
+        // independent of later frozen-flux preconditioner updates.
+        std::unique_ptr<BoussinesqEquation> static_physical;
+        if (physical_equation)
+            static_physical = std::make_unique<BoussinesqEquation>(mesh);
+        static_system = assemble(static_solver, static_equation, static_physical.get());
         if (static_system.pressure_gauge_gid)
         {
             const auto gauge = mesh->owned_cell_map()->getLocalElement(*static_system.pressure_gauge_gid);
@@ -505,6 +579,19 @@ struct CoupledNonlinearProblem::Impl
         }
         if (!finite_vector(*pack_initial()))
             throw std::invalid_argument("CoupledNonlinearProblem requires finite accepted velocity and pressure.");
+    }
+
+    CoupledSolver::system_type assemble(CoupledSolver& solver, MomentumEquation& equation,
+        BoussinesqEquation* selected_physical = nullptr)
+    {
+        if (physical_equation)
+            return solver.assemble(selected_physical ? *selected_physical : *physical_equation,
+                accepted_velocity, initial_pressure, *frozen_temperature,
+                trial_flux, velocity_boundaries, boundaries, time, target, frozen_material.get(), density,
+                density_feedback, nullptr, frozen_turbulent_gradient.get(),
+                frozen_boundary_viscosity ? &*frozen_boundary_viscosity : nullptr);
+        return solver.assemble(equation, accepted_velocity, initial_pressure, trial_flux,
+            velocity_boundaries, boundaries, time, target, density);
     }
 
     Teuchos::RCP<Vector> pack_initial() const
@@ -608,8 +695,7 @@ struct CoupledNonlinearProblem::Impl
         if (!trial(state))
             throw std::invalid_argument("Cannot linearize a non-finite coupled nonlinear state.");
         ++counters.linearizations;
-        auto system = dynamic_solver.assemble(dynamic_equation, accepted_velocity, initial_pressure, trial_flux,
-            velocity_boundaries, boundaries, time, target, density);
+        auto system = assemble(dynamic_solver, dynamic_equation);
         NonlinearLinearization result;
         result.right_preconditioner = Teuchos::rcp(
             new RetainedPreconditioner(dynamic_solver.right_preconditioner(system), system.linear_operator));
@@ -649,8 +735,17 @@ CoupledNonlinearProblem::CoupledNonlinearProblem(SP<const mesh_type> mesh, const
     const field_type& physical_pressure, const BoundaryConditionSet& boundaries, const TimeStepperOptions& time_options,
     const NonlinearSolverOptions& nonlinear_options, double reference_density,
     const continuity_target_type* continuity_target)
+    : CoupledNonlinearProblem(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
+          nonlinear_options, reference_density, continuity_target, nullptr)
+{
+}
+
+CoupledNonlinearProblem::CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
+    const field_type& physical_pressure, const BoundaryConditionSet& boundaries, const TimeStepperOptions& time_options,
+    const NonlinearSolverOptions& nonlinear_options, double reference_density,
+    const continuity_target_type* continuity_target, const FrozenBoussinesqInput* boussinesq)
     : d_impl(std::make_shared<Impl>(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
-          nonlinear_options, reference_density, continuity_target))
+          nonlinear_options, reference_density, continuity_target, boussinesq))
 {
 }
 

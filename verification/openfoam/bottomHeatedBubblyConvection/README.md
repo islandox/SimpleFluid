@@ -151,14 +151,46 @@ given edge arrays into conforming Z regions and merges matching physical patch
 names; it preserves the mesh coordinates and boundary conditions. `--regions`
 defaults to one and must not exceed the number of Z cells; multiple regions
 require `isoregion`. Use identical options on every MPI rank.
-`--coupling piso|coupled` defaults to the original PISO selection. The operator
+`--coupling piso|coupled|nox` defaults to the original PISO selection. The operator
 choices `assembled|block_composite` and workspace choices
-`cached_products|streamed_products` require `--coupling coupled`. The composite
+`cached_products|streamed_products` require `--coupling coupled` or `nox`. The composite
 operator avoids the monolithic coupled matrix while retaining scalar block and
 preconditioner matrices. It does not make the scalar transport solves matrix-free.
 Pressure-solver overrides describe the segregated pressure path; the coupled
-path uses its existing block GMRES/Schur solver. These controls do not change
-the case's physical or residual acceptance tolerances.
+path uses its existing block GMRES/Schur solver. Mesh/operator choices retain
+the case's physical acceptance checks and scalar transport tolerances. NOX
+adds nonlinear component/continuity convergence checks and uses inexact
+forcing tolerances for its individual Newton corrections.
+
+The optional NOX build supports this fixed-mesh physical Boussinesq case with
+temperature, material properties, SST coefficients, and gas state frozen during
+each nonlinear velocity-pressure solve. Their ordinary updates run once after
+the accepted flow solve. It is not a monolithic nonlinear solve of all transported
+fields. See the [nonlinear solver contract](../../../docs/architecture/coupled_nonlinear_solver.md).
+
+```sh
+bottom_heated_bubbly_convection --coupling nox \
+  --nonlinear-method newton --nonlinear-linear-solver gmres \
+  --coupled-operator block_composite --coupled-workspace cached_products \
+  --transport-solver bicgstab --transport-preconditioner sgs \
+  --mesh-file mesh.dat --output results-nox
+```
+
+This requires `SIMPLEFLUID_ENABLE_NOX=ON`. `--nonlinear-method newton|picard`,
+`--nonlinear-linear-solver gmres|bicgstab`, `--nonlinear-iterations N`, and
+`--nonlinear-restart N` require NOX selection. The independent linear override
+changes only NOX corrections; scalar transport retains its selected solver.
+Without overrides the typed nonlinear defaults apply. NOX runs additionally
+write `nonlinear_solver_statistics.csv`, including per-step convergence,
+iteration and residual-evaluation counts, physical continuity, and backend
+timers. Timers include nested work and are not an additive phase breakdown.
+
+`../run_coupled_nonlinear_performance.py` compares fresh two-rank OpenFOAM,
+PISO, coupled Krylov and NOX executions using prepared meshes and decomposed
+OpenFOAM fixtures. It records three alternating repetitions by default,
+checks executable/library hashes, and excludes failed solves or failed physical
+comparisons from timing summaries. The default window is ten steps; this is a
+startup performance comparison, not the full 20-second physical qualification.
 
 ### Historical uniform-grid comparison (2026-09-08, GCC Debug / OpenFOAM v2606)
 

@@ -5,6 +5,7 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
+#include "solvers/BoussinesqSolver.hh"
 #include "solvers/FluidSolver.hh"
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/NoxNonlinearSolver.hh"
@@ -232,6 +233,90 @@ TEST(CoupledNonlinearProblemTest, ResidualTrialsPreserveAcceptedHistoryPressureA
     }
     ASSERT_TRUE(callbacks.residual(*x, repeat));
     EXPECT_LT(difference(first, repeat), 1.e-14);
+}
+
+TEST(CoupledNonlinearProblemTest, FrozenPhysicalBoussinesqMatchesNativeStressSourcesAndDerivative)
+{
+    for (const auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+        for (const bool density_feedback : {false, true})
+        {
+            State state;
+            state.time.coupled_operator_backend = backend;
+            state.time.thermal_expansion = .03;
+            state.time.reference_temperature = 2.;
+            BoussinesqModelOptions options;
+            options.reference_density = 7.;
+            options.density = 6.8;
+            options.dynamic_viscosity = .19;
+            NonlinearProblem::material_type material(state.mesh, options, state.time);
+            NonlinearProblem::field_type temperature(state.mesh, "frozen_test_temperature");
+            NonlinearProblem::field_type viscosity(state.mesh, "frozen_test_viscosity");
+            NonlinearProblem::velocity_field_type k_gradient(state.mesh, "frozen_test_k_gradient");
+            for (size_t cell = 0; cell < state.mesh->num_owned_cells(); ++cell)
+            {
+                const auto lid = static_cast<LO>(cell);
+                const auto center = state.mesh->cell_centroid(lid);
+                temperature.set_owned_value(lid, 2. + .5 * center.z);
+                material.density.set_owned_value(lid, 6.8 + .15 * center.x);
+                viscosity.set_owned_value(lid, .3 + .2 * center.x);
+                k_gradient.set_owned_value(lid, {.01 * center.x, -.02 * center.y, .03});
+            }
+            temperature.sync_ghosts();
+            material.density.sync_ghosts();
+            viscosity.sync_ghosts();
+            k_gradient.sync_ghosts();
+            auto velocity_cache = FVM::cache_velocity_boundary_conditions<Pack>(state.mesh, state.boundaries);
+            NonlinearProblem::boundary_cache_type boundary_mu;
+            boundary_mu.mesh = state.mesh;
+            for (const auto& [batch, boundary_values] : velocity_cache.value)
+                boundary_mu.value[batch].assign(boundary_values.size(), .43);
+            const NonlinearProblem::FrozenBoussinesqInput physical{
+                temperature, material, density_feedback, &viscosity, &k_gradient, &boundary_mu};
+            NonlinearProblem problem(state.mesh, state.velocity, state.pressure, state.boundaries,
+                state.time, state.nonlinear, 7., nullptr, &physical);
+            auto x = problem.pack_initial();
+            const auto callbacks = problem.callbacks();
+            Vector residual(callbacks.map), expected(callbacks.map), repeated(callbacks.map);
+            ASSERT_TRUE(callbacks.residual(*x, residual));
+            FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, NativeMesh> workspace(state.mesh);
+            FVM::pressure_weighted_face_fluxes(state.velocity, state.pressure, state.time.time_step / 7.,
+                velocity_cache, state.boundaries.pressure, workspace, state.flux, state.time.pressure_gradient_scheme);
+            BoussinesqMomentumEquation<Pack, NativeMesh> equation(state.mesh);
+            CoupledPressureVelocitySolver<Pack, NativeMesh> native_solver(state.mesh);
+            const NonlinearProblem::continuity_target_type target(state.mesh);
+            const auto native = native_solver.assemble(equation, state.velocity, state.pressure, temperature,
+                state.flux, velocity_cache, state.boundaries, state.time, target, &material, 7., density_feedback,
+                &viscosity, &k_gradient, &boundary_mu);
+            native.linear_operator->apply(*x, expected);
+            expected.update(-1., *native.rhs, 1.);
+            EXPECT_LT(difference(residual, expected), 1.e-12);
+
+            Vector direction(callbacks.map), action(callbacks.map), plus(*x, Teuchos::Copy), minus(*x, Teuchos::Copy),
+                fplus(callbacks.map), fminus(callbacks.map);
+            set_direction(direction);
+            auto linearization = callbacks.linearize(*x);
+            linearization.jacobian->apply(direction, action);
+            constexpr double epsilon = 1.e-5;
+            plus.update(epsilon, direction, 1.);
+            minus.update(-epsilon, direction, 1.);
+            ASSERT_TRUE(callbacks.residual(plus, fplus));
+            ASSERT_TRUE(callbacks.residual(minus, fminus));
+            fplus.update(-1., fminus, 1.);
+            fplus.scale(.5 / epsilon);
+            EXPECT_LT(difference(action, fplus), 1.e-8);
+
+            temperature.put_value(100.);
+            material.density.put_value(700.);
+            viscosity.put_value(30.);
+            k_gradient.put_value({9., 8., 7.});
+            for (auto& [batch, boundary_values] : boundary_mu.value)
+                std::fill(boundary_values.begin(), boundary_values.end(), 43.);
+            ASSERT_TRUE(callbacks.residual(*x, repeated));
+            EXPECT_LT(difference(residual, repeated), 1.e-14);
+            auto later_linearization = callbacks.linearize(*x);
+            later_linearization.jacobian->apply(direction, repeated);
+            EXPECT_LT(difference(action, repeated), 1.e-12);
+        }
 }
 
 TEST(CoupledNonlinearProblemTest, ContinuityTargetChangesIntegratedRowsAndGaugeMetric)
@@ -993,6 +1078,110 @@ TEST(CoupledNonlinearSolverTest, NativeDriverLinearFailurePreservesAcceptedField
     EXPECT_DOUBLE_EQ(solver.time(), 0.);
     EXPECT_EQ(values(solver.velocity().owned_data()), accepted_u);
     EXPECT_EQ(values(solver.pressure().owned_data()), accepted_p);
+}
+
+TEST(CoupledNonlinearSolverTest, BoussinesqAdvancesHeatAndMaterialUpdaterOnceAfterAcceptedFlow)
+{
+    State state;
+    state.time.nonlinear = state.nonlinear;
+    state.time.nonlinear.linear_backend = LinearSolverBackend::Gmres;
+    state.linear.backend = LinearSolverBackend::BiCGStab;
+    state.time.reference_temperature = 300.;
+    for (const auto& [name, velocity] : state.boundaries.velocity)
+        state.boundaries.temperature[name] = {BoundaryConditionType::Neumann, 0.};
+    BoussinesqModelOptions material;
+    material.reference_density = material.density = 7.;
+    material.dynamic_viscosity = .28;
+    BoussinesqSolver<Pack> solver(state.mesh, state.boundaries, state.time, state.linear, material);
+    solver.temperature().put_value(300.);
+    State::seed(solver.velocity(), solver.pressure());
+    int updates = 0;
+    solver.set_material_updater([&](const auto&, auto&) { ++updates; });
+    solver.add_temperature_source("heat", 14.);
+    for (int step = 1; step <= 2; ++step)
+    {
+        ASSERT_NO_THROW(solver.step());
+        EXPECT_EQ(solver.step_index(), step);
+        EXPECT_DOUBLE_EQ(solver.time(), step * state.time.time_step);
+        EXPECT_EQ(updates, step);
+        EXPECT_TRUE(solver.last_nonlinear_result().converged);
+        EXPECT_LT(solver.last_volume_continuity_residuals().maximum, 1.e-9);
+        for (size_t cell = 0; cell < state.mesh->num_owned_cells(); ++cell)
+            EXPECT_NEAR(solver.temperature().value(static_cast<LO>(cell)), 300. + step * .08, 1.e-6);
+    }
+    EXPECT_EQ(solver.linear_solver_options().backend, LinearSolverBackend::BiCGStab);
+}
+
+TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSupportsRetry)
+{
+    State state;
+    state.time.nonlinear = state.nonlinear;
+    state.time.nonlinear.linear_backend = LinearSolverBackend::Gmres;
+    state.time.nonlinear.forcing_initial = 1.e-10;
+    state.time.nonlinear.forcing_minimum = 1.e-10;
+    state.time.reference_temperature = 300.;
+    state.linear.max_iterations = 1;
+    for (const auto& [name, velocity] : state.boundaries.velocity)
+        state.boundaries.temperature[name] = {BoundaryConditionType::Neumann, 0.};
+    BoussinesqModelOptions material;
+    material.reference_density = material.density = 7.;
+    material.dynamic_viscosity = .28;
+    BoussinesqSolver<Pack> solver(state.mesh, state.boundaries, state.time, state.linear, material);
+    solver.temperature().put_value(300.);
+    solver.add_fission_power_source().initialize_constant(0.);
+    RadiolyticGasOptions gas_options;
+    gas_options.mode = RadiolyticGasMode::Sheng2024TwoPopulation;
+    gas_options.hydrogen_yield_mol_per_j = 2.e-7;
+    gas_options.max_source_alpha_rate = 1.;
+    gas_options.dissolved_transport = RadiolyticTransportMode::Advective;
+    gas_options.henry_coefficient = 1.e-5;
+    gas_options.surface_tension = .07;
+    gas_options.hydrogen_diffusivity = 4.e-4;
+    gas_options.initial_dissolved_hydrogen = 1.;
+    gas_options.uranium_concentration_mol_per_m3 = 1000.;
+    gas_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    auto& gas = solver.configure_radiolytic_gas(gas_options);
+    State::seed(solver.velocity(), solver.pressure());
+    solver.set_material_updater([](const auto&, auto& properties) { properties.density.put_scalar(6.9); });
+    const auto accepted_u = values(solver.velocity().owned_data());
+    const auto accepted_p = values(solver.pressure().owned_data());
+    const auto accepted_t = values(solver.temperature().owned_data());
+    const auto accepted_rho = values(solver.material_properties().density.owned_data());
+    const auto accepted_flux = values(solver.pressure_corrected_face_fluxes().owned_data());
+    std::vector<std::vector<double>> accepted_gas;
+    for (const auto& [name, field] : gas.output_fields())
+        accepted_gas.push_back(values(field->owned_data()));
+    const bool accepted_initialization = gas.initial_state_initialized();
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        EXPECT_THROW(solver.step(), std::runtime_error);
+        EXPECT_EQ(solver.step_index(), 0);
+        EXPECT_DOUBLE_EQ(solver.time(), 0.);
+        EXPECT_EQ(values(solver.velocity().owned_data()), accepted_u);
+        EXPECT_EQ(values(solver.pressure().owned_data()), accepted_p);
+        EXPECT_EQ(values(solver.temperature().owned_data()), accepted_t);
+        EXPECT_EQ(values(solver.material_properties().density.owned_data()), accepted_rho);
+        EXPECT_EQ(values(solver.pressure_corrected_face_fluxes().owned_data()), accepted_flux);
+        EXPECT_EQ(gas.initial_state_initialized(), accepted_initialization);
+        size_t index = 0;
+        for (const auto& [name, field] : gas.output_fields())
+            EXPECT_EQ(values(field->owned_data()), accepted_gas.at(index++));
+    }
+    state.linear.max_iterations = 250;
+    solver.set_linear_solver_options(state.linear);
+    ASSERT_NO_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_DOUBLE_EQ(solver.time(), state.time.time_step);
+    EXPECT_TRUE(solver.last_nonlinear_result().converged);
+}
+
+TEST(CoupledNonlinearSolverTest, RejectsPcgNonlinearCorrectionOverride)
+{
+    State state;
+    auto problem = state.problem();
+    auto x = problem->pack_initial();
+    state.nonlinear.linear_backend = LinearSolverBackend::Cg;
+    EXPECT_THROW(solve_nox(problem->callbacks(), *x, state.nonlinear, state.linear), std::invalid_argument);
 }
 
 TEST(CoupledNonlinearSolverTest, DerivedPhysicalSolverRejectsUnsupportedModeBeforeAdvancing)
