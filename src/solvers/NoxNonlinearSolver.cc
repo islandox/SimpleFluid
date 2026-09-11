@@ -287,9 +287,9 @@ protected:
         parameters->set("Convergence Tolerance", tolerance);
         parameters->set("Verbosity", context_->linear.verbosity);
         parameters->set("Implicit Residual Scaling", "Norm of RHS");
-        parameters->set("Explicit Residual Scaling", "Norm of RHS");
         if (context_->linear.backend == LinearSolverBackend::Gmres)
         {
+            parameters->set("Explicit Residual Scaling", "Norm of RHS");
             parameters->set("Num Blocks", context_->nonlinear.krylov_restart);
             parameters->set("Maximum Restarts", context_->linear.max_iterations);
         }
@@ -461,6 +461,20 @@ protected:
         }
         if (!out.get_W_op().is_null())
         {
+            auto& linearization = dynamic_cast<LinearizationOperator&>(*out.get_W_op());
+            // This request follows the previous completed line search. Type 2
+            // forcing uses residual norms only, so neither it nor Armijo needs
+            // that Jacobian again. NOX group copies share this W_op and LOWS.
+            // Retire every internal operator reference before native assembly
+            // tests its leases for reuse, including the dormant Belos problem.
+            // External native J/P owners still hold their leases and therefore
+            // continue to require a distinct immutable numerical generation.
+            const bool retiring = !context_->active_generation.is_null();
+            context_->active_generation = Teuchos::null;
+            linear_solve_->invalidate();
+            linearization.generation = Teuchos::null;
+            if (retiring)
+                ++context_->cache_statistics.linearization_retirements;
             NonlinearLinearization native;
             {
                 AccumulateTime elapsed(context_->result.linearization_seconds);
@@ -499,7 +513,7 @@ protected:
                     native.right_preconditioner, callbacks_.state_scale, callbacks_.residual_scale, true));
             context_->active_generation = generation;
             ++context_->cache_statistics.linearization_generations;
-            dynamic_cast<LinearizationOperator&>(*out.get_W_op()).generation = generation;
+            linearization.generation = generation;
         }
     }
 
@@ -724,8 +738,10 @@ void validate(
     require(n.backend == NonlinearBackend::NOX &&
                 (n.linearization == CoupledLinearization::Picard ||
                     n.linearization == CoupledLinearization::AnalyticNewton) &&
+                (n.preconditioner_update == CoupledPreconditionerUpdate::EveryLinearization ||
+                    n.preconditioner_update == CoupledPreconditionerUpdate::PerTimeStep) &&
                 (l.backend == LinearSolverBackend::Gmres || l.backend == LinearSolverBackend::BiCGStab),
-        "NOX requires a valid linearization and GMRES or BiCGStab corrections");
+        "NOX requires valid linearization/preconditioner policies and GMRES or BiCGStab corrections");
     require(n.maximum_iterations > 0 && n.maximum_backtracks >= 0 && n.krylov_restart > 0 &&
                 positive(n.absolute_tolerance) && positive(n.relative_tolerance) && positive(n.forcing_minimum) &&
                 std::isfinite(n.forcing_initial) && std::isfinite(n.forcing_maximum) &&
@@ -734,14 +750,16 @@ void validate(
                 n.backtrack_factor < 1.0 && positive(n.minimum_step) && n.minimum_step <= 1.0 &&
                 positive(n.velocity_scale) && positive(n.pressure_scale) && positive(n.momentum_residual_scale) &&
                 positive(n.continuity_residual_scale) && positive(n.continuity_tolerance) && l.max_iterations > 0 &&
-                positive(l.tolerance) && l.tolerance < 1.0,
+                positive(l.tolerance) && l.tolerance < 1.0 && positive(n.preconditioner_stagnation_ratio) &&
+                n.preconditioner_stagnation_ratio <= 1.0,
         "Invalid NOX nonlinear or linear solve controls");
-    const std::array<double, 24> controls = {double(n.backend), double(n.linearization), double(n.maximum_iterations),
+    const std::array<double, 26> controls = {double(n.backend), double(n.linearization), double(n.maximum_iterations),
         double(n.maximum_backtracks), double(n.krylov_restart), n.relative_tolerance, n.absolute_tolerance,
         n.continuity_tolerance, n.velocity_scale, n.pressure_scale, n.momentum_residual_scale,
         n.continuity_residual_scale, n.forcing_initial, n.forcing_minimum, n.forcing_maximum, n.armijo,
         n.backtrack_factor, n.minimum_step, double(l.max_iterations), l.tolerance, double(l.verbosity),
-        double(l.backend), double(l.preconditioner), double(l.reuse_preconditioner)};
+        double(l.backend), double(l.preconditioner), double(l.reuse_preconditioner), double(n.preconditioner_update),
+        n.preconditioner_stagnation_ratio};
     std::array<double, controls.size()> minima{}, maxima{};
     Teuchos::reduceAll(*map.getComm(), Teuchos::REDUCE_MIN, int(controls.size()), controls.data(), minima.data());
     Teuchos::reduceAll(*map.getComm(), Teuchos::REDUCE_MAX, int(controls.size()), controls.data(), maxima.data());

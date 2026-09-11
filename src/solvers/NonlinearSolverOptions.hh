@@ -15,6 +15,11 @@ enum class CoupledLinearization
     Picard,
     AnalyticNewton
 };
+enum class CoupledPreconditionerUpdate
+{
+    EveryLinearization,
+    PerTimeStep
+};
 
 /** Controls for the opt-in fixed-mesh nonlinear pressure-velocity solve.
  * Reference scales are positive and fixed throughout one physical step.
@@ -43,6 +48,12 @@ struct NonlinearSolverOptions
     double armijo = 1.0e-4;
     double backtrack_factor = 0.5;
     double minimum_step = 1.0e-8;
+    /** Experimental: freeze the first preconditioner in a timestep, refreshing
+     * when consecutive linearization residual norms fail the reduction ratio.
+     * Jacobians and explicit linear/nonlinear convergence checks remain current.
+     */
+    CoupledPreconditionerUpdate preconditioner_update = CoupledPreconditionerUpdate::EveryLinearization;
+    double preconditioner_stagnation_ratio = 0.9;
 };
 
 } // namespace SimpleFluid

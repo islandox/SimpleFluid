@@ -86,6 +86,7 @@ template<TpetraTypePack Pack> struct CoupledPressureVelocitySystem
     std::array<Teuchos::RCP<matrix_type>, 3> gradient;
     std::array<Teuchos::RCP<matrix_type>, 3> divergence;
     Teuchos::RCP<matrix_type> pressure_stabilization;
+    /// Null when assembled for residual evaluation without linear-solve setup.
     Teuchos::RCP<matrix_type> schur;
     scalar_type reference_density = scalar_type{1};
     std::optional<global_ordinal_type> pressure_gauge_gid;
@@ -126,6 +127,16 @@ enum class CoupledRebuildPolicy : std::uint8_t
     Always = 1                 ///< Rebuild operator-dependent setup each call.
 };
 
+/** Select whether assembly also prepares the Schur approximation for a solve.
+ * ResidualOnly preserves the complete affine operator and RHS, including
+ * pressure stabilization, boundary terms, continuity targets, and the gauge.
+ */
+enum class CoupledAssemblyPurpose : std::uint8_t
+{
+    LinearSolve = 0,
+    ResidualOnly = 1
+};
+
 /**
  * @brief Observable counters for coupled setup reuse.
  *
@@ -142,6 +153,10 @@ struct CoupledPressureVelocityCacheStatistics
     size_t static_geometry_builds = 0;
     size_t static_geometry_reuses = 0;
     size_t matrix_graph_reuses = 0;
+    /// Completed Schur numeric assemblies, including compatible graph reuse.
+    size_t schur_builds = 0;
+    /// Computed D_i diag(A_m)^-1 G_i products, including numeric refreshes.
+    size_t schur_product_builds = 0;
     size_t schur_product_reuses = 0;
     size_t preconditioner_builds = 0;
     size_t preconditioner_numeric_reuses = 0;
@@ -408,12 +423,25 @@ public:
         const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
         const TimeStepperOptions& time_options, scalar_type reference_density = scalar_type{1}) const;
 
+    /** Assemble for a selected purpose without changing the linear-solve entry point. */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, scalar_type reference_density, CoupledAssemblyPurpose purpose) const;
+
     /** Assemble with an integrated per-cell continuity target [m^3/s]. */
     system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
         const field_type& pressure, const face_flux_field_type& face_fluxes,
         const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
         const TimeStepperOptions& time_options, const continuity_target_type& continuity_target,
         scalar_type reference_density = scalar_type{1}, const FVM::ALEControlVolumeState* ale = nullptr) const;
+
+    /** Assemble a continuity-target system for a selected purpose. */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, const continuity_target_type& continuity_target,
+        scalar_type reference_density, const FVM::ALEControlVolumeState* ale, CoupledAssemblyPurpose purpose) const;
 
     /**
      * @brief Assemble isothermal momentum with variable effective viscosity
@@ -430,6 +458,14 @@ public:
         const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
         const boundary_cache_type* boundary_dynamic_viscosity) const;
 
+    /** Assemble variable-viscosity momentum for a selected purpose. */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, scalar_type reference_density,
+        const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+        const boundary_cache_type* boundary_dynamic_viscosity, CoupledAssemblyPurpose purpose) const;
+
     /** Variable-viscosity assembly with an integrated continuity target. */
     system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
         const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -438,6 +474,15 @@ public:
         const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
         const boundary_cache_type* boundary_dynamic_viscosity, const continuity_target_type& continuity_target,
         const FVM::ALEControlVolumeState* ale = nullptr) const;
+
+    /** Assemble variable-viscosity momentum and a target for a selected purpose. */
+    system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
+        const field_type& pressure, const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, const BoundaryConditionSet& boundary_conditions,
+        const TimeStepperOptions& time_options, scalar_type reference_density,
+        const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+        const boundary_cache_type* boundary_dynamic_viscosity, const continuity_target_type& continuity_target,
+        const FVM::ALEControlVolumeState* ale, CoupledAssemblyPurpose purpose) const;
 
     /**
      * @brief Assemble a thermally buoyant coupled system.
@@ -454,6 +499,15 @@ public:
         const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
+    /** Assemble thermally buoyant momentum for a selected purpose. */
+    system_type assemble(const boussinesq_momentum_equation_type& momentum_equation,
+        const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+        const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+        const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+        const material_property_fields_type* material, scalar_type reference_density, bool density_feedback_enabled,
+        const field_type* dynamic_viscosity_override, const velocity_field_type* turbulent_kinetic_energy_gradient,
+        const boundary_cache_type* boundary_dynamic_viscosity, CoupledAssemblyPurpose purpose) const;
+
     /** Thermally buoyant assembly with an integrated continuity target. */
     system_type assemble(const boussinesq_momentum_equation_type& momentum_equation,
         const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
@@ -465,6 +519,17 @@ public:
         const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr,
         const FVM::ALEControlVolumeState* ale = nullptr) const;
+
+    /** Assemble thermally buoyant momentum and a target for a selected purpose. */
+    system_type assemble(const boussinesq_momentum_equation_type& momentum_equation,
+        const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
+        const face_flux_field_type& face_fluxes, const velocity_boundary_cache_type& velocity_boundary_cache,
+        const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
+        const continuity_target_type& continuity_target, const material_property_fields_type* material,
+        scalar_type reference_density, bool density_feedback_enabled, const field_type* dynamic_viscosity_override,
+        const velocity_field_type* turbulent_kinetic_energy_gradient,
+        const boundary_cache_type* boundary_dynamic_viscosity, const FVM::ALEControlVolumeState* ale,
+        CoupledAssemblyPurpose purpose) const;
 
 private:
     using pressure_graph_signature_type = std::vector<std::pair<std::string, BoundaryConditionType>>;
@@ -490,7 +555,8 @@ private:
 
     SIMPLEFLUID_SOLVERS_LOCAL
     bool has_external_generation() const;
-    void prepare_numeric_generation(const momentum_equation_type& equation, const TimeStepperOptions& options) const;
+    void prepare_numeric_generation(const momentum_equation_type& equation, const TimeStepperOptions& options,
+        CoupledAssemblyPurpose purpose) const;
 
     bool can_reuse_assembly_graph(
         const momentum_system_type& momentum, const pressure_graph_signature_type& pressure_signature) const;
@@ -500,7 +566,7 @@ private:
         const field_type& pressure, const velocity_boundary_cache_type& velocity_boundary_cache,
         const BoundaryConditionSet& boundary_conditions, const TimeStepperOptions& time_options,
         scalar_type reference_density, const continuity_target_type& continuity_target,
-        bool enforce_global_compatibility) const;
+        bool enforce_global_compatibility, CoupledAssemblyPurpose purpose) const;
 
     SIMPLEFLUID_SOLVERS_LOCAL
     void invalidate_cache() const;

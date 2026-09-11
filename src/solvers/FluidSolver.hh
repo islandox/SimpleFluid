@@ -33,6 +33,7 @@
 namespace SimpleFluid
 {
 class CoupledNonlinearProblem;
+class CoupledNonlinearWorkspace;
 
 /**
  * @brief Transient solver for incompressible momentum and pressure.
@@ -234,6 +235,7 @@ protected:
     /** Fail closed unless the exact driver supplies an immutable flow context. */
     virtual bool supports_coupled_nonlinear() const noexcept;
     virtual std::unique_ptr<CoupledNonlinearProblem> make_coupled_nonlinear_problem();
+    CoupledNonlinearWorkspace* coupled_nonlinear_workspace();
     /** @return Pressure normalization density in kg/m^3. */
     virtual scalar_type pressure_reference_density() const noexcept
     {

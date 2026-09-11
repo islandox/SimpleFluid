@@ -697,6 +697,225 @@ TEST(CoupledNonlinearProblemTest, RejectsInvalidPhysicalCoefficientsAndIncompati
     EXPECT_THROW(state.problem(), std::invalid_argument);
 }
 
+namespace
+{
+std::unique_ptr<NonlinearProblem> workspace_problem(State& state, CoupledNonlinearWorkspace* workspace,
+    double density = 1., const NonlinearProblem::continuity_target_type* target = nullptr,
+    const NonlinearProblem::FrozenBoussinesqInput* physical = nullptr)
+{
+    return std::make_unique<NonlinearProblem>(state.mesh, state.velocity, state.pressure, state.boundaries, state.time,
+        state.nonlinear, density, target, physical, workspace);
+}
+
+void expect_same_problem(NonlinearProblem& actual, NonlinearProblem& expected)
+{
+    const auto actual_callbacks = actual.callbacks(), expected_callbacks = expected.callbacks();
+    const auto x = actual.pack_initial(), expected_x = expected.pack_initial();
+    EXPECT_LT(difference(*x, *expected_x), 1.e-14);
+    Vector actual_value(x->getMap()), expected_value(x->getMap()), direction(x->getMap());
+    ASSERT_TRUE(actual_callbacks.residual(*x, actual_value));
+    ASSERT_TRUE(expected_callbacks.residual(*x, expected_value));
+    EXPECT_LT(difference(actual_value, expected_value), 1.e-12 * (1. + expected_value.norm2()));
+    EXPECT_NEAR(actual.continuity().maximum, expected.continuity().maximum, 1.e-14);
+    EXPECT_NEAR(actual.continuity().l2, expected.continuity().l2, 1.e-14);
+    set_direction(direction);
+    const auto actual_linear = actual_callbacks.linearize(*x), expected_linear = expected_callbacks.linearize(*x);
+    actual_linear.jacobian->apply(direction, actual_value);
+    expected_linear.jacobian->apply(direction, expected_value);
+    EXPECT_LT(difference(actual_value, expected_value), 1.e-12 * (1. + expected_value.norm2()));
+    actual_linear.right_preconditioner->apply(direction, actual_value);
+    expected_linear.right_preconditioner->apply(direction, expected_value);
+    EXPECT_LT(difference(actual_value, expected_value), 1.e-10 * (1. + expected_value.norm2()));
+}
+} // namespace
+
+TEST(CoupledNonlinearProblemTest, RecycledWorkspaceRefreshesHistoryCoefficientsAndTargetWithoutStaticSchur)
+{
+    for (const auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+    {
+        SCOPED_TRACE(static_cast<int>(backend));
+        State state;
+        state.time.coupled_operator_backend = backend;
+        CoupledNonlinearWorkspace workspace;
+        {
+            auto first = workspace_problem(state, &workspace);
+            EXPECT_EQ(first->statistics().workspace_builds, 1U);
+            EXPECT_EQ(first->statistics().geometry_builds, 1U);
+            EXPECT_EQ(first->statistics().schur_builds, 0U);
+            const auto x = first->pack_initial();
+            Vector residual(x->getMap());
+            ASSERT_TRUE(first->callbacks().residual(*x, residual));
+            EXPECT_EQ(first->statistics().schur_builds, 0U);
+        }
+        state.time.time_step = .13;
+        state.time.kinematic_viscosity = .075;
+        state.velocity.owned_data().scale(1.4);
+        state.pressure.owned_data().scale(2.3);
+        state.velocity.sync_ghosts();
+        state.pressure.sync_ghosts();
+        std::vector<double> rates(state.mesh->num_owned_cells(), 0.);
+        for (size_t cell = 0; cell < rates.size(); ++cell)
+        {
+            const auto gid = state.mesh->cell_global_id(static_cast<LO>(cell));
+            rates[cell] = gid == 0 ? .003 : (gid == 1 ? -.003 : 0.);
+        }
+        const NonlinearProblem::continuity_target_type target(state.mesh, rates, 21);
+        auto reused = workspace_problem(state, &workspace, 7., &target);
+        auto fresh = workspace_problem(state, nullptr, 7., &target);
+        EXPECT_EQ(reused->statistics().workspace_reuses, 1U);
+        EXPECT_EQ(reused->statistics().geometry_builds, 0U);
+        EXPECT_EQ(reused->statistics().schur_builds, 0U);
+        EXPECT_GE(reused->statistics().graph_reuses, 1U);
+        expect_same_problem(*reused, *fresh);
+        EXPECT_EQ(reused->statistics().schur_builds, 1U);
+    }
+}
+
+TEST(CoupledNonlinearProblemTest, RetainedCallbacksKeepSnapshotWhileWorkspaceUsesAnotherSlot)
+{
+    State state;
+    CoupledNonlinearWorkspace workspace;
+    NonlinearCallbacks retained;
+    Teuchos::RCP<Vector> x;
+    {
+        auto first = workspace_problem(state, &workspace);
+        retained = first->callbacks();
+        x = first->pack_initial();
+    }
+    Vector before(x->getMap()), after(x->getMap()), current(x->getMap());
+    ASSERT_TRUE(retained.residual(*x, before));
+    state.time.time_step = .12;
+    state.velocity.owned_data().scale(1.6);
+    state.velocity.sync_ghosts();
+    {
+        auto second = workspace_problem(state, &workspace);
+        EXPECT_EQ(second->statistics().workspace_builds, 1U);
+        EXPECT_EQ(second->statistics().workspace_reuses, 0U);
+        ASSERT_TRUE(second->callbacks().residual(*x, current));
+        EXPECT_GT(difference(before, current), 1.e-4);
+        ASSERT_TRUE(retained.residual(*x, after));
+        EXPECT_LT(difference(before, after), 1.e-14);
+    }
+    retained = {};
+    auto third = workspace_problem(state, &workspace);
+    EXPECT_EQ(third->statistics().workspace_reuses, 1U);
+    EXPECT_EQ(third->statistics().geometry_builds, 0U);
+}
+
+TEST(CoupledNonlinearProblemTest, RecycledWorkspacePreservesExternallyRetainedJacobianAndInverse)
+{
+    for (const auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+    {
+        SCOPED_TRACE(static_cast<int>(backend));
+        State state;
+        state.time.coupled_operator_backend = backend;
+        CoupledNonlinearWorkspace workspace;
+        NonlinearLinearization retained;
+        Teuchos::RCP<Vector> x;
+        {
+            auto first = workspace_problem(state, &workspace);
+            x = first->pack_initial();
+            retained = first->callbacks().linearize(*x);
+        }
+        Vector direction(x->getMap()), jacobian_before(x->getMap()), inverse_before(x->getMap()),
+            jacobian_after(x->getMap()), inverse_after(x->getMap()), current(x->getMap());
+        set_direction(direction);
+        retained.jacobian->apply(direction, jacobian_before);
+        retained.right_preconditioner->apply(direction, inverse_before);
+        state.time.time_step = .13;
+        state.time.kinematic_viscosity = .075;
+        state.velocity.owned_data().scale(1.4);
+        state.velocity.sync_ghosts();
+        auto reused = workspace_problem(state, &workspace, 7.);
+        EXPECT_EQ(reused->statistics().workspace_reuses, 1U);
+        EXPECT_EQ(reused->statistics().geometry_builds, 0U);
+        const auto next = reused->callbacks().linearize(*reused->pack_initial());
+        next.jacobian->apply(direction, current);
+        EXPECT_GT(difference(jacobian_before, current), 1.e-5);
+        retained.jacobian->apply(direction, jacobian_after);
+        retained.right_preconditioner->apply(direction, inverse_after);
+        EXPECT_LT(difference(jacobian_before, jacobian_after), 1.e-14);
+        EXPECT_LT(difference(inverse_before, inverse_after), 1.e-12);
+    }
+}
+
+TEST(CoupledNonlinearProblemTest, WorkspaceRebuildsChangedBoundaryGeometryAndRecoversAfterInvalidConstruction)
+{
+    State state;
+    CoupledNonlinearWorkspace workspace;
+    {
+        auto first = workspace_problem(state, &workspace);
+        EXPECT_EQ(first->statistics().geometry_builds, 1U);
+    }
+    for (const bool change_gradient : {false, true})
+    {
+        if (change_gradient)
+            state.time.pressure_gradient_scheme = FVM::CellGradientScheme::GaussLinear;
+        else
+            state.boundaries.velocity["ymax"].value.x = .45;
+        auto reused = workspace_problem(state, &workspace);
+        auto fresh = workspace_problem(state, nullptr);
+        EXPECT_EQ(reused->statistics().workspace_reuses, 1U);
+        EXPECT_EQ(reused->statistics().geometry_builds, 1U);
+        expect_same_problem(*reused, *fresh);
+    }
+    state.time.time_step = 0.;
+    EXPECT_THROW(workspace_problem(state, &workspace), std::invalid_argument);
+    state.time.time_step = .08;
+    auto recovered = workspace_problem(state, &workspace);
+    auto fresh = workspace_problem(state, nullptr);
+    EXPECT_EQ(recovered->statistics().workspace_builds, 1U);
+    EXPECT_EQ(recovered->statistics().schur_builds, 0U);
+    expect_same_problem(*recovered, *fresh);
+}
+
+TEST(CoupledNonlinearProblemTest, RecycledWorkspaceRefreshesPhysicalModeAndOptionalCoefficientSnapshots)
+{
+    State state;
+    state.time.coupled_operator_backend = CoupledOperatorBackend::BlockComposite;
+    state.time.thermal_expansion = .03;
+    state.time.reference_temperature = 2.;
+    BoussinesqModelOptions options;
+    options.reference_density = 7.;
+    options.density = 6.8;
+    options.dynamic_viscosity = .19;
+    NonlinearProblem::material_type material(state.mesh, options, state.time);
+    NonlinearProblem::field_type temperature(state.mesh, "pooled_temperature");
+    NonlinearProblem::field_type viscosity(state.mesh, "pooled_viscosity");
+    NonlinearProblem::velocity_field_type k_gradient(state.mesh, "pooled_k_gradient");
+    NonlinearProblem::boundary_cache_type boundary_mu;
+    boundary_mu.mesh = state.mesh;
+    const auto velocity_cache = FVM::cache_velocity_boundary_conditions<Pack>(state.mesh, state.boundaries);
+    for (const auto& [batch, boundary_values] : velocity_cache.value)
+        boundary_mu.value[batch].assign(boundary_values.size(), .43);
+    CoupledNonlinearWorkspace workspace;
+    for (int step = 0; step < 4; ++step)
+    {
+        SCOPED_TRACE(step);
+        state.time.time_step = .04 + .02 * step;
+        temperature.put_value(2.5 + .2 * step);
+        material.density.put_value(6.8 + .1 * step);
+        material.dynamic_viscosity.put_value(.19 + .03 * step);
+        viscosity.put_value(.3 + .04 * step);
+        k_gradient.put_value({.01, -.02 * step, .03});
+        for (auto& [batch, boundary_values] : boundary_mu.value)
+            std::fill(boundary_values.begin(), boundary_values.end(), .43 + .05 * step);
+        const bool optional_fields = step == 0 || step == 3;
+        const NonlinearProblem::FrozenBoussinesqInput physical{temperature, material, step == 2,
+            optional_fields ? &viscosity : nullptr, optional_fields ? &k_gradient : nullptr,
+            optional_fields ? &boundary_mu : nullptr};
+        // Visit full physical input, isothermal input, then physical inputs
+        // without and with optional stress/viscosity data on the same storage.
+        const auto* selected = step == 1 ? nullptr : &physical;
+        auto reused = workspace_problem(state, &workspace, 7., nullptr, selected);
+        auto fresh = workspace_problem(state, nullptr, 7., nullptr, selected);
+        EXPECT_EQ(reused->statistics().workspace_reuses, step == 0 ? 0U : 1U);
+        EXPECT_EQ(reused->statistics().geometry_builds, step == 0 ? 1U : 0U);
+        EXPECT_EQ(reused->statistics().schur_builds, 0U);
+        expect_same_problem(*reused, *fresh);
+    }
+}
+
 #ifdef SIMPLEFLUID_ENABLE_NOX
 TEST(CoupledNonlinearSolverTest, OwningSolverResetsConvergenceBaselineAndReusesVectorAndLinearCaches)
 {
@@ -1046,6 +1265,14 @@ TEST(CoupledNonlinearSolverTest, NativeDriverCommitsOnceAndFailedBudgetPreserves
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_DOUBLE_EQ(solver.time(), 2. * state.time.time_step);
 
+    solver.step();
+    EXPECT_EQ(solver.step_index(), 3);
+    EXPECT_EQ(solver.last_nonlinear_result().native_workspace_builds, 0U);
+    EXPECT_EQ(solver.last_nonlinear_result().native_workspace_reuses, 1U);
+    EXPECT_EQ(solver.last_nonlinear_result().native_geometry_builds, 0U);
+    EXPECT_GT(solver.last_nonlinear_result().native_graph_reuses, 0U);
+    EXPECT_GT(solver.last_nonlinear_result().native_preconditioner_refreshes, 0U);
+
     state.time.nonlinear.maximum_iterations = 1;
     state.time.nonlinear.relative_tolerance = 1.e-14;
     state.time.nonlinear.absolute_tolerance = 1.e-15;
@@ -1234,5 +1461,107 @@ TEST(CoupledNonlinearSolverTest, DisabledBackendRejectsModeBeforeChangingAccepte
     EXPECT_DOUBLE_EQ(solver.time(), 0.);
     EXPECT_EQ(values(solver.velocity().owned_data()), accepted_u);
     EXPECT_EQ(values(solver.pressure().owned_data()), accepted_p);
+}
+#endif
+
+#ifdef SIMPLEFLUID_ENABLE_NOX
+TEST(CoupledNonlinearSolverTest, PerStepPreconditionerReducesSetupWithTheSamePhysicalSolution)
+{
+    for (const auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+    {
+        SCOPED_TRACE(static_cast<int>(backend));
+        State state;
+        state.time.coupled_operator_backend = backend;
+        auto reference_problem = state.problem();
+        auto reference = reference_problem->pack_initial();
+        const auto reference_result =
+            solve_nox(reference_problem->callbacks(), *reference, state.nonlinear, state.linear);
+        ASSERT_TRUE(reference_result.converged) << reference_result.reason;
+        const auto reference_statistics = reference_problem->statistics();
+        EXPECT_EQ(reference_statistics.schur_builds, reference_statistics.linearizations);
+
+        state.nonlinear.preconditioner_update = CoupledPreconditionerUpdate::PerTimeStep;
+        auto lagged_problem = state.problem();
+        auto lagged = lagged_problem->pack_initial();
+        const auto callbacks = lagged_problem->callbacks();
+        const auto result = solve_nox(callbacks, *lagged, state.nonlinear, state.linear);
+        ASSERT_TRUE(result.converged) << result.reason;
+        EXPECT_LT(difference(*reference, *lagged), 2.e-8);
+        ASSERT_TRUE(callbacks.convergence_gate(*lagged));
+        EXPECT_LT(lagged_problem->continuity().maximum, state.nonlinear.continuity_tolerance);
+        const auto statistics = lagged_problem->statistics();
+        EXPECT_LT(statistics.schur_builds, statistics.linearizations);
+        EXPECT_EQ(statistics.preconditioner_builds + statistics.preconditioner_refreshes, statistics.schur_builds);
+    }
+}
+
+TEST(CoupledNonlinearSolverTest, PerStepPreconditionerRefreshesStaleOrStagnatingResidualsWithoutMutatingSnapshots)
+{
+    for (const auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+    {
+        SCOPED_TRACE(static_cast<int>(backend));
+        State state;
+        state.time.coupled_operator_backend = backend;
+        state.nonlinear.preconditioner_update = CoupledPreconditionerUpdate::PerTimeStep;
+        auto problem = state.problem();
+        const auto callbacks = problem->callbacks();
+        auto x = problem->pack_initial();
+        Vector residual(callbacks.map), y(*x, Teuchos::Copy), direction(callbacks.map);
+        set_direction(direction);
+        // Only one rank changes its trial. Cache compatibility must be collective.
+        if (callbacks.map->getComm()->getRank() == 0)
+            y.update(.2, direction, 1.);
+        ASSERT_TRUE(callbacks.residual(*x, residual));
+        const auto first = callbacks.linearize(*x);
+        Vector j_before(callbacks.map), p_before(callbacks.map), action(callbacks.map);
+        first.jacobian->apply(direction, j_before);
+        first.right_preconditioner->apply(direction, p_before);
+
+        ASSERT_TRUE(callbacks.residual(y, residual));
+        // The latest residual describes y, not x: force a refresh and invalidate
+        // the previous-base norm instead of making a stale lagging decision.
+        const auto second = callbacks.linearize(*x);
+        EXPECT_EQ(problem->statistics().schur_builds, 2U);
+        EXPECT_NE(second.right_preconditioner.getRawPtr(), first.right_preconditioner.getRawPtr());
+        ASSERT_TRUE(callbacks.residual(y, residual));
+        const auto third = callbacks.linearize(y);
+        EXPECT_EQ(problem->statistics().schur_builds, 3U);
+        ASSERT_TRUE(callbacks.residual(y, residual));
+        const auto fourth = callbacks.linearize(y); // No reduction at all: refresh.
+        EXPECT_EQ(problem->statistics().schur_builds, 4U);
+        EXPECT_NE(fourth.right_preconditioner.getRawPtr(), third.right_preconditioner.getRawPtr());
+        first.jacobian->apply(direction, action);
+        EXPECT_LT(difference(j_before, action), 1.e-14);
+        first.right_preconditioner->apply(direction, action);
+        EXPECT_LT(difference(p_before, action), 1.e-12);
+        third.jacobian->apply(direction, action);
+        EXPECT_GT(difference(j_before, action), 1.e-7);
+    }
+}
+
+TEST(CoupledNonlinearSolverTest, RejectsInvalidOrRankDivergentPreconditionerUpdateControls)
+{
+    State state;
+    auto problem = state.problem();
+    const auto callbacks = problem->callbacks();
+    auto x = problem->pack_initial();
+    for (const double ratio : {0., 1.1, std::numeric_limits<double>::quiet_NaN()})
+    {
+        state.nonlinear.preconditioner_stagnation_ratio = ratio;
+        EXPECT_THROW(state.problem(), std::invalid_argument);
+        EXPECT_THROW(solve_nox(callbacks, *x, state.nonlinear, state.linear), std::invalid_argument);
+    }
+    state.nonlinear.preconditioner_stagnation_ratio = .9;
+    state.nonlinear.preconditioner_update = static_cast<CoupledPreconditionerUpdate>(-1);
+    EXPECT_THROW(state.problem(), std::invalid_argument);
+    EXPECT_THROW(solve_nox(callbacks, *x, state.nonlinear, state.linear), std::invalid_argument);
+    if (callbacks.map->getComm()->getSize() > 1)
+    {
+        state.nonlinear.preconditioner_update = callbacks.map->getComm()->getRank() == 0
+                                                  ? CoupledPreconditionerUpdate::PerTimeStep
+                                                  : CoupledPreconditionerUpdate::EveryLinearization;
+        EXPECT_THROW(state.problem(), std::invalid_argument);
+        EXPECT_THROW(solve_nox(callbacks, *x, state.nonlinear, state.linear), std::invalid_argument);
+    }
 }
 #endif

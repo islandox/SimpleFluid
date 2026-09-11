@@ -148,6 +148,22 @@ for each problem; `set_callbacks()` replaces the problem while retaining
 compatible storage. `FluidSolver` retains one instance across physical steps.
 The free `solve_nox()` helper provides a one-shot convenience interface.
 
+The native problem registry retains a `CoupledNonlinearWorkspace` with two
+storage slots. A new timestep copies its history and coefficients into a slot
+only after the previous context releases it. Retained callbacks keep their
+original state; retained Jacobians and inverses keep their numerical leases.
+Extra live contexts remain valid without growing the pool beyond two cached
+slots. Boundary or geometry changes invalidate dependent caches; timestep
+and material changes refresh native numeric values and RHS terms. The affine
+residual workspace uses `ResidualOnly` assembly, retaining stabilization and
+the gauge without building Schur products. Continuity is accumulated with
+advection in cached face order; gate and commit checks use the cached rows too.
+
+Before requesting another Jacobian, NOX releases its retired internal
+operator/preconditioner references while retaining vector and Krylov storage.
+This permits native graph reuse and MueLu `RP` numeric refresh. External
+references still prevent in-place mutation of their generations.
+
 ```cpp
 SimpleFluid::NOXNonlinearSolver nonlinear_solver(problem.callbacks());
 auto x = problem.pack_initial();
@@ -173,6 +189,15 @@ while leaving the segregated scalar transport policy unchanged. An unset value
 inherits the supplied linear solver policy; PCG is rejected for this saddle-point
 correction system, and effective controls are checked collectively.
 
+`preconditioner_update` defaults to `EveryLinearization`. The opt-in
+`PerTimeStep` policy retains the first inverse while assembling current
+Jacobians without repeated Schur products. It refreshes the inverse when
+the scaled residual fails to decrease by `preconditioner_stagnation_ratio`
+(default `0.9`), or when no matching evaluated state is available. Only this
+policy incurs the residual-state copy and norm reduction for its decision.
+The preconditioner stays fixed within each linear solve; a failed explicit
+forcing check still fails the solve.
+
 Custom Armijo backtracking evaluates actual trial residuals. Invalid trials
 are rejected, and exhausted backtracking fails with no recovery step.
 Convergence requires separate absolute/relative RMS checks for all four
@@ -197,6 +222,12 @@ The backend also reports maximum-rank total, residual-callback, linearization,
 and linear-solve elapsed times. These include nested work and independently
 maximized rank times, so they are not an additive exclusive phase breakdown.
 Problem construction and the driver's final checks lie outside backend time.
+The driver reports `native_setup_seconds` separately, together with counts
+for native workspace builds/reuses, face-geometry builds, coupled operator
+builds, coupled graph reuses, Schur builds, preconditioner builds, and numeric
+preconditioner refreshes. Counts and durations are maximum-rank values per
+accepted step; operator counts do not enumerate every scalar graph or AMG
+allocation. These diagnostics are included in verification nonlinear CSVs.
 
 ## Validation and remaining qualification
 
