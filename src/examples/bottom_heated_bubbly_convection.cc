@@ -40,6 +40,7 @@ int run(int argc, char** argv)
     std::filesystem::path mesh_file = "verification/openfoam/bottomHeatedBubblyConvection/mesh.dat";
     int requested_steps = 0;
     double source_scale = 1.0;
+    bool skip_zero_auxiliary_gas = false;
     SimpleFluid::Verification::LinearSolverControls linear_controls;
     SimpleFluid::Verification::BackendControls backend_controls;
     for (int i = 1; i < argc; ++i)
@@ -59,6 +60,12 @@ int run(int argc, char** argv)
             requested_steps = std::stoi(value);
         else if (arg == "--source-scale")
             source_scale = std::stod(value);
+        else if (arg == "--gas-transport")
+        {
+            require(value == "full" || value == "skip-zero-auxiliary",
+                "--gas-transport requires full or skip-zero-auxiliary");
+            skip_zero_auxiliary_gas = value == "skip-zero-auxiliary";
+        }
         else if (linear_controls.parse(arg, value))
             continue;
         else if (backend_controls.parse(arg, value))
@@ -227,8 +234,14 @@ int run(int argc, char** argv)
     turbulence.restore_transported_state(
         initial_k, initial_omega, initial_nut, solver.velocity(), solver.material_properties(), water.density);
     auto* bubbles = solver.find_radiolytic_gas_model();
+    bubbles->set_skip_zero_auxiliary_transport(skip_zero_auxiliary_gas);
     linear_controls.apply_gas(*bubbles);
     SimpleFluid::Verification::LinearSolverHistory linear_history(output);
+    std::ofstream gas_history(output / "gas_transport_statistics.csv");
+    gas_history.exceptions(std::ios::badbit | std::ios::failbit);
+    gas_history
+        << std::setprecision(17)
+        << "step,time_s,field,skipped,solves,iterations,assemblies,assembly_seconds,solve_seconds,total_seconds\n";
     std::optional<SimpleFluid::Verification::NonlinearSolverHistory> nonlinear_history;
     if (time.pressure_velocity_coupling == SimpleFluid::PressureVelocityCoupling::CoupledNonlinear)
         nonlinear_history.emplace(output);
@@ -352,6 +365,20 @@ int run(int argc, char** argv)
             step, solver.time(), solver.last_step_statistics(), bubbles->last_statistics().transport_linear);
         // Keep completed-step progress observable during long parallel runs.
         linear_history.flush();
+        const auto& gas_statistics = bubbles->last_statistics();
+        constexpr std::array<const char*, 5> gas_fields{
+            "dissolved", "micro_number", "micro_moles", "large_number", "large_moles"};
+        for (size_t field = 0; field < gas_fields.size(); ++field)
+        {
+            const auto& work = gas_statistics.transport_work[field];
+            gas_history << step << ',' << solver.time() << ',' << gas_fields[field] << ',' << work.skipped << ','
+                        << work.solves << ',' << work.iterations << ',' << work.assemblies << ','
+                        << parallel.max(work.assembly_seconds) << ',' << parallel.max(work.solve_seconds) << ','
+                        << parallel.max(work.total_seconds) << '\n';
+        }
+        gas_history << step << ',' << solver.time() << ",gas_update,0,0,0,0,0,0,"
+                    << parallel.max(gas_statistics.gas_update_seconds) << '\n';
+        gas_history.flush();
         if (nonlinear_history)
             nonlinear_history->write(
                 step, solver.time(), solver.last_nonlinear_result(), solver.last_volume_continuity_residuals().maximum);

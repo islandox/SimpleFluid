@@ -78,6 +78,9 @@ int main(int argc, char* argv[])
     turbulentFields.exceptions(std::ios::badbit|std::ios::failbit);wallHistory.exceptions(std::ios::badbit|std::ios::failbit);
     turbulentFields<<std::setprecision(17)<<"time_s,sample,k_m2_s2,omega_1_s,nut_m2_s,wall_distance_m,wall_yplus\n";
     wallHistory<<std::setprecision(17)<<"step,time_s,wall_yplus_max\n";
+    std::ofstream gasHistory((runTime.path()/"gas_transport_statistics.csv").c_str());
+    gasHistory.exceptions(std::ios::badbit|std::ios::failbit);
+    gasHistory<<std::setprecision(17)<<"step,time_s,field,skipped,solves,iterations,assemblies,assembly_seconds,solve_seconds,total_seconds\n";
     auto check=[&](bool valid,const char* message){if(!valid)FatalErrorInFunction<<message<<exit(FatalError);};
     auto write=[&](label step)
     {
@@ -164,13 +167,25 @@ int main(int argc, char* argv[])
         wallHeatLoss=returnReduce(localWallHeat,sumOp<scalar>());
         reduce(localThermalResidual,sumOp<scalar>());
         thermalResidual=localThermalResidual-power*dt;
+        const auto gasStart=std::chrono::steady_clock::now();
         surfaceScalarField bubblePhi(phi+(mesh.Sf()&dimensionedVector("slip",dimVelocity,vector(0,0,par("slip_velocity")))));
         forAll(bubblePhi.boundaryField(),patch)
             if(mesh.boundary()[patch].coupled())continue;
             else if(patch!=outlet)bubblePhi.boundaryFieldRef()[patch]=0;
             else bubblePhi.boundaryFieldRef()[patch]=max(bubblePhi.boundaryField()[patch],scalar(0));
-        solve(fvm::ddt(moles)+fvm::div(bubblePhi,moles));
-        solve(fvm::ddt(number)+fvm::div(bubblePhi,number));
+        struct GasWork { label iterations; double assembly,solve,total; } gasWork[2];
+        auto transportGas=[&](volScalarField& field,GasWork& work)
+        {
+            const auto start=std::chrono::steady_clock::now();
+            fvScalarMatrix equation(fvm::ddt(field)+fvm::div(bubblePhi,field));
+            const auto assembled=std::chrono::steady_clock::now();
+            const auto performance=equation.solve();
+            const auto solved=std::chrono::steady_clock::now();
+            work={performance.nIterations(),std::chrono::duration<double>(assembled-start).count(),
+                std::chrono::duration<double>(solved-assembled).count(),std::chrono::duration<double>(solved-start).count()};
+        };
+        transportGas(moles,gasWork[0]);
+        transportGas(number,gasWork[1]);
         moles.correctBoundaryConditions();number.correctBoundaryConditions();
         escaped+=dt*gSum(bubblePhi.boundaryField()[outlet]*moles.boundaryField()[outlet]);
         scalar localProduced=0;
@@ -201,6 +216,18 @@ int main(int argc, char* argv[])
         }
         reduce(localProduced,sumOp<scalar>());produced+=localProduced;
         moles.correctBoundaryConditions();number.correctBoundaryConditions();alpha.correctBoundaryConditions();
+        const auto gasSeconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-gasStart).count();
+        for(label index=0;index<2;++index)
+        {
+            const auto& work=gasWork[index];
+            gasHistory<<step<<','<<runTime.value()<<','<<(index==0?"micro_moles":"micro_number")
+                <<",0,1,"<<returnReduce(work.iterations,maxOp<label>())<<",1,"
+                <<returnReduce(work.assembly,maxOp<double>())<<','<<returnReduce(work.solve,maxOp<double>())
+                <<','<<returnReduce(work.total,maxOp<double>())<<'\n';
+        }
+        gasHistory<<step<<','<<runTime.value()<<",gas_update,0,0,0,0,0,0,"
+            <<returnReduce(gasSeconds,maxOp<double>())<<'\n';
+        gasHistory.flush();
         if(step%stride==0||step==steps)write(step);
     }
     fields.flush();history.flush();turbulentFields.flush();

@@ -162,6 +162,26 @@ the case's physical acceptance checks and scalar transport tolerances. NOX
 adds nonlinear component/continuity convergence checks and uses inexact
 forcing tolerances for its individual Newton corrections.
 
+For the strict active-gas workload comparison, select
+`--gas-transport skip-zero-auxiliary`. The default `full` retains all five
+transport solves. The opt-in policy collectively checks dissolved hydrogen
+and each large-bubble moment for exact global zero and skips its fixed-mesh
+transport assembly/solve when zero. These transport stages have zero source,
+homogeneous boundaries and no incoming physical-boundary flux. Local kinetics
+still runs afterward; if it populates an auxiliary field, its transport resumes
+on the next step. Microbubble number and moles always execute, including the
+initial zero-inventory step, matching OpenFOAM's two calls per timestep. ALE
+retains the full path.
+
+Both executables export `gas_transport_statistics.csv` with per-field solve,
+skip, iteration and assembly counts plus matrix/RHS preparation, solver-call,
+and gas-update timers. Solver-call time includes preconditioning. Exported
+times are maximum-rank local durations; sums of these maxima are not an
+exclusive phase profile. The SimpleFluid number/moles pair shares one matrix;
+OpenFOAM assembles its two equations separately.
+See the [strict gas comparison](../../../docs/benchmarks/strict_gas_20260914.md)
+for matched 10k/98k timings and full/strict numerical equivalence checks.
+
 The optional NOX build supports this fixed-mesh physical Boussinesq case with
 temperature, material properties, SST coefficients, and gas state frozen during
 each nonlinear velocity-pressure solve. Their ordinary updates run once after
