@@ -33,6 +33,34 @@ class MatchedNonlinearPerformanceTest(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(argparse.ArgumentTypeError):
                 performance.forcing_tolerance(invalid)
 
+    def test_pressure_probe_preserves_strict_work_and_other_solvers(self):
+        base = performance.solver_arguments("piso-gas-strict", Path("inputs"), Path("output"), 10, 80)
+        tuned = performance.solver_arguments("piso-gas-strict", Path("inputs"), Path("output"), 10, 80,
+                                             pressure_preconditioner="muelu")
+        expected = base.copy()
+        expected[expected.index("--pressure-preconditioner") + 1] = "muelu"
+        self.assertEqual(tuned, expected)
+        nox = performance.solver_arguments("nox-composite-gas-strict", Path("inputs"), Path("output"), 10, 80)
+        self.assertEqual(nox, performance.solver_arguments(
+            "nox-composite-gas-strict", Path("inputs"), Path("output"), 10, 80,
+            pressure_preconditioner="muelu"))
+
+    def test_pressure_override_is_candidate_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = SimpleNamespace(output=root, fixtures=root, steps=10, nox_restart=80,
+                                   nox_forcing_initial=None, piso_pressure_preconditioner="muelu", timeout=10,
+                                   executable=root / "candidate", library_dir=root / "candidate-lib", libraries={},
+                                   baseline_executable=root / "baseline", baseline_library_dir=root / "baseline-lib",
+                                   baseline_libraries={})
+            artifacts = {str(args.executable): "candidate-hash", str(args.baseline_executable): "baseline-hash"}
+            for build, expected in [("baseline", "dic"), ("candidate", "muelu")]:
+                with self.subTest(build=build), patch.object(performance, "check_artifacts"), patch.object(
+                        performance.subprocess, "run", return_value=SimpleNamespace(returncode=7)) as run:
+                    performance.run_one(args, 10752, "piso-gas-strict", 1, artifacts, build)
+                command = run.call_args.args[0]
+                self.assertEqual(command[command.index("--pressure-preconditioner") + 1], expected)
+
     def test_preserved_baseline_uses_its_own_executable_and_libraries(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

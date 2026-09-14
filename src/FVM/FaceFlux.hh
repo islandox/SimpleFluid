@@ -26,6 +26,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -174,8 +175,9 @@ private:
 /**
  * @brief Reusable Rhie-Chow scratch storage for mesh-aware stored fields.
  *
- * The workspace retains a stored pressure-gradient field, boundary-face
- * locations, mesh-only gradient geometry, and ordered pressure-face metrics.
+ * Each workspace owns its pressure-gradient field. Boundary-face locations,
+ * mesh-only gradient geometry, and ordered pressure-face metrics may be shared
+ * as an immutable snapshot with other workspaces for the exact same mesh.
  * Geometry metrics reject stale epochs until refresh_geometry() is called.
  * It is tied to one exact mesh instance and is not safe for concurrent evaluations.
  *
@@ -191,18 +193,52 @@ public:
     using boundary_location_type =
         detail::BoundaryFaceLocation<mesh_type>;
 
+    /** @brief Immutable mesh metrics shared independently of field scratch.
+     * Boundary condition types and values are evaluated at each flux call;
+     * they are not part of this geometry snapshot.
+     */
+    class SharedGeometry
+    {
+        friend class FieldStoredPressureWeightedFaceFluxWorkspace;
+
+    public:
+        explicit SharedGeometry(SP<const mesh_type> mesh)
+            : d_mesh(require_mesh(std::move(mesh))),
+              d_gradient_cache(d_mesh),
+              d_face_geometry(detail::stored_pressure_face_geometry<Pack>(*d_mesh)),
+              d_geometry_identity(detail::ale_geometry_identity(*d_mesh)),
+              d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
+        {
+        }
+
+    private:
+        const SP<const mesh_type> d_mesh;
+        const CellGradientCache<Pack, mesh_type> d_gradient_cache;
+        const std::vector<face_geometry_type> d_face_geometry;
+        const void* const d_geometry_identity;
+        const std::uint64_t d_geometry_epoch;
+    };
+    using shared_geometry_type = std::shared_ptr<const SharedGeometry>;
+
     explicit FieldStoredPressureWeightedFaceFluxWorkspace(
         SP<const mesh_type> mesh)
+        : FieldStoredPressureWeightedFaceFluxWorkspace(
+              mesh, std::make_shared<SharedGeometry>(mesh))
+    {
+    }
+
+    /** @brief Allocate private scratch while reusing current mesh geometry.
+     * @throws std::invalid_argument for a null, foreign, or stale snapshot.
+     */
+    FieldStoredPressureWeightedFaceFluxWorkspace(
+        SP<const mesh_type> mesh, shared_geometry_type geometry)
         : d_mesh(require_mesh(std::move(mesh))),
+          d_geometry(require_geometry(d_mesh, std::move(geometry))),
           d_pressure_gradient(
               VectorCellFieldDescriptor<Pack>(
                   "rhie_chow_pressure_gradient_workspace"),
               d_mesh,
-              false),
-          d_gradient_cache(d_mesh),
-          d_face_geometry(detail::stored_pressure_face_geometry<Pack>(*d_mesh)),
-          d_geometry_identity(detail::ale_geometry_identity(*d_mesh)),
-          d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
+              false)
     {
     }
 
@@ -230,37 +266,50 @@ public:
 
     const std::vector<boundary_location_type>& boundary_locations() const
     {
-        return d_gradient_cache.boundary_locations();
+        return d_geometry->d_gradient_cache.boundary_locations();
     }
 
     const CellGradientCache<Pack, mesh_type>& gradient_cache() const noexcept
     {
-        return d_gradient_cache;
+        return d_geometry->d_gradient_cache;
     }
+
+    /** @brief Retain the immutable snapshot; new workspaces validate its epoch. */
+    const shared_geometry_type& shared_geometry() const noexcept { return d_geometry; }
 
     /** @brief Return ordered owned faces with current-epoch numeric metrics. */
     const std::vector<face_geometry_type>& face_geometry() const
     {
-        if (detail::ale_geometry_identity(*d_mesh) != d_geometry_identity ||
-            mesh_geometry_epoch(*d_mesh) != d_geometry_epoch)
-        {
-            throw std::invalid_argument(
-                "pressure face-flux geometry is stale for the mesh geometry epoch.");
-        }
-        return d_face_geometry;
+        require_current_geometry(*d_mesh, *d_geometry);
+        return d_geometry->d_face_geometry;
     }
 
     /** @brief Refresh Rhie--Chow reconstruction geometry after mesh motion. */
     void refresh_geometry()
     {
-        auto faces = detail::stored_pressure_face_geometry<Pack>(*d_mesh);
-        d_gradient_cache.refresh();
-        d_face_geometry = std::move(faces);
-        d_geometry_identity = detail::ale_geometry_identity(*d_mesh);
-        d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+        // Replacing a snapshot never mutates metrics retained by another
+        // workspace or an older analytic Jacobian generation.
+        d_geometry = std::make_shared<SharedGeometry>(d_mesh);
     }
 
 private:
+    static void require_current_geometry(const mesh_type& mesh, const SharedGeometry& geometry)
+    {
+        if (&mesh != geometry.d_mesh.get())
+            throw std::invalid_argument("pressure face-flux geometry belongs to another mesh.");
+        if (detail::ale_geometry_identity(mesh) != geometry.d_geometry_identity ||
+            mesh_geometry_epoch(mesh) != geometry.d_geometry_epoch)
+            throw std::invalid_argument("pressure face-flux geometry is stale for the mesh geometry epoch.");
+    }
+
+    static shared_geometry_type require_geometry(const SP<const mesh_type>& mesh, shared_geometry_type geometry)
+    {
+        if (!geometry)
+            throw std::invalid_argument("pressure face-flux geometry snapshot must not be null.");
+        require_current_geometry(*mesh, *geometry);
+        return geometry;
+    }
+
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
     {
         if (!mesh)
@@ -273,11 +322,8 @@ private:
     }
 
     SP<const mesh_type> d_mesh;
+    shared_geometry_type d_geometry;
     VectorCellFieldStored<Pack, mesh_type> d_pressure_gradient;
-    CellGradientCache<Pack, mesh_type> d_gradient_cache;
-    std::vector<face_geometry_type> d_face_geometry;
-    const void* d_geometry_identity;
-    std::uint64_t d_geometry_epoch;
 };
 
 /**

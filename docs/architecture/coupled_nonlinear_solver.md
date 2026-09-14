@@ -147,6 +147,9 @@ implementation. `solve()` resets nonlinear validity and convergence baselines
 for each problem; `set_callbacks()` replaces the problem while retaining
 compatible storage. `FluidSolver` retains one instance across physical steps.
 The free `solve_nox()` helper provides a one-shot convenience interface.
+The vector cache also retains component membership derived from ordered global
+IDs; equivalent maps reuse it, while a changed local ordering rebuilds it.
+Scaling and component-norm loops read host-view extents once per traversal.
 
 The native problem registry retains a `CoupledNonlinearWorkspace` with two
 storage slots. A new timestep copies its history and coefficients into a slot
@@ -158,6 +161,15 @@ and material changes refresh native numeric values and RHS terms. The affine
 residual workspace uses `ResidualOnly` assembly, retaining stabilization and
 the gauge without building Schur products. Continuity is accumulated with
 advection in cached face order; gate and commit checks use the cached rows too.
+
+Pressure-flux workspaces share immutable gradient stencils, boundary locations,
+and face metrics with analytic Jacobians on the same mesh and geometry epoch.
+Each workspace still owns its pressure-gradient field and directional scratch.
+Refreshing geometry replaces the snapshot, so retained generations cannot see
+new metrics through an old reference. Boundary values remain live inputs to
+flux evaluation. Native coupled assembly separately caches ordered local face
+incidences lazily and rebuilds them after an epoch change; gradient preparation
+resolves each incidence once through the concrete mesh backend.
 
 Before requesting another Jacobian, NOX releases its retired internal
 operator/preconditioner references while retaining vector and Krylov storage.
@@ -277,4 +289,9 @@ evidence; they are not external CFD validation or a performance qualification.
 NOX does not remove region traversal costs or establish a stronger Schur
 preconditioner. Performance evaluation must measure time per accepted,
 equally accurate physical step, including residual evaluations and setup,
-with failed solves excluded. No speedup is claimed by this implementation.
+with failed solves excluded. Runtime benefit remains workload-dependent.
+
+The subsequent [flame-profile optimization report](../benchmarks/flame_optimization_20260915.md)
+records matched before/after measurements for cached traversal, shared immutable
+geometry, and scoped field views. Those results are limited to its stated
+meshes, solver policies, and short verification windows.

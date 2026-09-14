@@ -38,7 +38,7 @@ def forcing_tolerance(value):
 
 
 def solver_arguments(variant, inputs, directory, steps, restart, forcing_initial=None,
-                     preconditioner_update=None):
+                     preconditioner_update=None, pressure_preconditioner=None):
     gas_policy = None
     for suffix, policy in [("-gas-full", "full"), ("-gas-strict", "skip-zero-auxiliary")]:
         if variant.endswith(suffix):
@@ -53,7 +53,7 @@ def solver_arguments(variant, inputs, directory, steps, restart, forcing_initial
         command += ["--gas-transport", gas_policy]
     if variant == "piso":
         return command + ["--coupling", "piso", "--pressure-solver", "pcg",
-                          "--pressure-preconditioner", "dic"]
+                          "--pressure-preconditioner", pressure_preconditioner or "dic"]
     nonlinear = "nox" in variant
     command += ["--coupling", "nox" if nonlinear else "coupled",
                 "--coupled-operator", "assembled" if "assembled" in variant else "block_composite",
@@ -94,8 +94,10 @@ def run_one(args, cells, variant, repeat, artifacts, build=None):
         executable = args.baseline_executable if build == "baseline" else args.executable
         forcing_initial = None if build == "baseline" else args.nox_forcing_initial
         preconditioner_update = None if build == "baseline" else getattr(args, "nox_preconditioner_update", None)
+        pressure_preconditioner = None if build == "baseline" else getattr(args, "piso_pressure_preconditioner", None)
         command = [str(executable), *solver_arguments(
-            variant, inputs, directory, args.steps, args.nox_restart, forcing_initial, preconditioner_update)]
+            variant, inputs, directory, args.steps, args.nox_restart, forcing_initial,
+            preconditioner_update, pressure_preconditioner)]
     check_artifacts(executable, artifacts[str(executable)], libraries)
     command = ["mpiexec", "--timeout", str(args.timeout), "--bind-to", "core", "--map-by", "core",
                "--report-bindings", "-n", "2", *command]
@@ -255,6 +257,8 @@ def main():
                         help="Candidate-only initial inner forcing tolerance; nonlinear acceptance gates are unchanged")
     parser.add_argument("--nox-preconditioner-update", choices=["iteration", "step"],
                         help="Candidate-only preconditioner refresh policy (solver default: iteration)")
+    parser.add_argument("--piso-pressure-preconditioner", choices=["dic", "muelu"],
+                        help="Candidate-only PISO pressure preconditioner diagnostic; PCG and residual gates are unchanged")
     args = parser.parse_args()
     args.fixtures, args.build_dir, args.output = (path.resolve() for path in
                                                  [args.fixtures, args.build_dir, args.output])

@@ -507,6 +507,8 @@ private:
         bool reuse_population_operator = false);
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
+    CellProperties cell_properties(scalar_type pressure, scalar_type temperature,
+        scalar_type density, scalar_type dynamic_viscosity) const;
     CellKineticsState integrate_cell_kinetics(
         local_ordinal_type cell_lid,
         scalar_type time_step,

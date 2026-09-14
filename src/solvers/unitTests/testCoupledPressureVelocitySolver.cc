@@ -412,6 +412,7 @@ TEST_P(CoupledResidualAssemblyTest, RefreshesSchurAfterSwitchingAssemblyPurpose)
         EXPECT_EQ(solver.cache_statistics().schur_product_builds, 3 * expected_schur_builds);
     }
     EXPECT_EQ(solver.cache_statistics().matrix_graph_reuses, 3U);
+    EXPECT_EQ(solver.cache_statistics().cell_face_cache_builds, 1U);
 }
 
 TEST_P(CoupledResidualAssemblyTest, PreservesRetainedGenerationsAcrossAssemblyPurposes)

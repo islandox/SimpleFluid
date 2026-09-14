@@ -2,6 +2,7 @@
  *  @brief Residual, derivative, transaction, and NOX integration contracts.
  */
 #include "FVM/FaceFlux.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
@@ -867,6 +868,41 @@ TEST(CoupledNonlinearProblemTest, WorkspaceRebuildsChangedBoundaryGeometryAndRec
     EXPECT_EQ(recovered->statistics().workspace_builds, 1U);
     EXPECT_EQ(recovered->statistics().schur_builds, 0U);
     expect_same_problem(*recovered, *fresh);
+}
+
+TEST(CoupledNonlinearProblemTest, RecycledWorkspaceRefreshesFluxGeometryAfterMotionAndRollback)
+{
+    auto mesh = std::make_shared<NativeMesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{{0., .25, .5, .75, 1.}, {0., .3, .65, 1.}, {0., .5, 1.}}}));
+    State state(mesh);
+    CoupledNonlinearWorkspace workspace;
+    Teuchos::RCP<const Pack::operator_type> retained;
+    {
+        auto first = workspace_problem(state, &workspace);
+        const auto x = first->pack_initial();
+        retained = first->callbacks().linearize(*x).jacobian;
+    }
+    Vector direction(retained->getDomainMap()), action(retained->getRangeMap());
+    set_direction(direction);
+    PlanarALEMeshMotion<Pack> motion(mesh);
+    motion.begin_trial(1.3, 1.0);
+    EXPECT_THROW(retained->apply(direction, action), std::invalid_argument);
+    {
+        auto reused = workspace_problem(state, &workspace);
+        auto fresh = workspace_problem(state, nullptr);
+        EXPECT_EQ(reused->statistics().workspace_reuses, 1U);
+        EXPECT_EQ(reused->statistics().geometry_builds, 1U);
+        expect_same_problem(*reused, *fresh);
+    }
+    motion.rollback_trial();
+    EXPECT_THROW(retained->apply(direction, action), std::invalid_argument);
+    {
+        auto reused = workspace_problem(state, &workspace);
+        auto fresh = workspace_problem(state, nullptr);
+        EXPECT_EQ(reused->statistics().workspace_reuses, 1U);
+        EXPECT_EQ(reused->statistics().geometry_builds, 1U);
+        expect_same_problem(*reused, *fresh);
+    }
 }
 
 TEST(CoupledNonlinearProblemTest, RecycledWorkspaceRefreshesPhysicalModeAndOptionalCoefficientSnapshots)
