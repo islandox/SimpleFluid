@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #ifdef SIMPLEFLUID_ENABLE_NOX
 #include <NOX_Config.h>
@@ -107,10 +108,14 @@ bool locally_same_map(const Map& first, const Map& second)
 
 bool finite(const Vector& v, bool positive = false)
 {
-    const auto values = v.getData(0);
+    const auto values = v.getLocalViewHost(Tpetra::Access::ReadOnly);
+    const std::size_t rows = values.extent(0);
     bool valid = true;
-    for (const double value : values)
+    for (std::size_t i = 0; i < rows; ++i)
+    {
+        const double value = values(i, 0);
         valid = valid && std::isfinite(value) && (!positive || value > 0.0);
+    }
     return collectively(*v.getMap(), valid);
 }
 
@@ -120,8 +125,9 @@ void multiply(MultiVector& value, const RCP<const Vector>& scale, bool inverse)
         return;
     const auto s = scale->getLocalViewHost(Tpetra::Access::ReadOnly);
     auto v = value.getLocalViewHost(Tpetra::Access::ReadWrite);
-    for (std::size_t j = 0; j < value.getNumVectors(); ++j)
-        for (std::size_t i = 0; i < value.getLocalLength(); ++i)
+    const std::size_t columns = v.extent(1), rows = v.extent(0);
+    for (std::size_t j = 0; j < columns; ++j)
+        for (std::size_t i = 0; i < rows; ++i)
             v(i, j) = inverse ? v(i, j) / s(i, 0) : v(i, j) * s(i, 0);
 }
 
@@ -150,10 +156,11 @@ public:
         }
         // NOX applies a retained generation sequentially. Scratch is private to
         // this scaled wrapper and never aliases a native or accepted vector.
-        if (input_.is_null() || input_->getNumVectors() != x.getNumVectors())
+        const std::size_t columns = x.getNumVectors();
+        if (input_.is_null() || input_->getNumVectors() != columns)
         {
-            input_ = rcp(new MultiVector(getDomainMap(), x.getNumVectors()));
-            output_ = rcp(new MultiVector(getRangeMap(), x.getNumVectors()));
+            input_ = rcp(new MultiVector(getDomainMap(), columns));
+            output_ = rcp(new MultiVector(getRangeMap(), columns));
         }
         input_->assign(x);
         multiply(*input_, right_, inverse_);
@@ -213,6 +220,9 @@ struct SolveContext
     NonlinearSolverCacheStatistics cache_statistics;
     RCP<const Generation> active_generation;
     RCP<Vector> scaled_x, accepted_x, gate_x, jacobian_direction;
+    // Component membership depends on ordered global IDs, not local row % 4.
+    // It shares the vector-cache lifetime across compatible callback resets.
+    std::vector<unsigned char> component_ids;
 };
 
 class NativeLinearSolve final : public Thyra::LinearOpWithSolveBase<double>
@@ -308,11 +318,12 @@ protected:
         const auto belos_status = solver_->solve();
         const int iterations = solver_->getNumIters();
         context_->result.krylov_iterations += iterations;
-        if (residual_.is_null() || residual_->getNumVectors() != b->getNumVectors())
-            residual_ = rcp(new MultiVector(b->getMap(), b->getNumVectors()));
+        const std::size_t columns = b->getNumVectors();
+        if (residual_.is_null() || residual_->getNumVectors() != columns)
+            residual_ = rcp(new MultiVector(b->getMap(), columns));
         generation->jacobian->apply(*x, *residual_);
         residual_->update(1.0, *b, -1.0);
-        Teuchos::Array<double> norms(b->getNumVectors()), rhs_norms(b->getNumVectors());
+        Teuchos::Array<double> norms(columns), rhs_norms(columns);
         residual_->norm2(norms());
         b->norm2(rhs_norms());
         double achieved = 0.0;
@@ -614,24 +625,21 @@ public:
             return status_ = Failed;
         std::array<double, 4> local_max{}, global_max{};
         std::array<double, 8> local{}, global{};
-        const auto values = f->getData(0);
-        const auto component_of = [&f](std::size_t i)
+        const auto values = f->getLocalViewHost(Tpetra::Access::ReadOnly);
+        const std::size_t rows = values.extent(0);
+        const auto& components = context_->component_ids;
+        for (std::size_t i = 0; i < rows; ++i)
         {
-            const auto gid = f->getMap()->getGlobalElement(static_cast<Pack::local_ordinal_type>(i));
-            return static_cast<std::size_t>((gid % 4 + 4) % 4);
-        };
-        for (std::size_t i = 0; i < f->getLocalLength(); ++i)
-        {
-            const auto c = component_of(i);
-            local_max[c] = std::max(local_max[c], std::abs(values[i]));
+            const auto c = components[i];
+            local_max[c] = std::max(local_max[c], std::abs(values(i, 0)));
         }
         Teuchos::reduceAll(*f->getMap()->getComm(), Teuchos::REDUCE_MAX, 4, local_max.data(), global_max.data());
         // Normalize before squaring so a finite large residual cannot overflow
         // its reference norm and falsely satisfy an infinite relative target.
-        for (std::size_t i = 0; i < f->getLocalLength(); ++i)
+        for (std::size_t i = 0; i < rows; ++i)
         {
-            const auto c = component_of(i);
-            const double scaled = global_max[c] > 0.0 ? values[i] / global_max[c] : 0.0;
+            const auto c = components[i];
+            const double scaled = global_max[c] > 0.0 ? values(i, 0) / global_max[c] : 0.0;
             local[c] += scaled * scaled;
             local[4 + c] += 1.0;
         }
@@ -809,6 +817,11 @@ struct NOXNonlinearSolver::Impl
         context->accepted_x = rcp(new Vector(callbacks.map));
         context->gate_x = rcp(new Vector(callbacks.map));
         context->jacobian_direction = rcp(new Vector(callbacks.map));
+        const auto gids = callbacks.map->getLocalElementList();
+        const std::size_t rows = gids.size();
+        context->component_ids.resize(rows);
+        for (std::size_t i = 0; i < rows; ++i)
+            context->component_ids[i] = static_cast<unsigned char>((gids[i] % 4 + 4) % 4);
         ++context->cache_statistics.vector_cache_builds;
         model = rcp(new NativeModel(callbacks, context));
         initial = Thyra::createVector<double, Pack::local_ordinal_type, Pack::global_ordinal_type, Pack::node_type>(

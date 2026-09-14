@@ -145,6 +145,15 @@ void expect_cells_preserved(const std::map<GlobalOrdinal, CellIdentity>& before,
         {
             faces.push_back(reordered.face_global_id(face));
         }
+        std::vector<GlobalOrdinal> visited_faces;
+        reordered.visit_cell_faces(cell, [&](auto face, auto native_face, auto native_cell, const auto& native)
+        {
+            visited_faces.push_back(reordered.face_global_id(face));
+            EXPECT_DOUBLE_EQ(native.face_area(native_face), reordered.face_area(face));
+            const auto displacement = native.cell_centroid(native_cell) - expected.centroid;
+            EXPECT_DOUBLE_EQ(displacement.norm(), 0.0);
+        });
+        EXPECT_EQ(visited_faces, faces);
         std::ranges::sort(faces);
         EXPECT_EQ(faces, expected.face_gids);
         EXPECT_EQ(reordered.overlap_cell_map()->getGlobalElement(cell), expected.gid);

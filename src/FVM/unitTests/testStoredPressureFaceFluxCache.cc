@@ -145,6 +145,46 @@ std::vector<double> check_quadratic_flux(const std::shared_ptr<Mesh>& mesh, Work
     return result;
 }
 
+std::vector<double> reconstruct_flux(const std::shared_ptr<Mesh>& mesh, Workspace& workspace,
+    double scale, double boundary_shift)
+{
+    VectorField velocity(mesh, "shared_geometry_velocity");
+    ScalarField pressure(mesh, "shared_geometry_pressure");
+    FluxField flux(mesh, "shared_geometry_flux");
+    velocity.put_value({0.2, 0.1, -0.3});
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const auto center = mesh->cell_centroid(cell);
+        pressure.set_owned_value(cell, scale * (0.2 * center.x + center.z * center.z));
+    }
+    pressure.sync_ghosts();
+    SimpleFluid::BoundaryConditionSet conditions;
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        conditions.velocity[mesh->boundary_batch_name(batch_id)] = {BoundaryType::Neumann, {}};
+    const SimpleFluid::SP<const Mesh> const_mesh = mesh;
+    const auto boundaries = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(const_mesh, conditions);
+    SimpleFluid::BoundaryConditionMap pressure_boundaries;
+    pressure_boundaries["zmax"] = {BoundaryType::Dirichlet, 16.0 * scale + boundary_shift};
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity, pressure, 0.13, boundaries, pressure_boundaries, workspace, flux);
+    std::vector<double> result;
+    for (size_t local = 0; local < mesh->num_faces(); ++local)
+        result.push_back(flux.local_value(static_cast<Pack::local_ordinal_type>(local)));
+    return result;
+}
+
+std::vector<double> gradient_values(const Workspace& workspace)
+{
+    const auto& gradient = workspace.pressure_gradient();
+    const auto values = gradient.local_read_view();
+    std::vector<double> result;
+    for (size_t owned = 0; owned < gradient.num_owned_cells(); ++owned)
+        for (size_t component = 0; component < 3; ++component)
+            result.push_back(values(owned, component));
+    return result;
+}
+
 } // namespace
 
 TEST(StoredPressureFaceFluxCacheTest, ReuseReadsUpdatedFieldsAndPhysicalBoundaryValues)
@@ -178,4 +218,62 @@ TEST(StoredPressureFaceFluxCacheTest, MotionAndRollbackRequireRefreshWithPrecomp
     EXPECT_THROW(static_cast<void>(workspace.face_geometry()), std::invalid_argument);
     workspace.refresh_geometry();
     EXPECT_EQ(check_quadratic_flux(mesh, workspace, 4.0, 0.0), original);
+}
+
+TEST(StoredPressureFaceFluxCacheTest, SharedGeometryKeepsScratchAndBoundaryReconstructionIndependent)
+{
+    auto mesh = make_mesh();
+    auto first = std::make_unique<Workspace>(mesh);
+    Workspace second(mesh, first->shared_geometry());
+    Workspace fresh(mesh);
+    EXPECT_EQ(second.shared_geometry(), first->shared_geometry());
+    EXPECT_EQ(&second.gradient_cache(), &first->gradient_cache());
+    EXPECT_EQ(second.face_geometry().data(), first->face_geometry().data());
+    EXPECT_NE(&second.pressure_gradient(), &first->pressure_gradient());
+
+    const auto first_flux = reconstruct_flux(mesh, *first, 1.0, 0.0);
+    const auto first_gradient = gradient_values(*first);
+    const auto second_flux = reconstruct_flux(mesh, second, 2.0, 0.75);
+    EXPECT_EQ(second_flux, reconstruct_flux(mesh, fresh, 2.0, 0.75));
+    EXPECT_NE(second_flux, first_flux);
+    EXPECT_NE(gradient_values(second), first_gradient);
+    EXPECT_EQ(gradient_values(*first), first_gradient);
+    EXPECT_EQ(reconstruct_flux(mesh, *first, 1.0, 0.0), first_flux);
+
+    // The shared snapshot owns its mesh and survives the creating workspace.
+    first.reset();
+    EXPECT_EQ(reconstruct_flux(mesh, second, 2.0, 0.75), second_flux);
+}
+
+TEST(StoredPressureFaceFluxCacheTest, RefreshReplacesSharedSnapshotAndRejectsForeignOrStaleGeometry)
+{
+    auto mesh = make_mesh();
+    Workspace workspace(mesh);
+    const auto original_geometry = workspace.shared_geometry();
+    Workspace retained(mesh, original_geometry);
+    const auto original_flux = check_quadratic_flux(mesh, workspace, 4.0, 0.0);
+    const auto foreign = make_mesh();
+    EXPECT_THROW(static_cast<void>(Workspace(foreign, original_geometry)), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(Workspace(mesh, {})), std::invalid_argument);
+
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(mesh);
+    motion.begin_trial(6.0, 1.0);
+    EXPECT_THROW(static_cast<void>(Workspace(mesh, original_geometry)), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(retained.face_geometry()), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(retained.boundary_locations()), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(retained.gradient_cache().interior_geometry()), std::invalid_argument);
+    workspace.refresh_geometry();
+    EXPECT_NE(workspace.shared_geometry(), original_geometry);
+    EXPECT_EQ(retained.shared_geometry(), original_geometry);
+    EXPECT_THROW(static_cast<void>(retained.face_geometry()), std::invalid_argument);
+    Workspace current(mesh, workspace.shared_geometry());
+    EXPECT_EQ(check_quadratic_flux(mesh, workspace, 6.0, 0.0), check_quadratic_flux(mesh, current, 6.0, 0.0));
+
+    motion.rollback_trial();
+    EXPECT_THROW(static_cast<void>(current.face_geometry()), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(Workspace(mesh, original_geometry)), std::invalid_argument);
+    retained.refresh_geometry();
+    EXPECT_NE(retained.shared_geometry(), original_geometry);
+    EXPECT_EQ(check_quadratic_flux(mesh, retained, 4.0, 0.0), original_flux);
+    EXPECT_THROW(static_cast<void>(workspace.face_geometry()), std::invalid_argument);
 }

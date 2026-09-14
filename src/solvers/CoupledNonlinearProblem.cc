@@ -217,11 +217,13 @@ class AnalyticCoupledOperator final : public Operator
 {
 public:
     AnalyticCoupledOperator(std::shared_ptr<const FrozenGeometry> geometry, CoupledSolver::system_type base,
-        const Velocity& velocity, const Flux& flux, double time_step)
+        const Velocity& velocity, const Flux& flux, double time_step,
+        const FluxWorkspace::shared_geometry_type& flux_geometry)
         : d_geometry(std::move(geometry)), d_base(std::move(base)), d_time_step(time_step),
           d_direction_velocity(d_geometry->mesh, "nonlinear_direction_velocity"),
           d_direction_pressure(d_geometry->mesh, "nonlinear_direction_pressure"),
-          d_direction_flux(d_geometry->mesh, "nonlinear_direction_flux"), d_flux_workspace(d_geometry->mesh)
+          d_direction_flux(d_geometry->mesh, "nonlinear_direction_flux"),
+          d_flux_workspace(d_geometry->mesh, flux_geometry)
     {
         const auto u = velocity.local_read_view();
         const auto phi = flux.local_read_view();
@@ -595,6 +597,8 @@ struct CoupledNonlinearProblem::Impl
             {
                 // Boundary-affine stencils also depend on configuration. Retire
                 // caches rather than mutating any externally held generation.
+                if (workspace->geometry->epoch != mesh_geometry_epoch(*mesh))
+                    flux_workspace.refresh_geometry();
                 workspace->static_solver.clear_cache();
                 dynamic_solver.clear_cache();
                 workspace->static_equation.refresh_geometry();
@@ -927,8 +931,8 @@ struct CoupledNonlinearProblem::Impl
         else
             result.right_preconditioner = lagged_preconditioner;
         if (nonlinear.linearization == CoupledLinearization::AnalyticNewton)
-            result.jacobian = Teuchos::rcp(
-                new AnalyticCoupledOperator(geometry, std::move(system), trial_velocity, trial_flux, time.time_step));
+            result.jacobian = Teuchos::rcp(new AnalyticCoupledOperator(geometry, std::move(system), trial_velocity,
+                trial_flux, time.time_step, flux_workspace.shared_geometry()));
         else
             result.jacobian = system.linear_operator;
         if (lagging)

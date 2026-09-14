@@ -708,6 +708,104 @@ void add_gradient_coefficient(
              value.z + coefficient.z};
 }
 
+/** @brief Visit native or field-local cell incidences without repeated range scans. */
+template<class MeshType, class CellID, class Visitor>
+void visit_cell_faces(const MeshType& mesh, CellID cell, Visitor&& visitor)
+{
+    if constexpr (requires { mesh.visit_cell_faces(cell, visitor); })
+        mesh.visit_cell_faces(cell, visitor);
+    else
+        for (const auto face : mesh.faces(cell)) visitor(face);
+}
+
+/** @brief One operation-local gradient sample, retaining field-local adjacency. */
+template<class MeshType> struct GradientGeometrySample
+{
+    typename MeshType::local_ordinal_type face_lid{};
+    typename MeshType::local_ordinal_type other_lid{};
+    typename MeshType::Vec3 direction{};
+    real_t normal_distance{};
+    bool interior = false;
+    bool boundary = false;
+};
+
+template<class MeshType, class FaceID>
+size_t packed_face_local_id(const MeshType& mesh, FaceID face_id);
+
+/**
+ * @brief Resolve each gradient incidence once, using one native dispatch per cell.
+ *
+ * These samples expire with the operation. Native metrics use the same centroid
+ * differences as MeshHandle; composite periodic images retain their geometry
+ * provider's displacement. All neighbor ordinals still come from the handle's
+ * owned/overlap map, including reordered and noncontiguous identifiers.
+ */
+template<class MeshType, class Visitor>
+void visit_gradient_geometry_samples(const MeshType& mesh,
+    typename MeshType::local_ordinal_type cell, Visitor&& visitor, bool include_boundary = true)
+{
+    using sample_type = GradientGeometrySample<MeshType>;
+    if constexpr (requires { mesh.visit_cell_faces(cell, [](auto) {}); })
+    {
+        mesh.visit_cell_faces(cell, [&](auto face, auto native_face, auto native_cell, const auto& native,
+                                      const auto& to_local_cell)
+        {
+            sample_type sample;
+            sample.face_lid = face;
+            const auto native_neighbor = native.neighbor_cell(native_face);
+            const auto neighbor = to_local_cell(native_neighbor);
+            sample.interior = neighbor != MeshType::invalid_local_id();
+            sample.boundary = include_boundary && !sample.interior
+                && native.boundary_id(native_face) != MeshType::invalid_boundary_id;
+            if (!sample.interior && !sample.boundary) return;
+            const auto owner = native.owner_cell(native_face);
+            const bool owned_orientation = owner == native_cell;
+            if (sample.interior)
+            {
+                sample.other_lid = owned_orientation ? neighbor : to_local_cell(owner);
+                if (sample.other_lid == MeshType::invalid_local_id())
+                    throw std::invalid_argument("Exterior face does not have an opposite cell.");
+                if constexpr (requires { native.acquire_execution_view(); })
+                    sample.direction = native.cell_center_vector(native_face, native_cell);
+                else
+                    sample.direction = native.cell_centroid(owned_orientation ? native_neighbor : owner)
+                        - native.cell_centroid(native_cell);
+            }
+            else
+            {
+                sample.direction = native.face_centroid(native_face) - native.cell_centroid(native_cell);
+                const auto normal = native.face_normal(native_face);
+                sample.normal_distance = static_cast<typename MeshType::scalar_type>(
+                    sample.direction.dot(owned_orientation ? normal : normal * -1.0));
+            }
+            visitor(sample);
+        });
+    }
+    else
+    {
+        const auto cell_id = query_cell_id(mesh, cell);
+        for (const auto face : mesh.faces(cell_id))
+        {
+            sample_type sample;
+            sample.face_lid = static_cast<typename MeshType::local_ordinal_type>(packed_face_local_id(mesh, face));
+            sample.interior = mesh.is_interior_face(face);
+            sample.boundary = include_boundary && !sample.interior && mesh.is_boundary_face(face);
+            if (sample.interior)
+            {
+                sample.other_lid = packed_cell_local_id(mesh, mesh.opposite_or_periodic_neighbor_cell(face, cell_id));
+                sample.direction = mesh.cell_center_vector(face, cell_id);
+            }
+            else if (sample.boundary)
+            {
+                sample.direction = mesh.face_centroid(face) - mesh.cell_centroid(cell_id);
+                sample.normal_distance = boundary_normal_distance(mesh, sample.face_lid, cell);
+            }
+            else continue;
+            visitor(sample);
+        }
+    }
+}
+
 /**
  * @brief Compute least-squares gradient reconstruction stencils for all
  *        owned cells.
@@ -725,23 +823,18 @@ least_squares_gradient_stencils(const MeshType& mesh)
 
     std::vector<LeastSquaresGradientStencil<MeshType>> stencils(
         mesh.num_owned_cells());
+    std::vector<GradientGeometrySample<MeshType>> samples;
+    samples.reserve(6);
 
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto cell_id = query_cell_id(mesh, cell_lid);
         std::array<std::array<real_t, 3>, 3> normal{};
-        std::vector<typename MeshType::Vec3> directions;
-
-        for (const auto face_id : mesh.faces(cell_id))
+        samples.clear();
+        visit_gradient_geometry_samples(mesh, cell_lid, [&](const auto& sample)
         {
-            if (!mesh.is_interior_face(face_id))
-            {
-                continue;
-            }
-
-            const auto d = mesh.cell_center_vector(face_id, cell_id);
-            directions.push_back(d);
+            const auto& d = sample.direction;
+            samples.push_back(sample);
 
             normal[0][0] += d.x * d.x;
             normal[0][1] += d.x * d.y;
@@ -749,7 +842,7 @@ least_squares_gradient_stencils(const MeshType& mesh)
             normal[1][1] += d.y * d.y;
             normal[1][2] += d.y * d.z;
             normal[2][2] += d.z * d.z;
-        }
+        }, false);
 
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
@@ -757,25 +850,16 @@ least_squares_gradient_stencils(const MeshType& mesh)
 
         std::unordered_map<local_ordinal_type, typename MeshType::Vec3>
             coefficients;
-        coefficients.reserve(directions.size() + 1);
+        coefficients.reserve(samples.size() + 1);
 
-        size_t direction_id = 0;
-        for (const auto face_id : mesh.faces(cell_id))
+        for (const auto& sample : samples)
         {
-            if (!mesh.is_interior_face(face_id))
-            {
-                continue;
-            }
-
-            auto rhs = directions[direction_id++];
+            auto rhs = sample.direction;
             auto local_normal = normal;
             const auto basis = solve_3x3(local_normal, rhs);
-            const auto other_id =
-                mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
-            const auto other_lid = packed_cell_local_id(mesh, other_id);
 
             add_gradient_coefficient<MeshType>(
-                coefficients, other_lid, basis);
+                coefficients, sample.other_lid, basis);
             add_gradient_coefficient<MeshType>(
                 coefficients, cell_lid,
                 {-basis.x, -basis.y, -basis.z});
@@ -980,10 +1064,11 @@ boundary_aware_gradient_geometry(
 
     std::vector<BoundaryAwareGradientCellGeometry<MeshType>> geometry(
         mesh.num_owned_cells());
+    std::vector<GradientGeometrySample<MeshType>> samples;
+    samples.reserve(6);
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto cell_id = query_cell_id(mesh, cell_lid);
         std::array<std::array<real_t, 3>, 3> normal{};
         auto add_direction = [&](const vec_type& direction)
         {
@@ -995,26 +1080,13 @@ boundary_aware_gradient_geometry(
             normal[2][2] += direction.z * direction.z;
         };
 
-        for (const auto face_id : mesh.faces(cell_id))
+        samples.clear();
+        visit_gradient_geometry_samples(mesh, cell_lid, [&](const auto& sample)
         {
-            if (mesh.is_interior_face(face_id))
-            {
-                add_direction(mesh.cell_center_vector(face_id, cell_id));
-                continue;
-            }
-            if (!mesh.is_boundary_face(face_id))
-            {
-                continue;
-            }
-            const auto location = boundary_locations.at(
-                packed_face_local_id(mesh, face_id));
-            if (location.active)
-            {
-                add_direction(
-                    mesh.face_centroid(face_id)
-                    - mesh.cell_centroid(cell_id));
-            }
-        }
+            if (!sample.interior && !boundary_locations.at(sample.face_lid).active) return;
+            add_direction(sample.direction);
+            samples.push_back(sample);
+        });
 
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
@@ -1022,45 +1094,27 @@ boundary_aware_gradient_geometry(
         std::unordered_map<local_ordinal_type, vec_type> coefficients;
         auto& cell_geometry = geometry[owned];
 
-        for (const auto face_id : mesh.faces(cell_id))
+        for (const auto& sample : samples)
         {
-            if (mesh.is_interior_face(face_id))
+            if (sample.interior)
             {
-                auto direction = mesh.cell_center_vector(face_id, cell_id);
+                auto direction = sample.direction;
                 auto local_normal = normal;
                 const auto basis = solve_3x3(local_normal, direction);
-                const auto other_id =
-                    mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
-                const auto other_lid =
-                    packed_cell_local_id(mesh, other_id);
                 add_gradient_coefficient<MeshType>(
-                    coefficients, other_lid, basis);
+                    coefficients, sample.other_lid, basis);
                 add_gradient_coefficient<MeshType>(
                     coefficients, cell_lid,
                     {-basis.x, -basis.y, -basis.z});
                 continue;
             }
-            if (!mesh.is_boundary_face(face_id))
-            {
-                continue;
-            }
-            const auto packed_face_lid = static_cast<local_ordinal_type>(
-                packed_face_local_id(mesh, face_id));
-            const auto location = boundary_locations.at(
-                static_cast<size_t>(packed_face_lid));
-            if (!location.active)
-            {
-                continue;
-            }
-            auto direction =
-                mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+            auto direction = sample.direction;
             auto local_normal = normal;
             cell_geometry.boundary_samples.push_back({
-                packed_face_lid,
-                location,
+                sample.face_lid,
+                boundary_locations.at(sample.face_lid),
                 solve_3x3(local_normal, direction),
-                static_cast<real_t>(
-                    boundary_normal_distance(mesh, face_id, cell_id))});
+                sample.normal_distance});
         }
 
         cell_geometry.interior_entries.reserve(coefficients.size());

@@ -499,15 +499,16 @@ auto RadiolyticGasModel<Pack, MeshType>::global_integral(
         throw std::invalid_argument("Radiolytic integral volume span must use mesh-local cell order.");
     }
     detail::CompensatedSum<> local_integral;
-    const auto values = field.owned_read_view();
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        const auto volume = cell_volumes.empty()
-                                ? static_cast<scalar_type>(d_mesh->cell_volume(cell_lid))
-                                : static_cast<scalar_type>(cell_volumes[owned]);
-        local_integral += static_cast<long double>(values(owned, 0)) * volume;
+        const auto values = field.owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto volume = cell_volumes.empty()
+                                    ? static_cast<scalar_type>(d_mesh->cell_volume(cell_lid))
+                                    : static_cast<scalar_type>(cell_volumes[owned]);
+            local_integral += static_cast<long double>(values(owned, 0)) * volume;
+        }
     }
     return global_sum(static_cast<scalar_type>(local_integral.value()));
 }
@@ -519,21 +520,23 @@ auto RadiolyticGasModel<Pack, MeshType>::population_integrals(
 {
     if (!cell_volumes.empty() && cell_volumes.size() != d_mesh->num_local_cells())
         throw std::invalid_argument("Radiolytic integral volume span must use mesh-local cell order.");
-    const std::array values{
-        d_dissolved_hydrogen_inventory.owned_read_view(), d_micro_moles.owned_read_view(),
-        d_large_moles.owned_read_view(), d_micro_number.owned_read_view(), d_large_number.owned_read_view()};
     std::array<scalar_type, 5> local{}, global{};
     // The transport guard resolves changes at tens of scalar epsilons.
     // Compensate before rounding to the MPI scalar so cell count and changed
     // spatial distributions do not create an apparent inventory increase.
     std::array<detail::CompensatedSum<>, 5> accumulated{};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto volume = cell_volumes.empty()
-            ? static_cast<scalar_type>(d_mesh->cell_volume(static_cast<local_ordinal_type>(owned)))
-            : static_cast<scalar_type>(cell_volumes[owned]);
-        for (size_t column = 0; column < values.size(); ++column)
-            accumulated[column] += static_cast<long double>(values[column](owned, 0)) * volume;
+        const std::array values{
+            d_dissolved_hydrogen_inventory.owned_read_view(), d_micro_moles.owned_read_view(),
+            d_large_moles.owned_read_view(), d_micro_number.owned_read_view(), d_large_number.owned_read_view()};
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto volume = cell_volumes.empty()
+                ? static_cast<scalar_type>(d_mesh->cell_volume(static_cast<local_ordinal_type>(owned)))
+                : static_cast<scalar_type>(cell_volumes[owned]);
+            for (size_t column = 0; column < values.size(); ++column)
+                accumulated[column] += static_cast<long double>(values[column](owned, 0)) * volume;
+        }
     }
     for (size_t column = 0; column < local.size(); ++column)
         local[column] = static_cast<scalar_type>(accumulated[column].value());
@@ -1011,14 +1014,15 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_absolute_pressure(
 
     scalar_type local_pressure_volume{};
     scalar_type local_volume{};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        const auto volume = d_mesh->cell_volume(cell_lid);
-        local_pressure_volume +=
-            gauge_pressure.value(cell_lid) * volume;
-        local_volume += volume;
+        const auto gauge_values = gauge_pressure.owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto volume = d_mesh->cell_volume(cell_lid);
+            local_pressure_volume += gauge_values(owned, 0) * volume;
+            local_volume += volume;
+        }
     }
     const auto volume = global_sum(local_volume);
     const auto mean_pressure =
@@ -1026,19 +1030,19 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_absolute_pressure(
             ? global_sum(local_pressure_volume) / volume
             : 0.0;
 
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        auto pressure =
-            d_absolute_pressure_offset
-          + gauge_pressure.value(cell_lid) - mean_pressure;
-        if (pressure < d_options.minimum_absolute_pressure)
+        const auto gauge_values = gauge_pressure.owned_read_view();
+        const auto pressure_values = d_absolute_pressure.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            ++d_last_statistics.pressure_floor_cells;
-            pressure = d_options.minimum_absolute_pressure;
+            auto pressure = d_absolute_pressure_offset + gauge_values(owned, 0) - mean_pressure;
+            if (pressure < d_options.minimum_absolute_pressure)
+            {
+                ++d_last_statistics.pressure_floor_cells;
+                pressure = d_options.minimum_absolute_pressure;
+            }
+            pressure_values(owned, 0) = pressure;
         }
-        d_absolute_pressure.set_owned_value(cell_lid, pressure);
     }
     d_absolute_pressure.sync_ghosts();
 }
@@ -1072,34 +1076,33 @@ void RadiolyticGasModel<Pack, MeshType>::update_ideal_gas_source(
             "Radiolytic gas timestep must be finite and positive.");
     }
 
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        const auto alpha = alpha_g.value(cell_lid);
-        RadiolyticGasPhysics::require_positive(
-            temperature.value(cell_lid), "temperature");
-        RadiolyticGasPhysics::require_positive(
-            d_absolute_pressure.value(cell_lid),
-            "absolute pressure");
-        scalar_type source{};
-        if (alpha < alpha_max
-            && fission_power_density->value(cell_lid) > 0.0)
+        const auto alpha_values = alpha_g.owned_read_view();
+        const auto temperature_values = temperature.owned_read_view();
+        const auto pressure_values = d_absolute_pressure.owned_read_view();
+        const auto power_values = fission_power_density->owned_read_view();
+        const auto source_values = d_source_alpha_rad.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            source = RadiolyticGasPhysics::ideal_gas_alpha_source(
-                1.0 - alpha,
-                d_options.gas_release_efficiency,
-                d_options.hydrogen_yield_mol_per_j,
-                fission_power_density->value(cell_lid),
-                d_options.gas_constant,
-                temperature.value(cell_lid),
-                d_absolute_pressure.value(cell_lid),
-                d_options.max_source_alpha_rate);
-            source = std::min(
-                source,
-                (alpha_max - alpha) / time_step);
+            const auto alpha = alpha_values(owned, 0);
+            RadiolyticGasPhysics::require_positive(temperature_values(owned, 0), "temperature");
+            RadiolyticGasPhysics::require_positive(pressure_values(owned, 0), "absolute pressure");
+            scalar_type source{};
+            if (alpha < alpha_max && power_values(owned, 0) > 0.0)
+            {
+                source = RadiolyticGasPhysics::ideal_gas_alpha_source(
+                    1.0 - alpha,
+                    d_options.gas_release_efficiency,
+                    d_options.hydrogen_yield_mol_per_j,
+                    power_values(owned, 0),
+                    d_options.gas_constant,
+                    temperature_values(owned, 0),
+                    pressure_values(owned, 0),
+                    d_options.max_source_alpha_rate);
+                source = std::min(source, (alpha_max - alpha) / time_step);
+            }
+            source_values(owned, 0) = source;
         }
-        d_source_alpha_rad.set_owned_value(cell_lid, source);
     }
     d_source_alpha_rad.sync_ghosts();
 }
@@ -1173,51 +1176,58 @@ void RadiolyticGasModel<Pack, MeshType>::bubble_slip_volume_flux(
         const auto& name = d_mesh->boundary_batch_name(d_mesh->boundary_id(face_lid));
         return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
     };
-    auto cell_speed = [&](local_ordinal_type cell_lid, scalar_type radius)
-    {
-        if (!(radius > scalar_type{}))
-            return scalar_type{};
-        const auto surface_tension = d_options.surface_tension_mode == SurfaceTensionMode::Constant
-                                         ? d_options.surface_tension
-                                         : RadiolyticGasPhysics::sheng2024_surface_tension(
-                                               temperature.local_value(cell_lid) - 273.15,
-                                               d_options.uranium_concentration_mol_per_m3);
-        return rise_velocity(radius, material.density.local_value(cell_lid),
-            material.dynamic_viscosity.local_value(cell_lid), surface_tension);
-    };
-
     collective_detail::collective_local_validation(
         *d_mesh, "Radiolytic bubble slip-volume flux", [&]
         {
+            const auto temperature_values = temperature.local_read_view();
+            const auto density_values = material.density.local_read_view();
+            const auto viscosity_values = material.dynamic_viscosity.local_read_view();
+            const auto micro_radius_values = d_micro_radius.local_read_view();
+            const auto large_radius_values = d_large_radius.local_read_view();
+            const auto micro_alpha_values = d_alpha_g_micro.local_read_view();
+            const auto large_alpha_values = d_alpha_g_large.local_read_view();
+            const auto output_values = output.owned_write_view();
+            const auto cell_speed = [&](local_ordinal_type cell_lid, scalar_type radius)
+            {
+                if (!(radius > scalar_type{}))
+                    return scalar_type{};
+                const auto surface_tension = d_options.surface_tension_mode == SurfaceTensionMode::Constant
+                    ? d_options.surface_tension
+                    : RadiolyticGasPhysics::sheng2024_surface_tension(
+                          temperature_values(cell_lid, 0) - 273.15,
+                          d_options.uranium_concentration_mol_per_m3);
+                return rise_velocity(radius, density_values(cell_lid, 0),
+                    viscosity_values(cell_lid, 0), surface_tension);
+            };
             for (const auto face_lid : output.owned_face_ids())
             {
-        const auto area_component = static_cast<scalar_type>(
-            d_mesh->face_area_vector(face_lid).component(static_cast<size_t>(component)));
-        const auto owner = d_mesh->owner_cell(face_lid);
-        auto micro_speed = cell_speed(owner, d_micro_radius.local_value(owner));
-        auto large_speed = cell_speed(owner, d_large_radius.local_value(owner));
-        local_ordinal_type neighbor = owner;
-        if (d_mesh->is_interior_face(face_lid))
-        {
-            neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
-            micro_speed = scalar_type{0.5} *
-                          (micro_speed + cell_speed(neighbor, d_micro_radius.local_value(neighbor)));
-            large_speed = scalar_type{0.5} *
-                          (large_speed + cell_speed(neighbor, d_large_radius.local_value(neighbor)));
-        }
-        const auto population_flux = [&](scalar_type speed, const field_type& raw_alpha)
-        {
-            const auto kinematic_flux = speed * area_component;
-            const auto upwind = kinematic_flux >= scalar_type{} ? owner : neighbor;
-            return kinematic_flux * raw_alpha.local_value(upwind);
-        };
-        auto flux = population_flux(micro_speed, d_alpha_g_micro) +
-                    population_flux(large_speed, d_alpha_g_large);
-        if (d_mesh->is_boundary_face(face_lid))
-        {
-            flux = is_free_surface(face_lid) ? std::max(flux, scalar_type{}) : scalar_type{};
-        }
-        output.set_owned_value(face_lid, flux);
+                const auto area_component = static_cast<scalar_type>(
+                    d_mesh->face_area_vector(face_lid).component(static_cast<size_t>(component)));
+                const auto owner = d_mesh->owner_cell(face_lid);
+                auto micro_speed = cell_speed(owner, micro_radius_values(owner, 0));
+                auto large_speed = cell_speed(owner, large_radius_values(owner, 0));
+                local_ordinal_type neighbor = owner;
+                if (d_mesh->is_interior_face(face_lid))
+                {
+                    neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
+                    micro_speed = scalar_type{0.5} *
+                                  (micro_speed + cell_speed(neighbor, micro_radius_values(neighbor, 0)));
+                    large_speed = scalar_type{0.5} *
+                                  (large_speed + cell_speed(neighbor, large_radius_values(neighbor, 0)));
+                }
+                const auto population_flux = [&](scalar_type speed, const auto& raw_alpha)
+                {
+                    const auto kinematic_flux = speed * area_component;
+                    const auto upwind = kinematic_flux >= scalar_type{} ? owner : neighbor;
+                    return kinematic_flux * raw_alpha(upwind, 0);
+                };
+                auto flux = population_flux(micro_speed, micro_alpha_values) +
+                            population_flux(large_speed, large_alpha_values);
+                if (d_mesh->is_boundary_face(face_lid))
+                {
+                    flux = is_free_surface(face_lid) ? std::max(flux, scalar_type{}) : scalar_type{};
+                }
+                output_values(output.owned_row(face_lid), 0) = flux;
             }
         });
     output.sync_ghosts();
@@ -1279,9 +1289,11 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     if (d_skip_zero_auxiliary_transport && ale == nullptr && operator_slot != 1)
     {
         int local_nonzero = 0, global_nonzero = 0;
-        const auto values = field.owned_read_view();
-        for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
-            local_nonzero |= values(cell, 0) != scalar_type{};
+        {
+            const auto values = field.owned_read_view();
+            for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+                local_nonzero |= values(cell, 0) != scalar_type{};
+        }
         Teuchos::reduceAll(
             *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_nonzero, &global_nonzero);
         if (!global_nonzero)
@@ -1579,27 +1591,24 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         &liquid_face_flux;
     if (d_options.bubble_transport == BubbleTransportMode::Axial)
     {
-        for (size_t face = 0; face < d_mesh->num_faces(); ++face)
         {
-            const auto face_lid =
-                static_cast<local_ordinal_type>(face);
-            if (!axial_bubble_flux.is_owned_face(face_lid))
-                continue;
-            const auto owner = d_mesh->owner_cell(face_lid);
-            auto axial_velocity = velocity.local_value(owner).z;
-            if (!d_mesh->is_boundary_face(face_lid))
+            const auto velocity_values = velocity.local_read_view();
+            const auto flux_values = axial_bubble_flux.owned_write_view();
+            for (size_t face = 0; face < d_mesh->num_faces(); ++face)
             {
-                const auto neighbor =
-                    d_mesh->opposite_or_periodic_neighbor_cell(
-                        face_lid, owner);
-                axial_velocity = 0.5
-                    * (axial_velocity
-                       + velocity.local_value(neighbor).z);
+                const auto face_lid = static_cast<local_ordinal_type>(face);
+                if (!axial_bubble_flux.is_owned_face(face_lid))
+                    continue;
+                const auto owner = d_mesh->owner_cell(face_lid);
+                auto axial_velocity = velocity_values(owner, 2);
+                if (!d_mesh->is_boundary_face(face_lid))
+                {
+                    const auto neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
+                    axial_velocity = 0.5 * (axial_velocity + velocity_values(neighbor, 2));
+                }
+                flux_values(axial_bubble_flux.owned_row(face_lid), 0) =
+                    axial_velocity * d_mesh->face_area_vector(face_lid).z;
             }
-            axial_bubble_flux.set_value(
-                face_lid,
-                axial_velocity
-              * d_mesh->face_area_vector(face_lid).z);
         }
         if constexpr (requires { axial_bubble_flux.sync_ghosts(); })
         {
@@ -1613,11 +1622,21 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic bubble-slip evaluation",
         [&]
         {
+            const auto pressure_values = d_absolute_pressure.owned_read_view();
+            const auto temperature_values = temperature.owned_read_view();
+            const auto density_values = material.density.owned_read_view();
+            const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
+            const auto micro_number_values = d_micro_number.owned_read_view();
+            const auto micro_moles_values = d_micro_moles.owned_read_view();
+            const auto large_number_values = d_large_number.owned_read_view();
+            const auto large_moles_values = d_large_moles.owned_read_view();
+            const auto micro_slip_values = micro_slip.owned_write_view();
+            const auto large_slip_values = large_slip.owned_write_view();
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 const auto properties =
-                    cell_properties(cell_lid, temperature, material.density, material.dynamic_viscosity);
+                    cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
+                        density_values(owned, 0), viscosity_values(owned, 0));
                 const auto category_slip = [&](scalar_type number, scalar_type moles)
                 {
                     if (number <= d_options.min_population || moles <= 0.0)
@@ -1634,10 +1653,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
                     return rise_velocity(
                         radius.radius, properties.density, properties.viscosity, properties.surface_tension);
                 };
-                micro_slip.set_owned_value(
-                    cell_lid, category_slip(d_micro_number.value(cell_lid), d_micro_moles.value(cell_lid)));
-                large_slip.set_owned_value(
-                    cell_lid, category_slip(d_large_number.value(cell_lid), d_large_moles.value(cell_lid)));
+                micro_slip_values(owned, 0) = category_slip(micro_number_values(owned, 0), micro_moles_values(owned, 0));
+                large_slip_values(owned, 0) = category_slip(large_number_values(owned, 0), large_moles_values(owned, 0));
             }
         });
     micro_slip.sync_ghosts();
@@ -1689,11 +1706,22 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic transported-volume reconstruction",
         [&]
         {
+            const auto pressure_values = d_absolute_pressure.owned_read_view();
+            const auto temperature_values = temperature.owned_read_view();
+            const auto density_values = material.density.owned_read_view();
+            const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
+            const auto micro_number_values = d_micro_number.owned_read_view();
+            const auto micro_moles_values = d_micro_moles.owned_read_view();
+            const auto large_number_values = d_large_number.owned_read_view();
+            const auto large_moles_values = d_large_moles.owned_read_view();
+            const auto micro_alpha_values = transported_micro_alpha.owned_write_view();
+            const auto large_alpha_values = transported_large_alpha.owned_write_view();
+            const auto raw_alpha_values = d_transport_alpha_g_raw.owned_write_view();
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 const auto properties =
-                    cell_properties(cell_lid, temperature, material.density, material.dynamic_viscosity);
+                    cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
+                        density_values(owned, 0), viscosity_values(owned, 0));
                 const auto population_alpha = [&](scalar_type number, scalar_type moles)
                 {
                     if (number <= d_options.min_population || moles <= scalar_type{})
@@ -1708,12 +1736,12 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
                                             : scalar_type{};
                 };
                 const auto micro_alpha =
-                    population_alpha(d_micro_number.value(cell_lid), d_micro_moles.value(cell_lid));
+                    population_alpha(micro_number_values(owned, 0), micro_moles_values(owned, 0));
                 const auto large_alpha =
-                    population_alpha(d_large_number.value(cell_lid), d_large_moles.value(cell_lid));
-                transported_micro_alpha.set_owned_value(cell_lid, micro_alpha);
-                transported_large_alpha.set_owned_value(cell_lid, large_alpha);
-                d_transport_alpha_g_raw.set_owned_value(cell_lid, micro_alpha + large_alpha);
+                    population_alpha(large_number_values(owned, 0), large_moles_values(owned, 0));
+                micro_alpha_values(owned, 0) = micro_alpha;
+                large_alpha_values(owned, 0) = large_alpha;
+                raw_alpha_values(owned, 0) = micro_alpha + large_alpha;
             }
         });
     transported_micro_alpha.sync_ghosts();
@@ -1730,48 +1758,51 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
     };
     const auto slip_component = static_cast<size_t>(slip_axis);
-    for (const auto face_lid : d_transport_bubble_slip_volume_flux.owned_face_ids())
     {
-        const auto owner = d_mesh->owner_cell(face_lid);
-        auto micro_speed = micro_slip.local_value(owner);
-        auto large_speed = large_slip.local_value(owner);
-        local_ordinal_type neighbor = owner;
-        if (d_mesh->is_interior_face(face_lid))
+        const auto micro_slip_values = micro_slip.local_read_view();
+        const auto large_slip_values = large_slip.local_read_view();
+        const auto carrier_values = bubble_liquid_flux->owned_read_view();
+        const auto micro_alpha_values = transported_micro_alpha.local_read_view();
+        const auto large_alpha_values = transported_large_alpha.local_read_view();
+        const auto slip_flux_values = d_transport_bubble_slip_volume_flux.owned_write_view();
+        const auto carrier_flux_values = d_transport_bubble_carrier_volume_flux.owned_write_view();
+        for (const auto face_lid : d_transport_bubble_slip_volume_flux.owned_face_ids())
         {
-            neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
-            micro_speed = scalar_type{0.5} * (micro_speed + micro_slip.local_value(neighbor));
-            large_speed = scalar_type{0.5} * (large_speed + large_slip.local_value(neighbor));
-        }
-        const auto area_component =
-            static_cast<scalar_type>(d_mesh->face_area_vector(face_lid).component(slip_component));
-        const auto carrier_kinematic_flux =
-            bubble_liquid_flux->is_owned_face(face_lid) ? bubble_liquid_flux->value(face_lid) : scalar_type{};
-        const auto population_flux = [&](scalar_type speed, const field_type& transported_alpha)
-        {
-            const auto slip_kinematic_flux = speed * area_component;
-            const auto total_kinematic_flux = carrier_kinematic_flux + slip_kinematic_flux;
-            if (d_mesh->is_boundary_face(face_lid) &&
-                (!is_free_surface(face_lid) || total_kinematic_flux <= scalar_type{}))
+            const auto owner = d_mesh->owner_cell(face_lid);
+            auto micro_speed = micro_slip_values(owner, 0);
+            auto large_speed = large_slip_values(owner, 0);
+            local_ordinal_type neighbor = owner;
+            if (d_mesh->is_interior_face(face_lid))
             {
-                return std::array<scalar_type, 2>{};
+                neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
+                micro_speed = scalar_type{0.5} * (micro_speed + micro_slip_values(neighbor, 0));
+                large_speed = scalar_type{0.5} * (large_speed + large_slip_values(neighbor, 0));
             }
-            const auto upwind = total_kinematic_flux >= scalar_type{} ? owner : neighbor;
-            const auto alpha = transported_alpha.local_value(upwind);
-            return std::array<scalar_type, 2>{carrier_kinematic_flux * alpha, slip_kinematic_flux * alpha};
-        };
-        const auto micro_flux = population_flux(micro_speed, transported_micro_alpha);
-        const auto large_flux = population_flux(large_speed, transported_large_alpha);
-        const auto carrier_flux = micro_flux[0] + large_flux[0];
-        const auto slip_flux = micro_flux[1] + large_flux[1];
-        if constexpr (requires { d_transport_bubble_slip_volume_flux.set_owned_value(face_lid, slip_flux); })
-        {
-            d_transport_bubble_slip_volume_flux.set_owned_value(face_lid, slip_flux);
-            d_transport_bubble_carrier_volume_flux.set_owned_value(face_lid, carrier_flux);
-        }
-        else
-        {
-            d_transport_bubble_slip_volume_flux.set_value(face_lid, slip_flux);
-            d_transport_bubble_carrier_volume_flux.set_value(face_lid, carrier_flux);
+            const auto area_component =
+                static_cast<scalar_type>(d_mesh->face_area_vector(face_lid).component(slip_component));
+            const auto carrier_kinematic_flux =
+                bubble_liquid_flux->is_owned_face(face_lid)
+                    ? carrier_values(bubble_liquid_flux->owned_row(face_lid), 0)
+                    : scalar_type{};
+            const auto population_flux = [&](scalar_type speed, const auto& transported_alpha)
+            {
+                const auto slip_kinematic_flux = speed * area_component;
+                const auto total_kinematic_flux = carrier_kinematic_flux + slip_kinematic_flux;
+                if (d_mesh->is_boundary_face(face_lid) &&
+                    (!is_free_surface(face_lid) || total_kinematic_flux <= scalar_type{}))
+                {
+                    return std::array<scalar_type, 2>{};
+                }
+                const auto upwind = total_kinematic_flux >= scalar_type{} ? owner : neighbor;
+                const auto alpha = transported_alpha(upwind, 0);
+                return std::array<scalar_type, 2>{carrier_kinematic_flux * alpha, slip_kinematic_flux * alpha};
+            };
+            const auto micro_flux = population_flux(micro_speed, micro_alpha_values);
+            const auto large_flux = population_flux(large_speed, large_alpha_values);
+            const auto carrier_flux = micro_flux[0] + large_flux[0];
+            const auto slip_flux = micro_flux[1] + large_flux[1];
+            slip_flux_values(d_transport_bubble_slip_volume_flux.owned_row(face_lid), 0) = slip_flux;
+            carrier_flux_values(d_transport_bubble_carrier_volume_flux.owned_row(face_lid), 0) = carrier_flux;
         }
     }
     if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
@@ -1880,11 +1911,20 @@ auto RadiolyticGasModel<Pack, MeshType>::cell_properties(
     const field_type& density,
     const field_type& dynamic_viscosity) const -> CellProperties
 {
+    return cell_properties(d_absolute_pressure.value(cell_lid), temperature.value(cell_lid),
+        density.value(cell_lid), dynamic_viscosity.value(cell_lid));
+}
+
+/** Derive properties from values acquired by a caller's scoped field views. */
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::cell_properties(scalar_type pressure, scalar_type temperature,
+    scalar_type density, scalar_type dynamic_viscosity) const -> CellProperties
+{
     CellProperties properties;
-    properties.pressure = d_absolute_pressure.value(cell_lid);
-    properties.temperature = temperature.value(cell_lid);
-    properties.density = density.value(cell_lid);
-    properties.viscosity = dynamic_viscosity.value(cell_lid);
+    properties.pressure = pressure;
+    properties.temperature = temperature;
+    properties.density = density;
+    properties.viscosity = dynamic_viscosity;
     properties.surface_tension =
         d_options.surface_tension_mode == SurfaceTensionMode::Constant
             ? d_options.surface_tension
@@ -2189,10 +2229,34 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic derived-state reconstruction",
         [&]
         {
+            const auto pressure_values = d_absolute_pressure.owned_read_view();
+            const auto temperature_values = temperature.owned_read_view();
+            const auto density_values = density.owned_read_view();
+            const auto viscosity_values = dynamic_viscosity.owned_read_view();
+            const auto micro_number_values = d_micro_number.owned_read_view();
+            const auto micro_moles_values = d_micro_moles.owned_read_view();
+            const auto large_number_values = d_large_number.owned_read_view();
+            const auto large_moles_values = d_large_moles.owned_read_view();
+            const auto inventory_values = d_dissolved_hydrogen_inventory.owned_read_view();
+            const auto nucleation_radius_values = d_nucleation_radius.owned_write_view();
+            const auto micro_radius_values = d_micro_radius.owned_write_view();
+            const auto large_radius_values = d_large_radius.owned_write_view();
+            const auto micro_void_values = d_alpha_g_micro.owned_write_view();
+            const auto large_void_values = d_alpha_g_large.owned_write_view();
+            const auto raw_void_values = d_alpha_g_raw.owned_write_view();
+            const auto bounded_void_values = d_alpha_g.owned_write_view();
+            const auto liquid_fraction_values = d_alpha_l.owned_write_view();
+            const auto excess_void_values = d_alpha_g_excess.owned_write_view();
+            const auto characteristic_radius_values = d_characteristic_radius.owned_write_view();
+            const auto concentration_values = d_dissolved_hydrogen.owned_write_view();
+            const auto excluded_inventory_values = d_excluded_dissolved_inventory.owned_write_view();
+            const auto critical_concentration_values = d_critical_concentration.owned_write_view();
+            const auto equilibrium_concentration_values = d_equilibrium_concentration.owned_write_view();
+            const auto transfer_coefficient_values = d_mass_transfer_coefficient.owned_write_view();
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto cell_lid = static_cast<local_ordinal_type>(owned);
-                const auto properties = cell_properties(cell_lid, temperature, density, dynamic_viscosity);
+                const auto properties = cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
+                    density_values(owned, 0), viscosity_values(owned, 0));
                 const auto solve_radius = [&](scalar_type number, scalar_type moles)
                 {
                     if (number <= d_options.min_population || moles <= 0.0)
@@ -2210,55 +2274,54 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_
                     return result.radius;
                 };
 
-                const auto micro_radius = solve_radius(d_micro_number.value(cell_lid), d_micro_moles.value(cell_lid));
-                const auto large_radius = solve_radius(d_large_number.value(cell_lid), d_large_moles.value(cell_lid));
+                const auto micro_radius = solve_radius(micro_number_values(owned, 0), micro_moles_values(owned, 0));
+                const auto large_radius = solve_radius(large_number_values(owned, 0), large_moles_values(owned, 0));
                 const auto micro_void =
-                    RadiolyticGasPhysics::bubble_void_fraction(d_micro_number.value(cell_lid), micro_radius);
+                    RadiolyticGasPhysics::bubble_void_fraction(micro_number_values(owned, 0), micro_radius);
                 const auto large_void =
-                    RadiolyticGasPhysics::bubble_void_fraction(d_large_number.value(cell_lid), large_radius);
+                    RadiolyticGasPhysics::bubble_void_fraction(large_number_values(owned, 0), large_radius);
                 const auto raw_void = micro_void + large_void;
                 const auto bounded_void = std::clamp(raw_void, d_options.alpha_min, d_options.alpha_max);
                 if (record_event_statistics && bounded_void != raw_void)
                     ++d_last_statistics.clipped_cells;
                 const auto liquid_fraction = 1.0 - bounded_void;
-                const auto raw_concentration = d_dissolved_hydrogen_inventory.value(cell_lid) / liquid_fraction;
+                const auto raw_concentration = inventory_values(owned, 0) / liquid_fraction;
                 const auto published_concentration = std::min(raw_concentration, d_options.max_concentration);
                 const auto characteristic_radius = RadiolyticGasPhysics::characteristic_radius(
-                    d_micro_number.value(cell_lid), micro_radius, d_large_number.value(cell_lid), large_radius);
+                    micro_number_values(owned, 0), micro_radius, large_number_values(owned, 0), large_radius);
                 const auto equilibrium_radius = large_radius > 0.0 ? large_radius : properties.nucleation_radius;
 
-                d_nucleation_radius.set_owned_value(cell_lid, properties.nucleation_radius);
-                d_micro_radius.set_owned_value(cell_lid, micro_radius);
-                d_large_radius.set_owned_value(cell_lid, large_radius);
-                d_alpha_g_micro.set_owned_value(cell_lid, micro_void);
-                d_alpha_g_large.set_owned_value(cell_lid, large_void);
-                d_alpha_g_raw.set_owned_value(cell_lid, raw_void);
-                d_alpha_g.set_owned_value(cell_lid, bounded_void);
-                d_alpha_l.set_owned_value(cell_lid, liquid_fraction);
-                d_alpha_g_excess.set_owned_value(cell_lid, std::max(raw_void - bounded_void, scalar_type{}));
-                d_characteristic_radius.set_owned_value(cell_lid, characteristic_radius);
-                d_dissolved_hydrogen.set_owned_value(cell_lid, published_concentration);
-                d_excluded_dissolved_inventory.set_owned_value(cell_lid,
-                    std::max(d_dissolved_hydrogen_inventory.value(cell_lid) - liquid_fraction * published_concentration,
-                        scalar_type{}));
-                d_critical_concentration.set_owned_value(
-                    cell_lid, RadiolyticGasPhysics::henry_equilibrium_concentration(d_options.henry_coefficient,
-                                  properties.pressure, properties.surface_tension, properties.nucleation_radius));
-                d_equilibrium_concentration.set_owned_value(
-                    cell_lid, RadiolyticGasPhysics::henry_equilibrium_concentration(d_options.henry_coefficient,
-                                  properties.pressure, properties.surface_tension, equilibrium_radius));
+                nucleation_radius_values(owned, 0) = properties.nucleation_radius;
+                micro_radius_values(owned, 0) = micro_radius;
+                large_radius_values(owned, 0) = large_radius;
+                micro_void_values(owned, 0) = micro_void;
+                large_void_values(owned, 0) = large_void;
+                raw_void_values(owned, 0) = raw_void;
+                bounded_void_values(owned, 0) = bounded_void;
+                liquid_fraction_values(owned, 0) = liquid_fraction;
+                excess_void_values(owned, 0) = std::max(raw_void - bounded_void, scalar_type{});
+                characteristic_radius_values(owned, 0) = characteristic_radius;
+                concentration_values(owned, 0) = published_concentration;
+                excluded_inventory_values(owned, 0) =
+                    std::max(inventory_values(owned, 0) - liquid_fraction * published_concentration, scalar_type{});
+                critical_concentration_values(owned, 0) =
+                    RadiolyticGasPhysics::henry_equilibrium_concentration(d_options.henry_coefficient,
+                        properties.pressure, properties.surface_tension, properties.nucleation_radius);
+                equilibrium_concentration_values(owned, 0) =
+                    RadiolyticGasPhysics::henry_equilibrium_concentration(d_options.henry_coefficient,
+                        properties.pressure, properties.surface_tension, equilibrium_radius);
 
                 if (characteristic_radius > 0.0)
                 {
-                    d_mass_transfer_coefficient.set_owned_value(
-                        cell_lid, RadiolyticGasPhysics::hughmark_mass_transfer_coefficient(properties.diffusivity,
-                                      characteristic_radius, properties.density, properties.viscosity,
-                                      rise_velocity(characteristic_radius, properties.density, properties.viscosity,
-                                          properties.surface_tension)));
+                    transfer_coefficient_values(owned, 0) =
+                        RadiolyticGasPhysics::hughmark_mass_transfer_coefficient(properties.diffusivity,
+                            characteristic_radius, properties.density, properties.viscosity,
+                            rise_velocity(characteristic_radius, properties.density, properties.viscosity,
+                                properties.surface_tension));
                 }
                 else
                 {
-                    d_mass_transfer_coefficient.set_owned_value(cell_lid, 0.0);
+                    transfer_coefficient_values(owned, 0) = 0.0;
                 }
             }
         });
@@ -2300,13 +2363,19 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic local-kinetics integration",
         [&]
         {
+            const auto pressure_values = d_absolute_pressure.owned_read_view();
+            const auto temperature_values = temperature.owned_read_view();
+            const auto density_values = material.density.owned_read_view();
+            const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
+            const auto power_values = fission_power_density->owned_read_view();
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
                 const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 const auto properties =
-                    cell_properties(cell_lid, temperature, material.density, material.dynamic_viscosity);
+                    cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
+                        density_values(owned, 0), viscosity_values(owned, 0));
                 assign_cell_state(cell_lid,
-                    integrate_cell_kinetics(cell_lid, time_step, fission_power_density->value(cell_lid), properties));
+                    integrate_cell_kinetics(cell_lid, time_step, power_values(owned, 0), properties));
             }
         });
     d_dissolved_hydrogen_inventory.sync_ghosts();
@@ -2319,15 +2388,14 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
         temperature,
         material.density,
         material.dynamic_viscosity);
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        d_source_alpha_rad.set_owned_value(
-            cell_lid,
-            (d_alpha_g.value(cell_lid)
-             - d_previous_alpha_g.value(cell_lid))
-            / time_step);
+        const auto alpha_values = d_alpha_g.owned_read_view();
+        const auto previous_alpha_values = d_previous_alpha_g.owned_read_view();
+        const auto source_values = d_source_alpha_rad.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            source_values(owned, 0) = (alpha_values(owned, 0) - previous_alpha_values(owned, 0)) / time_step;
+        }
     }
 
     d_last_statistics.hydrogen_produced =

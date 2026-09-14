@@ -145,6 +145,7 @@ enum class CoupledAssemblyPurpose : std::uint8_t
  */
 struct CoupledPressureVelocityCacheStatistics
 {
+    size_t cell_face_cache_builds = 0;
     size_t coupled_matrix_builds = 0;
     size_t composite_operator_builds = 0;
     size_t streamed_product_peak = 0;
@@ -573,6 +574,8 @@ private:
 
     SIMPLEFLUID_SOLVERS_LOCAL
     void refresh_geometry_if_needed() const;
+    SIMPLEFLUID_SOLVERS_LOCAL
+    void refresh_cell_face_adjacency() const;
 
     SIMPLEFLUID_SOLVERS_LOCAL
     std::vector<std::optional<scalar_type>> evaluate_fixed_boundary_fluxes(
@@ -605,6 +608,9 @@ private:
     Teuchos::RCP<const typename Pack::map_type> d_coupled_map;
     mutable std::vector<FVM::detail::BoundaryFaceLocation<mesh_type>> d_boundary_locations;
     mutable std::uint64_t d_geometry_epoch = 0;
+    mutable std::vector<size_t> d_cell_face_offsets;
+    mutable std::vector<local_ordinal_type> d_cell_faces;
+    mutable std::uint64_t d_cell_face_epoch = 0;
     mutable CoupledPressureVelocityCacheStatistics d_cache_statistics;
     mutable system_type d_cached_system;
     mutable std::optional<std::pair<CoupledOperatorBackend, CoupledWorkspacePolicy>> d_logged_backends;

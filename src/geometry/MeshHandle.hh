@@ -659,6 +659,20 @@ public:
     using CellFaceRange = Meshes::EntityRange<local_ordinal_type>;
     CellFaceRange faces(local_ordinal_type cell_lid) const;
 
+    /**
+     * @brief Visit visible incident faces with one concrete-backend dispatch.
+     *
+     * The callback accepts either a field-local face ordinal or
+     * (field-local face ordinal, native face ID, native cell ID, concrete mesh).
+     * A fifth argument may receive a native-cell-to-local translator, which
+     * preserves invalid and absent overlap cells without another dispatch.
+     * Native IDs and geometry are borrowed for the callback; field ownership
+     * and incidence order match faces(), including filtered halo incidences.
+     * No persistent connectivity or shared scratch storage is allocated.
+     */
+    template<class Visitor>
+    void visit_cell_faces(local_ordinal_type cell_lid, Visitor&& visitor) const;
+
     /** @brief Explicit opt-in CSR compatibility storage; never needed by FVM. */
     void materialize_cell_faces() { initialize_cell_faces(); }
     std::span<const local_ordinal_type> materialized_faces(local_ordinal_type cell_lid) const

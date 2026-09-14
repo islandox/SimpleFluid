@@ -74,7 +74,7 @@ struct NonlinearSolveResult
 /** Cumulative workspace counters for a reusable solver instance. */
 struct NonlinearSolverCacheStatistics
 {
-    std::size_t vector_cache_builds = 0;  // map-dependent native vector bundles
+    std::size_t vector_cache_builds = 0;  // map-dependent native vectors and row component IDs
     std::size_t linear_solver_builds = 0; // Belos solver manager creations
     std::size_t linearization_generations = 0;
     /** Completed generations released before the next linearization within a solve. */

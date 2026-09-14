@@ -525,29 +525,78 @@ TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
 
 TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
 {
+    const auto visible_native_faces = [](const Handle& mesh, const auto& native_mesh, size_t cell)
+    {
+        std::vector<Pack::global_ordinal_type> faces;
+        const auto native_cell = native_mesh.cell_id(mesh.cell_geometry_global_id(cell));
+        for (const auto face : native_mesh.cell_faces(native_cell))
+        {
+            const auto global = static_cast<Pack::global_ordinal_type>(native_mesh.face_local_id(face));
+            if (mesh.overlap_face_map()->getLocalElement(global) != Handle::invalid_local_id())
+                faces.push_back(global);
+        }
+        return faces;
+    };
+    const auto check_visitation = [](const Handle& mesh)
+    {
+        for (size_t index = 0; index < mesh.num_local_cells(); ++index)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(index);
+            const auto expected = mesh.faces(cell);
+            std::vector<Pack::local_ordinal_type> visited;
+            mesh.visit_cell_faces(cell, [&](auto face)
+            {
+                visited.push_back(face);
+                // Nested visitors must not overwrite the outer traversal.
+                size_t nested_count = 0;
+                mesh.visit_cell_faces(cell, [&](auto) { ++nested_count; });
+                EXPECT_EQ(nested_count, expected.size());
+            });
+            EXPECT_TRUE(std::ranges::equal(visited, expected));
+            visited.clear();
+            mesh.visit_cell_faces(cell, [&](auto face, auto native_face, auto native_cell, const auto& native,
+                                           const auto& to_local_cell)
+            {
+                visited.push_back(face);
+                EXPECT_EQ(to_local_cell(native.owner_cell(native_face)), mesh.owner_cell(face));
+                EXPECT_EQ(to_local_cell(native.neighbor_cell(native_face)), mesh.neighbor_cell(face));
+                EXPECT_DOUBLE_EQ(native.face_area(native_face), mesh.face_area(face));
+                EXPECT_DOUBLE_EQ(native.cell_volume(native_cell), mesh.cell_volume(cell));
+                const auto center = native.cell_centroid(native_cell) - mesh.cell_centroid(cell);
+                EXPECT_DOUBLE_EQ(center.norm(), 0.0);
+            });
+            EXPECT_TRUE(std::ranges::equal(visited, expected));
+        }
+        EXPECT_EQ(mesh.connectivity_storage_bytes(), 0U);
+        EXPECT_FALSE(mesh.has_materialized_indexer());
+    };
     auto cylinder=std::make_shared<Cylindrical>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
         {1,2,3},{0,std::numbers::pi,2*std::numbers::pi},{0,1,2}}});
     Handle periodic(cylinder);
+    check_visitation(periodic);
     for(size_t c=0;c<periodic.num_cells();++c)
     {
-        const auto native=cylinder->cell_faces(cylinder->cell_id(c));
+        const auto native=visible_native_faces(periodic,*cylinder,c);
         const auto range=periodic.faces(c);
-        const auto other=periodic.faces((c+1)%periodic.num_cells());
+        const auto other_cell=(c+1)%periodic.num_cells();
+        const auto other=periodic.faces(other_cell);
         ASSERT_EQ(range.size(),native.size());
-        for(size_t i=0;i<range.size();++i) EXPECT_EQ(periodic.face_global_id(range[i]),cylinder->face_local_id(native[i]));
-        EXPECT_EQ(other.size(),6U);
+        for(size_t i=0;i<range.size();++i) EXPECT_EQ(periodic.face_global_id(range[i]),native[i]);
+        EXPECT_EQ(other.size(),visible_native_faces(periodic,*cylinder,other_cell).size());
+        if(periodic.overlap_face_map()->getComm()->getSize()==1) EXPECT_EQ(other.size(),6U);
     }
     auto cart=std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0,1,2,3,4,5,6},{0,1,2},{0,1,2}}});
     Handle partition(cart,{.ghost_layers=1,.partition=0,.partitions=2});
+    check_visitation(partition);
     bool absent_remote_neighbor=false;
     for(size_t c=0;c<partition.num_cells();++c)
     {
-        const auto native=cart->cell_faces(cart->cell_id(partition.cell_global_id(c)));
+        const auto native=visible_native_faces(partition,*cart,c);
         const auto range=partition.faces(c);
         ASSERT_EQ(range.size(),native.size());
         for(size_t i=0;i<range.size();++i)
         {
-            EXPECT_EQ(partition.face_global_id(range[i]),cart->face_local_id(native[i]));
+            EXPECT_EQ(partition.face_global_id(range[i]),native[i]);
             if(partition.neighbor_cell(range[i])==Handle::invalid_local_id() && !partition.is_geometry_exterior_face(range[i]))
             { absent_remote_neighbor=true; EXPECT_FALSE(partition.is_boundary_face(range[i])); }
         }

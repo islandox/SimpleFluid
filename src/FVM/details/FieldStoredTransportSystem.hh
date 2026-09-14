@@ -1991,141 +1991,150 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
     std::vector<StoredTransportMatrixRow<Pack>> rows;
     rows.reserve(mesh.num_owned_cells());
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell_lid));
-        const auto new_volume = ale == nullptr
-            ? volume
-            : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
-        const auto old_volume = ale == nullptr
-            ? volume
-            : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-        const auto transient = new_volume / time_step;
-        const auto old_transient = old_volume / time_step;
-        const auto old_value = old_values.local_value(cell_lid);
-        const auto source_value = source(cell_lid);
-        row_values.clear();
-        add_matrix_entry(row_values, cell_lid, transient);
-        for (size_t component = 0; component < components; ++component)
+        const auto old_value_data = old_values.local_read_view();
+        const auto face_flux_data = face_fluxes.local_read_view();
+        using gradient_view_type = decltype(std::as_const(*partition_gradients).local_read_view());
+        std::optional<gradient_view_type> partition_data;
+        if (partition_gradients)
+            partition_data.emplace(std::as_const(*partition_gradients).local_read_view());
+        const auto owned_cells = mesh.num_owned_cells();
+        for (size_t owned = 0; owned < owned_cells; ++owned)
         {
-            rhs->replaceLocalValue(cell_lid, component,
-                (ale == nullptr ? transient : old_transient)
-                        * old_value.component(component)
-                    + new_volume * source_value.component(component));
-        }
-
-        auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
-                                              const typename MeshType::Vec3& tangential_area)
-        {
-            if (gradient_weight == scalar_type{} || !mesh.is_owned_cell(gradient_cell_lid) ||
-                static_cast<size_t>(gradient_cell_lid) >= stencils->size())
-            {
-                return;
-            }
-            const auto scale = -weights.implicit * diffusivity * gradient_weight;
-            for (const auto& entry : (*stencils)[static_cast<size_t>(gradient_cell_lid)])
-            {
-                add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
-            }
-        };
-
-        for (const auto face_lid : mesh.faces(cell_lid))
-        {
-            const auto is_interior = mesh.is_interior_face(face_lid);
-            local_ordinal_type other{};
-            if (is_interior)
-            {
-                other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                row_values.ensure(other);
-            }
-
-            const auto owner_flux = face_fluxes.local_value(face_lid);
-            const auto outward_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_flux : -owner_flux;
-            if (outward_flux >= scalar_type{})
-            {
-                add_matrix_entry(row_values, cell_lid, outward_flux);
-            }
-            else if (is_interior)
-            {
-                add_matrix_entry(row_values, other, outward_flux);
-            }
-            else if (mesh.is_boundary_face(face_lid))
-            {
-                const auto index = packed_face_local_id(mesh, face_lid);
-                if (index < locations->size() && (*locations)[index].active)
-                {
-                    const auto location = (*locations)[index];
-                    const auto value = boundary_value(location.batch_id, location.in_batch_id);
-                    for (size_t component = 0; component < components; ++component)
-                    {
-                        rhs->sumIntoLocalValue(cell_lid, component, -outward_flux * value.component(component));
-                    }
-                }
-            }
-
-            if (diffusivity <= scalar_type{})
-            {
-                continue;
-            }
-            if (is_interior)
-            {
-                const auto coefficient = interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
-                add_matrix_entry(row_values, cell_lid, coefficient);
-                add_matrix_entry(row_values, other, -coefficient);
-                const auto tangential_area = non_orthogonal_area_vector(
-                    mesh.face_area_vector_outward(face_lid, cell_lid), mesh.cell_center_vector(face_lid, cell_lid));
-                if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < stencils->size())
-                {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, tangential_area);
-                    add_non_orthogonal_stencil(other, scalar_type{0.5}, tangential_area);
-                }
-                else if (weights.implicit > scalar_type{})
-                {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, tangential_area);
-                    if (partition_gradients == nullptr)
-                    {
-                        throw std::logic_error("Partition-face implicit vector reconstruction "
-                                               "requires synchronized remote gradients.");
-                    }
-                    const auto remote_gradient = partition_gradients->local_value(other);
-                    for (size_t component = 0; component < components; ++component)
-                    {
-                        rhs->sumIntoLocalValue(cell_lid, component,
-                            weights.implicit * diffusivity * scalar_type{0.5} *
-                                remote_gradient[component].dot(tangential_area));
-                    }
-                }
-                continue;
-            }
-
-            if (!mesh.is_boundary_face(face_lid))
-            {
-                continue;
-            }
-            const auto index = packed_face_local_id(mesh, face_lid);
-            if (index >= locations->size() || !(*locations)[index].active)
-            {
-                continue;
-            }
-            const auto location = (*locations)[index];
-            if (!boundary_diffusion(location.batch_id, location.in_batch_id))
-            {
-                continue;
-            }
-            const auto value = boundary_value(location.batch_id, location.in_batch_id);
-            const auto coefficient = boundary_diffusion_coefficient(mesh, face_lid, cell_lid, diffusivity);
-            add_matrix_entry(row_values, cell_lid, coefficient);
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto volume = static_cast<scalar_type>(mesh.cell_volume(cell_lid));
+            const auto new_volume = ale == nullptr
+                ? volume
+                : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume = ale == nullptr
+                ? volume
+                : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+            const auto transient = new_volume / time_step;
+            const auto old_transient = old_volume / time_step;
+            const auto old_value = vector_view_value<Pack>(old_value_data, cell_lid);
+            const auto source_value = source(cell_lid);
+            row_values.clear();
+            add_matrix_entry(row_values, cell_lid, transient);
             for (size_t component = 0; component < components; ++component)
             {
-                rhs->sumIntoLocalValue(cell_lid, component, coefficient * value.component(component));
+                rhs->replaceLocalValue(cell_lid, component,
+                    (ale == nullptr ? transient : old_transient)
+                            * old_value.component(component)
+                        + new_volume * source_value.component(component));
             }
-            const auto tangential_area = non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
-                mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
-            add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
-        }
 
-        rows.push_back(capture_stored_transport_row<Pack>(row_values));
+            auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
+                                                  const typename MeshType::Vec3& tangential_area)
+            {
+                if (gradient_weight == scalar_type{} || !mesh.is_owned_cell(gradient_cell_lid) ||
+                    static_cast<size_t>(gradient_cell_lid) >= stencils->size())
+                {
+                    return;
+                }
+                const auto scale = -weights.implicit * diffusivity * gradient_weight;
+                for (const auto& entry : (*stencils)[static_cast<size_t>(gradient_cell_lid)])
+                {
+                    add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
+                }
+            };
+
+            for (const auto face_lid : mesh.faces(cell_lid))
+            {
+                const auto is_interior = mesh.is_interior_face(face_lid);
+                local_ordinal_type other{};
+                if (is_interior)
+                {
+                    other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                    row_values.ensure(other);
+                }
+
+                const auto owner_flux = face_flux_data(face_lid, 0);
+                const auto outward_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_flux : -owner_flux;
+                if (outward_flux >= scalar_type{})
+                {
+                    add_matrix_entry(row_values, cell_lid, outward_flux);
+                }
+                else if (is_interior)
+                {
+                    add_matrix_entry(row_values, other, outward_flux);
+                }
+                else if (mesh.is_boundary_face(face_lid))
+                {
+                    const auto index = packed_face_local_id(mesh, face_lid);
+                    if (index < locations->size() && (*locations)[index].active)
+                    {
+                        const auto location = (*locations)[index];
+                        const auto value = boundary_value(location.batch_id, location.in_batch_id);
+                        for (size_t component = 0; component < components; ++component)
+                        {
+                            rhs->sumIntoLocalValue(cell_lid, component, -outward_flux * value.component(component));
+                        }
+                    }
+                }
+
+                if (diffusivity <= scalar_type{})
+                {
+                    continue;
+                }
+                if (is_interior)
+                {
+                    const auto coefficient = interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
+                    add_matrix_entry(row_values, cell_lid, coefficient);
+                    add_matrix_entry(row_values, other, -coefficient);
+                    const auto tangential_area = non_orthogonal_area_vector(
+                        mesh.face_area_vector_outward(face_lid, cell_lid), mesh.cell_center_vector(face_lid, cell_lid));
+                    if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < stencils->size())
+                    {
+                        add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, tangential_area);
+                        add_non_orthogonal_stencil(other, scalar_type{0.5}, tangential_area);
+                    }
+                    else if (weights.implicit > scalar_type{})
+                    {
+                        add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, tangential_area);
+                        if (partition_gradients == nullptr)
+                        {
+                            throw std::logic_error("Partition-face implicit vector reconstruction "
+                                                   "requires synchronized remote gradients.");
+                        }
+                        const auto remote_gradient = tensor_view_value<Pack>(*partition_data, other);
+                        for (size_t component = 0; component < components; ++component)
+                        {
+                            rhs->sumIntoLocalValue(cell_lid, component,
+                                weights.implicit * diffusivity * scalar_type{0.5} *
+                                    remote_gradient[component].dot(tangential_area));
+                        }
+                    }
+                    continue;
+                }
+
+                if (!mesh.is_boundary_face(face_lid))
+                {
+                    continue;
+                }
+                const auto index = packed_face_local_id(mesh, face_lid);
+                if (index >= locations->size() || !(*locations)[index].active)
+                {
+                    continue;
+                }
+                const auto location = (*locations)[index];
+                if (!boundary_diffusion(location.batch_id, location.in_batch_id))
+                {
+                    continue;
+                }
+                const auto value = boundary_value(location.batch_id, location.in_batch_id);
+                const auto coefficient = boundary_diffusion_coefficient(mesh, face_lid, cell_lid, diffusivity);
+                add_matrix_entry(row_values, cell_lid, coefficient);
+                for (size_t component = 0; component < components; ++component)
+                {
+                    rhs->sumIntoLocalValue(cell_lid, component, coefficient * value.component(component));
+                }
+                const auto tangential_area = non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
+                    mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
+                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
+            }
+
+            rows.push_back(capture_stored_transport_row<Pack>(row_values));
+        }
     }
 
     if (correction_field != nullptr && weights.explicit_ > scalar_type{})
@@ -2166,25 +2175,28 @@ void add_stored_variable_explicit_non_orthogonal_correction(
     const auto& mesh = correction_field.mesh();
     const auto execution = acquire_mesh_execution(mesh);
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    const auto gradient_values = gradients.local_read_view();
+    const auto viscosity_values = dynamic_viscosity.local_read_view();
+    const auto owned_cells = mesh.num_owned_cells();
+    for (size_t owned = 0; owned < owned_cells; ++owned)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_cell_faces(mesh, cell_lid, [&](local_ordinal_type face_lid)
         {
-            auto gradient = gradients.local_value(cell_lid);
-            auto face_viscosity = dynamic_viscosity.local_value(cell_lid);
+            auto gradient = tensor_view_value<Pack>(gradient_values, cell_lid);
+            auto face_viscosity = viscosity_values(cell_lid, 0);
             typename MeshType::Vec3 direction{};
             if (mesh.is_interior_face(face_lid))
             {
                 const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                const auto other_gradient = gradients.local_value(other);
+                const auto other_gradient = tensor_view_value<Pack>(gradient_values, other);
                 for (size_t component = 0; component < 3; ++component)
                 {
                     gradient[component] = (gradient[component] + other_gradient[component]) / scalar_type{2};
                 }
                 face_viscosity =
-                    face_coefficient_value(mesh, face_lid, cell_lid, other, dynamic_viscosity.local_value(cell_lid),
-                        dynamic_viscosity.local_value(other), coefficient_interpolation);
+                    face_coefficient_value(mesh, face_lid, cell_lid, other, viscosity_values(cell_lid, 0),
+                        viscosity_values(other, 0), coefficient_interpolation);
                 direction = mesh.cell_center_vector(face_lid, cell_lid);
             }
             else if (mesh.is_boundary_face(face_lid))
@@ -2192,19 +2204,19 @@ void add_stored_variable_explicit_non_orthogonal_correction(
                 const auto index = packed_face_local_id(mesh, face_lid);
                 if (index >= boundary_locations.size() || !boundary_locations[index].active)
                 {
-                    continue;
+                    return;
                 }
                 const auto location = boundary_locations[index];
                 if (!boundary_diffusion(location.batch_id, location.in_batch_id))
                 {
-                    continue;
+                    return;
                 }
                 face_viscosity = boundary_viscosity(location.batch_id, location.in_batch_id, face_viscosity);
                 direction = mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
             }
             else
             {
-                continue;
+                return;
             }
 
             const auto tangential_area =
@@ -2214,7 +2226,7 @@ void add_stored_variable_explicit_non_orthogonal_correction(
                 rhs.sumIntoLocalValue(
                     cell_lid, component, correction_weight * face_viscosity * gradient[component].dot(tangential_area));
             }
-        }
+        });
     }
 }
 
@@ -2255,7 +2267,7 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
             cell_gradient[component] = {gradient_data(cell_lid, component * 3),
                 gradient_data(cell_lid, component * 3 + 1), gradient_data(cell_lid, component * 3 + 2)};
         }
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_cell_faces(mesh, cell_lid, [&](local_ordinal_type face_lid)
         {
             auto face_gradient = cell_gradient;
             auto face_viscosity = viscosity_data(cell_lid, 0);
@@ -2276,17 +2288,17 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
             {
                 if (!mesh.is_boundary_face(face_lid))
                 {
-                    continue;
+                    return;
                 }
                 const auto index = packed_face_local_id(mesh, face_lid);
                 if (index >= boundary_locations.size() || !boundary_locations[index].active)
                 {
-                    continue;
+                    return;
                 }
                 const auto location = boundary_locations[index];
                 if (!boundary_stress(location.batch_id, location.in_batch_id))
                 {
-                    continue;
+                    return;
                 }
                 face_viscosity = boundary_viscosity(location.batch_id, location.in_batch_id, face_viscosity);
             }
@@ -2310,7 +2322,7 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
             {
                 cell_rhs[component] += scale * traction.component(component);
             }
-        }
+        });
         for (size_t component = 0; component < 3; ++component)
         {
             rhs_data(cell_lid, component) = cell_rhs[component];
@@ -2391,10 +2403,12 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     int invalid_viscosity = 0;
     if (incompatible_fields == 0)
     {
-        for (size_t local = 0; local < mesh.num_local_cells(); ++local)
+        const auto viscosity_values = dynamic_viscosity.local_read_view();
+        const auto local_cells = mesh.num_local_cells();
+        for (size_t local = 0; local < local_cells; ++local)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(local);
-            const auto viscosity = dynamic_viscosity.local_value(cell_lid);
+            const auto viscosity = viscosity_values(cell_lid, 0);
             invalid_viscosity = invalid_viscosity || !std::isfinite(viscosity) || viscosity < scalar_type{};
         }
     }
@@ -2476,162 +2490,173 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
         local_assembly_geometry = transport_assembly_geometry(mesh);
         return &local_assembly_geometry;
     }();
-    visit_transport_assembly_rows(mesh, *assembly_geometry,
-        [&](local_ordinal_type cell_lid, auto cell_volume, const auto& visit_faces)
     {
-        const auto owned = static_cast<size_t>(cell_lid);
-        const auto volume = static_cast<scalar_type>(cell_volume);
-        const auto new_volume = ale == nullptr
-            ? volume
-            : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
-        const auto old_volume = ale == nullptr
-            ? volume
-            : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-        const auto transient = new_volume / time_step;
-        const auto old_transient = old_volume / time_step;
-        const auto old_value = old_velocity.local_value(cell_lid);
-        const auto source_value = source(cell_lid);
-        row_values.clear();
-        add_matrix_entry(row_values, cell_lid, transient);
-        for (size_t component = 0; component < components; ++component)
+        // All input views are acquired after gradient synchronization. End this
+        // scope before deferred/stress kernels synchronize their own workspaces.
+        const auto velocity_values = old_velocity.local_read_view();
+        const auto flux_values = face_fluxes.local_read_view();
+        const auto viscosity_values = dynamic_viscosity.local_read_view();
+        using gradient_view_type = decltype(std::as_const(*partition_gradients).local_read_view());
+        std::optional<gradient_view_type> partition_values;
+        if (partition_gradients)
+            partition_values.emplace(std::as_const(*partition_gradients).local_read_view());
+        visit_transport_assembly_rows(mesh, *assembly_geometry,
+            [&](local_ordinal_type cell_lid, auto cell_volume, const auto& visit_faces)
         {
-            rhs->replaceLocalValue(cell_lid, component,
-                (ale == nullptr ? transient : old_transient)
-                        * old_value.component(component)
-                    + new_volume * source_value.component(component));
-        }
-
-        auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
-                                              scalar_type face_kinematic_viscosity,
-                                              const typename MeshType::Vec3& tangential_area)
-        {
-            if (weights.implicit == scalar_type{} || gradient_weight == scalar_type{} ||
-                !mesh.is_owned_cell(gradient_cell_lid) ||
-                static_cast<size_t>(gradient_cell_lid) >= gradient_stencils.size())
-            {
-                return;
-            }
-            const auto scale = -weights.implicit * face_kinematic_viscosity * gradient_weight;
-            const auto& stencil = gradient_stencils[static_cast<size_t>(gradient_cell_lid)];
+            const auto owned = static_cast<size_t>(cell_lid);
+            const auto volume = static_cast<scalar_type>(cell_volume);
+            const auto new_volume = ale == nullptr
+                ? volume
+                : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume = ale == nullptr
+                ? volume
+                : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+            const auto transient = new_volume / time_step;
+            const auto old_transient = old_volume / time_step;
+            const auto old_value = vector_view_value<Pack>(velocity_values, cell_lid);
+            const auto source_value = source(cell_lid);
+            row_values.clear();
+            add_matrix_entry(row_values, cell_lid, transient);
             for (size_t component = 0; component < components; ++component)
             {
-                rhs->sumIntoLocalValue(cell_lid, component, -scale * stencil.constants[component].dot(tangential_area));
-            }
-            for (const auto& entry : stencil.entries)
-            {
-                add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
-            }
-        };
-
-        visit_faces([&](const auto& face, const auto& metrics)
-        {
-            const auto face_lid = face.face_lid;
-            const auto is_interior = face.interior;
-            local_ordinal_type other{};
-            if (is_interior)
-            {
-                other = face.other;
-                row_values.ensure(other);
+                rhs->replaceLocalValue(cell_lid, component,
+                    (ale == nullptr ? transient : old_transient)
+                            * old_value.component(component)
+                        + new_volume * source_value.component(component));
             }
 
-            const auto owner_flux = face_fluxes.local_value(face_lid);
-            const auto outward_flux = face.owned_orientation ? owner_flux : -owner_flux;
-            if (outward_flux >= scalar_type{})
+            auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
+                                                  scalar_type face_kinematic_viscosity,
+                                                  const typename MeshType::Vec3& tangential_area)
             {
-                add_matrix_entry(row_values, cell_lid, outward_flux);
-            }
-            else if (is_interior)
-            {
-                add_matrix_entry(row_values, other, outward_flux);
-            }
-            else if (face.boundary)
-            {
-                const auto index = packed_face_local_id(mesh, face_lid);
-                if (index < locations->size() && (*locations)[index].active)
-                {
-                    const auto location = (*locations)[index];
-                    const auto value = boundary_value(location.batch_id, location.in_batch_id);
-                    for (size_t component = 0; component < components; ++component)
-                    {
-                        rhs->sumIntoLocalValue(cell_lid, component, -outward_flux * value.component(component));
-                    }
-                }
-            }
-
-            if (is_interior)
-            {
-                const auto face_kinematic_viscosity =
-                    face_coefficient_value(metrics, face_lid, cell_lid, other, dynamic_viscosity.local_value(cell_lid),
-                        dynamic_viscosity.local_value(other), coefficient_interpolation) /
-                    reference_density;
-                if (face_kinematic_viscosity <= scalar_type{})
+                if (weights.implicit == scalar_type{} || gradient_weight == scalar_type{} ||
+                    !mesh.is_owned_cell(gradient_cell_lid) ||
+                    static_cast<size_t>(gradient_cell_lid) >= gradient_stencils.size())
                 {
                     return;
                 }
-                const auto coefficient =
-                    interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_kinematic_viscosity);
-                add_matrix_entry(row_values, cell_lid, coefficient);
-                add_matrix_entry(row_values, other, -coefficient);
-                const auto tangential_area = non_orthogonal_area_vector(
-                    metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
-                if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
-                {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
-                    add_non_orthogonal_stencil(other, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
-                }
-                else if (weights.implicit > scalar_type{})
-                {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
-                    if (partition_gradients == nullptr)
-                    {
-                        throw std::logic_error("Partition-face implicit momentum reconstruction "
-                                               "requires synchronized remote gradients.");
-                    }
-                    const auto remote_gradient = partition_gradients->local_value(other);
-                    for (size_t component = 0; component < components; ++component)
-                    {
-                        rhs->sumIntoLocalValue(cell_lid, component,
-                            weights.implicit * face_kinematic_viscosity * scalar_type{0.5} *
-                                remote_gradient[component].dot(tangential_area));
-                    }
-                }
-                return;
-            }
-
-            if (!face.boundary)
-            {
-                return;
-            }
-            const auto index = packed_face_local_id(mesh, face_lid);
-            if (index >= locations->size() || !(*locations)[index].active)
-            {
-                return;
-            }
-            const auto location = (*locations)[index];
-            if (!boundary_diffusion(location.batch_id, location.in_batch_id))
-            {
-                return;
-            }
-            const auto face_kinematic_viscosity =
-                boundary_viscosity(location.batch_id, location.in_batch_id, dynamic_viscosity.local_value(cell_lid)) /
-                reference_density;
-            const auto coefficient = boundary_diffusion_coefficient(metrics, face_lid, cell_lid, face_kinematic_viscosity);
-            if (coefficient > scalar_type{})
-            {
-                add_matrix_entry(row_values, cell_lid, coefficient);
-                const auto value = boundary_value(location.batch_id, location.in_batch_id);
+                const auto scale = -weights.implicit * face_kinematic_viscosity * gradient_weight;
+                const auto& stencil = gradient_stencils[static_cast<size_t>(gradient_cell_lid)];
                 for (size_t component = 0; component < components; ++component)
                 {
-                    rhs->sumIntoLocalValue(cell_lid, component, coefficient * value.component(component));
+                    rhs->sumIntoLocalValue(cell_lid, component, -scale * stencil.constants[component].dot(tangential_area));
                 }
-            }
-            const auto tangential_area = non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
-                metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
-            add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_kinematic_viscosity, tangential_area);
-        });
+                for (const auto& entry : stencil.entries)
+                {
+                    add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
+                }
+            };
 
-        rows.push_back(capture_stored_transport_row<Pack>(row_values));
-    });
+            visit_faces([&](const auto& face, const auto& metrics)
+            {
+                const auto face_lid = face.face_lid;
+                const auto is_interior = face.interior;
+                local_ordinal_type other{};
+                if (is_interior)
+                {
+                    other = face.other;
+                    row_values.ensure(other);
+                }
+
+                const auto owner_flux = flux_values(face_lid, 0);
+                const auto outward_flux = face.owned_orientation ? owner_flux : -owner_flux;
+                if (outward_flux >= scalar_type{})
+                {
+                    add_matrix_entry(row_values, cell_lid, outward_flux);
+                }
+                else if (is_interior)
+                {
+                    add_matrix_entry(row_values, other, outward_flux);
+                }
+                else if (face.boundary)
+                {
+                    const auto index = packed_face_local_id(mesh, face_lid);
+                    if (index < locations->size() && (*locations)[index].active)
+                    {
+                        const auto location = (*locations)[index];
+                        const auto value = boundary_value(location.batch_id, location.in_batch_id);
+                        for (size_t component = 0; component < components; ++component)
+                        {
+                            rhs->sumIntoLocalValue(cell_lid, component, -outward_flux * value.component(component));
+                        }
+                    }
+                }
+
+                if (is_interior)
+                {
+                    const auto face_kinematic_viscosity =
+                        face_coefficient_value(metrics, face_lid, cell_lid, other, viscosity_values(cell_lid, 0),
+                            viscosity_values(other, 0), coefficient_interpolation) /
+                        reference_density;
+                    if (face_kinematic_viscosity <= scalar_type{})
+                    {
+                        return;
+                    }
+                    const auto coefficient =
+                        interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_kinematic_viscosity);
+                    add_matrix_entry(row_values, cell_lid, coefficient);
+                    add_matrix_entry(row_values, other, -coefficient);
+                    const auto tangential_area = non_orthogonal_area_vector(
+                        metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
+                    if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
+                    {
+                        add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
+                        add_non_orthogonal_stencil(other, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
+                    }
+                    else if (weights.implicit > scalar_type{})
+                    {
+                        add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
+                        if (partition_gradients == nullptr)
+                        {
+                            throw std::logic_error("Partition-face implicit momentum reconstruction "
+                                                   "requires synchronized remote gradients.");
+                        }
+                        const auto remote_gradient = tensor_view_value<Pack>(*partition_values, other);
+                        for (size_t component = 0; component < components; ++component)
+                        {
+                            rhs->sumIntoLocalValue(cell_lid, component,
+                                weights.implicit * face_kinematic_viscosity * scalar_type{0.5} *
+                                    remote_gradient[component].dot(tangential_area));
+                        }
+                    }
+                    return;
+                }
+
+                if (!face.boundary)
+                {
+                    return;
+                }
+                const auto index = packed_face_local_id(mesh, face_lid);
+                if (index >= locations->size() || !(*locations)[index].active)
+                {
+                    return;
+                }
+                const auto location = (*locations)[index];
+                if (!boundary_diffusion(location.batch_id, location.in_batch_id))
+                {
+                    return;
+                }
+                const auto face_kinematic_viscosity =
+                    boundary_viscosity(location.batch_id, location.in_batch_id, viscosity_values(cell_lid, 0)) /
+                    reference_density;
+                const auto coefficient = boundary_diffusion_coefficient(metrics, face_lid, cell_lid, face_kinematic_viscosity);
+                if (coefficient > scalar_type{})
+                {
+                    add_matrix_entry(row_values, cell_lid, coefficient);
+                    const auto value = boundary_value(location.batch_id, location.in_batch_id);
+                    for (size_t component = 0; component < components; ++component)
+                    {
+                        rhs->sumIntoLocalValue(cell_lid, component, coefficient * value.component(component));
+                    }
+                }
+                const auto tangential_area = non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
+                    metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
+                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_kinematic_viscosity, tangential_area);
+            });
+
+            rows.push_back(capture_stored_transport_row<Pack>(row_values));
+        });
+    }
 
     if (correction_field != nullptr && weights.explicit_ > scalar_type{})
     {

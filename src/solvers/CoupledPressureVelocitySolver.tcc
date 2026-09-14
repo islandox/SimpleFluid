@@ -1101,6 +1101,30 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
     d_solution = Teuchos::null;
 }
 
+/** @brief Cache owned-cell incidences without materializing mesh connectivity. */
+template<TpetraTypePack Pack, class MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_cell_face_adjacency() const
+{
+    const auto epoch = mesh_geometry_epoch(*d_mesh);
+    const auto cells = d_mesh->num_owned_cells();
+    if (d_cell_face_offsets.size() == cells + 1 && d_cell_face_epoch == epoch)
+        return;
+    std::vector<size_t> offsets;
+    std::vector<local_ordinal_type> faces;
+    offsets.reserve(cells + 1);
+    offsets.push_back(0);
+    for (size_t cell = 0; cell < cells; ++cell)
+    {
+        FVM::detail::visit_cell_faces(*d_mesh, static_cast<local_ordinal_type>(cell),
+            [&](local_ordinal_type face) { faces.push_back(face); });
+        offsets.push_back(faces.size());
+    }
+    d_cell_face_offsets = std::move(offsets);
+    d_cell_faces = std::move(faces);
+    d_cell_face_epoch = epoch;
+    ++d_cache_statistics.cell_face_cache_builds;
+}
+
 /** @brief Detect geometry motion even when the owning solver missed refresh. */
 template<TpetraTypePack Pack, class MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_geometry_if_needed() const
@@ -1584,6 +1608,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     CoupledAssemblyPurpose purpose) const
 {
     refresh_geometry_if_needed();
+    refresh_cell_face_adjacency();
     continuity_target.validate(*d_mesh, "CoupledPressureVelocitySolver continuity target");
     if (!std::isfinite(reference_density) || reference_density <= scalar_type{})
     {
@@ -1753,8 +1778,11 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         std::array<scalar_type, 3> momentum_boundary_rhs{};
         scalar_type continuity_rhs = {};
 
-        for (const auto face_lid : d_mesh->faces(cell_lid))
+        const auto faces_begin = d_cell_face_offsets[owned];
+        const auto faces_end = d_cell_face_offsets[owned + 1];
+        for (size_t incidence = faces_begin; incidence < faces_end; ++incidence)
         {
+            const auto face_lid = d_cell_faces[incidence];
             const auto area = d_mesh->face_area_vector_outward(face_lid, cell_lid);
             const std::array<scalar_type, 3> area_components{area.x, area.y, area.z};
 
