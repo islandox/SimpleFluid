@@ -26,7 +26,8 @@ from run_performance import (check_artifacts, digest, merge_outputs,
 VARIANTS = ["openfoam", "piso", "coupled-assembled", "coupled-composite",
             "nox-assembled", "nox-composite", "nox-composite-streamed",
             "iso2-nox-composite-streamed", "nox-picard-composite",
-            "nox-bicgstab-composite"]
+            "nox-bicgstab-composite", "piso-gas-full", "piso-gas-strict",
+            "nox-composite-gas-full", "nox-composite-gas-strict"]
 
 
 def forcing_tolerance(value):
@@ -38,11 +39,18 @@ def forcing_tolerance(value):
 
 def solver_arguments(variant, inputs, directory, steps, restart, forcing_initial=None,
                      preconditioner_update=None):
+    gas_policy = None
+    for suffix, policy in [("-gas-full", "full"), ("-gas-strict", "skip-zero-auxiliary")]:
+        if variant.endswith(suffix):
+            variant, gas_policy = variant[:-len(suffix)], policy
+            break
     command = ["--output", str(directory), "--mesh-file", str(inputs / "mesh.dat"),
                "--properties", str(inputs / "reference.properties"),
                "--water-properties", str(inputs / "reference_water.properties"),
                "--steps", str(steps), "--transport-solver", "bicgstab",
                "--transport-preconditioner", "sgs"]
+    if gas_policy:
+        command += ["--gas-transport", gas_policy]
     if variant == "piso":
         return command + ["--coupling", "piso", "--pressure-solver", "pcg",
                           "--pressure-preconditioner", "dic"]
@@ -112,6 +120,33 @@ def run_one(args, cells, variant, repeat, artifacts, build=None):
     if returncode == 0:
         try:
             record.update(merge_outputs(directory, 2, start, "processor" if variant == "openfoam" else "rank"))
+            gas_path = directory / "merged/gas_transport_statistics.csv"
+            if "-gas-" in variant and not gas_path.is_file():
+                raise ValueError("missing gas transport statistics")
+            if gas_path.is_file():
+                with gas_path.open() as stream:
+                    gas_rows = list(csv.DictReader(stream))
+                fields = {row["field"] for row in gas_rows}
+                expected_fields = {"micro_moles", "micro_number", "gas_update"}
+                if variant != "openfoam":
+                    expected_fields |= {"dissolved", "large_number", "large_moles"}
+                if fields != expected_fields or len(gas_rows) != args.steps * len(fields):
+                    raise ValueError("incomplete gas per-field statistics")
+                keys = ["skipped", "solves", "iterations", "assemblies", "assembly_seconds", "solve_seconds", "total_seconds"]
+                if any(not math.isfinite(float(row[key])) or float(row[key]) < 0 for row in gas_rows for key in keys):
+                    raise ValueError("invalid gas work statistics")
+                record["gas"] = {field: {key: sum(float(row[key]) for row in gas_rows if row["field"] == field)
+                                         for key in keys} for field in sorted(fields)}
+                for field in ["micro_moles", "micro_number"]:
+                    if record["gas"][field]["solves"] != args.steps:
+                        raise ValueError("microbubble transport count differs from physical step count")
+                if variant.endswith("-gas-strict"):
+                    for field in ["dissolved", "large_number", "large_moles"]:
+                        if record["gas"][field]["skipped"] != args.steps or record["gas"][field]["solves"] != 0:
+                            raise ValueError("strict fixture did not keep its auxiliary populations inactive")
+                if variant.endswith("-gas-full"):
+                    if sum(work["solves"] for work in record["gas"].values()) != 5 * args.steps:
+                        raise ValueError("full gas transport call count mismatch")
             nonlinear_path = directory / "merged/nonlinear_solver_statistics.csv"
             if "nox" in variant and not nonlinear_path.is_file():
                 raise ValueError("missing nonlinear solver statistics")

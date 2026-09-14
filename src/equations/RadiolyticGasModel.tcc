@@ -18,6 +18,7 @@
 #include <Teuchos_CommHelpers.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -133,6 +134,7 @@ void RadiolyticGasModel<Pack, MeshType>::configure(
     validate_radiolytic_gas_options(options);
     d_options = options;
     d_transport_workspace.reset();
+    d_skip_zero_auxiliary_transport = false;
     d_transport_linear_options = {};
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     d_transport_solver.reset();
@@ -153,6 +155,14 @@ void RadiolyticGasModel<Pack, MeshType>::configure(
     d_cumulative_escaped_bubble_count = 0.0;
     d_last_statistics = {};
     initialize_fields();
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::set_skip_zero_auxiliary_transport(bool enabled)
+{
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(enabled), "Radiolytic zero auxiliary transport policy");
+    d_skip_zero_auxiliary_transport = enabled;
 }
 
 /** @brief Validate and install a rank-consistent FV transport solver policy. */
@@ -1242,6 +1252,12 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     size_t operator_slot,
     bool reuse_population_operator)
 {
+    const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = [](auto begin)
+    { return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(); };
+    const size_t field_index = operator_slot == 0 ? 0 : 2 * operator_slot - 1 + reuse_population_operator;
+    auto& work = d_last_statistics.transport_work.at(field_index);
+
     if (&escape_rate.mesh() != d_mesh.get())
     {
         throw std::invalid_argument(
@@ -1255,6 +1271,26 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     if (ale != nullptr)
     {
         ale->validate(*d_mesh, static_cast<real_t>(time_step));
+    }
+    // This transport stage has no source, homogeneous Neumann data, and no
+    // incoming physical-boundary flux. Exact global zero is an invariant of
+    // this stage, irrespective of kinetics that may populate it afterward.
+    // Keep MPI decisions collective: local emptiness alone is insufficient.
+    if (d_skip_zero_auxiliary_transport && ale == nullptr && operator_slot != 1)
+    {
+        int local_nonzero = 0, global_nonzero = 0;
+        const auto values = field.owned_read_view();
+        for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+            local_nonzero |= values(cell, 0) != scalar_type{};
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_nonzero, &global_nonzero);
+        if (!global_nonzero)
+        {
+            field.sync_ghosts();
+            ++work.skipped;
+            work.total_seconds += elapsed(started);
+            return;
+        }
     }
     auto is_free_surface = [&](local_ordinal_type face_lid)
     {
@@ -1274,6 +1310,10 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     auto& diffusion_weight = workspace.diffusion;
     auto& solution = workspace.solution;
     auto& system = workspace.systems.at(operator_slot);
+    // If the number equation was skipped, a populated moles equation must
+    // assemble current coefficients instead of reusing a previous timestep.
+    reuse_population_operator = reuse_population_operator && workspace.operator_ready.at(operator_slot);
+    const auto assembly_started = std::chrono::steady_clock::now();
     if (!reuse_population_operator)
     {
         {
@@ -1365,6 +1405,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                 .geometry_cache = &d_transport_geometry_cache,
                 .ale = ale,
                 .symbolic_plan = &workspace.symbolic_plans.at(operator_slot)});
+        workspace.operator_ready.at(operator_slot) = true;
+        ++work.assemblies;
     }
     else
     {
@@ -1385,6 +1427,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
         }
     }
 
+    work.assembly_seconds += elapsed(assembly_started);
+    const auto solve_started = std::chrono::steady_clock::now();
     // Keep the original zero initial guess. The shared matrix is numerically
     // refreshed each stage; only its adjacent number/moles solves share a factor.
     auto solve_options = d_transport_linear_options;
@@ -1392,6 +1436,9 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     const auto solve_statistics = d_transport_solver.solve_from_zero_with_statistics(
         system.matrix, *system.rhs, solution.owned_data(), solve_options);
     d_last_statistics.transport_linear.add(solve_statistics);
+    ++work.solves;
+    work.iterations += solve_statistics.iterations;
+    work.solve_seconds += elapsed(solve_started);
     if (!solve_statistics.converged)
     {
         throw std::runtime_error(
@@ -1444,6 +1491,7 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                                       ale->new_cell_volumes()[static_cast<size_t>(owner)]);
         escape_values(owner, 0) += boundary_rate / volume;
     }
+    work.total_seconds += elapsed(started);
 }
 
 /**
@@ -1476,6 +1524,7 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
     if (!d_transport_workspace)
         d_transport_workspace = std::make_unique<TransportWorkspace>(d_mesh);
     auto& workspace = *d_transport_workspace;
+    workspace.operator_ready.fill(false);
     const auto old_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes();
     const auto new_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->new_cell_volumes();
     const auto inventories_before = population_integrals(old_cell_volumes);
@@ -2495,6 +2544,7 @@ void RadiolyticGasModel<Pack, MeshType>::advance(
     Dimension slip_axis)
 {
     d_last_statistics = {};
+    const auto update_started = std::chrono::steady_clock::now();
     if (!enabled())
     {
         d_source_alpha_rad.put_scalar(0.0);
@@ -2567,6 +2617,8 @@ void RadiolyticGasModel<Pack, MeshType>::advance(
         d_history_initialized = true;
     }
     sync_all_fields();
+    d_last_statistics.gas_update_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - update_started).count();
 }
 
 /**

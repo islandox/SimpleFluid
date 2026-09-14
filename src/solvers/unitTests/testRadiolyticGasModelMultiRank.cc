@@ -624,3 +624,100 @@ TEST(RadiolyticGasModelMultiRankTest,
             std::string::npos);
     }
 }
+
+/** Auxiliary transport skips require global zero and resume after local kinetics. */
+TEST(RadiolyticGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesCollectively)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    auto options = sheng_options();
+    options.microbubble_lifetime = 0.01;
+    options.large_bubble_dissolution_time = 1.e100;
+    options.micro_to_large_conversion_coefficient = 0.;
+    options.max_subcycles = 1;
+    RadiolyticModelType full(mesh, options), reduced(mesh, options);
+    reduced.set_skip_zero_auxiliary_transport(true);
+    if (comm->getSize() > 1)
+        EXPECT_THROW(reduced.set_skip_zero_auxiliary_transport(comm->getRank() == 0), std::invalid_argument);
+    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+    if (comm->getRank() == 0 && mesh->num_owned_cells())
+        power.set_owned_value(0, 1000.);
+    power.sync_ghosts();
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0., "flux");
+    auto material = make_water_properties(mesh);
+    for (int step = 1; step <= 3; ++step)
+    {
+        full.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
+        reduced.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
+        EXPECT_EQ(full.last_statistics().transport_linear.solves, 5);
+        EXPECT_EQ(reduced.last_statistics().transport_linear.solves, step == 1 ? 2 : 3);
+        EXPECT_EQ(reduced.last_statistics().transport_work[0].skipped, step == 1 ? 1 : 0);
+        EXPECT_EQ(reduced.last_statistics().transport_work[3].skipped, 1);
+        EXPECT_EQ(reduced.last_statistics().transport_work[4].skipped, 1);
+        EXPECT_EQ(reduced.last_statistics().transport_work[1].solves, 1);
+        EXPECT_EQ(reduced.last_statistics().transport_work[2].assemblies, 0);
+        const auto expected = full.output_fields(), actual = reduced.output_fields();
+        ASSERT_EQ(expected.size(), actual.size());
+        for (const auto& [name, field] : expected)
+        {
+            SCOPED_TRACE(name);
+            const auto a = field->owned_data().getData();
+            const auto b = actual.at(name)->owned_data().getData();
+            for (size_t cell = 0; cell < a.size(); ++cell)
+                EXPECT_NEAR(a[cell], b[cell], std::max(1.e-20, std::abs(a[cell]) * 1.e-12));
+        }
+        EXPECT_NEAR(reduced.last_statistics().inventory_error, 0., 1.e-14);
+    }
+}
+
+/** A populated large category and dissolved inventory must retain all five solves. */
+TEST(RadiolyticGasModelMultiRankTest, ZeroAuxiliaryPolicyRetainsPopulatedInventories)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto options = sheng_options();
+    options.initial_dissolved_hydrogen = 1.e-5;
+    options.initial_large_number_density = 1.e7;
+    options.initial_large_moles = 1.e-6;
+    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1.e100;
+    options.micro_to_large_conversion_coefficient = 0.;
+    RadiolyticModelType model(mesh, options);
+    model.set_skip_zero_auxiliary_transport(true);
+    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0., "flux");
+    auto material = make_water_properties(mesh);
+    model.advance(.001, .001, temperature, pressure, velocity, flux, material, &power);
+    EXPECT_EQ(model.last_statistics().transport_linear.solves, 5);
+    for (const auto& work : model.last_statistics().transport_work)
+        EXPECT_EQ(work.skipped, 0);
+    EXPECT_NEAR(model.last_statistics().inventory_error, 0., 1.e-14);
+}
+
+/** A skipped number equation cannot leave its moles partner using a stale operator. */
+TEST(RadiolyticGasModelMultiRankTest, ZeroNumberStillAssemblesPopulatedMoles)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto options = sheng_options();
+    options.initial_large_moles = 1.e-6;
+    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1.e100;
+    options.micro_to_large_conversion_coefficient = 0.;
+    RadiolyticModelType full(mesh, options), reduced(mesh, options);
+    reduced.set_skip_zero_auxiliary_transport(true);
+    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0., "flux");
+    auto material = make_water_properties(mesh);
+    for (int step = 1; step <= 2; ++step)
+    {
+        full.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
+        reduced.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
+        EXPECT_EQ(reduced.last_statistics().transport_linear.solves, 3);
+        EXPECT_EQ(reduced.last_statistics().transport_work[3].skipped, 1);
+        EXPECT_EQ(reduced.last_statistics().transport_work[4].assemblies, 1);
+        const auto a = full.large_moles().owned_data().getData();
+        const auto b = reduced.large_moles().owned_data().getData();
+        for (size_t i = 0; i < a.size(); ++i) EXPECT_DOUBLE_EQ(a[i], b[i]);
+    }
+}

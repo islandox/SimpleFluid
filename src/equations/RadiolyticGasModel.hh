@@ -28,6 +28,17 @@
 
 namespace SimpleFluid
 {
+/** Local elapsed times; reduce across ranks when exporting diagnostics. */
+struct RadiolyticTransportWork
+{
+    int skipped = 0;
+    int solves = 0;
+    int iterations = 0;
+    int assemblies = 0;
+    double assembly_seconds = 0;
+    double solve_seconds = 0; ///< Includes preconditioner setup and residual checks.
+    double total_seconds = 0;
+};
 
 /**
  * @brief Per-step global diagnostics from a radiolytic gas update.
@@ -60,6 +71,9 @@ struct RadiolyticGasStepStatistics
     int pressure_floor_cells = 0;
     int radius_solver_failures = 0;
     LinearSolveSummary transport_linear; ///< All FV transport solves in this step.
+    /** Dissolved inventory, micro number/moles, large number/moles. */
+    std::array<RadiolyticTransportWork, 5> transport_work;
+    double gas_update_seconds = 0; ///< Local complete two-population update time.
 };
 
 /**
@@ -117,6 +131,12 @@ public:
      * transport_solver_tolerance. Apply an explicit solver policy afterward.
      */
     void configure(const RadiolyticGasOptions& options);
+    /** Collectively opt in to skipping exactly zero auxiliary inventories on
+     * fixed meshes. Transport has zero source and homogeneous boundaries;
+     * kinetics still executes and populated fields resume normal transport.
+     * Microbubble equations always execute, including their initial zero step.
+     */
+    void set_skip_zero_auxiliary_transport(bool enabled);
     /**
      * @brief Return the active radiolysis options.
      */
@@ -552,6 +572,7 @@ private:
         field_type micro_slip, large_slip, micro_alpha, large_alpha;
         // Dissolved, microbubble, and large-bubble graphs can differ.
         std::array<FVM::TransportSystem<Pack>, 3> systems;
+        std::array<bool, 3> operator_ready{};
         std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 3> symbolic_plans;
     };
 
@@ -559,6 +580,7 @@ private:
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     RadiolyticGasOptions d_options;
     LinearSolverOptions d_transport_linear_options;
+    bool d_skip_zero_auxiliary_transport = false;
 
     field_type d_alpha_g;
     field_type d_alpha_l;
