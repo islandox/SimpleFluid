@@ -88,6 +88,42 @@ inline auto MeshHandle<Pack>::faces(local_ordinal_type cell_lid) const -> CellFa
         }};
 }
 
+template<TpetraTypePack Pack>
+template<class Visitor>
+inline void MeshHandle<Pack>::visit_cell_faces(
+    local_ordinal_type cell_lid, Visitor&& visitor) const
+{
+    const auto execution = acquire_execution_view();
+    const auto geometry = geometry_cell_lid(cell_lid);
+    visit([&](const auto& mesh)
+    {
+        const auto cell = mesh.cell_id(static_cast<size_t>(geometry));
+        const auto to_local_cell = [&](auto native_cell) -> local_ordinal_type
+        {
+            using mesh_type = std::remove_cvref_t<decltype(mesh)>;
+            if constexpr (std::is_same_v<mesh_type, STKAdapter>)
+            {
+                if (native_cell == invalid_id<local_ordinal_type>()) return invalid_local_id();
+            }
+            else if (native_cell == mesh_type::invalid_cell_id()) return invalid_local_id();
+            return geometry_to_local_cell(mesh.cell_local_id(native_cell));
+        };
+        for (const auto face : mesh.faces(cell))
+        {
+            const auto local = geometry_to_local_face(mesh.face_local_id(face));
+            if (local == invalid_local_id()) continue;
+            if constexpr (std::is_invocable_v<Visitor&, local_ordinal_type,
+                              decltype(face), decltype(cell), decltype(mesh), decltype(to_local_cell)>)
+                visitor(local, face, cell, mesh, to_local_cell);
+            else if constexpr (std::is_invocable_v<Visitor&, local_ordinal_type,
+                              decltype(face), decltype(cell), decltype(mesh)>)
+                visitor(local, face, cell, mesh);
+            else
+                visitor(local);
+        }
+    });
+}
+
 /// @}
 
 /// @name Per-face geometry queries

@@ -201,29 +201,12 @@ private:
     {
         const auto execution = acquire_mesh_execution(mesh);
         std::vector<CellGeometry> geometry(mesh.num_owned_cells());
+        std::vector<detail::GradientGeometrySample<mesh_type>> samples;
+        samples.reserve(6);
         for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
         {
             const auto cell_lid =
                 static_cast<local_ordinal_type>(owned);
-            if (include_boundary_samples)
-            {
-                const auto cell_faces = mesh.faces(cell_lid);
-                const auto has_boundary_sample =
-                    std::any_of(
-                        cell_faces.begin(),
-                        cell_faces.end(),
-                        [&](const auto face_lid)
-                        {
-                            return mesh.is_boundary_face(face_lid)
-                                && boundary_locations.at(
-                                       static_cast<size_t>(face_lid))
-                                       .active;
-                        });
-                if (!has_boundary_sample)
-                {
-                    continue;
-                }
-            }
             std::array<std::array<real_t, 3>, 3> normal{};
             auto add_direction = [&](const vec_type& direction)
             {
@@ -235,72 +218,44 @@ private:
                 normal[2][2] += direction.z * direction.z;
             };
 
-            for (const auto face_lid : mesh.faces(cell_lid))
+            samples.clear();
+            bool has_boundary_sample = false;
+            detail::visit_gradient_geometry_samples(mesh, cell_lid, [&](const auto& sample)
             {
-                if (mesh.is_interior_face(face_lid))
+                if (!sample.interior)
                 {
-                    add_direction(
-                        mesh.cell_center_vector(face_lid, cell_lid));
+                    if (!boundary_locations.at(sample.face_lid).active) return;
+                    has_boundary_sample = true;
                 }
-                else if (include_boundary_samples
-                         && mesh.is_boundary_face(face_lid))
-                {
-                    const auto location = boundary_locations.at(
-                        static_cast<size_t>(face_lid));
-                    if (location.active)
-                    {
-                        add_direction(
-                            mesh.face_centroid(face_lid)
-                            - mesh.cell_centroid(cell_lid));
-                    }
-                }
-            }
+                samples.push_back(sample);
+                add_direction(sample.direction);
+            }, include_boundary_samples);
+            if (include_boundary_samples && !has_boundary_sample) continue;
             normal[1][0] = normal[0][1];
             normal[2][0] = normal[0][2];
             normal[2][1] = normal[1][2];
 
             const auto inverse = inverse_columns(normal);
             auto& cell_geometry = geometry[owned];
-            cell_geometry.interior_samples.reserve(
-                mesh.faces(cell_lid).size());
+            cell_geometry.interior_samples.reserve(samples.size());
             if (include_boundary_samples)
             {
-                cell_geometry.boundary_samples.reserve(
-                    mesh.faces(cell_lid).size());
+                cell_geometry.boundary_samples.reserve(samples.size());
             }
 
-            for (const auto face_lid : mesh.faces(cell_lid))
+            for (const auto& sample : samples)
             {
-                if (mesh.is_interior_face(face_lid))
+                if (sample.interior)
                 {
-                    const auto direction =
-                        mesh.cell_center_vector(face_lid, cell_lid);
                     cell_geometry.interior_samples.push_back({
-                        mesh.opposite_or_periodic_neighbor_cell(
-                            face_lid, cell_lid),
-                        apply_inverse(inverse, direction)});
+                        sample.other_lid,
+                        apply_inverse(inverse, sample.direction)});
                     continue;
                 }
-                if (!include_boundary_samples
-                    || !mesh.is_boundary_face(face_lid))
-                {
-                    continue;
-                }
-                const auto location = boundary_locations.at(
-                    static_cast<size_t>(face_lid));
-                if (!location.active)
-                {
-                    continue;
-                }
-                const auto direction =
-                    mesh.face_centroid(face_lid)
-                    - mesh.cell_centroid(cell_lid);
                 cell_geometry.boundary_samples.push_back({
-                    location,
-                    apply_inverse(inverse, direction),
-                    static_cast<real_t>(
-                        detail::boundary_normal_distance(
-                            mesh, face_lid, cell_lid))});
+                    boundary_locations.at(sample.face_lid),
+                    apply_inverse(inverse, sample.direction),
+                    sample.normal_distance});
             }
         }
         return geometry;
