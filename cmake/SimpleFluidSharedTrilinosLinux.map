@@ -1,0 +1,27 @@
+SIMPLEFLUID_TRILINOS_RTTI_1.0 {
+    global:
+        /* Shared Trilinos exchanges polymorphic parameter values, operators,
+         * and factory objects with its callers. Preserve dependency RTTI
+         * identity while the main version map still hides vendor functions. */
+        _ZTIN7Teuchos*;
+        _ZTSN7Teuchos*;
+        _ZTIN6Tpetra*;
+        _ZTSN6Tpetra*;
+        _ZTIN6Xpetra*;
+        _ZTSN6Xpetra*;
+        _ZTIN5MueLu*;
+        _ZTSN5MueLu*;
+        _ZTIN7Ifpack2*;
+        _ZTSN7Ifpack2*;
+        _ZTIN5Belos*;
+        _ZTSN5Belos*;
+        _ZTIN5Thyra*;
+        _ZTSN5Thyra*;
+        _ZTIN3NOX*;
+        _ZTSN3NOX*;
+        /* ParameterEntry also compares the underlying string value type. */
+        _ZTINSt3__112basic_stringI*;
+        _ZTSNSt3__112basic_stringI*;
+        _ZTINSt7__cxx1112basic_stringI*;
+        _ZTSNSt7__cxx1112basic_stringI*;
+};

@@ -14,6 +14,16 @@ set(SIMPLEFLUID_EXTERNAL_LIBRARIES
     ${Trilinos_TPL_LIBRARIES}
     MPI::MPI_CXX
 )
+set(SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME ${Trilinos_BUILD_SHARED_LIBS})
+if(SIMPLEFLUID_WRAP_STATIC_TRILINOS AND NOT Trilinos_BUILD_SHARED_LIBS)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        message(FATAL_ERROR "SIMPLEFLUID_WRAP_STATIC_TRILINOS currently requires Linux")
+    endif()
+    include("${PROJECT_SOURCE_DIR}/cmake/StaticTrilinosBackend.cmake")
+    simplefluid_add_static_trilinos_backend(${SIMPLEFLUID_EXTERNAL_LIBRARIES})
+    set(SIMPLEFLUID_EXTERNAL_LIBRARIES SimpleFluid::TrilinosBackend)
+    set(SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME ON)
+endif()
 
 function(simplefluid_configure_library target_name)
     target_include_directories(${target_name} PUBLIC
@@ -32,7 +42,8 @@ function(simplefluid_enable_native_archive_fallback target_name)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
        AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
        AND SIMPLEFLUID_ENABLE_LTO
-       AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+       AND NOT SIMPLEFLUID_ENABLE_COVERAGE
+       AND NOT SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME)
         target_compile_options(${target_name} PRIVATE
             "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo>>:-ffat-lto-objects>")
     endif()
@@ -147,8 +158,8 @@ set_target_properties(SimpleFluidMesh PROPERTIES
     VISIBILITY_INLINES_HIDDEN ${SIMPLEFLUID_SHARED_VISIBILITY_INLINES_HIDDEN})
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 
-# Fields remain header-only. FVM compiles the deliberately supported template
-# pack so consumers do not repeatedly instantiate the large assembly kernels.
+# Fields remain header-only. FVM exports the deliberately supported template
+# pack from a shared library so consumers reuse the compiled assembly kernels.
 add_library(SimpleFluidFields INTERFACE)
 add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
 target_include_directories(SimpleFluidFields INTERFACE
@@ -156,13 +167,12 @@ target_include_directories(SimpleFluidFields INTERFACE
 )
 target_link_libraries(SimpleFluidFields INTERFACE SimpleFluidMesh)
 
-add_library(SimpleFluidFVM STATIC
+add_library(SimpleFluidFVM SHARED
     FVM/NonOrthogonalCorrection.cc
     FVM/TransportSystem.cc
 )
 add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
 simplefluid_configure_library(SimpleFluidFVM)
-simplefluid_enable_native_archive_fallback(SimpleFluidFVM)
 set_target_properties(SimpleFluidFVM PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET ${SIMPLEFLUID_SHARED_CXX_VISIBILITY_PRESET}
@@ -199,7 +209,8 @@ set(SIMPLEFLUID_SOLVER_SOURCES
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
    AND SIMPLEFLUID_ENABLE_LTO
-   AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+   AND NOT SIMPLEFLUID_ENABLE_COVERAGE
+   AND NOT SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME)
     add_library(SimpleFluidClangLtoCompatibility OBJECT
         ClangLtoTrilinosCompatibility.cc)
     simplefluid_configure_library(SimpleFluidClangLtoCompatibility)
@@ -214,11 +225,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
         ClangLtoTrilinosCompatibility.cc)
 endif()
 
-# Static Trilinos installations put vendor implementations, RTTI, and mutable
-# process state into every shared object that consumes them.  Keep equations
-# and solvers in one physical DSO so the ELF export boundary can localize those
-# archive symbols without duplicating them or splitting cross-layer type
-# identity.  The logical equation and solver link targets remain separate.
+# Keep equations and solvers in one physical DSO to preserve cross-layer type
+# identity. The FVM DSO below it now supplies the canonical Kokkos runtime
+# bridge on ELF when Trilinos is static; the version map localizes the other
+# embedded vendor implementations. The logical equation and solver targets
+# remain separate.
 add_library(SimpleFluidSolvers SHARED
     ${SIMPLEFLUID_EQUATION_SOURCES}
     ${SIMPLEFLUID_SOLVER_SOURCES}
@@ -236,6 +247,9 @@ if(SIMPLEFLUID_ENABLE_NOX)
     target_compile_definitions(SimpleFluidSolvers PUBLIC SIMPLEFLUID_ENABLE_NOX=1)
 endif()
 if(TARGET SimpleFluidClangLtoCompatibility)
+    add_dependencies(SimpleFluidFVM SimpleFluidClangLtoCompatibility)
+    target_link_options(SimpleFluidFVM PRIVATE
+        "$<$<CONFIG:Release,RelWithDebInfo>:$<TARGET_OBJECTS:SimpleFluidClangLtoCompatibility>>")
     add_dependencies(
         SimpleFluidSolvers SimpleFluidClangLtoCompatibility)
     target_link_options(SimpleFluidSolvers PRIVATE
@@ -255,11 +269,24 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(SIMPLEFLUID_ELF_VERSION_SCRIPT
         "${PROJECT_SOURCE_DIR}/cmake/SimpleFluidLinux.map")
-    target_link_options(SimpleFluidSolvers PRIVATE
-        "LINKER:--version-script=${SIMPLEFLUID_ELF_VERSION_SCRIPT}"
-        "LINKER:-Bsymbolic-functions")
-    set_property(TARGET SimpleFluidSolvers APPEND PROPERTY
-        LINK_DEPENDS "${SIMPLEFLUID_ELF_VERSION_SCRIPT}")
+    foreach(shared_target IN ITEMS SimpleFluidFVM SimpleFluidSolvers)
+        target_link_options(${shared_target} PRIVATE
+            "LINKER:--version-script=${SIMPLEFLUID_ELF_VERSION_SCRIPT}"
+            "LINKER:-Bsymbolic-functions")
+        if(SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME)
+            # Shared dependencies can supply entries named by the static
+            # runtime bridge, so those entries need not be defined here.
+            target_link_options(${shared_target} PRIVATE "LINKER:--undefined-version")
+            set(shared_trilinos_version_script
+                "${PROJECT_SOURCE_DIR}/cmake/SimpleFluidSharedTrilinosLinux.map")
+            target_link_options(${shared_target} PRIVATE
+                "LINKER:--version-script=${shared_trilinos_version_script}")
+            set_property(TARGET ${shared_target} APPEND PROPERTY
+                LINK_DEPENDS "${shared_trilinos_version_script}")
+        endif()
+        set_property(TARGET ${shared_target} APPEND PROPERTY
+            LINK_DEPENDS "${SIMPLEFLUID_ELF_VERSION_SCRIPT}")
+    endforeach()
 endif()
 
 # Preserve the former linker names for source-level consumers.  New binaries
@@ -292,18 +319,62 @@ if(BUILD_TESTING
     find_program(SIMPLEFLUID_CXXFILT
         NAMES c++filt llvm-cxxfilt
         REQUIRED)
+    set(SIMPLEFLUID_RUNTIME_TARGET SimpleFluidFVM)
+    if(TARGET SimpleFluidTrilinosBackend)
+        set(SIMPLEFLUID_RUNTIME_TARGET SimpleFluidTrilinosBackend)
+    elseif(Trilinos_BUILD_SHARED_LIBS)
+        set(SIMPLEFLUID_RUNTIME_TARGET Kokkos::kokkoscore)
+    endif()
     add_test(NAME simplefluid_elf_export_boundary
         COMMAND "${CMAKE_COMMAND}"
             "-DSIMPLEFLUID_LIBRARY=$<TARGET_FILE:SimpleFluidSolvers>"
+            "-DSIMPLEFLUID_RUNTIME_LIBRARY=$<TARGET_FILE:${SIMPLEFLUID_RUNTIME_TARGET}>"
+            "-DSIMPLEFLUID_RUNTIME_SONAME=$<TARGET_SONAME_FILE_NAME:${SIMPLEFLUID_RUNTIME_TARGET}>"
+            "-DSIMPLEFLUID_TRILINOS_SHARED=$<BOOL:${Trilinos_BUILD_SHARED_LIBS}>"
+            "-DSIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME=$<BOOL:${SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME}>"
             "-DSIMPLEFLUID_NM=${CMAKE_NM}"
             "-DSIMPLEFLUID_READELF=${CMAKE_READELF}"
             "-DSIMPLEFLUID_CXXFILT=${SIMPLEFLUID_CXXFILT}"
             "-DSIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING=${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}"
             "-DSIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING=${SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING}"
-            "-DSIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES=$<BOOL:${SIMPLEFLUID_CXX_USES_LIBCXX}>"
+            "-DSIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES=$<AND:$<BOOL:${SIMPLEFLUID_CXX_USES_LIBCXX}>,$<NOT:$<BOOL:${SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME}>>>"
+            "-DSIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES=$<AND:$<BOOL:${SIMPLEFLUID_CXX_USES_LIBCXX}>,$<BOOL:${SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME}>>"
             -P "${PROJECT_SOURCE_DIR}/cmake/CheckSimpleFluidElfExports.cmake")
     set_tests_properties(simplefluid_elf_export_boundary PROPERTIES
         LABELS abi)
+    # LLVM's demangler understands Clang's constrained-template encodings.
+    find_program(SIMPLEFLUID_FVM_CXXFILT
+        NAMES llvm-cxxfilt c++filt
+        REQUIRED)
+    add_test(NAME simplefluid_fvm_elf_export_boundary
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSIMPLEFLUID_LIBRARY=$<TARGET_FILE:SimpleFluidFVM>"
+            "-DSIMPLEFLUID_NM=${CMAKE_NM}"
+            "-DSIMPLEFLUID_CXXFILT=${SIMPLEFLUID_FVM_CXXFILT}"
+            "-DSIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES=$<AND:$<BOOL:${SIMPLEFLUID_CXX_USES_LIBCXX}>,$<BOOL:${SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME}>>"
+            "-DSIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING=${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}"
+            "-DSIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING=${SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING}"
+            -P "${PROJECT_SOURCE_DIR}/cmake/CheckSimpleFluidFvmExports.cmake")
+    set_tests_properties(simplefluid_fvm_elf_export_boundary PROPERTIES
+        LABELS abi)
+    if(TARGET SimpleFluidTrilinosBackend)
+        set(backend_link_rules "")
+        if(CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
+            set(backend_link_rules "${CMAKE_BINARY_DIR}/CMakeFiles/impl-$<CONFIG>.ninja")
+        elseif(CMAKE_GENERATOR STREQUAL "Ninja")
+            set(backend_link_rules "${CMAKE_BINARY_DIR}/build.ninja")
+        endif()
+        get_filename_component(backend_trilinos_prefix "${Trilinos_DIR}/../../.." ABSOLUTE)
+        add_test(NAME simplefluid_trilinos_backend_boundary
+            COMMAND "${CMAKE_COMMAND}"
+                "-DSIMPLEFLUID_BACKEND_LIBRARY=$<TARGET_FILE:SimpleFluidTrilinosBackend>"
+                "-DSIMPLEFLUID_NM=${CMAKE_NM}"
+                "-DSIMPLEFLUID_READELF=${CMAKE_READELF}"
+                "-DSIMPLEFLUID_LINK_RULES=${backend_link_rules}"
+                "-DSIMPLEFLUID_TRILINOS_PREFIX=${backend_trilinos_prefix}"
+                -P "${PROJECT_SOURCE_DIR}/cmake/CheckSimpleFluidTrilinosBackend.cmake")
+        set_tests_properties(simplefluid_trilinos_backend_boundary PROPERTIES LABELS abi)
+    endif()
 endif()
 
 # GCC's LTO plugin can select, then discard, weak libstdc++ COMDAT definitions
@@ -313,7 +384,8 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
    AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
    AND SIMPLEFLUID_ENABLE_LTO
-   AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+   AND NOT SIMPLEFLUID_ENABLE_COVERAGE
+   AND NOT SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME)
     add_library(SimpleFluidGccLtoCompatibility OBJECT
         GccLtoStdlibCompatibility.cc)
     set_target_properties(SimpleFluidGccLtoCompatibility PROPERTIES
@@ -383,7 +455,8 @@ if(BUILD_TESTING)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
            AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
            AND SIMPLEFLUID_ENABLE_LTO
-           AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
+           AND NOT SIMPLEFLUID_ENABLE_COVERAGE
+           AND NOT SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME)
             set_target_properties(${target_name} PROPERTIES
                 INTERPROCEDURAL_OPTIMIZATION FALSE
                 INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE

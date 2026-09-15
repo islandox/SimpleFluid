@@ -1,21 +1,6 @@
 set(SIMPLEFLUID_PROFILE_GUIDED_OPTIMIZATION_DIR
     "${CMAKE_CURRENT_LIST_DIR}")
 
-set(SIMPLEFLUID_PGO_PHASE "OFF" CACHE STRING
-    "Profile-guided optimization phase: OFF, GENERATE, or USE")
-set_property(CACHE SIMPLEFLUID_PGO_PHASE
-             PROPERTY STRINGS OFF GENERATE USE)
-set(SIMPLEFLUID_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH
-    "Compiler-specific profile data directory")
-set(SIMPLEFLUID_PGO_CONFIG "RelWithDebInfo" CACHE STRING
-    "Single optimized configuration trained by PGO")
-set_property(CACHE SIMPLEFLUID_PGO_CONFIG
-             PROPERTY STRINGS Release RelWithDebInfo)
-set(SIMPLEFLUID_PGO_WORKLOAD "natural_convection_shiri" CACHE STRING
-    "Production workload represented by the profile data")
-set_property(CACHE SIMPLEFLUID_PGO_WORKLOAD
-             PROPERTY STRINGS natural_convection_shiri)
-
 macro(simplefluid_configure_profile_guided_optimization)
     string(TOUPPER "${SIMPLEFLUID_PGO_PHASE}"
            SIMPLEFLUID_PGO_PHASE_NORMALIZED)

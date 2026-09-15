@@ -5,6 +5,11 @@
 #pragma once
 
 #if defined(_WIN32) || defined(__CYGWIN__)
+#if defined(SimpleFluidFVM_EXPORTS)
+#define SIMPLEFLUID_FVM_EXPORT __declspec(dllexport)
+#else
+#define SIMPLEFLUID_FVM_EXPORT __declspec(dllimport)
+#endif
 #if defined(SimpleFluidEquations_EXPORTS)
 #define SIMPLEFLUID_EQUATIONS_EXPORT __declspec(dllexport)
 #else
@@ -20,13 +25,16 @@
 #define SIMPLEFLUID_LOCAL
 #define SIMPLEFLUID_PUBLIC_TYPE
 #elif defined(__GNUC__) || defined(__clang__)
+#define SIMPLEFLUID_FVM_EXPORT [[gnu::visibility("default")]]
 #define SIMPLEFLUID_EQUATIONS_EXPORT [[gnu::visibility("default")]]
 #define SIMPLEFLUID_SOLVERS_EXPORT [[gnu::visibility("default")]]
+#define SIMPLEFLUID_FVM_LOCAL [[gnu::visibility("hidden")]]
 #define SIMPLEFLUID_EQUATIONS_LOCAL [[gnu::visibility("hidden")]]
 #define SIMPLEFLUID_SOLVERS_LOCAL [[gnu::visibility("hidden")]]
 #define SIMPLEFLUID_LOCAL [[gnu::visibility("hidden")]]
 #define SIMPLEFLUID_PUBLIC_TYPE [[gnu::visibility("default")]]
 #else
+#define SIMPLEFLUID_FVM_EXPORT
 #define SIMPLEFLUID_EQUATIONS_EXPORT
 #define SIMPLEFLUID_SOLVERS_EXPORT
 #define SIMPLEFLUID_EQUATIONS_LOCAL

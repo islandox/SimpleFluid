@@ -16,6 +16,7 @@
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/details/FieldStoredNonOrthogonalDiffusion.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -62,7 +63,7 @@ void evaluate_vector_interior_gradients(const VectorCellField<Pack>& field,
  * @throws std::invalid_argument if @p rhs is not on the owned-cell map.
  */
 template<TpetraTypePack Pack>
-void add_explicit_non_orthogonal_correction(const CellField<Pack>& correction_field,
+SIMPLEFLUID_FVM_EXPORT void add_explicit_non_orthogonal_correction(const CellField<Pack>& correction_field,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     typename Pack::vector_type& rhs, typename Pack::scalar_type correction_weight = 1.0);
 
@@ -80,7 +81,7 @@ void add_explicit_non_orthogonal_correction(const CellField<Pack>& correction_fi
  *         does not contain three component vectors.
  */
 template<TpetraTypePack Pack>
-void add_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correction_field,
+SIMPLEFLUID_FVM_EXPORT void add_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correction_field,
     typename Pack::scalar_type diffusivity, typename Pack::multi_vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
@@ -99,7 +100,7 @@ void add_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correct
  *         an incompatible map, or a cell coefficient is negative.
  */
 template<TpetraTypePack Pack>
-void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& correction_field,
+SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& correction_field,
     const CellField<Pack>& coefficient_field, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarBoundaryValueProvider<Pack> boundary_value, typename Pack::vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0, BoundaryCoefficientProvider<Pack> boundary_coefficient = {},
@@ -108,7 +109,7 @@ void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& corr
 
 /** @brief Backward-compatible scalar overload omitting boundary samples. */
 template<TpetraTypePack Pack>
-void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& correction_field,
+SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& correction_field,
     const CellField<Pack>& coefficient_field, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     typename Pack::vector_type& rhs, typename Pack::scalar_type correction_weight = 1.0,
     BoundaryCoefficientProvider<Pack> boundary_coefficient = {});
@@ -127,9 +128,10 @@ void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& corr
  *         incompatible, or a cell coefficient is negative.
  */
 template<TpetraTypePack Pack>
-void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correction_field,
-    const CellField<Pack>& coefficient_field, VectorBoundaryValueProvider<Pack> boundary_value,
-    typename Pack::multi_vector_type& rhs, typename Pack::scalar_type correction_weight = 1.0,
+SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(
+    const VectorCellField<Pack>& correction_field, const CellField<Pack>& coefficient_field,
+    VectorBoundaryValueProvider<Pack> boundary_value, typename Pack::multi_vector_type& rhs,
+    typename Pack::scalar_type correction_weight = 1.0,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     BoundaryCoefficientProvider<Pack> boundary_coefficient = {},
     const std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils = nullptr,
@@ -138,9 +140,9 @@ void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>
 
 /** @brief Backward-compatible vector overload omitting boundary samples. */
 template<TpetraTypePack Pack>
-void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correction_field,
-    const CellField<Pack>& coefficient_field, typename Pack::multi_vector_type& rhs,
-    typename Pack::scalar_type correction_weight = 1.0,
+SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(
+    const VectorCellField<Pack>& correction_field, const CellField<Pack>& coefficient_field,
+    typename Pack::multi_vector_type& rhs, typename Pack::scalar_type correction_weight = 1.0,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     BoundaryCoefficientProvider<Pack> boundary_coefficient = {});
 
@@ -169,7 +171,7 @@ void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>
  * @param cached_boundary_locations Optional mesh-bound boundary lookup.
  */
 template<TpetraTypePack Pack>
-void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pack>& old_velocity,
+SIMPLEFLUID_FVM_EXPORT void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pack>& old_velocity,
     const CellField<Pack>& dynamic_viscosity, typename Pack::scalar_type reference_density,
     VectorBoundaryValueProvider<Pack> boundary_value, typename Pack::multi_vector_type& rhs,
     BoundaryFaceSelector boundary_stress = detail::AlwaysDiffuseBoundary{},
@@ -194,7 +196,7 @@ void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pac
  *         target mesh.
  */
 template<TpetraTypePack Pack>
-DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, const CellField<Pack>& correction_field);
 
@@ -221,7 +223,7 @@ DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const Mesh<Pack>&
  *         mesh, or a distributed partition face needs a missing field.
  */
 template<TpetraTypePack Pack>
-DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type non_orthogonal_implicit_weight = 1.0,
     const CellField<Pack>* partition_correction_field = nullptr);
@@ -233,7 +235,7 @@ DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const Mesh<Pack>&
  * remote half of partition-face gradients.
  */
 template<TpetraTypePack Pack>
-DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, const CellField<Pack>* partition_correction_field = nullptr);
 
@@ -251,9 +253,10 @@ DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const Mesh<
  *         @p treatment is invalid.
  */
 template<TpetraTypePack Pack>
-DiffusionSystem<Pack> non_orthogonal_diffusion_system(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
-    NonOrthogonalTreatment treatment, const CellField<Pack>* correction_field = nullptr);
+SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
+    const CellField<Pack>* correction_field = nullptr);
 
 /**
  * @brief Apply the full scalar non-orthogonal diffusion residual.
@@ -266,7 +269,7 @@ DiffusionSystem<Pack> non_orthogonal_diffusion_system(const Mesh<Pack>& mesh, ty
  * @throws std::invalid_argument if @p diffusivity is negative.
  */
 template<TpetraTypePack Pack>
-Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField<Pack>& field,
+SIMPLEFLUID_FVM_EXPORT Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField<Pack>& field,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition);
 
 /**
@@ -292,9 +295,10 @@ Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField
  *         or @p nNonOrthogonalCorrectors is negative.
  */
 template<TpetraTypePack Pack>
-bool solve_explicit_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
-    CellField<Pack>& solution, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {});
+SIMPLEFLUID_FVM_EXPORT bool solve_explicit_non_orthogonal_diffusion(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarCellValueProvider<Pack> right_hand_source, CellField<Pack>& solution, int nNonOrthogonalCorrectors,
+    const LinearSolverOptions& linear_options = {});
 
 /**
  * @brief Solve scalar diffusion using the selected non-orthogonal treatment.
@@ -317,17 +321,18 @@ bool solve_explicit_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pa
  *         or ranks disagree on solver controls, treatment, or diffusivity.
  */
 template<TpetraTypePack Pack>
-bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
-    CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
-    const LinearSolverOptions& linear_options = {});
+SIMPLEFLUID_FVM_EXPORT bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarCellValueProvider<Pack> right_hand_source, CellField<Pack>& solution, NonOrthogonalTreatment treatment,
+    int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {});
 
 /** @brief Steady solve with explicit implicit-correction convergence controls. */
 template<TpetraTypePack Pack>
-bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
-    CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
-    const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options);
+SIMPLEFLUID_FVM_EXPORT bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarCellValueProvider<Pack> right_hand_source, CellField<Pack>& solution, NonOrthogonalTreatment treatment,
+    int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options,
+    const NonOrthogonalConvergenceOptions& correction_options);
 
 /**
  * @brief Solve a scalar diffusion equation with zero source and explicit
@@ -344,25 +349,26 @@ bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scala
  * @return true if all solves converged, false otherwise.
  */
 template<TpetraTypePack Pack>
-bool solve_explicit_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution, int nNonOrthogonalCorrectors,
-    const LinearSolverOptions& linear_options = {});
+SIMPLEFLUID_FVM_EXPORT bool solve_explicit_non_orthogonal_diffusion(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    CellField<Pack>& solution, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {});
 
 /**
  * @brief Solve a zero-source scalar diffusion equation using the selected
  *        non-orthogonal treatment.
  */
 template<TpetraTypePack Pack>
-bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
-    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {});
+SIMPLEFLUID_FVM_EXPORT bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
+    const LinearSolverOptions& linear_options = {});
 
 /** @brief Zero-source steady solve with explicit implicit-correction convergence controls. */
 template<TpetraTypePack Pack>
-bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, CellField<Pack>& solution,
-    NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options,
-    const NonOrthogonalConvergenceOptions& correction_options);
+SIMPLEFLUID_FVM_EXPORT bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh,
+    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    CellField<Pack>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
+    const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options);
 
 /**
  * @brief Assemble steady non-orthogonal diffusion on a mapped mesh.
@@ -395,7 +401,8 @@ bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_
     const LinearSolverOptions& linear_options = {}, const NonOrthogonalConvergenceOptions& correction_options = {})
 {
     return detail::solve_stored_non_orthogonal_diffusion<Pack>(mesh, diffusivity, std::move(boundary_condition),
-        std::move(right_hand_source), solution, treatment, nNonOrthogonalCorrectors, linear_options, correction_options);
+        std::move(right_hand_source), solution, treatment, nNonOrthogonalCorrectors, linear_options,
+        correction_options);
 }
 
 /** @brief Solve zero-source mapped steady non-orthogonal diffusion. */

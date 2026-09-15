@@ -1,0 +1,4 @@
+SIMPLEFLUID_TRILINOS_BACKEND_1.0 {
+    global:
+        simplefluid_trilinos_backend_abi_version;
+};

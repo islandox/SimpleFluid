@@ -9,23 +9,13 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/SimpleFluidDefaultOptions.cmake")
+
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag(
     "-fno-semantic-interposition"
     SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
 
-option(SIMPLEFLUID_ENABLE_COVERAGE
-       "Build with compiler coverage instrumentation" OFF)
-option(SIMPLEFLUID_BUILD_BENCHMARKS
-       "Build performance and solver-regression benchmarks" ON)
-option(SIMPLEFLUID_BUILD_DOCS
-       "Enable the Doxygen API-documentation target" OFF)
-option(SIMPLEFLUID_ENABLE_IF97
-       "Build the optional IAPWS-IF97 water material library" OFF)
-option(SIMPLEFLUID_ENABLE_NOX
-       "Build the optional NOX/Thyra coupled nonlinear solver" OFF)
-option(SIMPLEFLUID_ENABLE_LTO
-       "Enable link-time optimization in Release and RelWithDebInfo" ON)
 include(CTest)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/profileGuidedOptimization.cmake")
 
@@ -46,9 +36,8 @@ if(SIMPLEFLUID_ENABLE_LTO AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
 
-    # GNU ld cannot safely resolve every hidden archive definition when
-    # Clang ThinLTO is combined with the GCC-built static Trilinos libraries.
-    # LLD is required together with the non-LTO compatibility object below.
+    # Use LLD for Clang ThinLTO. Legacy direct-static Trilinos linking also
+    # needs the non-LTO compatibility object in src/CMakeLists.txt.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
        AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         check_cxx_compiler_flag(
@@ -83,8 +72,6 @@ set_property(GLOBAL PROPERTY JOB_POOLS
 set(CMAKE_JOB_POOL_COMPILE compile_pool)
 set(CMAKE_JOB_POOL_LINK link_pool)
 
-set(SIMPLEFLUID_MAX_TEST_PROCS "0" CACHE STRING
-    "Maximum MPI processes for tests (0 = unlimited). Set to 2 for free-tier runners.")
 if(NOT SIMPLEFLUID_MAX_TEST_PROCS MATCHES "^(0|[1-9][0-9]*)$")
     message(FATAL_ERROR
         "SIMPLEFLUID_MAX_TEST_PROCS must be a non-negative integer; got "
@@ -180,9 +167,6 @@ if(BUILD_TESTING)
     find_package(GTest REQUIRED)
     include(GoogleTest)
     include("${CMAKE_CURRENT_LIST_DIR}/cmake/SimpleFluidTesting.cmake")
-
-    set(SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT "30" CACHE STRING
-        "Maximum seconds allowed for GoogleTest test discovery")
 
     function(simplefluid_discover_tests target)
         gtest_discover_tests(
