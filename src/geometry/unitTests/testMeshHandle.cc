@@ -562,8 +562,13 @@ TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
                 EXPECT_EQ(to_local_cell(native.neighbor_cell(native_face)), mesh.neighbor_cell(face));
                 EXPECT_DOUBLE_EQ(native.face_area(native_face), mesh.face_area(face));
                 EXPECT_DOUBLE_EQ(native.cell_volume(native_cell), mesh.cell_volume(cell));
-                const auto center = native.cell_centroid(native_cell) - mesh.cell_centroid(cell);
-                EXPECT_DOUBLE_EQ(center.norm(), 0.0);
+                const auto native_center = native.cell_centroid(native_cell);
+                const auto handle_center = mesh.cell_centroid(cell);
+                // Apply ULP tolerance at each coordinate's magnitude, including
+                // near-zero cylindrical components affected by roundoff.
+                EXPECT_DOUBLE_EQ(native_center.x, handle_center.x);
+                EXPECT_DOUBLE_EQ(native_center.y, handle_center.y);
+                EXPECT_DOUBLE_EQ(native_center.z, handle_center.z);
             });
             EXPECT_TRUE(std::ranges::equal(visited, expected));
         }

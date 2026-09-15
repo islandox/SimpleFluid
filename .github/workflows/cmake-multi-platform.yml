@@ -68,11 +68,13 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           clang \
+          llvm \
           lld \
           flang
 
         clang --version
         clang++ --version
+        llvm-cxxfilt --version
 
         if command -v flang-new >/dev/null 2>&1; then
           flang-new --version
