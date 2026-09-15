@@ -130,12 +130,18 @@ set(simplefluid_required_tpetra_rtti_patterns
     "^_ZTSN6Tpetra6VectorIdix")
 set(simplefluid_missing_tpetra_rtti_patterns
     ${simplefluid_required_tpetra_rtti_patterns})
+set(simplefluid_kokkos_anchor_symbol_pattern
+    "^(_ZN6Kokkos10initializeERKNS_22InitializationSettingsE|_ZN6Kokkos8finalizeEv|_ZN6Kokkos14is_initializedEv|_ZN6Kokkos4Impl16ExecSpaceManager12get_instanceEv)$")
 set(simplefluid_symbols_to_demangle)
+set(simplefluid_shared_trilinos_rtti_symbols)
 set(simplefluid_unexpected_symbols)
 foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
     string(REGEX REPLACE "@.*$" ""
            simplefluid_unversioned_symbol "${simplefluid_symbol}")
-    if(simplefluid_symbol MATCHES
+    if(simplefluid_symbol MATCHES "@@SIMPLEFLUID_TRILINOS_RTTI_1[.]0$"
+       AND NOT simplefluid_unversioned_symbol STREQUAL "SIMPLEFLUID_TRILINOS_RTTI_1.0")
+        list(APPEND simplefluid_shared_trilinos_rtti_symbols "${simplefluid_unversioned_symbol}")
+    elseif(simplefluid_symbol MATCHES
        "^(_ZN11SimpleFluid|_ZNK11SimpleFluid|_ZNV11SimpleFluid|_ZNKV11SimpleFluid|_ZTIN11SimpleFluid|_ZTSN11SimpleFluid|_ZTVN11SimpleFluid|_ZTTN11SimpleFluid)")
         list(APPEND simplefluid_symbols_to_demangle
              "${simplefluid_unversioned_symbol}")
@@ -150,7 +156,7 @@ foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
     elseif(simplefluid_symbol MATCHES
            "^(_ZN6Kokkos|_ZNK6Kokkos|_ZNV6Kokkos|_ZNKV6Kokkos|_ZTIN6Kokkos|_ZTSN6Kokkos|_ZTVN6Kokkos|_ZTTN6Kokkos|Kokkos_|kokkosp_)")
         if(simplefluid_unversioned_symbol MATCHES
-           "^(_ZN6Kokkos10initializeERKNS_22InitializationSettingsE|_ZN6Kokkos8finalizeEv|_ZN6Kokkos14is_initializedEv|_ZN6Kokkos4Impl16ExecSpaceManager12get_instanceEv)$")
+           "${simplefluid_kokkos_anchor_symbol_pattern}")
             list(APPEND simplefluid_symbols_to_demangle
                  "${simplefluid_unversioned_symbol}")
         endif()
@@ -188,10 +194,14 @@ foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
                  "${simplefluid_symbol} (wrong Tpetra RTTI version)")
         endif()
     elseif(NOT simplefluid_unversioned_symbol MATCHES
-           "^SIMPLEFLUID_(1[.]0|KOKKOS_RUNTIME_1[.]0|TEUCHOS_COMM_RUNTIME_1[.]0|TPETRA_RTTI_1[.]0)$")
+           "^SIMPLEFLUID_(1[.]0|KOKKOS_RUNTIME_1[.]0|TEUCHOS_COMM_RUNTIME_1[.]0|TRILINOS_RTTI_1[.]0|TPETRA_RTTI_1[.]0)$")
         list(APPEND simplefluid_unexpected_symbols "${simplefluid_symbol}")
     endif()
 endforeach()
+
+include("${CMAKE_CURRENT_LIST_DIR}/CheckSimpleFluidSharedTrilinosRtti.cmake")
+simplefluid_check_shared_trilinos_rtti("${simplefluid_shared_trilinos_rtti_symbols}"
+    "${SIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES}")
 
 execute_process(
     COMMAND "${SIMPLEFLUID_CXXFILT}" ${simplefluid_symbols_to_demangle}
@@ -506,20 +516,86 @@ foreach(simplefluid_required_exact_api_index
     endif()
 endforeach()
 
+# Verify the runtime provider: shared Kokkos, or FVM's versioned bridge when
+# Trilinos is static. The solver's own API and export checks remain separate.
+set(simplefluid_runtime_demangled_symbols "${simplefluid_demangled_symbols}")
+set(simplefluid_runtime_has_kokkos_bridge ${simplefluid_kokkos_bridge_symbol_count})
+if(DEFINED SIMPLEFLUID_RUNTIME_LIBRARY)
+    if(NOT EXISTS "${SIMPLEFLUID_RUNTIME_LIBRARY}")
+        message(FATAL_ERROR "SIMPLEFLUID_RUNTIME_LIBRARY must exist")
+    endif()
+    execute_process(
+        COMMAND "${SIMPLEFLUID_NM}" -D --defined-only -j
+                "${SIMPLEFLUID_RUNTIME_LIBRARY}"
+        RESULT_VARIABLE runtime_nm_result
+        OUTPUT_VARIABLE simplefluid_runtime_symbols)
+    execute_process(
+        COMMAND "${SIMPLEFLUID_READELF}" --dynamic "${SIMPLEFLUID_LIBRARY}"
+        RESULT_VARIABLE runtime_readelf_result
+        OUTPUT_VARIABLE runtime_dependencies)
+    get_filename_component(runtime_name "${SIMPLEFLUID_RUNTIME_LIBRARY}" NAME)
+    if(DEFINED SIMPLEFLUID_RUNTIME_SONAME)
+        set(runtime_name "${SIMPLEFLUID_RUNTIME_SONAME}")
+    endif()
+    string(FIND "${runtime_dependencies}" "[${runtime_name}]" runtime_dependency)
+    if(NOT runtime_nm_result EQUAL 0 OR NOT runtime_readelf_result EQUAL 0
+       OR runtime_dependency EQUAL -1)
+        message(FATAL_ERROR "Cannot verify the solver's runtime dependency: ${runtime_name}")
+    endif()
+    set(simplefluid_runtime_demangled_symbols)
+    set(simplefluid_runtime_symbols_to_demangle)
+    set(simplefluid_runtime_has_kokkos_bridge FALSE)
+    if(SIMPLEFLUID_TRILINOS_SHARED OR SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME
+       OR simplefluid_runtime_symbols MATCHES "@@SIMPLEFLUID_KOKKOS_RUNTIME_1[.]0")
+        set(simplefluid_runtime_has_kokkos_bridge TRUE)
+    endif()
+    string(REPLACE "\r\n" "\n" simplefluid_runtime_symbols "${simplefluid_runtime_symbols}")
+    string(REPLACE "\n" ";" simplefluid_runtime_symbols "${simplefluid_runtime_symbols}")
+    # The bundled backend exports the complete selected dependency closure.
+    # Keep its potentially large symbol table out of the per-symbol CMake loop.
+    string(REGEX REPLACE "\\$$" "" runtime_anchor_pattern "${simplefluid_kokkos_anchor_symbol_pattern}")
+    list(FILTER simplefluid_runtime_symbols INCLUDE REGEX "${runtime_anchor_pattern}(@.*)?$")
+    foreach(simplefluid_runtime_symbol IN LISTS simplefluid_runtime_symbols)
+        if(SIMPLEFLUID_TRILINOS_SHARED OR SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME)
+            string(REGEX REPLACE "@.*$" "" simplefluid_unversioned_symbol "${simplefluid_runtime_symbol}")
+            if(simplefluid_unversioned_symbol MATCHES "${simplefluid_kokkos_anchor_symbol_pattern}")
+                list(APPEND simplefluid_runtime_symbols_to_demangle "${simplefluid_unversioned_symbol}")
+            endif()
+        elseif(simplefluid_runtime_symbol MATCHES "^(.+)@@SIMPLEFLUID_KOKKOS_RUNTIME_1[.]0$")
+            set(simplefluid_unversioned_symbol "${CMAKE_MATCH_1}")
+            set(simplefluid_runtime_has_kokkos_bridge TRUE)
+            if(simplefluid_unversioned_symbol MATCHES "${simplefluid_kokkos_anchor_symbol_pattern}")
+                list(APPEND simplefluid_runtime_symbols_to_demangle "${simplefluid_unversioned_symbol}")
+            endif()
+        endif()
+    endforeach()
+    # Reuse the solver's anchor filter rather than demangling thousands of
+    # unrelated Kokkos template exports from the runtime provider.
+    if(simplefluid_runtime_symbols_to_demangle)
+        execute_process(
+            COMMAND "${SIMPLEFLUID_CXXFILT}" ${simplefluid_runtime_symbols_to_demangle}
+            RESULT_VARIABLE runtime_cxxfilt_result
+            OUTPUT_VARIABLE simplefluid_runtime_demangled_symbols
+            ERROR_VARIABLE runtime_cxxfilt_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT runtime_cxxfilt_result EQUAL 0)
+            message(FATAL_ERROR "Cannot demangle Kokkos runtime exports: ${runtime_cxxfilt_error}")
+        endif()
+        string(REPLACE "\n" ";" simplefluid_runtime_demangled_symbols
+               "${simplefluid_runtime_demangled_symbols}")
+    endif()
+endif()
 set(simplefluid_required_kokkos_patterns
     "^Kokkos::initialize[(]Kokkos::InitializationSettings const&[)]$"
     "^Kokkos::finalize[(][)]$"
     "^Kokkos::is_initialized[(][)]$"
     "^Kokkos::Impl::ExecSpaceManager::get_instance[(][)]$")
 set(simplefluid_missing_kokkos_patterns)
-if(simplefluid_kokkos_bridge_symbol_count GREATER 0)
-    foreach(simplefluid_required_kokkos_pattern
-            IN LISTS simplefluid_required_kokkos_patterns)
+if(simplefluid_runtime_has_kokkos_bridge)
+    foreach(simplefluid_required_kokkos_pattern IN LISTS simplefluid_required_kokkos_patterns)
         set(simplefluid_found_required_kokkos FALSE)
-        foreach(simplefluid_demangled_symbol
-                IN LISTS simplefluid_demangled_symbols)
-            if(simplefluid_demangled_symbol MATCHES
-               "${simplefluid_required_kokkos_pattern}")
+        foreach(simplefluid_demangled_symbol IN LISTS simplefluid_runtime_demangled_symbols)
+            if(simplefluid_demangled_symbol MATCHES "${simplefluid_required_kokkos_pattern}")
                 set(simplefluid_found_required_kokkos TRUE)
                 break()
             endif()
@@ -543,7 +619,8 @@ if(simplefluid_hidden_undefined_symbols)
         "the linker discarded required archive definitions:\n  "
         "${simplefluid_hidden_undefined_symbols}")
 endif()
-if(simplefluid_missing_local_definition_symbols)
+if(NOT SIMPLEFLUID_TRILINOS_SHARED AND NOT SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME
+   AND simplefluid_missing_local_definition_symbols)
     list(JOIN simplefluid_missing_local_definition_symbols "\n  "
          simplefluid_missing_local_definition_symbols)
     message(FATAL_ERROR
@@ -568,7 +645,7 @@ if(simplefluid_missing_kokkos_patterns)
     list(JOIN simplefluid_missing_kokkos_patterns "\n  "
          simplefluid_missing_kokkos_patterns)
     message(FATAL_ERROR
-        "${SIMPLEFLUID_LIBRARY} has an incomplete Kokkos runtime bridge:\n  "
+        "${SIMPLEFLUID_LIBRARY} has an incomplete Kokkos runtime dependency:\n  "
         "${simplefluid_missing_kokkos_patterns}")
 endif()
 if(SIMPLEFLUID_REQUIRE_STATIC_LIBCXX_RTTI_BRIDGES

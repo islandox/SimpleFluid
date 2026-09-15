@@ -37,8 +37,8 @@
 #include <vector>
 
 #if defined(__ELF__) && defined(_LIBCPP_VERSION)
-// Static Trilinos is linked into both SimpleFluidSolvers and its consumers.
-// libc++ requires its polymorphic template types to keep non-unique RTTI for
+// Trilinos exchanges polymorphic template objects with SimpleFluid.
+// libc++ requires these types to keep non-unique RTTI for
 // cross-image dynamic_cast, while SimpleFluid implementation symbols remain
 // hidden by the surrounding target visibility policy.
 #  pragma GCC visibility push(default)
@@ -54,6 +54,7 @@
 #include <Ifpack2_Factory.hpp>
 #include <Ifpack2_Preconditioner.hpp>
 #include <Kokkos_Core.hpp>
+#include <MueLu_CreateTpetraPreconditioner.hpp>
 #include <Teuchos_Array.hpp>
 #include <Teuchos_Comm.hpp>
 #include <Teuchos_OrdinalTraits.hpp>
