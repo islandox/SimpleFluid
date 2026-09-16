@@ -12,11 +12,15 @@ void FissionPowerSource<Pack, MeshType>::set_interval_energy(
 {
     collective_detail::collective_local_validation(*d_mesh, "Fission interval energy", [&]
     {
+        const auto end = start + duration;
         if (owned_energy.size() != d_mesh->num_owned_cells() || !std::isfinite(start) ||
             !std::isfinite(duration) || duration <= scalar_type{} ||
-            !std::isfinite(start + duration) || start + duration <= start || d_time_multiplier)
+            !std::isfinite(end) || end <= start || d_time_multiplier)
             throw std::invalid_argument("Fission interval energy requires owned-cell joules, finite time, "
                                         "positive duration, and no user multiplier.");
+        const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * duration;
+        if (std::abs((end - start) - duration) > tolerance)
+            throw std::invalid_argument("Fission interval duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < owned_energy.size(); ++owned)
         {
             require_non_negative(owned_energy[owned], "interval joules");
@@ -41,12 +45,16 @@ void FissionPowerSource<Pack, MeshType>::refresh_interval_energy(scalar_type tim
 {
     collective_detail::collective_local_validation(*d_mesh, "Fission interval source refresh", [&]
     {
-        const auto scale = std::max({scalar_type{1}, std::abs(time), std::abs(interval_end_time())});
-        const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * scale;
+        const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * d_interval_duration;
+        const auto next = time + time_step;
+        const auto end = interval_end_time();
         if (!has_interval_energy() || d_interval_energy.size() != d_mesh->num_owned_cells() ||
             !std::isfinite(time) || !std::isfinite(time_step) || time_step <= scalar_type{} ||
-            time < d_interval_start - tolerance || time + time_step > interval_end_time() + tolerance)
+            !std::isfinite(next) || next <= time || time >= end ||
+            time < d_interval_start - tolerance || next > end + tolerance)
             throw std::invalid_argument("Fission substep lies outside the configured energy interval.");
+        if (std::abs((next - time) - time_step) > tolerance)
+            throw std::invalid_argument("Fission substep duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < d_interval_energy.size(); ++owned)
         {
             const auto volume = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
