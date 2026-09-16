@@ -3,7 +3,6 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     explicit_instantiation/VolumeContinuityModel.cc
     explicit_instantiation/PlanarALEBoundary.cc
     explicit_instantiation/CoupledBlockOperator.cc
-    explicit_instantiation/DICPreconditioner.cc
     explicit_instantiation/BoussinesqSolver.cc
     explicit_instantiation/CoupledPressureVelocitySolver.cc
     CoupledNonlinearProblem.cc

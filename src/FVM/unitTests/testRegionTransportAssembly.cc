@@ -2,6 +2,8 @@
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"
+// The TU-local ReferenceHandle needs its own ALE validation instantiation.
+#include "FVM/ALEControlVolumeState.tcc"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
@@ -205,11 +207,14 @@ TEST(RegionTransportAssemblyTest, MotionAndRollbackRejectStaleCachesAndRefreshRe
         compare(actual, expected, 0);
         PlanarALEMeshMotion<> motion(mesh);
         motion.begin_trial(1.35, 0.2);
+        const auto reference_ale = make_ale_control_volume_state(*expected.mesh, motion);
+        EXPECT_NO_THROW(reference_ale.validate(*expected.mesh));
         EXPECT_THROW(actual.geometry.assembly_geometry(), std::invalid_argument);
         EXPECT_THROW(expected.geometry.assembly_geometry(), std::invalid_argument);
         actual.geometry.refresh(); expected.geometry.refresh();
         compare(actual, expected, 1);
         motion.rollback_trial();
+        EXPECT_THROW(reference_ale.validate(*expected.mesh), std::logic_error);
         EXPECT_THROW(actual.geometry.assembly_geometry(), std::invalid_argument);
         actual.geometry.refresh(); expected.geometry.refresh();
         compare(actual, expected, 2);
