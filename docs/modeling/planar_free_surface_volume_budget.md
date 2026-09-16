@@ -207,6 +207,19 @@ relaxed. A constant intensive inventory is preserved under pure mesh motion by
 the cellwise GCL, while the extensive liquid mass is evaluated with
 $V_c^{n+1}$ only after the trial is accepted.
 
+Before returning a cellwise preview, liquid transport checks the owned-cell
+balance using old-volume mass, new-volume phase-change amounts, and trial mass.
+If the initial linear solve leaves a defect above `64 * machine epsilon` of
+the transported mass scale, at most two residual corrections solve the same
+matrix equation with the configured solver policy and reused preconditioner.
+The refinement bound includes a `64 * denorm_min` floor for subnormal totals.
+This prevents small same-sign solve errors from accumulating against the
+fixed initial-mass gate. Neither mass normalization nor clipping is applied.
+Both existing physical mass gates still run, and only then are trial ghosts
+published. Reported iterations include the corrections; the reported relative
+residual uses the original right-hand side. Failure diagnostics print masses,
+residuals, and tolerances in scientific notation.
+
 The initial field is distributed without a cell-centre pool mask:
 
 $$
