@@ -246,6 +246,39 @@ TEST(CellGradientCacheTest,
         cached_scalar_gradient, direct_scalar_gradient);
 }
 
+TEST(CellGradientCacheTest, GaussGeometryRetainsLiveLegacyBoundariesAndPublishedValues)
+{
+    auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    SimpleFluid::FVM::GaussLinearGradientCache<Pack> cache(mesh);
+    FieldType scalar(mesh, "gauss_scalar");
+    VectorFieldType vector(mesh, "gauss_vector"), actual(mesh, "actual"), expected(mesh, "expected");
+    TensorFieldType actual_tensor(mesh, "actual_tensor"), expected_tensor(mesh, "expected_tensor");
+    for (const auto scale : {0.7, -1.3})
+    {
+        for (size_t c = 0; c < mesh->num_owned_cells(); ++c)
+        {
+            scalar.set_owned_value(c, scalar_value(mesh->cell_centroid(c), scale));
+            vector.set_owned_value(c, vector_value(mesh->cell_centroid(c), scale));
+        }
+        scalar.sync_ghosts();
+        vector.sync_ghosts();
+        SimpleFluid::BoundaryConditionMap boundaries;
+        boundaries["xmin"] = {scale > 0 ? SimpleFluid::BoundaryConditionType::Dirichlet
+                                        : SimpleFluid::BoundaryConditionType::Neumann, scale};
+        SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, boundaries, actual, cache);
+        SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, boundaries, expected);
+        expect_scalar_gradients_near(actual, expected, 0.0);
+        SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, actual, cache);
+        SimpleFluid::FVM::gauss_linear_cell_gradient(scalar, expected);
+        expect_scalar_gradients_near(actual, expected, 0.0);
+        auto boundary = [&](int batch, size_t index)
+        { return vector_value(mesh->face_centroid(mesh->boundary_face_batch(batch).face_lids[index]), scale); };
+        SimpleFluid::FVM::gauss_linear_cell_gradient(vector, boundary, actual_tensor, cache);
+        SimpleFluid::FVM::gauss_linear_cell_gradient(vector, boundary, expected_tensor);
+        expect_vector_gradients_near(actual_tensor, expected_tensor, 0.0);
+    }
+}
+
 TEST(CellGradientCacheTest,
      MatchesRankDeficientPeriodicReconstruction)
 {

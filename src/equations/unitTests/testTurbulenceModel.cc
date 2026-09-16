@@ -13,6 +13,7 @@
 
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -254,27 +255,83 @@ TEST(TurbulenceModelTest, EveryClosureInitializesPositiveEddyViscosityAndEffecti
     for (const auto& entry : active_models)
     {
         SCOPED_TRACE(entry.name);
-        const auto options = make_model_options(entry.type);
-        model.configure(options, material, reference_density);
+        for (const auto scheme : {SimpleFluid::FVM::CellGradientScheme::LeastSquares,
+                 SimpleFluid::FVM::CellGradientScheme::GaussLinear,
+                 SimpleFluid::FVM::CellGradientScheme::LeastSquares})
+        {
+            auto options = make_model_options(entry.type);
+            options.gradient_scheme = scheme;
+            model.configure(options, material, reference_density);
 
-        const auto nu_t = model.turbulent_kinematic_viscosity().value(0);
-        ASSERT_TRUE(std::isfinite(nu_t));
-        EXPECT_GT(nu_t, 0.0);
+            const auto nu_t = model.turbulent_kinematic_viscosity().value(0);
+            ASSERT_TRUE(std::isfinite(nu_t));
+            EXPECT_GT(nu_t, 0.0);
 
-        const auto expected_dynamic_viscosity =
-            material.dynamic_viscosity.value(0) + reference_density * nu_t;
-        const auto expected_thermal_conductivity =
-            material.thermal_conductivity.value(0) + material.density.value(0) *
-                                                         material.specific_heat_capacity.value(0) *
-                                                         nu_t / options.turbulent_prandtl_number;
-        EXPECT_DOUBLE_EQ(model.effective_dynamic_viscosity().value(0), expected_dynamic_viscosity);
-        EXPECT_DOUBLE_EQ(model.effective_thermal_conductivity().value(0),
-                         expected_thermal_conductivity);
-        EXPECT_GT(model.effective_dynamic_viscosity().value(0),
-                  material.dynamic_viscosity.value(0));
-        EXPECT_GT(model.effective_thermal_conductivity().value(0),
-                  material.thermal_conductivity.value(0));
+            const auto expected_dynamic_viscosity =
+                material.dynamic_viscosity.value(0) + reference_density * nu_t;
+            const auto expected_thermal_conductivity =
+                material.thermal_conductivity.value(0) + material.density.value(0) *
+                                                             material.specific_heat_capacity.value(0) *
+                                                             nu_t / options.turbulent_prandtl_number;
+            EXPECT_DOUBLE_EQ(model.effective_dynamic_viscosity().value(0), expected_dynamic_viscosity);
+            EXPECT_DOUBLE_EQ(model.effective_thermal_conductivity().value(0),
+                             expected_thermal_conductivity);
+            EXPECT_GT(model.effective_dynamic_viscosity().value(0),
+                      material.dynamic_viscosity.value(0));
+            EXPECT_GT(model.effective_thermal_conductivity().value(0),
+                      material.thermal_conductivity.value(0));
+        }
     }
+}
+
+/** @brief State-owned Gauss geometry follows motion and rollback without reconfiguration. */
+TEST(TurbulenceModelTest, GaussRestartGradientsRefreshAfterMotionAndRollback)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    using NativeModel = SimpleFluid::TurbulenceModel<Pack, Handle>;
+    auto mesh = std::make_shared<Handle>(std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0, .5, 1}, {0, .5, 1}, {0, .5, 1}}}));
+    SimpleFluid::BoussinesqModelOptions material_options;
+    material_options.reference_density = reference_density;
+    material_options.density = density;
+    material_options.specific_heat_capacity = heat_capacity;
+    material_options.dynamic_viscosity = molecular_viscosity;
+    material_options.thermal_conductivity = molecular_conductivity;
+    NativeModel::material_type material(mesh, material_options, SimpleFluid::TimeStepperOptions{});
+    SimpleFluid::BoundaryConditionSet boundaries;
+    NativeModel model(mesh, boundaries);
+    auto options = make_model_options(ModelType::SSTKOmega);
+    options.gradient_scheme = SimpleFluid::FVM::CellGradientScheme::GaussLinear;
+    model.configure(options, material, reference_density);
+    NativeModel::field_type k(mesh, "restart_k"), omega(mesh, "restart_omega"), nu_t(mesh, .012, "restart_nu_t");
+    NativeModel::velocity_field_type velocity(mesh, "restart_velocity"), expected(mesh, "expected_gradient");
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(mesh);
+    const auto check = [&]
+    {
+        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        {
+            const auto center = mesh->cell_centroid(cell);
+            k.set_owned_value(cell, .2 + .3 * center.z * center.z);
+            omega.set_owned_value(cell, 2. + center.z);
+        }
+        k.sync_ghosts();
+        omega.sync_ghosts();
+        model.restore_transported_state(k, omega, nu_t, velocity, material, reference_density);
+        SimpleFluid::FVM::gauss_linear_cell_gradient(k, expected);
+        const auto actual = model.turbulent_kinetic_energy_gradient().owned_read_view();
+        const auto reference = expected.owned_read_view();
+        for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+            for (size_t component = 0; component < 3; ++component)
+                EXPECT_EQ(actual(cell, component), reference(cell, component));
+    };
+    check();
+    motion.begin_trial(1.3, .2);
+    motion.accept_trial();
+    check();
+    motion.begin_trial(.8, .2);
+    check();
+    motion.rollback_trial();
+    check();
 }
 
 /** @brief Verifies restart publication and dependent-property reconstruction. */
