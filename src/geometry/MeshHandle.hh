@@ -153,6 +153,8 @@ public:
         size_t ghost_layers = 1;
         std::optional<size_t> partition;
         std::optional<size_t> partitions;
+        /** @brief Allow empty orthogonal partitions; must agree on all ranks. */
+        bool allow_empty_partitions = false;
     };
 
     static constexpr int invalid_boundary_id = -1;

@@ -3,11 +3,22 @@
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testGhostSyncMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testMeshToMeshTransferMultiRank\\.cc$")
 
 add_executable(testFields ${TEST_SOURCES})
 target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testFields)
 simplefluid_discover_tests(testFields)
+
+add_executable(testMeshToMeshTransferMultiRank testMeshToMeshTransferMultiRank.cc)
+target_link_libraries(testMeshToMeshTransferMultiRank SimpleFluid::Fields GTest::gtest_main)
+simplefluid_configure_test_executable(testMeshToMeshTransferMultiRank)
+simplefluid_add_mpi_test(
+  NAME MeshToMeshTransferMultiRank_2procs
+  TARGET testMeshToMeshTransferMultiRank
+  PROCS 2
+  TIMEOUT 60
+  LABELS mpi)
 
 add_executable(testGhostSyncMultiRank testGhostSyncMultiRank.cc)
 target_link_libraries(testGhostSyncMultiRank SimpleFluid::Fields GTest::gtest_main)
