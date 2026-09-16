@@ -11,6 +11,7 @@
 #pragma once
 
 #include "FVM/CellGradientScheme.hh"
+#include "FVM/GaussLinearGradientCache.hh"
 #include "FVM/details/FieldStoredCellOperators.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "equations/BoundaryConditions.hh"
@@ -1435,6 +1436,100 @@ void gauss_linear_cell_gradient(
                 gradient[component].z;
         }
     }
+}
+
+/** @brief Reconstruct a scalar Gauss gradient with retained geometry and live boundaries. */
+template<TpetraTypePack Pack, class BoundaryConditionProvider, class BoundaryValueProvider>
+void gauss_linear_cell_gradient(const CellField<Pack>& field,
+    BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
+    VectorCellField<Pack>& gradients, const GaussLinearGradientCache<Pack>& cache)
+{
+    detail::cached_gauss_linear_scalar_gradient<Pack>(
+        field, boundary_condition, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct a cached Gauss gradient using a boundary map. */
+template<TpetraTypePack Pack>
+void gauss_linear_cell_gradient(const CellField<Pack>& field,
+    const BoundaryConditionMap& boundary_conditions, VectorCellField<Pack>& gradients,
+    const GaussLinearGradientCache<Pack>& cache)
+{
+    auto boundary_condition = [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end() ? BoundaryCondition{} : iter->second;
+    };
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        return static_cast<typename Pack::scalar_type>(boundary_condition(batch_id, in_batch_id).value);
+    };
+    gauss_linear_cell_gradient(field, boundary_condition, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct a cached Gauss gradient with zero-normal walls. */
+template<TpetraTypePack Pack>
+void gauss_linear_cell_gradient(const CellField<Pack>& field,
+    VectorCellField<Pack>& gradients, const GaussLinearGradientCache<Pack>& cache)
+{
+    gauss_linear_cell_gradient(field, [](int, size_t) { return BoundaryCondition{}; },
+        [](int, size_t) { return typename Pack::scalar_type{}; }, gradients, cache);
+}
+
+/** @brief Reconstruct a vector Gauss gradient with retained geometry and live boundaries. */
+template<TpetraTypePack Pack, class BoundaryValueProvider>
+void gauss_linear_cell_gradient(const VectorCellField<Pack>& field,
+    BoundaryValueProvider boundary_value, TensorCellField<Pack>& gradients,
+    const GaussLinearGradientCache<Pack>& cache)
+{
+    detail::cached_gauss_linear_vector_gradient<Pack>(field, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct a scalar Gauss gradient with retained geometry and live boundaries. */
+template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
+    BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
+    VectorCellFieldStored<Pack, MeshType>& gradients, const GaussLinearGradientCache<Pack, MeshType>& cache)
+{
+    detail::cached_gauss_linear_scalar_gradient<Pack>(
+        field, boundary_condition, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct a cached Gauss gradient using a boundary map. */
+template<TpetraTypePack Pack, class MeshType>
+void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
+    const BoundaryConditionMap& boundary_conditions, VectorCellFieldStored<Pack, MeshType>& gradients,
+    const GaussLinearGradientCache<Pack, MeshType>& cache)
+{
+    auto boundary_condition = [&](int batch_id, size_t)
+    {
+        const auto& name = field.mesh().boundary_batch_name(batch_id);
+        const auto iter = boundary_conditions.find(name);
+        return iter == boundary_conditions.end() ? BoundaryCondition{} : iter->second;
+    };
+    auto boundary_value = [&](int batch_id, size_t in_batch_id)
+    {
+        return static_cast<typename Pack::scalar_type>(boundary_condition(batch_id, in_batch_id).value);
+    };
+    gauss_linear_cell_gradient(field, boundary_condition, boundary_value, gradients, cache);
+}
+
+/** @brief Reconstruct a cached Gauss gradient with zero-normal walls. */
+template<TpetraTypePack Pack, class MeshType>
+void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
+    VectorCellFieldStored<Pack, MeshType>& gradients, const GaussLinearGradientCache<Pack, MeshType>& cache)
+{
+    gauss_linear_cell_gradient(field, [](int, size_t) { return BoundaryCondition{}; },
+        [](int, size_t) { return typename Pack::scalar_type{}; }, gradients, cache);
+}
+
+/** @brief Reconstruct a vector Gauss gradient with retained geometry and live boundaries. */
+template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+void gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
+    BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients,
+    const GaussLinearGradientCache<Pack, MeshType>& cache)
+{
+    detail::cached_gauss_linear_vector_gradient<Pack>(field, boundary_value, gradients, cache);
 }
 
 /**
