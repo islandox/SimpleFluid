@@ -3,6 +3,9 @@
 
 #include "solvers/PlanarFreeSurfaceModel.hh"
 
+#include <iomanip>
+#include <sstream>
+
 namespace SimpleFluid
 {
 
@@ -221,7 +224,7 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
     // The cached graph is refilled with new transient/flux/source values;
     // a preconditioner prepared for its previous numeric values is stale.
     transport_linear_options.reuse_preconditioner = false;
-    const auto statistics = d_transport_solver.solve_with_statistics(
+    auto statistics = d_transport_solver.solve_with_statistics(
         system.matrix, *system.rhs, d_trial_cell_mass_inventory.owned_data(), transport_linear_options);
     const int local_solve_failure = statistics.converged ? 0 : 1;
     int any_solve_failure = 0;
@@ -230,57 +233,122 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
     {
         throw std::runtime_error("Cellwise liquid-mass transport solve did not converge on every rank.");
     }
-    // The solver writes authoritative owned storage directly. Publish the
-    // trial to overlap storage before any ALE ledger or partition-face
-    // consumer requests mesh-local values from the preview field.
-    d_trial_cell_mass_inventory.sync_ghosts();
-
-    detail::CompensatedSum<> local_mass_before{};
-    detail::CompensatedSum<> local_evaporated{};
-    detail::CompensatedSum<> local_condensed{};
-    detail::CompensatedSum<> local_mass_after{};
-    detail::CompensatedSum<> local_liquid_volume{};
-    local_invalid_value = 0;
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    // Refine the same conservative equation before publishing a trial. A
+    // per-step error below the physical gate can otherwise accumulate until
+    // the fixed initial-mass gate fails over many weakly heated substeps.
+    const auto measure_trial = [&]()
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
-                                               : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
-        const auto old_volume =
-            ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-        const auto mass_before = d_cell_mass_inventory.value(cell);
-        const auto mass_after = d_trial_cell_mass_inventory.value(cell);
-        const auto density = d_pure_liquid_density.value(cell);
-        const auto evaporation =
-            evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_mass_rate->value(cell);
-        const auto condensation =
-            condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
-        local_invalid_value = local_invalid_value || !std::isfinite(mass_after) || mass_after < scalar_type{} ||
-                              !std::isfinite(density) || density <= scalar_type{};
-        local_mass_before += mass_before * old_volume;
-        local_evaporated += evaporation * new_volume * time_step;
-        local_condensed += condensation * new_volume * time_step;
-        local_mass_after += mass_after * new_volume;
-        local_liquid_volume += mass_after / density * new_volume;
-    }
-    int any_invalid_trial = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid_value, &any_invalid_trial);
-    if (any_invalid_trial != 0)
-    {
-        throw std::runtime_error("Cellwise liquid-mass transport produced a non-finite or negative inventory.");
-    }
-    const std::array<scalar_type, 5> local_totals{static_cast<scalar_type>(local_mass_before.value()),
-        static_cast<scalar_type>(local_evaporated.value()), static_cast<scalar_type>(local_condensed.value()),
-        static_cast<scalar_type>(local_mass_after.value()), static_cast<scalar_type>(local_liquid_volume.value())};
-    std::array<scalar_type, 5> global_totals{};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, static_cast<int>(local_totals.size()),
-        local_totals.data(), global_totals.data());
-    for (const auto value : global_totals)
-    {
-        if (!std::isfinite(value) || value < scalar_type{})
+        detail::CompensatedSum<> local_mass_before{};
+        detail::CompensatedSum<> local_evaporated{};
+        detail::CompensatedSum<> local_condensed{};
+        detail::CompensatedSum<> local_mass_after{};
+        detail::CompensatedSum<> local_liquid_volume{};
+        int invalid_trial_values = 0;
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            throw std::runtime_error("Cellwise liquid-mass global reduction is invalid.");
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                                                   : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume =
+                ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+            const auto mass_before = d_cell_mass_inventory.value(cell);
+            const auto mass_after = d_trial_cell_mass_inventory.value(cell);
+            const auto density = d_pure_liquid_density.value(cell);
+            const auto evaporation =
+                evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_mass_rate->value(cell);
+            const auto condensation =
+                condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
+            invalid_trial_values = invalid_trial_values || !std::isfinite(mass_after) || mass_after < scalar_type{} ||
+                                  !std::isfinite(density) || density <= scalar_type{};
+            local_mass_before += static_cast<long double>(mass_before) * old_volume;
+            local_evaporated += static_cast<long double>(evaporation) * new_volume * time_step;
+            local_condensed += static_cast<long double>(condensation) * new_volume * time_step;
+            local_mass_after += static_cast<long double>(mass_after) * new_volume;
+            local_liquid_volume += static_cast<long double>(mass_after) / density * new_volume;
         }
+        int any_invalid_trial = 0;
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &invalid_trial_values, &any_invalid_trial);
+        if (any_invalid_trial != 0)
+        {
+            throw std::runtime_error("Cellwise liquid-mass transport produced a non-finite or negative inventory.");
+        }
+        const std::array<scalar_type, 5> local_totals{static_cast<scalar_type>(local_mass_before.value()),
+            static_cast<scalar_type>(local_evaporated.value()), static_cast<scalar_type>(local_condensed.value()),
+            static_cast<scalar_type>(local_mass_after.value()), static_cast<scalar_type>(local_liquid_volume.value())};
+        std::array<scalar_type, 5> global_totals{};
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, static_cast<int>(local_totals.size()),
+            local_totals.data(), global_totals.data());
+        for (const auto value : global_totals)
+        {
+            if (!std::isfinite(value) || value < scalar_type{})
+            {
+                throw std::runtime_error("Cellwise liquid-mass global reduction is invalid.");
+            }
+        }
+        return global_totals;
+    };
+    const auto mass_defect = [](const auto& totals)
+    {
+        return static_cast<scalar_type>(static_cast<long double>(totals[0])
+            + totals[2] - totals[1] - totals[3]);
+    };
+    const auto roundoff_tolerance = [](const auto& totals)
+    {
+        const auto scale = std::max(totals[0] + totals[1] + totals[2], totals[3]);
+        return scalar_type{64} * std::max(std::numeric_limits<scalar_type>::epsilon() * scale,
+            std::numeric_limits<scalar_type>::denorm_min());
+    };
+    auto global_totals = measure_trial();
+    if (std::abs(mass_defect(global_totals)) > roundoff_tolerance(global_totals))
+    {
+        typename Pack::vector_type residual(system.rhs->getMap(), false);
+        typename Pack::vector_type correction(d_mesh->owned_cell_map(), false);
+        const auto form_residual = [&]
+        {
+            residual.update(scalar_type{1}, *system.rhs, scalar_type{});
+            system.matrix->apply(d_trial_cell_mass_inventory.owned_data(), residual,
+                Teuchos::NO_TRANS, scalar_type{-1}, scalar_type{1});
+        };
+        auto refinement_options = transport_linear_options;
+        refinement_options.reuse_preconditioner = true;
+        constexpr int maximum_mass_refinements = 2;
+        for (int refinement = 0; refinement < maximum_mass_refinements &&
+             std::abs(mass_defect(global_totals)) > roundoff_tolerance(global_totals); ++refinement)
+        {
+            form_residual();
+            const auto refined = d_transport_solver.solve_from_zero_with_statistics(
+                system.matrix, residual, correction, refinement_options);
+            statistics.iterations += refined.iterations;
+            const int local_refinement_failure = refined.converged ? 0 : 1;
+            int any_refinement_failure = 0;
+            Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1,
+                &local_refinement_failure, &any_refinement_failure);
+            if (any_refinement_failure != 0)
+                throw std::runtime_error("Cellwise liquid-mass residual correction did not converge.");
+            d_trial_cell_mass_inventory.owned_data().update(scalar_type{1}, correction, scalar_type{1});
+            global_totals = measure_trial();
+        }
+        // Report the final residual of the original equation, not the much
+        // smaller correction RHS. Iterations include all bounded corrections.
+        form_residual();
+        const auto residual_norm = static_cast<real_t>(residual.norm2());
+        statistics.achieved_tolerance = statistics.rhs_norm > real_t{}
+            ? residual_norm / statistics.rhs_norm : residual_norm;
+        statistics.converged = std::isfinite(statistics.achieved_tolerance) &&
+            statistics.achieved_tolerance <= transport_linear_options.tolerance;
+        if (!statistics.converged)
+            throw std::runtime_error("Cellwise liquid-mass residual correction failed the original equation tolerance.");
+    }
+    if (std::abs(mass_defect(global_totals)) > roundoff_tolerance(global_totals))
+    {
+        std::ostringstream message;
+        message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                << "Cellwise liquid-mass transport could not resolve its balance after residual correction: residual="
+                << mass_defect(global_totals) << " kg, roundoff=" << roundoff_tolerance(global_totals)
+                << " kg, strict physical tolerance="
+                << massClosureTolerance(global_totals[0] + global_totals[1] + global_totals[2])
+                << " kg, achieved linear relative residual=" << statistics.achieved_tolerance << '.';
+        throw std::runtime_error(message.str());
     }
 
     auto preview = d_diagnostics;
@@ -290,19 +358,23 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
     preview.liquid_volume = global_totals[4];
     preview.mass_weighted_specific_volume =
         preview.total_mass > scalar_type{} ? preview.liquid_volume / preview.total_mass : scalar_type{};
-    preview.step_mass_balance_residual = global_totals[0] + global_totals[2] - global_totals[1] - global_totals[3];
+    preview.step_mass_balance_residual = mass_defect(global_totals);
     const auto step_scale = std::max(scalar_type{1}, global_totals[0] + global_totals[1] + global_totals[2]);
     preview.normalized_step_mass_balance_residual = preview.step_mass_balance_residual / step_scale;
     const auto tolerance = massClosureTolerance(step_scale);
     if (std::abs(preview.step_mass_balance_residual) > tolerance)
     {
-        throw std::runtime_error(
-            "Cellwise liquid-mass step closure exceeded its strict physical tolerance: "
-            "residual=" +
-            std::to_string(preview.step_mass_balance_residual) + " kg, tolerance=" + std::to_string(tolerance) +
-            " kg, achieved linear relative residual=" + std::to_string(statistics.achieved_tolerance) + ".");
+        std::ostringstream message;
+        message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                << "Cellwise liquid-mass step closure exceeded its strict physical tolerance: residual="
+                << preview.step_mass_balance_residual << " kg, tolerance=" << tolerance
+                << " kg, achieved linear relative residual=" << statistics.achieved_tolerance << '.';
+        throw std::runtime_error(message.str());
     }
     updateMassBalance(preview);
+    // Publish overlap values only after refinement and both unchanged physical
+    // gates pass; accepted inventory remains untouched until commitPhaseChange.
+    d_trial_cell_mass_inventory.sync_ghosts();
     return PhaseChangePreview(
         this, d_phase_change_generation, std::move(preview), true, d_cellwise_trial_nonce, statistics);
 }
@@ -453,9 +525,15 @@ void LiquidMassInventory<Pack, MeshType>::updateMassBalance(diagnostics_type& di
     const auto tolerance = massClosureTolerance(scale);
     if (std::abs(diagnostics.mass_balance_residual) > tolerance)
     {
-        throw std::logic_error("LiquidMassInventory mass closure exceeded its accepted tolerance: residual=" +
-                               std::to_string(diagnostics.mass_balance_residual) +
-                               " kg, tolerance=" + std::to_string(tolerance) + " kg.");
+        std::ostringstream message;
+        message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                << "LiquidMassInventory mass closure exceeded its accepted tolerance: residual="
+                << diagnostics.mass_balance_residual << " kg, tolerance=" << tolerance
+                << " kg, initial mass=" << diagnostics.initial_mass
+                << " kg, condensed=" << diagnostics.cumulative_condensed_mass
+                << " kg, evaporated=" << diagnostics.cumulative_evaporated_mass
+                << " kg, current mass=" << diagnostics.total_mass << " kg.";
+        throw std::logic_error(message.str());
     }
 }
 
