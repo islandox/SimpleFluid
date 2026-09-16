@@ -1483,6 +1483,118 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
             "Radiolytic weighted transport solve did not converge.");
     }
 
+    // A configured RHS-relative linear tolerance can leave an inventory
+    // defect larger than the transport ledger's existing 64-epsilon gate.
+    // Check the physical balance before publishing fields or escape rates;
+    // refine the same equation rather than rescaling its conserved inventory.
+    struct TransportBalance
+    {
+        scalar_type before, after, outflow, residual, tolerance;
+        bool satisfied() const { return std::abs(residual) <= tolerance; }
+    };
+    const auto transport_balance = [&]() -> TransportBalance
+    {
+        std::array<detail::CompensatedSum<>, 3> accumulated;
+        int invalid_candidate = 0;
+        {
+            const auto previous = field.owned_read_view();
+            const auto candidate = solution.owned_read_view();
+            const auto storage = storage_weight.owned_read_view();
+            const auto advection = storage_weight.local_read_view();
+            const auto flux = transport_flux.owned_read_view();
+            // Match the existing publication path, including its nonnegative
+            // clipping, so publication cannot introduce a new balance defect.
+            const auto published_value = [&](size_t owned)
+            {
+                auto value = candidate(owned, 0);
+                if (liquid_weighted)
+                    value *= storage(owned, 0);
+                if (!std::isfinite(value))
+                {
+                    invalid_candidate = 1;
+                    return scalar_type{};
+                }
+                return std::max(value, scalar_type{});
+            };
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto new_volume = ale == nullptr
+                    ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                    : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+                const auto old_volume = ale == nullptr ? new_volume
+                    : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+                accumulated[0] += static_cast<long double>(previous(owned, 0)) * old_volume;
+                accumulated[1] += static_cast<long double>(published_value(owned)) * new_volume;
+            }
+            for (const auto face : transport_flux.owned_face_ids())
+            {
+                if (!is_free_surface(face))
+                    continue;
+                const auto owner = d_mesh->owner_cell(face);
+                const auto value = published_value(static_cast<size_t>(owner));
+                const auto primary = liquid_weighted ? value / storage(owner, 0) : value;
+                const auto boundary_rate = std::max(
+                    flux(transport_flux.owned_row(face), 0), scalar_type{})
+                    * advection(owner, 0) * primary;
+                accumulated[2] += static_cast<long double>(boundary_rate) * time_step;
+            }
+        }
+        const std::array<scalar_type, 4> local{
+            static_cast<scalar_type>(accumulated[0].value()),
+            static_cast<scalar_type>(accumulated[1].value()),
+            static_cast<scalar_type>(accumulated[2].value()),
+            static_cast<scalar_type>(invalid_candidate)};
+        std::array<scalar_type, 4> global{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+            static_cast<int>(local.size()), local.data(), global.data());
+        if (global[3] != scalar_type{} || !std::isfinite(global[0]) ||
+            !std::isfinite(global[1]) || !std::isfinite(global[2]))
+            throw std::runtime_error("Radiolytic transport produced an invalid candidate inventory.");
+        return {global[0], global[1], global[2],
+            (global[1] - global[0]) + global[2],
+            // Below the normal range, epsilon * inventory can underflow to
+            // zero. Bound this refinement check by 64 representable ULPs;
+            // the downstream escape and donor gates remain unchanged.
+            scalar_type{64} * std::max(
+                std::numeric_limits<scalar_type>::epsilon()
+                    * std::max(std::abs(global[0]), std::abs(global[1])),
+                std::numeric_limits<scalar_type>::denorm_min())};
+    };
+    auto balance = transport_balance();
+    constexpr int maximum_inventory_refinements = 2;
+    for (int refinement = 0;
+         refinement < maximum_inventory_refinements && !balance.satisfied(); ++refinement)
+    {
+        const auto refinement_started = std::chrono::steady_clock::now();
+        typename Pack::vector_type residual(system.rhs->getMap(), false);
+        typename Pack::vector_type correction(solution.owned_data().getMap(), false);
+        residual.update(scalar_type{1}, *system.rhs, scalar_type{});
+        system.matrix->apply(solution.owned_data(), residual, Teuchos::NO_TRANS,
+            scalar_type{-1}, scalar_type{1});
+        auto refinement_options = solve_options;
+        refinement_options.reuse_preconditioner = true;
+        const auto refinement_statistics = d_transport_solver.solve_from_zero_with_statistics(
+            system.matrix, residual, correction, refinement_options);
+        d_last_statistics.transport_linear.add(refinement_statistics);
+        ++work.solves;
+        work.iterations += refinement_statistics.iterations;
+        work.solve_seconds += elapsed(refinement_started);
+        if (!refinement_statistics.converged)
+            throw std::runtime_error("Radiolytic inventory residual correction did not converge.");
+        solution.owned_data().update(scalar_type{1}, correction, scalar_type{1});
+        balance = transport_balance();
+    }
+    if (!balance.satisfied())
+    {
+        std::ostringstream message;
+        message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                << "Radiolytic transport inventory closure failed after residual correction: before="
+                << balance.before << ", after=" << balance.after << ", outflow=" << balance.outflow
+                << ", residual=" << balance.residual << ", roundoff=" << balance.tolerance << '.';
+        throw std::runtime_error(message.str());
+    }
+
     {
         const auto solution_values = solution.owned_read_view();
         const auto storage = storage_weight.owned_read_view();

@@ -2135,6 +2135,184 @@ TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydro
     solver.accept_coupling_checkpoint(checkpoint);
 }
 
+TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnergyAndHydrogen)
+{
+    // Match the physical scales and solver configuration of the Hydra-TF
+    // annular consumer: the thermal increment is tiny relative to M*cp*T.
+    constexpr double inner_radius = 0.04;
+    constexpr double outer_radius = 0.25;
+    constexpr double initial_height = 0.5;
+    constexpr double initial_mass = 148.20868454718243;
+    constexpr double specific_heat = 4200.0;
+    constexpr double initial_temperature = 300.0;
+    constexpr double interval_duration = 1.e-4;
+    constexpr double interval_energy = 0.10133263268392909;
+    constexpr double hydrogen_yield = 1.5e-7;
+    const double area = std::numbers::pi *
+        (outer_radius * outer_radius - inner_radius * inner_radius);
+    const double density = initial_mass / (area * initial_height);
+    const auto uniform_edges = [](double begin, double end, int cells)
+    {
+        SimpleFluid::ArrReal result(static_cast<size_t>(cells) + 1);
+        for (int i = 0; i <= cells; ++i)
+            result[static_cast<size_t>(i)] = std::lerp(begin, end, static_cast<double>(i) / cells);
+        return result;
+    };
+    auto geometry = std::make_shared<Handle::Cylindrical>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
+            uniform_edges(inner_radius, outer_radius, 2),
+            uniform_edges(0.0, 2.0 * std::numbers::pi, 4),
+            uniform_edges(0.0, initial_height, 4)}});
+    const auto communicator = Tpetra::getDefaultComm();
+    Handle::DistributionOptions distribution;
+    distribution.partition = static_cast<size_t>(communicator->getRank());
+    distribution.partitions = static_cast<size_t>(communicator->getSize());
+    distribution.allow_empty_partitions = true;
+    auto mesh = std::make_shared<Handle>(std::move(geometry), distribution);
+
+    SimpleFluid::BoundaryConditionSet boundaries;
+    for (const auto* name : {"rmin", "rmax", "zmin", "zmax"})
+    {
+        boundaries.temperature[name] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+        boundaries.pressure[name] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+        boundaries.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    }
+    boundaries.pressure["zmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    boundaries.velocity["zmax"] = {SimpleFluid::BoundaryConditionType::Slip, {}};
+    SimpleFluid::TimeStepperOptions time;
+    time.time_step = interval_duration;
+    time.steps = 1;
+    time.reference_temperature = initial_temperature;
+    time.thermal_expansion = 2.1e-4;
+    time.gravity_z = 0.0;
+    time.pressure_velocity_coupling = Coupling::PISO;
+    time.n_pressure_correctors = 2;
+    SimpleFluid::LinearSolverOptions linear;
+    linear.tolerance = 1.e-11;
+    linear.max_iterations = 1000;
+    SimpleFluid::BoussinesqModelOptions material;
+    material.reference_density = density;
+    material.density = density;
+    material.specific_heat_capacity = specific_heat;
+    material.dynamic_viscosity = 1.e-3;
+    material.thermal_conductivity = 0.6;
+    auto solver_owner = std::make_unique<Solver>(mesh, boundaries, time, linear, material);
+    auto& solver = *solver_owner;
+    SimpleFluid::MaterialFeedbackOptions thermal;
+    thermal.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
+    thermal.reference_density = density;
+    thermal.liquid_density = density;
+    thermal.reference_temperature = initial_temperature;
+    thermal.thermal_expansion = 2.1e-4;
+    thermal.reference_dynamic_viscosity = 1.e-3;
+    solver.configure_material_feedback(thermal);
+    solver.add_fission_power_source().initialize_constant(0.0);
+    SimpleFluid::RadiolyticGasOptions gas_options;
+    gas_options.mode = SimpleFluid::RadiolyticGasMode::Sheng2024TwoPopulation;
+    gas_options.pressure_mode = SimpleFluid::RadiolyticPressureMode::Constant;
+    gas_options.dissolved_transport = SimpleFluid::RadiolyticTransportMode::Advective;
+    gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
+    gas_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+    gas_options.constant_slip_velocity = 0.0;
+    gas_options.hydrogen_yield_mol_per_j = hydrogen_yield;
+    gas_options.gas_release_efficiency = 1.0;
+    gas_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    gas_options.max_source_alpha_rate = 10.0;
+    gas_options.henry_coefficient = 1.e-5;
+    gas_options.surface_tension = 0.07;
+    gas_options.hydrogen_diffusivity = 4.5e-9;
+    gas_options.uranium_concentration_mol_per_m3 = 1000.0;
+    gas_options.initial_dissolved_hydrogen = 0.0;
+    gas_options.reference_pressure = 101325.0;
+    gas_options.free_surface_patches = {"zmax"};
+    auto& gas = solver.configure_radiolytic_gas(gas_options);
+    gas.enable_donor_hydrogen_deficit_tracking();
+    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
+    SimpleFluid::FreeSurfaceOptions surface;
+    surface.enabled = true;
+    surface.mode = SimpleFluid::FreeSurfaceMode::PlanarALE;
+    surface.gravity_axis = SimpleFluid::Dimension::Z;
+    surface.range_policy = SimpleFluid::FreeSurfaceRangePolicy::Error;
+    surface.initial_liquid_volume = area * initial_height;
+    surface.vessel.mode = SimpleFluid::VesselVolumeMapMode::ConstantArea;
+    surface.vessel.bottom_elevation = 0.0;
+    surface.vessel.top_elevation = 1.0;
+    surface.vessel.cross_section_area = area;
+    surface.vessel.total_internal_volume = area;
+    surface.liquid_mass.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    surface.liquid_mass.depletion_policy = SimpleFluid::FreeSurfaceRangePolicy::Error;
+    surface.headspace.mode = SimpleFluid::HeadspaceMode::Vented;
+    surface.headspace.ambient_pressure = 101325.0;
+    surface.headspace.initial_pressure = 101325.0;
+    surface.headspace.initial_temperature = initial_temperature;
+    surface.ale.top_boundary = "zmax";
+    surface.ale.maximum_correctors = 30;
+    ASSERT_NE(solver.configure_free_surface(surface), nullptr);
+    ConfiguredCase state{mesh, std::move(solver_owner), nullptr};
+
+    // Axisymmetric, nonuniform radial/axial source; normalize owned volumes
+    // so serial and independently partitioned MPI runs receive the same joules.
+    const std::array<double, 4> axial_shape{0.8, 1.2, 1.5, 0.9};
+    std::vector<double> energy(mesh->num_owned_cells());
+    double local_weight = 0.0;
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const auto gid = mesh->cell_global_id(cell);
+        const size_t radial = static_cast<size_t>(gid) % 2;
+        const size_t axial = static_cast<size_t>(gid) / 8;
+        energy[owned] = mesh->cell_volume(cell) * axial_shape[axial] * (radial == 0 ? 1.0 : 0.7);
+        local_weight += energy[owned];
+    }
+    double global_weight = 0.0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_weight, &global_weight);
+    for (auto& value : energy) value *= interval_energy / global_weight;
+    const auto initial_sensible_energy = coupling_sensible_energy(state);
+    const auto initial_history_size = solver.free_surface_history().size();
+    EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass, 2.e-11);
+
+    for (int interval = 0; interval < 2; ++interval)
+    {
+        SCOPED_TRACE(interval);
+        auto checkpoint = solver.create_coupling_checkpoint();
+        std::vector<double> first_temperatures;
+        double first_level = 0.0;
+        for (int attempt = 0; attempt < 2; ++attempt)
+        {
+            SCOPED_TRACE(attempt);
+            solver.restore_coupling_checkpoint(checkpoint);
+            solver.set_coupling_interval_energy(energy, interval_duration);
+            ASSERT_NO_THROW(solver.step());
+            const double cumulative_energy = (interval + 1) * interval_energy;
+            const double produced = cumulative_energy * hydrogen_yield;
+            EXPECT_NEAR(solver.time(), (interval + 1) * interval_duration, 1.e-19);
+            EXPECT_NEAR(coupling_sensible_energy(state) - initial_sensible_energy,
+                        cumulative_energy, 2.e-6);
+            // Keep the established cumulative liquid-mass conservation gate
+            // at this 148 kg scale, independently of the transport solver.
+            EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass,
+                std::max(4096.0 * std::numeric_limits<double>::epsilon(), 1.e-10) * initial_mass);
+            EXPECT_NEAR(gas.cumulative_hydrogen_produced(), produced, 1.e-18);
+            EXPECT_NEAR(gas.global_submerged_hydrogen_moles() +
+                            gas.cumulative_submerged_bubble_hydrogen_escaped(), produced, 1.e-17);
+            EXPECT_NEAR(gas.last_statistics().donor_inventory_error, 0.0, 1.e-17);
+            EXPECT_NEAR(top_elevation(*mesh), solver.free_surface_diagnostics().pool_level,
+                surface.ale.level_absolute_tolerance + surface.ale.level_relative_tolerance);
+            EXPECT_EQ(solver.free_surface_history().size(), initial_history_size + interval + 1);
+            for (size_t owned = 0; owned < energy.size(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                const auto temperature = solver.temperature().value(cell);
+                if (attempt == 0) first_temperatures.push_back(temperature);
+                else EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
+            }
+            if (attempt == 0) first_level = top_elevation(*mesh);
+            else EXPECT_NEAR(top_elevation(*mesh), first_level, 1.e-13);
+        }
+        solver.accept_coupling_checkpoint(checkpoint);
+    }
+}
+
 TEST(BoussinesqCouplingIntervalTest, RejectsForeignCheckpointAndPreservesTrialState)
 {
     auto first = make_case(Coupling::PISO, 0.0, 25, true);

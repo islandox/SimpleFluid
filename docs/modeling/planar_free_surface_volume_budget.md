@@ -541,8 +541,9 @@ One accepted ALE step proceeds as a single logical transaction:
 1. Snapshot accepted flow/temperature fields, old absolute flux, material
    properties, liquid and optional H2 state, free-surface/headspace ledgers,
    diagnostics, time, and history position.
-2. Start one geometry trial from the accepted surface to the current relaxed
-   level candidate. Retain both volume states and the exact mesh flux.
+2. Start one geometry trial from the accepted mesh height, deriving its new
+   height from the relaxed global volume-source target and top area. Retain
+   both volume states and the exact mesh flux.
 3. Refresh every geometry-dependent equation, boundary, pressure/coupled
    numeric cache, preconditioner, and VTU point cache for the trial epoch.
 4. Restore the accepted physical snapshot at each outer corrector, solve the
@@ -618,7 +619,7 @@ These keys are parsed in every mode but are active only for `planarALE`.
 | `free_surface_ale_maximum_correctors` | `12` | integer | Positive limit used independently for the outer geometry/physics/source Picard trials and for strict pressure-only continuity refinements within each outer trial. Enabled Sheng H2 requires at least two outer trials. |
 | `free_surface_ale_level_absolute_tolerance` | `1e-10` | m | Nonnegative absolute level-corrector tolerance. |
 | `free_surface_ale_level_relative_tolerance` | `1e-10` | dimensionless | Nonnegative tolerance scaled by the level/elevation magnitude. |
-| `free_surface_ale_relaxation` | `0.5` | dimensionless | Outer level/source relaxation in `(0, 1]`. |
+| `free_surface_ale_relaxation` | `0.5` | dimensionless | Outer source relaxation in `(0, 1]`; trial height follows that same relaxed integrated source. |
 | `free_surface_ale_maximum_growth_ratio` | `5` | dimensionless | Finite mesh-quality limit >= 1. |
 | `free_surface_ale_maximum_non_orthogonality_degrees` | `75` | degrees | Finite nonnegative mesh-quality limit. |
 | `free_surface_ale_maximum_skewness` | `4` | dimensionless | Nonnegative mesh-quality limit. |
@@ -783,6 +784,16 @@ tolerances. Target change and generalized-continuity maximum residual use
 relative tolerance scaled by `max(1 m3/s, integrated-target scale)`. A
 succeeding Picard trial must also change material coefficients and gas primary
 inventories by no more than `1e-10` in the reported scale-normalized maximum.
+Each trial starts from the actual accepted mesh height and derives its height
+from the same target supplied to pressure:
+`h_trial = h_mesh_old + dt * sum_owned(target) / top_area`.
+This relation applies to both the next-step predictor and relaxed outer
+correctors. The thermodynamic pool-level diagnostic can differ from mesh
+coordinates within its tolerance; using it as an exact geometric origin would
+add a spurious swept flux in the next interval. The source remains the physical
+volume ledger. Pressure retains its global compatibility check for each trial,
+and the physical ledger retains the existing nonlinear acceptance tolerances.
+
 Actual trial mesh volume versus closure-implied pool volume uses the configured
 volume absolute-plus-relative tolerance with `max(1 m3, mesh/pool-volume
 scale)`. The adiabatic sensible-energy gate applies to
@@ -792,6 +803,16 @@ energy, and added volumetric heat. Liquid mass, H2 inventory, and pool/source
 closure retain their model-specific physical tolerances. None of these
 conservation gates is relaxed when a Krylov solve is configured with a looser
 algebraic tolerance.
+
+Radiolytic transport checks the candidate inventory against accepted-old
+inventory and physical boundary outflow before publishing fields. If the
+initial linear solve misses the existing `64 * machine epsilon` inventory
+balance, at most two residual corrections solve the same transport equation
+with its existing preconditioner. The unchanged inventory gate must pass before
+fields and escape ledgers are updated. This is relevant for consecutive weakly
+heated intervals whose retained H2 is small but nonzero.
+The new residual check has a `64 * denorm_min` absolute floor for subnormal
+roundoff; the existing escape and donor-inventory gates are unchanged.
 
 The source-to-pool diagnostic is a rate in m3/s, so its absolute term is
 `free_surface_volume_closure_absolute_tolerance / dt`; the relative term uses
