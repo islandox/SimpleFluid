@@ -41,7 +41,7 @@ struct DICPreconditionerTestAccess;
  * reuses mutable workspace and must not execute concurrently on one instance.
  */
 template<TpetraTypePack Pack>
-class SIMPLEFLUID_SOLVERS_EXPORT DICPreconditioner final : public Pack::operator_type
+class SIMPLEFLUID_FVM_EXPORT DICPreconditioner final : public Pack::operator_type
 {
 public:
     using scalar_type = typename Pack::scalar_type;
@@ -87,25 +87,25 @@ private:
         mutable Teuchos::RCP<multi_vector_type> halo;
     };
 
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     static constexpr local_ordinal_type invalid_row()
     {
         return Teuchos::OrdinalTraits<local_ordinal_type>::invalid();
     }
 
     /** Local map comparison: Map::isSameAs can take rank-dependent fast exits. */
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     bool local_map_matches(const Teuchos::RCP<const map_type>& other) const;
 
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     void require_collectively(bool valid, const char* message) const;
 
     /** Extract owned rows in global-column order without communication. */
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     std::vector<std::vector<GlobalEntry>> global_rows(const matrix_type& matrix) const;
 
     /** Build a global DIC factor with only owned rows and column-map halos. */
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     void initialize_distributed(const matrix_type& matrix);
 
     /**
@@ -118,14 +118,14 @@ private:
      * All ranks construct every plan, including ranks with no receiving rows:
      * those ranks may still export values needed by another rank.
      */
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     std::vector<StageTransfer> make_stage_transfers(
         const Teuchos::RCP<const map_type>& column_map,
         const std::vector<std::size_t>& offsets,
         std::vector<DistributedEntry>& entries) const;
 
     /** Replay the factor schedule using its directional remote-only plans. */
-    SIMPLEFLUID_SOLVERS_LOCAL
+    SIMPLEFLUID_FVM_LOCAL
     void apply_distributed(const multi_vector_type& input, multi_vector_type& output,
         Teuchos::ETransp mode, scalar_type alpha, scalar_type beta) const;
 

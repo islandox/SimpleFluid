@@ -1,4 +1,6 @@
 add_library(SimpleFluidFVM SHARED
+    # Non-orthogonal FVM solves and higher-level solvers share this instance.
+    explicit_instantiation/DICPreconditioner.cc
     explicit_instantiation/ALEControlVolumeState.cc
     explicit_instantiation/CellGradientCache.cc
     explicit_instantiation/GaussLinearGradientCache.cc
