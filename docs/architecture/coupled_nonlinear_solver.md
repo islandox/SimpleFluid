@@ -162,6 +162,15 @@ residual workspace uses `ResidualOnly` assembly, retaining stabilization and
 the gauge without building Schur products. Continuity is accumulated with
 advection in cached face order; gate and commit checks use the cached rows too.
 
+Coupled assembly caches face-to-coefficient row slots and retains compatible
+gradient, divergence, and pressure-stabilization blocks. Collective reuse checks
+cover geometry, pressure boundaries, density, timestep, interpolation, and fixed
+fluxes, while live boundary/RHS terms remain current. Cached Schur assembly maps
+ordered contributions to final CRS value slots; source/destination graph owners
+and the gauge identify that plan. Momentum-dependent products and MueLu `RP`
+numeric refresh remain active. Externally retained generations still prevent
+in-place matrix mutation.
+
 Pressure-flux workspaces share immutable gradient stencils, boundary locations,
 and face metrics with analytic Jacobians on the same mesh and geometry epoch.
 Each workspace still owns its pressure-gradient field and directional scratch.

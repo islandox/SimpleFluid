@@ -414,15 +414,35 @@ TEST_P(CompositeMeshTest, StreamedProductsPreserveNumericsAndReleaseStorage)
     EXPECT_EQ(streamed.cache_statistics().matrix_graph_reuses, 1U);
     EXPECT_EQ(streamed.cache_statistics().streamed_product_peak, 1U);
     EXPECT_EQ(streamed.cache_statistics().streamed_products_live, 0U);
-    // Switching workspace policy does not change the true operator backend.
+    // Switching workspace policy retains the completed geometry blocks. Only
+    // the three scaled gradients and three momentum-dependent Schur products
+    // need storage; the three D*gradient products stay unallocated until a
+    // geometry dependency changes.
+    const auto geometry_reuses = streamed.cache_statistics().geometry_block_reuses;
+    system.pressure_stabilization->apply(x, a);
+    system.schur->apply(x, b);
     system = {};
     options.coupled_workspace_policy = CoupledWorkspacePolicy::CachedProducts;
     system = streamed.assemble(equation, u, p, flux, boundary, boundaries, options);
+    EXPECT_EQ(streamed.storage_statistics().live_matrices, before.live_matrices + 6);
+    EXPECT_EQ(streamed.cache_statistics().geometry_block_reuses, geometry_reuses + 1);
+    MV after(mesh->owned_cell_map(), 2);
+    system.pressure_stabilization->apply(x, after);
+    expect_near(a, after);
+    system.schur->apply(x, after);
+    expect_near(b, after);
+
+    // Changing dt rebuilds stabilization and allocates those cached products.
+    system = {};
+    options.time_step *= 1.1;
+    system = streamed.assemble(equation, u, p, flux, boundary, boundaries, options);
     EXPECT_EQ(streamed.storage_statistics().live_matrices, before.live_matrices + 9);
+    EXPECT_EQ(streamed.cache_statistics().geometry_block_reuses, geometry_reuses + 1);
     system = {};
     options.coupled_workspace_policy = CoupledWorkspacePolicy::StreamedProducts;
     system = streamed.assemble(equation, u, p, flux, boundary, boundaries, options);
     EXPECT_EQ(streamed.storage_statistics().live_matrices, before.live_matrices);
+    EXPECT_EQ(streamed.cache_statistics().geometry_block_reuses, geometry_reuses + 2);
     EXPECT_THROW(coupled_workspace_policy_from_string("local_only"), std::invalid_argument);
 }
 

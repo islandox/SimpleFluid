@@ -19,6 +19,7 @@ using Scalar = ScalarCellFieldStored<Pack>;
 using Vector = VectorCellFieldStored<Pack>;
 using Tensor = TensorCellFieldStored<Pack>;
 using Cache = FVM::CellGradientCache<Pack, Handle>;
+using GaussCache = FVM::GaussLinearGradientCache<Pack, Handle>;
 using Vec = MeshUtils::Vec3;
 using Calls = std::vector<std::tuple<char, int, size_t>>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -139,13 +140,16 @@ void compare_gauss(const SP<const Handle>& mesh)
     Vector vector(mesh, "vector"), actual(mesh, Vec{-91, -91, -91}, "actual"), expected(mesh, "expected");
     Tensor actual_tensor(mesh, "actual_tensor"), expected_tensor(mesh, "expected_tensor");
     initialize(scalar, vector);
+    GaussCache cache(mesh);
+    int boundary_phase = 0;
     Calls actual_calls, expected_calls;
-    auto run = [&](bool reference, Calls& calls, Vector& scalar_gradient, Tensor& vector_gradient)
+    auto run = [&](int mode, Calls& calls, Vector& scalar_gradient, Tensor& vector_gradient)
     {
         auto bc = [&](int b, size_t i)
         {
             calls.emplace_back('c', b, i);
-            return condition(*mesh, b, i);
+            return boundary_phase == 0 ? condition(*mesh, b, i)
+                : BoundaryCondition{BoundaryConditionType::Neumann, -0.41};
         };
         auto bv = [&](int b, size_t i)
         {
@@ -160,10 +164,15 @@ void compare_gauss(const SP<const Handle>& mesh)
             const auto face = mesh->boundary_face_batch(b).face_lids[i];
             return vector_value(mesh->face_centroid(face)) + vector.value(mesh->owner_cell(face)) * 0.1;
         };
-        if (reference)
+        if (mode == 1)
         {
             FVM::detail::stored_gauss_linear_cell_gradient_reference(scalar, bc, bv, scalar_gradient);
             FVM::detail::stored_gauss_linear_cell_gradient_reference(vector, vv, vector_gradient);
+        }
+        else if (mode == 2)
+        {
+            FVM::gauss_linear_cell_gradient(scalar, bc, bv, scalar_gradient, cache);
+            FVM::gauss_linear_cell_gradient(vector, vv, vector_gradient, cache);
         }
         else
         {
@@ -171,12 +180,25 @@ void compare_gauss(const SP<const Handle>& mesh)
             FVM::gauss_linear_cell_gradient(vector, vv, vector_gradient);
         }
     };
-    run(false, actual_calls, actual, actual_tensor);
-    run(true, expected_calls, expected, expected_tensor);
-    EXPECT_EQ(actual_calls, expected_calls);
-    expect_same(actual, expected);
-    expect_same(actual_tensor, expected_tensor);
-    expect_unpublished(actual, -91);
+    for (boundary_phase = 0; boundary_phase < 2; ++boundary_phase)
+    {
+        expected_calls.clear();
+        run(1, expected_calls, expected, expected_tensor);
+        for (int mode : {0, 2})
+        {
+            actual_calls.clear();
+            run(mode, actual_calls, actual, actual_tensor);
+            EXPECT_EQ(actual_calls, expected_calls);
+            expect_same(actual, expected);
+            expect_same(actual_tensor, expected_tensor);
+            expect_unpublished(actual, -91);
+        }
+        // Change the published input values without rebuilding the cache.
+        scalar.put_scalar(-0.7);
+        vector.put_value(Vec{0.7, 1.2, -0.4});
+        scalar.sync_ghosts();
+        vector.sync_ghosts();
+    }
     EXPECT_EQ(mesh->connectivity_storage_bytes(), 0U);
     EXPECT_EQ(mesh->has_materialized_indexer(), indexer);
 }
@@ -227,19 +249,29 @@ TEST(StoredGradientViewsTest, MotionRefreshRollbackAndStaleCachePreserveGradient
     {
         auto mesh = std::make_shared<Handle>(geometry);
         Cache cache(mesh);
+        GaussCache gauss_cache(mesh);
         Scalar scalar(mesh, 1.0, "scalar");
         Vector gradient(mesh, Vec{-39, -39, -39}, "gradient");
         PlanarALEMeshMotion<> motion(mesh);
         motion.begin_trial(1.35, 0.2);
         motion.accept_trial();
         EXPECT_THROW(FVM::cell_gradient(scalar, gradient, cache), std::invalid_argument);
+        EXPECT_THROW(FVM::gauss_linear_cell_gradient(scalar, gradient, gauss_cache), std::invalid_argument);
         expect_unpublished(gradient, -39);
         cache.refresh();
+        gauss_cache.refresh();
+        EXPECT_NO_THROW(FVM::gauss_linear_cell_gradient(scalar, gradient, gauss_cache));
         EXPECT_NO_THROW(FVM::cell_gradient(scalar, gradient, cache));
         compare_gauss(mesh);
         motion.begin_trial(0.8, 0.2);
+        EXPECT_THROW(FVM::gauss_linear_cell_gradient(scalar, gradient, gauss_cache), std::invalid_argument);
+        gauss_cache.refresh();
+        EXPECT_NO_THROW(FVM::gauss_linear_cell_gradient(scalar, gradient, gauss_cache));
         compare_gauss(mesh);
         motion.rollback_trial();
+        EXPECT_THROW(FVM::gauss_linear_cell_gradient(scalar, gradient, gauss_cache), std::invalid_argument);
+        gauss_cache.refresh();
+        EXPECT_NO_THROW(FVM::gauss_linear_cell_gradient(scalar, gradient, gauss_cache));
         compare_gauss(mesh);
     }
 }
@@ -268,6 +300,14 @@ TEST(StoredGradientViewsTest, InvalidBoundaryAndWrongMeshDoNotBypassValidation)
     Cache cache(mesh);
     EXPECT_THROW(FVM::cell_gradient(scalar, wrong, cache), std::invalid_argument);
     EXPECT_THROW(FVM::gauss_linear_cell_gradient(scalar, wrong), std::invalid_argument);
+    GaussCache gauss_cache(mesh), wrong_cache(other);
+    EXPECT_THROW(FVM::gauss_linear_cell_gradient(scalar, wrong, gauss_cache), std::invalid_argument);
+    EXPECT_THROW(FVM::gauss_linear_cell_gradient(scalar, actual, wrong_cache), std::invalid_argument);
+    if (mesh->num_owned_cells())
+        EXPECT_THROW(FVM::gauss_linear_cell_gradient(
+                         scalar, [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Robin, 1}; },
+                         [](int, size_t) { return 1.0; }, actual, gauss_cache),
+            std::invalid_argument);
     if (mesh->num_owned_cells())
         EXPECT_THROW(FVM::gauss_linear_cell_gradient(
                          scalar, [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Robin, 1}; },
@@ -354,7 +394,7 @@ TEST(StoredGradientViewsTest, PublishedSourceAliasObservesEarlierOutputRows)
     if (Tpetra::getDefaultComm()->getSize() != 1)
         GTEST_SKIP() << "The output owned map aliases the source overlap map in serial.";
     SP<const Handle> mesh = std::make_shared<Handle>(test::two_regions(2));
-    for (int mode = 0; mode < 3; ++mode)
+    for (int mode = 0; mode < 4; ++mode)
     {
         Scalar source(mesh, "source"), reference_source(mesh, "reference_source");
         Vector actual(mesh, "actual"), expected(mesh, "expected"), vector(mesh, "vector");
@@ -377,7 +417,13 @@ TEST(StoredGradientViewsTest, PublishedSourceAliasObservesEarlierOutputRows)
             auto bc = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; };
             auto bv = [](int, size_t) { return 0.0; };
             FVM::detail::stored_gauss_linear_cell_gradient_reference(reference_source, bc, bv, expected);
-            FVM::gauss_linear_cell_gradient(source, bc, bv, actual);
+            if (mode == 3)
+            {
+                GaussCache gauss_cache(mesh);
+                FVM::gauss_linear_cell_gradient(source, bc, bv, actual, gauss_cache);
+            }
+            else
+                FVM::gauss_linear_cell_gradient(source, bc, bv, actual);
         }
         expect_same(actual, expected);
     }

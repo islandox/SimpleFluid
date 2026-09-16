@@ -445,6 +445,50 @@ TEST_P(CoupledResidualAssemblyTest, PreservesRetainedGenerationsAcrossAssemblyPu
     EXPECT_EQ(solver.cache_statistics().schur_product_builds, 6U);
 }
 
+TEST_P(CoupledResidualAssemblyTest, ReusesGeometryBlocksWhileRefreshingMomentumAndLiveBoundaryValues)
+{
+    NativeSolver solver(mesh);
+    const Equation equation(mesh);
+    for (size_t generation = 0; generation < 5; ++generation)
+    {
+        // Values change with fixed topology; their Schur contribution must be
+        // refreshed even when G, D and C remain exactly the same.
+        flux.put_value(0.015 + 0.006 * generation);
+        boundaries.velocity["ymax"].value = {0.3 + 0.04 * generation, 0.0, 0.0};
+        if (generation == 2)
+            boundaries.pressure["ymax"].value = 0.07;
+        if (generation == 3)
+            options.time_step = 0.09;
+        if (generation == 4)
+        {
+            boundaries.pressure["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.11};
+            boundaries.velocity["xmax"] = {SimpleFluid::BoundaryConditionType::Neumann, {}};
+        }
+
+        const auto actual = assemble(solver, equation, AssemblyPurpose::LinearSolve);
+        NativeSolver fresh_solver(mesh);
+        const Equation fresh_equation(mesh);
+        const auto fresh = assemble(fresh_solver, fresh_equation, AssemblyPurpose::LinearSolve);
+        expect_same_affine_system(actual, fresh);
+        Vector x(mesh->owned_cell_map()), actual_action(x.getMap()), expected_action(x.getMap());
+        fill_pressure_direction(x);
+        actual.schur->apply(x, actual_action);
+        fresh.schur->apply(x, expected_action);
+        expect_vector_near(actual_action, expected_action);
+
+        // Only the second assembly has unchanged geometry dependencies. Live
+        // velocity boundary values do not enter these blocks or freeze RHS.
+        EXPECT_EQ(solver.cache_statistics().geometry_block_reuses, generation == 0 ? 0U : 1U);
+        if (generation == 1 && options.coupled_workspace_policy == WorkspacePolicy::CachedProducts)
+        {
+            EXPECT_EQ(solver.cache_statistics().schur_slot_builds, 1U);
+            EXPECT_EQ(solver.cache_statistics().schur_slot_reuses, 1U);
+        }
+    }
+    EXPECT_EQ(solver.cache_statistics().cell_face_cache_builds, 1U);
+    EXPECT_EQ(solver.cache_statistics().schur_product_builds, 15U);
+}
+
 TEST_P(CoupledResidualAssemblyTest, RejectsInvalidOrRankDivergentPurposeBeforeNumericMutation)
 {
     NativeSolver solver(mesh);

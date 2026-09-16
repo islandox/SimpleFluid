@@ -59,12 +59,6 @@ private:
     CoupledPressureVelocityCacheStatistics* d_statistics;
 };
 
-template<class Column, class Scalar>
-void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar value)
-{
-    row[column] += value;
-}
-
 template<TpetraTypePack Pack, class MeshType>
 auto make_coupled_map(const MeshType& mesh) -> Teuchos::RCP<const typename Pack::map_type>
 {
@@ -500,6 +494,63 @@ Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(const typenam
     const auto prepared_schur =
         prepare_coupled_matrix<Pack>(pressure_stabilization.getRowMap(), Teuchos::null, std::move(cached_schur), 32);
     const auto& schur = prepared_schur.matrix;
+    const std::array<const matrix_type*, 4> sources{active_workspace.product[0].getRawPtr(),
+        active_workspace.product[1].getRawPtr(), active_workspace.product[2].getRawPtr(), &pressure_stabilization};
+    bool reuse_slots = prepared_schur.reused && schur->isStorageOptimized() &&
+                       active_workspace.schur_graph.getRawPtr() == schur->getCrsGraph().getRawPtr() &&
+                       active_workspace.pressure_gauge_gid == pressure_gauge_gid;
+    for (size_t source = 0; source < sources.size(); ++source)
+        reuse_slots = reuse_slots &&
+                      active_workspace.source_graphs[source].getRawPtr() == sources[source]->getCrsGraph().getRawPtr();
+    if (reuse_slots)
+    {
+        // getLocalMatrixHost synchronizes and marks the values modified; keep
+        // the host view scoped before fillComplete/device readers. Each slot
+        // receives precisely the previous product/component summation order.
+        {
+            const auto destination = schur->getLocalMatrixHost();
+            std::array<size_t, 4> source_entries{};
+            for (size_t row = 0; row < schur->getLocalNumRows(); ++row)
+            {
+                const auto local_row = static_cast<local_ordinal_type>(row);
+                const auto global_row = schur->getRowMap()->getGlobalElement(local_row);
+                const bool gauge = pressure_gauge_gid && global_row == *pressure_gauge_gid;
+                for (size_t source = 0; source < sources.size(); ++source)
+                {
+                    typename matrix_type::local_inds_host_view_type columns;
+                    typename matrix_type::values_host_view_type values;
+                    sources[source]->getLocalRowView(local_row, columns, values);
+                    if (!gauge)
+                    {
+                        for (size_t entry = 0; entry < values.extent(0); ++entry)
+                        {
+                            const auto slot =
+                                active_workspace.contribution_slots[source][source_entries[source] + entry];
+                            if (source < 3)
+                                destination.values(slot) -= values[entry];
+                            else
+                                destination.values(slot) += values[entry];
+                        }
+                    }
+                    source_entries[source] += values.extent(0);
+                }
+                const auto diagonal_slot = active_workspace.diagonal_slots[row];
+                if (gauge)
+                {
+                    destination.values(diagonal_slot) = scalar_type{1};
+                    continue;
+                }
+                scalar_type row_scale{1};
+                for (size_t slot = destination.graph.row_map(row); slot < destination.graph.row_map(row + 1); ++slot)
+                    row_scale = std::max(row_scale, std::abs(destination.values(slot)));
+                destination.values(diagonal_slot) += scalar_type{1.0e-10} * row_scale;
+            }
+        }
+        schur->fillComplete();
+        if (statistics != nullptr)
+            ++statistics->schur_slot_reuses;
+        return schur;
+    }
     const auto stabilization_col_map = pressure_stabilization.getColMap();
     for (size_t row = 0; row < pressure_stabilization.getLocalNumRows(); ++row)
     {
@@ -552,6 +603,52 @@ Teuchos::RCP<typename Pack::matrix_type> build_schur_approximation(const typenam
         add_coupled_global_values<Pack>(prepared_schur, global_row, columns(), values());
     }
     schur->fillComplete();
+    // Resolve source columns only after fillComplete has sorted/compressed
+    // both graphs and established the complete two-hop off-rank column map.
+    {
+        const auto destination = schur->getLocalMatrixHost();
+        const auto column_map = schur->getColMap();
+        active_workspace.diagonal_slots.resize(schur->getLocalNumRows());
+        auto find_slot = [&](size_t row, global_ordinal_type column)
+        {
+            const auto local_column = column_map->getLocalElement(column);
+            size_t slot = destination.graph.row_map(row);
+            const size_t end = destination.graph.row_map(row + 1);
+            while (slot < end && destination.graph.entries(slot) != local_column)
+                ++slot;
+            if (slot == end)
+                throw std::logic_error("Coupled Schur graph lost a required coefficient slot.");
+            return slot;
+        };
+        for (size_t row = 0; row < schur->getLocalNumRows(); ++row)
+        {
+            const auto gid = schur->getRowMap()->getGlobalElement(static_cast<local_ordinal_type>(row));
+            active_workspace.diagonal_slots[row] = find_slot(row, gid);
+        }
+        for (size_t source = 0; source < sources.size(); ++source)
+        {
+            auto& slots = active_workspace.contribution_slots[source];
+            slots.clear();
+            slots.reserve(sources[source]->getLocalNumEntries());
+            const auto source_columns = sources[source]->getColMap();
+            for (size_t row = 0; row < sources[source]->getLocalNumRows(); ++row)
+            {
+                const auto local_row = static_cast<local_ordinal_type>(row);
+                const auto gid = sources[source]->getRowMap()->getGlobalElement(local_row);
+                const bool gauge = pressure_gauge_gid && gid == *pressure_gauge_gid;
+                typename matrix_type::local_inds_host_view_type columns;
+                typename matrix_type::values_host_view_type values;
+                sources[source]->getLocalRowView(local_row, columns, values);
+                for (size_t entry = 0; entry < columns.extent(0); ++entry)
+                    slots.push_back(gauge ? 0 : find_slot(row, source_columns->getGlobalElement(columns[entry])));
+            }
+            active_workspace.source_graphs[source] = sources[source]->getCrsGraph();
+        }
+        active_workspace.schur_graph = schur->getCrsGraph();
+        active_workspace.pressure_gauge_gid = pressure_gauge_gid;
+    }
+    if (statistics != nullptr)
+        ++statistics->schur_slot_builds;
     return schur;
 }
 
@@ -560,6 +657,11 @@ template<TpetraTypePack Pack> void CoupledSchurWorkspace<Pack>::clear()
     inverse_diagonal = Teuchos::null;
     scaled_gradient = {};
     product = {};
+    source_graphs = {};
+    schur_graph = Teuchos::null;
+    contribution_slots = {};
+    diagonal_slots.clear();
+    pressure_gauge_gid.reset();
 }
 
 template<TpetraTypePack Pack> class CoupledSchurPreconditioner final : public Pack::operator_type
@@ -1092,6 +1194,8 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
 {
     d_cached_system = {};
     d_static_geometry = {};
+    d_geometry_block_time_step = {};
+    d_geometry_block_fixed_fluxes.clear();
     d_schur_workspace.clear();
     d_gradient_stabilization_products = {};
     d_cached_momentum_graph = nullptr;
@@ -1109,18 +1213,39 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_cell_face_adjacency(
     const auto cells = d_mesh->num_owned_cells();
     if (d_cell_face_offsets.size() == cells + 1 && d_cell_face_epoch == epoch)
         return;
-    std::vector<size_t> offsets;
-    std::vector<local_ordinal_type> faces;
+    std::vector<size_t> offsets{0}, coefficient_offsets{0}, neighbor_slots;
+    std::vector<local_ordinal_type> faces, columns;
     offsets.reserve(cells + 1);
-    offsets.push_back(0);
+    coefficient_offsets.reserve(cells + 1);
     for (size_t cell = 0; cell < cells; ++cell)
     {
-        FVM::detail::visit_cell_faces(*d_mesh, static_cast<local_ordinal_type>(cell),
-            [&](local_ordinal_type face) { faces.push_back(face); });
+        const auto cell_lid = static_cast<local_ordinal_type>(cell);
+        const auto row_begin = columns.size();
+        columns.push_back(cell_lid);
+        FVM::detail::visit_cell_faces(*d_mesh, cell_lid,
+            [&](local_ordinal_type face)
+            {
+                faces.push_back(face);
+                size_t slot = 0;
+                if (d_mesh->is_interior_face(face))
+                {
+                    const auto other = d_mesh->opposite_or_periodic_neighbor_cell(face, cell_lid);
+                    const auto begin = columns.begin() + row_begin;
+                    const auto found = std::find(begin, columns.end(), other);
+                    slot = static_cast<size_t>(found - begin);
+                    if (found == columns.end())
+                        columns.push_back(other);
+                }
+                neighbor_slots.push_back(slot);
+            });
         offsets.push_back(faces.size());
+        coefficient_offsets.push_back(columns.size());
     }
     d_cell_face_offsets = std::move(offsets);
     d_cell_faces = std::move(faces);
+    d_coefficient_offsets = std::move(coefficient_offsets);
+    d_coefficient_columns = std::move(columns);
+    d_face_neighbor_slots = std::move(neighbor_slots);
     d_cell_face_epoch = epoch;
     ++d_cache_statistics.cell_face_cache_builds;
 }
@@ -1632,6 +1757,25 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         d_gradient_stabilization_products = {};
     }
 
+    const auto reuse_static_geometry =
+        d_rebuild_policy == CoupledRebuildPolicy::OnOperatorGraphChange && !d_static_geometry.empty() &&
+        d_static_geometry.reference_density == reference_density &&
+        d_static_geometry.gradient_scheme == time_options.pressure_gradient_scheme &&
+        same_pressure_boundaries(d_static_geometry.pressure_boundaries, boundary_conditions.pressure);
+    // These blocks contain only geometry, boundary categories, pressure-gradient
+    // reconstruction and dt. Momentum and live velocity affect the RHS/Schur,
+    // never G, D or C. Be conservative about pressure values and fixed fluxes.
+    const int local_reuse_geometry = reuse_assembly_graph && reuse_static_geometry &&
+                                     d_geometry_block_time_step == time_options.time_step &&
+                                     d_geometry_block_linear_weights == enforce_global_compatibility &&
+                                     d_geometry_block_fixed_fluxes == fixed_boundary_fluxes;
+    int global_reuse_geometry = 0;
+    Teuchos::reduceAll(
+        *d_coupled_map->getComm(), Teuchos::REDUCE_MIN, 1, &local_reuse_geometry, &global_reuse_geometry);
+    const bool reuse_geometry_blocks = global_reuse_geometry != 0;
+    if (reuse_geometry_blocks)
+        ++d_cache_statistics.geometry_block_reuses;
+
     const bool assembled_backend = time_options.coupled_operator_backend == CoupledOperatorBackend::Assembled;
     detail::PreparedCoupledMatrix<Pack> prepared_coupled;
     if (assembled_backend)
@@ -1647,30 +1791,33 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
 
     std::array<detail::PreparedCoupledMatrix<Pack>, 3> prepared_gradient;
     std::array<detail::PreparedCoupledMatrix<Pack>, 3> prepared_divergence;
-    for (size_t component = 0; component < 3; ++component)
-    {
-        prepared_gradient[component] = detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(),
-            d_mesh->overlap_cell_map(), reuse_assembly_graph ? d_cached_system.gradient[component] : Teuchos::null, 16);
-        prepared_divergence[component] =
-            detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), d_mesh->overlap_cell_map(),
-                reuse_assembly_graph ? d_cached_system.divergence[component] : Teuchos::null, 16);
-    }
     std::array<Teuchos::RCP<matrix_type>, 3> gradient;
     std::array<Teuchos::RCP<matrix_type>, 3> divergence;
     for (size_t component = 0; component < 3; ++component)
     {
+        if (reuse_geometry_blocks)
+        {
+            prepared_gradient[component] = {d_cached_system.gradient[component], true};
+            prepared_divergence[component] = {d_cached_system.divergence[component], true};
+        }
+        else
+        {
+            prepared_gradient[component] =
+                detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), d_mesh->overlap_cell_map(),
+                    reuse_assembly_graph ? d_cached_system.gradient[component] : Teuchos::null, 16);
+            prepared_divergence[component] =
+                detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), d_mesh->overlap_cell_map(),
+                    reuse_assembly_graph ? d_cached_system.divergence[component] : Teuchos::null, 16);
+        }
         gradient[component] = prepared_gradient[component].matrix;
         divergence[component] = prepared_divergence[component].matrix;
     }
-    auto prepared_pressure_stabilization = detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), Teuchos::null,
-        reuse_assembly_graph ? d_cached_system.pressure_stabilization : Teuchos::null, 32);
+    auto prepared_pressure_stabilization =
+        reuse_geometry_blocks ? detail::PreparedCoupledMatrix<Pack>{d_cached_system.pressure_stabilization, true}
+                              : detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), Teuchos::null,
+                                    reuse_assembly_graph ? d_cached_system.pressure_stabilization : Teuchos::null, 32);
     auto& pressure_stabilization = prepared_pressure_stabilization.matrix;
 
-    const auto reuse_static_geometry =
-        d_rebuild_policy == CoupledRebuildPolicy::OnOperatorGraphChange && !d_static_geometry.empty() &&
-        d_static_geometry.reference_density == reference_density &&
-        d_static_geometry.gradient_scheme == time_options.pressure_gradient_scheme &&
-        same_pressure_boundaries(d_static_geometry.pressure_boundaries, boundary_conditions.pressure);
     if (reuse_static_geometry)
     {
         ++d_cache_statistics.static_geometry_reuses;
@@ -1765,6 +1912,13 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     std::vector<scalar_type> continuity_rhs_values(d_mesh->num_owned_cells(), scalar_type{});
     scalar_type local_prescribed_boundary_flux{};
     scalar_type local_continuity_target{};
+    // A single row scratch buffer is reused across owned cells. Structural
+    // masks retain explicitly inserted zeros without adding absent columns.
+    std::vector<std::array<scalar_type, 7>> coefficient_values;
+    std::vector<std::uint8_t> coefficient_masks;
+    Teuchos::Array<local_ordinal_type> local_columns;
+    Teuchos::Array<global_ordinal_type> global_columns;
+    Teuchos::Array<scalar_type> row_values;
 
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
@@ -1772,9 +1926,21 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         const auto cell_gid = d_mesh->owned_cell_map()->getGlobalElement(cell_lid);
         local_continuity_target += continuity_target.integrated_rate(cell_lid);
 
-        std::array<std::unordered_map<local_ordinal_type, scalar_type>, 3> gradient_rows;
-        std::array<std::unordered_map<local_ordinal_type, scalar_type>, 3> divergence_rows;
-        std::unordered_map<local_ordinal_type, scalar_type> stabilization_row;
+        const auto coefficient_begin = d_coefficient_offsets[owned];
+        const auto coefficient_count = d_coefficient_offsets[owned + 1] - coefficient_begin;
+        if (!reuse_geometry_blocks)
+        {
+            coefficient_values.assign(coefficient_count, {});
+            coefficient_masks.assign(coefficient_count, 0);
+        }
+        auto add_coefficient = [&](size_t slot, size_t component, scalar_type value)
+        {
+            if (!reuse_geometry_blocks)
+            {
+                coefficient_values[slot][component] += value;
+                coefficient_masks[slot] |= static_cast<std::uint8_t>(1U << component);
+            }
+        };
         std::array<scalar_type, 3> momentum_boundary_rhs{};
         scalar_type continuity_rhs = {};
 
@@ -1783,12 +1949,15 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         for (size_t incidence = faces_begin; incidence < faces_end; ++incidence)
         {
             const auto face_lid = d_cell_faces[incidence];
+            if (reuse_geometry_blocks && d_mesh->is_interior_face(face_lid))
+                continue;
             const auto area = d_mesh->face_area_vector_outward(face_lid, cell_lid);
             const std::array<scalar_type, 3> area_components{area.x, area.y, area.z};
 
             if (d_mesh->is_interior_face(face_lid))
             {
-                const auto other = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other_slot = d_face_neighbor_slots[incidence];
+                const auto other = d_coefficient_columns[coefficient_begin + other_slot];
                 const auto interpolation_weights = [&]() -> std::pair<scalar_type, scalar_type>
                 {
                     // Preserve the established arithmetic interpolation for
@@ -1812,10 +1981,10 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 const auto other_weight = interpolation_weights.second;
                 for (size_t component = 0; component < 3; ++component)
                 {
-                    detail::add_entry(gradient_rows[component], cell_lid, cell_weight * area_components[component]);
-                    detail::add_entry(gradient_rows[component], other, other_weight * area_components[component]);
-                    detail::add_entry(divergence_rows[component], cell_lid, cell_weight * area_components[component]);
-                    detail::add_entry(divergence_rows[component], other, other_weight * area_components[component]);
+                    add_coefficient(0, component, cell_weight * area_components[component]);
+                    add_coefficient(other_slot, component, other_weight * area_components[component]);
+                    add_coefficient(0, component + 3, cell_weight * area_components[component]);
+                    add_coefficient(other_slot, component + 3, other_weight * area_components[component]);
                 }
 
                 const auto center_delta = d_mesh->cell_center_vector(face_lid, cell_lid);
@@ -1823,8 +1992,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 if (distance_squared > scalar_type{})
                 {
                     const auto direct_weight = area.dot(center_delta) / distance_squared;
-                    detail::add_entry(stabilization_row, cell_lid, time_options.time_step * direct_weight);
-                    detail::add_entry(stabilization_row, other, -time_options.time_step * direct_weight);
+                    add_coefficient(0, 6, time_options.time_step * direct_weight);
+                    add_coefficient(other_slot, 6, -time_options.time_step * direct_weight);
                 }
                 continue;
             }
@@ -1862,11 +2031,11 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                     // u_P.A + dt*k*q_P + dt*grad(q)_P.A - dt*k*q_D.
                     for (size_t component = 0; component < 3; ++component)
                     {
-                        detail::add_entry(divergence_rows[component], cell_lid, area_components[component]);
+                        add_coefficient(0, component + 3, area_components[component]);
                     }
                     const auto boundary_coefficient =
                         FVM::detail::boundary_diffusion_coefficient(*d_mesh, face_lid, cell_lid, scalar_type{1});
-                    detail::add_entry(stabilization_row, cell_lid, time_options.time_step * boundary_coefficient);
+                    add_coefficient(0, 6, time_options.time_step * boundary_coefficient);
                     continuity_rhs += time_options.time_step * boundary_coefficient * normalized_pressure_value;
                 }
             }
@@ -1874,7 +2043,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             {
                 for (size_t component = 0; component < 3; ++component)
                 {
-                    detail::add_entry(gradient_rows[component], cell_lid, area_components[component]);
+                    add_coefficient(0, component, area_components[component]);
                     momentum_boundary_rhs[component] -=
                         normalized_pressure_value * FVM::detail::boundary_normal_distance(*d_mesh, face_lid, cell_lid) *
                         area_components[component];
@@ -1907,40 +2076,37 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         }
         continuity_rhs_values[owned] = continuity_rhs + continuity_target.integrated_rate(cell_lid);
 
-        for (size_t component = 0; component < 3; ++component)
+        if (!reuse_geometry_blocks)
         {
-            Teuchos::Array<local_ordinal_type> columns;
-            Teuchos::Array<scalar_type> values;
-            columns.reserve(gradient_rows[component].size());
-            values.reserve(gradient_rows[component].size());
-            for (const auto& [column, value] : gradient_rows[component])
+            for (size_t component = 0; component < 6; ++component)
             {
-                columns.push_back(static_cast<local_ordinal_type>(column));
-                values.push_back(value);
+                local_columns.clear();
+                row_values.clear();
+                for (size_t slot = 0; slot < coefficient_count; ++slot)
+                {
+                    if (coefficient_masks[slot] & (1U << component))
+                    {
+                        local_columns.push_back(d_coefficient_columns[coefficient_begin + slot]);
+                        row_values.push_back(coefficient_values[slot][component]);
+                    }
+                }
+                const auto& prepared =
+                    component < 3 ? prepared_gradient[component] : prepared_divergence[component - 3];
+                detail::add_coupled_local_values<Pack>(prepared, cell_lid, local_columns(), row_values());
             }
-            detail::add_coupled_local_values<Pack>(prepared_gradient[component], cell_lid, columns(), values());
-
-            columns.clear();
-            values.clear();
-            for (const auto& [column, value] : divergence_rows[component])
+            global_columns.clear();
+            row_values.clear();
+            for (size_t slot = 0; slot < coefficient_count; ++slot)
             {
-                columns.push_back(static_cast<local_ordinal_type>(column));
-                values.push_back(value);
+                if (coefficient_masks[slot] & (1U << 6))
+                {
+                    global_columns.push_back(
+                        d_mesh->overlap_cell_map()->getGlobalElement(d_coefficient_columns[coefficient_begin + slot]));
+                    row_values.push_back(coefficient_values[slot][6]);
+                }
             }
-            detail::add_coupled_local_values<Pack>(prepared_divergence[component], cell_lid, columns(), values());
-        }
-
-        {
-            Teuchos::Array<global_ordinal_type> columns;
-            Teuchos::Array<scalar_type> values;
-            columns.reserve(stabilization_row.size());
-            values.reserve(stabilization_row.size());
-            for (const auto& [column, value] : stabilization_row)
-            {
-                columns.push_back(d_mesh->overlap_cell_map()->getGlobalElement(column));
-                values.push_back(value);
-            }
-            detail::add_coupled_global_values<Pack>(prepared_pressure_stabilization, cell_gid, columns(), values());
+            detail::add_coupled_global_values<Pack>(
+                prepared_pressure_stabilization, cell_gid, global_columns(), row_values());
         }
 
         if (assembled_backend)
@@ -1952,7 +2118,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             {
                 Teuchos::Array<global_ordinal_type> columns;
                 Teuchos::Array<scalar_type> values;
-                columns.reserve(momentum_columns.extent(0) + gradient_rows[component].size());
+                columns.reserve(momentum_columns.extent(0) + coefficient_count);
                 values.reserve(columns.capacity());
                 for (size_t entry = 0; entry < momentum_columns.extent(0); ++entry)
                 {
@@ -1960,12 +2126,30 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                     columns.push_back(4 * column_cell_gid + static_cast<global_ordinal_type>(component));
                     values.push_back(momentum_values[entry]);
                 }
-                for (const auto& [column, value] : gradient_rows[component])
+                if (reuse_geometry_blocks)
                 {
-                    const auto column_cell_gid =
-                        d_mesh->overlap_cell_map()->getGlobalElement(static_cast<local_ordinal_type>(column));
-                    columns.push_back(4 * column_cell_gid + 3);
-                    values.push_back(value);
+                    typename matrix_type::local_inds_host_view_type gradient_columns;
+                    typename matrix_type::values_host_view_type gradient_values;
+                    gradient[component]->getLocalRowView(cell_lid, gradient_columns, gradient_values);
+                    for (size_t entry = 0; entry < gradient_columns.extent(0); ++entry)
+                    {
+                        const auto gid = gradient[component]->getColMap()->getGlobalElement(gradient_columns[entry]);
+                        columns.push_back(4 * gid + 3);
+                        values.push_back(gradient_values[entry]);
+                    }
+                }
+                else
+                {
+                    for (size_t slot = 0; slot < coefficient_count; ++slot)
+                    {
+                        if (coefficient_masks[slot] & (1U << component))
+                        {
+                            const auto gid = d_mesh->overlap_cell_map()->getGlobalElement(
+                                d_coefficient_columns[coefficient_begin + slot]);
+                            columns.push_back(4 * gid + 3);
+                            values.push_back(coefficient_values[slot][component]);
+                        }
+                    }
                 }
 
                 const auto coupled_row = 4 * cell_gid + static_cast<global_ordinal_type>(component);
@@ -1994,10 +2178,13 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         }
     }
 
-    for (size_t component = 0; component < 3; ++component)
+    if (!reuse_geometry_blocks)
     {
-        gradient[component]->fillComplete();
-        divergence[component]->fillComplete();
+        for (size_t component = 0; component < 3; ++component)
+        {
+            gradient[component]->fillComplete();
+            divergence[component]->fillComplete();
+        }
     }
 
     // The divergence matrices contain the face interpolation weights.
@@ -2012,6 +2199,9 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         {
             continuity_rhs_values[owned] -= time_options.time_step * constant_divergence_data[owned];
         }
+
+        if (reuse_geometry_blocks)
+            continue;
 
         const bool streamed = time_options.coupled_workspace_policy == CoupledWorkspacePolicy::StreamedProducts;
         detail::ScopedCoupledProduct lifetime(streamed ? &d_cache_statistics : nullptr);
@@ -2045,7 +2235,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             detail::add_coupled_global_values<Pack>(prepared_pressure_stabilization, row_gid, columns(), values());
         }
     }
-    pressure_stabilization->fillComplete();
+    if (!reuse_geometry_blocks)
+        pressure_stabilization->fillComplete();
 
     const auto stabilization_col_map = pressure_stabilization->getColMap();
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
@@ -2142,6 +2333,9 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 assembled.divergence, assembled.pressure_stabilization, pressure_gauge_gid, assembled.numeric_lease));
         ++d_cache_statistics.composite_operator_builds;
     }
+    d_geometry_block_time_step = time_options.time_step;
+    d_geometry_block_linear_weights = enforce_global_compatibility;
+    d_geometry_block_fixed_fluxes = fixed_boundary_fluxes;
     d_cached_momentum_graph = momentum.matrix->getCrsGraph().getRawPtr();
     d_cached_pressure_graph_signature = pressure_signature;
     d_cached_system = assembled;

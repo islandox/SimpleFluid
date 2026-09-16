@@ -154,6 +154,9 @@ struct CoupledPressureVelocityCacheStatistics
     size_t static_geometry_builds = 0;
     size_t static_geometry_reuses = 0;
     size_t matrix_graph_reuses = 0;
+    size_t geometry_block_reuses = 0;
+    size_t schur_slot_builds = 0;
+    size_t schur_slot_reuses = 0;
     /// Completed Schur numeric assemblies, including compatible graph reuse.
     size_t schur_builds = 0;
     /// Computed D_i diag(A_m)^-1 G_i products, including numeric refreshes.
@@ -181,18 +184,6 @@ struct CoupledStorageStatistics
 
 namespace detail
 {
-
-/**
- * @brief Accumulate one sparse coefficient into an assembly row.
- *
- * @tparam Column Sparse column-index type.
- * @tparam Scalar Sparse coefficient type.
- * @param row Row accumulator keyed by column.
- * @param column Column receiving the contribution.
- * @param value Contribution to add.
- */
-template<class Column, class Scalar>
-SIMPLEFLUID_SOLVERS_LOCAL void add_entry(std::unordered_map<Column, Scalar>& row, Column column, Scalar value);
 
 /**
  * @brief Build the four-unknown-per-cell map for a coupled system.
@@ -282,6 +273,13 @@ template<TpetraTypePack Pack> struct CoupledSchurWorkspace
     Teuchos::RCP<typename Pack::vector_type> inverse_diagonal;
     std::array<Teuchos::RCP<typename Pack::matrix_type>, 3> scaled_gradient;
     std::array<Teuchos::RCP<typename Pack::matrix_type>, 3> product;
+    // Source entry order maps directly into the completed Schur CRS values.
+    // Graph owners keep every recorded slot tied to its symbolic generation.
+    std::array<Teuchos::RCP<const typename Pack::matrix_type::crs_graph_type>, 4> source_graphs;
+    Teuchos::RCP<const typename Pack::matrix_type::crs_graph_type> schur_graph;
+    std::array<std::vector<size_t>, 4> contribution_slots;
+    std::vector<size_t> diagonal_slots;
+    std::optional<typename Pack::global_ordinal_type> pressure_gauge_gid;
 
     SIMPLEFLUID_SOLVERS_LOCAL
     void clear();
@@ -611,6 +609,13 @@ private:
     mutable std::vector<size_t> d_cell_face_offsets;
     mutable std::vector<local_ordinal_type> d_cell_faces;
     mutable std::uint64_t d_cell_face_epoch = 0;
+    // Cell first, then first-seen neighbours; face order is never changed.
+    mutable std::vector<size_t> d_coefficient_offsets;
+    mutable std::vector<local_ordinal_type> d_coefficient_columns;
+    mutable std::vector<size_t> d_face_neighbor_slots;
+    mutable scalar_type d_geometry_block_time_step = {};
+    mutable bool d_geometry_block_linear_weights = false;
+    mutable std::vector<std::optional<scalar_type>> d_geometry_block_fixed_fluxes;
     mutable CoupledPressureVelocityCacheStatistics d_cache_statistics;
     mutable system_type d_cached_system;
     mutable std::optional<std::pair<CoupledOperatorBackend, CoupledWorkspacePolicy>> d_logged_backends;
