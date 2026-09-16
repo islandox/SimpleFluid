@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
+
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/GaussLinearGradientCache.hh"
 #include "FVM/details/FieldStoredCellOperators.hh"
@@ -52,7 +54,7 @@ namespace SimpleFluid::FVM
  * @tparam MeshType Runtime or statically dispatched mesh interface.
  */
 template<TpetraTypePack Pack, class MeshType = Mesh<Pack>>
-class CellGradientCache
+class SIMPLEFLUID_FVM_EXPORT CellGradientCache
 {
 public:
     using mesh_type = MeshType;
@@ -88,13 +90,7 @@ public:
      * @param mesh Shared mesh whose lifetime and geometry the cache retains.
      * @throws std::invalid_argument if @p mesh is null.
      */
-    explicit CellGradientCache(SP<const mesh_type> mesh)
-        : d_mesh(require_mesh(std::move(mesh))), d_boundary_locations(detail::boundary_face_locations(*d_mesh)),
-          d_interior_geometry(build_geometry(*d_mesh, d_boundary_locations, false)),
-          d_boundary_geometry(build_geometry(*d_mesh, d_boundary_locations, true)),
-          d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
-    {
-    }
+    explicit CellGradientCache(SP<const mesh_type> mesh);
 
     CellGradientCache(const CellGradientCache&) = delete;
     CellGradientCache& operator=(const CellGradientCache&) = delete;
@@ -124,17 +120,7 @@ public:
     }
 
     /** @brief Rebuild geometry-dependent weights at the current mesh epoch. */
-    void refresh()
-    {
-        const auto execution = acquire_mesh_execution(*d_mesh);
-        auto locations = detail::boundary_face_locations(*d_mesh);
-        auto interior = build_geometry(*d_mesh, locations, false);
-        auto boundary = build_geometry(*d_mesh, locations, true);
-        d_boundary_locations = std::move(locations);
-        d_interior_geometry = std::move(interior);
-        d_boundary_geometry = std::move(boundary);
-        d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
-    }
+    void refresh();
 
     /** @brief Geometry epoch represented by this cache. */
     std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
@@ -171,20 +157,9 @@ private:
         return mesh;
     }
 
+    SIMPLEFLUID_FVM_LOCAL
     static std::array<vec_type, 3> inverse_columns(
-        const std::array<std::array<real_t, 3>, 3>& normal)
-    {
-        std::array<vec_type, 3> inverse{};
-        for (size_t column = 0; column < inverse.size(); ++column)
-        {
-            auto local_normal = normal;
-            vec_type direction{};
-            direction.component(column) = real_t{1};
-            inverse[column] =
-                detail::solve_3x3(local_normal, direction);
-        }
-        return inverse;
-    }
+        const std::array<std::array<real_t, 3>, 3>& normal);
 
     static vec_type apply_inverse(
         const std::array<vec_type, 3>& inverse,
@@ -195,72 +170,11 @@ private:
              + inverse[2] * direction.z;
     }
 
+    SIMPLEFLUID_FVM_LOCAL
     static std::vector<CellGeometry> build_geometry(
         const mesh_type& mesh,
         const std::vector<boundary_location_type>& boundary_locations,
-        bool include_boundary_samples)
-    {
-        const auto execution = acquire_mesh_execution(mesh);
-        std::vector<CellGeometry> geometry(mesh.num_owned_cells());
-        std::vector<detail::GradientGeometrySample<mesh_type>> samples;
-        samples.reserve(6);
-        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            std::array<std::array<real_t, 3>, 3> normal{};
-            auto add_direction = [&](const vec_type& direction)
-            {
-                normal[0][0] += direction.x * direction.x;
-                normal[0][1] += direction.x * direction.y;
-                normal[0][2] += direction.x * direction.z;
-                normal[1][1] += direction.y * direction.y;
-                normal[1][2] += direction.y * direction.z;
-                normal[2][2] += direction.z * direction.z;
-            };
-
-            samples.clear();
-            bool has_boundary_sample = false;
-            detail::visit_gradient_geometry_samples(mesh, cell_lid, [&](const auto& sample)
-            {
-                if (!sample.interior)
-                {
-                    if (!boundary_locations.at(sample.face_lid).active) return;
-                    has_boundary_sample = true;
-                }
-                samples.push_back(sample);
-                add_direction(sample.direction);
-            }, include_boundary_samples);
-            if (include_boundary_samples && !has_boundary_sample) continue;
-            normal[1][0] = normal[0][1];
-            normal[2][0] = normal[0][2];
-            normal[2][1] = normal[1][2];
-
-            const auto inverse = inverse_columns(normal);
-            auto& cell_geometry = geometry[owned];
-            cell_geometry.interior_samples.reserve(samples.size());
-            if (include_boundary_samples)
-            {
-                cell_geometry.boundary_samples.reserve(samples.size());
-            }
-
-            for (const auto& sample : samples)
-            {
-                if (sample.interior)
-                {
-                    cell_geometry.interior_samples.push_back({
-                        sample.other_lid,
-                        apply_inverse(inverse, sample.direction)});
-                    continue;
-                }
-                cell_geometry.boundary_samples.push_back({
-                    boundary_locations.at(sample.face_lid),
-                    apply_inverse(inverse, sample.direction),
-                    sample.normal_distance});
-            }
-        }
-        return geometry;
-    }
+        bool include_boundary_samples);
 
     SP<const mesh_type> d_mesh;
     std::vector<boundary_location_type> d_boundary_locations;
@@ -268,6 +182,9 @@ private:
     std::vector<CellGeometry> d_boundary_geometry;
     std::uint64_t d_geometry_epoch = 0;
 };
+extern template class CellGradientCache<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
+extern template class CellGradientCache<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
+
 
 namespace detail
 {
