@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "geometry/PlanarALEMeshMotion.hh"
+
 #include <Teuchos_CommHelpers.hpp>
 
 #include <algorithm>

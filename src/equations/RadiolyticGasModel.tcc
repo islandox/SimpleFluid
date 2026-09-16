@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "equations/RadiolyticGasModel.hh"
+
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
 #include "utils/CompensatedSum.hh"
@@ -1230,7 +1232,8 @@ void RadiolyticGasModel<Pack, MeshType>::bubble_slip_volume_flux(
                 output_values(output.owned_row(face_lid), 0) = flux;
             }
         });
-    output.sync_ghosts();
+    if constexpr (requires { output.sync_ghosts(); })
+        output.sync_ghosts();
 }
 
 /**
