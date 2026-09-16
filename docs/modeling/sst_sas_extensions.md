@@ -1,6 +1,6 @@
 # SST-SAS support extensions
 
-This work starts from clean `feature/turbulence` at
+The earlier support series started from clean `feature/turbulence` at
 `8cf294944dd9c65112cf02040cd812a770cc90c6`, with the initial source extension
 already committed. The initial focused GCC baseline passed 20 registrations.
 Each support addition is tested and committed separately. All evidence here
@@ -10,11 +10,97 @@ parent, source units, source algebra, or external-comparison gates.
 
 ## Coupled nonlinear integration
 
-Active SST-SAS does not support `pressure_velocity_coupling = "coupledNonlinear"`.
-The solver rejects this combination before changing accepted state because SAS
-rollback does not include the nonlinear solver's accepted result and workspace.
-Source-disabled SST-SAS remains eligible for the existing NOX Boussinesq path,
-subject to that path's material, geometry, and driver restrictions.
+This extension starts from clean `feature/turbulence` at
+`809fd9e7843c1a6044b6c7daf3d0c1eb1eb03384`. Before editing, the GCC Debug
+NOX/SAS selection passed 57 serial tests with two MPI-only skips; both
+`CoupledNonlinearSolver_2procs` and `SASSupportedPaths_2procs` passed. The
+previous explicit active-SAS NOX rejection test also passed. These are local
+baseline results, independent of the historical GitHub LLVM failures.
+
+With `SIMPLEFLUID_ENABLE_NOX=ON`, native isothermal and physical Boussinesq
+drivers now accept active SAS with `PressureVelocityCoupling::CoupledNonlinear`
+(`"coupledNonlinear"`). NOX freezes viscosity, wall coefficients and turbulent
+pressure while solving velocity/pressure, retaining native explicit
+accepted-velocity transpose stress. The new `FrozenIsothermalInput` context
+does not allocate temperature. Turbulence advances once after flow acceptance;
+its source cap uses the physical timestep. Parent SST-1994 and source algebra
+are unchanged.
+
+The SAS transaction now restores the accepted nonlinear report as well as
+flow/model fields, applied-source diagnostics and time. Downstream failure no
+longer permanently disables retries. The NOX object and bounded workspace
+reuse storage, but every attempt copies restored accepted history into a new
+immutable context and resets solver validity. Rejected nonlinear scratch is
+never used as physical old-time data.
+
+NOX retains its fixed native orthogonal geometry, prescribed/axis-aligned slip
+velocity, Neumann pressure and mesh-periodic boundary contract. Isothermal
+tests cover assembled/composite operators, least-squares/Gauss-linear gradients,
+resolved-SST walls, periodicity and nonunit density. Physical Boussinesq tests
+cover thermal forcing, material feedback, scalar void and ideal radiolysis.
+Free-surface, boiling, precursors, custom momentum drivers, legacy drivers,
+unsupported boundaries and moving grids remain rejected for NOX. Their
+previously tested non-NOX SAS paths are unchanged. This does not introduce a
+monolithic turbulence/temperature/gas nonlinear solve or broaden the NOX
+geometry qualification to skewed/cylindrical meshes.
+
+The independent turbulence oracle starts with the preceding accepted k/omega
+and advances once with the final flow and physical timestep, then compares
+every output field with the driver, including the applied SAS record. Active
+fixtures require `max_source > 1e-6 s^-2`; a zero-source implementation cannot
+pass. Source-disabled SAS reproduces the parent SST velocity, pressure and
+flux bitwise. Rejection tests cover both failed NOX corrections and failures
+after successful flow/turbulence, including restoration of the accepted report
+and successful retry. Native frozen-input tests check residual and analytic
+directional-derivative agreement, deep copies, reused storage and retained
+callback isolation in serial and MPI.
+
+Final focused verification used the existing caches, without shared preset
+changes: GCC 16.2.1/Trilinos 17.2.0 with NOX **ON**, and Clang 22.1.8 with
+libc++/Trilinos 17.3.0 and NOX **OFF**. The latter exercises the frozen native
+context and disabled-backend rejection; it does not qualify enabled LLVM NOX.
+
+| Final check | Result |
+| --- | --- |
+| GCC Debug affected serial selection, including export audit | 85 passed; 3 expected MPI-only skips (88 registrations) |
+| GCC Debug explicit MPI selection | 4/4 registrations passed |
+| LLVM Debug affected serial selection, including export audit | 53 passed; 1 expected MPI-only skip (54 registrations) |
+| LLVM Debug explicit MPI selection | 2/2 registrations passed |
+| Whitespace review | `git diff --check` passed |
+
+MPI runs used host networking. The existing serial-only semi-structured body
+skips inside the broader MPI executable. `SASNonlinear_2procs` retains the
+`small_fixture` label. No production-size regression was introduced.
+
+Executed final build/test commands (logs retained locally under
+`build/verification/sas-nox-20260916/`):
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testCoupledNonlinearSolver testSASSupportedPaths testTurbulentBoussinesqSolver testIncompressibleIsothermalSolver testNoxLinearizationRetirement
+cmake --build --preset LLVM-Debug --parallel 1 --target testCoupledNonlinearSolver testSASSupportedPaths testTurbulentBoussinesqSolver
+ctest --test-dir build/gcc -C Debug -R '^(CoupledNonlinear.*Test\.|SASSupportedPathsTest\.|TurbulentBoussinesqSolverTest\.|IncompressibleIsothermalSolverTest\.|NoxLinearizationRetirementTest\.|simplefluid_elf_export_boundary$)' -E '_2procs' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SASNonlinear_2procs|CoupledNonlinearSolver_2procs|SASSupportedPaths_2procs|TurbulentBoussinesq_2procs)$' --output-on-failure
+ctest --test-dir build/llvm -C Debug -R '^(CoupledNonlinear.*Test\.|SASSupportedPathsTest\.|TurbulentBoussinesqSolverTest\.|simplefluid_elf_export_boundary$)' -E '_2procs' --output-on-failure
+ctest --test-dir build/llvm -C Debug -R '^(SASNonlinear_2procs|CoupledNonlinearSolver_2procs)$' --output-on-failure
+```
+
+Development failures were resolved: a missing context include, two test compile
+errors, mismatched native continuity/gauge overloads in the reference fixture,
+missing resolved-wall names, and rank-local instead of replicated NOX boundary
+configuration. The LLVM export audit exposed four additional ABI entries
+(902 total versus the old 900 ceiling). Hiding the virtual hooks then failed
+the GCC downstream-subclass link test: its vtable requires those exports.
+The final audit keeps them, adds exact-count anchors for the two virtual hooks
+and two constructor entries, and budgets exactly four additional symbols
+(ceiling 904), preserving private/vendor exclusions. No numerical tolerance,
+external reference manifest or flow-comparison acceptance gate was relaxed.
+There are no unresolved failures in the final selections.
+
+This extension is implemented, component-tested and solver-regression-tested.
+No enabled LLVM NOX run, Release campaign, new whole-flow OpenFOAM comparison,
+resolution study or physical-validation campaign was performed. Earlier SAS
+pointwise evidence and pending pitzDaily/3D scale-resolution qualifications
+remain distinct from this coupling verification.
 
 ## Cylindrical geometry
 
@@ -263,7 +349,11 @@ ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.*FreeSurface' --o
 ctest --test-dir build/gcc -C Debug -R '^SASFreeSurface_2procs$' --output-on-failure
 ```
 
-## Commit series and final verification
+## Earlier commit series and verification
+
+This section retains the preceding support campaign's pre-rebase commit IDs
+and test evidence. The current NOX extension and its own verification matrix
+are recorded above.
 
 | Support | Commit |
 | --- | --- |
@@ -279,7 +369,7 @@ ctest --test-dir build/gcc -C Debug -R '^SASFreeSurface_2procs$' --output-on-fai
 | Bulk/wall boiling | `65bfc8f` |
 | Fixed-grid free surface and liquid inventories | `e038b95` |
 
-The final numerical tree is `e038b95`; the verification record is committed
+That campaign's final numerical tree was `e038b95`; the verification record was committed
 separately. The source-policy Decimal reference still matches all six rows,
 and the small transient activation example still agrees between serial and
 two ranks with rtol=1e-9, atol=1e-11 (maximum applied source 522.89735022936

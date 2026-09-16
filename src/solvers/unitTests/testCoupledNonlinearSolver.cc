@@ -320,6 +320,98 @@ TEST(CoupledNonlinearProblemTest, FrozenPhysicalBoussinesqMatchesNativeStressSou
         }
 }
 
+TEST(CoupledNonlinearProblemTest, FrozenIsothermalMatchesNativeStressSourcesAndDerivative)
+{
+    for (const auto backend : {CoupledOperatorBackend::Assembled, CoupledOperatorBackend::BlockComposite})
+    {
+        State state;
+        state.time.coupled_operator_backend = backend;
+        NonlinearProblem::field_type viscosity(state.mesh, "isothermal_viscosity");
+        NonlinearProblem::velocity_field_type k_gradient(state.mesh, "isothermal_k_gradient");
+        for (size_t cell = 0; cell < state.mesh->num_owned_cells(); ++cell)
+        {
+            const auto center = state.mesh->cell_centroid(cell);
+            viscosity.set_owned_value(cell, .3 + .2 * center.x);
+            k_gradient.set_owned_value(cell, {.01 * center.x, -.02 * center.y, .03});
+        }
+        viscosity.sync_ghosts();
+        k_gradient.sync_ghosts();
+        const auto velocity_cache = FVM::cache_velocity_boundary_conditions<Pack>(state.mesh, state.boundaries);
+        NonlinearProblem::boundary_cache_type boundary_mu;
+        boundary_mu.mesh = state.mesh;
+        for (const auto& [batch, values] : velocity_cache.value)
+            boundary_mu.value[batch].assign(values.size(), .43);
+        const NonlinearProblem::FrozenIsothermalInput physical{viscosity, &k_gradient, &boundary_mu};
+        CoupledNonlinearWorkspace pool;
+        NonlinearProblem problem(state.mesh, state.velocity, state.pressure, state.boundaries,
+            state.time, state.nonlinear, 7., nullptr, physical, &pool);
+        auto x = problem.pack_initial();
+        const auto callbacks = problem.callbacks();
+        Vector residual(callbacks.map), expected(callbacks.map), repeated(callbacks.map);
+        ASSERT_TRUE(callbacks.residual(*x, residual));
+        FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, NativeMesh> flux_workspace(state.mesh);
+        FVM::pressure_weighted_face_fluxes(state.velocity, state.pressure, state.time.time_step / 7.,
+            velocity_cache, state.boundaries.pressure, flux_workspace, state.flux, state.time.pressure_gradient_scheme);
+        IncompressibleMomentumEquation<Pack, NativeMesh> equation(state.mesh);
+        CoupledPressureVelocitySolver<Pack, NativeMesh> native_solver(state.mesh);
+        const NonlinearProblem::continuity_target_type target(state.mesh);
+        const auto native = native_solver.assemble(equation, state.velocity, state.pressure,
+            state.flux, velocity_cache, state.boundaries, state.time, 7., &viscosity, &k_gradient, &boundary_mu, target);
+        native.linear_operator->apply(*x, expected);
+        expected.update(-1., *native.rhs, 1.);
+        EXPECT_LT(difference(residual, expected), 1.e-12);
+
+        Vector direction(callbacks.map), action(callbacks.map), plus(*x, Teuchos::Copy), minus(*x, Teuchos::Copy),
+            fplus(callbacks.map), fminus(callbacks.map);
+        set_direction(direction);
+        auto linearization = callbacks.linearize(*x);
+        linearization.jacobian->apply(direction, action);
+        constexpr double epsilon = 1.e-5;
+        plus.update(epsilon, direction, 1.);
+        minus.update(-epsilon, direction, 1.);
+        ASSERT_TRUE(callbacks.residual(plus, fplus));
+        ASSERT_TRUE(callbacks.residual(minus, fminus));
+        fplus.update(-1., fminus, 1.);
+        fplus.scale(.5 / epsilon);
+        EXPECT_LT(difference(action, fplus), 1.e-8);
+
+        viscosity.put_value(30.);
+        k_gradient.put_value({9., 8., 7.});
+        for (auto& [batch, values] : boundary_mu.value)
+            std::fill(values.begin(), values.end(), 43.);
+        // Reuse the other workspace slot with changed coefficients and no
+        // optional sources. Retained callbacks/actions must remain immutable.
+        for (int step = 0; step < 2; ++step)
+        {
+            NonlinearProblem next(state.mesh, state.velocity, state.pressure, state.boundaries,
+                state.time, state.nonlinear, 7., nullptr, NonlinearProblem::FrozenIsothermalInput{viscosity}, &pool);
+            ASSERT_TRUE(next.callbacks().residual(*next.pack_initial(), repeated));
+            EXPECT_GT(difference(residual, repeated), 1.e-4);
+            EXPECT_EQ(next.statistics().workspace_reuses, step == 1 ? 1U : 0U);
+            ASSERT_TRUE(callbacks.residual(*x, repeated));
+            EXPECT_LT(difference(residual, repeated), 1.e-14);
+            callbacks.linearize(*x).jacobian->apply(direction, repeated);
+            EXPECT_LT(difference(action, repeated), 1.e-12);
+        }
+    }
+}
+
+TEST(CoupledNonlinearProblemTest, IsothermalInvalidViscosityFailsCollectively)
+{
+    State state;
+    NonlinearProblem::field_type viscosity(state.mesh, "invalid_viscosity");
+    for (const double invalid : {-1., std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::infinity()})
+    {
+        viscosity.put_value(.1);
+        if (state.mesh->owned_cell_map()->getComm()->getRank() == 0)
+            viscosity.set_owned_value(0, invalid);
+        EXPECT_THROW((NonlinearProblem(state.mesh, state.velocity, state.pressure, state.boundaries,
+            state.time, state.nonlinear, 1., nullptr, NonlinearProblem::FrozenIsothermalInput{viscosity})),
+            std::invalid_argument);
+    }
+}
+
 TEST(CoupledNonlinearProblemTest, ContinuityTargetChangesIntegratedRowsAndGaugeMetric)
 {
     State state;
@@ -1447,13 +1539,18 @@ TEST(CoupledNonlinearSolverTest, RejectsPcgNonlinearCorrectionOverride)
     EXPECT_THROW(solve_nox(problem->callbacks(), *x, state.nonlinear, state.linear), std::invalid_argument);
 }
 
-TEST(CoupledNonlinearSolverTest, DerivedPhysicalSolverRejectsUnsupportedModeBeforeAdvancing)
+TEST(CoupledNonlinearSolverTest, CustomIsothermalDriverRejectsUnsupportedModeBeforeAdvancing)
 {
+    class CustomIsothermalSolver final : public IncompressibleIsothermalSolver<Pack>
+    {
+    public:
+        using IncompressibleIsothermalSolver<Pack>::IncompressibleIsothermalSolver;
+    };
     State state;
     state.time.nonlinear = state.nonlinear;
     EXPECT_THROW(
         {
-            IncompressibleIsothermalSolver<Pack> solver(state.mesh, state.boundaries, state.time, state.linear, 7.);
+            CustomIsothermalSolver solver(state.mesh, state.boundaries, state.time, state.linear, 7.);
             solver.step();
         },
         std::invalid_argument);

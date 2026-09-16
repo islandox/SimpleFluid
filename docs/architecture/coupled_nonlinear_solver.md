@@ -2,8 +2,9 @@
 
 `PressureVelocityCoupling::CoupledNonlinear` selects the optional NOX backend.
 Supported drivers are the native constant-kinematic-viscosity
-`FluidSolver<DefaultTpetraTypes>` and physical `BoussinesqSolver<DefaultTpetraTypes>`
-with frozen thermal, material, turbulence, and gas state during the flow solve.
+`FluidSolver<DefaultTpetraTypes>`, `IncompressibleIsothermalSolver<DefaultTpetraTypes>`,
+and physical `BoussinesqSolver<DefaultTpetraTypes>` with frozen material,
+turbulence (including active SST-SAS), thermal and gas state during the flow solve.
 Existing SIMPLE, PISO, PIMPLE, and
 `CoupledKrylov` modes retain their algorithms.
 
@@ -47,17 +48,26 @@ change does not introduce a separate input-file parser.
 
 The initial mode supports fixed orthogonal native finite-volume meshes,
 backward Euler, first-order upwind convection, constant nonnegative kinematic
-viscosity, prescribed Dirichlet/NoSlip or axis-aligned Slip velocity and
-Neumann pressure on physical boundaries, and mesh periodic interfaces. The
+viscosity or frozen physical viscosity fields, prescribed Dirichlet/NoSlip or
+axis-aligned Slip velocity and Neumann pressure on physical boundaries, and
+mesh periodic interfaces. The
 selected native least-squares or Gauss-linear pressure reconstruction is retained.
+Named velocity/pressure configuration must match on every mesh rank, including
+patches absent from that rank's local boundary batches.
 
-Built-in physical/material isothermal solvers, custom momentum
-subclasses, legacy mesh drivers, pressure outlets, extrapolated/oblique-slip velocity
-boundaries, nonorthogonal geometry, free-surface, boiling and precursor models,
-and moving-mesh contexts are unsupported.
+Custom momentum subclasses, legacy mesh drivers, pressure outlets,
+extrapolated/oblique-slip velocity boundaries, nonorthogonal geometry,
+free-surface, boiling and precursor models, and moving-mesh contexts are unsupported.
 They are rejected rather than silently losing their momentum sources or
 stress terms. A monolithic nonlinear temperature/turbulence/gas solve and ALE
 require separate trial residual and state contracts.
+
+The physical isothermal context copies effective dynamic viscosity, the
+turbulent kinetic-energy gradient and wall viscosity. It uses the native
+variable-viscosity incompressible assembly, preserving turbulent pressure and
+the explicit accepted-velocity transpose stress, without allocating a
+temperature field. Both physical contexts retain the parent SST-1994 closure
+when `SSTKOmegaSAS` is selected.
 
 The physical Boussinesq extension copies accepted temperature, density,
 effective dynamic viscosity, turbulent kinetic-energy gradient, and boundary
@@ -75,9 +85,20 @@ accepted flow solution. NOX callbacks never invoke these updates. A rejected
 flow preserves primary fields, time, and accepted solver diagnostics and
 restores material, material-feedback, gas, and void-fraction snapshots.
 Source/property updater callbacks may have caller-owned side effects and are
-not replayed or undone by residual evaluations. A later failure in the native
-post-flow model updates prevents retrying the partially advanced driver; this
-extension does not claim an atomic transaction over every multiphysics model.
+not replayed or undone by residual evaluations. In ordinary non-SAS Boussinesq
+runs, a later failure in post-flow model updates prevents retrying the partially
+advanced driver; those runs do not have an atomic multiphysics transaction.
+
+Active SST-SAS uses its complete accepted-state transaction, including the
+nonlinear result, applied-source record, flow/temperature/material/model fields
+and step diagnostics. A failure after flow acceptance restores them and allows
+retry. The isothermal NOX driver also captures its state for laminar and ordinary
+RANS runs. Retained NOX callbacks and workspace slots are private scratch:
+each retry constructs a new immutable context from restored accepted fields;
+`solve()` resets nonlinear validity before reusing allocations. No rejected
+context supplies old-time transport state. The retained-generation ownership
+contract is unchanged. SAS source evaluation and both turbulence solves occur
+once outside NOX callbacks, using physical time; active SAS rejects pseudo-time.
 
 Axis-aligned slip faces retain the native kinematic momentum treatment and
 have identically zero normal flux for every trial and directional state.
@@ -288,6 +309,11 @@ The subsequent physical Boussinesq extension has a separate
 It includes 35 nonlinear tests exercised across serial/MPI and matched physical
 convection runs; the initial matrix above is not a claim that every old check
 was repeated for the extension.
+
+The [SST-SAS support record](../modeling/sst_sas_extensions.md#coupled-nonlinear-integration)
+records the isothermal physical-context and active-SAS tests, including frozen
+native residual/derivative agreement, single-step turbulence equivalence,
+nonzero sources, disabled-source equality, and rollback/retry with NOX.
 
 The nonlinear equations differ from a single frozen-convection timestep.
 Compare converged nonlinear solutions against an equivalent residual and

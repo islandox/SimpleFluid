@@ -305,6 +305,16 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
+# Isothermal NOX adds one public context constructor (two Itanium entries) and
+# two virtual hooks. Even private overrides must remain exported: downstream
+# derived-driver vtables refer to them. The custom-driver link test covers this.
+simplefluid_require_exact_api(
+    "^SimpleFluid::CoupledNonlinearProblem::CoupledNonlinearProblem[(].*SimpleFluid::CoupledNonlinearProblem::FrozenIsothermalInput const&, SimpleFluid::CoupledNonlinearWorkspace[*][)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::supports_coupled_nonlinear[(][)] const$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::make_coupled_nonlinear_problem[(][)]$" 1)
+
 # Preserve all seven established FluidSolver/BoussinesqSolver constructor
 # signatures and the four mutable-MeshHandle additions.
 simplefluid_require_exact_api(
@@ -682,16 +692,18 @@ endif()
 # vendor or implementation-detail namespaces.
 # The planar-ALE API adds explicit old/new-volume overloads while retaining
 # the established protected solver subclass seam and exact pre-ALE entry
-# points. A current GCC Debug build has 787 exported SimpleFluid symbols;
-# while Release build has 805 exported. 900 leaves narrow growth headroom 
-# without claiming that an untested compiler or configuration has the same
-# symbol count. 
+# points. The historical ceiling was 900.
+# Isothermal NOX adds exactly four anchored ABI entries above; LLVM Debug now
+# exports 902. A ceiling of 904 grants only those four additions, retaining
+# the previous headroom and all private/vendor exclusions.
+# This does not claim that an untested compiler or configuration has the same
+# symbol count.
 # Private-family exclusions and exact API anchors above remain authoritative.
 if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 900)
+   OR simplefluid_api_symbol_count GREATER 904)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 900")
+        "SimpleFluid symbols; the reviewed public-API range is 300 to 904")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)

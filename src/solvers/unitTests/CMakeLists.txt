@@ -334,6 +334,10 @@ simplefluid_add_mpi_test(NAME SASMaterialFeedback_2procs TARGET testSASSupported
     ARGS "--gtest_filter=SASSupportedPathsTest.MaterialFeedbackPublishesAndRollsBackWithSAS"
     LABELS "mpi;turbulence;sas;feedback;small_fixture" TIMEOUT 120)
 
+simplefluid_add_mpi_test(NAME SASNonlinear_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.Nox*"
+    LABELS "mpi;turbulence;sas;nonlinear_solver;transaction;small_fixture" TIMEOUT 180)
+
 simplefluid_add_mpi_test(NAME SASScalarVoid_2procs TARGET testSASSupportedPaths PROCS 2
     ARGS "--gtest_filter=SASSupportedPathsTest.ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSAS"
     LABELS "mpi;turbulence;sas;void;small_fixture" TIMEOUT 120)

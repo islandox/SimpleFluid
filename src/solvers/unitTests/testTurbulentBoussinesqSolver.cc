@@ -1030,7 +1030,7 @@ TEST(TurbulentBoussinesqSolverTest, SASRejectsPseudoTimeAndAdvancesTurbulenceOnc
 }
 
 #ifdef SIMPLEFLUID_ENABLE_NOX
-TEST(TurbulentBoussinesqSolverTest, SASRejectsCoupledNonlinearBeforeMutatingAcceptedState)
+TEST(TurbulentBoussinesqSolverTest, SASRollsBackNonlinearResultAfterTemperatureFailureAndRetries)
 {
     using namespace SimpleFluid;
     SP<const MeshHandle<Pack>> mesh = std::make_shared<MeshHandle<Pack>>(
@@ -1073,6 +1073,10 @@ TEST(TurbulentBoussinesqSolverTest, SASRejectsCoupledNonlinearBeforeMutatingAcce
 
     options.sas.enabled = true;
     solver.configure_turbulence(options);
+    ASSERT_NO_THROW(solver.step());
+    ASSERT_TRUE(solver.find_turbulence_model()->sas_statistics().valid);
+    ASSERT_EQ(solver.step_index(), 2);
+    ASSERT_EQ(material_updates, 2);
     const auto field_values = [](const auto& field)
     {
         const auto values = field.owned_data().getLocalViewHost(Tpetra::Access::ReadOnly);
@@ -1097,19 +1101,16 @@ TEST(TurbulentBoussinesqSolverTest, SASRejectsCoupledNonlinearBeforeMutatingAcce
     const auto saved_time = solver.time();
     const auto saved_statistics = solver.last_step_statistics();
     const auto saved_nonlinear = solver.last_nonlinear_result();
-    try
-    {
-        solver.step();
-        FAIL() << "Active SAS must reject coupled nonlinear stepping.";
-    }
-    catch (const std::invalid_argument& error)
-    {
-        EXPECT_NE(std::string(error.what()).find("active SST-SAS"), std::string::npos);
-    }
+    // Finite individual sources overflow only when assembled, after successful
+    // nonlinear flow and both turbulence transports. Caller callbacks run once
+    // per attempt; their external side effects are intentionally not undone.
+    solver.add_temperature_source("overflow_one", std::numeric_limits<double>::max());
+    solver.add_temperature_source("overflow_two", std::numeric_limits<double>::max());
+    EXPECT_ANY_THROW(solver.step());
     EXPECT_EQ(accepted_fields(), saved_fields);
-    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_EQ(solver.step_index(), 2);
     EXPECT_DOUBLE_EQ(solver.time(), saved_time);
-    EXPECT_EQ(material_updates, 1);
+    EXPECT_EQ(material_updates, 3);
     const auto& statistics = solver.last_step_statistics();
     EXPECT_EQ(statistics.converged, saved_statistics.converged);
     EXPECT_EQ(statistics.nonlinear_iterations, saved_statistics.nonlinear_iterations);
@@ -1124,12 +1125,12 @@ TEST(TurbulentBoussinesqSolverTest, SASRejectsCoupledNonlinearBeforeMutatingAcce
     EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations, saved_nonlinear.residual_evaluations);
     EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds, saved_nonlinear.total_seconds);
 
-    options.sas.enabled = false;
-    solver.configure_turbulence(options);
+    solver.remove_temperature_source("overflow_one");
+    solver.remove_temperature_source("overflow_two");
     ASSERT_NO_THROW(solver.step());
-    EXPECT_EQ(solver.step_index(), 2);
-    EXPECT_DOUBLE_EQ(solver.time(), 2 * time.time_step);
-    EXPECT_EQ(material_updates, 2);
+    EXPECT_EQ(solver.step_index(), 3);
+    EXPECT_NEAR(solver.time(), 3 * time.time_step, 1.e-14);
+    EXPECT_EQ(material_updates, 4);
     EXPECT_TRUE(solver.last_nonlinear_result().converged);
 }
 #endif

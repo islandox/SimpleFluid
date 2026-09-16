@@ -279,6 +279,9 @@ mistaken for foundation or Phase 9 completion.
 - [x] Add rollback-safe SAS bulk/wall boiling and phase-change state.
 - [x] Add rollback-safe fixed-grid SAS free-surface/liquid-mass budgets,
       including lazy initialization and accepted history.
+- [x] Support NOX velocity-pressure coupling for native isothermal and physical
+      Boussinesq SAS, with frozen coefficients, one turbulence advance per
+      physical step, accepted-report restoration and retry after rejection.
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.
 - [ ] Perform qualified whole-flow external comparisons with explicit parent-SST

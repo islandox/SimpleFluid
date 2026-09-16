@@ -10,6 +10,7 @@
  */
 
 #include "solvers/FieldStateTransaction.hh"
+#include "solvers/CoupledNonlinearProblem.hh"
 #include "IncompressibleIsothermalSolver.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -267,6 +268,29 @@ auto IncompressibleIsothermalSolver<Pack>::assemble_coupled_system() -> coupled_
         target != nullptr ? *target : zero_target);
 }
 
+template<TpetraTypePack Pack>
+bool IncompressibleIsothermalSolver<Pack>::supports_coupled_nonlinear() const noexcept
+{
+    return typeid(*this) == typeid(IncompressibleIsothermalSolver<Pack>);
+}
+
+template<TpetraTypePack Pack>
+std::unique_ptr<CoupledNonlinearProblem> IncompressibleIsothermalSolver<Pack>::make_coupled_nonlinear_problem()
+{
+    if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
+    {
+        const auto* turbulence = find_turbulence_model();
+        const CoupledNonlinearProblem::FrozenIsothermalInput physical{
+            turbulence ? turbulence->effective_dynamic_viscosity() : stored_material_properties().dynamic_viscosity,
+            turbulence ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
+            turbulence ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr};
+        return std::make_unique<CoupledNonlinearProblem>(d_mesh, velocity(), pressure(),
+            d_problem.boundary_conditions(), d_problem.time_options(), d_problem.time_options().nonlinear,
+            d_reference_density, this->volume_continuity_target(), physical, this->coupled_nonlinear_workspace());
+    }
+    throw std::invalid_argument("coupledNonlinear requires the default Tpetra pack.");
+}
+
 /** @brief Advance pressure, velocity, and optional turbulence one step. */
 template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
 {
@@ -275,8 +299,11 @@ template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
     auto* sas_model = find_turbulence_model();
     const bool active_sas = sas_model && sas_model->type() == TurbulenceModelType::SSTKOmegaSAS
                             && sas_model->options().sas.enabled;
+    const bool nonlinear_flow =
+        d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear;
+    const bool transactional = active_sas || nonlinear_flow;
     if (sas_model) sas_model->validate_time_mode(d_problem.time_options().physical_time);
-    if (active_sas)
+    if (transactional)
     {
         sas_rollback.capture(pressure());
         sas_rollback.capture(this->pressure_correction());
@@ -289,13 +316,18 @@ template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
                         { pressure_velocity_residuals() = residuals; this->d_last_volume_continuity_residuals = volume; });
         sas_rollback.add([this, saved = stored_material_properties().snapshot()]
                         { stored_material_properties().restore(saved); });
-        sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        if (sas_model)
+            sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        sas_rollback.add([this, saved = this->d_last_nonlinear_result] { this->d_last_nonlinear_result = saved; });
         sas_rollback.add([this, time = this->d_time, step = this->d_step_index, statistics = d_last_step_statistics]
                         { this->d_time = time; this->d_step_index = step; d_last_step_statistics = statistics; });
     }
     try
     {
-        begin_step();
+        // NOX constructs private history/ghosts and publishes only after its
+        // physical gates. Preserve accepted reports until that publication.
+        if (!nonlinear_flow)
+            begin_step();
         if (auto* turbulence = find_turbulence_model())
         {
             turbulence->refresh_effective_properties(stored_material_properties(), d_reference_density);
@@ -313,7 +345,7 @@ template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
     }
     catch (...)
     {
-        if (active_sas)
+        if (transactional)
         {
             sas_rollback.restore();
             if (uses_legacy_backend()) this->sync_primary_fields_to_legacy();
