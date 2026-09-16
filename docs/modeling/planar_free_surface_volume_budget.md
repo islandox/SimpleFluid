@@ -710,9 +710,9 @@ fixed-flux boundary supplies the exact mesh-normal volume flux.
 | Geometry | Mutable native Cartesian X/Y/Z, serial/MPI; mutable native cylindrical axial-Z, serial/MPI; mutable native `SemiStructuredXY_Z` axial-Z, serial only | Const-only handles, legacy mesh compatibility, general unstructured/partitioned-unstructured/STK motion, non-axial cylindrical or semi-structured motion, topology change, remeshing, repartitioning |
 | Vessel/range | `constantArea`; `error` range and depletion policies | Tabulated vessel ALE and `clampAndReport` |
 | Time/flow | Backward Euler; laminar dimensional Boussinesq; SIMPLE, PISO, PIMPLE, or coupled Krylov using the common target; gravity zero or inward along the top axis | BDF2/other moving-volume histories, transverse/outward gravity, and RANS/wall-distance/wall-law paths |
-| Thermal/material | Physical temperature transport with accepted/trial $V m_l^*c_pT$ storage; nonzero `BoussinesqTemperatureOnly` pure-liquid expansion; adiabatic boundaries; rollback-safe static volumetric sources | Legacy nondimensional temperature, solids/conjugate heat transfer, nonadiabatic boundaries, pressure/composition material laws, dynamic material or source callbacks |
+| Thermal/material | Physical temperature transport with accepted/trial $V m_l^*c_pT$ storage; nonzero `BoussinesqTemperatureOnly` pure-liquid expansion; adiabatic boundaries; rollback-safe static volumetric sources or extensive interval fission budgets | Legacy nondimensional temperature, solids/conjugate heat transfer, nonadiabatic boundaries, pressure/composition material laws, dynamic material or source callbacks |
 | Liquid | `cellMassInventory`; every nonmoving patch has a closed velocity condition and absent or homogeneous-Neumann pressure, giving zero physical-boundary liquid flux | `globalConstantMass`, liquid inlet/outlet composition, separate solvent/solute/fissile inventories |
-| Gas/void | No gas model, or `sheng2024TwoPopulation` with a uniform geometry-invariant fission-power source, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | Sheng without fission power, Gaussian/spatial fission profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
+| Gas/void | No gas model, or `sheng2024TwoPopulation` with a uniform geometry-invariant source or an extensive interval fission budget, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | Sheng without fission power, unmapped Gaussian/spatial fission profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
 | Headspace/phase change | Fixed-temperature vented headspace with prescribed positive ambient absolute pressure | Closed/restricted headspace, non-fixed headspace-temperature policies, boiling, steam/condensation transport or escape |
 | Other transported physics | None beyond the supported liquid, temperature, momentum, and optional H2 equations | Delayed-neutron precursors and any optional extensive equation without ALE storage/flux/cache/rollback tests |
 
@@ -1059,3 +1059,42 @@ Full VOF/interface capturing and Euler--Euler gas momentum remain separate
 deferred model families. The present conservation tests establish the discrete
 contract for a flat moving boundary; they do not constitute quantitative
 physical validation.
+
+
+## External coupling intervals
+
+The laminar planar-ALE/PISO driver exposes `create_coupling_checkpoint()`,
+`restore_coupling_checkpoint(checkpoint)`, and `accept_coupling_checkpoint(checkpoint)`.
+All are collective on the mesh communicator. The move-only checkpoint belongs to
+one solver and may be restored repeatedly after multiple successful `step()` calls.
+Only one live checkpoint is allowed; destruction performs no MPI work and does not
+undo physical state. Configure every model and source before checkpoint creation.
+Changing topology, model ownership, callbacks, or solver configuration invalidates
+the checkpoint. The time step may change for subcycling and is restored on retry.
+
+Restoration recovers accepted geometry, physical fields, gas and liquid ledgers,
+source state, time and accepted history. Geometry epochs and preview generations
+remain monotonic, so retained geometry views become stale even when coordinates
+return to earlier values. Numeric transport and pressure caches are rebuilt.
+No checkpoint operation writes output files; callers publish output after acceptance.
+An interval-energy trial can be accepted only after its full duration has elapsed.
+
+`set_coupling_interval_energy(owned_joules, duration)` sets one finite nonnegative
+fission-energy budget per owned CFD cell for an interval beginning at `time()`.
+The fission source must already exist. The caller performs spatial mapping before
+setting this budget. Stable cell IDs carry fixed extensive budgets through every
+substep and ALE corrector. The source recomputes `q = E / (duration * current_volume)`
+on each candidate mesh, and both heat and radiolysis use that same field. A
+substep outside the interval fails before physical state advances. Replay never
+consumes or adds to the source budget. This is a first-order, uniform-in-time,
+material-following source approximation; pulse applications need temporal refinement.
+Ordinary nonuniform profiles and arbitrary dynamic callbacks remain unsupported in ALE.
+
+Before initializing Sheng state, callers may enable
+`enable_donor_hydrogen_deficit_tracking()`. Its `donor_hydrogen_deficit()` field is
+measured in mol H2-equivalent per control-volume m3. It follows the liquid carrier
+with conservative ALE transport, without bubble slip or diffusion, and receives
+the same hydrogen-production source as the gas model. Configured initial molecular
+hydrogen is included in the initial deficit. Donor transport has a separate balance
+report and does not change the nominal hydrodynamic liquid mass. Dissolved and
+bubble hydrogen remain separate inventories; the ledger never creates oxygen.

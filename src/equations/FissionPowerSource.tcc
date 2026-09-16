@@ -7,6 +7,112 @@ namespace SimpleFluid
 {
 
 template<TpetraTypePack Pack, class MeshType>
+void FissionPowerSource<Pack, MeshType>::set_interval_energy(
+    std::span<const scalar_type> owned_energy, scalar_type start, scalar_type duration)
+{
+    collective_detail::collective_local_validation(*d_mesh, "Fission interval energy", [&]
+    {
+        if (owned_energy.size() != d_mesh->num_owned_cells() || !std::isfinite(start) ||
+            !std::isfinite(duration) || duration <= scalar_type{} ||
+            !std::isfinite(start + duration) || start + duration <= start || d_time_multiplier)
+            throw std::invalid_argument("Fission interval energy requires owned-cell joules, finite time, "
+                                        "positive duration, and no user multiplier.");
+        for (size_t owned = 0; owned < owned_energy.size(); ++owned)
+        {
+            require_non_negative(owned_energy[owned], "interval joules");
+            const auto volume = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
+            if (!std::isfinite(volume) || volume <= scalar_type{} ||
+                !std::isfinite(owned_energy[owned] / duration / volume))
+                throw std::invalid_argument("Fission interval source requires finite positive cell volumes.");
+        }
+    });
+    require_uniform_value(start, "interval start");
+    require_uniform_value(duration, "interval duration");
+    d_interval_energy.assign(owned_energy.begin(), owned_energy.end());
+    d_interval_start = start;
+    d_interval_duration = duration;
+    d_source->clear_updater();
+    d_source->set_enabled(true);
+    refresh_interval_energy(start, duration);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void FissionPowerSource<Pack, MeshType>::refresh_interval_energy(scalar_type time, scalar_type time_step)
+{
+    collective_detail::collective_local_validation(*d_mesh, "Fission interval source refresh", [&]
+    {
+        const auto scale = std::max({scalar_type{1}, std::abs(time), std::abs(interval_end_time())});
+        const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * scale;
+        if (!has_interval_energy() || d_interval_energy.size() != d_mesh->num_owned_cells() ||
+            !std::isfinite(time) || !std::isfinite(time_step) || time_step <= scalar_type{} ||
+            time < d_interval_start - tolerance || time + time_step > interval_end_time() + tolerance)
+            throw std::invalid_argument("Fission substep lies outside the configured energy interval.");
+        for (size_t owned = 0; owned < d_interval_energy.size(); ++owned)
+        {
+            const auto volume = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
+            if (!std::isfinite(volume) || volume <= scalar_type{} ||
+                !std::isfinite(d_interval_energy[owned] / d_interval_duration / volume))
+                throw std::invalid_argument("Fission interval source produced invalid power density.");
+        }
+    });
+    require_uniform_value(time, "substep start");
+    require_uniform_value(time_step, "substep duration");
+    for (size_t owned = 0; owned < d_interval_energy.size(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        d_base_profile.set_owned_value(cell, d_interval_energy[owned] / d_interval_duration / d_mesh->cell_volume(cell));
+    }
+    d_base_profile.sync_ghosts();
+    apply_base_profile(scalar_type{1});
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto FissionPowerSource<Pack, MeshType>::snapshot() const -> StateSnapshot
+{
+    collective_detail::collective_local_validation(*d_mesh, "Fission source checkpoint", [&]
+    {
+        if (d_time_multiplier) throw std::logic_error("Cannot checkpoint a user fission multiplier.");
+    });
+    StateSnapshot result;
+    result.owner = this;
+    result.enabled = d_source->enabled();
+    result.interval_energy = d_interval_energy;
+    result.interval_start = d_interval_start;
+    result.interval_duration = d_interval_duration;
+    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        result.base.push_back(d_base_profile.value(cell));
+        result.applied.push_back(d_source->field().value(cell));
+    }
+    return result;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void FissionPowerSource<Pack, MeshType>::restore(const StateSnapshot& saved)
+{
+    collective_detail::collective_local_validation(*d_mesh, "Fission source restore", [&]
+    {
+        if (saved.owner != this || saved.base.size() != d_mesh->num_owned_cells() ||
+            saved.applied.size() != saved.base.size() || d_time_multiplier)
+            throw std::invalid_argument("Fission checkpoint is foreign or incompatible.");
+    });
+    d_interval_energy = saved.interval_energy;
+    d_interval_start = saved.interval_start;
+    d_interval_duration = saved.interval_duration;
+    d_source->clear_updater();
+    d_source->set_enabled(saved.enabled);
+    for (size_t owned = 0; owned < saved.base.size(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        d_base_profile.set_owned_value(cell, saved.base[owned]);
+        d_source->field().set_owned_value(cell, saved.applied[owned]);
+    }
+    d_base_profile.sync_ghosts();
+    d_source->field().sync_ghosts();
+}
+
+template<TpetraTypePack Pack, class MeshType>
 void FissionPowerSource<Pack, MeshType>::configure(const FissionPowerSourceOptions& options)
 {
     collective_detail::collective_local_validation(
@@ -46,6 +152,8 @@ void FissionPowerSource<Pack, MeshType>::initialize_constant(scalar_type power_d
                 power_density, "power density");
         });
     require_uniform_value(power_density, "power density");
+    d_interval_energy.clear();
+    d_interval_duration = {};
     d_base_profile.put_scalar(power_density);
     apply_base_profile(scalar_type{1});
 }
@@ -92,6 +200,8 @@ void FissionPowerSource<Pack, MeshType>::initialize_gaussian(
             "Gaussian standard deviation");
     }
 
+    d_interval_energy.clear();
+    d_interval_duration = {};
     scalar_type local_integral{};
     for (size_t owned = 0;
          owned < d_mesh->num_owned_cells();
@@ -208,6 +318,8 @@ void FissionPowerSource<Pack, MeshType>::initialize_from_shape(
                         : checked_scale(
                               total_power, profile_integral);
         });
+    d_interval_energy.clear();
+    d_interval_duration = {};
     copy_scaled_field(shape, scale);
     apply_base_profile(scalar_type{1});
 }
@@ -215,6 +327,8 @@ void FissionPowerSource<Pack, MeshType>::initialize_from_shape(
 template<TpetraTypePack Pack, class MeshType>
 void FissionPowerSource<Pack, MeshType>::set_time_multiplier(multiplier_type multiplier)
 {
+    if (has_interval_energy())
+        throw std::logic_error("An interval-energy source cannot install a time multiplier.");
     if (!multiplier)
     {
         throw std::invalid_argument(
@@ -406,6 +520,8 @@ void FissionPowerSource<Pack, MeshType>::initialize_from_power_density(const fie
         *d_mesh,
         "Fission power-density initialization",
         [&] { require_same_mesh(power_density); });
+    d_interval_energy.clear();
+    d_interval_duration = {};
     copy_non_negative_field(power_density);
     apply_base_profile(scalar_type{1});
 }

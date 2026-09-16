@@ -59,6 +59,9 @@ struct RadiolyticGasStepStatistics
     Scalar hydrogen_escaped = {};
     Scalar hydrogen_after = {};
     Scalar inventory_error = {}; ///< Hydrogen conservation residual.
+    Scalar donor_hydrogen_before = {}, donor_hydrogen_after = {}, donor_hydrogen_outflow = {};
+    Scalar donor_inventory_error = {}; ///< Tracked donor deficit plus production minus outflow.
+    RadiolyticTransportWork donor_transport_work;
     Scalar escaped_microbubble_count = {};
     Scalar escaped_large_bubble_count = {};
     Scalar escaped_bubble_count = {};
@@ -109,6 +112,7 @@ public:
         std::vector<scalar_type> d_transport_slip_face_values;
         std::vector<scalar_type> d_transport_carrier_face_values;
         statistics_type d_statistics;
+        bool d_donor_tracking_enabled = false;
         bool d_history_initialized = false;
         bool d_initial_state_initialized = false;
         scalar_type d_absolute_pressure_offset = {};
@@ -281,6 +285,15 @@ public:
     {
         return d_absolute_pressure;
     }
+    /** Enable a separate transported donor-H deficit before state initialization.
+     * Units are mol H2-equivalent per control-volume m^3. This diagnostic chemical
+     * inventory follows the liquid carrier without bubble slip or diffusion;
+     * the source equals generated H2. It does not modify hydrodynamic liquid mass.
+     */
+    void enable_donor_hydrogen_deficit_tracking();
+    bool donor_hydrogen_deficit_tracking_enabled() const noexcept { return d_donor_tracking_enabled; }
+    const field_type& donor_hydrogen_deficit() const noexcept { return d_donor_hydrogen_deficit; }
+
     /**
      * @brief Dissolved hydrogen concentration field.
      */
@@ -602,9 +615,9 @@ private:
         face_flux_field_type zero_flux, axial_flux;
         field_type micro_slip, large_slip, micro_alpha, large_alpha;
         // Dissolved, microbubble, and large-bubble graphs can differ.
-        std::array<FVM::TransportSystem<Pack>, 3> systems;
-        std::array<bool, 3> operator_ready{};
-        std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 3> symbolic_plans;
+        std::array<FVM::TransportSystem<Pack>, 4> systems;
+        std::array<bool, 4> operator_ready{};
+        std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 4> symbolic_plans;
     };
 
     SP<const mesh_type> d_mesh;
@@ -622,6 +635,9 @@ private:
     field_type d_previous_dynamic_viscosity;
     field_type d_previous_alpha_g;
 
+    field_type d_donor_hydrogen_deficit;
+    field_type d_donor_escape_rate;
+    bool d_donor_tracking_enabled = false;
     field_type d_dissolved_hydrogen;
     field_type d_dissolved_hydrogen_inventory;
     field_type d_excluded_dissolved_inventory;

@@ -74,6 +74,8 @@ RadiolyticGasModel<Pack, MeshType>::RadiolyticGasModel(
       d_previous_dynamic_viscosity(
           d_mesh, "radiolytic_previous_dynamic_viscosity"),
       d_previous_alpha_g(d_mesh, "radiolytic_previous_alpha_g"),
+      d_donor_hydrogen_deficit(d_mesh, "donorH2Deficit"),
+      d_donor_escape_rate(d_mesh, "donorH2OutflowRate"),
       d_dissolved_hydrogen(d_mesh, "C_H2"),
       d_dissolved_hydrogen_inventory(d_mesh, "I_H2"),
       d_excluded_dissolved_inventory(d_mesh, "I_H2_excluded"),
@@ -135,6 +137,8 @@ void RadiolyticGasModel<Pack, MeshType>::configure(
 {
     validate_radiolytic_gas_options(options);
     d_options = options;
+    d_donor_tracking_enabled = false;
+    d_output_fields.erase("donorH2Deficit");
     d_transport_workspace.reset();
     d_skip_zero_auxiliary_transport = false;
     d_transport_linear_options = {};
@@ -157,6 +161,19 @@ void RadiolyticGasModel<Pack, MeshType>::configure(
     d_cumulative_escaped_bubble_count = 0.0;
     d_last_statistics = {};
     initialize_fields();
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::enable_donor_hydrogen_deficit_tracking()
+{
+    collective_detail::collective_local_validation(*d_mesh, "Radiolytic donor tracking setup", [&]
+    {
+        if (d_initial_state_initialized || d_history_initialized ||
+            d_options.mode != RadiolyticGasMode::Sheng2024TwoPopulation)
+            throw std::logic_error("Donor-H tracking requires Sheng mode before state initialization.");
+    });
+    d_donor_tracking_enabled = true;
+    d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -269,6 +286,8 @@ void RadiolyticGasModel<Pack, MeshType>::initialize_fields()
         (1.0 - d_options.alpha_min)
         * d_options.initial_dissolved_hydrogen);
     d_excluded_dissolved_inventory.put_scalar(0.0);
+    d_donor_hydrogen_deficit.put_scalar(0.0);
+    d_donor_escape_rate.put_scalar(0.0);
     d_micro_number.put_scalar(
         d_options.initial_micro_number_density);
     d_micro_moles.put_scalar(d_options.initial_micro_moles);
@@ -373,6 +392,9 @@ void RadiolyticGasModel<Pack, MeshType>::initialize_state(
             liquid_fraction * d_options.initial_dissolved_hydrogen;
         d_dissolved_hydrogen_inventory.set_owned_value(
             cell_lid, dissolved_inventory);
+        if (d_donor_tracking_enabled)
+            d_donor_hydrogen_deficit.set_owned_value(cell_lid,
+                dissolved_inventory + d_micro_moles.value(cell_lid) + d_large_moles.value(cell_lid));
         d_dissolved_hydrogen.set_owned_value(
             cell_lid, published_concentration);
         d_excluded_dissolved_inventory.set_owned_value(
@@ -1269,7 +1291,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     const auto elapsed = [](auto begin)
     { return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(); };
     const size_t field_index = operator_slot == 0 ? 0 : 2 * operator_slot - 1 + reuse_population_operator;
-    auto& work = d_last_statistics.transport_work.at(field_index);
+    auto& work = operator_slot == 3 ? d_last_statistics.donor_transport_work
+                                    : d_last_statistics.transport_work.at(field_index);
 
     if (&escape_rate.mesh() != d_mesh.get())
     {
@@ -1588,6 +1611,13 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         d_escape_molar_rate,
         ale,
         slip_axis);
+
+    if (d_donor_tracking_enabled)
+    {
+        d_donor_escape_rate.put_scalar(0.0);
+        transport_scalar(d_donor_hydrogen_deficit, time_step, liquid_face_flux, nullptr,
+            0.0, false, false, d_donor_escape_rate, ale, slip_axis, 3);
+    }
 
     auto& axial_bubble_flux = workspace.axial_flux;
     const face_flux_field_type* bubble_liquid_flux =
@@ -2359,8 +2389,13 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
             "Sheng 2024 radiolysis requires a fission power source.");
     }
 
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_donor_tracking_enabled),
+        "Radiolytic donor-H tracking selection");
     d_last_statistics.hydrogen_before =
         total_hydrogen_inventory(ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes());
+    if (d_donor_tracking_enabled)
+        d_last_statistics.donor_hydrogen_before = global_integral(d_donor_hydrogen_deficit,
+            ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes());
     transport_populations(time_step, temperature, velocity, liquid_face_flux, material, ale, slip_axis);
 
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic local-kinetics integration",
@@ -2379,6 +2414,14 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
                         density_values(owned, 0), viscosity_values(owned, 0));
                 assign_cell_state(cell_lid,
                     integrate_cell_kinetics(cell_lid, time_step, power_values(owned, 0), properties));
+                if (d_donor_tracking_enabled)
+                {
+                    const auto deficit = d_donor_hydrogen_deficit.value(cell_lid) +
+                        time_step * d_hydrogen_production_rate.value(cell_lid);
+                    if (!std::isfinite(deficit) || deficit < scalar_type{})
+                        throw std::runtime_error("Radiolytic donor deficit is invalid.");
+                    d_donor_hydrogen_deficit.set_owned_value(cell_lid, deficit);
+                }
             }
         });
     d_dissolved_hydrogen_inventory.sync_ghosts();
@@ -2403,6 +2446,20 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
 
     d_last_statistics.hydrogen_produced =
         global_integral(d_hydrogen_production_rate) * time_step;
+    if (d_donor_tracking_enabled)
+    {
+        d_donor_hydrogen_deficit.sync_ghosts();
+        d_last_statistics.donor_hydrogen_after = global_integral(d_donor_hydrogen_deficit);
+        d_last_statistics.donor_hydrogen_outflow = global_integral(d_donor_escape_rate) * time_step;
+        d_last_statistics.donor_inventory_error = d_last_statistics.donor_hydrogen_after -
+            d_last_statistics.donor_hydrogen_before - d_last_statistics.hydrogen_produced +
+            d_last_statistics.donor_hydrogen_outflow;
+        const auto scale = std::max(scalar_type{1}, std::abs(d_last_statistics.donor_hydrogen_before) +
+            std::abs(d_last_statistics.hydrogen_produced) + std::abs(d_last_statistics.donor_hydrogen_after));
+        if (std::abs(d_last_statistics.donor_inventory_error) >
+            (scalar_type{4096} * std::numeric_limits<scalar_type>::epsilon() + scalar_type{1.e-10}) * scale)
+            throw std::runtime_error("Radiolytic donor-H inventory closure failed.");
+    }
     d_cumulative_hydrogen_produced +=
         d_last_statistics.hydrogen_produced;
     d_last_statistics.cumulative_hydrogen_produced =
@@ -2793,6 +2850,8 @@ RadiolyticGasModel<Pack, MeshType>::mutable_state_fields()
         &d_previous_density,
         &d_previous_dynamic_viscosity,
         &d_previous_alpha_g,
+        &d_donor_hydrogen_deficit,
+        &d_donor_escape_rate,
         &d_dissolved_hydrogen,
         &d_dissolved_hydrogen_inventory,
         &d_excluded_dissolved_inventory,
@@ -2835,6 +2894,8 @@ RadiolyticGasModel<Pack, MeshType>::state_fields() const
         &d_previous_density,
         &d_previous_dynamic_viscosity,
         &d_previous_alpha_g,
+        &d_donor_hydrogen_deficit,
+        &d_donor_escape_rate,
         &d_dissolved_hydrogen,
         &d_dissolved_hydrogen_inventory,
         &d_excluded_dissolved_inventory,
@@ -2892,6 +2953,7 @@ auto RadiolyticGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
             d_transport_bubble_carrier_volume_flux.value(face_lid));
     }
     result.d_statistics = d_last_statistics;
+    result.d_donor_tracking_enabled = d_donor_tracking_enabled;
     result.d_history_initialized = d_history_initialized;
     result.d_initial_state_initialized = d_initial_state_initialized;
     result.d_absolute_pressure_offset = d_absolute_pressure_offset;
@@ -2962,6 +3024,11 @@ void RadiolyticGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
         }
     }
     d_last_statistics = snapshot.d_statistics;
+    d_donor_tracking_enabled = snapshot.d_donor_tracking_enabled;
+    if (d_donor_tracking_enabled)
+        d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);
+    else
+        d_output_fields.erase("donorH2Deficit");
     d_history_initialized = snapshot.d_history_initialized;
     d_initial_state_initialized = snapshot.d_initial_state_initialized;
     d_absolute_pressure_offset = snapshot.d_absolute_pressure_offset;
