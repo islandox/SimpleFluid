@@ -1274,7 +1274,11 @@ Add data structures for mapping CFD feedback fields to a coarser external-source
 **Status:** the in-memory scaffold is implemented and focused-tested. It
 provides volume averaging, power import, a standard feedback-field registry,
 deterministic mapped snapshots, and a callback-driven placeholder outer loop
-with thermal-hydraulic subcycles and power exchange. This is not a production
+with thermal-hydraulic subcycles and power exchange. Reusable cell-field
+transfer adds centroid interpolation on supported mesh families and conservative
+cell-average/inventory projection between Cartesian or coaxial annular grids,
+including explicit partial coverage and conservation reports; see
+[mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md). This is not a production
 external-external-source physics interface or a external-source physics solver.
 
 - [x] Add feedback field registry:
@@ -1284,6 +1288,10 @@ external-external-source physics interface or a external-source physics solver.
   - [x] `C_i`
 - [x] Add volume-averaging utilities from CFD cells to feedback cells.
 - [x] Add conservative mapping tests for scalar fields.
+- [x] Add reusable mesh-to-mesh scalar/vector/tensor cell-field transfer with
+      nearest-cell and inverse-distance interpolation, conservative Cartesian
+      and cylindrical overlap projection, explicit intensive/extensive quantities,
+      coverage/inventory diagnostics, MPI donor exchange, and geometry/map invalidation.
 - [x] Add import path for externally supplied prescribed heat power density.
 - [x] Add deterministic in-memory snapshot export for mapped
       thermal-hydraulic feedback.
