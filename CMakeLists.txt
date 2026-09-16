@@ -9,7 +9,7 @@ project(SimpleFluid C CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/SimpleFluidDefaultOptions.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/Options.cmake")
 
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag(
@@ -17,7 +17,7 @@ check_cxx_compiler_flag(
     SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
 
 include(CTest)
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/profileGuidedOptimization.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/Profiling.cmake")
 
 if(SIMPLEFLUID_ENABLE_LTO AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
     if(POLICY CMP0138)
@@ -143,8 +143,6 @@ if(SIMPLEFLUID_ENABLE_NOX)
     endif()
 endif()
 
-set(SIMPLEFLUID_PCH_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrecompiledHeaders.hh")
-
 if(SIMPLEFLUID_BUILD_DOCS)
     find_package(Doxygen REQUIRED)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -166,14 +164,7 @@ endif()
 if(BUILD_TESTING)
     find_package(GTest REQUIRED)
     include(GoogleTest)
-    include("${CMAKE_CURRENT_LIST_DIR}/cmake/SimpleFluidTesting.cmake")
-
-    function(simplefluid_discover_tests target)
-        gtest_discover_tests(
-            ${target}
-            DISCOVERY_TIMEOUT ${SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT}
-            ${ARGN})
-    endfunction()
+    include("${CMAKE_CURRENT_LIST_DIR}/cmake/Testing.cmake")
 endif()
 
 add_subdirectory(src)

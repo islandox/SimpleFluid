@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
+
 #include "equations/BoussinesqModel.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/RadiolyticGasProperties.hh"
@@ -83,7 +85,7 @@ struct RadiolyticGasStepStatistics
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
          class MeshType = Mesh<Pack>>
-class RadiolyticGasModel
+class SIMPLEFLUID_EQUATIONS_EXPORT RadiolyticGasModel
 {
 public:
     using scalar_type = typename Pack::scalar_type;
@@ -462,19 +464,26 @@ private:
         scalar_type nucleation_moles = {};
     };
 
+    SIMPLEFLUID_EQUATIONS_LOCAL
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void initialize_fields();
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void register_output_fields();
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void reconstruct_absolute_pressure(
         scalar_type time,
         const field_type& gauge_pressure);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type prescribed_pressure(scalar_type time) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void update_ideal_gas_source(
         scalar_type time_step,
         const field_type& temperature,
         const field_type* fission_power_density,
         const field_type& alpha_g,
         scalar_type alpha_max);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void advance_two_population(
         scalar_type time_step,
         const field_type& temperature,
@@ -484,6 +493,7 @@ private:
         const field_type* fission_power_density,
         const FVM::ALEControlVolumeState* ale,
         Dimension slip_axis);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void transport_populations(
         scalar_type time_step,
         const field_type& temperature,
@@ -492,6 +502,7 @@ private:
         const material_type& material,
         const FVM::ALEControlVolumeState* ale,
         Dimension slip_axis);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void transport_scalar(
         field_type& field,
         scalar_type time_step,
@@ -505,48 +516,66 @@ private:
         Dimension slip_axis,
         size_t operator_slot = 0,
         bool reuse_population_operator = false);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     CellProperties cell_properties(scalar_type pressure, scalar_type temperature,
         scalar_type density, scalar_type dynamic_viscosity) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     CellKineticsState integrate_cell_kinetics(
         local_ordinal_type cell_lid,
         scalar_type time_step,
         scalar_type power_density,
         const CellProperties& properties);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void reconstruct_derived_fields(const field_type& temperature, const field_type& density,
         const field_type& dynamic_viscosity, bool record_event_statistics = true);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void update_inertial_pressure(
         scalar_type time_step,
         const field_type& temperature,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void sync_all_fields();
     /** @brief Compute a globally reduced volume integral. */
+    SIMPLEFLUID_EQUATIONS_LOCAL
     std::array<scalar_type, 5> population_integrals(std::span<const real_t> cell_volumes) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type global_integral(const field_type& field,
         std::span<const real_t> cell_volumes = {}) const;
     /** @brief Sum a rank-local scalar and replicate it on every rank. */
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type global_sum(scalar_type local_value) const;
     /** @brief Compute and replicate the communicator-wide scalar minimum. */
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type global_min(scalar_type local_value) const;
     /** @brief Compute and replicate the communicator-wide integer maximum. */
+    SIMPLEFLUID_EQUATIONS_LOCAL
     int global_max(int local_value) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void reduce_event_statistics();
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type total_hydrogen_inventory(
         std::span<const real_t> cell_volumes = {}) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type rise_velocity(
         scalar_type radius,
         scalar_type liquid_density,
         scalar_type dynamic_viscosity,
         scalar_type surface_tension) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     scalar_type concentration(
         const CellKineticsState& state,
         scalar_type liquid_fraction) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void assign_cell_state(
         local_ordinal_type cell_lid,
         const CellKineticsState& state);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     std::vector<field_type*> mutable_state_fields();
+    SIMPLEFLUID_EQUATIONS_LOCAL
     std::vector<const field_type*> state_fields() const;
 
     // Scratch storage is not accepted physical state. Numeric operators are
@@ -641,6 +670,7 @@ private:
     std::map<std::string, const field_type*> d_output_fields;
 };
 
-} // namespace SimpleFluid
+extern template class RadiolyticGasModel<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
+extern template class RadiolyticGasModel<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
-#include "equations/RadiolyticGasModel.tcc"
+} // namespace SimpleFluid

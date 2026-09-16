@@ -730,6 +730,23 @@ TEST(LiquidMassInventoryTest, PureDensityControlsVolumeAndPhaseChangeOnce)
     EXPECT_DOUBLE_EQ(diagnostics.mass_balance_residual, 0.0);
 }
 
+TEST(LiquidMassInventoryTest, CompiledDensityOperationsBorrowMoveOnlyCallbacks)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::LiquidMassInventory<Pack> inventory(mesh);
+    auto density = [value = std::make_unique<double>(1000.0)](Pack::local_ordinal_type) mutable
+    {
+        const auto result = *value;
+        *value -= 200.0;
+        return result;
+    };
+    inventory.initialize(1.0, density);
+    EXPECT_DOUBLE_EQ(inventory.totalMass(), 1000.0);
+    inventory.updatePureLiquidDensity(density);
+    EXPECT_DOUBLE_EQ(inventory.liquidVolume(), 1.25);
+    EXPECT_DOUBLE_EQ(density(0), 600.0);
+}
+
 TEST(LiquidMassInventoryTest, PhaseChangePreviewDoesNotMutateUntilCommitted)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());

@@ -225,7 +225,7 @@ solver type, the abstraction is probably in the wrong layer.
 
 `SimpleFluid::Equations` remains a logical link target, but compiled equation
 and solver specializations share the `SimpleFluidSolvers` DSO. On ELF builds,
-`cmake/SimpleFluidLinux.map` and `cmake/CheckSimpleFluidElfExports.cmake`
+`cmake/linkage/maps/Linux.map` and `cmake/testing/abi/CheckElfExports.cmake`
 enforce the public API and the narrowly reviewed Trilinos/Kokkos runtime
 bridges. Changes to explicit instantiations, visibility, or the shared PCH must
 retain that audit.
@@ -305,7 +305,7 @@ Useful configuration switches are:
 
 The project uses one shared precompiled header. Add only stable, frequently
 included third-party or standard-library headers to
-`cmake/PrecompiledHeaders.hh`; volatile project headers increase rebuild cost
+`cmake/targets/PrecompiledHeaders.hh`; volatile project headers increase rebuild cost
 and can create dependency cycles.
 
 ## Change discipline and code conventions

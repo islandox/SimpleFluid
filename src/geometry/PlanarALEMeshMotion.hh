@@ -221,5 +221,3 @@ private:
 extern template class PlanarALEMeshMotion<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid
-
-#include "geometry/PlanarALEMeshMotion.tcc"
