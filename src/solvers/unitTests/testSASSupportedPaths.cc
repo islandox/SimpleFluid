@@ -3,6 +3,7 @@
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
+#include <limits>
 #include <numbers>
 
 namespace
@@ -517,3 +518,218 @@ TEST(SASSupportedPathsTest, FixedFreeSurfaceStillRejectsSASALE)
     auto options=fixed_surface_options(); options.mode=FreeSurfaceMode::PlanarALE; options.ale.top_boundary="zmax";
     EXPECT_ANY_THROW(solver.configure_free_surface(options));
 }
+
+namespace
+{
+// NOX requires the named configuration to be replicated even on ranks which
+// do not own a particular patch. closed_boundaries() enumerates local patches.
+BoundaryConditionSet nox_box_boundaries()
+{
+    BoundaryConditionSet result;
+    for(const auto* name:{"xmin","xmax","ymin","ymax","zmin","zmax"})
+        result.velocity[name]={BoundaryConditionType::NoSlip,{}};
+    return result;
+}
+
+TimeStepperOptions nox_options()
+{
+    auto time=transient_options();
+    time.pressure_velocity_coupling=PressureVelocityCoupling::CoupledNonlinear;
+    time.nonlinear.linear_backend=LinearSolverBackend::Gmres;
+    time.nonlinear.maximum_iterations=40;
+    return time;
+}
+
+template<class Field> std::vector<double> owned_values(const Field& field)
+{
+    const auto view=field.owned_data().getLocalViewHost(Tpetra::Access::ReadOnly);
+    std::vector<double> result;
+    for(size_t i=0;i<view.extent(0);++i)
+        for(size_t j=0;j<view.extent(1);++j) result.push_back(view(i,j));
+    return result;
+}
+
+void expect_same_turbulence(const TurbulenceModel<Pack,Handle>& actual,
+    const TurbulenceModel<Pack,Handle>& expected)
+{
+    ASSERT_EQ(actual.output_fields().size(),expected.output_fields().size());
+    for(const auto& [name,field]:expected.output_fields())
+    {
+        SCOPED_TRACE(name);
+        const auto* other=actual.output_fields().at(name);
+        for(size_t cell=0;cell<field->num_owned_cells();++cell)
+            EXPECT_NEAR(other->value(cell),field->value(cell),1e-11*std::max(1.,std::abs(field->value(cell))));
+    }
+}
+}
+
+#ifdef SIMPLEFLUID_ENABLE_NOX
+TEST(SASSupportedPathsTest, NoxIsothermalAdvancesSASOnceAcrossBackendsAndGradients)
+{
+    for(auto backend:{CoupledOperatorBackend::Assembled,CoupledOperatorBackend::BlockComposite})
+        for(auto gradient:{FVM::CellGradientScheme::LeastSquares,FVM::CellGradientScheme::GaussLinear})
+        {
+            auto mesh=box_mesh(); auto bc=nox_box_boundaries();
+            bc.velocity["zmin"].type=bc.velocity["zmax"].type=BoundaryConditionType::Slip;
+            auto time=nox_options(); time.coupled_operator_backend=backend; time.pressure_gradient_scheme=gradient;
+            auto options=sas_options(); options.gradient_scheme=gradient;
+            if(gradient==FVM::CellGradientScheme::GaussLinear)
+            {
+                options.wall_treatment=TurbulenceWallTreatmentType::ResolvedLowReSST;
+                options.wall_options.boundary_names={"xmin","xmax","ymin","ymax"};
+            }
+            LinearSolverOptions linear; linear.tolerance=1e-11; linear.max_iterations=250;
+            IncompressibleIsothermalSolver<Pack> solver(mesh,bc,time,linear,7.);
+            auto& model=solver.configure_turbulence(options); initialize_circulation(solver);
+            TurbulenceModel<Pack,Handle> once(mesh,bc);
+            once.configure(options,solver.material_properties(),solver.reference_density());
+            const auto velocity_bc=FVM::cache_velocity_boundary_conditions<Pack>(mesh,bc);
+            for(int step=1;step<=3;++step)
+            {
+                ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+                EXPECT_TRUE(solver.last_nonlinear_result().converged);
+                EXPECT_GT(solver.last_nonlinear_result().residual_evaluations,1);
+                EXPECT_LT(solver.last_volume_continuity_residuals().maximum,time.nonlinear.continuity_tolerance);
+                EXPECT_EQ(solver.step_index(),step); EXPECT_NEAR(solver.time(),step*time.time_step,1e-15);
+                // An independent model advances the previous accepted k/omega
+                // exactly once with the final flow and the physical dt. This
+                // also checks the applied SAS record survives closure refresh.
+                ASSERT_NO_THROW(once.advance(solver.velocity(),solver.pressure_corrected_face_fluxes(),velocity_bc,
+                    time.time_step,solver.material_properties(),solver.reference_density(),time.non_orthogonal_treatment,linear));
+                expect_same_turbulence(model,once);
+                if(step==3) EXPECT_GT(solver.last_nonlinear_result().native_workspace_reuses,0U);
+            }
+        }
+}
+
+TEST(SASSupportedPathsTest, NoxDisabledSourceReproducesParentSST)
+{
+    auto mesh=box_mesh(); const auto bc=nox_box_boundaries(); const auto time=nox_options();
+    IncompressibleIsothermalSolver<Pack> parent(mesh,bc,time), disabled(mesh,bc,time);
+    auto options=sas_options(); options.model=TurbulenceModelType::SSTKOmega;
+    parent.configure_turbulence(options);
+    options.model=TurbulenceModelType::SSTKOmegaSAS; options.sas.enabled=false;
+    disabled.configure_turbulence(options);
+    initialize_circulation(parent); initialize_circulation(disabled);
+    for(int step=0;step<2;++step)
+    {
+        ASSERT_NO_THROW(parent.step());
+        ASSERT_NO_THROW(disabled.step());
+        EXPECT_EQ(owned_values(parent.velocity()),owned_values(disabled.velocity()));
+        EXPECT_EQ(owned_values(parent.pressure()),owned_values(disabled.pressure()));
+        EXPECT_EQ(owned_values(parent.pressure_corrected_face_fluxes()),owned_values(disabled.pressure_corrected_face_fluxes()));
+        expect_same_turbulence(*parent.find_turbulence_model(),*disabled.find_turbulence_model());
+        EXPECT_FALSE(disabled.find_turbulence_model()->sas_statistics().valid);
+    }
+}
+
+TEST(SASSupportedPathsTest, NoxPeriodicIsothermalFlowActivatesSAS)
+{
+    const ArrReal edges{0.,.25,.5,.75,1.};
+    SP<const Handle> mesh=std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{edges,edges,edges}},Vec3D<bool>{true,true,true}));
+    IncompressibleIsothermalSolver<Pack> solver(mesh,{},nox_options());
+    solver.configure_turbulence(sas_options());
+    for(size_t i=0;i<mesh->num_owned_cells();++i)
+    {
+        const auto p=mesh->cell_centroid(i); const auto pi=std::numbers::pi;
+        solver.velocity().set_owned_value(i,{std::sin(2*pi*p.y),std::sin(2*pi*p.z),std::sin(2*pi*p.x)});
+    }
+    solver.velocity().sync_ghosts();
+    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+    EXPECT_TRUE(solver.last_nonlinear_result().converged);
+}
+
+TEST(SASSupportedPathsTest, NoxRejectedFlowRestoresSASAndRetries)
+{
+    auto mesh=box_mesh(); auto time=nox_options();
+    time.nonlinear.forcing_initial=time.nonlinear.forcing_minimum=1e-10;
+    LinearSolverOptions linear; linear.max_iterations=250; linear.tolerance=1e-11;
+    IncompressibleIsothermalSolver<Pack> solver(mesh,nox_box_boundaries(),time,linear);
+    auto& model=solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+    const auto velocity=owned_values(solver.velocity()), pressure=owned_values(solver.pressure());
+    const auto flux=owned_values(solver.pressure_corrected_face_fluxes());
+    std::map<std::string,std::vector<double>> turbulence;
+    for(const auto& [name,field]:model.output_fields()) turbulence[name]=owned_values(*field);
+    const auto report=solver.last_nonlinear_result();
+    linear.max_iterations=1; solver.set_linear_solver_options(linear);
+    for(int attempt=0;attempt<2;++attempt)
+    {
+        EXPECT_THROW(solver.step(),std::runtime_error);
+        EXPECT_EQ(solver.step_index(),1); EXPECT_DOUBLE_EQ(solver.time(),time.time_step);
+        EXPECT_EQ(owned_values(solver.velocity()),velocity); EXPECT_EQ(owned_values(solver.pressure()),pressure);
+        EXPECT_EQ(owned_values(solver.pressure_corrected_face_fluxes()),flux);
+        for(const auto& [name,field]:model.output_fields()) EXPECT_EQ(owned_values(*field),turbulence.at(name));
+        EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds,report.total_seconds);
+        EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations,report.residual_evaluations);
+    }
+    linear.max_iterations=250; solver.set_linear_solver_options(linear);
+    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+}
+
+TEST(SASSupportedPathsTest, NoxBoussinesqRestoresActiveSourceAndMultiphysicsAfterLateRejection)
+{
+    auto mesh=box_mesh(); auto time=nox_options();
+    time.thermal_expansion=.001; time.gravity_z=-9.81; time.reference_temperature=300;
+    BoussinesqSolver<Pack> solver(mesh,nox_box_boundaries(),time);
+    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    ScalarVoidFractionOptions phase; phase.initial_alpha=.1; phase.alpha_collapse_time=1.;
+    solver.configure_scalar_void_fraction(phase);
+    MaterialFeedbackOptions feedback; feedback.reference_dynamic_viscosity=.001;
+    solver.configure_material_feedback(feedback);
+    auto options=seeded_radiolysis_options(RadiolyticGasMode::IdealGasSource);
+    auto& gas=solver.configure_radiolytic_gas(options);
+    solver.add_fission_power_source().initialize_constant(1.);
+    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+    ASSERT_TRUE(solver.last_nonlinear_result().converged);
+    const auto report=solver.last_nonlinear_result();
+    const auto velocity=owned_values(solver.velocity()), flux=owned_values(solver.pressure_corrected_face_fluxes());
+    const auto gas_before=gas.last_statistics();
+    expect_late_multiphysics_rollback(solver,[&]
+    {
+        EXPECT_EQ(owned_values(solver.velocity()),velocity);
+        EXPECT_EQ(owned_values(solver.pressure_corrected_face_fluxes()),flux);
+        EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds,report.total_seconds);
+        EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations,report.residual_evaluations);
+        EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after,gas_before.hydrogen_after);
+    });
+    EXPECT_EQ(solver.step_index(),2);
+    EXPECT_TRUE(solver.last_nonlinear_result().converged);
+}
+
+TEST(SASSupportedPathsTest, NoxSASRetainsPseudoTimeAndNonorthogonalRejections)
+{
+    auto mesh=box_mesh(); auto time=nox_options(); time.physical_time=false;
+    IncompressibleIsothermalSolver<Pack> pseudo(mesh,nox_box_boundaries(),time);
+    pseudo.configure_turbulence(sas_options()); initialize_circulation(pseudo);
+    const auto saved=owned_values(pseudo.velocity());
+    EXPECT_THROW(pseudo.step(),std::invalid_argument);
+    EXPECT_EQ(pseudo.step_index(),0); EXPECT_EQ(owned_values(pseudo.velocity()),saved);
+    if(Tpetra::getDefaultComm()->getSize()!=1) return; // Underlying semi-structured mesh is serial-only.
+    using Semi=Meshes::SemiStructuredXY_Z;
+    SP<const Handle> skewed=std::make_shared<Handle>(std::make_shared<Semi>(
+        Arr<Semi::Vec3>{{0,0,0},{1,0,0},{1,1,0},{0,1,0},{.4,.4,0}},
+        Arr<Arr<unsigned>>{{0,1,4},{1,2,4},{2,3,4},{3,0,4}},ArrReal{0,.25,.5,.75,1}));
+    IncompressibleIsothermalSolver<Pack> solver(skewed,closed_boundaries(*skewed),nox_options());
+    solver.configure_turbulence(sas_options());
+    EXPECT_THROW(solver.step(),std::invalid_argument);
+    EXPECT_EQ(solver.step_index(),0);
+}
+#else
+TEST(SASSupportedPathsTest, NoxDisabledBuildRejectsSASBeforeMutation)
+{
+    auto mesh=box_mesh(); auto time=nox_options();
+    IncompressibleIsothermalSolver<Pack> isothermal(mesh,nox_box_boundaries(),time);
+    isothermal.configure_turbulence(sas_options()); initialize_circulation(isothermal);
+    const auto before=owned_values(isothermal.velocity());
+    EXPECT_THROW(isothermal.step(),std::invalid_argument);
+    EXPECT_EQ(isothermal.step_index(),0); EXPECT_EQ(owned_values(isothermal.velocity()),before);
+    EXPECT_FALSE(isothermal.find_turbulence_model()->sas_statistics().valid);
+    BoussinesqSolver<Pack> thermal(mesh,nox_box_boundaries(),time);
+    thermal.configure_turbulence(sas_options());
+    EXPECT_THROW(thermal.step(),std::invalid_argument);
+    EXPECT_EQ(thermal.step_index(),0); EXPECT_FALSE(thermal.find_turbulence_model()->sas_statistics().valid);
+}
+#endif

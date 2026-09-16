@@ -3173,11 +3173,8 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::pressure_reference_de
 
 template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::supports_coupled_nonlinear() const noexcept
 {
-    const auto* turbulence = find_turbulence_model();
-    const bool active_sas = turbulence && turbulence->type() == TurbulenceModelType::SSTKOmegaSAS &&
-        turbulence->options().sas.enabled;
     return typeid(*this) == typeid(BoussinesqSolver<Pack>) && d_physical_model_enabled &&
-        !d_free_surface_model && !d_boiling_source_model && !d_precursor_model && !active_sas;
+        !d_free_surface_model && !d_boiling_source_model && !d_precursor_model;
 }
 
 template<TpetraTypePack Pack>
@@ -4355,6 +4352,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         sas_rollback.add([this, saved = stored_material_properties().snapshot()]
                         { stored_material_properties().restore(saved); });
         sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        sas_rollback.add([this, saved = this->d_last_nonlinear_result] { this->d_last_nonlinear_result = saved; });
         sas_rollback.add([this, time = this->d_time, step = this->d_step_index, statistics = d_last_step_statistics]
                         { this->d_time = time; this->d_step_index = step; d_last_step_statistics = statistics; });
     }
@@ -4368,7 +4366,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     std::optional<typename material_feedback_model_type::StateSnapshot> nonlinear_feedback_snapshot;
     std::optional<typename radiolytic_gas_model_type::StateSnapshot> nonlinear_gas_snapshot;
     std::optional<typename scalar_void_fraction_model_type::StateSnapshot> nonlinear_void_snapshot;
-    if (nonlinear_flow)
+    if (nonlinear_flow && !active_sas)
     {
         nonlinear_material_snapshot.emplace(stored_material_properties().snapshot());
         if (d_material_feedback_model)
@@ -4416,7 +4414,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     }
     catch (...)
     {
-        if (nonlinear_flow && !flow_accepted)
+        if (nonlinear_flow && !flow_accepted && !active_sas)
         {
             stored_material_properties().restore(*nonlinear_material_snapshot);
             if (nonlinear_feedback_snapshot)
@@ -4433,7 +4431,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
             sas_rollback.restore();
             if (uses_legacy_backend()) { this->sync_primary_fields_to_legacy(); sync_temperature_to_legacy(); }
         }
-        if ((free_surface_active && !active_sas) || (nonlinear_flow && flow_accepted))
+        if (!active_sas && (free_surface_active || (nonlinear_flow && flow_accepted)))
         {
             d_free_surface_step_failed = true;
         }

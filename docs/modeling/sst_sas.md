@@ -241,6 +241,15 @@ record. Solver scope is fixed-grid physical-time isothermal or Boussinesq
 flow and its existing compatible optional models, including signed buoyancy
 production and resolved SST
 wall policy. The existing high-Re k-epsilon wall policy remains incompatible.
+With `SIMPLEFLUID_ENABLE_NOX=ON`, `coupledNonlinear` freezes accepted turbulence
+coefficients during the velocity-pressure solve and advances k/omega once
+after its physical acceptance gates, using the physical timestep for SAS.
+It supports the native isothermal and physical Boussinesq drivers within the
+[NOX scope](../architecture/coupled_nonlinear_solver.md): fixed orthogonal
+geometry, prescribed or axis-aligned slip velocity, Neumann pressure and
+mesh periodic interfaces. Its existing free-surface, boiling, precursor,
+legacy-driver and moving-grid restrictions remain. The accepted nonlinear
+report participates in SAS rollback; a rejected downstream update can retry.
 Material feedback is included in the SAS transaction, restoring its mirrors
 as well as material and turbulence fields on failure. Scalar void diffusion
 and collapse also participate, including alpha_g, alpha_l and source mirrors;

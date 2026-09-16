@@ -1350,7 +1350,7 @@ void FluidSolver<Pack>::validate_pressure_velocity_selection() const
     if (unsupported)
     {
         throw std::invalid_argument("coupledNonlinear requires an explicitly supported native driver on "
-            "unchanged geometry; custom momentum, legacy, free-surface, and active SST-SAS paths are not supported.");
+            "unchanged geometry; custom momentum, legacy, free-surface, boiling, and precursor paths are not supported.");
     }
 #endif
 }
