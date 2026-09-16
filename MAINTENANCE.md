@@ -223,6 +223,11 @@ The CMake targets make the same boundary explicit:
 Keep dependencies pointing down this table. If a low-level layer needs a
 solver type, the abstraction is probably in the wrong layer.
 
+The compiled DIC preconditioner is owned by `SimpleFluid::FVM`: non-orthogonal
+FVM solves and higher-level solvers both use it. Its existing header path under
+`solvers/` is retained for source compatibility. Keep the FVM-only consumer
+test and the FVM/solver export audits passing when changing this ownership.
+
 `SimpleFluid::Equations` remains a logical link target, but compiled equation
 and solver specializations share the `SimpleFluidSolvers` DSO. On ELF builds,
 `cmake/linkage/maps/Linux.map` and `cmake/testing/abi/CheckElfExports.cmake`
@@ -266,6 +271,13 @@ Template declarations and definitions are intentionally split among `.hh`,
 should remain thin forwarding surfaces where a mapped implementation already
 exists. Review all included implementation fragments before changing a
 template interface.
+
+FVM's compiled gradient caches cover `DefaultTpetraTypes` with `Mesh` and
+`MeshHandle`. Consumers using other packs or statically dispatched mesh types
+(including `PartitionedMesh`) include `FVM/CellGradientCache.tcc` or
+`FVM/GaussLinearGradientCache.tcc` for the caches they instantiate. Likewise,
+custom mesh views include `FVM/ALEControlVolumeState.tcc` for ALE validation.
+Keep those definitions in the consumer's translation unit for local mesh types.
 
 ## Configure and build
 

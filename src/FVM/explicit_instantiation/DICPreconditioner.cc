@@ -1,4 +1,4 @@
-/** @file DICPreconditioner.cc @brief Explicit instantiations for DICPreconditioner. */
+/** @file DICPreconditioner.cc @brief FVM-owned explicit DIC instantiation. */
 
 #include "solvers/DICPreconditioner.tcc"
 

@@ -94,8 +94,20 @@ foreach(index RANGE ${last_symbol})
         message(FATAL_ERROR
             "Cannot decode FVM export with ${SIMPLEFLUID_CXXFILT}: ${name}; use a compatible llvm-cxxfilt")
     endif()
+    # DIC's public interface is shared by FVM and header-defined Belos users.
+    # Its private helpers remain subject to the detail-namespace prohibition.
+    if(name MATCHES "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::(DICPreconditioner|~DICPreconditioner|apply|getDomainMap|getRangeMap)([(]|$)")
+        continue()
+    endif()
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")
         message(FATAL_ERROR "Private implementation exported: ${name}")
+    endif()
+endforeach()
+
+# The lower-level FVM DSO must own the compiled DIC API; solvers consume it.
+foreach(method IN ITEMS DICPreconditioner apply)
+    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::detail::DICPreconditioner<[^\n]+>::${method}([(]|\n|$)")
+        message(FATAL_ERROR "Missing compiled DIC ${method} in FVM")
     endif()
 endforeach()
 

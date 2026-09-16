@@ -80,6 +80,8 @@ public:
      * Validation is collective on the mesh communicator. It is intentionally
      * repeated at each assembly boundary because this object is a non-owning
      * view whose originating trial may have been accepted or rolled back.
+     * Mesh, MeshHandle and SolidSubdomain with DefaultTpetraTypes are compiled
+     * into FVM. Other mesh types must include FVM/ALEControlVolumeState.tcc.
      */
     template<class MeshType>
     SIMPLEFLUID_FVM_EXPORT void validate(const MeshType& mesh) const;

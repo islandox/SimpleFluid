@@ -5,6 +5,10 @@
 
 #include <gtest/gtest.h>
 
+// Static PartitionedCartesian dispatch is outside the compiled Mesh/Handle set.
+#include "FVM/ALEControlVolumeState.tcc"
+#include "FVM/CellGradientCache.tcc"
+
 #include "FVM/Operators.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/MeshHandle.hh"

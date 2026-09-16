@@ -245,12 +245,6 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::SteadyStateFieldMonitor<.*>[ ]*::(require_mesh|require_field_mesh|capture_current_state)[(]")
 set(simplefluid_forbidden_api_symbols)
 foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
-    # Header-defined Belos consumers call the compiled DIC public interface.
-    # Keep every private DIC helper under the detail-namespace prohibition.
-    if(simplefluid_demangled_symbol MATCHES
-       "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::(DICPreconditioner|~DICPreconditioner|apply|getDomainMap|getRangeMap)[(]")
-        continue()
-    endif()
     foreach(simplefluid_forbidden_api_pattern
             IN LISTS simplefluid_forbidden_api_patterns)
         if(simplefluid_demangled_symbol MATCHES
@@ -271,8 +265,6 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::LiquidMassInventory<.*>[ ]*::previewCellwiseAdvance[(]"
     "^SimpleFluid::VolumeContinuityModel<.*>[ ]*::preview[(]"
     "^SimpleFluid::PlanarALEBoundary<.*>[ ]*::apply_kinematic_velocity[(]"
-    "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::DICPreconditioner[(]"
-    "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::apply[(]"
     "^SimpleFluid::CoupledBlockOperator<.*>[ ]*::CoupledBlockOperator[(]"
     "^SimpleFluid::CoupledBlockOperator<.*>[ ]*::apply[(]"
     "^SimpleFluid::FluidSolver<.*>[ ]*::step[(][)]$"
