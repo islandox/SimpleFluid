@@ -1,6 +1,8 @@
-add_library(SimpleFluidFields INTERFACE)
-add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
-target_include_directories(SimpleFluidFields INTERFACE
-    ${SIMPLEFLUID_PUBLIC_INCLUDE_DIRS}
+add_library(SimpleFluidFields STATIC
+    explicit_instantiation/MeshToMeshTransfer.cc
 )
-target_link_libraries(SimpleFluidFields INTERFACE SimpleFluidMesh)
+add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
+simplefluid_configure_component(SimpleFluidFields)
+target_link_libraries(SimpleFluidFields PUBLIC SimpleFluidMesh)
+simplefluid_exclude_from_pgo_sources(
+    "${CMAKE_CURRENT_SOURCE_DIR}/explicit_instantiation/MeshToMeshTransfer.cc")

@@ -293,6 +293,14 @@ void MeshHandle<Pack>::initialize_orthogonal(
     DistributionOptions options)
 {
     const auto comm = Tpetra::getDefaultComm();
+    const int allow_empty = options.allow_empty_partitions ? 1 : 0;
+    int empty_options_count = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &allow_empty, &empty_options_count);
+    if (empty_options_count != 0 && empty_options_count != comm->getSize())
+    {
+        throw std::invalid_argument(
+            "Orthogonal allow_empty_partitions must agree on every rank.");
+    }
     const auto rank = options.partition.value_or(
         static_cast<size_t>(comm->getRank()));
     const auto ranks = options.partitions.value_or(
@@ -324,30 +332,37 @@ void MeshHandle<Pack>::initialize_orthogonal(
             coordinate = candidate;
         }
     }
-    if (ranks > dimensions[coordinate])
+    if (ranks > dimensions[coordinate] && !options.allow_empty_partitions)
     {
         throw std::invalid_argument(
             "Orthogonal mesh has fewer cells than MPI ranks along "
             "its largest coordinate.");
     }
 
+    // Keep the partitioner's nonempty-slab contract, while allowing callers to
+    // retain the full communicator for transfers involving a very coarse mesh.
+    const auto active_partitions =
+        std::min(ranks, static_cast<size_t>(dimensions[coordinate]));
     Meshes::OrthoMeshPartitioner partitioner(
         mesh->topology(),
         static_cast<typename Meshes::OrthoMeshPartitioner::Dimension>(
             coordinate),
-        ranks,
+        active_partitions,
         static_cast<Meshes::OrthoMeshPartitioner::Ordinal>(
             options.ghost_layers));
 
     std::vector<size_t> owned_cells;
     std::vector<size_t> ghost_cells;
-    for (const auto id : partitioner.owned_cells(rank))
+    if (rank < active_partitions)
     {
-        owned_cells.push_back(mesh->cell_local_id(id));
-    }
-    for (const auto id : partitioner.ghost_cells(rank))
-    {
-        ghost_cells.push_back(mesh->cell_local_id(id));
+        for (const auto id : partitioner.owned_cells(rank))
+        {
+            owned_cells.push_back(mesh->cell_local_id(id));
+        }
+        for (const auto id : partitioner.ghost_cells(rank))
+        {
+            ghost_cells.push_back(mesh->cell_local_id(id));
+        }
     }
     initialize_cells(std::move(owned_cells), std::move(ghost_cells));
 
