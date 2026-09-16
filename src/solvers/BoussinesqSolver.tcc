@@ -3944,7 +3944,13 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
         density_guess[owned] = d_ale_old_density->value(cell);
         heat_capacity_guess[owned] = d_ale_old_heat_capacity->value(cell);
     }
-    auto candidate_level = static_cast<scalar_type>(accepted_surface.pool_level);
+    // Pressure prescribes the exact swept flux on the moving top. Its global
+    // source and trial geometry must therefore describe the same volume change.
+    // The thermodynamic pool level can differ from accepted mesh coordinates
+    // within the outer-corrector tolerance; it is not an exact geometric origin.
+    const auto accepted_mesh_level = d_ale_boundary->diagnostics().surface_elevation;
+    const auto top_area = d_ale_boundary->diagnostics().global_area;
+    auto candidate_level = accepted_mesh_level;
     if (d_volume_continuity_model->generation() != 0)
     {
         for (size_t owned = 0; owned < target_guess.size(); ++owned)
@@ -3952,7 +3958,6 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             target_guess[owned] = d_volume_continuity_model->continuity_target_field().value(
                 static_cast<local_ordinal_type>(owned));
         }
-        candidate_level += time_step * static_cast<scalar_type>(accepted_surface.pool_level_rate);
     }
 
     scalar_type last_level_residual{};
@@ -3975,6 +3980,12 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     {
         for (int corrector = 1; corrector <= d_free_surface_options.ale.maximum_correctors; ++corrector)
         {
+            scalar_type local_target_integral{};
+            for (const auto value : target_guess) local_target_integral += value;
+            scalar_type target_integral{};
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                1, &local_target_integral, &target_integral);
+            candidate_level = accepted_mesh_level + time_step * target_integral / top_area;
             d_ale_motion->begin_trial(candidate_level, time_step);
             d_active_ale.emplace(FVM::make_ale_control_volume_state(*d_mesh, *d_ale_motion));
             refresh_geometry_dependent_state();
@@ -4442,13 +4453,11 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                     (volume_trial.target().integrated_rate(static_cast<local_ordinal_type>(owned)) -
                         target_guess[owned]);
             }
-            const auto next_level = candidate_level + relaxation * level_residual;
             restore_accepted();
             target_guess = std::move(next_target);
             density_guess = std::move(next_density_guess);
             heat_capacity_guess = std::move(next_heat_capacity_guess);
             previous_gas_state = std::move(current_gas_state);
-            candidate_level = next_level;
         }
         std::ostringstream message;
         message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)

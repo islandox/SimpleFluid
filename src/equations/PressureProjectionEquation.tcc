@@ -15,6 +15,8 @@
 
 #include <array>
 #include <cmath>
+#include <iomanip>
+#include <sstream>
 
 namespace SimpleFluid
 {
@@ -674,9 +676,13 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         if (enforce_global_compatibility && d_pressure_gauge_gid && std::abs(global_values[0]) > tolerance)
         {
             d_cached_predictor_flux_valid = false;
-            throw std::invalid_argument("PressureProjectionEquation all-Neumann/fixed-flux "
-                                        "boundaries are globally incompatible with the integrated "
-                                        "continuity target.");
+            std::ostringstream message;
+            message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                    << "PressureProjectionEquation all-Neumann/fixed-flux boundaries are globally "
+                       "incompatible with the integrated continuity target: residual="
+                    << global_values[0] << " m^3/s, tolerance=" << tolerance
+                    << " m^3/s, scale=" << global_values[1] << " m^3/s.";
+            throw std::invalid_argument(message.str());
         }
     }
 
