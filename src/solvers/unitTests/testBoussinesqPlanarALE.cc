@@ -193,7 +193,8 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
     bool use_celata_slip = false,
     SimpleFluid::CoupledOperatorBackend backend = SimpleFluid::CoupledOperatorBackend::Assembled,
     SimpleFluid::CoupledWorkspacePolicy workspace = SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
-    SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares)
+    SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares,
+    bool track_donor = false)
 {
     auto mesh = make_column();
     SimpleFluid::LinearSolverOptions linear_options;
@@ -221,7 +222,8 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
         {
             gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
         }
-        solver->configure_radiolytic_gas(gas);
+        auto& gas_model = solver->configure_radiolytic_gas(gas);
+        if (track_donor) gas_model.enable_donor_hydrogen_deficit_tracking();
     }
     solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto surface_options = free_surface_options(maximum_correctors);
@@ -1922,6 +1924,214 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsMultiRankSemiStructuredBeforeS
         diagnostic = error.what();
     }
     EXPECT_NE(diagnostic.find("does not yet support multi-rank"), std::string::npos) << diagnostic;
+}
+
+
+/** Integrate physical liquid sensible energy independently of the solver report. */
+double coupling_sensible_energy(const ConfiguredCase& state)
+{
+    double local = 0.0;
+    const auto& mass = state.solver->liquid_mass_inventory().cellMassInventory();
+    const auto& cp = state.solver->material_properties().specific_heat_capacity;
+    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        local += state.mesh->cell_volume(cell) * mass.value(cell) * cp.value(cell) *
+            state.solver->temperature().value(cell);
+    }
+    double global = 0.0;
+    Teuchos::reduceAll(*state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &global);
+    return global;
+}
+
+TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwoAcceptedSubsteps)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25, true, 0.0, false,
+        SimpleFluid::RadiolyticPressureMode::Constant, false,
+        SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+        SimpleFluid::FVM::CellGradientScheme::LeastSquares, true);
+    auto& solver = *state.solver;
+    auto* gas = solver.find_radiolytic_gas_model();
+    const auto initial_energy = coupling_sensible_energy(state);
+    const auto initial_hydrogen = gas->global_submerged_hydrogen_moles();
+    const auto initial_history = solver.free_surface_history().size();
+    std::vector<double> energy(state.mesh->num_owned_cells());
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+        energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5 ? 0.01 : 0.02;
+    auto checkpoint = solver.create_coupling_checkpoint();
+    EXPECT_THROW(static_cast<void>(solver.create_coupling_checkpoint()), std::logic_error);
+    solver.set_coupling_interval_energy(energy, 0.02);
+    solver.step();
+    EXPECT_NEAR(solver.find_fission_power_source()->integrated_power(), 1.5, 1.e-13);
+    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
+    EXPECT_THROW(solver.set_coupling_interval_energy(energy, 0.02), std::logic_error);
+    solver.step();
+    const auto accepted_time = solver.time();
+    const auto accepted_level = top_elevation(*state.mesh);
+    const auto accepted_energy = coupling_sensible_energy(state);
+    const auto accepted_hydrogen = gas->global_submerged_hydrogen_moles();
+    const auto accepted_generation = gas->cumulative_hydrogen_produced();
+    const auto advanced_epoch = state.mesh->geometry_epoch();
+    std::vector<double> accepted_temperature;
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+        accepted_temperature.push_back(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)));
+    EXPECT_NEAR(accepted_energy - initial_energy, 0.03, 2.e-8);
+    EXPECT_GT(accepted_level, 1.0);
+    EXPECT_NEAR(accepted_generation, 0.03 * gas->options().hydrogen_yield_mol_per_j, 1.e-16);
+    EXPECT_NEAR(accepted_hydrogen - initial_hydrogen, accepted_generation, 2.e-12);
+    EXPECT_NEAR(gas->last_statistics().donor_inventory_error, 0.0, 2.e-12);
+    double local_donor = 0.0;
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        local_donor += state.mesh->cell_volume(cell) * gas->donor_hydrogen_deficit().value(cell);
+    }
+    double global_donor = 0.0;
+    Teuchos::reduceAll(*state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+        1, &local_donor, &global_donor);
+    EXPECT_NEAR(global_donor, initial_hydrogen + accepted_generation, 2.e-12);
+    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
+
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_GT(state.mesh->geometry_epoch(), advanced_epoch);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_EQ(solver.step_index(), 0);
+    EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
+    EXPECT_EQ(solver.free_surface_history().size(), initial_history);
+    EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), 0.0);
+    EXPECT_NEAR(gas->global_submerged_hydrogen_moles(), initial_hydrogen, 1.e-14);
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+        EXPECT_DOUBLE_EQ(gas->donor_hydrogen_deficit().value(static_cast<Pack::local_ordinal_type>(owned)), 1.0);
+    solver.set_coupling_interval_energy(energy, 0.02);
+    solver.step();
+    solver.step();
+    EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
+    EXPECT_NEAR(top_elevation(*state.mesh), accepted_level, 1.e-13);
+    EXPECT_NEAR(coupling_sensible_energy(state), accepted_energy, 2.e-8);
+    EXPECT_NEAR(gas->cumulative_hydrogen_produced(), accepted_generation, 1.e-16);
+    EXPECT_EQ(solver.free_surface_history().size(), initial_history + 2);
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+        EXPECT_NEAR(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)),
+            accepted_temperature[owned], 1.e-11);
+    solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_THROW(solver.restore_coupling_checkpoint(checkpoint), std::invalid_argument);
+}
+
+TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterFailedTrial)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 1);
+    state.solver->add_fission_power_source().initialize_constant(0.0);
+    auto& solver = *state.solver;
+    auto checkpoint = solver.create_coupling_checkpoint();
+    std::vector<double> invalid(state.mesh->num_owned_cells(), 0.0);
+    if (state.mesh->owned_cell_map()->getComm()->getRank() == 0 && !invalid.empty())
+        invalid[0] = -1.0;
+    EXPECT_THROW(solver.set_coupling_interval_energy(invalid, 0.01), std::exception);
+    std::vector<double> energy(state.mesh->num_owned_cells(), 0.01);
+    EXPECT_THROW(solver.set_coupling_interval_energy(energy, 0.0), std::invalid_argument);
+    solver.set_coupling_interval_energy(energy, 0.01);
+    const auto before_source = solver.find_fission_power_source()->integrated_power();
+    EXPECT_THROW(solver.step(), std::runtime_error);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
+    EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->integrated_power(), before_source);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->integrated_power(), 0.0);
+    EXPECT_FALSE(solver.find_fission_power_source()->has_interval_energy());
+    solver.accept_coupling_checkpoint(checkpoint);
+}
+
+TEST(BoussinesqCouplingIntervalTest, RejectsForeignCheckpointAndPreservesTrialState)
+{
+    auto first = make_case(Coupling::PISO, 0.0, 25, true);
+    auto second = make_case(Coupling::PISO, 0.0, 25, true);
+    auto checkpoint = first.solver->create_coupling_checkpoint();
+    EXPECT_THROW(second.solver->restore_coupling_checkpoint(checkpoint), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(second.solver->time(), 0.0);
+    first.solver->accept_coupling_checkpoint(checkpoint);
+}
+
+
+TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycles)
+{
+    constexpr double area = 0.75 * std::numbers::pi;
+    auto state = configure_matrix_case({MatrixMeshFamily::Cylindrical, SimpleFluid::Dimension::Z, "zmax", area}, 0.0);
+    auto& solver = *state.solver;
+    solver.add_fission_power_source().initialize_constant(0.0);
+    const auto original_geometry = capture_geometry(*state.mesh);
+    const auto original_map = state.mesh->owned_cell_map();
+    auto checkpoint = solver.create_coupling_checkpoint();
+    std::vector<double> energy(state.mesh->num_owned_cells());
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        energy[owned] = state.mesh->cell_volume(cell) * 1.e-6 *
+            (state.mesh->cell_centroid(cell).z < 0.5 ? 1.0 : 2.0);
+    }
+    solver.set_coupling_interval_energy(energy, 0.02);
+    solver.step();
+    solver.step();
+    const auto epoch = state.mesh->geometry_epoch();
+    EXPECT_GT(boundary_elevation(*state.mesh, state.definition), 1.0);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_GT(state.mesh->geometry_epoch(), epoch);
+    EXPECT_EQ(state.mesh->owned_cell_map().getRawPtr(), original_map.getRawPtr());
+    expect_geometry_restored(*state.mesh, original_geometry);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    solver.accept_coupling_checkpoint(checkpoint);
+}
+
+TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnlyOnce)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 20, true, 100.0);
+    auto& solver = *state.solver;
+    auto* gas = solver.find_radiolytic_gas_model();
+    solver.find_fission_power_source()->initialize_constant(1.e3);
+    solver.step(); // Create populations that can escape during the coupled interval.
+    const auto history_size = solver.free_surface_history().size();
+    const auto escape_before = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    auto checkpoint = solver.create_coupling_checkpoint();
+    std::vector<double> no_energy(state.mesh->num_owned_cells(), 0.0);
+    solver.set_coupling_interval_energy(no_energy, 0.02);
+    solver.step();
+    solver.step();
+    const auto escaped = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    const auto vented = solver.free_surface_diagnostics().vented_gas_moles.at("H2");
+    ASSERT_GT(escaped, escape_before);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), escape_before);
+    EXPECT_EQ(solver.free_surface_history().size(), history_size);
+    solver.set_coupling_interval_energy(no_energy, 0.02);
+    solver.step();
+    solver.step();
+    solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_NEAR(gas->cumulative_submerged_bubble_hydrogen_escaped(), escaped, 1.e-14);
+    EXPECT_NEAR(solver.free_surface_diagnostics().vented_gas_moles.at("H2"), vented, 1.e-14);
+    EXPECT_EQ(solver.free_surface_history().size(), history_size + 2);
+}
+
+
+TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDependencies)
+{
+    auto mesh = make_column();
+    Solver solver(mesh, planar_boundaries(), time_options(Coupling::PISO),
+        SimpleFluid::LinearSolverOptions{}, physical_options());
+    solver.configure_material_feedback(material_feedback_options());
+    solver.add_fission_power_source().initialize_constant(0.0);
+    auto& gas = solver.configure_radiolytic_gas(gas_options());
+    gas.enable_donor_hydrogen_deficit_tracking();
+    // Supported direct field initialization without initialize_linear_temperature().
+    solver.temperature().put_scalar(300.0);
+    ASSERT_NE(solver.configure_free_surface(free_surface_options(10)), nullptr);
+    EXPECT_FALSE(gas.initial_state_initialized());
+    auto checkpoint = solver.create_coupling_checkpoint();
+    EXPECT_TRUE(gas.initial_state_initialized());
+    EXPECT_TRUE(solver.find_free_surface_model()->initialized());
+    EXPECT_NEAR(gas.global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_TRUE(solver.planar_ale_enabled());
+    solver.accept_coupling_checkpoint(checkpoint);
 }
 
 } // namespace

@@ -141,6 +141,22 @@ public:
     PlanarALEMeshMotion(PlanarALEMeshMotion&&) = delete;
     PlanarALEMeshMotion& operator=(PlanarALEMeshMotion&&) = delete;
 
+    /** Accepted geometry checkpoint; reference edges and ownership remain fixed. */
+    class StateSnapshot
+    {
+        friend class PlanarALEMeshMotion;
+        const PlanarALEMeshMotion* owner = nullptr;
+        ArrReal axis_edges;
+        real_t accepted_surface = {};
+        MeshQualityMetrics accepted_quality;
+    };
+    /** Collective; requires no active geometry trial. */
+    [[nodiscard]] StateSnapshot snapshot() const;
+    /** Restore accepted geometry after any number of committed substeps.
+     * Publishes a fresh monotonic epoch and invalidates all old geometry views.
+     */
+    void restore(const StateSnapshot& snapshot);
+
     void begin_trial(real_t surface_elevation, real_t time_step) override;
     void accept_trial() override;
     void rollback_trial() override;

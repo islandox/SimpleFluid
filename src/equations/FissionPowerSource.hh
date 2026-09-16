@@ -23,6 +23,9 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <limits>
+#include <span>
+#include <vector>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -287,6 +290,32 @@ public:
         const field_type& shape,
         scalar_type total_power);
 
+    /** Opaque source state; callbacks are deliberately excluded. */
+    class StateSnapshot
+    {
+        friend class FissionPowerSource;
+        const FissionPowerSource* owner = nullptr;
+        std::vector<scalar_type> base, applied, interval_energy;
+        scalar_type interval_start = {}, interval_duration = {};
+        bool enabled = true;
+    };
+
+    /**
+     * Set extensive joules per owned cell over [start, start + duration].
+     * Stable cell IDs follow the moving material mesh. The interval is replayable:
+     * refresh_interval_energy() never consumes energy or advances a ledger.
+     * Collective; values must be finite/nonnegative, duration positive, and no
+     * user time multiplier may be installed.
+     */
+    void set_interval_energy(std::span<const scalar_type> owned_energy,
+        scalar_type start, scalar_type duration);
+    /** Recompute W/m^3 using current geometry; validate the requested subinterval. */
+    void refresh_interval_energy(scalar_type time, scalar_type time_step);
+    bool has_interval_energy() const noexcept { return d_interval_duration > scalar_type{}; }
+    scalar_type interval_end_time() const noexcept { return d_interval_start + d_interval_duration; }
+    StateSnapshot snapshot() const;
+    void restore(const StateSnapshot& snapshot);
+
     /**
      * @brief Install a non-negative time multiplier for the source field.
      * @note The callback must perform rank-local work only; callback failures
@@ -437,6 +466,9 @@ private:
     source_registry_type* d_registry; ///< Non-owning source registry.
     source_type* d_source; ///< Non-owning registry entry.
     multiplier_type d_time_multiplier;
+    std::vector<scalar_type> d_interval_energy;
+    scalar_type d_interval_start = {};
+    scalar_type d_interval_duration = {};
 };
 extern template class FissionPowerSource<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class FissionPowerSource<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;

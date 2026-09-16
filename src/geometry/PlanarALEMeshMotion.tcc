@@ -714,6 +714,45 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::begin_trial(real_t
     }
 }
 
+template<TpetraTypePack Pack>
+auto PlanarALEMeshMotion<Pack>::snapshot() const -> StateSnapshot
+{
+    // Existing trial preflight validates ownership, geometry parity and epoch
+    // without changing geometry. Reusing the accepted level requests no motion.
+    validate_collective_trial(d_accepted_surface_elevation, real_t{1});
+    StateSnapshot result;
+    result.owner = this;
+    result.axis_edges = current_axis_edges();
+    result.accepted_surface = d_accepted_surface_elevation;
+    result.accepted_quality = d_accepted_quality;
+    return result;
+}
+
+template<TpetraTypePack Pack>
+void PlanarALEMeshMotion<Pack>::restore(const StateSnapshot& saved)
+{
+    validate_collective_trial(d_accepted_surface_elevation, real_t{1});
+    const auto communicator = d_mesh->owned_cell_map()->getComm();
+    const int invalid = saved.owner != this || saved.axis_edges.size() != d_reference_axis_edges.size() ||
+        saved.axis_edges != candidate_axis_edges(saved.accepted_surface);
+    int any_invalid = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &invalid, &any_invalid);
+    if (any_invalid)
+        throw std::invalid_argument("Planar ALE checkpoint is foreign or incompatible.");
+    const bool same_surface = planar_ale_detail::collectively_equal(*communicator, saved.accepted_surface);
+    if (!same_surface)
+        throw std::invalid_argument("Planar ALE checkpoint elevations differ across ranks.");
+    // Never restore the old epoch: retained views must remain detectably stale.
+    replace_axis_edges(saved.axis_edges);
+    d_expected_geometry_epoch = d_mesh->geometry_epoch();
+    d_accepted_surface_elevation = saved.accepted_surface;
+    d_accepted_quality = saved.accepted_quality;
+    d_pre_trial_axis_edges.clear();
+    d_trial_geometry_edges = {};
+    d_trial_active = false;
+    reset_stationary_state();
+}
+
 template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::accept_trial()
 {
     validate_collective_transaction(TransactionAction::Accept);

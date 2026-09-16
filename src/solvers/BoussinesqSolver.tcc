@@ -2203,7 +2203,7 @@ void BoussinesqSolver<Pack>::validate_planar_ale_support(const FreeSurfaceOption
     // A spatially anchored fission profile would retain stale cell values after
     // the mesh moves.  Until that source owns an epoch-aware refresh contract,
     // every ALE heat/radiolysis use must be geometry-invariant.
-    if (d_fission_power_source)
+    if (d_fission_power_source && !d_fission_power_source->has_interval_energy())
     {
         scalar_type local_minimum_fission = std::numeric_limits<scalar_type>::infinity();
         scalar_type local_maximum_fission = -std::numeric_limits<scalar_type>::infinity();
@@ -3571,6 +3571,216 @@ void BoussinesqSolver<Pack>::advance_post_temperature_models(scalar_type time_st
 }
 
 /** @brief Execute one rollback-safe solver-integrated planar-ALE step. */
+/** Complete physical interval state. Geometry epochs and preview nonces stay monotonic. */
+template<TpetraTypePack Pack>
+struct BoussinesqSolver<Pack>::CouplingState
+{
+    const BoussinesqSolver* owner = nullptr;
+    std::string configuration;
+    std::vector<const void*> model_owners;
+    std::vector<std::pair<field_type*, FieldStateSnapshot<field_type>>> scalar_fields;
+    std::vector<std::pair<velocity_field_type*, FieldStateSnapshot<velocity_field_type>>> vector_fields;
+    std::vector<std::pair<face_flux_field_type*, FieldStateSnapshot<face_flux_field_type>>> face_fields;
+    std::vector<std::pair<volumetric_source_type*, bool>> sources;
+    typename ale_motion_type::StateSnapshot geometry;
+    typename material_type::StateSnapshot material;
+    typename material_feedback_model_type::StateSnapshot feedback;
+    typename liquid_mass_inventory_type::StateSnapshot liquid;
+    std::optional<typename free_surface_model_type::StateSnapshot> surface;
+    std::optional<typename volume_continuity_model_type::StateSnapshot> continuity;
+    std::optional<typename radiolytic_gas_model_type::StateSnapshot> gas;
+    std::optional<typename scalar_void_fraction_model_type::StateSnapshot> void_state;
+    std::optional<typename fission_power_source_type::StateSnapshot> fission;
+    scalar_type time = {}, time_step = {}, occupancy_error = {};
+    int step_index = 0;
+    bool primary_initialized = false, failed = false;
+    step_statistics_type statistics;
+    residual_type residuals;
+    continuity_residual_type volume_residuals;
+    NonlinearSolveResult nonlinear_result;
+    PlanarALEStepDiagnostics ale_diagnostics;
+    std::vector<FreeSurfaceHistoryRecord> history;
+};
+
+template<TpetraTypePack Pack>
+std::string BoussinesqSolver<Pack>::coupling_configuration_signature() const
+{
+    auto time_options = d_problem.time_options();
+    time_options.time_step = 1.0; // Subcycling may change dt; configuration may not change.
+    std::vector<std::pair<std::string, bool>> sources;
+    for (const auto& [name, source] : stored_temperature_sources().entries())
+        sources.emplace_back(name, true); // Enabled flags are checkpointed physical source state.
+    return std::to_string(d_radiolytic_gas_model &&
+               d_radiolytic_gas_model->donor_hydrogen_deficit_tracking_enabled()) +
+        encode_free_surface_options(d_free_surface_options) +
+        encode_planar_ale_runtime_options(time_options, d_problem.linear_options(),
+            this->pressure_linear_solver_options(), d_model_options,
+            d_material_feedback_model ? &d_material_feedback_model->options() : nullptr,
+            d_radiolytic_gas_model ? &d_radiolytic_gas_model->options() : nullptr,
+            d_problem.boundary_conditions(), sources,
+            this->has_mutable_mesh_handle(), uses_legacy_backend(), physical_transport_enabled(),
+            stored_turbulence_model().enabled(),
+            d_boiling_source_model && d_boiling_source_model->enabled(),
+            d_precursor_model && d_precursor_model->enabled(), d_scalar_void_fraction_explicitly_configured,
+            stored_material_properties().has_updater(), stored_temperature_sources().has_dynamic_updates());
+}
+
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::create_coupling_checkpoint() -> CouplingCheckpoint
+{
+    collective_detail::collective_local_validation(*d_mesh, "ALE coupling checkpoint", [&]
+    {
+        if (!planar_ale_enabled() || !d_active_coupling_checkpoint.expired() ||
+            d_active_ale || d_free_surface_step_failed ||
+            d_problem.time_options().pressure_velocity_coupling != PressureVelocityCoupling::PISO)
+            throw std::logic_error("Coupling checkpoints require idle, healthy planar ALE/PISO and no live checkpoint.");
+    });
+    validate_collective_model_state();
+    validate_planar_ale_support(d_free_surface_options);
+    initialize_free_surface_if_needed(true, false);
+    initialize_planar_ale_if_needed();
+    auto saved = std::make_shared<CouplingState>();
+    saved->owner = this;
+    saved->configuration = coupling_configuration_signature();
+    saved->model_owners = {d_ale_motion.get(), d_free_surface_model.get(), d_liquid_mass_inventory.get(),
+        d_volume_continuity_model.get(), d_material_feedback_model.get(), d_radiolytic_gas_model.get(),
+        d_scalar_void_fraction_model.get(), d_fission_power_source.get()};
+    saved->geometry = d_ale_motion->snapshot();
+    for (auto* field : {&pressure(), &this->pressure_correction(), &temperature(), d_clear_level.get(),
+             d_pool_level.get(), d_headspace_pressure.get(), d_pool_occupancy.get(), d_mesh_volume_rate.get(),
+             d_continuity_residual.get(), d_ale_old_density.get(), d_ale_old_heat_capacity.get()})
+        saved->scalar_fields.emplace_back(field, FieldStateSnapshot(*field));
+    for (auto* field : {&velocity(), &predictor_pressure_gradient(), &this->predictor_velocity()})
+        saved->vector_fields.emplace_back(field, FieldStateSnapshot(*field));
+    for (auto* field : {&old_face_fluxes(), &projected_face_fluxes(), d_mesh_relative_face_flux.get(),
+             d_bubble_slip_volume_flux.get()})
+        saved->face_fields.emplace_back(field, FieldStateSnapshot(*field));
+    for (const auto& [name, source] : stored_temperature_sources().entries())
+    {
+        saved->sources.emplace_back(source.get(), source->enabled());
+        saved->scalar_fields.emplace_back(&source->field(), FieldStateSnapshot(source->field()));
+    }
+    saved->material = stored_material_properties().snapshot();
+    saved->feedback = d_material_feedback_model->snapshot();
+    saved->liquid = d_liquid_mass_inventory->snapshot();
+    saved->surface.emplace(d_free_surface_model->snapshot());
+    saved->continuity.emplace(d_volume_continuity_model->snapshot());
+    if (d_radiolytic_gas_model) saved->gas.emplace(d_radiolytic_gas_model->snapshot());
+    if (d_scalar_void_fraction_model) saved->void_state.emplace(d_scalar_void_fraction_model->snapshot());
+    if (d_fission_power_source) saved->fission.emplace(d_fission_power_source->snapshot());
+    saved->time = d_time;
+    saved->time_step = this->time_step();
+    saved->step_index = d_step_index;
+    saved->primary_initialized = d_primary_fields_initialized;
+    saved->failed = d_free_surface_step_failed;
+    saved->statistics = d_last_step_statistics;
+    saved->residuals = pressure_velocity_residuals();
+    saved->volume_residuals = this->d_last_volume_continuity_residuals;
+    saved->nonlinear_result = this->d_last_nonlinear_result;
+    saved->ale_diagnostics = d_planar_ale_diagnostics;
+    saved->occupancy_error = d_pool_occupancy_volume_error;
+    saved->history = d_free_surface_history;
+    d_active_coupling_checkpoint = saved;
+    return CouplingCheckpoint(std::move(saved));
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::validate_coupling_checkpoint(const CouplingCheckpoint& checkpoint) const
+{
+    const auto& saved = checkpoint.d_state;
+    collective_detail::collective_local_validation(*d_mesh, "ALE interval checkpoint validation", [&]
+    {
+        const std::vector<const void*> owners{d_ale_motion.get(), d_free_surface_model.get(),
+            d_liquid_mass_inventory.get(), d_volume_continuity_model.get(), d_material_feedback_model.get(),
+            d_radiolytic_gas_model.get(), d_scalar_void_fraction_model.get(), d_fission_power_source.get()};
+        if (!saved || saved->owner != this || saved.get() != d_active_coupling_checkpoint.lock().get() ||
+            saved->model_owners != owners || saved->configuration != coupling_configuration_signature() ||
+            d_active_ale || !d_ale_motion || d_ale_motion->has_active_trial())
+            throw std::invalid_argument("Coupling checkpoint is stale, foreign, active, or reconfigured.");
+        size_t index = 0;
+        if (saved->sources.size() != stored_temperature_sources().entries().size())
+            throw std::invalid_argument("Coupling source registry changed after checkpoint.");
+        for (const auto& [name, source] : stored_temperature_sources().entries())
+            if (saved->sources[index++].first != source.get())
+                throw std::invalid_argument("Coupling source ownership changed after checkpoint.");
+    });
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::restore_coupling_checkpoint(const CouplingCheckpoint& checkpoint)
+{
+    validate_coupling_checkpoint(checkpoint);
+    const auto& saved = *checkpoint.d_state;
+    clear_volume_continuity_target();
+    clear_ale_pressure_boundary();
+    d_ale_temperature_density = nullptr;
+    d_active_ale.reset();
+    d_ale_motion->restore(saved.geometry);
+    refresh_geometry_dependent_state();
+    d_ale_boundary->refresh(d_free_surface_model->volumeMap());
+    for (const auto& [field, state] : saved.scalar_fields) state.restore(*field);
+    for (const auto& [field, state] : saved.vector_fields) state.restore(*field);
+    for (const auto& [field, state] : saved.face_fields) state.restore(*field);
+    for (const auto& [source, enabled] : saved.sources) source->set_enabled(enabled);
+    stored_material_properties().restore(saved.material);
+    d_material_feedback_model->restore(saved.feedback);
+    d_liquid_mass_inventory->restore(saved.liquid);
+    d_free_surface_model->restore(*saved.surface);
+    d_volume_continuity_model->restore(*saved.continuity);
+    if (saved.gas) d_radiolytic_gas_model->restore(*saved.gas);
+    if (saved.void_state) d_scalar_void_fraction_model->restore(*saved.void_state);
+    if (saved.fission) d_fission_power_source->restore(*saved.fission);
+    d_time = saved.time;
+    this->set_time_step(saved.time_step);
+    d_step_index = saved.step_index;
+    d_primary_fields_initialized = saved.primary_initialized;
+    d_free_surface_step_failed = saved.failed;
+    d_last_step_statistics = saved.statistics;
+    pressure_velocity_residuals() = saved.residuals;
+    this->d_last_volume_continuity_residuals = saved.volume_residuals;
+    this->d_last_nonlinear_result = saved.nonlinear_result;
+    d_planar_ale_diagnostics = saved.ale_diagnostics;
+    d_pool_occupancy_volume_error = saved.occupancy_error;
+    d_free_surface_history = saved.history;
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::accept_coupling_checkpoint(CouplingCheckpoint& checkpoint)
+{
+    validate_coupling_checkpoint(checkpoint);
+    collective_detail::collective_local_validation(*d_mesh, "ALE interval acceptance", [&]
+    {
+        if (d_free_surface_step_failed)
+            throw std::logic_error("A failed coupling interval cannot be accepted.");
+        if (d_fission_power_source && d_fission_power_source->has_interval_energy())
+        {
+            const auto end = d_fission_power_source->interval_end_time();
+            const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() *
+                std::max({scalar_type{1}, std::abs(end), std::abs(d_time)});
+            if (std::abs(d_time - end) > tolerance)
+                throw std::logic_error("Accept the complete fission-energy interval, not a partial subcycle.");
+        }
+    });
+    d_active_coupling_checkpoint.reset();
+    checkpoint.d_state.reset();
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::set_coupling_interval_energy(
+    std::span<const scalar_type> owned_cell_energy_joules, scalar_type interval_duration)
+{
+    collective_detail::collective_local_validation(*d_mesh, "Coupling interval source selection", [&]
+    {
+        const auto checkpoint = d_active_coupling_checkpoint.lock();
+        if (checkpoint && d_time != checkpoint->time)
+            throw std::logic_error("Restore the coupling checkpoint before replacing an interval energy budget.");
+        if (!planar_ale_enabled() || !d_fission_power_source || d_active_ale ||
+            (d_ale_motion && d_ale_motion->has_active_trial()))
+            throw std::logic_error("Interval energy requires an idle planar ALE solver with a fission source.");
+    });
+    d_fission_power_source->set_interval_energy(owned_cell_energy_joules, d_time, interval_duration);
+}
+
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
 {
     d_ale_temperature_density = nullptr;
@@ -3609,6 +3819,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     FieldStateSnapshot headspace_pressure_snapshot(*d_headspace_pressure);
     FieldStateSnapshot occupancy_snapshot(*d_pool_occupancy);
     FieldStateSnapshot continuity_residual_snapshot(*d_continuity_residual);
+    std::optional<typename fission_power_source_type::StateSnapshot> fission_snapshot;
+    if (d_fission_power_source) fission_snapshot.emplace(d_fission_power_source->snapshot());
     const auto material_snapshot = stored_material_properties().snapshot();
     std::optional<typename material_feedback_model_type::StateSnapshot> material_feedback_snapshot;
     if (d_material_feedback_model)
@@ -3694,6 +3906,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
         headspace_pressure_snapshot.restore(*d_headspace_pressure);
         occupancy_snapshot.restore(*d_pool_occupancy);
         continuity_residual_snapshot.restore(*d_continuity_residual);
+        if (fission_snapshot) d_fission_power_source->restore(*fission_snapshot);
         stored_material_properties().restore(material_snapshot);
         if (material_feedback_snapshot)
         {
@@ -3763,6 +3976,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             d_ale_motion->begin_trial(candidate_level, time_step);
             d_active_ale.emplace(FVM::make_ale_control_volume_state(*d_mesh, *d_ale_motion));
             refresh_geometry_dependent_state();
+            if (d_fission_power_source && d_fission_power_source->has_interval_energy())
+                d_fission_power_source->refresh_interval_energy(d_time, time_step);
             // Picard data from the preceding outer trial supplies the
             // new-time rho/cp coefficients. Accepted-old coefficients remain
             // in d_ale_old_* for the conservative transient RHS.
@@ -4292,6 +4507,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
 {
     this->validate_pressure_velocity_selection();
     validate_step_coupling();
+    if (d_fission_power_source && d_fission_power_source->has_interval_energy())
+        d_fission_power_source->refresh_interval_energy(d_time, this->time_step());
     if (d_free_surface_model && d_free_surface_options.mode == FreeSurfaceMode::PlanarALE)
     {
         // begin_step() intentionally clears per-step numerical statistics.

@@ -46,6 +46,9 @@ namespace SimpleFluid
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_SOLVERS_EXPORT BoussinesqSolver : public FluidSolver<Pack>
 {
+private:
+    struct CouplingState;
+
 public:
     using base_type = FluidSolver<Pack>;
     using typename base_type::coupled_system_type;
@@ -189,6 +192,34 @@ public:
 
     using base_type::step;
     void step() override;
+
+    /** Move-only, reusable interval checkpoint. No destructor performs MPI work. */
+    class CouplingCheckpoint
+    {
+    public:
+        CouplingCheckpoint(CouplingCheckpoint&&) noexcept = default;
+        CouplingCheckpoint& operator=(CouplingCheckpoint&&) noexcept = default;
+        CouplingCheckpoint(const CouplingCheckpoint&) = delete;
+        CouplingCheckpoint& operator=(const CouplingCheckpoint&) = delete;
+    private:
+        friend class BoussinesqSolver;
+        explicit CouplingCheckpoint(std::shared_ptr<const CouplingState> state) : d_state(std::move(state)) {}
+        std::shared_ptr<const CouplingState> d_state;
+    };
+    /** Collective ALE interval transaction. Configuration/mesh topology must stay fixed.
+     * Restore permits repeated trials after multiple accepted physical substeps;
+     * accept keeps the current fields and invalidates the checkpoint. Only one
+     * checkpoint may remain live. Destroying one does not restore physical state.
+     */
+    [[nodiscard]] CouplingCheckpoint create_coupling_checkpoint();
+    void restore_coupling_checkpoint(const CouplingCheckpoint& checkpoint);
+    void accept_coupling_checkpoint(CouplingCheckpoint& checkpoint);
+    /** Assign a material-following extensive fission budget [J/owned cell].
+     * Uniform in time over [time(), time()+duration]; remapped by current cell
+     * volume on every ALE trial. Configure a fission source before checkpointing.
+     */
+    void set_coupling_interval_energy(std::span<const scalar_type> owned_cell_energy_joules,
+        scalar_type interval_duration);
 
     const field_type& temperature() const noexcept;
     field_type& temperature() noexcept;
@@ -599,6 +630,9 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     void record_free_surface_history();
 
+    SIMPLEFLUID_SOLVERS_LOCAL std::string coupling_configuration_signature() const;
+    SIMPLEFLUID_SOLVERS_LOCAL void validate_coupling_checkpoint(const CouplingCheckpoint& checkpoint) const;
+    std::weak_ptr<const CouplingState> d_active_coupling_checkpoint;
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;
     bool d_primary_fields_initialized = false;
