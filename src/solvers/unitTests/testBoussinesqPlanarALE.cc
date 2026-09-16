@@ -2042,6 +2042,99 @@ TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterF
     solver.accept_coupling_checkpoint(checkpoint);
 }
 
+TEST(BoussinesqCouplingIntervalTest, ShortEnergyIntervalCannotBeAcceptedWithoutAdvancing)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25);
+    auto& solver = *state.solver;
+    solver.add_fission_power_source().initialize_constant(0.0);
+    auto checkpoint = solver.create_coupling_checkpoint();
+    const std::vector<double> energy(state.mesh->num_owned_cells(), 1.e-6);
+    solver.set_coupling_interval_energy(energy, 1.e-16);
+    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_FALSE(solver.find_fission_power_source()->has_interval_energy());
+    solver.accept_coupling_checkpoint(checkpoint);
+}
+
+TEST(BoussinesqCouplingIntervalTest, RejectsEndpointOverrunAndUnresolvableSourceTimes)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25);
+    auto& source = state.solver->add_fission_power_source();
+    const std::vector<double> energy(state.mesh->num_owned_cells(), 1.e-6);
+    source.set_interval_energy(energy, 0.0, 1.e-16);
+    const double short_power = source.integrated_power();
+    EXPECT_THROW(source.refresh_interval_energy(1.e-16, 1.e-16), std::invalid_argument);
+    EXPECT_THROW(source.refresh_interval_energy(0.0, 2.e-16), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), short_power);
+
+    source.set_interval_energy(energy, 1.0, 1.0);
+    const double power = source.integrated_power();
+    EXPECT_THROW(source.refresh_interval_energy(1.0, std::numeric_limits<double>::denorm_min()),
+                 std::invalid_argument);
+    EXPECT_THROW(source.set_interval_energy(energy, 1.e8, 1.e-8), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), power);
+    EXPECT_DOUBLE_EQ(source.interval_end_time(), 2.0);
+
+    // Even advancing by one representable clock tick must not silently round
+    // a requested substep by a significant fraction of the energy interval.
+    const double start = 1.e8;
+    const double tick = std::nextafter(start, std::numeric_limits<double>::infinity()) - start;
+    source.set_interval_energy(energy, start, 2.0 * tick);
+    const double large_clock_power = source.integrated_power();
+    EXPECT_THROW(source.refresh_interval_energy(start, 1.25 * tick), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), large_clock_power);
+    EXPECT_NO_THROW(source.refresh_interval_energy(start, tick));
+    EXPECT_NO_THROW(source.refresh_interval_energy(start + tick, tick));
+}
+
+TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydrogenBudgets)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25, true, 0.0, false,
+        SimpleFluid::RadiolyticPressureMode::Constant, false,
+        SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+        SimpleFluid::FVM::CellGradientScheme::LeastSquares, true);
+    auto& solver = *state.solver;
+    auto* gas = solver.find_radiolytic_gas_model();
+    const auto before_energy = coupling_sensible_energy(state);
+    const auto before_hydrogen = gas->global_submerged_hydrogen_moles();
+    const auto history_size = solver.free_surface_history().size();
+    std::vector<double> energy(state.mesh->num_owned_cells());
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+        energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5
+            ? 0.01 : 0.02;
+    auto checkpoint = solver.create_coupling_checkpoint();
+    std::vector<double> first_temperatures;
+    double first_level = 0.0;
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        SCOPED_TRACE(attempt);
+        if (attempt != 0) solver.restore_coupling_checkpoint(checkpoint);
+        solver.set_coupling_interval_energy(energy, 0.02);
+        for (double dt : {0.003, 0.007, 0.01})
+        {
+            solver.set_time_step(dt);
+            solver.step();
+        }
+        EXPECT_NEAR(solver.time(), 0.02, 1.e-17);
+        EXPECT_NEAR(coupling_sensible_energy(state) - before_energy, 0.03, 2.e-8);
+        const double generated = 0.03 * gas->options().hydrogen_yield_mol_per_j;
+        EXPECT_NEAR(gas->cumulative_hydrogen_produced(), generated, 1.e-16);
+        EXPECT_NEAR(gas->global_submerged_hydrogen_moles() - before_hydrogen, generated, 2.e-12);
+        EXPECT_NEAR(gas->last_statistics().donor_inventory_error, 0.0, 2.e-12);
+        EXPECT_EQ(solver.free_surface_history().size(), history_size + 3);
+        for (size_t owned = 0; owned < energy.size(); ++owned)
+        {
+            const double temperature = solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned));
+            if (attempt == 0) first_temperatures.push_back(temperature);
+            else EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
+        }
+        if (attempt == 0) first_level = top_elevation(*state.mesh);
+        else EXPECT_NEAR(top_elevation(*state.mesh), first_level, 1.e-13);
+    }
+    solver.accept_coupling_checkpoint(checkpoint);
+}
+
 TEST(BoussinesqCouplingIntervalTest, RejectsForeignCheckpointAndPreservesTrialState)
 {
     auto first = make_case(Coupling::PISO, 0.0, 25, true);

@@ -3755,9 +3755,11 @@ void BoussinesqSolver<Pack>::accept_coupling_checkpoint(CouplingCheckpoint& chec
         if (d_fission_power_source && d_fission_power_source->has_interval_energy())
         {
             const auto end = d_fission_power_source->interval_end_time();
+            // A clock-scale tolerance can exceed a short energy interval and
+            // accept its budget without executing any physical substep.
             const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() *
-                std::max({scalar_type{1}, std::abs(end), std::abs(d_time)});
-            if (std::abs(d_time - end) > tolerance)
+                d_fission_power_source->interval_duration();
+            if (!std::isfinite(d_time) || std::abs(d_time - end) > tolerance)
                 throw std::logic_error("Accept the complete fission-energy interval, not a partial subcycle.");
         }
     });
