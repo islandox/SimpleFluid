@@ -9,6 +9,7 @@
  *
  */
 
+#include "solvers/FieldStateTransaction.hh"
 #include "BoussinesqSolver.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
 
@@ -2706,7 +2707,7 @@ auto BoussinesqSolver<Pack>::make_free_surface_update(
 /** @brief Initialize a configured free-surface after fields are usable. */
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
-    bool allow_default_fields, bool dependencies_already_refreshed)
+    bool allow_default_fields, bool dependencies_already_refreshed, bool preserve_on_failure)
 {
     if (!d_free_surface_model || d_free_surface_model->initialized() ||
         (!d_primary_fields_initialized && !allow_default_fields))
@@ -2779,7 +2780,7 @@ void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
     }
     catch (...)
     {
-        remove_free_surface_model();
+        if (!preserve_on_failure) remove_free_surface_model();
         throw;
     }
 }
@@ -4548,6 +4549,48 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         }
         return;
     }
+    AcceptedStateRollback sas_rollback;
+    auto* sas_model = find_turbulence_model();
+    const bool active_sas = sas_model && sas_model->type() == TurbulenceModelType::SSTKOmegaSAS
+                            && sas_model->options().sas.enabled;
+    if (sas_model) sas_model->validate_time_mode(d_problem.time_options().physical_time);
+    if (active_sas)
+    {
+        if (d_material_feedback_model) sas_rollback.capture_model(*d_material_feedback_model);
+        if (d_scalar_void_fraction_model) sas_rollback.capture_model(*d_scalar_void_fraction_model);
+        if (d_precursor_model) sas_rollback.capture_model(*d_precursor_model);
+        if (d_radiolytic_gas_model) sas_rollback.capture_model(*d_radiolytic_gas_model);
+        if (d_boiling_source_model) sas_rollback.capture_model(*d_boiling_source_model);
+        if (d_free_surface_model) sas_rollback.capture_model(*d_free_surface_model);
+        if (d_liquid_mass_inventory) sas_rollback.capture_model(*d_liquid_mass_inventory);
+        for (auto* field : {d_clear_level.get(), d_pool_level.get(), d_headspace_pressure.get(), d_pool_occupancy.get()})
+            if (field) sas_rollback.capture(*field);
+        sas_rollback.add([this, history_size=d_free_surface_history.size(),
+            occupancy_error=d_pool_occupancy_volume_error, failed=d_free_surface_step_failed]
+        {
+            d_free_surface_history.resize(history_size);
+            d_pool_occupancy_volume_error=occupancy_error;
+            d_free_surface_step_failed=failed;
+        });
+        sas_rollback.capture(temperature());
+        for (const auto& [name, source] : stored_temperature_sources().entries())
+            sas_rollback.capture(source->field());
+        sas_rollback.capture(pressure());
+        sas_rollback.capture(this->pressure_correction());
+        sas_rollback.capture(velocity());
+        sas_rollback.capture(predictor_pressure_gradient());
+        sas_rollback.capture(this->predictor_velocity());
+        sas_rollback.capture(old_face_fluxes());
+        sas_rollback.capture(projected_face_fluxes());
+        sas_rollback.add([this, residuals = pressure_velocity_residuals(), volume = this->d_last_volume_continuity_residuals]
+                        { pressure_velocity_residuals() = residuals; this->d_last_volume_continuity_residuals = volume; });
+        sas_rollback.add([this, saved = stored_material_properties().snapshot()]
+                        { stored_material_properties().restore(saved); });
+        sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        sas_rollback.add([this, saved = this->d_last_nonlinear_result] { this->d_last_nonlinear_result = saved; });
+        sas_rollback.add([this, time = this->d_time, step = this->d_step_index, statistics = d_last_step_statistics]
+                        { this->d_time = time; this->d_step_index = step; d_last_step_statistics = statistics; });
+    }
     const bool nonlinear_flow =
         d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear;
     // Preserve accepted reports and primary ghosts until the private flow
@@ -4558,7 +4601,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     std::optional<typename material_feedback_model_type::StateSnapshot> nonlinear_feedback_snapshot;
     std::optional<typename radiolytic_gas_model_type::StateSnapshot> nonlinear_gas_snapshot;
     std::optional<typename scalar_void_fraction_model_type::StateSnapshot> nonlinear_void_snapshot;
-    if (nonlinear_flow)
+    if (nonlinear_flow && !active_sas)
     {
         nonlinear_material_snapshot.emplace(stored_material_properties().snapshot());
         if (d_material_feedback_model)
@@ -4580,7 +4623,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         {
             refresh_physical_models();
         }
-        initialize_free_surface_if_needed(true, d_physical_model_enabled);
+        initialize_free_surface_if_needed(true, d_physical_model_enabled, active_sas);
         if (auto* turbulence = find_turbulence_model())
         {
             turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
@@ -4606,7 +4649,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
     }
     catch (...)
     {
-        if (nonlinear_flow && !flow_accepted)
+        if (nonlinear_flow && !flow_accepted && !active_sas)
         {
             stored_material_properties().restore(*nonlinear_material_snapshot);
             if (nonlinear_feedback_snapshot)
@@ -4618,7 +4661,12 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
             if (auto* turbulence = find_turbulence_model())
                 turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
         }
-        if (free_surface_active || (nonlinear_flow && flow_accepted))
+        if (active_sas)
+        {
+            sas_rollback.restore();
+            if (uses_legacy_backend()) { this->sync_primary_fields_to_legacy(); sync_temperature_to_legacy(); }
+        }
+        if (!active_sas && (free_surface_active || (nonlinear_flow && flow_accepted)))
         {
             d_free_surface_step_failed = true;
         }

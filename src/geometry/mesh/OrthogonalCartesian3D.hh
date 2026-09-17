@@ -79,6 +79,14 @@ public:
     explicit OrthogonalCartesian3D(
         const Vec3D<Arr<real_t>>& cell_edges);
 
+    /** Connect opposite coordinate faces; each periodic axis needs >=2 cells. */
+    OrthogonalCartesian3D(const Vec3D<Arr<real_t>>& cell_edges, Vec3D<bool> periodic_dimensions);
+
+    Vec3 cell_center_vector(face_id_t face, cell_id_t cell) const;
+    real_t cell_to_face_distance(face_id_t face, cell_id_t cell) const;
+    real_t face_cell_center_distance(face_id_t face) const;
+
+
     const Vec3D<unsigned>& num_cells_per_dimension() const noexcept
     {
         return d_indexer.num_cells_per_dim;

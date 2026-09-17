@@ -90,7 +90,12 @@ public:
      * @param mesh Shared mesh whose lifetime and geometry the cache retains.
      * @throws std::invalid_argument if @p mesh is null.
      */
+    using boundary_direction_provider_type = std::function<vec_type(local_ordinal_type, local_ordinal_type)>;
+
     explicit CellGradientCache(SP<const mesh_type> mesh);
+
+    /** Optional displacement override for mixed vector boundary constraints. */
+    CellGradientCache(SP<const mesh_type> mesh, boundary_direction_provider_type boundary_direction);
 
     CellGradientCache(const CellGradientCache&) = delete;
     CellGradientCache& operator=(const CellGradientCache&) = delete;
@@ -174,9 +179,10 @@ private:
     static std::vector<CellGeometry> build_geometry(
         const mesh_type& mesh,
         const std::vector<boundary_location_type>& boundary_locations,
-        bool include_boundary_samples);
+        bool include_boundary_samples, const boundary_direction_provider_type& boundary_direction);
 
     SP<const mesh_type> d_mesh;
+    boundary_direction_provider_type d_boundary_direction;
     std::vector<boundary_location_type> d_boundary_locations;
     std::vector<CellGeometry> d_interior_geometry;
     std::vector<CellGeometry> d_boundary_geometry;

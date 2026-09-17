@@ -13,6 +13,8 @@
 #include "TurbulenceModel.hh"
 
 #include "FVM/CellOperators.hh"
+#include "FVM/VectorLaplacian.hh"
+#include "FVM/MomentCorrectedGaussGradient.hh"
 #include "fields/TensorCellField.hh"
 
 #include <algorithm>
@@ -79,79 +81,93 @@ auto& current_gauss_geometry(Cache& cache)
     return gauss;
 }
 
-template<class ScalarField,
-         class BoundaryConditionProvider,
-         class BoundaryValueProvider,
-         class VectorField,
-         class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const ScalarField& field,
-    BoundaryConditionProvider boundary_condition,
-    BoundaryValueProvider boundary_value,
-    VectorField& gradient,
-    GradientCache& cache)
+template<class Field>
+concept ScalarReconstructionField = std::is_arithmetic_v<std::remove_cvref_t<decltype(
+    std::declval<const Field&>().value(typename Field::local_ordinal_type{}))>>;
+
+template<class Field>
+using GaussGeometry = FVM::TransportGeometryCache<std::remove_cvref_t<decltype(std::declval<const Field&>().mesh())>>;
+
+template<ScalarReconstructionField ScalarField, class BoundaryConditionProvider, class BoundaryValueProvider,
+         class VectorField, class GradientCache>
+    requires std::invocable<BoundaryConditionProvider,int,size_t> && std::invocable<BoundaryValueProvider,int,size_t>
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const ScalarField& field,
+    BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
+    VectorField& gradient, GradientCache& cache, const GaussGeometry<ScalarField>* geometry = nullptr)
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(
-            field, boundary_condition, boundary_value, gradient, current_gauss_geometry(cache));
+        if (geometry)
+            FVM::moment_corrected_gauss_cell_gradient<1>(
+                field, boundary_condition, boundary_value, gradient, *geometry);
+        else
+            FVM::gauss_linear_cell_gradient(
+                field, boundary_condition, boundary_value, gradient, current_gauss_geometry(cache));
         return;
     }
-    FVM::cell_gradient(
-        field, boundary_condition, boundary_value, gradient, std::get<0>(cache));
+    FVM::cell_gradient(field, boundary_condition, boundary_value, gradient, std::get<0>(cache));
 }
 
-template<class ScalarField, class VectorField, class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const ScalarField& field,
-    const BoundaryConditionMap& boundary_conditions,
-    VectorField& gradient,
-    GradientCache& cache)
+template<ScalarReconstructionField ScalarField, class VectorField, class GradientCache>
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const ScalarField& field,
+    const BoundaryConditionMap& conditions, VectorField& gradient, GradientCache& cache,
+    const GaussGeometry<ScalarField>* geometry = nullptr)
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(
-            field, boundary_conditions, gradient, current_gauss_geometry(cache));
+        if (geometry)
+        {
+            auto condition = [&](int batch, size_t)
+            {
+                auto found = conditions.find(field.mesh().boundary_batch_name(batch));
+                return found == conditions.end() ? BoundaryCondition{} : found->second;
+            };
+            reconstruct_gradient(scheme, field, condition,
+                [&](int batch, size_t index) { return condition(batch, index).value; },
+                gradient, cache, geometry);
+        }
+        else
+            FVM::gauss_linear_cell_gradient(field, conditions, gradient, current_gauss_geometry(cache));
         return;
     }
-    FVM::cell_gradient(
-        field, boundary_conditions, gradient, std::get<0>(cache));
+    FVM::cell_gradient(field, conditions, gradient, std::get<0>(cache));
 }
 
-template<class ScalarField, class VectorField, class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const ScalarField& field,
-    VectorField& gradient,
-    GradientCache& cache)
+template<ScalarReconstructionField ScalarField, class VectorField, class GradientCache>
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const ScalarField& field,
+    VectorField& gradient, GradientCache& cache, const GaussGeometry<ScalarField>* geometry = nullptr)
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(field, gradient, current_gauss_geometry(cache));
+        if (geometry)
+            reconstruct_gradient(scheme, field, [](int, size_t) { return BoundaryCondition{}; },
+                [](int, size_t) { return real_t{}; }, gradient, cache, geometry);
+        else
+            FVM::gauss_linear_cell_gradient(field, gradient, current_gauss_geometry(cache));
         return;
     }
     FVM::cell_gradient(field, gradient, std::get<0>(cache));
 }
 
-template<class VectorField, class BoundaryValueProvider,
-         class TensorField, class GradientCache>
-void reconstruct_gradient(
-    FVM::CellGradientScheme scheme,
-    const VectorField& field,
-    BoundaryValueProvider boundary_value,
-    TensorField& gradient,
-    GradientCache& cache)
+template<class VectorField, class BoundaryValueProvider, class TensorField, class GradientCache>
+    requires (!ScalarReconstructionField<VectorField>)
+void reconstruct_gradient(FVM::CellGradientScheme scheme, const VectorField& field,
+    BoundaryValueProvider boundary_value, TensorField& gradient, GradientCache& cache,
+    const GaussGeometry<VectorField>* geometry = nullptr,
+    std::function<BoundaryConditionType(int,size_t)> boundary_type = {})
 {
     if (scheme == FVM::CellGradientScheme::GaussLinear)
     {
-        FVM::gauss_linear_cell_gradient(
-            field, boundary_value, gradient, current_gauss_geometry(cache));
+        if (geometry)
+            FVM::moment_corrected_gauss_cell_gradient<3>(field,
+                [&](int batch, size_t index)
+                { return boundary_type ? boundary_type(batch, index) : BoundaryConditionType::Dirichlet; },
+                boundary_value, gradient, *geometry);
+        else
+            FVM::gauss_linear_cell_gradient(field, boundary_value, gradient, current_gauss_geometry(cache));
         return;
     }
-    FVM::cell_gradient(
-        field, boundary_value, gradient, std::get<0>(cache));
+    FVM::cell_gradient(field, boundary_value, gradient, std::get<0>(cache));
 }
 
 } // namespace turbulence_detail
@@ -184,6 +200,78 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
         Arr<WallYPlusStatistics> statistics;
     };
 
+    struct SASWorkspace
+    {
+        inline static constexpr std::array<const char*, 11> names{
+            "sas_L", "sas_Lvk_flow", "sas_Lvk_grid", "sas_Lvk", "sas_delta",
+            "sas_production", "sas_damping", "sas_Q_raw", "sas_Q_applied",
+            "sas_grid_limiter_active", "sas_time_limiter_active"};
+        static FVM::TransportGeometryCache<mesh_type> checked_geometry(const mesh_type& mesh)
+        {
+            std::optional<FVM::TransportGeometryCache<mesh_type>> result;
+            collective_detail::collective_local_validation(mesh, "SAS geometry cache", [&]
+            {
+                result.emplace(mesh);
+                for (const auto volume : result->assembly_geometry().volumes)
+                    turbulence_detail::require_positive(volume, "SAS cell volume");
+            });
+            return std::move(*result);
+        }
+        SASWorkspace(SP<const mesh_type> mesh, const SSTSASOptions& options,
+                     const VectorBoundaryConditionMap& velocity_conditions)
+            : geometry(checked_geometry(*mesh)), laplacian(mesh, "sas_velocity_laplacian"),
+              delta(mesh->num_owned_cells())
+        {
+            const SSTSASSource source(options);
+            collective_detail::collective_local_validation(*mesh, "SAS filter geometry", [&]
+            {
+                for (size_t i = 0; i < delta.size(); ++i)
+                    delta[i] = source.filter_width(geometry.assembly_geometry().volumes[i]);
+                if (std::any_of(velocity_conditions.begin(), velocity_conditions.end(),
+                    [](const auto& entry) { return entry.second.type == BoundaryConditionType::Slip; }))
+                {
+                    const auto locations = geometry.boundary_locations();
+                    slip_gradient = std::make_unique<turbulence_detail::GradientCache<Pack, mesh_type>>(
+                        std::in_place_index<0>, mesh,
+                        [mesh, locations, velocity_conditions](local_ordinal_type face, local_ordinal_type cell)
+                        {
+                            const auto& location = locations.at(face);
+                            const auto found = velocity_conditions.find(mesh->boundary_batch_name(location.batch_id));
+                            if (found != velocity_conditions.end() && found->second.type == BoundaryConditionType::Slip)
+                                return mesh->face_normal_outward(face, cell)
+                                    * FVM::detail::boundary_normal_distance(*mesh, face, cell);
+                            return mesh->face_centroid(face) - mesh->cell_centroid(cell);
+                        });
+                }
+            });
+            if (options.diagnostics)
+                for (size_t i = 0; i < names.size(); ++i)
+                {
+                    fields[i] = std::make_unique<field_type>(mesh, scalar_type{}, names[i]);
+                    candidate_fields[i] = std::make_unique<field_type>(mesh, scalar_type{}, names[i]);
+                }
+        }
+        std::unique_ptr<turbulence_detail::GradientCache<Pack, mesh_type>> slip_gradient;
+        FVM::TransportGeometryCache<mesh_type> geometry;
+        velocity_field_type laplacian;
+        std::vector<real_t> delta;
+        std::array<std::unique_ptr<field_type>, 11> fields, candidate_fields;
+        SSTSASStatistics statistics, candidate_statistics;
+    };
+
+    template<class Visitor> void visit_accepted_fields(Visitor&& visitor)
+    {
+        for (auto* field : {&k, &secondary, &nu_t, &effective_dynamic_viscosity,
+                &effective_thermal_conductivity, &buoyancy_production, &wall_distance, &wall_y_plus})
+            visitor(*field);
+        for (auto* field : {&wall_velocity, &k_gradient, &secondary_gradient})
+            visitor(*field);
+        visitor(velocity_gradient);
+        if (sas)
+            for (auto& field : sas->fields)
+                if (field) visitor(*field);
+    }
+
     State(SP<const mesh_type> mesh, const TurbulenceBoundaryConditionSet& boundary_conditions,
           const VectorBoundaryConditionMap& velocity_boundary_conditions,
           const TurbulenceModelOptions& options)
@@ -191,7 +279,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
                          options.model == TurbulenceModelType::RNGKEpsilon ||
                          options.model == TurbulenceModelType::RealizableKEpsilon),
           menter_family(options.model == TurbulenceModelType::BSLKOmega ||
-                        options.model == TurbulenceModelType::SSTKOmega),
+                        is_sst_model(options.model)),
           wall_boundary_names(options.wall_options.boundary_names),
           closure(make_closure(options)),
           wall_treatment(make_wall_treatment(mesh, options, velocity_boundary_conditions)),
@@ -243,6 +331,8 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
           secondary_equation(mesh, epsilon_family ? boundary_conditions.dissipation_rate
                                                   : boundary_conditions.specific_dissipation_rate)
     {
+        if (options.model == TurbulenceModelType::SSTKOmegaSAS && options.sas.enabled)
+            sas = std::make_unique<SASWorkspace>(mesh, options.sas, velocity_boundary_conditions);
         const auto initial_k = options.initial_turbulent_kinetic_energy;
         const auto initial_secondary = epsilon_family ? options.initial_dissipation_rate
                                                       : options.initial_specific_dissipation_rate;
@@ -271,6 +361,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
             initial_nu_t = std::get<BSLKOmegaEquation>(closure).turbulent_kinematic_viscosity(
                 {initial_k, initial_secondary});
             break;
+        case TurbulenceModelType::SSTKOmegaSAS:
         case TurbulenceModelType::SSTKOmega:
             initial_nu_t = std::get<SSTKOmegaEquation>(closure).turbulent_kinematic_viscosity(
                 {initial_k, initial_secondary},
@@ -287,6 +378,9 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
                          {"nu_t", &nu_t},
                          {"mu_eff", &effective_dynamic_viscosity},
                          {"lambda_eff", &effective_thermal_conductivity}};
+        if (sas && options.sas.diagnostics)
+            for (size_t i = 0; i < SASWorkspace::names.size(); ++i)
+                output_fields.emplace(SASWorkspace::names[i], sas->fields[i].get());
         if (options.wall_treatment != TurbulenceWallTreatmentType::None)
         {
             output_fields.emplace("wall_y_plus", &wall_y_plus);
@@ -326,6 +420,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
             return StandardKOmegaEquation{};
         case TurbulenceModelType::BSLKOmega:
             return BSLKOmegaEquation{};
+        case TurbulenceModelType::SSTKOmegaSAS:
         case TurbulenceModelType::SSTKOmega:
         {
             auto coefficients = SSTKOmegaEquation::Coefficients{};
@@ -607,6 +702,8 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
         wall_evaluation = std::move(publication.evaluation);
     }
 
+    std::unique_ptr<SASWorkspace> sas;
+    std::shared_ptr<const int> configuration_identity = std::make_shared<const int>(0);
     bool epsilon_family;
     bool menter_family;
     ArrString wall_boundary_names;
@@ -649,6 +746,90 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
     TurbulenceScalarTransportEquation<Pack, mesh_type> secondary_equation;
     std::map<std::string, const field_type*> output_fields;
 };
+
+template<TpetraTypePack Pack, class MeshType>
+struct TurbulenceModel<Pack, MeshType>::SnapshotData
+{
+    std::shared_ptr<const int> identity;
+    std::uint64_t epoch{};
+    std::vector<std::pair<Teuchos::RCP<typename Pack::multi_vector_type>,
+                          Teuchos::RCP<typename Pack::multi_vector_type>>> fields;
+    typename State::wall_evaluation_type wall;
+    Arr<WallYPlusStatistics> wall_statistics;
+    velocity_boundary_cache_type boundary;
+    SSTSASStatistics sas;
+    explicit SnapshotData(const velocity_boundary_cache_type& cache) : boundary(cache) {}
+};
+
+template<TpetraTypePack Pack, class MeshType>
+auto TurbulenceModel<Pack, MeshType>::snapshot() const -> StateSnapshot
+{
+    auto& state = const_cast<State&>(require_state());
+    StateSnapshot result;
+    result.data = std::make_shared<SnapshotData>(d_wall_velocity_boundary_cache);
+    auto& data = *result.data;
+    data.identity = state.configuration_identity;
+    data.epoch = mesh_geometry_epoch(*d_mesh);
+    data.wall = state.wall_evaluation;
+    data.wall_statistics = state.wall_statistics;
+    if (state.sas) data.sas = state.sas->statistics;
+    state.visit_accepted_fields([&](auto& field)
+    {
+        auto copy = [](const auto& values)
+        {
+            auto clone = Teuchos::rcp(new typename Pack::multi_vector_type(values.getMap(), values.getNumVectors()));
+            clone->update(scalar_type{1}, values, scalar_type{});
+            return clone;
+        };
+        data.fields.emplace_back(copy(field.owned_data()), copy(field.overlap_data()));
+    });
+    return result;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void TurbulenceModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
+{
+    auto& state = require_state();
+    collective_detail::collective_local_validation(*d_mesh, "Turbulence snapshot restore", [&]
+    {
+        if (!snapshot.data || snapshot.data->identity != state.configuration_identity
+            || snapshot.data->epoch != mesh_geometry_epoch(*d_mesh))
+            throw std::invalid_argument("Turbulence snapshot belongs to another configuration or geometry epoch.");
+    });
+    const auto& data = *snapshot.data;
+    // Copy potentially allocating metadata before changing any fields.
+    auto wall = data.wall;
+    auto wall_statistics = data.wall_statistics;
+    auto boundary = data.boundary;
+    size_t i = 0;
+    state.visit_accepted_fields([&](auto& field)
+    {
+        field.owned_data().update(scalar_type{1}, *data.fields[i].first, scalar_type{});
+        field.overlap_data().update(scalar_type{1}, *data.fields[i].second, scalar_type{});
+        ++i;
+    });
+    state.wall_evaluation = std::move(wall);
+    state.wall_statistics = std::move(wall_statistics);
+    d_wall_velocity_boundary_cache = std::move(boundary);
+    if (state.sas) state.sas->statistics = data.sas;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+const SSTSASStatistics& TurbulenceModel<Pack, MeshType>::sas_statistics() const
+{
+    static const SSTSASStatistics inactive;
+    return d_state && d_state->sas ? d_state->sas->statistics : inactive;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void TurbulenceModel<Pack, MeshType>::validate_time_mode(bool physical_time) const
+{
+    if (d_options.model != TurbulenceModelType::SSTKOmegaSAS || !d_options.sas.enabled)
+        return;
+    collective_detail::require_uniform_value(*d_mesh, physical_time ? 1 : 0, "Turbulence physical-time mode");
+    if (!physical_time)
+        throw std::invalid_argument("Active SST-SAS requires physical-time transient flow; pseudo-transient steady search is unsupported.");
+}
 
 /**
  * @brief Construct a runtime turbulence model on a mesh.
@@ -734,6 +915,12 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
     collective_detail::collective_local_validation(*d_mesh, "Turbulence model option validation",
                                                    [&]
                                                    { validate_turbulence_model_options(options); });
+    collective_detail::require_uniform_value(*d_mesh, options.sas.enabled ? 1 : 0, "SAS enabled");
+    collective_detail::require_uniform_value(*d_mesh, options.sas.diagnostics ? 1 : 0, "SAS diagnostics");
+    collective_detail::require_uniform_value(*d_mesh, options.sas.time_limiter ? 1 : 0, "SAS time limiter");
+    for (const auto value : {options.sas.zeta2, options.sas.sigma_phi, options.sas.c,
+            options.sas.cs, options.sas.delta_multiplier, options.sas.cap_time_fraction})
+        collective_detail::require_uniform_value(*d_mesh, value, "SAS coefficient");
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(options.model),
                                                 "Turbulence model type");
     collective_detail::require_uniform_value(
@@ -910,6 +1097,17 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
     auto configured_velocity_boundary_cache =
         FVM::cache_velocity_boundary_conditions<Pack>(
             d_mesh, configured_boundaries);
+    if (options.model == TurbulenceModelType::SSTKOmegaSAS && options.sas.enabled)
+        collective_detail::collective_local_validation(*d_mesh, "SAS supported geometry and boundaries", [&]
+        {
+            for (const auto& [name, condition] : d_velocity_boundary_conditions)
+                if (condition.type == BoundaryConditionType::Periodic)
+                    for (const auto& [batch, faces] : d_mesh->boundary_batches())
+                        if (d_mesh->boundary_batch_name(batch) == name)
+                            for (const auto face : faces.face_lids)
+                                if (!d_mesh->is_interior_face(face))
+                                    throw std::invalid_argument("SAS periodic patches require paired/connected mesh topology before configuration.");
+        });
     auto candidate = std::make_unique<State>(d_mesh, d_boundary_conditions,
                                              d_velocity_boundary_conditions, options);
     if (candidate->menter_family
@@ -961,7 +1159,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
             turbulence_detail::reconstruct_gradient(
                 options.gradient_scheme,
                 candidate->k, k_condition, k_value,
-                candidate->k_gradient, candidate->gradient_cache);
+                candidate->k_gradient, candidate->gradient_cache, candidate->sas ? &candidate->sas->geometry : nullptr);
             if (candidate->menter_family)
             {
                 auto secondary_condition = [&](int batch_id, size_t in_batch_id)
@@ -987,7 +1185,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                     candidate->secondary, secondary_condition,
                     secondary_value,
                     candidate->secondary_gradient,
-                    candidate->gradient_cache);
+                    candidate->gradient_cache, candidate->sas ? &candidate->sas->geometry : nullptr);
             }
         });
     candidate->k_gradient.sync_ghosts();
@@ -996,7 +1194,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
         candidate->secondary_gradient.sync_ghosts();
     }
 
-    if (options.model == TurbulenceModelType::SSTKOmega)
+    if (is_sst_model(options.model))
     {
         const auto wall_velocity_values =
             candidate->wall_velocity.local_read_view();
@@ -1047,7 +1245,9 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
                     candidate->wall_velocity,
                     initial_boundary_velocity,
                     candidate->velocity_gradient,
-                    candidate->gradient_cache);
+                    candidate->sas && candidate->sas->slip_gradient ? *candidate->sas->slip_gradient : candidate->gradient_cache,
+                    candidate->sas ? &candidate->sas->geometry : nullptr,
+                    [&](int batch,size_t){return configured_velocity_boundary_cache.type.at(batch);});
                 const auto& closure =
                     std::get<SSTKOmegaEquation>(
                         candidate->closure);
@@ -1456,8 +1656,7 @@ void TurbulenceModel<Pack, MeshType>::stage_menter_eddy_viscosity(
                                state.closure)
                                .turbulent_kinematic_viscosity(local);
                 }
-                else if (d_options.model
-                         == TurbulenceModelType::SSTKOmega)
+                else if (is_sst_model(d_options.model))
                 {
                     nu_t = std::get<SSTKOmegaEquation>(
                                state.closure)
@@ -1682,7 +1881,7 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
                 d_options.gradient_scheme,
                 state.candidate_k, k_condition, k_value,
                 state.candidate_k_gradient,
-                state.gradient_cache);
+                state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
 
             if (state.menter_family)
             {
@@ -1718,7 +1917,7 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
                     state.candidate_secondary,
                     secondary_condition, secondary_value,
                     state.candidate_secondary_gradient,
-                    state.gradient_cache);
+                    state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
             }
         });
     state.candidate_k_gradient.sync_ghosts();
@@ -1758,6 +1957,13 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
         std::move(wall_publication));
     d_wall_velocity_boundary_cache =
         std::move(velocity_boundary_cache);
+    if (state.sas)
+    {
+        state.sas->statistics = {};
+        for (auto& field : state.sas->fields)
+            if (field) field->put_scalar(scalar_type{});
+    }
+
 }
 
 /**
@@ -1786,11 +1992,12 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                                     FVM::NonOrthogonalTreatment treatment,
                                     const LinearSolverOptions& linear_options,
                                     const TurbulenceBuoyancyContext<Pack, mesh_type>*
-                                        buoyancy_context) -> LinearSolveSummary
+                                        buoyancy_context, bool physical_time) -> LinearSolveSummary
 {
     collective_detail::require_uniform_value(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
     auto& state = require_state();
+    validate_time_mode(physical_time);
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_options.model),
                                                 "Active turbulence model type");
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(treatment),
@@ -1799,6 +2006,12 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                                             "Turbulence time step");
     collective_detail::require_uniform_value(*d_mesh, static_cast<real_t>(reference_density),
                                             "Turbulence reference density");
+    if (state.sas)
+        collective_detail::collective_local_validation(*d_mesh, "SAS fixed geometry and physical timestep", [&]
+        {
+            state.sas->geometry.require_mesh(*d_mesh);
+            turbulence_detail::require_positive(time_step, "SAS physical timestep");
+        });
     const auto direct_buoyancy =
         d_options.buoyancy_model
         == TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
@@ -1833,6 +2046,15 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         *d_mesh, "Turbulence advance input validation",
         [&]
         {
+            if (state.sas)
+                for (const auto& [batch, faces] : d_mesh->boundary_batches())
+                {
+                    const auto configured = d_velocity_boundary_conditions.find(d_mesh->boundary_batch_name(batch));
+                    const bool slip = configured != d_velocity_boundary_conditions.end()
+                        && configured->second.type == BoundaryConditionType::Slip;
+                    if (slip != (velocity_boundary_cache.type.at(batch) == BoundaryConditionType::Slip))
+                        throw std::invalid_argument("Changing SAS slip boundary membership requires reconfiguration.");
+                }
             if (&velocity.mesh() != d_mesh.get() || &projected_face_fluxes.mesh() != d_mesh.get() ||
                 velocity_boundary_cache.mesh.get() != d_mesh.get())
             {
@@ -1892,7 +2114,15 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         });
     auto accepted_velocity_boundary_cache = velocity_boundary_cache;
 
-    const auto velocity_local_values = velocity.local_read_view();
+    // The additional stencil imports current owned velocity into existing candidate storage.
+    // Ordinary SST retains its established caller-owned synchronization contract.
+    if (state.sas)
+    {
+        state.candidate_wall_velocity.owned_data().update(scalar_type{1}, velocity.owned_data(), scalar_type{});
+        state.candidate_wall_velocity.sync_ghosts();
+    }
+    const auto& derivative_velocity = state.sas ? state.candidate_wall_velocity : velocity;
+    const auto velocity_local_values = derivative_velocity.local_read_view();
     auto boundary_velocity = [&](int batch_id, size_t in_batch_id) ->
         typename velocity_field_type::vec_type
     {
@@ -1960,7 +2190,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         turbulence_detail::reconstruct_gradient(
             d_options.gradient_scheme,
             k_field, k_condition, k_value, k_gradient,
-            state.gradient_cache);
+            state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
         if (state.menter_family)
         {
             auto secondary_condition = [&](int batch_id, size_t in_batch_id)
@@ -1985,7 +2215,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                 d_options.gradient_scheme,
                 secondary_field, secondary_condition,
                 secondary_value, secondary_gradient,
-                state.gradient_cache);
+                state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
         }
     };
     auto sync_scalar_gradients = [&](velocity_field_type& k_gradient,
@@ -2003,9 +2233,11 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         {
             turbulence_detail::reconstruct_gradient(
                 d_options.gradient_scheme,
-                velocity, boundary_velocity,
+                derivative_velocity, boundary_velocity,
                 state.candidate_velocity_gradient,
-                state.gradient_cache);
+                state.sas && state.sas->slip_gradient ? *state.sas->slip_gradient : state.gradient_cache,
+                state.sas ? &state.sas->geometry : nullptr,
+                [&](int batch,size_t){return velocity_boundary_cache.type.at(batch);});
             update_scalar_gradients(state.k, state.secondary,
                                     state.candidate_k_gradient,
                                     state.candidate_secondary_gradient,
@@ -2017,7 +2249,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                     turbulence_detail::reconstruct_gradient(
                         d_options.gradient_scheme,
                         material.density, state.buoyancy_gradient,
-                        state.gradient_cache);
+                        state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
                 }
                 else
                 {
@@ -2027,7 +2259,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                         *buoyancy_context
                              ->temperature_boundary_conditions,
                         state.buoyancy_gradient,
-                        state.gradient_cache);
+                        state.gradient_cache, state.sas ? &state.sas->geometry : nullptr);
                 }
             }
         });
@@ -2039,6 +2271,18 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
     {
         state.buoyancy_gradient.sync_ghosts();
     }
+
+    if (state.sas)
+        collective_detail::collective_local_validation(*d_mesh, "SAS vector Laplacian", [&]
+        {
+            FVM::unit_vector_laplacian(derivative_velocity, state.candidate_velocity_gradient,
+                state.sas->laplacian, state.sas->geometry, boundary_velocity,
+                [&](int batch, size_t) { return velocity_boundary_cache.type.at(batch); });
+        });
+    std::array<real_t, 7> sas_local_sums{}; // cells, active, capped, volume, QV, active V, capped V
+    real_t sas_local_min = std::numeric_limits<real_t>::max(), sas_local_max = 0;
+    bool assemble_sas = true;
+    const SSTSASSource sas_source(d_options.sas);
 
     auto evaluate_closure =
         [&, this](const field_type& k_field, const field_type& secondary_field,
@@ -2242,6 +2486,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                         break;
                     }
                     case TurbulenceModelType::BSLKOmega:
+                    case TurbulenceModelType::SSTKOmegaSAS:
                     case TurbulenceModelType::SSTKOmega:
                     {
                         const KOmegaState local{k, secondary};
@@ -2306,6 +2551,37 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                                 coefficients.gamma
                               / (nu_t
                                  + std::numeric_limits<real_t>::epsilon());
+                            if (state.sas && assemble_sas)
+                            {
+                                const auto lap = state.sas->laplacian.value(cell_lid);
+                                const auto result = sas_source.evaluate({
+                                    .state = local, .strain_squared = 2.0 * strain_squared,
+                                    .velocity_laplacian_magnitude = std::hypot(lap.x, lap.y, lap.z),
+                                    .grad_k_magnitude = std::hypot(local_k_gradient.x, local_k_gradient.y, local_k_gradient.z),
+                                    .grad_omega_magnitude = std::hypot(omega_gradient.x, omega_gradient.y, omega_gradient.z),
+                                    .delta = state.sas->delta[owned], .time_step = time_step,
+                                    .beta_star = closure.coefficients().beta_star,
+                                    .beta = coefficients.beta, .gamma = coefficients.gamma,
+                                    .kappa = closure.coefficients().kappa});
+                                explicit_secondary_source += result.Q_applied;
+                                const auto volume = state.sas->geometry.assembly_geometry().volumes[owned];
+                                const bool active = result.Q_applied > 0;
+                                sas_local_sums[0] += 1;
+                                sas_local_sums[1] += active;
+                                sas_local_sums[2] += result.time_limiter_active;
+                                sas_local_sums[3] += volume;
+                                sas_local_sums[4] += volume * result.Q_applied;
+                                sas_local_sums[5] += active ? volume : 0;
+                                sas_local_sums[6] += result.time_limiter_active ? volume : 0;
+                                sas_local_min = std::min(sas_local_min, result.Q_applied);
+                                sas_local_max = std::max(sas_local_max, result.Q_applied);
+                                if (d_options.sas.diagnostics)
+                                {
+                                    const auto values = result.values();
+                                    for (size_t i = 0; i < values.size(); ++i)
+                                        state.sas->candidate_fields[i]->set_owned_value(cell_lid, values[i]);
+                                }
+                            }
                         }
                         break;
                     }
@@ -2488,6 +2764,29 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         state.k, state.secondary, state.candidate_k_gradient,
         state.candidate_secondary_gradient, current_wall_evaluation);
 
+    // Preserve the assembled record across the post-solve property refresh.
+    assemble_sas = false;
+    if (state.sas)
+    {
+        std::array<real_t, 7> sums{};
+        const auto comm = d_mesh->owned_cell_map()->getComm();
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 7, sas_local_sums.data(), sums.data());
+        auto& stats = state.sas->candidate_statistics;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &sas_local_min, &stats.min_source);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &sas_local_max, &stats.max_source);
+        if (sums[0] <= 0 || sums[3] <= 0 || std::any_of(sums.begin(), sums.end(), [](auto v) { return !std::isfinite(v); }))
+            throw std::overflow_error("SAS global source measures require finite positive total volume and cell count.");
+        stats.valid = true;
+        stats.active_cell_fraction = sums[1] / sums[0];
+        stats.cap_active_cell_fraction = sums[2] / sums[0];
+        stats.volume_integrated_source = sums[4];
+        stats.volume_mean_source = sums[4] / sums[3];
+        stats.active_volume_fraction = sums[5] / sums[3];
+        stats.cap_active_volume_fraction = sums[6] / sums[3];
+        for (auto& field : state.sas->candidate_fields)
+            if (field) field->sync_ghosts();
+    }
+
     auto summary = [&]
     {
         const auto k_source_values =
@@ -2632,9 +2931,16 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
     state.candidate_wall_velocity.owned_data().update(
         scalar_type{1}, velocity.owned_data(), scalar_type{0});
     state.candidate_wall_velocity.overlap_data().update(
-        scalar_type{1}, velocity.overlap_data(), scalar_type{0});
+        scalar_type{1}, derivative_velocity.overlap_data(), scalar_type{0});
 
     // Publish only after both solves and all derived-field validation pass.
+    if (state.sas)
+    {
+        for (size_t i = 0; i < state.sas->fields.size(); ++i)
+            if (state.sas->fields[i])
+                State::publish_synced_field(*state.sas->fields[i], *state.sas->candidate_fields[i]);
+        state.sas->statistics = state.sas->candidate_statistics;
+    }
     State::publish_synced_field(state.k, state.candidate_k);
     State::publish_synced_field(
         state.secondary, state.candidate_secondary);

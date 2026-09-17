@@ -255,6 +255,44 @@ mistaken for foundation or Phase 9 completion.
 - [x] Document that the current RANS variables use single-continuum, full-cell
       transport rather than phase-volume-fraction-weighted equations.
 
+#### SST-1994 plus SAS source extension
+
+- [x] Implement opt-in `SSTKOmegaSAS` without changing ordinary SST-1994.
+- [x] Add bounded local algebra, physical-time cap, explicit omega source,
+      unit-coefficient vector Laplacian, lazy work fields and accepted diagnostics.
+- [x] Add pointwise reference, derivative, source-weighting, disabled-equivalence,
+      wall/configuration, native/legacy and serial/MPI transaction checks.
+- [x] Add a small isothermal transient activation example without IF97.
+- [x] Qualify native cylindrical SAS with Cartesian vector components and
+      integrated radial-face normals, including serial/MPI transient swirl.
+- [x] Qualify serial SemiStructuredXY_Z SAS on skewed triangular extrusions.
+- [x] Qualify mixed slip SAS boundaries with normal-foot reconstruction and
+      serial/MPI affine, curved-source and transient tests.
+- [x] Qualify native Cartesian periodic SAS and legacy translational pairs,
+      including wrapped derivatives, flux geometry and output images.
+- [x] Qualify Gauss-linear SAS with coordinate-moment consistency correction
+      on native/legacy, curved, skewed, slip and periodic paths.
+- [x] Add rollback-safe SAS material feedback.
+- [x] Add rollback-safe SAS scalar void diffusion/collapse and mixture feedback.
+- [x] Add rollback-safe SAS precursor inventories and balance diagnostics.
+- [x] Add rollback-safe SAS ideal/two-population radiolysis and hydrogen ledgers.
+- [x] Add rollback-safe SAS bulk/wall boiling and phase-change state.
+- [x] Add rollback-safe fixed-grid SAS free-surface/liquid-mass budgets,
+      including lazy initialization and accepted history.
+- [x] Support NOX velocity-pressure coupling for native isothermal and physical
+      Boussinesq SAS, with frozen coefficients, one turbulence advance per
+      physical step, accepted-report restoration and retry after rejection.
+- [ ] Establish spatial/temporal resolution and sustained three-dimensional
+      scale-resolution evidence beyond source activation.
+- [ ] Perform qualified whole-flow external comparisons with explicit parent-SST
+      and discretization differences, then quantitative physical validation.
+
+The [SAS model document](docs/modeling/sst_sas.md) and
+[verification record](docs/modeling/sst_sas_verification.md) distinguish
+implemented, component-tested, solver-regression-tested, externally compared
+and physically validated status. The parent closure and pending pitzDaily gates
+are unchanged.
+
 #### Remaining work and acceptance
 
 - [ ] Establish a converged pitzDaily reference configuration and checked-in

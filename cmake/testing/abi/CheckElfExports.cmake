@@ -321,6 +321,16 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
+# Isothermal NOX adds one public context constructor (two Itanium entries) and
+# two virtual hooks. Even private overrides must remain exported: downstream
+# derived-driver vtables refer to them. The custom-driver link test covers this.
+simplefluid_require_exact_api(
+    "^SimpleFluid::CoupledNonlinearProblem::CoupledNonlinearProblem[(].*SimpleFluid::CoupledNonlinearProblem::FrozenIsothermalInput const&, SimpleFluid::CoupledNonlinearWorkspace[*][)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::supports_coupled_nonlinear[(][)] const$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::make_coupled_nonlinear_problem[(][)]$" 1)
+
 # Preserve all seven established FluidSolver/BoussinesqSolver constructor
 # signatures and the four mutable-MeshHandle additions.
 simplefluid_require_exact_api(

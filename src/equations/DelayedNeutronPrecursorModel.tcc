@@ -11,6 +11,7 @@ void DelayedNeutronPrecursorModel<Pack, MeshType>::configure(const DelayedNeutro
 {
     validate_collective_configuration(options);
     validate_delayed_neutron_precursor_options(options);
+    d_snapshot_configuration = std::make_shared<const int>(0);
     d_options = options;
     d_fields.clear();
     d_inventories.clear();

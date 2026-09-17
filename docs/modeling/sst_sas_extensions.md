@@ -1,0 +1,431 @@
+# SST-SAS support extensions
+
+The earlier support series started from clean `feature/turbulence` at
+`8cf294944dd9c65112cf02040cd812a770cc90c6`, with the initial source extension
+already committed. The initial focused GCC baseline passed 20 registrations.
+Each support addition is tested and committed separately. All evidence here
+concerns component correctness and fixed-grid transient regression; it does
+not establish physical scale-resolution validation or change the SST-1994
+parent, source units, source algebra, or external-comparison gates.
+
+## Coupled nonlinear integration
+
+This extension starts from clean `feature/turbulence` at
+`809fd9e7843c1a6044b6c7daf3d0c1eb1eb03384`. Before editing, the GCC Debug
+NOX/SAS selection passed 57 serial tests with two MPI-only skips; both
+`CoupledNonlinearSolver_2procs` and `SASSupportedPaths_2procs` passed. The
+previous explicit active-SAS NOX rejection test also passed. These are local
+baseline results, independent of the historical GitHub LLVM failures.
+
+With `SIMPLEFLUID_ENABLE_NOX=ON`, native isothermal and physical Boussinesq
+drivers now accept active SAS with `PressureVelocityCoupling::CoupledNonlinear`
+(`"coupledNonlinear"`). NOX freezes viscosity, wall coefficients and turbulent
+pressure while solving velocity/pressure, retaining native explicit
+accepted-velocity transpose stress. The new `FrozenIsothermalInput` context
+does not allocate temperature. Turbulence advances once after flow acceptance;
+its source cap uses the physical timestep. Parent SST-1994 and source algebra
+are unchanged.
+
+The SAS transaction now restores the accepted nonlinear report as well as
+flow/model fields, applied-source diagnostics and time. Downstream failure no
+longer permanently disables retries. The NOX object and bounded workspace
+reuse storage, but every attempt copies restored accepted history into a new
+immutable context and resets solver validity. Rejected nonlinear scratch is
+never used as physical old-time data.
+
+NOX retains its fixed native orthogonal geometry, prescribed/axis-aligned slip
+velocity, Neumann pressure and mesh-periodic boundary contract. Isothermal
+tests cover assembled/composite operators, least-squares/Gauss-linear gradients,
+resolved-SST walls, periodicity and nonunit density. Physical Boussinesq tests
+cover thermal forcing, material feedback, scalar void and ideal radiolysis.
+Free-surface, boiling, precursors, custom momentum drivers, legacy drivers,
+unsupported boundaries and moving grids remain rejected for NOX. Their
+previously tested non-NOX SAS paths are unchanged. This does not introduce a
+monolithic turbulence/temperature/gas nonlinear solve or broaden the NOX
+geometry qualification to skewed/cylindrical meshes.
+
+The independent turbulence oracle starts with the preceding accepted k/omega
+and advances once with the final flow and physical timestep, then compares
+every output field with the driver, including the applied SAS record. Active
+fixtures require `max_source > 1e-6 s^-2`; a zero-source implementation cannot
+pass. Source-disabled SAS reproduces the parent SST velocity, pressure and
+flux bitwise. Rejection tests cover both failed NOX corrections and failures
+after successful flow/turbulence, including restoration of the accepted report
+and successful retry. Native frozen-input tests check residual and analytic
+directional-derivative agreement, deep copies, reused storage and retained
+callback isolation in serial and MPI.
+
+Final focused verification used the existing caches, without shared preset
+changes: GCC 16.2.1/Trilinos 17.2.0 with NOX **ON**, and Clang 22.1.8 with
+libc++/Trilinos 17.3.0 and NOX **OFF**. The latter exercises the frozen native
+context and disabled-backend rejection; it does not qualify enabled LLVM NOX.
+
+| Final check | Result |
+| --- | --- |
+| GCC Debug affected serial selection, including export audit | 85 passed; 3 expected MPI-only skips (88 registrations) |
+| GCC Debug explicit MPI selection | 4/4 registrations passed |
+| LLVM Debug affected serial selection, including export audit | 53 passed; 1 expected MPI-only skip (54 registrations) |
+| LLVM Debug explicit MPI selection | 2/2 registrations passed |
+| Whitespace review | `git diff --check` passed |
+
+MPI runs used host networking. The existing serial-only semi-structured body
+skips inside the broader MPI executable. `SASNonlinear_2procs` retains the
+`small_fixture` label. No production-size regression was introduced.
+
+Executed final build/test commands (logs retained locally under
+`build/verification/sas-nox-20260916/`):
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testCoupledNonlinearSolver testSASSupportedPaths testTurbulentBoussinesqSolver testIncompressibleIsothermalSolver testNoxLinearizationRetirement
+cmake --build --preset LLVM-Debug --parallel 1 --target testCoupledNonlinearSolver testSASSupportedPaths testTurbulentBoussinesqSolver
+ctest --test-dir build/gcc -C Debug -R '^(CoupledNonlinear.*Test\.|SASSupportedPathsTest\.|TurbulentBoussinesqSolverTest\.|IncompressibleIsothermalSolverTest\.|NoxLinearizationRetirementTest\.|simplefluid_elf_export_boundary$)' -E '_2procs' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SASNonlinear_2procs|CoupledNonlinearSolver_2procs|SASSupportedPaths_2procs|TurbulentBoussinesq_2procs)$' --output-on-failure
+ctest --test-dir build/llvm -C Debug -R '^(CoupledNonlinear.*Test\.|SASSupportedPathsTest\.|TurbulentBoussinesqSolverTest\.|simplefluid_elf_export_boundary$)' -E '_2procs' --output-on-failure
+ctest --test-dir build/llvm -C Debug -R '^(SASNonlinear_2procs|CoupledNonlinearSolver_2procs)$' --output-on-failure
+```
+
+Development failures were resolved: a missing context include, two test compile
+errors, mismatched native continuity/gauge overloads in the reference fixture,
+missing resolved-wall names, and rank-local instead of replicated NOX boundary
+configuration. The LLVM export audit exposed four additional ABI entries
+(902 total versus the old 900 ceiling). Hiding the virtual hooks then failed
+the GCC downstream-subclass link test: its vtable requires those exports.
+The final audit keeps them, adds exact-count anchors for the two virtual hooks
+and two constructor entries, and budgets exactly four additional symbols
+(ceiling 904), preserving private/vendor exclusions. No numerical tolerance,
+external reference manifest or flow-comparison acceptance gate was relaxed.
+There are no unresolved failures in the final selections.
+
+This extension is implemented, component-tested and solver-regression-tested.
+No enabled LLVM NOX run, Release campaign, new whole-flow OpenFOAM comparison,
+resolution study or physical-validation campaign was performed. Earlier SAS
+pointwise evidence and pending pitzDaily/3D scale-resolution qualifications
+remain distinct from this coupling verification.
+
+## Cylindrical geometry
+
+Native cylindrical sectors and closed annuli use stored global Cartesian
+velocity components. The SAS vector Laplacian now integrates the radial face
+normal using the chord factor `sin(dtheta/2)/(dtheta/2)`, instead of treating
+its arc area and midpoint normal as an integrated vector. Existing parent
+momentum, SST, scalar transport and mesh geometry are unchanged.
+
+`SSTSASDerivativesTest.CylindricalSectorsAndClosedAnnuli` checks uniform flow,
+affine shear, rigid rotation, scalar gradients, quadratic vector curvature,
+nonzero SAS transport, disabled-source equality, diagnostics and restoration.
+Its volume-weighted quadratic Laplacian L1 errors decrease from 0.898220 to
+0.492935 on a sector and 0.858865 to 0.461980 on a full annulus as the radial,
+azimuthal and axial resolution doubles. Both serial and two-rank paths pass.
+`SASSupportedPathsTest.CylindricalCartesianComponentsAdvanceTransientSwirl`
+checks two accepted isothermal steps, nonzero SAS, positivity and continuity.
+The existing positive-inner-radius restriction remains; this does not add
+axis cells or qualify a thin angular extrusion as resolved 3D turbulence.
+
+Commands:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^SSTSAS' -E '_2procs' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SSTSAS_2procs$' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Cylindrical' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPaths_2procs$' --output-on-failure
+```
+
+MPI registrations run with host network access. The SAS component selection
+contains 18 passing serial registrations; the explicit MPI registration also
+passes. The cylindrical solver registration passes in serial and on two ranks.
+
+## Semi-structured geometry
+
+`SemiStructuredXY_Z` now runs SAS directly through its native handle/fields.
+No legacy mesh or extra derivative approximation is introduced. Skewed
+triangular extrusions pass affine/vector/scalar derivative checks, quadratic
+curvature refinement, nonzero transport, disabled-source equality, restart and
+rollback tests. A native isothermal prism case accepts two steps with nonzero
+SAS and controlled continuity. The two focused serial registrations passed:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^(SSTSASDerivativesTest.SemiStructured|SASSupportedPathsTest.SemiStructured)' --output-on-failure
+```
+
+The underlying handle remains serial-only for this mesh family, so these
+geometry-specific bodies skip under MPI. This extension does not change mesh
+ownership or qualify arbitrary extrusion thickness as a 3D resolution scale.
+
+## Slip boundaries
+
+The SAS derivative now enforces `U_n=0` and `dU_t/dn=0`. The normal boundary
+flux is retained; tangential diffusion is zero. `CellGradientCache` has an
+optional cached boundary-displacement provider, preserving its original
+constructor and default arithmetic. Active SAS creates the additional cache
+only for configured slip patches, using the normal foot rather than treating
+the projected owner velocity as a full Dirichlet value at a skewed centroid.
+The provider survives cache refresh. Ordinary SST/source-disabled SAS do not
+select this new reconstruction; the analytic parent SST closure is unchanged.
+
+The slip tests protect affine tangential shear and normal-velocity gradients
+on native/legacy boxes and skewed prisms, so neither treating slip as no-slip
+nor dropping its whole vector flux can pass. Quadratic fields activate SAS.
+Cartesian slip and cylindrical no-slip/slip transient cases check bounded
+fields and continuity. GCC builds and the 27-registration serial selection
+pass; MPI runs use the existing two SAS registrations:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths testCellGradientCache
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS.*Test\.|SASSupportedPathsTest\.|CellGradientCacheTest\.)' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs)$' --output-on-failure
+```
+
+## Periodic topology and geometry
+
+Native Cartesian meshes now expose the indexer's existing periodic-axis and
+wrapped MPI ownership machinery. Connected face normals, cell-center vectors,
+face distances and VTU endpoint images follow that topology. Legacy
+translational face pairing now stores the neighbor image displacement;
+MeshHandle preserves it. Diffusion and Rhie-Chow both consume the wrapped
+vector, avoiding inconsistent projection coefficients at the seam. These are
+geometry corrections, not changes to SST coefficients or source algebra.
+
+Native Fourier-gradient/Laplacian refinement, legacy/native paired-image
+agreement, VTU cell-volume geometry and nonzero periodic transient SAS pass.
+The existing non-adjacent-cell query rejection is preserved. Unpaired periodic
+patches fail collectively; a peer rank receives the established propagated
+runtime error rather than the originating invalid_argument. The legacy
+fixture supplies its partners locally; native periodic meshes exercise MPI
+seam halos. Rotational sector transformations and one-cell periodic native
+axes are outside this API.
+
+The focused GCC serial selection passes 23 registrations and all three MPI
+registrations pass. A final ten-registration geometry/periodic subset also
+passes after retaining the original overflow and adjacency guards. Before the fix,
+the transient continuity check exposed unwrapped Rhie-Chow geometry; the
+original continuity tolerance was retained. Commands:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths testOrthogonalCartesian3D testFvmOperators testCellGradientCache testStoredPressureFaceFluxCache
+ctest --test-dir build/gcc -C Debug -R 'Periodic|OrthogonalCartesian3DTest|StoredPressureFaceFluxCacheTest' -E '_[24]procs' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs|StoredPressureFaceFluxCache_2procs)$' --output-on-failure
+```
+
+## Gauss-linear discretization
+
+The new `turbulence_gradient_scheme` database key accepts `leastSquares`
+(default) and `gaussLinear`, matching the typed option. Active SAS uses a
+linearity-preserving Gauss-linear coordinate-moment correction. It normalizes
+by volume and solves a dimensionless, pivoted 3x3 system locally; it rejects
+singular moments, respects mixed slip/Neumann constraints and uses integrated
+curved-face area vectors and wrapped periodic displacements. Constant offsets
+cancel before reconstruction. This is a documented SAS numerical policy,
+not a claim of equality with an uncorrected OpenFOAM Gauss gradient. Ordinary
+SST and source-disabled SAS retain their previous reconstruction paths.
+
+Manufactured affine gradients/curvature and quadratic refinement cover native
+and legacy boxes, skewed prisms, cylindrical annuli, semi-structured extrusions
+and periodic Fourier fields. Runtime checks cover disabled-source equivalence,
+restart/diagnostics, slip flow and signed Boussinesq production with a nonzero
+SAS source. The Gauss/option selection initially passed 20 serial registrations;
+final selection passes 21 serial registrations, and both MPI registrations
+pass, including the added periodic and buoyancy checks:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASModel testSASSupportedPaths testTurbulenceModelOptions
+ctest --test-dir build/gcc -C Debug -R '(SSTSAS|SASSupportedPaths).*Gauss|TurbulenceModelOptionsTest' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^(SSTSAS_2procs|SASSupportedPaths_2procs)$' --output-on-failure
+```
+
+## Material feedback
+
+SAS now supports the existing temperature/constant material-feedback model.
+Its accepted mirrors are captured with the model's snapshot API in addition
+to the existing material, flow and turbulence snapshots. No feedback closure
+or turbulence transport weighting changes. The regression demonstrates changed
+density/viscosity and nonzero SAS, then induces overflow only in post-temperature
+feedback. All published model/material/turbulence fields and time restore,
+and the corrected input can retry successfully. The focused serial test and
+its dedicated two-rank registration both pass.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.MaterialFeedback' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASMaterialFeedback_2procs$' --output-on-failure
+```
+
+## Scalar void fraction
+
+The existing void diffusion/collapse path is enabled with SAS, using its
+snapshot to restore alpha_g, alpha_l and the explicit source mirror. The test
+checks the global collapse balance, bounded complementary fractions, mixture
+density feedback, nonzero SAS and late-rejection restoration/retry. It does
+not add gas momentum, phase-weighted RANS, or a new void-advection scheme.
+The focused serial and dedicated two-rank registrations pass:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.ScalarVoid' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASScalarVoid_2procs$' --output-on-failure
+```
+
+## Delayed-neutron precursors
+
+The precursor model now snapshots all concentration, mixture-volume inventory,
+source, initialization and balance-diagnostic state. Snapshots reject foreign
+configurations/geometry and invalidate retained Krylov state on restoration.
+SAS permits the existing precursor reaction/advection/diffusion path and adds
+that snapshot to the accepted-step transaction. Turbulence itself remains
+full-cell; precursor inventories retain their existing alpha_l C definition.
+
+The regression checks the exact integrated reaction balance with transport,
+nonzero SAS, late-failure field/diagnostic restoration, retry and stale-snapshot
+rejection. The SAS/precursor serial selection passed 11 tests with three
+expected MPI-only skips; the dedicated two-rank registration passed.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testPhase13PlusModels
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Precursor|^DelayedNeutronPrecursorModelTest' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASPrecursors_2procs$' --output-on-failure
+```
+
+## Radiolysis
+
+SAS now includes the existing radiolytic snapshot: dissolved/population
+inventories, pressure/history state, carrier/slip fluxes and cumulative
+hydrogen ledgers. Ideal-gas void production and Sheng two-population transport
+both run with nonzero SAS. The serial and dedicated MPI registrations pass.
+The test checks hydrogen production/conservation,
+restoration after post-temperature feedback rejection, and successful retry.
+The unit-density fixture selects nu/D=100 inside the existing Hughmark domain;
+no model validity gate or conservation tolerance was relaxed. This remains
+weak single-continuum coupling, not a bubble-induced turbulence or interphase
+momentum closure.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testRadiolyticGasModel
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Radiolysis' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASRadiolysis_2procs$' --output-on-failure
+```
+
+## Boiling
+
+The existing bulk/wall boiling model now snapshots all six source fields,
+steam/condensate and cumulative ledgers, pending phase-change scalars/vectors,
+completion flag and diagnostics. Its configuration/geometry identity guards
+restoration. SAS enables this model with scalar void while preserving existing
+latent-heat and source ownership and the prohibition on simultaneous Sheng
+radiolysis and boiling.
+
+The test checks nonzero SAS and boiling, volume-integrated latent-energy/source
+consistency, restoration of pending state and diagnostics after a later
+rejection, retry and stale-snapshot rejection. The serial selection passes
+13 tests with one expected MPI-only skip; the dedicated MPI registration passes.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testPhase13PlusModels
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.Boiling|^BoilingSourceModelTest' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASBoiling_2procs$' --output-on-failure
+```
+
+## Fixed-grid free surface and liquid inventories
+
+The SAS transaction now owns snapshots of the existing planar-volume-budget
+and liquid-mass models, their published fields, accepted history cursor,
+occupancy error and failure flag. Both global-constant-mass and cell-mass
+policies are covered. A failed lazy initialization keeps its configured owners
+alive for rollback instead of destroying objects referenced by snapshots.
+A later failure also removes initialization/history publication; a corrected
+input can retry. Non-SAS failure behavior is preserved.
+
+Regressions cover boiling with a vented budget and both mass policies,
+two-population escape with a closed headspace, invalid and successful-but-later-
+rejected lazy initialization, source/ledger/history restoration and retry with
+a smaller physical timestep. Prescribed headspace history provides a failure
+after upstream physics has advanced. The initial pressure bracket stays within
+the existing bubble-EOS validity domain. Planar ALE remains laminar-only; no
+moving-grid turbulence histories or new interface/phase closure is added.
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSASSupportedPaths testBoussinesqFreeSurface testBoussinesqPlanarALE
+ctest --test-dir build/gcc -C Debug -R '^SASSupportedPathsTest.*FreeSurface' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^SASFreeSurface_2procs$' --output-on-failure
+```
+
+## Earlier commit series and verification
+
+This section retains the preceding support campaign's pre-rebase commit IDs
+and test evidence. The current NOX extension and its own verification matrix
+are recorded above.
+
+| Support | Commit |
+| --- | --- |
+| Cylindrical sectors/annuli | `0707b28` |
+| Serial semi-structured extrusion | `b9e487d` |
+| Mixed slip boundaries | `6d803ad` |
+| Periodic topology, images and flux geometry | `362543b` |
+| Corrected Gauss-linear gradients | `7fad6d7` |
+| Material feedback | `e74a03b` |
+| Scalar void fraction | `23d2bc1` |
+| Precursor transport | `f9b9ea2` |
+| Ideal/two-population radiolysis | `d937d9e` |
+| Bulk/wall boiling | `65bfc8f` |
+| Fixed-grid free surface and liquid inventories | `e038b95` |
+
+That campaign's final numerical tree was `e038b95`; the verification record was committed
+separately. The source-policy Decimal reference still matches all six rows,
+and the small transient activation example still agrees between serial and
+two ranks with rtol=1e-9, atol=1e-11 (maximum applied source 522.89735022936
+s^-2). Both ELF export audits pass. Shared presets, the SST-1994 equation
+class and external OpenFOAM manifests/gates are unchanged.
+
+The final combined selections have no failures:
+
+| Toolchain | Serial registrations | Explicit MPI registrations |
+| --- | --- | --- |
+| GCC Debug | 314 passed, 15 expected skips (329 selected) | 15/15 passed |
+| LLVM/libc++ Debug | 314 passed, 15 expected skips (329 selected) | 15/15 passed |
+
+The serial skips are existing rank-count-specific tests. Serial-only geometry
+bodies also skip within MPI executables; this does not imply multi-rank
+semi-structured support. There were no unresolved build or test failures.
+
+The final build target selection was:
+
+```sh
+cmake --build --preset GCC-Debug --parallel 2 --target testSSTSASSource testSSTSASModel testSASSupportedPaths testTurbulenceEquations testTurbulenceModel testTurbulenceModelOptions testTurbulenceModelMultiRank testTurbulenceScalarTransportEquation testTurbulenceWallTreatment testTurbulenceBuoyancy testTurbulentBoussinesqSolver testOrthogonalCartesian3D testMeshHandle testCellGradientCache testFvmOperators testStoredPressureFaceFluxCache testStoredTransportReuse testGeometryEpochCaches testPhase13PlusModels testRadiolyticGasModel testBoussinesqFreeSurface testBoussinesqPlanarALE sst_sas_activation
+cmake --build --preset LLVM-Debug --parallel 2 --target testSSTSASSource testSSTSASModel testSASSupportedPaths testTurbulenceEquations testTurbulenceModel testTurbulenceModelOptions testTurbulenceModelMultiRank testTurbulenceScalarTransportEquation testTurbulenceWallTreatment testTurbulenceBuoyancy testTurbulentBoussinesqSolver testOrthogonalCartesian3D testMeshHandle testCellGradientCache testFvmOperators testStoredPressureFaceFluxCache testStoredTransportReuse testGeometryEpochCaches testPhase13PlusModels testRadiolyticGasModel testBoussinesqFreeSurface testBoussinesqPlanarALE sst_sas_activation
+cmake --build --preset GCC-Debug --parallel 2 --target testIncompressibleIsothermalSolver testSteadyStateSearch testBoundaryConditions
+cmake --build --preset LLVM-Debug --parallel 2 --target testIncompressibleIsothermalSolver testSteadyStateSearch testBoundaryConditions
+```
+
+The last three targets were explicitly rebuilt after auditing every executable
+in the broad selection, preventing old test binaries from counting as final
+evidence. Serial selections use the following regex, separately with
+`--test-dir build/gcc` and `--test-dir build/llvm`, `-C Debug`,
+`-E '_[0-9]+procs'`, and `--output-on-failure`:
+
+```text
+SSTSAS.*Test\.|SASSupportedPathsTest\.|Turbulence|TurbulentBoussinesq|SSTKOmega|BSLKOmega|KEpsilon|StandardKOmega|OrthogonalCartesian3DTest|MeshHandleTest|CellGradientCacheTest|StoredPressureFaceFluxCacheTest|StoredTransportReuseTest|GeometryEpochCacheTest|BoussinesqFreeSurface|BoussinesqPlanarALE|DelayedNeutronPrecursorModelTest|BoilingSourceModelTest|MaterialFeedbackModelTest|ScalarVoidFractionModelTest|RadiolyticGasModelTest|FvmOperatorsTest.*Periodic|simplefluid_elf_export_boundary|sst_sas_activation_small
+```
+
+Both toolchains also run the same 15 explicit MPI registrations, with the
+working host-network launcher and the following `ctest -R` expression:
+
+```text
+^(SSTSAS_2procs|SASSupportedPaths_2procs|SSTSASActivation_2procs|SASMaterialFeedback_2procs|SASScalarVoid_2procs|SASPrecursors_2procs|SASRadiolysis_2procs|SASBoiling_2procs|SASFreeSurface_2procs|TurbulenceModel_2procs|TurbulenceBuoyancy_2procs|TurbulentBoussinesq_2procs|BoussinesqPlanarALE_2procs|StoredPressureFaceFluxCache_2procs|StoredTransportReuse_2procs)$
+```
+
+```sh
+python3 verification/sst_sas/pointwise_reference.py --check
+python3 verification/sst_sas/compare_serial_mpi.py build/gcc/bin/Debug/sst_sas_activation
+git diff --check
+```
+
+All 15 MPI registrations pass on both GCC and LLVM. Counts refer to CTest
+registrations, with overlapping coverage across selections. Semi-structured
+geometry remains serial-only under its existing mesh ownership contract.
+Periodic support is translational plus the existing closed cylindrical ring;
+rotational sector transforms and one-cell native periodic axes are not added.
+SAS remains fixed-grid and physical-time; planar ALE and pseudo-time SAS remain
+rejected. Existing incompatible physics pairings remain rejected. These are
+component/solver regressions, not physical turbulence validation. No full
+repository, Release, macOS, accelerator or long external flow assessment was
+run for this extension series.

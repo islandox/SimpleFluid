@@ -51,7 +51,7 @@ struct CoupledNonlinearProblemStatistics
 
 /**
  * Fixed orthogonal-mesh backward-Euler momentum with constant viscosity or
- * frozen physical Boussinesq material/source coefficients, and a coupled
+ * frozen physical isothermal/Boussinesq coefficients, and a coupled
  * pressure problem. Physical boundaries prescribe velocity (including
  * NoSlip) or use axis-aligned Slip, with Neumann pressure; mesh periodic
  * interfaces are supported.
@@ -87,6 +87,17 @@ public:
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr;
     };
 
+    /** Isothermal physical momentum, without a temperature/material allocation.
+     * Viscosity, turbulent pressure and boundary viscosity are deeply copied;
+     * the native accepted-velocity transpose stress remains explicit.
+     */
+    struct FrozenIsothermalInput
+    {
+        const field_type& dynamic_viscosity;
+        const velocity_field_type* turbulent_kinetic_energy_gradient = nullptr;
+        const boundary_cache_type* boundary_dynamic_viscosity = nullptr;
+    };
+
     CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
         const field_type& physical_pressure, const BoundaryConditionSet& boundaries,
         const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
@@ -102,6 +113,11 @@ public:
         const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
         double reference_density, const continuity_target_type* continuity_target,
         const FrozenBoussinesqInput* boussinesq, CoupledNonlinearWorkspace* workspace);
+    CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
+        const field_type& physical_pressure, const BoundaryConditionSet& boundaries,
+        const TimeStepperOptions& time_options, const NonlinearSolverOptions& nonlinear_options,
+        double reference_density, const continuity_target_type* continuity_target,
+        const FrozenIsothermalInput& isothermal, CoupledNonlinearWorkspace* workspace = nullptr);
     ~CoupledNonlinearProblem();
 
     NonlinearCallbacks callbacks();
