@@ -8,9 +8,12 @@
 #include "dataclass/TpetraTypes.hh"
 
 #include <Teuchos_Array.hpp>
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <algorithm>
 #include <cstddef>
+#include <vector>
 #include <optional>
 #include <stdexcept>
 
@@ -108,16 +111,15 @@ Teuchos::RCP<typename Pack::matrix_type> upwind_convection_matrix_impl(
     return matrix;
 }
 
-/** @brief Assemble pressure Poisson on a generic mapped mesh. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
-Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const MeshType& mesh,
-    std::optional<typename Pack::global_ordinal_type> gauge_cell_gid, BoundaryConditionProvider boundary_condition)
+/** @brief Visit pressure rows in the same face order for fresh and reused graphs. */
+template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class RowVisitor>
+void visit_pressure_poisson_rows(const MeshType& mesh,
+    std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
+    BoundaryConditionProvider boundary_condition, RowVisitor visit_row)
 {
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
     Teuchos::Array<local_ordinal_type> columns;
     Teuchos::Array<scalar_type> values;
     columns.reserve(32);
@@ -134,7 +136,7 @@ Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const Mesh
         {
             columns.push_back(cell_lid);
             values.push_back(scalar_type{1});
-            matrix->insertLocalValues(cell_lid, columns(), values());
+            visit_row(cell_lid, columns, values);
             continue;
         }
 
@@ -175,10 +177,115 @@ Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const Mesh
         }
         columns.push_back(cell_lid);
         values.push_back(diagonal > scalar_type{} ? diagonal : scalar_type{1});
-        matrix->insertLocalValues(cell_lid, columns(), values());
+        visit_row(cell_lid, columns, values);
     }
+}
+
+/** @brief Assemble pressure Poisson on a generic mapped mesh. */
+template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
+Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const MeshType& mesh,
+    std::optional<typename Pack::global_ordinal_type> gauge_cell_gid, BoundaryConditionProvider boundary_condition)
+{
+    auto matrix = Teuchos::rcp(new typename Pack::matrix_type(
+        mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
+        [&](auto row, const auto& columns, const auto& values)
+        {
+            matrix->insertLocalValues(row, columns(), values());
+        });
     matrix->fillComplete();
     return matrix;
+}
+
+/**
+ * @brief Refresh a compatible pressure graph without rebuilding its maps/imports.
+ * Stage every coefficient before publication. Both graph compatibility and exact
+ * numeric equality are collective, including ranks whose gauge row never changes.
+ * Incompatible maps/entries leave the matrix untouched. False requires a fresh
+ * graph, also if Tpetra unexpectedly rejects a staged replacement. The caller
+ * must invalidate numeric preconditioners whenever values_changed is true.
+ */
+template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
+bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
+    std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
+    BoundaryConditionProvider boundary_condition, bool symmetric_gauge,
+    typename Pack::matrix_type& matrix, bool& values_changed)
+{
+    using scalar_type = typename Pack::scalar_type;
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    values_changed = false;
+    int local_invalid = matrix.isFillComplete() ? 0 : 1;
+    int global_invalid = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid, &global_invalid);
+    if (global_invalid != 0) return false;
+    // isSameAs is collective; all ranks follow the same short-circuit path.
+    if (!matrix.getRowMap()->isSameAs(*mesh.owned_cell_map()) ||
+        !matrix.getColMap()->isSameAs(*mesh.overlap_cell_map()) ||
+        !matrix.getDomainMap()->isSameAs(*mesh.owned_cell_map()) ||
+        !matrix.getRangeMap()->isSameAs(*mesh.owned_cell_map())) return false;
+
+    std::vector<Teuchos::Array<scalar_type>> staged(mesh.num_owned_cells());
+    int local_changed = 0;
+    visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
+        [&](auto row, const auto& columns, const auto& values)
+        {
+            typename Pack::matrix_type::local_inds_host_view_type previous_columns;
+            typename Pack::matrix_type::values_host_view_type previous_values;
+            matrix.getLocalRowView(row, previous_columns, previous_values);
+            auto& refreshed = staged[static_cast<size_t>(row)];
+            refreshed.resize(previous_values.extent(0), scalar_type{});
+            std::vector<bool> visited(previous_values.extent(0), false);
+            for (int entry = 0; entry < columns.size(); ++entry)
+            {
+                size_t slot = 0;
+                while (slot < previous_columns.extent(0) && previous_columns(slot) != columns[entry]) ++slot;
+                if (slot == previous_columns.extent(0))
+                {
+                    local_invalid = 1;
+                    continue;
+                }
+                visited[slot] = true;
+                refreshed[slot] += values[entry];
+            }
+            for (size_t slot = 0; slot < previous_columns.extent(0); ++slot)
+            {
+                if (!visited[slot]) local_invalid = 1;
+                if (symmetric_gauge && gauge_cell_gid &&
+                    mesh.owned_cell_map()->getGlobalElement(row) != *gauge_cell_gid &&
+                    matrix.getColMap()->getGlobalElement(previous_columns(slot)) == *gauge_cell_gid)
+                    refreshed[slot] = scalar_type{};
+                if (refreshed[slot] != previous_values(slot)) local_changed = 1;
+            }
+        });
+    const int local_status[2]{local_invalid, local_changed};
+    int global_status[2]{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 2, local_status, global_status);
+    if (global_status[0] != 0) return false;
+    values_changed = global_status[1] != 0;
+    if (!values_changed) return true;
+    const auto domain_map = matrix.getDomainMap();
+    const auto range_map = matrix.getRangeMap();
+    // Tpetra's host replacement API requires fill-active state even when
+    // every entry already exists. It otherwise returns invalid without writing.
+    matrix.resumeFill();
+    int local_replacement_failed = 0;
+    for (size_t owned = 0; owned < staged.size(); ++owned)
+    {
+        const auto row = static_cast<local_ordinal_type>(owned);
+        typename Pack::matrix_type::local_inds_host_view_type columns;
+        typename Pack::matrix_type::values_host_view_type previous_values;
+        matrix.getLocalRowView(row, columns, previous_values);
+        const auto entries = static_cast<local_ordinal_type>(columns.extent(0));
+        const auto replaced = matrix.replaceLocalValues(row, entries,
+            staged[owned].getRawPtr(), columns.data());
+        if (replaced != entries) local_replacement_failed = 1;
+    }
+    matrix.fillComplete(domain_map, range_map);
+    int global_replacement_failed = 0;
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1,
+        &local_replacement_failed, &global_replacement_failed);
+    return global_replacement_failed == 0;
 }
 
 } // namespace SimpleFluid::FVM::detail

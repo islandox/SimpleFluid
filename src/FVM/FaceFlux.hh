@@ -287,9 +287,17 @@ public:
     /** @brief Refresh Rhie--Chow reconstruction geometry after mesh motion. */
     void refresh_geometry()
     {
+        if (detail::ale_geometry_identity(*d_mesh) == d_geometry->d_geometry_identity &&
+            mesh_geometry_epoch(*d_mesh) == d_geometry->d_geometry_epoch) return;
         // Replacing a snapshot never mutates metrics retained by another
         // workspace or an older analytic Jacobian generation.
         d_geometry = std::make_shared<SharedGeometry>(d_mesh);
+    }
+
+    /** @brief Share validated current metrics while retaining private field scratch. */
+    void refresh_geometry(shared_geometry_type geometry)
+    {
+        d_geometry = require_geometry(d_mesh, std::move(geometry));
     }
 
 private:
