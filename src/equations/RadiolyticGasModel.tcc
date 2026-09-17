@@ -2125,78 +2125,35 @@ auto RadiolyticGasModel<Pack, MeshType>::concentration(
 }
 
 /**
- * @brief Clamp and publish one updated cell kinetics state.
- * @tparam Pack Tpetra type pack used by the model.
- * @param cell_lid Local cell identifier.
- * @param state Updated conserved inventories and populations.
- */
-template<TpetraTypePack Pack, class MeshType>
-void RadiolyticGasModel<Pack, MeshType>::assign_cell_state(
-    local_ordinal_type cell_lid,
-    const CellKineticsState& state)
-{
-    const auto micro_number = std::clamp(
-        state.micro_number, scalar_type{}, d_options.max_population);
-    const auto large_number = std::clamp(
-        state.large_number, scalar_type{}, d_options.max_population);
-    if (micro_number != state.micro_number
-        || large_number != state.large_number)
-    {
-        ++d_last_statistics.clipped_cells;
-    }
-    d_dissolved_hydrogen_inventory.set_owned_value(
-        cell_lid, std::max(state.dissolved_inventory, scalar_type{}));
-    d_micro_number.set_owned_value(cell_lid, micro_number);
-    d_micro_moles.set_owned_value(
-        cell_lid, std::max(state.micro_moles, scalar_type{}));
-    d_large_number.set_owned_value(cell_lid, large_number);
-    d_large_moles.set_owned_value(
-        cell_lid, std::max(state.large_moles, scalar_type{}));
-}
-
-/**
  * @brief Integrate local hydrogen production, conversion, and dissolution.
  * @tparam Pack Tpetra type pack used by the model.
- * @param cell_lid Local cell identifier.
+ * @param initial Transported inventories and populations.
  * @param time_step Positive physical time step.
- * @param power_density Local fission power density.
+ * @param production_rate Local hydrogen production rate.
+ * @param liquid_fraction Liquid fraction frozen until derived-field reconstruction.
  * @param properties Derived thermophysical cell properties.
- * @return Updated conserved cell kinetics state.
+ * @param substeps Step-wide subcycle schedule and analytic decay coefficients.
+ * @return Updated conserved cell kinetics state and diagnostic rates.
  * @throws std::invalid_argument if a correlation input is invalid.
  * @throws std::runtime_error if the selected rise-velocity solve fails.
  */
 template<TpetraTypePack Pack, class MeshType>
 auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
-    local_ordinal_type cell_lid,
+    const CellKineticsState& initial,
     scalar_type time_step,
-    scalar_type power_density,
-    const CellProperties& properties) -> CellKineticsState
+    scalar_type production_rate,
+    scalar_type liquid_fraction,
+    const CellProperties& properties,
+    const KineticsSubsteps& substeps) -> CellKineticsResult
 {
-    CellKineticsState state{
-        d_dissolved_hydrogen_inventory.value(cell_lid),
-        d_micro_number.value(cell_lid),
-        d_micro_moles.value(cell_lid),
-        d_large_number.value(cell_lid),
-        d_large_moles.value(cell_lid)};
-    const auto initial = state;
-    const auto production_rate =
-        d_options.gas_release_efficiency
-      * d_options.hydrogen_yield_mol_per_j
-      * std::max(power_density, scalar_type{});
-    d_hydrogen_production_rate.set_owned_value(
-        cell_lid, production_rate);
-
-    const auto controlling_time =
-        std::min(
-            d_options.microbubble_lifetime,
-            d_options.large_bubble_dissolution_time);
-    auto subcycles = static_cast<int>(
-        std::ceil(time_step / (0.2 * controlling_time)));
-    subcycles = std::clamp(
-        subcycles, 1, d_options.max_subcycles);
-    d_last_statistics.maximum_subcycles = std::max(
-        d_last_statistics.maximum_subcycles, subcycles);
-    const auto substep = time_step / subcycles;
+    CellKineticsResult result;
+    auto& state = result.state;
+    state = initial;
+    const auto substep = substeps.duration;
+    const auto produced = production_rate * substep;
+    const auto produced_number = produced / properties.nucleation_moles;
+    const auto conversion_pressure_factor =
+        d_options.micro_to_large_conversion_coefficient * properties.pressure;
 
     scalar_type converted_number{};
     scalar_type converted_moles{};
@@ -2209,27 +2166,20 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
             properties.surface_tension,
             properties.nucleation_radius);
 
-    for (int cycle = 0; cycle < subcycles; ++cycle)
+    for (int cycle = 0; cycle < substeps.count; ++cycle)
     {
-        const auto produced = production_rate * substep;
         state.micro_moles += produced;
-        state.micro_number +=
-            produced / properties.nucleation_moles;
+        state.micro_number += produced_number;
 
-        const auto micro_decay_fraction =
-            1.0 - std::exp(
-                -substep / d_options.microbubble_lifetime);
         const auto micro_decay_moles =
-            state.micro_moles * micro_decay_fraction;
+            state.micro_moles * substeps.micro_decay_fraction;
         state.micro_moles -= micro_decay_moles;
-        state.micro_number *= 1.0 - micro_decay_fraction;
+        state.micro_number *= substeps.micro_retention;
         state.dissolved_inventory += micro_decay_moles;
         dissolved_moles += micro_decay_moles;
 
-        const auto liquid_fraction =
-            std::max(
-                1.0 - d_alpha_g.value(cell_lid),
-                scalar_type{1.0e-15});
+        // Concentration, conversion and bubble properties depend on the
+        // evolving populations and must be recomputed in every subcycle.
         const auto dissolved_concentration =
             concentration(state, liquid_fraction);
         const auto supersaturation =
@@ -2240,8 +2190,7 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
                 d_options.heaviside_mode,
                 d_options.smooth_heaviside_width);
         const auto conversion_frequency =
-            d_options.micro_to_large_conversion_coefficient
-          * properties.pressure
+            conversion_pressure_factor
           * std::max(supersaturation, scalar_type{})
           * activation;
         const auto conversion_fraction =
@@ -2321,29 +2270,21 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
         {
             const auto analytic_decay =
                 state.large_moles
-              * (1.0 - std::exp(
-                    -substep
-                    / d_options.large_bubble_dissolution_time));
+              * substeps.large_decay_fraction;
             const auto transfer = std::min(
                 state.large_moles,
                 -transfer_rate * substep + analytic_decay);
             state.large_moles -= transfer;
-            state.large_number *= std::exp(
-                -substep
-                / d_options.large_bubble_dissolution_time);
+            state.large_number *= substeps.large_retention;
             state.dissolved_inventory += transfer;
             dissolved_moles += transfer;
         }
     }
 
-    d_micro_to_large_number_rate.set_owned_value(
-        cell_lid, converted_number / time_step);
-    d_micro_to_large_molar_rate.set_owned_value(
-        cell_lid, converted_moles / time_step);
-    d_large_growth_rate.set_owned_value(
-        cell_lid, large_growth / time_step);
-    d_dissolution_rate.set_owned_value(
-        cell_lid, dissolved_moles / time_step);
+    result.converted_number_rate = converted_number / time_step;
+    result.converted_molar_rate = converted_moles / time_step;
+    result.large_growth_rate = large_growth / time_step;
+    result.dissolution_rate = dissolved_moles / time_step;
 
     const auto before =
         initial.dissolved_inventory
@@ -2351,10 +2292,8 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
     const auto after =
         state.dissolved_inventory
       + state.micro_moles + state.large_moles;
-    d_inventory_error.set_owned_value(
-        cell_lid,
-        after - before - production_rate * time_step);
-    return state;
+    result.inventory_error = after - before - production_rate * time_step;
+    return result;
 }
 
 /**
@@ -2513,26 +2452,82 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic local-kinetics integration",
         [&]
         {
+            KineticsSubsteps substeps;
+            const auto controlling_time = std::min(
+                d_options.microbubble_lifetime, d_options.large_bubble_dissolution_time);
+            substeps.count = std::clamp(static_cast<int>(
+                std::ceil(time_step / (0.2 * controlling_time))), 1, d_options.max_subcycles);
+            substeps.duration = time_step / substeps.count;
+            substeps.micro_decay_fraction =
+                1.0 - std::exp(-substeps.duration / d_options.microbubble_lifetime);
+            // Retain the original subtraction order for microbubble number.
+            substeps.micro_retention = 1.0 - substeps.micro_decay_fraction;
+            substeps.large_retention =
+                std::exp(-substeps.duration / d_options.large_bubble_dissolution_time);
+            substeps.large_decay_fraction = 1.0 - substeps.large_retention;
             const auto pressure_values = d_absolute_pressure.owned_read_view();
             const auto temperature_values = temperature.owned_read_view();
             const auto density_values = material.density.owned_read_view();
             const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
             const auto power_values = fission_power_density->owned_read_view();
+            const auto alpha_values = d_alpha_g.owned_read_view();
+            const auto inventory_values = d_dissolved_hydrogen_inventory.owned_write_view();
+            const auto micro_number_values = d_micro_number.owned_write_view();
+            const auto micro_moles_values = d_micro_moles.owned_write_view();
+            const auto large_number_values = d_large_number.owned_write_view();
+            const auto large_moles_values = d_large_moles.owned_write_view();
+            const auto production_values = d_hydrogen_production_rate.owned_write_view();
+            const auto converted_number_values = d_micro_to_large_number_rate.owned_write_view();
+            const auto converted_molar_values = d_micro_to_large_molar_rate.owned_write_view();
+            const auto growth_values = d_large_growth_rate.owned_write_view();
+            const auto dissolution_values = d_dissolution_rate.owned_write_view();
+            const auto error_values = d_inventory_error.owned_write_view();
+            const auto donor_values = d_donor_tracking_enabled
+                ? d_donor_hydrogen_deficit.owned_write_view()
+                : decltype(d_donor_hydrogen_deficit.owned_write_view()){};
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 const auto properties =
                     cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
                         density_values(owned, 0), viscosity_values(owned, 0));
-                assign_cell_state(cell_lid,
-                    integrate_cell_kinetics(cell_lid, time_step, power_values(owned, 0), properties));
+                const CellKineticsState initial{inventory_values(owned, 0),
+                    micro_number_values(owned, 0), micro_moles_values(owned, 0),
+                    large_number_values(owned, 0), large_moles_values(owned, 0)};
+                const auto production_rate = d_options.gas_release_efficiency
+                    * d_options.hydrogen_yield_mol_per_j
+                    * std::max(power_values(owned, 0), scalar_type{});
+                production_values(owned, 0) = production_rate;
+                d_last_statistics.maximum_subcycles = std::max(
+                    d_last_statistics.maximum_subcycles, substeps.count);
+                // alpha_g is reconstructed only after all cell kinetics;
+                // its liquid fraction is invariant over these subcycles.
+                const auto liquid_fraction = std::max(
+                    1.0 - alpha_values(owned, 0), scalar_type{1.0e-15});
+                const auto result = integrate_cell_kinetics(
+                    initial, time_step, production_rate, liquid_fraction, properties, substeps);
+                converted_number_values(owned, 0) = result.converted_number_rate;
+                converted_molar_values(owned, 0) = result.converted_molar_rate;
+                growth_values(owned, 0) = result.large_growth_rate;
+                dissolution_values(owned, 0) = result.dissolution_rate;
+                error_values(owned, 0) = result.inventory_error;
+                const auto& state = result.state;
+                const auto micro_number = std::clamp(
+                    state.micro_number, scalar_type{}, d_options.max_population);
+                const auto large_number = std::clamp(
+                    state.large_number, scalar_type{}, d_options.max_population);
+                if (micro_number != state.micro_number || large_number != state.large_number)
+                    ++d_last_statistics.clipped_cells;
+                inventory_values(owned, 0) = std::max(state.dissolved_inventory, scalar_type{});
+                micro_number_values(owned, 0) = micro_number;
+                micro_moles_values(owned, 0) = std::max(state.micro_moles, scalar_type{});
+                large_number_values(owned, 0) = large_number;
+                large_moles_values(owned, 0) = std::max(state.large_moles, scalar_type{});
                 if (d_donor_tracking_enabled)
                 {
-                    const auto deficit = d_donor_hydrogen_deficit.value(cell_lid) +
-                        time_step * d_hydrogen_production_rate.value(cell_lid);
+                    const auto deficit = donor_values(owned, 0) + time_step * production_rate;
                     if (!std::isfinite(deficit) || deficit < scalar_type{})
                         throw std::runtime_error("Radiolytic donor deficit is invalid.");
-                    d_donor_hydrogen_deficit.set_owned_value(cell_lid, deficit);
+                    donor_values(owned, 0) = deficit;
                 }
             }
         });
@@ -2839,20 +2834,20 @@ void RadiolyticGasModel<Pack, MeshType>::advance(
 
     if (d_options.pressure_mode != RadiolyticPressureMode::Inertial)
     {
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
+        const auto temperature_values = temperature.owned_read_view();
+        const auto density_values = material.density.owned_read_view();
+        const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
+        const auto alpha_values = d_alpha_g.owned_read_view();
+        const auto previous_temperature_values = d_previous_temperature.owned_write_view();
+        const auto previous_density_values = d_previous_density.owned_write_view();
+        const auto previous_viscosity_values = d_previous_dynamic_viscosity.owned_write_view();
+        const auto previous_alpha_values = d_previous_alpha_g.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            d_previous_temperature.set_owned_value(
-                cell_lid, temperature.value(cell_lid));
-            d_previous_density.set_owned_value(
-                cell_lid, material.density.value(cell_lid));
-            d_previous_dynamic_viscosity.set_owned_value(
-                cell_lid, material.dynamic_viscosity.value(cell_lid));
-            d_previous_alpha_g.set_owned_value(
-                cell_lid, d_alpha_g.value(cell_lid));
+            previous_temperature_values(owned, 0) = temperature_values(owned, 0);
+            previous_density_values(owned, 0) = density_values(owned, 0);
+            previous_viscosity_values(owned, 0) = viscosity_values(owned, 0);
+            previous_alpha_values(owned, 0) = alpha_values(owned, 0);
         }
         d_history_initialized = true;
     }
@@ -3046,9 +3041,10 @@ auto RadiolyticGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     {
         auto& values = result.d_fields.emplace_back();
         values.resize(d_mesh->num_owned_cells());
+        const auto field_values = field->owned_read_view();
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            values[owned] = field->value(static_cast<local_ordinal_type>(owned));
+            values[owned] = field_values(owned, 0);
         }
     }
     result.d_transport_slip_face_ids =
@@ -3104,10 +3100,10 @@ void RadiolyticGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
     }
     for (size_t field_index = 0; field_index < fields.size(); ++field_index)
     {
+        const auto values = fields[field_index]->owned_write_view();
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            fields[field_index]->set_owned_value(
-                static_cast<local_ordinal_type>(owned), snapshot.d_fields[field_index][owned]);
+            values(owned, 0) = snapshot.d_fields[field_index][owned];
         }
     }
     for (size_t face = 0; face < snapshot.d_transport_slip_face_ids.size(); ++face)

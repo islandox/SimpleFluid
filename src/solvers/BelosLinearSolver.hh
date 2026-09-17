@@ -283,13 +283,19 @@ public:
             typename Pack::node_type>;
 
     /**
-     * @brief Release all operator-dependent Krylov and preconditioner state.
+     * @brief Invalidate numeric factors after changing the current operator in place.
      *
-     * Maps may remain compatible after fixed-topology mesh motion while the
-     * matrix numeric values are no longer compatible.  Callers use this hook
-     * when such an external invalidation cannot be inferred from operator
-     * identity alone.  The cumulative preconditioner setup count is retained.
+     * Operator identity alone cannot detect changed coefficients. Call collectively
+     * before the next solve whenever any rank changes values; compatible Krylov
+     * storage remains available, but the preconditioner is rebuilt from new values.
+     * The cumulative preconditioner setup count is retained.
      */
+    void notify_operator_values_changed()
+    {
+        invalidate_preconditioner();
+    }
+
+    /** @brief Release all operator-dependent state, including compatible Krylov storage. */
     void reset()
     {
         if (!d_problem.is_null())

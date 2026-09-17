@@ -58,8 +58,7 @@ void PressureProjectionEquation<Pack, MeshType>::set_linear_solver_options(Linea
     {
         // CG eliminates the zero-pressure gauge column as well as its row.
         // Switching policies must rebuild that numerical operator before use.
-        d_cached_pressure_matrix = Teuchos::null;
-        d_linear_solver.reset();
+        d_matrix_values_stale = true;
     }
     d_linear_options = std::move(options);
 }
@@ -74,9 +73,7 @@ const LinearSolverOptions& PressureProjectionEquation<Pack, MeshType>::linear_so
 /** @brief Refresh geometry-dependent state after a fixed-topology motion. */
 template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pack, MeshType>::refresh_geometry()
 {
-    d_cached_pressure_matrix = Teuchos::null;
-    d_cached_rhs = Teuchos::null;
-    d_pressure_gauge_gid.reset();
+    d_matrix_values_stale = true;
     d_cached_predictor_flux_valid = false;
     d_rhs_norm_reference = {};
     d_cached_target_generation = 0;
@@ -84,7 +81,6 @@ template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pa
     d_cached_predictor_time_step = {};
     d_cached_predictor_reference_density = {};
     d_cached_fixed_boundary_flux_generation = 0;
-    d_linear_solver.reset();
     d_face_flux_workspace.refresh_geometry();
 }
 
@@ -126,18 +122,17 @@ void PressureProjectionEquation<Pack, MeshType>::set_fixed_boundary_flux_provide
             condition.type = BoundaryConditionType::Neumann;
         }
     }
-    d_cached_pressure_matrix = Teuchos::null;
-    d_cached_rhs = Teuchos::null;
-    d_pressure_gauge_gid.reset();
+    // The callback/generation changes flux values only. Compare the effective
+    // boundary mask at the next solve, after any clear/reconfigure sequence.
     d_cached_predictor_flux_valid = false;
     d_rhs_norm_reference = {};
-    d_linear_solver.reset();
 }
 
 /** @brief Clear exact boundary fluxes and restore physical correction types. */
 template<TpetraTypePack Pack, class MeshType>
 void PressureProjectionEquation<Pack, MeshType>::clear_fixed_boundary_flux_provider()
 {
+    if (d_fixed_boundary_flux_names.empty() && !d_fixed_boundary_flux_provider) return;
     d_fixed_boundary_flux_names.clear();
     d_fixed_boundary_flux_provider = {};
     d_fixed_boundary_flux_generation = 0;
@@ -147,12 +142,10 @@ void PressureProjectionEquation<Pack, MeshType>::clear_fixed_boundary_flux_provi
         static_cast<void>(name);
         condition.value = scalar_type{};
     }
-    d_cached_pressure_matrix = Teuchos::null;
-    d_cached_rhs = Teuchos::null;
-    d_pressure_gauge_gid.reset();
+    // The callback/generation changes flux values only. Compare the effective
+    // boundary mask at the next solve, after any clear/reconfigure sequence.
     d_cached_predictor_flux_valid = false;
     d_rhs_norm_reference = {};
-    d_linear_solver.reset();
 }
 
 /** @brief Relax only the compatibility check for exact fixed-flux faces. */
@@ -350,6 +343,13 @@ auto PressureProjectionEquation<Pack, MeshType>::require_owned_cell_map(const SP
  */
 template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pack, MeshType>::rebuild_matrix() const
 {
+    update_matrix(false);
+}
+
+/** @brief Refresh all coefficients while retaining collectively compatible setup. */
+template<TpetraTypePack Pack, class MeshType>
+void PressureProjectionEquation<Pack, MeshType>::update_matrix(bool allow_graph_reuse) const
+{
     const auto owned_map = require_owned_cell_map(d_mesh);
     int local_has_dirichlet = 0;
     for (const auto& [batch_id, boundary_batch] : d_mesh->boundary_batches())
@@ -384,6 +384,19 @@ template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pa
         const auto iter = d_pressure_correction_boundary_conditions.find(d_mesh->boundary_batch_name(batch_id));
         return iter == d_pressure_correction_boundary_conditions.end() ? BoundaryCondition{} : iter->second;
     };
+    if (allow_graph_reuse && !d_cached_pressure_matrix.is_null())
+    {
+        bool values_changed = false;
+        if (FVM::detail::refresh_pressure_poisson_matrix_values<Pack>(*d_mesh, d_pressure_gauge_gid,
+                boundary_condition, d_linear_options.backend == LinearSolverBackend::Cg,
+                *d_cached_pressure_matrix, values_changed))
+        {
+            if (values_changed) d_linear_solver.notify_operator_values_changed();
+            d_matrix_values_stale = false;
+            d_matrix_fixed_boundary_flux_names = d_fixed_boundary_flux_names;
+            return;
+        }
+    }
     d_cached_pressure_matrix = FVM::pressure_poisson_matrix<Pack>(*d_mesh, d_pressure_gauge_gid, boundary_condition);
     if (d_linear_options.backend == LinearSolverBackend::Cg && d_pressure_gauge_gid)
     {
@@ -411,6 +424,8 @@ template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pa
         }
         d_cached_pressure_matrix->fillComplete();
     }
+    d_matrix_values_stale = false;
+    d_matrix_fixed_boundary_flux_names = d_fixed_boundary_flux_names;
 }
 
 /**
@@ -642,11 +657,12 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         apply_fixed_boundary_fluxes(d_cached_face_fluxes);
     }
     const auto owned_map = require_owned_cell_map(d_mesh);
-    if (d_cached_pressure_matrix.is_null())
+    if (d_cached_pressure_matrix.is_null() || d_matrix_values_stale ||
+        d_matrix_fixed_boundary_flux_names != d_fixed_boundary_flux_names)
     {
-        rebuild_matrix();
+        update_matrix(true);
     }
-    if (d_cached_rhs.is_null())
+    if (d_cached_rhs.is_null() || !d_cached_rhs->getMap()->isSameAs(*owned_map))
     {
         d_cached_rhs = Teuchos::rcp(new typename Pack::vector_type(d_mesh->owned_cell_map(), false));
     }

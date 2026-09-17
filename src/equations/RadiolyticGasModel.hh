@@ -464,6 +464,28 @@ private:
         scalar_type large_moles = {};
     };
 
+    /** @brief Step-wide coefficients shared by all local kinetics subcycles. */
+    struct KineticsSubsteps
+    {
+        int count = 1;
+        scalar_type duration = {};
+        scalar_type micro_decay_fraction = {};
+        scalar_type micro_retention = {};
+        scalar_type large_decay_fraction = {};
+        scalar_type large_retention = {};
+    };
+
+    /** @brief Local state and rates, published after the cell solve completes. */
+    struct CellKineticsResult
+    {
+        CellKineticsState state;
+        scalar_type converted_number_rate = {};
+        scalar_type converted_molar_rate = {};
+        scalar_type large_growth_rate = {};
+        scalar_type dissolution_rate = {};
+        scalar_type inventory_error = {};
+    };
+
     /** @brief Thermophysical inputs derived for one local kinetics solve. */
     struct CellProperties
     {
@@ -536,11 +558,13 @@ private:
     CellProperties cell_properties(scalar_type pressure, scalar_type temperature,
         scalar_type density, scalar_type dynamic_viscosity) const;
     SIMPLEFLUID_EQUATIONS_LOCAL
-    CellKineticsState integrate_cell_kinetics(
-        local_ordinal_type cell_lid,
+    CellKineticsResult integrate_cell_kinetics(
+        const CellKineticsState& initial,
         scalar_type time_step,
-        scalar_type power_density,
-        const CellProperties& properties);
+        scalar_type production_rate,
+        scalar_type liquid_fraction,
+        const CellProperties& properties,
+        const KineticsSubsteps& substeps);
     SIMPLEFLUID_EQUATIONS_LOCAL
     void reconstruct_derived_fields(const field_type& temperature, const field_type& density,
         const field_type& dynamic_viscosity, bool record_event_statistics = true);
@@ -582,10 +606,6 @@ private:
     scalar_type concentration(
         const CellKineticsState& state,
         scalar_type liquid_fraction) const;
-    SIMPLEFLUID_EQUATIONS_LOCAL
-    void assign_cell_state(
-        local_ordinal_type cell_lid,
-        const CellKineticsState& state);
     SIMPLEFLUID_EQUATIONS_LOCAL
     std::vector<field_type*> mutable_state_fields();
     SIMPLEFLUID_EQUATIONS_LOCAL
