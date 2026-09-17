@@ -11,6 +11,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::configure(const ScalarSourceDec
 {
     validate_collective_configuration(options);
     validate_scalar_source_decay_options(options);
+    d_snapshot_configuration = std::make_shared<const int>(0);
     d_options = options;
     d_fields.clear();
     d_inventories.clear();

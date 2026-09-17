@@ -89,13 +89,11 @@ inline auto
 OrthogonalCartesian3D::cell_faces_impl(cell_id_t id) const
     -> std::array<face_id_t, 6>
 {
-    return {{
-        {id.i, id.j, id.k, X_FACE},
-        {id.i + 1, id.j, id.k, X_FACE},
-        {id.i, id.j, id.k, Y_FACE},
-        {id.i, id.j + 1, id.k, Y_FACE},
-        {id.i, id.j, id.k, Z_FACE},
-        {id.i, id.j, id.k + 1, Z_FACE}}};
+    const auto upper = [&](auto coordinate, size_t axis)
+    { return d_indexer.periodic_dimensions[axis] && coordinate+1==d_indexer.num_cells_per_dim[axis] ? decltype(coordinate){} : coordinate+1; };
+    return {{{id.i,id.j,id.k,X_FACE}, {upper(id.i,X),id.j,id.k,X_FACE},
+             {id.i,id.j,id.k,Y_FACE}, {id.i,upper(id.j,Y),id.k,Y_FACE},
+             {id.i,id.j,id.k,Z_FACE}, {id.i,id.j,upper(id.k,Z),Z_FACE}}};
 }
 
 inline auto
@@ -168,16 +166,44 @@ OrthogonalCartesian3D::face_centroid_impl(face_id_t id) const -> Vec3
 inline auto
 OrthogonalCartesian3D::face_normal_impl(face_id_t id) const -> Vec3
 {
-    const auto sign =
-        (id.orientation == X_FACE && id.i == 0)
-        || (id.orientation == Y_FACE && id.j == 0)
-        || (id.orientation == Z_FACE && id.k == 0)
-      ? -1.0
-      : 1.0;
+    const auto axis=static_cast<size_t>(id.orientation);
+    const std::array coordinates{id.i,id.j,id.k};
+    const auto sign=!d_indexer.periodic_dimensions[axis] && coordinates[axis]==0 ? -1. : 1.;
 
     Vec3 normal;
     normal.component(static_cast<size_t>(id.orientation)) = sign;
     return normal;
+}
+
+/** Wrapped geometric displacement, including the two-cell periodic case. */
+inline auto OrthogonalCartesian3D::cell_center_vector(face_id_t face, cell_id_t cell) const -> Vec3
+{
+    const auto other=opposite_cell(face,cell);
+    if (other==invalid_cell_id()) throw std::invalid_argument("Exterior face has no center displacement.");
+    auto displacement=cell_centroid(other)-cell_centroid(cell);
+    const auto axis=static_cast<size_t>(face.orientation);
+    const std::array coordinates{face.i,face.j,face.k};
+    if (d_indexer.periodic_dimensions[axis] && coordinates[axis]==0)
+        displacement.component(axis)+=(owner_cell(face)==cell ? 1 : -1)
+            *(d_cell_edges[axis].back()-d_cell_edges[axis].front());
+    return displacement;
+}
+
+inline real_t OrthogonalCartesian3D::cell_to_face_distance(face_id_t face, cell_id_t cell) const
+{
+    if (owner_cell(face)!=cell && (neighbor_cell(face)==invalid_cell_id() || neighbor_cell(face)!=cell))
+        throw std::invalid_argument("Cell is not adjacent to requested face.");
+    auto point=face_centroid(face);
+    const auto axis=static_cast<size_t>(face.orientation);
+    const std::array coordinates{face.i,face.j,face.k};
+    if (d_indexer.periodic_dimensions[axis] && coordinates[axis]==0 && owner_cell(face)==cell)
+        point.component(axis)+=d_cell_edges[axis].back()-d_cell_edges[axis].front();
+    return (point-cell_centroid(cell)).norm();
+}
+
+inline real_t OrthogonalCartesian3D::face_cell_center_distance(face_id_t face) const
+{
+    return neighbor_cell(face)==invalid_cell_id() ? 0 : cell_center_vector(face,owner_cell(face)).norm();
 }
 
 /**
