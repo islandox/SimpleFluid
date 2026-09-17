@@ -2036,10 +2036,88 @@ TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterF
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
     EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->integrated_power(), before_source);
+    const Solver& observer = solver;
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
     solver.restore_coupling_checkpoint(checkpoint);
     EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->integrated_power(), 0.0);
     EXPECT_FALSE(solver.find_fission_power_source()->has_interval_energy());
+    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
     solver.accept_coupling_checkpoint(checkpoint);
+}
+
+TEST(BoussinesqCouplingIntervalTest, AcceptancePreflightPreservesPartialAndCompleteCheckpoints)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25);
+    auto& solver = *state.solver;
+    const Solver& observer = solver;
+    auto& source = solver.add_fission_power_source();
+    source.initialize_constant(0.0);
+    auto checkpoint = solver.create_coupling_checkpoint();
+    const std::vector<double> energy(state.mesh->num_owned_cells(), 0.01);
+    solver.set_coupling_interval_energy(energy, 0.02);
+    solver.step();
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_FALSE(source.has_interval_energy());
+    solver.set_coupling_interval_energy(energy, 0.02);
+    solver.step();
+    solver.step();
+
+    const auto primary = capture_primary(observer);
+    const auto source_values = capture_owned_values(source.field());
+    const auto mass_values = capture_owned_values(solver.liquid_mass_inventory().cellMassInventory());
+    const auto geometry = capture_geometry(*state.mesh);
+    const auto history = solver.free_surface_history();
+    const double power = source.integrated_power();
+    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
+    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
+    EXPECT_DOUBLE_EQ(solver.time(), 0.02);
+    EXPECT_EQ(solver.step_index(), 2);
+    EXPECT_EQ(state.mesh->geometry_epoch(), geometry.epoch);
+    EXPECT_EQ(capture_geometry(*state.mesh).cell_volumes, geometry.cell_volumes);
+    expect_primary_restored(observer, primary);
+    expect_owned_values(source.field(), source_values);
+    expect_owned_values(solver.liquid_mass_inventory().cellMassInventory(), mass_values);
+    EXPECT_TRUE(source.has_interval_energy());
+    EXPECT_DOUBLE_EQ(source.interval_duration(), 0.02);
+    EXPECT_DOUBLE_EQ(source.interval_end_time(), 0.02);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), power);
+    ASSERT_EQ(solver.free_surface_history().size(), history.size());
+    for (size_t record = 0; record < history.size(); ++record)
+    {
+        EXPECT_DOUBLE_EQ(solver.free_surface_history()[record].free_surface.pool_level,
+                         history[record].free_surface.pool_level);
+        EXPECT_DOUBLE_EQ(solver.free_surface_history()[record].liquid_mass.total_mass,
+                         history[record].liquid_mass.total_mass);
+    }
+    EXPECT_THROW(static_cast<void>(solver.create_coupling_checkpoint()), std::logic_error);
+    solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::invalid_argument);
+    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::invalid_argument);
+}
+
+TEST(BoussinesqCouplingIntervalTest, AcceptancePreflightRejectsForeignAndRankLocalForeignTokens)
+{
+    auto first = make_case(Coupling::PISO, 0.0, 25);
+    auto second = make_case(Coupling::PISO, 0.0, 25);
+    auto first_checkpoint = first.solver->create_coupling_checkpoint();
+    auto second_checkpoint = second.solver->create_coupling_checkpoint();
+    const Solver& first_observer = *first.solver;
+    const Solver& second_observer = *second.solver;
+    EXPECT_THROW(first_observer.validate_coupling_checkpoint_acceptance(second_checkpoint),
+                 std::invalid_argument);
+    const auto& rank_local_token = Tpetra::getDefaultComm()->getRank() == 0
+        ? second_checkpoint : first_checkpoint;
+    EXPECT_THROW(first_observer.validate_coupling_checkpoint_acceptance(rank_local_token), std::exception);
+    EXPECT_NO_THROW(first_observer.validate_coupling_checkpoint_acceptance(first_checkpoint));
+    EXPECT_NO_THROW(second_observer.validate_coupling_checkpoint_acceptance(second_checkpoint));
+    first.solver->restore_coupling_checkpoint(first_checkpoint);
+    second.solver->restore_coupling_checkpoint(second_checkpoint);
+    first.solver->accept_coupling_checkpoint(first_checkpoint);
+    second.solver->accept_coupling_checkpoint(second_checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, ShortEnergyIntervalCannotBeAcceptedWithoutAdvancing)
@@ -2050,10 +2128,43 @@ TEST(BoussinesqCouplingIntervalTest, ShortEnergyIntervalCannotBeAcceptedWithoutA
     auto checkpoint = solver.create_coupling_checkpoint();
     const std::vector<double> energy(state.mesh->num_owned_cells(), 1.e-6);
     solver.set_coupling_interval_energy(energy, 1.e-16);
+    const Solver& observer = solver;
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
     EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     solver.restore_coupling_checkpoint(checkpoint);
     EXPECT_FALSE(solver.find_fission_power_source()->has_interval_energy());
+    solver.accept_coupling_checkpoint(checkpoint);
+}
+
+TEST(BoussinesqCouplingIntervalTest, AcceptanceRejectsOneUlpShortOfCanonicalIntervalEnd)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25);
+    auto& solver = *state.solver;
+    const Solver& observer = solver;
+    solver.add_fission_power_source().initialize_constant(0.0);
+    solver.set_time_step(0.002);
+    solver.step();
+    auto checkpoint = solver.create_coupling_checkpoint();
+    const double start = solver.time();
+    const double canonical_end = start + 5.e-5;
+    const double duration = canonical_end - start;
+    const std::vector<double> energy(state.mesh->num_owned_cells(), 0.0);
+    solver.set_coupling_interval_energy(energy, duration);
+    const double partial_end = std::nextafter(canonical_end, start);
+    solver.set_time_step(partial_end - start);
+    solver.step();
+    EXPECT_DOUBLE_EQ(solver.time(), partial_end);
+    ASSERT_GT(canonical_end - solver.time(),
+        32.0 * std::numeric_limits<double>::epsilon() * duration);
+    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
+    solver.restore_coupling_checkpoint(checkpoint);
+    solver.set_coupling_interval_energy(energy, duration);
+    solver.set_time_step(duration);
+    solver.step();
+    EXPECT_DOUBLE_EQ(solver.time(), canonical_end);
+    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
     solver.accept_coupling_checkpoint(checkpoint);
 }
 

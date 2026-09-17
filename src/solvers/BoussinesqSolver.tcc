@@ -3745,7 +3745,8 @@ void BoussinesqSolver<Pack>::restore_coupling_checkpoint(const CouplingCheckpoin
 }
 
 template<TpetraTypePack Pack>
-void BoussinesqSolver<Pack>::accept_coupling_checkpoint(CouplingCheckpoint& checkpoint)
+void BoussinesqSolver<Pack>::validate_coupling_checkpoint_acceptance(
+    const CouplingCheckpoint& checkpoint) const
 {
     validate_coupling_checkpoint(checkpoint);
     collective_detail::collective_local_validation(*d_mesh, "ALE interval acceptance", [&]
@@ -3763,6 +3764,12 @@ void BoussinesqSolver<Pack>::accept_coupling_checkpoint(CouplingCheckpoint& chec
                 throw std::logic_error("Accept the complete fission-energy interval, not a partial subcycle.");
         }
     });
+}
+
+template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::accept_coupling_checkpoint(CouplingCheckpoint& checkpoint)
+{
+    validate_coupling_checkpoint_acceptance(checkpoint);
     d_active_coupling_checkpoint.reset();
     checkpoint.d_state.reset();
 }

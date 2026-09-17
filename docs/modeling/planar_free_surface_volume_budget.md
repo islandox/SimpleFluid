@@ -1098,7 +1098,9 @@ physical validation.
 ## External coupling intervals
 
 The laminar planar-ALE/PISO driver exposes `create_coupling_checkpoint()`,
-`restore_coupling_checkpoint(checkpoint)`, and `accept_coupling_checkpoint(checkpoint)`.
+`restore_coupling_checkpoint(checkpoint)`,
+`validate_coupling_checkpoint_acceptance(checkpoint)`, and
+`accept_coupling_checkpoint(checkpoint)`.
 All are collective on the mesh communicator. The move-only checkpoint belongs to
 one solver and may be restored repeatedly after multiple successful `step()` calls.
 Only one live checkpoint is allowed; destruction performs no MPI work and does not
@@ -1112,6 +1114,13 @@ remain monotonic, so retained geometry views become stale even when coordinates
 return to earlier values. Numeric transport and pressure caches are rebuilt.
 No checkpoint operation writes output files; callers publish output after acceptance.
 An interval-energy trial can be accepted only after its full duration has elapsed.
+The const acceptance preflight performs the same ownership, configuration,
+failed-state, and strict interval-end checks as acceptance, without changing
+the checkpoint or physical state. A coupled driver can validate SF before
+committing the neutron solver, then call SF acceptance. No SF state or
+configuration may change between preflight and acceptance; preflight does not
+reserve the candidate. Acceptance repeats the preflight before releasing the
+token. The duration-relative endpoint tolerance is unchanged.
 
 `set_coupling_interval_energy(owned_joules, duration)` sets one finite nonnegative
 fission-energy budget per owned CFD cell for an interval beginning at `time()`.

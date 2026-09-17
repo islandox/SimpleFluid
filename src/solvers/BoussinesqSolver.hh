@@ -213,6 +213,13 @@ public:
      */
     [[nodiscard]] CouplingCheckpoint create_coupling_checkpoint();
     void restore_coupling_checkpoint(const CouplingCheckpoint& checkpoint);
+    /** Collective read-only acceptance preflight for an external coupled commit.
+     * Performs the same checks as accept_coupling_checkpoint without releasing
+     * the checkpoint or changing fields, geometry, clocks, or ledgers. Call
+     * before committing another solver, then accept without intervening SF
+     * state/configuration changes. This check does not reserve the candidate.
+     */
+    void validate_coupling_checkpoint_acceptance(const CouplingCheckpoint& checkpoint) const;
     void accept_coupling_checkpoint(CouplingCheckpoint& checkpoint);
     /** Assign a material-following extensive fission budget [J/owned cell].
      * Uniform in time over [time(), time()+duration]; remapped by current cell
