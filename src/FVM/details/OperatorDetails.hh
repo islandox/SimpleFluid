@@ -548,8 +548,7 @@ inline auto interior_diffusion_coefficient(
 
     const auto face_id = query_face_id(mesh, face_lid);
     const auto cell_id = query_cell_id(mesh, cell_lid);
-    const auto other_id = query_cell_id(mesh, other_lid);
-    const auto d = mesh.cell_center_vector(face_id,cell_id);
+    const auto d = mesh.cell_center_vector(face_id, cell_id);
     const auto d2 = d.dot(d);
     if (d2 <= scalar_type{0})
     {
@@ -735,9 +734,9 @@ size_t packed_face_local_id(const MeshType& mesh, FaceID face_id);
 /**
  * @brief Resolve each gradient incidence once, using one native dispatch per cell.
  *
- * These samples expire with the operation. Native metrics use the same centroid
- * differences as MeshHandle; composite periodic images retain their geometry
- * provider's displacement. All neighbor ordinals still come from the handle's
+ * These samples expire with the operation. Geometry providers retain their
+ * periodic-image displacements instead of subtracting wrapped centroids.
+ * All neighbor ordinals still come from the handle's
  * owned/overlap map, including reordered and noncontiguous identifiers.
  */
 template<class MeshType, class Visitor>
@@ -765,7 +764,7 @@ void visit_gradient_geometry_samples(const MeshType& mesh,
                 sample.other_lid = owned_orientation ? neighbor : to_local_cell(owner);
                 if (sample.other_lid == MeshType::invalid_local_id())
                     throw std::invalid_argument("Exterior face does not have an opposite cell.");
-                if constexpr (requires { native.acquire_execution_view(); })
+                if constexpr (requires { native.cell_center_vector(native_face, native_cell); })
                     sample.direction = native.cell_center_vector(native_face, native_cell);
                 else
                     sample.direction = native.cell_centroid(owned_orientation ? native_neighbor : owner)

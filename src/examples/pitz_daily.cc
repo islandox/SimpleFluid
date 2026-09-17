@@ -686,6 +686,7 @@ int main(int argc, char** argv)
             "SIMPLEFLUID_PITZ_STEADY_FULL_ACCURACY_UPDATE_RATIO", 10.0);
         const int progress_interval = positive_environment_integer("SIMPLEFLUID_PITZ_STEADY_PROGRESS_INTERVAL", 1);
 
+        turbulence.validate_time_mode(false);
         SimpleFluid::AdaptiveSteadyStateController controller(steady_options, time_step);
         SimpleFluid::AdaptiveLinearToleranceController linear_tolerance_controller(
             adaptive_linear_options, steady_options.relative_update_tolerance);

@@ -324,6 +324,7 @@ struct NativeNonlinearWorkspace
     std::unique_ptr<BoussinesqEquation> static_physical, physical_equation;
     std::unique_ptr<Problem::material_type> frozen_material;
     std::unique_ptr<Pressure> frozen_temperature;
+    std::unique_ptr<Pressure> frozen_isothermal_viscosity;
     std::unique_ptr<Velocity> frozen_turbulent_gradient;
     std::optional<Problem::boundary_cache_type> frozen_boundary_viscosity;
     NativeVelocityBoundaryCache velocity_boundaries;
@@ -423,10 +424,12 @@ struct CoupledNonlinearProblem::Impl
     std::unique_ptr<BoussinesqEquation>& physical_equation;
     std::unique_ptr<material_type>& frozen_material;
     std::unique_ptr<Pressure>& frozen_temperature;
+    std::unique_ptr<Pressure>& frozen_isothermal_viscosity;
     std::unique_ptr<Velocity>& frozen_turbulent_gradient;
     std::optional<boundary_cache_type>& frozen_boundary_viscosity;
     bool density_feedback = false;
     bool physical_mode = false;
+    bool isothermal_mode = false;
     bool turbulent_gradient_enabled = false;
     CoupledSolver& dynamic_solver;
     CoupledSolver::system_type static_system;
@@ -445,7 +448,8 @@ struct CoupledNonlinearProblem::Impl
     Impl(SP<const mesh_type> mesh_, const Velocity& accepted, const Pressure& pressure,
         const BoundaryConditionSet& boundaries_, const TimeStepperOptions& time_,
         const NonlinearSolverOptions& nonlinear_, double density_, const continuity_target_type* target_,
-        const FrozenBoussinesqInput* physical, std::shared_ptr<NativeNonlinearWorkspace> storage)
+        const FrozenBoussinesqInput* physical, const FrozenIsothermalInput* isothermal,
+        std::shared_ptr<NativeNonlinearWorkspace> storage)
         : workspace(std::move(storage)), mesh(require_mesh(std::move(mesh_))), boundaries(boundaries_), time(time_),
           nonlinear(nonlinear_), density(density_), target(target_ ? *target_ : continuity_target_type(mesh)),
           accepted_velocity(workspace->accepted_velocity), initial_pressure(workspace->initial_pressure),
@@ -454,9 +458,12 @@ struct CoupledNonlinearProblem::Impl
           velocity_boundaries(workspace->velocity_boundaries), dynamic_equation(workspace->dynamic_equation),
           physical_equation(workspace->physical_equation), frozen_material(workspace->frozen_material),
           frozen_temperature(workspace->frozen_temperature),
+          frozen_isothermal_viscosity(workspace->frozen_isothermal_viscosity),
           frozen_turbulent_gradient(workspace->frozen_turbulent_gradient),
           frozen_boundary_viscosity(workspace->frozen_boundary_viscosity), physical_mode(physical != nullptr),
-          turbulent_gradient_enabled(physical && physical->turbulent_kinetic_energy_gradient),
+          isothermal_mode(isothermal != nullptr),
+          turbulent_gradient_enabled((physical && physical->turbulent_kinetic_energy_gradient) ||
+              (isothermal && isothermal->turbulent_kinetic_energy_gradient)),
           dynamic_solver(workspace->dynamic_solver)
     {
         workspace->ready = false;
@@ -467,15 +474,19 @@ struct CoupledNonlinearProblem::Impl
         dynamic_before = dynamic_solver.cache_statistics();
         collective_require(*mesh, accepted.mesh_ptr().get() == mesh.get() && pressure.mesh_ptr().get() == mesh.get(),
             "CoupledNonlinearProblem requires accepted fields on its exact mesh.");
-        const std::array<int, 5> physical_flags{physical != nullptr, physical && physical->density_feedback_enabled,
+        const auto* k_gradient = physical ? physical->turbulent_kinetic_energy_gradient :
+            (isothermal ? isothermal->turbulent_kinetic_energy_gradient : nullptr);
+        const auto* boundary_viscosity = physical ? physical->boundary_dynamic_viscosity :
+            (isothermal ? isothermal->boundary_dynamic_viscosity : nullptr);
+        const std::array<int, 6> physical_flags{physical != nullptr, isothermal != nullptr,
+            physical && physical->density_feedback_enabled,
             physical && physical->effective_dynamic_viscosity != nullptr,
-            physical && physical->turbulent_kinetic_energy_gradient != nullptr,
-            physical && physical->boundary_dynamic_viscosity != nullptr};
-        std::array<int, 5> flags_min{}, flags_max{};
+            k_gradient != nullptr, boundary_viscosity != nullptr};
+        std::array<int, 6> flags_min{}, flags_max{};
         Teuchos::reduceAll(
-            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 5, physical_flags.data(), flags_min.data());
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 6, physical_flags.data(), flags_min.data());
         Teuchos::reduceAll(
-            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 5, physical_flags.data(), flags_max.data());
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 6, physical_flags.data(), flags_max.data());
         collective_require(*mesh, flags_min == flags_max,
             "Coupled nonlinear physical momentum inputs must have rank-consistent presence and modes.");
         const std::array<double, 10> parameters{density, time.time_step, time.kinematic_viscosity,
@@ -625,6 +636,11 @@ struct CoupledNonlinearProblem::Impl
         initial_pressure.owned_data().update(1.0, pressure.owned_data(), 0.0);
         accepted_velocity.sync_ghosts();
         initial_pressure.sync_ghosts();
+        const auto copy = [](auto& destination, const auto& source)
+        {
+            destination.owned_data().update(1., source.owned_data(), 0.);
+            destination.sync_ghosts();
+        };
         if (physical)
         {
             const auto gravity = time.gravity_vector();
@@ -648,11 +664,6 @@ struct CoupledNonlinearProblem::Impl
                     (!physical->turbulent_kinetic_energy_gradient ||
                         physical->turbulent_kinetic_energy_gradient->mesh_ptr().get() == mesh.get()),
                 "Coupled nonlinear physical momentum fields must use the exact context mesh.");
-            const auto copy = [](auto& destination, const auto& source)
-            {
-                destination.owned_data().update(1., source.owned_data(), 0.);
-                destination.sync_ghosts();
-            };
             if (!frozen_material)
                 frozen_material = std::make_unique<material_type>(mesh, BoussinesqModelOptions{}, time);
             copy(frozen_material->density, physical->material.density);
@@ -670,20 +681,37 @@ struct CoupledNonlinearProblem::Impl
             collective_require(*mesh, valid_coefficients && finite_temperature,
                 "Coupled nonlinear physical momentum requires finite positive density, nonnegative viscosity, and "
                 "temperature.");
-            if (physical->turbulent_kinetic_energy_gradient)
-            {
-                if (!frozen_turbulent_gradient)
-                    frozen_turbulent_gradient = std::make_unique<Velocity>(mesh, "nonlinear_frozen_k_gradient");
-                copy(*frozen_turbulent_gradient, *physical->turbulent_kinetic_energy_gradient);
-            }
-            if (physical->boundary_dynamic_viscosity)
-                frozen_boundary_viscosity = *physical->boundary_dynamic_viscosity;
-            else
-                frozen_boundary_viscosity.reset();
             density_feedback = physical->density_feedback_enabled;
             if (!physical_equation)
                 physical_equation = std::make_unique<BoussinesqEquation>(mesh);
         }
+        if (isothermal)
+        {
+            collective_require(*mesh, isothermal->dynamic_viscosity.mesh_ptr().get() == mesh.get() &&
+                (!k_gradient || k_gradient->mesh_ptr().get() == mesh.get()),
+                "Coupled nonlinear isothermal momentum fields must use the exact context mesh.");
+            if (!frozen_isothermal_viscosity)
+                frozen_isothermal_viscosity = std::make_unique<Pressure>(mesh, "nonlinear_frozen_viscosity");
+            copy(*frozen_isothermal_viscosity, isothermal->dynamic_viscosity);
+            bool valid_viscosity = true;
+            {
+                const auto values = frozen_isothermal_viscosity->owned_read_view();
+                for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+                    valid_viscosity = valid_viscosity && std::isfinite(values(cell, 0)) && values(cell, 0) >= 0;
+            }
+            collective_require(*mesh, valid_viscosity,
+                "Coupled nonlinear isothermal momentum requires finite nonnegative dynamic viscosity.");
+        }
+        if (k_gradient)
+        {
+            if (!frozen_turbulent_gradient)
+                frozen_turbulent_gradient = std::make_unique<Velocity>(mesh, "nonlinear_frozen_k_gradient");
+            copy(*frozen_turbulent_gradient, *k_gradient);
+        }
+        if (boundary_viscosity)
+            frozen_boundary_viscosity = *boundary_viscosity;
+        else
+            frozen_boundary_viscosity.reset();
         // Zero convection gives the immutable affine BE/diffusion/pressure
         // residual. Its dedicated workspace never constructs Schur products.
         trial_flux.put_value(0.0);
@@ -745,6 +773,11 @@ struct CoupledNonlinearProblem::Impl
                 frozen_material.get(), density, density_feedback, nullptr,
                 turbulent_gradient_enabled ? frozen_turbulent_gradient.get() : nullptr,
                 frozen_boundary_viscosity ? &*frozen_boundary_viscosity : nullptr, nullptr, purpose);
+        if (isothermal_mode)
+            return solver.assemble(equation, accepted_velocity, initial_pressure, trial_flux, velocity_boundaries,
+                boundaries, time, density, frozen_isothermal_viscosity.get(),
+                turbulent_gradient_enabled ? frozen_turbulent_gradient.get() : nullptr,
+                frozen_boundary_viscosity ? &*frozen_boundary_viscosity : nullptr, target, nullptr, purpose);
         return solver.assemble(equation, accepted_velocity, initial_pressure, trial_flux, velocity_boundaries,
             boundaries, time, target, density, nullptr, purpose);
     }
@@ -990,7 +1023,18 @@ CoupledNonlinearProblem::CoupledNonlinearProblem(SP<const mesh_type> mesh, const
 {
     auto storage = workspace ? workspace->d_impl->acquire(mesh) : std::make_shared<NativeNonlinearWorkspace>(mesh);
     d_impl = std::make_shared<Impl>(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
-        nonlinear_options, reference_density, continuity_target, boussinesq, std::move(storage));
+        nonlinear_options, reference_density, continuity_target, boussinesq, nullptr, std::move(storage));
+}
+
+CoupledNonlinearProblem::CoupledNonlinearProblem(SP<const mesh_type> mesh, const velocity_field_type& accepted_velocity,
+    const field_type& physical_pressure, const BoundaryConditionSet& boundaries, const TimeStepperOptions& time_options,
+    const NonlinearSolverOptions& nonlinear_options, double reference_density,
+    const continuity_target_type* continuity_target, const FrozenIsothermalInput& isothermal,
+    CoupledNonlinearWorkspace* workspace)
+{
+    auto storage = workspace ? workspace->d_impl->acquire(mesh) : std::make_shared<NativeNonlinearWorkspace>(mesh);
+    d_impl = std::make_shared<Impl>(std::move(mesh), accepted_velocity, physical_pressure, boundaries, time_options,
+        nonlinear_options, reference_density, continuity_target, nullptr, &isothermal, std::move(storage));
 }
 
 CoupledNonlinearProblem::~CoupledNonlinearProblem() = default;

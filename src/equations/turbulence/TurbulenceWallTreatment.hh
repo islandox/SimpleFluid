@@ -200,7 +200,7 @@ public:
     {
     public:
         Evaluation() = default;
-        Evaluation(const Evaluation&) = default;
+        SIMPLEFLUID_EQUATIONS_LOCAL Evaluation(const Evaluation&) = default;
         SIMPLEFLUID_EQUATIONS_LOCAL Evaluation(Evaluation&&) noexcept = default;
         Evaluation& operator=(const Evaluation&) = default;
         Evaluation& operator=(Evaluation&&) noexcept = default;

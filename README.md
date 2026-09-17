@@ -42,7 +42,7 @@ quantitative bubbly-flow validation remain open.
 | Momentum equation (transient + convection + diffusion) | ✅ |
 | Pressure–velocity coupling (SIMPLE/PISO/PIMPLE) | ✅ |
 | Coupled Krylov solver (block Schur + MueLu AMG) | ✅ |
-| Optional NOX nonlinear velocity-pressure solver (native fixed orthogonal mesh, constant kinematic viscosity) | ✅ |
+| Optional NOX nonlinear velocity-pressure solver (native fixed orthogonal mesh, frozen physical coefficients) | ✅ |
 | Rhie–Chow collocated stabilization | ✅ |
 | Verification suite (cavity smoke cases, Poiseuille, MMS) | ✅ |
 | External OpenFOAM profile-comparison workflow | ✅ |
@@ -257,6 +257,19 @@ The principal database selectors are `turbulence_model`, `wall_treatment`,
 `turbulence_buoyancy_model`. Roughness arrays are aligned with
 `wall_boundaries`. Automatic distance always includes every configured no-slip
 velocity patch; explicit names augment that set and must also be no-slip.
+
+The opt-in `SSTKOmegaSAS` selection adds a SAS omega source to the existing
+**SST-1994** parent. See [the mathematical contract, configuration and supported
+scope](docs/modeling/sst_sas.md) and [verification evidence](docs/modeling/sst_sas_verification.md).
+The `sst_sas_activation` example is a small, isothermal transient source check
+with optional diagnostics. The [tested support extensions](docs/modeling/sst_sas_extensions.md)
+cover cylindrical and serial semi-structured meshes, mixed slip and translational
+periodicity, corrected Gauss-linear gradients, and accepted-state transactions
+for compatible fixed-grid multiphysics models. Isothermal and physical Boussinesq
+SAS also support optional NOX velocity-pressure coupling within its
+[mesh, boundary and physics limits](docs/architecture/coupled_nonlinear_solver.md).
+Source implementation and solver regression do not
+establish physically validated scale-resolving turbulence.
 
 ### Turbulent Bubble-Flow Scope
 

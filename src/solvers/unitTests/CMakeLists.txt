@@ -322,3 +322,38 @@ foreach(_region_procs IN ITEMS 2 4)
         PROCS ${_region_procs} ARGS "--gtest_filter=BoussinesqPlanarALESupportMatrixTest.AcceptsCompositeAxialMotion"
         LABELS "mpi;multi_region;ale;pressure_velocity" TIMEOUT 180)
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME SASSupportedPaths_2procs
+    TARGET testSASSupportedPaths
+    PROCS 2
+    LABELS "mpi;turbulence;sas;small_fixture"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASMaterialFeedback_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.MaterialFeedbackPublishesAndRollsBackWithSAS"
+    LABELS "mpi;turbulence;sas;feedback;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASNonlinear_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.Nox*"
+    LABELS "mpi;turbulence;sas;nonlinear_solver;transaction;small_fixture" TIMEOUT 180)
+
+simplefluid_add_mpi_test(NAME SASScalarVoid_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSAS"
+    LABELS "mpi;turbulence;sas;void;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASPrecursors_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.PrecursorInventoryAndDiagnosticsRollBackWithSAS"
+    LABELS "mpi;turbulence;sas;precursors;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASRadiolysis_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.RadiolysisAndHydrogenLedgersRollBackWithSAS"
+    LABELS "mpi;turbulence;sas;radiolysis;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASBoiling_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.BoilingSourcesAndPendingStateRollBackWithSAS"
+    LABELS "mpi;turbulence;sas;boiling;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME SASFreeSurface_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.FixedFreeSurface*:SASSupportedPathsTest.LazyFreeSurface*"
+    LABELS "mpi;turbulence;sas;free_surface;small_fixture" TIMEOUT 120)

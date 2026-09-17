@@ -10,6 +10,7 @@ template<TpetraTypePack Pack, class MeshType>
 void BoilingSourceModel<Pack, MeshType>::configure(const BoilingSourceOptions& options)
 {
     validate_boiling_source_options(options);
+    d_snapshot_configuration = std::make_shared<const int>(0);
     d_options = options;
     d_source_alpha_boil.put_scalar(0.0);
     d_latent_heat_sink.put_scalar(0.0);
