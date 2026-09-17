@@ -440,7 +440,7 @@ void FluidSolver<Pack>::refresh_geometry_dependent_state()
     refresh_pressure_velocity_geometry_state();
 }
 
-/** Refresh base pressure coupling and invalidate every numeric reuse owner. */
+/** Refresh base pressure coupling while retaining compatible storage and geometry. */
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::refresh_pressure_velocity_geometry_state()
 {
@@ -457,6 +457,9 @@ void FluidSolver<Pack>::refresh_pressure_velocity_geometry_state()
         native_velocity_boundary_cache() = FVM::cache_velocity_boundary_conditions<Pack>(
             d_mesh, d_problem.boundary_conditions());
         native_pressure_face_flux_workspace().refresh_geometry();
+        // Both owners use the same immutable metrics and keep separate scratch.
+        native_pressure_projection().d_face_flux_workspace.refresh_geometry(
+            native_pressure_face_flux_workspace().shared_geometry());
         native_pressure_projection().refresh_geometry();
         native_coupled_pressure_velocity_solver().clear_cache();
     }

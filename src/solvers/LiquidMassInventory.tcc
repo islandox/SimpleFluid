@@ -147,26 +147,33 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
         local_invalid_value = local_invalid_value || !std::isfinite(flux);
         local_boundary_flux = local_boundary_flux || (d_mesh->is_boundary_face(face_lid) && flux != scalar_type{});
     }
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        const auto mass_density = d_cell_mass_inventory.value(cell);
-        const auto evaporation =
-            evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_mass_rate->value(cell);
-        const auto condensation =
-            condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
-        const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
-                                               : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
-        const auto old_volume =
-            ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-        local_invalid_value = local_invalid_value || !std::isfinite(mass_density) || mass_density < scalar_type{} ||
-                              !std::isfinite(evaporation) || evaporation < scalar_type{} ||
-                              !std::isfinite(condensation) || condensation < scalar_type{} ||
-                              !std::isfinite(new_volume) || new_volume <= scalar_type{} ||
-                              !std::isfinite(old_volume) || old_volume <= scalar_type{};
-        local_depleted_cell =
-            local_depleted_cell ||
-            mass_density * old_volume + time_step * (condensation - evaporation) * new_volume < scalar_type{};
+        const auto old_mass = d_cell_mass_inventory.owned_read_view();
+        const auto evaporation_values = evaporation_mass_rate
+                ? evaporation_mass_rate->owned_read_view() : decltype(old_mass){};
+        const auto condensation_values = condensation_mass_rate
+                ? condensation_mass_rate->owned_read_view() : decltype(old_mass){};
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            const auto mass_density = old_mass(owned, 0);
+            const auto evaporation =
+                evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_values(owned, 0);
+            const auto condensation =
+                condensation_mass_rate == nullptr ? scalar_type{} : condensation_values(owned, 0);
+            const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                                                   : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume =
+                ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+            local_invalid_value = local_invalid_value || !std::isfinite(mass_density) || mass_density < scalar_type{} ||
+                                  !std::isfinite(evaporation) || evaporation < scalar_type{} ||
+                                  !std::isfinite(condensation) || condensation < scalar_type{} ||
+                                  !std::isfinite(new_volume) || new_volume <= scalar_type{} ||
+                                  !std::isfinite(old_volume) || old_volume <= scalar_type{};
+            local_depleted_cell =
+                local_depleted_cell ||
+                mass_density * old_volume + time_step * (condensation - evaporation) * new_volume < scalar_type{};
+        }
     }
     const std::array<int, 3> local_validation{local_invalid_value, local_boundary_flux, local_depleted_cell};
     std::array<int, 3> global_validation{};
@@ -244,27 +251,36 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
         detail::CompensatedSum<> local_mass_after{};
         detail::CompensatedSum<> local_liquid_volume{};
         int invalid_trial_values = 0;
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
-            const auto cell = static_cast<local_ordinal_type>(owned);
-            const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
-                                                   : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
-            const auto old_volume =
-                ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-            const auto mass_before = d_cell_mass_inventory.value(cell);
-            const auto mass_after = d_trial_cell_mass_inventory.value(cell);
-            const auto density = d_pure_liquid_density.value(cell);
-            const auto evaporation =
-                evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_mass_rate->value(cell);
-            const auto condensation =
-                condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
-            invalid_trial_values = invalid_trial_values || !std::isfinite(mass_after) || mass_after < scalar_type{} ||
-                                  !std::isfinite(density) || density <= scalar_type{};
-            local_mass_before += static_cast<long double>(mass_before) * old_volume;
-            local_evaporated += static_cast<long double>(evaporation) * new_volume * time_step;
-            local_condensed += static_cast<long double>(condensation) * new_volume * time_step;
-            local_mass_after += static_cast<long double>(mass_after) * new_volume;
-            local_liquid_volume += static_cast<long double>(mass_after) / density * new_volume;
+            const auto old_mass = d_cell_mass_inventory.owned_read_view();
+            const auto trial_mass = d_trial_cell_mass_inventory.owned_read_view();
+            const auto pure_density = d_pure_liquid_density.owned_read_view();
+            const auto evaporation_values = evaporation_mass_rate
+                    ? evaporation_mass_rate->owned_read_view() : decltype(old_mass){};
+            const auto condensation_values = condensation_mass_rate
+                    ? condensation_mass_rate->owned_read_view() : decltype(old_mass){};
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto new_volume = ale == nullptr ? static_cast<scalar_type>(d_mesh->cell_volume(cell))
+                                                       : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+                const auto old_volume =
+                    ale == nullptr ? new_volume : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+                const auto mass_before = old_mass(owned, 0);
+                const auto mass_after = trial_mass(owned, 0);
+                const auto density = pure_density(owned, 0);
+                const auto evaporation =
+                    evaporation_mass_rate == nullptr ? scalar_type{} : evaporation_values(owned, 0);
+                const auto condensation =
+                    condensation_mass_rate == nullptr ? scalar_type{} : condensation_values(owned, 0);
+                invalid_trial_values = invalid_trial_values || !std::isfinite(mass_after) || mass_after < scalar_type{} ||
+                                      !std::isfinite(density) || density <= scalar_type{};
+                local_mass_before += static_cast<long double>(mass_before) * old_volume;
+                local_evaporated += static_cast<long double>(evaporation) * new_volume * time_step;
+                local_condensed += static_cast<long double>(condensation) * new_volume * time_step;
+                local_mass_after += static_cast<long double>(mass_after) * new_volume;
+                local_liquid_volume += static_cast<long double>(mass_after) / density * new_volume;
+            }
         }
         int any_invalid_trial = 0;
         Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &invalid_trial_values, &any_invalid_trial);
@@ -436,12 +452,16 @@ auto LiquidMassInventory<Pack, MeshType>::snapshot() const -> StateSnapshot
     result.d_pure_density.resize(d_mesh->num_owned_cells());
     result.d_cell_mass.resize(d_mesh->num_owned_cells());
     result.d_trial_cell_mass.resize(d_mesh->num_owned_cells());
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        result.d_pure_density[owned] = d_pure_liquid_density.value(cell);
-        result.d_cell_mass[owned] = d_cell_mass_inventory.value(cell);
-        result.d_trial_cell_mass[owned] = d_trial_cell_mass_inventory.value(cell);
+        const auto density = d_pure_liquid_density.owned_read_view();
+        const auto mass = d_cell_mass_inventory.owned_read_view();
+        const auto trial_mass = d_trial_cell_mass_inventory.owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            result.d_pure_density[owned] = density(owned, 0);
+            result.d_cell_mass[owned] = mass(owned, 0);
+            result.d_trial_cell_mass[owned] = trial_mass(owned, 0);
+        }
     }
     result.d_diagnostics = d_diagnostics;
     result.d_phase_change_generation = d_phase_change_generation;
@@ -467,12 +487,16 @@ void LiquidMassInventory<Pack, MeshType>::restore(const StateSnapshot& snapshot)
         d_phase_change_generation, snapshot.d_phase_change_generation, "phase-change generation");
     const auto next_cellwise_trial_nonce =
         invalidatedCounter(d_cellwise_trial_nonce, snapshot.d_cellwise_trial_nonce, "cellwise trial nonce");
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        d_pure_liquid_density.set_owned_value(cell, snapshot.d_pure_density[owned]);
-        d_cell_mass_inventory.set_owned_value(cell, snapshot.d_cell_mass[owned]);
-        d_trial_cell_mass_inventory.set_owned_value(cell, snapshot.d_trial_cell_mass[owned]);
+        auto density = d_pure_liquid_density.owned_write_view();
+        auto mass = d_cell_mass_inventory.owned_write_view();
+        auto trial_mass = d_trial_cell_mass_inventory.owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            density(owned, 0) = snapshot.d_pure_density[owned];
+            mass(owned, 0) = snapshot.d_cell_mass[owned];
+            trial_mass(owned, 0) = snapshot.d_trial_cell_mass[owned];
+        }
     }
     d_pure_liquid_density.sync_ghosts();
     d_cell_mass_inventory.sync_ghosts();
@@ -490,13 +514,17 @@ void LiquidMassInventory<Pack, MeshType>::updateVolumeFromStoredDensity()
     if (d_options.mode == LiquidVolumeMode::CellMassInventory)
     {
         detail::CompensatedSum<> local_liquid_volume{};
-        for (size_t owned = 0; owned < d_reference_mass_fraction.size(); ++owned)
         {
-            const auto cell = static_cast<local_ordinal_type>(owned);
-            const auto mass_density = d_cell_mass_inventory.value(cell);
-            const auto density = d_pure_liquid_density.value(cell);
-            const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
-            local_liquid_volume += mass_density / density * volume;
+            const auto mass = d_cell_mass_inventory.owned_read_view();
+            const auto pure_density = d_pure_liquid_density.owned_read_view();
+            for (size_t owned = 0; owned < d_reference_mass_fraction.size(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto mass_density = mass(owned, 0);
+                const auto density = pure_density(owned, 0);
+                const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
+                local_liquid_volume += mass_density / density * volume;
+            }
         }
         d_diagnostics.liquid_volume = globalSum(static_cast<scalar_type>(local_liquid_volume.value()));
         d_diagnostics.mass_weighted_specific_volume = d_diagnostics.total_mass > scalar_type{}
@@ -505,10 +533,13 @@ void LiquidMassInventory<Pack, MeshType>::updateVolumeFromStoredDensity()
         return;
     }
     detail::CompensatedSum<> local_specific_volume = {};
-    for (size_t owned = 0; owned < d_reference_mass_fraction.size(); ++owned)
     {
-        const auto density = d_pure_liquid_density.value(static_cast<local_ordinal_type>(owned));
-        local_specific_volume += d_reference_mass_fraction[owned] / density;
+        const auto pure_density = d_pure_liquid_density.owned_read_view();
+        for (size_t owned = 0; owned < d_reference_mass_fraction.size(); ++owned)
+        {
+            const auto density = pure_density(owned, 0);
+            local_specific_volume += d_reference_mass_fraction[owned] / density;
+        }
     }
     d_diagnostics.mass_weighted_specific_volume = globalSum(static_cast<scalar_type>(local_specific_volume.value()));
     d_diagnostics.liquid_volume = d_diagnostics.total_mass * d_diagnostics.mass_weighted_specific_volume;

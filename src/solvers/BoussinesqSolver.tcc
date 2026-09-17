@@ -2423,23 +2423,31 @@ auto BoussinesqSolver<Pack>::material_volumes(const field_type& liquid_mass_dens
         ? &d_radiolytic_gas_model->raw_bubble_volume_fraction()
         : nullptr;
     int local_invalid = 0;
-    for (size_t local = 0; local < result.size(); ++local)
     {
-        const auto cell = static_cast<local_ordinal_type>(local);
-        const bool owned = local < d_mesh->num_owned_cells();
-        const auto density = owned ? pure_liquid_density_field.value(cell)
-                                   : pure_liquid_density_field.local_value(cell);
-        const auto mass_density = owned ? liquid_mass_density.value(cell)
-                                        : liquid_mass_density.local_value(cell);
-        const auto volume = static_cast<scalar_type>(cell_volumes[local]);
-        const auto bubble_fraction = raw_bubble
-            ? (owned ? raw_bubble->value(cell) : raw_bubble->local_value(cell))
-            : scalar_type{};
-        result[local] = volume * (mass_density / density + bubble_fraction);
-        local_invalid = local_invalid || !std::isfinite(density) || density <= scalar_type{} ||
-                        !std::isfinite(mass_density) || mass_density < scalar_type{} ||
-                        !std::isfinite(bubble_fraction) || bubble_fraction < scalar_type{} ||
-                        !std::isfinite(result[local]) || result[local] < scalar_type{};
+        // Owned storage is authoritative; overlap supplies only ghost cells.
+        const auto density_owned = pure_liquid_density_field.owned_read_view();
+        const auto density_local = pure_liquid_density_field.local_read_view();
+        const auto mass_owned = liquid_mass_density.owned_read_view();
+        const auto mass_local = liquid_mass_density.local_read_view();
+        const auto bubble_owned = raw_bubble ? raw_bubble->owned_read_view() : decltype(mass_owned){};
+        const auto bubble_local = raw_bubble ? raw_bubble->local_read_view() : decltype(mass_local){};
+        for (size_t local = 0; local < result.size(); ++local)
+        {
+            const bool owned = local < d_mesh->num_owned_cells();
+            const auto density = owned ? density_owned(local, 0)
+                                       : density_local(local, 0);
+            const auto mass_density = owned ? mass_owned(local, 0)
+                                            : mass_local(local, 0);
+            const auto volume = static_cast<scalar_type>(cell_volumes[local]);
+            const auto bubble_fraction = raw_bubble
+                ? (owned ? bubble_owned(local, 0) : bubble_local(local, 0))
+                : scalar_type{};
+            result[local] = volume * (mass_density / density + bubble_fraction);
+            local_invalid = local_invalid || !std::isfinite(density) || density <= scalar_type{} ||
+                            !std::isfinite(mass_density) || mass_density < scalar_type{} ||
+                            !std::isfinite(bubble_fraction) || bubble_fraction < scalar_type{} ||
+                            !std::isfinite(result[local]) || result[local] < scalar_type{};
+        }
     }
     int any_invalid = 0;
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
@@ -2457,12 +2465,15 @@ auto BoussinesqSolver<Pack>::volume_weighted_mean_pressure() const -> scalar_typ
 {
     scalar_type local_pressure_volume{};
     scalar_type local_volume{};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
-        local_pressure_volume += pressure().value(cell) * volume;
-        local_volume += volume;
+        const auto values = pressure().owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<local_ordinal_type>(owned);
+            const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
+            local_pressure_volume += values(owned, 0) * volume;
+            local_volume += volume;
+        }
     }
     std::array<scalar_type, 2> local{local_pressure_volume, local_volume};
     std::array<scalar_type, 2> global{};
@@ -2481,11 +2492,15 @@ auto BoussinesqSolver<Pack>::total_sensible_energy(const field_type& density,
         throw std::invalid_argument("planarALE energy accounting requires mesh-local cell-volume order.");
     }
     scalar_type local_energy{};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        local_energy += static_cast<scalar_type>(cell_volumes[owned]) * density.value(cell) *
-                        heat_capacity.value(cell) * temperature().value(cell);
+        const auto density_values = density.owned_read_view();
+        const auto heat_capacity_values = heat_capacity.owned_read_view();
+        const auto temperature_values = temperature().owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            local_energy += static_cast<scalar_type>(cell_volumes[owned]) * density_values(owned, 0) *
+                            heat_capacity_values(owned, 0) * temperature_values(owned, 0);
+        }
     }
     scalar_type global_energy{};
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
@@ -3872,12 +3887,16 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     scalar_type accepted_mesh_volume{};
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
         1, &local_accepted_mesh_volume, &accepted_mesh_volume);
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        d_ale_old_density->set_owned_value(cell, stored_material_properties().density.value(cell));
-        d_ale_old_heat_capacity->set_owned_value(cell,
-            stored_material_properties().specific_heat_capacity.value(cell));
+        const auto density = stored_material_properties().density.owned_read_view();
+        const auto heat_capacity = stored_material_properties().specific_heat_capacity.owned_read_view();
+        auto old_density = d_ale_old_density->owned_write_view();
+        auto old_heat_capacity = d_ale_old_heat_capacity->owned_write_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            old_density(owned, 0) = density(owned, 0);
+            old_heat_capacity(owned, 0) = heat_capacity(owned, 0);
+        }
     }
     d_ale_old_density->sync_ghosts();
     d_ale_old_heat_capacity->sync_ghosts();
@@ -3946,11 +3965,14 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     std::vector<scalar_type> target_guess(d_mesh->num_owned_cells(), scalar_type{});
     std::vector<scalar_type> density_guess(d_mesh->num_owned_cells());
     std::vector<scalar_type> heat_capacity_guess(d_mesh->num_owned_cells());
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        density_guess[owned] = d_ale_old_density->value(cell);
-        heat_capacity_guess[owned] = d_ale_old_heat_capacity->value(cell);
+        const auto density = d_ale_old_density->owned_read_view();
+        const auto heat_capacity = d_ale_old_heat_capacity->owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            density_guess[owned] = density(owned, 0);
+            heat_capacity_guess[owned] = heat_capacity(owned, 0);
+        }
     }
     // Pressure prescribes the exact swept flux on the moving top. Its global
     // source and trial geometry must therefore describe the same volume change.
@@ -4002,12 +4024,14 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             // Picard data from the preceding outer trial supplies the
             // new-time rho/cp coefficients. Accepted-old coefficients remain
             // in d_ale_old_* for the conservative transient RHS.
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto cell = static_cast<local_ordinal_type>(owned);
-                stored_material_properties().density.set_owned_value(cell, density_guess[owned]);
-                stored_material_properties().specific_heat_capacity.set_owned_value(
-                    cell, heat_capacity_guess[owned]);
+                auto density = stored_material_properties().density.owned_write_view();
+                auto heat_capacity = stored_material_properties().specific_heat_capacity.owned_write_view();
+                for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    density(owned, 0) = density_guess[owned];
+                    heat_capacity(owned, 0) = heat_capacity_guess[owned];
+                }
             }
             stored_material_properties().density.sync_ghosts();
             stored_material_properties().specific_heat_capacity.sync_ghosts();
@@ -4082,12 +4106,15 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             refresh_material_feedback(d_time + time_step);
             std::vector<scalar_type> next_density_guess(d_mesh->num_owned_cells());
             std::vector<scalar_type> next_heat_capacity_guess(d_mesh->num_owned_cells());
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto cell = static_cast<local_ordinal_type>(owned);
-                next_density_guess[owned] = stored_material_properties().density.value(cell);
-                next_heat_capacity_guess[owned] =
-                    stored_material_properties().specific_heat_capacity.value(cell);
+                const auto density = stored_material_properties().density.owned_read_view();
+                const auto heat_capacity = stored_material_properties().specific_heat_capacity.owned_read_view();
+                for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    next_density_guess[owned] = density(owned, 0);
+                    next_heat_capacity_guess[owned] =
+                        heat_capacity(owned, 0);
+                }
             }
             scalar_type local_material_state_residual{};
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
@@ -4126,10 +4153,10 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                     gas_fields.size() * d_mesh->num_owned_cells());
                 for (const auto* field : gas_fields)
                 {
+                    const auto values = field->owned_read_view();
                     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
                     {
-                        current_gas_state.push_back(field->value(
-                            static_cast<local_ordinal_type>(owned)));
+                        current_gas_state.push_back(values(owned, 0));
                     }
                 }
                 if (previous_gas_state.size() != current_gas_state.size())

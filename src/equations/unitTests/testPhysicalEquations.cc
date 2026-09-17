@@ -20,6 +20,7 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 
@@ -60,8 +61,9 @@ struct PressureProjectionEquationTestAccess
         return equation.d_cached_pressure_matrix;
     }
 
+    template<class MeshType>
     static std::size_t preconditioner_setup_count(
-        const PressureProjectionEquation<Pack>& equation) noexcept
+        const PressureProjectionEquation<Pack, MeshType>& equation) noexcept
     {
         return BelosLinearSolverTestAccess<Pack>::
             preconditioner_setup_count(equation.d_linear_solver);
@@ -930,18 +932,22 @@ void expect_cg_pressure_projection_matches_gmres(SimpleFluid::SP<const TestMeshT
         const auto gmres_result = equation.project(gmres_pressure, 0.2, 997.0, cache, gmres_velocity, target);
         ASSERT_TRUE(gmres_result.linear_solve.converged);
         const auto gmres_matrix = Access::pressure_matrix(equation);
+        Pack::vector_type probe(row_map, true);
+        Pack::vector_type before(row_map, true);
+        probe.putScalar(1.0);
+        gmres_matrix->apply(probe, before);
 
         options.backend = SimpleFluid::LinearSolverBackend::Cg;
         options.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
         equation.set_linear_solver_options(options);
-        EXPECT_TRUE(Access::pressure_matrix(equation).is_null());
+        EXPECT_EQ(Access::pressure_matrix(equation), gmres_matrix);
         CellField cg_pressure(mesh, "cg_pressure");
         VectorField cg_velocity(mesh, SimpleFluid::vec3{}, "cg_velocity");
         const auto cg_result = equation.project(cg_pressure, 0.2, 997.0, cache, cg_velocity, target);
         ASSERT_TRUE(cg_result.linear_solve.converged);
         const auto cg_matrix = Access::pressure_matrix(equation);
         ASSERT_FALSE(cg_matrix.is_null());
-        EXPECT_NE(cg_matrix.getRawPtr(), gmres_matrix.getRawPtr());
+        EXPECT_EQ(cg_matrix.getRawPtr(), gmres_matrix.getRawPtr());
 
         std::vector<std::vector<Pack::scalar_type>> entries(cells, std::vector<Pack::scalar_type>(cells));
         for (size_t owned = 0; owned < cells; ++owned)
@@ -969,18 +975,14 @@ void expect_cg_pressure_projection_matches_gmres(SimpleFluid::SP<const TestMeshT
         }
         EXPECT_NEAR(cg_result.continuity, gmres_result.continuity, 1.0e-11);
 
-        // Going back to GMRES must discard the CG-specific matrix as well.
+        // Going back to GMRES must restore the nonsymmetric gauge coefficients.
         options.backend = SimpleFluid::LinearSolverBackend::Gmres;
         options.preconditioner = SimpleFluid::LinearPreconditioner::None;
         equation.set_linear_solver_options(options);
-        EXPECT_TRUE(Access::pressure_matrix(equation).is_null());
+        EXPECT_EQ(Access::pressure_matrix(equation), cg_matrix);
         equation.rebuild_matrix();
         const auto rebuilt = Access::pressure_matrix(equation);
-        Pack::vector_type probe(row_map, true);
-        Pack::vector_type before(row_map, true);
         Pack::vector_type after(row_map, true);
-        probe.putScalar(1.0);
-        gmres_matrix->apply(probe, before);
         rebuilt->apply(probe, after);
         after.update(-1.0, before, 1.0);
         EXPECT_NEAR(after.norm2(), 0.0, 1.0e-14);
@@ -1038,6 +1040,138 @@ TEST(PhysicalEquationsTest,
     equation.rebuild_matrix();
     equation.project(pressure, 0.1, 1.0, cache, velocity);
     EXPECT_EQ(setup_count(), 2U);
+}
+
+/** @brief ALE refresh preserves the graph, and only identical values keep factors. */
+TEST(PhysicalEquationsTest, PressureProjectionALERefreshMatchesFreshSetup)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    using Equation = SimpleFluid::PressureProjectionEquation<Pack, Handle>;
+    using Access = SimpleFluid::detail::PressureProjectionEquationTestAccess<Pack>;
+    auto geometry = std::make_shared<Handle::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
+    auto mesh = std::make_shared<Handle>(geometry);
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(mesh);
+    SimpleFluid::BoundaryConditionSet bcs;
+    bcs.pressure["zmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
+    options.reuse_preconditioner = true;
+    options.tolerance = 1.0e-12;
+    Equation equation(mesh, options, bcs.pressure);
+    const auto set_flux = [](Equation& projection, std::uint64_t generation)
+    {
+        projection.set_fixed_boundary_flux_provider({"zmax"},
+            [](int, size_t, Pack::local_ordinal_type) { return Pack::scalar_type{}; }, generation);
+    };
+    set_flux(equation, 1);
+    bool fixed_flux = true;
+    const auto compare_fresh = [&]()
+    {
+        Equation fresh(mesh, options, bcs.pressure);
+        if (fixed_flux) set_flux(fresh, 1);
+        typename Equation::field_type reused_pressure(mesh, "reused_pressure");
+        typename Equation::field_type fresh_pressure(mesh, "fresh_pressure");
+        typename Equation::velocity_field_type reused_velocity(mesh, "reused_velocity");
+        typename Equation::velocity_field_type fresh_velocity(mesh, "fresh_velocity");
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto center = mesh->cell_centroid(cell);
+            const Handle::Vec3 value{0.0, 0.0, 0.25 * center.z};
+            reused_velocity.set_value(cell, value);
+            fresh_velocity.set_value(cell, value);
+        }
+        reused_velocity.sync_ghosts();
+        fresh_velocity.sync_ghosts();
+        const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+            std::shared_ptr<const Handle>(mesh), bcs);
+        const auto reused_result = equation.project(reused_pressure, 0.1, 1.0, cache, reused_velocity);
+        const auto fresh_result = fresh.project(fresh_pressure, 0.1, 1.0, cache, fresh_velocity);
+        ASSERT_TRUE(reused_result.linear_solve.converged);
+        ASSERT_TRUE(fresh_result.linear_solve.converged);
+        EXPECT_NEAR(reused_result.continuity, fresh_result.continuity, 1.0e-12);
+        const auto actual = Access::pressure_matrix(equation);
+        const auto expected = Access::pressure_matrix(fresh);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_NEAR(reused_pressure.value(cell), fresh_pressure.value(cell), 1.0e-12);
+            EXPECT_NEAR(reused_velocity.value(cell).z, fresh_velocity.value(cell).z, 1.0e-12);
+            Pack::matrix_type::local_inds_host_view_type actual_columns, expected_columns;
+            Pack::matrix_type::values_host_view_type actual_values, expected_values;
+            actual->getLocalRowView(cell, actual_columns, actual_values);
+            expected->getLocalRowView(cell, expected_columns, expected_values);
+            ASSERT_EQ(actual_columns.extent(0), expected_columns.extent(0));
+            for (size_t entry = 0; entry < actual_columns.extent(0); ++entry)
+            {
+                EXPECT_EQ(actual_columns(entry), expected_columns(entry));
+                EXPECT_DOUBLE_EQ(actual_values(entry), expected_values(entry));
+            }
+        }
+    };
+    compare_fresh();
+    const auto original_matrix = Access::pressure_matrix(equation);
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 1U);
+    equation.clear_fixed_boundary_flux_provider();
+    set_flux(equation, 2);
+    equation.refresh_geometry();
+    compare_fresh();
+    EXPECT_EQ(Access::pressure_matrix(equation), original_matrix);
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 1U);
+
+    const auto checkpoint = motion.snapshot();
+    motion.begin_trial(3.0, 0.1);
+    equation.refresh_geometry();
+    compare_fresh();
+    EXPECT_EQ(Access::pressure_matrix(equation), original_matrix);
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 2U);
+    motion.rollback_trial();
+    equation.refresh_geometry();
+    compare_fresh();
+    EXPECT_EQ(Access::pressure_matrix(equation), original_matrix);
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 3U);
+
+    // A new epoch at identical restored coordinates keeps the numeric setup.
+    motion.restore(checkpoint);
+    equation.refresh_geometry();
+    compare_fresh();
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 3U);
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    equation.set_linear_solver_options(options);
+    compare_fresh();
+    EXPECT_EQ(Access::pressure_matrix(equation), original_matrix);
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 4U);
+
+    // Reopening the Dirichlet outlet removes the gauge and changes its graph.
+    equation.clear_fixed_boundary_flux_provider();
+    fixed_flux = false;
+    compare_fresh();
+    EXPECT_NE(Access::pressure_matrix(equation), original_matrix);
+    EXPECT_EQ(Access::preconditioner_setup_count(equation), 5U);
+}
+
+/** @brief A changed map cannot reuse pressure entries or mutate a foreign matrix. */
+TEST(PhysicalEquationsTest, PressureProjectionNumericRefreshRejectsForeignMap)
+{
+    auto mesh = make_2x2x2_mesh();
+    const auto row_map = mesh->owned_cell_map();
+    auto foreign_map = Teuchos::rcp(new Pack::map_type(row_map->getGlobalNumElements(),
+        row_map->getLocalNumElements(), 1000, row_map->getComm()));
+    auto foreign = SimpleFluid::FVM::identity_matrix<Pack>(foreign_map);
+    bool changed = true;
+    EXPECT_FALSE(SimpleFluid::FVM::detail::refresh_pressure_poisson_matrix_values<Pack>(*mesh,
+        std::optional<Pack::global_ordinal_type>{row_map->getMinAllGlobalIndex()},
+        [](int, size_t) { return SimpleFluid::BoundaryCondition{}; }, false, *foreign, changed));
+    EXPECT_FALSE(changed);
+    for (size_t owned = 0; owned < foreign_map->getLocalNumElements(); ++owned)
+    {
+        Pack::matrix_type::local_inds_host_view_type columns;
+        Pack::matrix_type::values_host_view_type values;
+        foreign->getLocalRowView(static_cast<Pack::local_ordinal_type>(owned), columns, values);
+        ASSERT_EQ(values.extent(0), 1U);
+        EXPECT_DOUBLE_EQ(values(0), 1.0);
+    }
 }
 
 /**

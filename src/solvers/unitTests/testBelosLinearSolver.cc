@@ -1136,6 +1136,36 @@ TEST(BelosLinearSolverTest, ResetForcesSameOperatorPreconditionerRebuild)
     EXPECT_EQ(preconditioner_setup_count(solver), 2U);
 }
 
+/** @brief In-place numeric updates rebuild factors while maps remain compatible. */
+TEST(BelosLinearSolverTest, ChangedOperatorValuesInvalidateReusedPreconditioners)
+{
+    const auto invalid_global_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto map = Teuchos::rcp(new Pack::map_type(invalid_global_size, 8, 0, Tpetra::getDefaultComm()));
+    for (const auto kind : {SimpleFluid::LinearPreconditioner::MueLu,
+             SimpleFluid::LinearPreconditioner::Jacobi, SimpleFluid::LinearPreconditioner::DIC})
+    {
+        auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);
+        auto op = Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix);
+        Pack::vector_type rhs(map, true);
+        Pack::vector_type solution(map, true);
+        rhs.putScalar(3.0);
+        SimpleFluid::LinearSolverOptions options;
+        options.preconditioner = kind;
+        options.reuse_preconditioner = true;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        ASSERT_TRUE(solver.solve_from_zero_with_statistics(op, rhs, solution, options).converged);
+        EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+        matrix->scale(2.0);
+        solver.notify_operator_values_changed();
+        ASSERT_TRUE(solver.solve_from_zero_with_statistics(op, rhs, solution, options).converged);
+        EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+        const auto values = solution.getData(0);
+        for (const auto value : values) EXPECT_NEAR(value, 1.5, 1.0e-12);
+        ASSERT_TRUE(solver.solve_from_zero_with_statistics(op, rhs, solution, options).converged);
+        EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+    }
+}
+
 /** @brief Verify MueLu rejects operators that are not Tpetra CRS matrices. */
 TEST(BelosLinearSolverTest, RejectsMueLuForNonCrsOperators)
 {

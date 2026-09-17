@@ -21,7 +21,9 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <numbers>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -151,6 +153,93 @@ void expect_same_on_all_ranks(const MeshType& mesh, double value)
 }
 
 } // namespace
+
+/** Subcycles preserve split-source decay, changing cell inputs and ghost state. */
+TEST(RadiolyticGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInputsAndDonorInventory)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 2, 2, 0.25));
+    auto options = sheng_options();
+    options.microbubble_lifetime = 1.e-5;
+    options.large_bubble_dissolution_time = 2.e-5;
+    options.micro_to_large_conversion_coefficient = 0.;
+    options.max_subcycles = 9;
+    RadiolyticModelType model(mesh, options);
+    model.enable_donor_hydrogen_deficit_tracking();
+    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"),
+        power(mesh, 0., "power");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0., "flux");
+    auto material = make_water_properties(mesh);
+    const std::array<double, 3> time_steps{8.e-6, 3.1e-5, 1.1e-5};
+    const std::array<int, 3> expected_subcycles{4, 9, 6};
+    std::vector<double> micro_moles(mesh->num_local_cells());
+    std::vector<double> micro_number(mesh->num_local_cells());
+    std::vector<double> donor(mesh->num_local_cells());
+    double time = 0.;
+    for (size_t step = 0; step < time_steps.size(); ++step)
+    {
+        SCOPED_TRACE(step);
+        const auto power_at = [step](auto gid)
+        {
+            return (gid % 5 == 0 ? -1. : 1.) * 1000. * (1. + 0.1 * gid) * (step + 1.);
+        };
+        const auto temperature_at = [step](auto gid) { return 300. + 0.5 * gid + 2. * step; };
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto lid = static_cast<Pack::local_ordinal_type>(owned);
+            const auto gid = mesh->cell_global_id(lid);
+            power.set_owned_value(lid, power_at(gid));
+            temperature.set_owned_value(lid, temperature_at(gid));
+        }
+        power.sync_ghosts();
+        temperature.sync_ghosts();
+        const auto dt = time_steps[step];
+        const auto substep = dt / expected_subcycles[step];
+        const auto retention = std::exp(-dt / options.microbubble_lifetime);
+        // Closed-form geometric sum for source impulses preceding each decay.
+        const auto source_retention = substep * std::exp(-substep / options.microbubble_lifetime)
+            * std::expm1(-dt / options.microbubble_lifetime)
+            / std::expm1(-substep / options.microbubble_lifetime);
+        time += dt;
+        model.advance(time, dt, temperature, pressure, velocity, flux, material, &power);
+        EXPECT_EQ(model.last_statistics().maximum_subcycles, expected_subcycles[step]);
+        double local_total = 0.;
+        for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+        {
+            const auto lid = static_cast<Pack::local_ordinal_type>(local);
+            const auto gid = mesh->cell_global_id(lid);
+            const auto production = options.gas_release_efficiency * options.hydrogen_yield_mol_per_j
+                * std::max(power_at(gid), 0.);
+            const auto cell_temperature = temperature_at(gid);
+            const auto radius = SimpleFluid::RadiolyticGasPhysics::sheng2024_nucleation_radius(
+                cell_temperature, options.uranium_concentration_mol_per_m3,
+                options.hydrogen_yield_molecules_per_100_ev, options.reference_pressure,
+                options.atmospheric_pressure);
+            const auto nucleation_moles = 4. * std::numbers::pi / 3.
+                * (options.reference_pressure * radius * radius * radius
+                    + 2. * options.surface_tension * radius * radius)
+                / (options.gas_constant * cell_temperature);
+            micro_moles[local] = micro_moles[local] * retention + production * source_retention;
+            micro_number[local] = micro_number[local] * retention
+                + production * source_retention / nucleation_moles;
+            donor[local] += production * dt;
+            EXPECT_NEAR(model.micro_moles().local_value(lid), micro_moles[local],
+                std::max(1.e-23, micro_moles[local] * 1.e-11));
+            EXPECT_NEAR(model.micro_number_density().local_value(lid), micro_number[local],
+                std::max(1.e-14, micro_number[local] * 1.e-11));
+            EXPECT_NEAR(model.donor_hydrogen_deficit().local_value(lid), donor[local],
+                std::max(1.e-23, donor[local] * 1.e-11));
+            EXPECT_DOUBLE_EQ(model.output_fields().at("H2_production_rate")->local_value(lid), production);
+            if (local < mesh->num_owned_cells())
+                local_total += donor[local] * mesh->cell_volume(lid);
+        }
+        const auto total = global_sum(*mesh, local_total);
+        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), total, total * 1.e-11);
+        EXPECT_NEAR(model.last_statistics().inventory_error, 0., total * 1.e-11);
+        EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., total * 1.e-11);
+    }
+}
 
 /** @brief Collective policy selection rejects divergent ranks and supports GS. */
 TEST(RadiolyticGasModelMultiRankTest, TransportSolverPolicyIsCollective)

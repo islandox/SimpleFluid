@@ -123,3 +123,9 @@ target_compile_definitions(coupled_operator_memory PRIVATE
     SIMPLEFLUID_GIT_DIRTY="${SIMPLEFLUID_GIT_DIRTY_VALUE}"
     SIMPLEFLUID_BUILD_TYPE="$<CONFIG>"
     SIMPLEFLUID_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+
+# Opt-in paired-build measurement; numerical checks apply, timing has no threshold.
+add_executable(coupling_kernel_benchmark EXCLUDE_FROM_ALL coupling_kernel_benchmark.cc)
+target_link_libraries(coupling_kernel_benchmark PRIVATE SimpleFluid::Solvers)
+simplefluid_exe_reuse_precompiled_header(coupling_kernel_benchmark)
+simplefluid_exclude_from_pgo_sources(coupling_kernel_benchmark.cc)

@@ -113,7 +113,7 @@ public:
 
     void rebuild_matrix() const;
 
-    /** Refresh geometry-dependent workspaces and discard numeric solver state. */
+    /** Refresh geometry; retain compatible graphs and exactly unchanged numeric setup. */
     void refresh_geometry();
 
     /**
@@ -217,6 +217,9 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_fixed_boundary_flux_provider() const;
 
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    void update_matrix(bool allow_graph_reuse) const;
+
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
     BoundaryConditionMap d_pressure_boundary_conditions;
@@ -228,6 +231,8 @@ private:
     FVM::CellFluxBalanceCache<Pack, mesh_type> d_flux_balance_cache;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
+    mutable bool d_matrix_values_stale = true;
+    mutable std::vector<std::string> d_matrix_fixed_boundary_flux_names;
     real_t d_rhs_norm_reference = {};
     bool d_cached_predictor_flux_valid = false;
     std::size_t d_cached_predictor_flux_reuse_count = 0;
@@ -239,7 +244,7 @@ private:
     std::vector<std::string> d_fixed_boundary_flux_names;
     fixed_boundary_flux_provider_type d_fixed_boundary_flux_provider;
     std::uint64_t d_fixed_boundary_flux_generation = 0;
-    BelosLinearSolver<Pack> d_linear_solver;
+    mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
 extern template class PressureProjectionEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;

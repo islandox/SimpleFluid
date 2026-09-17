@@ -250,6 +250,8 @@ TEST(StoredPressureFaceFluxCacheTest, RefreshReplacesSharedSnapshotAndRejectsFor
     auto mesh = make_mesh();
     Workspace workspace(mesh);
     const auto original_geometry = workspace.shared_geometry();
+    workspace.refresh_geometry();
+    EXPECT_EQ(workspace.shared_geometry(), original_geometry);
     Workspace retained(mesh, original_geometry);
     const auto original_flux = check_quadratic_flux(mesh, workspace, 4.0, 0.0);
     const auto foreign = make_mesh();
@@ -264,9 +266,17 @@ TEST(StoredPressureFaceFluxCacheTest, RefreshReplacesSharedSnapshotAndRejectsFor
     EXPECT_THROW(static_cast<void>(retained.gradient_cache().interior_geometry()), std::invalid_argument);
     workspace.refresh_geometry();
     EXPECT_NE(workspace.shared_geometry(), original_geometry);
+    const auto moved_geometry = workspace.shared_geometry();
+    workspace.refresh_geometry();
+    EXPECT_EQ(workspace.shared_geometry(), moved_geometry);
     EXPECT_EQ(retained.shared_geometry(), original_geometry);
     EXPECT_THROW(static_cast<void>(retained.face_geometry()), std::invalid_argument);
     Workspace current(mesh, workspace.shared_geometry());
+    EXPECT_THROW(retained.refresh_geometry(original_geometry), std::invalid_argument);
+    EXPECT_THROW(retained.refresh_geometry(Workspace(foreign).shared_geometry()), std::invalid_argument);
+    retained.refresh_geometry(moved_geometry);
+    EXPECT_EQ(retained.shared_geometry(), moved_geometry);
+    EXPECT_NE(&retained.pressure_gradient(), &workspace.pressure_gradient());
     EXPECT_EQ(check_quadratic_flux(mesh, workspace, 6.0, 0.0), check_quadratic_flux(mesh, current, 6.0, 0.0));
 
     motion.rollback_trial();
