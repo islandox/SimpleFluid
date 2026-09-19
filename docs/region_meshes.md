@@ -247,3 +247,71 @@ conservation, not convergence order or experimental physical validation. See
 [the original implementation record](region_mesh_implementation.md) for dated
 initial measurements. Rebuild downstream C++ consumers after interface/layout
 changes; symbol export checks do not certify class-layout ABI compatibility.
+
+## Per-rank partition diagnostics
+
+Build the opt-in diagnostic with an optimized configuration:
+
+~~~bash
+cmake --build --preset GCC-RelWithDebInfo --target region_partition_benchmark
+python3 verification/run_region_partition_diagnostics.py \
+  --output build/region-partition-diagnostics \
+  --sizes 40 64 --ranks 1 2 4 --repeats 5
+~~~
+
+Both the launcher and executable enforce at least **10,000 owned cells on every
+rank**. The default matrix has a minimum of 16,000. Output directories must be
+new so an existing measurement cannot be overwritten accidentally.
+
+The fixtures compare two and eight spatially ordered slabs, eight slabs in
+even/odd descriptor order, and nested 1:2/1:3 planar interfaces. Reordering the
+descriptors changes the current contiguous partition's spatial locality without
+changing the physical mesh. This is a diagnostic fixture, not a production
+repartitioning API.
+
+Each run records per-rank owned/ghost counts, owned faces, regions touched,
+neighboring ranks, cell-face incidences, maximum cell valence, matrix nonzeros
+and maximum row width. Cut faces are incidences from locally owned cells to
+remote cells; divide their sum across ranks by two to obtain unique cuts.
+Coarse/fine cuts count individual canonical subfaces. Cut area is reported
+separately so refinement does not masquerade as additional physical area.
+
+One warmup precedes repeated fresh scalar diffusion assemblies. Each matrix
+application sample averages 20 applications after warming that matrix's
+importer. The summary uses the median of the maximum rank time per repetition.
+Assembly includes Tpetra communication and waiting; similar per-rank elapsed
+times do not establish equal local compute cost. The diagnostic traversal timer
+includes statistics collection and is not a production kernel benchmark.
+
+The executable checks production/generic assembly equivalence, a constant
+Dirichlet solution, and preservation of compact storage. The launcher also
+checks cell/nonzero totals, analytically known slab cuts, coarse/fine subface
+counts, and serial/MPI and descriptor-order agreement of operator-action and
+RHS norms. No timing threshold determines correctness. These diagnostics cover
+a scalar face-neighbor diffusion operator, not non-orthogonal extended
+stencils, nonlinear physics, preconditioner setup or end-to-end solver scaling.
+
+The current selected-cell reordering factory explicitly rejects composite
+handles. A future partitioning implementation must preserve or replace the
+region-native traversal contract, update cell/face ownership and halos together,
+and construct fields and caches after the new maps are finalized.
+
+Measured results and the row-capacity regression found by this assessment are
+recorded in the [2026-09-18 partition report](qualification/region_partition_20260918/report.md).
+
+For hardware-thread scaling on the six-core/twelve-thread qualification host:
+
+~~~bash
+python3 verification/run_region_partition_diagnostics.py \
+  --output build/region-partition-hwthreads \
+  --sizes 64 --ranks 1 2 4 6 12 --repeats 7 \
+  --mpi-args="--use-hwthread-cpus --map-by core --bind-to hwthread --report-bindings"
+~~~
+
+On this host the mapping gives six ranks one hardware thread per physical core,
+and twelve ranks distinct hardware threads across all six cores. Check the
+binding report on another topology rather than assuming the same placement.
+The 64³ base mesh keeps at least 21,845 owned cells per rank at twelve ranks;
+40³ would violate the 10,000-cell floor. See the
+[hardware-thread scaling report](qualification/region_partition_hwthreads_20260919/report.md)
+for the measured six-versus-twelve-rank comparison.

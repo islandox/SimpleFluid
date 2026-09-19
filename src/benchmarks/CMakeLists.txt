@@ -129,3 +129,14 @@ add_executable(coupling_kernel_benchmark EXCLUDE_FROM_ALL coupling_kernel_benchm
 target_link_libraries(coupling_kernel_benchmark PRIVATE SimpleFluid::Solvers)
 simplefluid_exe_reuse_precompiled_header(coupling_kernel_benchmark)
 simplefluid_exclude_from_pgo_sources(coupling_kernel_benchmark.cc)
+
+# Opt-in per-rank diagnostics; timings are observations, never pass/fail thresholds.
+add_executable(region_partition_benchmark EXCLUDE_FROM_ALL region_partition_benchmark.cc)
+target_link_libraries(region_partition_benchmark PRIVATE SimpleFluid::Solvers)
+simplefluid_exe_reuse_precompiled_header(region_partition_benchmark)
+target_compile_definitions(region_partition_benchmark PRIVATE
+    SIMPLEFLUID_GIT_COMMIT="${SIMPLEFLUID_GIT_COMMIT_VALUE}"
+    SIMPLEFLUID_GIT_DIRTY="${SIMPLEFLUID_GIT_DIRTY_VALUE}"
+    SIMPLEFLUID_BUILD_TYPE="$<CONFIG>"
+    SIMPLEFLUID_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
+simplefluid_exclude_from_pgo_sources(region_partition_benchmark.cc)

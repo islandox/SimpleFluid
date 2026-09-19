@@ -151,3 +151,96 @@ TEST(RegionDiffusionAssemblyTest, ReorderedHandlesRetainGenericAssembly)
     EXPECT_FALSE(layout.mesh->supports_region_execution());
     compare_assembly(layout.mesh);
 }
+
+
+// A genuinely three-dimensional 1:3 seam has nine-entry coarse rows.
+// Keep at least 10k cells per process in the supported 1/2/4-rank runs.
+TEST(RegionDiffusionAssemblyTest, CoarseFineLargeStencilsPreserveScalarVectorAndConvection)
+{
+    using namespace Meshes;
+    constexpr size_t n=32,ratio=3;
+    auto axis=[](size_t count,real_t lower=0,real_t upper=1)
+    {
+        ArrReal result;
+        for(size_t i=0;i<=count;++i) result.push_back(lower+(upper-lower)*i/count);
+        return result;
+    };
+    auto coarse=cartesian_region("coarse",{{axis(n/2,0,.5),axis(n),axis(n)}});
+    auto fine=cartesian_region("fine",{{axis(n/2,.5,1),axis(ratio*n),axis(n)}});
+    std::vector<std::vector<uint64_t>> tiles(n*n);
+    auto bucket=[](const auto& region,size_t face)
+    {
+        const auto p=region.geometry().face_centroid(face);
+        return std::min(n-1,size_t(p.z*n))*n+std::min(n-1,size_t(p.y*n));
+    };
+    for(size_t f=0;f<fine.layout().faces;++f)
+        if(fine.topology().boundary_id(f)==0) tiles[bucket(fine,f)].push_back(f);
+    NonconformingInterface seam{0,1,1,0,{}};
+    for(size_t f=0;f<coarse.layout().faces;++f)
+        if(coarse.topology().boundary_id(f)==1) seam.faces.push_back({f,tiles[bucket(coarse,f)]});
+    auto geometry=std::make_shared<MultiRegionMesh>(
+        std::vector<MultiRegionMesh::Region>{coarse,fine},std::vector<MultiRegionMesh::Interface>{seam});
+    auto mesh=std::make_shared<Handle>(geometry);
+    const auto execution=mesh->acquire_execution_view();
+    const auto comm=mesh->owned_cell_map()->getComm();
+    auto scalar_bc=[](int,size_t){return BoundaryCondition{BoundaryConditionType::Dirichlet,1.};};
+    auto zero_bc=[](int,size_t){return BoundaryCondition{BoundaryConditionType::Neumann,0.};};
+    auto vector_bc=[](int,size_t){return VectorBoundaryCondition{BoundaryConditionType::Dirichlet,{1,1,1}};};
+    const auto scalar=FVM::diffusion_system<Pack>(*mesh,1.,scalar_bc,[](int){return 0.;});
+    const auto reference=FVM::detail::diffusion_system_reference_impl<Pack>(*mesh,1.,scalar_bc,[](int){return 0.;});
+    const auto vector=FVM::vector_diffusion_system<Pack>(*mesh,1.,vector_bc,[](int){return Vec{};});
+    const auto bare=FVM::diffusion_matrix<Pack>(*mesh,1.);
+    const auto neumann=FVM::diffusion_system<Pack>(*mesh,1.,zero_bc,[](int){return 0.;});
+    Pack::vector_type input(mesh->owned_cell_map(),true),actual(mesh->owned_cell_map(),true),
+        expected(mesh->owned_cell_map(),true),difference(mesh->owned_cell_map(),true);
+    for(size_t c=0;c<mesh->num_owned_cells();++c) input.replaceLocalValue(c,value(mesh->cell_centroid(c)));
+    scalar.matrix->apply(input,expected);
+    for(const auto& matrix:{reference.matrix,vector.matrix})
+    {
+        matrix->apply(input,actual);
+        difference.update(1.,actual,-1.,expected,0.);
+        EXPECT_LT(difference.norm2(),1e-12*(1+expected.norm2()));
+        EXPECT_EQ(matrix->getGlobalNumEntries(),scalar.matrix->getGlobalNumEntries());
+    }
+    bare->apply(input,actual);
+    neumann.matrix->apply(input,expected);
+    difference.update(1.,actual,-1.,expected,0.);
+    EXPECT_LT(difference.norm2(),1e-12*(1+expected.norm2()));
+    input.putScalar(1.);
+    scalar.matrix->apply(input,actual);
+    actual.update(-1.,*scalar.rhs,1.);
+    EXPECT_LT(actual.normInf(),1e-12);
+    for(size_t component=0;component<3;++component)
+    {
+        difference.update(1.,*vector.rhs->getVector(component),-1.,*scalar.rhs,0.);
+        EXPECT_LT(difference.normInf(),1e-12);
+    }
+
+    // Direct every incident flux into one interior coarse cell: upwind then
+    // needs the full nine-entry row, including every fine neighbor.
+    Pack::global_ordinal_type candidate=std::numeric_limits<Pack::global_ordinal_type>::max(),target=candidate;
+    for(size_t c=0;c<mesh->num_owned_cells();++c)
+        if(scalar.matrix->getNumEntriesInLocalRow(c)==9)
+            candidate=std::min(candidate,mesh->cell_global_id(c));
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MIN,1,&candidate,&target);
+    ASSERT_NE(target,std::numeric_limits<Pack::global_ordinal_type>::max());
+    ScalarFaceFieldStored<Pack> flux(mesh,"inward_stencil");
+    for(size_t f=0;f<mesh->num_owned_faces();++f)
+    {
+        const auto owner=mesh->cell_global_id(mesh->owner_cell(f));
+        const auto neighbor=mesh->neighbor_cell(f);
+        const bool incident_neighbor=neighbor!=Handle::invalid_local_id() && mesh->cell_global_id(neighbor)==target;
+        flux.set_owned_value(f,owner==target ? -1. : incident_neighbor ? 1. : 0.);
+    }
+    flux.sync_ghosts();
+    const auto convection=FVM::upwind_convection_matrix<Pack>(*mesh,flux);
+    convection->apply(input,actual);
+    EXPECT_NEAR(actual.meanValue()*mesh->owned_cell_map()->getGlobalNumElements(),0.,1e-12);
+    const auto local=mesh->owned_cell_map()->getLocalElement(target);
+    if(local!=Handle::invalid_local_id())
+    {
+        EXPECT_EQ(convection->getNumEntriesInLocalRow(local),9U);
+        EXPECT_DOUBLE_EQ(actual.getData()[local],-8.);
+    }
+    EXPECT_EQ(mesh->connectivity_storage_bytes(),0U);
+}
