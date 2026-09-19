@@ -13,6 +13,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "FVM/details/DiffusionSystemImpl.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/FaceStencilMatrix.hh"
 #include "fields/CellField.hh"
 #include "geometry/Mesh.hh"
 
