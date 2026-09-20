@@ -13,6 +13,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME AnnularSemiStructuredMeshFactory_2procs
+    TARGET testAnnularSemiStructuredMeshFactory
+    PROCS 2
+    ARGS "--gtest_filter=AnnularSemiStructuredMeshFactoryTest.CompositeWrapperPartitionsAndMovesWithoutMutatingChild"
+    LABELS "mpi;mesh;semi_structured;ale"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME RegionExecution_2procs
     TARGET testRegionExecution
     PROCS 2

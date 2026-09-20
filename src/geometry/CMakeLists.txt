@@ -1,4 +1,5 @@
 set(SIMPLEFLUID_MESH_SOURCES
+    AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     explicit_instantiation/Mesh.cc
     explicit_instantiation/MeshHandle.cc
@@ -37,6 +38,7 @@ target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
+    AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     explicit_instantiation/MeshReorderingFactory.cc
     explicit_instantiation/PlanarALEMeshMotion.cc
