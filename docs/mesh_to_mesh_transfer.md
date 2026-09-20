@@ -12,7 +12,7 @@ coupling schedule and the physical meaning of the transferred quantities.
 | --- | --- | --- | --- |
 | `NearestCell` | Copy the value at the closest source-cell centroid. | Every `MeshHandle` family. | Preserves constants and donor bounds; discontinuous and generally not conservative. |
 | `InverseDistance` | Average the nearest source-cell centroids with normalized inverse-square distance weights. | Every `MeshHandle` family. | Preserves constants and donor bounds; generally neither linear-exact nor conservative. |
-| `ConservativeCellAverage` | Build exact cell-overlap volumes for conservative projection. | Two native orthogonal Cartesian handles, or two coaxial native cylindrical handles, including independent partitions and reordered cells. | Preserves fully covered constants and inventories; partial transfers explicitly report uncovered inventory. |
+| `ConservativeCellAverage` | Build exact cell-overlap volumes for conservative projection. | Two native orthogonal Cartesian handles; two coaxial native cylindrical handles; or a cylindrical handle paired with a straight convex XY polygon extrusion. Independent partitions and reordered cells are supported. | Preserves fully covered constants and inventories; partial transfers explicitly report uncovered inventory. |
 
 Nearest and inverse-distance methods use Euclidean distances between physical
 cell centroids. A centroid match returns its donor value directly; equal-distance
@@ -52,10 +52,35 @@ rejects partial mode. Significant excess coverage is rejected in either mode.
 No overlap weights are renormalized to conceal uncovered volume.
 
 The map uses piecewise-constant source averages and does not reconstruct a
-linear profile inside a cell. Cartesian/cylindrical cross-family intersections,
-general unstructured conservative intersections, and multi-region conservative
-intersections are not implemented. Interpolation still supports all handle
-families.
+linear profile inside a cell. Cartesian/cylindrical, Cartesian/polygon and
+polygon/polygon intersections, general unstructured intersections, and arbitrary
+multi-region providers are not implemented. Interpolation still supports all
+handle families.
+
+### Cylindrical cells and polygonal extrusions
+
+A cylindrical endpoint may be paired in either direction with a direct
+`SemiStructuredXY_Z` handle or a `MultiRegionMesh` containing only
+`NativeIsoRegion<SemiStructuredXY_Z>` and/or `ExtrudedRegion` providers. Direct
+semi-structured handles retain their serial-only contract; composite extrusions
+support distributed maps. Each XY polygon must be convex and counter-clockwise.
+Curved cylindrical providers inside a composite and general unstructured
+providers are rejected, even if they report a hexahedron or prism cell type.
+
+Overlap is the polygon/annular-sector intersection area times the axial overlap.
+Sector spans are split into wedges no wider than pi, clipped by straight radial
+half-planes, and integrated against the circular arcs analytically in extended
+precision. Curved boundaries are not replaced by polygons or bounding boxes.
+Only signed empty-intersection cancellation within an explicit floating-point
+roundoff bound is set to zero; native cell volumes and uncovered-inventory
+reports are never rescaled. Composite node coordinates include current affine
+Z motion; geometry IDs remain independent of field-map reordering.
+
+Polygonal and circular vessel boundaries generally enclose different domains.
+Use `AllowPartial` and inspect the uncovered inventories, or supply genuinely
+matching domains. Constant values are preserved only on fully covered target
+cells; a partly covered target averages the mapped inventory over its whole
+native volume. A domain mismatch is not corrected by normalizing weights.
 
 ### Cylindrical geometry and angular measure
 
@@ -293,13 +318,16 @@ This does not establish empty-rank support for unrelated solver paths.
 
 ## Storage, build, and current limits
 
-Construction temporarily gathers owned source-cell geometry on every rank and
-searches it for each locally owned target cell. Its geometry memory is
-\(O(N_s)\) per rank, with \(O(N_sN_{t,\mathrm{local}})\) search work before
-donor ordering. The reusable result is a sparse Tpetra transfer matrix; repeated
+Construction temporarily gathers owned source-cell geometry on every rank.
+Geometry memory remains proportional to source geometry (including polygon
+vertices). Conservative construction builds a bounding-volume hierarchy in XYZ
+for Cartesian boxes and RZ for cylindrical/polygonal cells, then evaluates only
+candidate overlaps. Donors are restored to their original order before overlap
+accumulation. Interpolation still searches all source centroids for each local
+target. The reusable result is a sparse Tpetra transfer matrix; repeated
 application imports required donor values rather than gathering the whole
-source field. Large production meshes may need a distributed spatial search
-before construction is affordable.
+source field. Very large production meshes may still require distributed
+geometry storage/search; the hierarchy does not eliminate source replication.
 
 Link the `SimpleFluid::Fields` CMake target and include the public header.
 `DefaultTpetraTypes` uses the library's explicit instantiation. A custom type
@@ -308,6 +336,6 @@ corresponding compile/link support, following the other explicit template
 instantiations in the project.
 
 The current API transfers cell data. Face flux transfer, boundary mortar
-mapping, geometric phase occupancy, high-order reconstruction, mixed-coordinate
+mapping, geometric phase occupancy, high-order reconstruction, other mixed-coordinate
 intersections, and arbitrary polyhedral conservative intersections remain
 separate work.

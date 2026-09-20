@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "fields/MeshToMeshTransfer.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "utils/testing_environment.hh"
@@ -774,4 +775,159 @@ TEST(MeshToMeshTransferMultiRankTest, ExplicitConstructionContextSupportsASubgro
     Transfer transfer(*subgroup, source_mesh, target_mesh);
     transfer.apply(source, target);
     EXPECT_DOUBLE_EQ(target.value(0), 29.0);
+}
+
+namespace
+{
+SimpleFluid::SP<Handle> make_polygon_composite()
+{
+    using Composite = Handle::MultiRegion;
+    auto native = std::make_shared<Handle::SemiStructured>(
+        SimpleFluid::Arr<Handle::Vec3>{{0.5, 0.5, 0}, {1.5, 0.5, 0},
+                                     {1.5, 1.5, 0}, {0.5, 1.5, 0}},
+        SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}, {0, 2, 3}},
+        SimpleFluid::ArrReal{0, 1});
+    auto composite = std::make_shared<Composite>(
+        std::vector<Composite::Region>{SimpleFluid::Meshes::native_region("triangles", native)},
+        std::vector<Composite::Interface>{});
+    return std::make_shared<Handle>(composite);
+}
+
+Options polygon_partial_options()
+{
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    options.coverage_mode = CoverageMode::AllowPartial;
+    return options;
+}
+
+SimpleFluid::SP<Handle> make_polygon_enclosing_annulus(bool reversed = false)
+{
+    return make_cylindrical({{{0.1, 3.0},
+        {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0}, {0.0, 1.0}}}, reversed);
+}
+} // namespace
+
+TEST(MeshToMeshTransferMultiRankTest, PolygonRemoteOwnersPreserveInventoriesAndRefreshHalos)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    auto polygon = make_polygon_composite();
+    auto annulus = make_polygon_enclosing_annulus(true);
+    ASSERT_GT(polygon->num_local_cells(), polygon->num_owned_cells());
+    const auto options = polygon_partial_options();
+    Transfer forward(polygon, annulus, options);
+    EXPECT_NEAR(forward.coverage().source_volume, 1.0, 1.0e-13);
+    EXPECT_NEAR(forward.coverage().overlap_volume, 1.0, 1.0e-13);
+    EXPECT_NEAR(forward.coverage().uncovered_source_volume, 0.0, 1.0e-13);
+    ScalarField source(polygon, "polygon_source"), target(annulus, "annulus_target");
+    VectorField source_vector(polygon, "polygon_vector"), target_vector(annulus, "annulus_vector");
+    for (const auto quantity : {Quantity::Intensive, Quantity::Extensive})
+    {
+        SCOPED_TRACE(static_cast<int>(quantity));
+        for (size_t c = 0; c < polygon->num_owned_cells(); ++c)
+        {
+            const auto lid = static_cast<LO>(c);
+            double value = polygon->cell_geometry_global_id(lid) == 0 ? 2.0 : 6.0;
+            if (quantity == Quantity::Extensive) value *= polygon->cell_volume(lid);
+            source.set_owned_value(lid, value);
+            source_vector.set_owned_value(lid, {value, -2.0 * value, 0.25 * value});
+        }
+        const auto report = forward.project(source, target, quantity);
+        expect_scalar_report(report, 4.0, 4.0, 0.0);
+        const auto vector_report = forward.project(source_vector, target_vector, quantity);
+        ASSERT_EQ(vector_report.target_integral.size(), 3U);
+        const std::array<double, 3> integrated{4.0, -8.0, 1.0};
+        for (size_t j = 0; j < integrated.size(); ++j)
+        {
+            EXPECT_NEAR(vector_report.source_integral[j], integrated[j], 1.0e-12);
+            EXPECT_NEAR(vector_report.target_integral[j], integrated[j], 1.0e-12);
+            EXPECT_NEAR(vector_report.conservation_error[j], 0.0, 1.0e-12);
+        }
+        for (size_t c = 0; c < annulus->num_local_cells(); ++c)
+        {
+            const auto lid = static_cast<LO>(c);
+            double expected = cylindrical_id(*annulus, lid).j == 0 ? 1.0 : 3.0;
+            if (quantity == Quantity::Intensive) expected /= annulus->cell_volume(lid);
+            EXPECT_NEAR(target.local_value(lid), expected, 1.0e-12);
+            const auto value = target_vector.local_value(lid);
+            EXPECT_NEAR(value.x, expected, 1.0e-12);
+            EXPECT_NEAR(value.y, -2.0 * expected, 1.0e-12);
+            EXPECT_NEAR(value.z, 0.25 * expected, 1.0e-12);
+        }
+    }
+
+    // Reciprocal projection fully covers every triangle, despite retaining
+    // the annulus's uncovered inventory in the conservation report.
+    target.put_scalar(5.0);
+    Transfer backward(annulus, polygon, options);
+    const auto report = backward.project(target, source, Quantity::Intensive);
+    const double inventory = 5.0 * backward.coverage().source_volume;
+    expect_scalar_report(report, inventory, 5.0, inventory - 5.0);
+    for (size_t c = 0; c < polygon->num_local_cells(); ++c)
+        EXPECT_NEAR(source.local_value(static_cast<LO>(c)), 5.0, 1.0e-12);
+    EXPECT_NEAR(global_integral(source), 5.0, 1.0e-12);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, PolygonCompositeALEUsesTransformedNodesAndRejectsStalePlans)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    auto polygon = make_polygon_composite();
+    auto annulus = make_polygon_enclosing_annulus();
+    std::vector<Pack::global_ordinal_type> geometry_ids;
+    for (size_t c = 0; c < polygon->num_local_cells(); ++c)
+        geometry_ids.push_back(polygon->cell_geometry_global_id(static_cast<LO>(c)));
+    ScalarField source(annulus, "annulus_density"), target(polygon, "polygon_density");
+    source.put_scalar(4.0);
+    const auto options = polygon_partial_options();
+    Transfer initial(annulus, polygon, options);
+    SimpleFluid::PlanarALEMeshMotion<Pack> polygon_motion(polygon);
+    polygon_motion.begin_trial(2.0, 1.0);
+    EXPECT_THROW(initial.coverage(), std::runtime_error);
+    EXPECT_THROW((void)initial.project(source, target, Quantity::Intensive), std::runtime_error);
+    polygon_motion.accept_trial();
+
+    Transfer expanded(annulus, polygon, options);
+    EXPECT_NEAR(expanded.coverage().target_volume, 2.0, 1.0e-12);
+    EXPECT_NEAR(expanded.coverage().overlap_volume, 1.0, 1.0e-12);
+    const auto expanded_report = expanded.project(source, target, Quantity::Intensive);
+    expect_scalar_report(expanded_report, 4.0 * expanded.coverage().source_volume,
+                         4.0, 4.0 * expanded.coverage().source_volume - 4.0);
+    for (size_t c = 0; c < polygon->num_local_cells(); ++c)
+        EXPECT_NEAR(target.local_value(static_cast<LO>(c)), 2.0, 1.0e-12);
+
+    SimpleFluid::PlanarALEMeshMotion<Pack> annulus_motion(annulus);
+    annulus_motion.begin_trial(0.5, 1.0);
+    EXPECT_THROW(expanded.coverage(), std::runtime_error);
+    annulus_motion.accept_trial();
+    Transfer contracted(annulus, polygon, options);
+    EXPECT_NEAR(contracted.coverage().overlap_volume, 0.5, 1.0e-12);
+    const auto contracted_report = contracted.project(source, target, Quantity::Intensive);
+    expect_scalar_report(contracted_report, 4.0 * contracted.coverage().source_volume,
+                         2.0, 4.0 * contracted.coverage().source_volume - 2.0);
+    for (size_t c = 0; c < polygon->num_local_cells(); ++c)
+    {
+        const auto lid = static_cast<LO>(c);
+        EXPECT_EQ(polygon->cell_geometry_global_id(lid), geometry_ids[c]);
+        EXPECT_NEAR(target.local_value(lid), 1.0, 1.0e-12);
+    }
+
+    target.put_scalar(6.0);
+    Transfer reverse(polygon, annulus, options);
+    const auto reverse_report = reverse.project(target, source, Quantity::Intensive);
+    expect_scalar_report(reverse_report, 12.0, 3.0, 9.0);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, PolygonRejectsCurvedCompositeProvidersCollectively)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    auto native = std::make_shared<Handle::Cylindrical>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.1, 3.0},
+            {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0}, {0.0, 1.0}}});
+    auto geometry = std::make_shared<Handle::MultiRegion>(
+        std::vector<Handle::MultiRegion::Region>{SimpleFluid::Meshes::native_region("curved", native)},
+        std::vector<Handle::MultiRegion::Interface>{});
+    auto curved = std::make_shared<Handle>(geometry);
+    auto polygon = make_polygon_composite();
+    EXPECT_THROW((Transfer(curved, polygon, polygon_partial_options())), std::invalid_argument);
+    EXPECT_THROW((Transfer(polygon, curved, polygon_partial_options())), std::invalid_argument);
 }
