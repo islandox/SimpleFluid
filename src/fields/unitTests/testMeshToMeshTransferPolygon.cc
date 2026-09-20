@@ -150,6 +150,44 @@ TEST(MeshToMeshTransferPolygonTest, QuadrilateralCircleCutRetainsCurvedSegment)
     }
 }
 
+TEST(MeshToMeshTransferPolygonTest, DiagonalTriangleCircleCutAndSplitPairHaveExactCoverage)
+{
+    constexpr double side = 1.25, inner = 0.25;
+    const double distance = side / std::sqrt(2.0);
+    const double quarter_ring = std::numbers::pi * (1.0 - inner * inner) / 4.0;
+    // The omitted circular cap lies entirely in the first quadrant and
+    // outside the inner circle. This analytic oracle uses no mesh clipping.
+    const double overlap = quarter_ring - std::acos(distance)
+        + distance * std::sqrt(1.0 - distance * distance);
+    for (const bool composite : {false, true})
+    {
+        auto triangle = polygon_mesh({{0, 0, 0}, {side, 0, 0}, {0, side, 0}},
+                                     {{0, 1, 2}}, composite);
+        auto annulus = quarter_annulus(inner);
+        for (const bool reverse : {false, true})
+        {
+            auto source = reverse ? triangle : annulus;
+            auto target = reverse ? annulus : triangle;
+            Transfer transfer(source, target, partial_polygon_options());
+            EXPECT_NEAR(transfer.coverage().overlap_volume, overlap, 2e-13);
+            ScalarField density(source, "density"), result(target, "result");
+            density.put_scalar(1.0);
+            expect_polygon_report(transfer.project(density, result, Quantity::Intensive),
+                                  source->cell_volume(0), overlap);
+        }
+        auto pair = polygon_mesh({{0, 0, 0}, {side, 0, 0}, {side, side, 0}, {0, side, 0}},
+                                 {{0, 1, 3}, {1, 2, 3}}, composite);
+        auto sectors = quarter_annulus(inner, 1.0, true);
+        Transfer transfer(pair, sectors, partial_polygon_options());
+        ScalarField density(pair, "pair_density"), result(sectors, "sector_density");
+        density.put_scalar(1.0);
+        expect_polygon_report(transfer.project(density, result, Quantity::Intensive),
+                              side * side, quarter_ring);
+        for (size_t row = 0; row < sectors->num_owned_cells(); ++row)
+            EXPECT_NEAR(result.value(static_cast<LO>(row)), 1.0, 2e-13);
+    }
+}
+
 TEST(MeshToMeshTransferPolygonTest, SignedMulticomponentInventoriesUseSameExactOverlap)
 {
     const double overlap = 3.0 * std::numbers::pi / 16.0;
