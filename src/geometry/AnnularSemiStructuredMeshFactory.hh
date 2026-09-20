@@ -13,7 +13,7 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Build triangular bulk prisms surrounded by hexahedral wall layers.
+ * @brief Build triangular bulk prisms with hexahedral radial-wall layers.
  *
  * All lengths are in mesh coordinate units (metres in the SI solvers). The
  * inner polygon circumscribes the inner circle and the outer polygon is
@@ -29,10 +29,10 @@ namespace SimpleFluid
  * Inner-ring tangential spacing is consequently smaller than xy_spacing.
  * Only radial bulk sectors are split into two CCW triangles. Inner/outer
  * wall bands remain quadrilateral, producing hexahedral wall cells. Bottom
- * and optional top wall stacks use separate all-quadrilateral XY slabs.
- * Planar coarse/fine interfaces join their quadrilateral faces to the middle
- * slab's matching quadrilaterals or pairs of triangles without transition
- * volume cells. Every selected boundary-layer cell is a hexahedron.
+ * and optional top stacks retain this same mixed XY topology: bulk cells
+ * remain triangular prisms, including the bottom refinement, while corners
+ * next to the radial walls remain hexahedra. Each axial interface matches
+ * faces one-to-one without subdivisions or transition volume cells.
  * The mesher retains the inner hole, which the convex-polygon/disk Delaunay
  * entry points cannot represent. Custom spacing and wall widths must satisfy
  * the solver's existing mesh-quality gate; skinny triangular cells can exceed
@@ -67,8 +67,8 @@ public:
         size_t angular_cells = 0;
         size_t radial_cells = 0;
         size_t axial_cells = 0;
-        size_t xy_cells = 0; ///< Alias of mixed_xy_cells; not a whole-mesh multiplier.
-        size_t coarse_xy_cells = 0;
+        size_t xy_cells = 0; ///< Same mixed XY template in every axial layer.
+        size_t coarse_xy_cells = 0; ///< Unsplit parent sectors; not a region cell count.
         size_t mixed_xy_cells = 0;
         size_t xy_nodes = 0;
         size_t bottom_axial_cells = 0;
