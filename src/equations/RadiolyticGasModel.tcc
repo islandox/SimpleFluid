@@ -1442,7 +1442,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                 .cached_matrix = system.matrix,
                 .geometry_cache = &d_transport_geometry_cache,
                 .ale = ale,
-                .symbolic_plan = &workspace.symbolic_plans.at(operator_slot)});
+                .symbolic_plan = &workspace.symbolic_plans.at(operator_slot),
+                .cached_rhs = system.rhs});
         workspace.operator_ready.at(operator_slot) = true;
         ++work.assemblies;
     }
@@ -3155,14 +3156,17 @@ void RadiolyticGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 }
 
 template<TpetraTypePack Pack, class MeshType>
-void RadiolyticGasModel<Pack, MeshType>::refresh_geometry()
+void RadiolyticGasModel<Pack, MeshType>::refresh_geometry(
+    typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {
-    d_transport_geometry_cache.refresh();
-    d_transport_solver = BelosLinearSolver<Pack>{};
+    d_transport_geometry_cache.refresh(std::move(geometry));
+    d_transport_solver.notify_operator_values_changed();
     if (d_transport_workspace)
     {
-        d_transport_workspace->systems = {};
-        d_transport_workspace->symbolic_plans = {};
+        // Fixed-topology ALE keeps maps and graph storage valid. Assembly
+        // validates the required columns and overwrites all numerical values.
+        // Number/moles may share an operator only within the next stage.
+        d_transport_workspace->operator_ready.fill(false);
     }
 }
 

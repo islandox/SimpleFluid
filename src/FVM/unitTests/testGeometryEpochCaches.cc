@@ -69,7 +69,14 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     auto mesh = std::make_shared<Mesh>(geometry);
     auto alias_mesh = std::make_shared<Mesh>(geometry);
     GeometryCache transport_cache(*mesh);
+    GeometryCache shared_transport_cache(*mesh);
+    shared_transport_cache.refresh(transport_cache.shared_geometry());
+    EXPECT_EQ(&shared_transport_cache.assembly_geometry(), &transport_cache.assembly_geometry());
+    const auto original_snapshot = transport_cache.shared_geometry();
+    transport_cache.refresh();
+    EXPECT_EQ(original_snapshot, transport_cache.shared_geometry());
     GeometryCache alias_transport_cache(*alias_mesh);
+    EXPECT_THROW(alias_transport_cache.refresh(original_snapshot), std::invalid_argument);
     GradientCache gradient_cache(mesh);
     FluxWorkspace flux_workspace(mesh);
     EXPECT_EQ(transport_cache.geometry_epoch(), 0U);
@@ -105,6 +112,10 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
     EXPECT_THROW(flux_workspace.gradient_cache().require_mesh(*mesh), std::invalid_argument);
 
     transport_cache.refresh();
+    EXPECT_THROW(shared_transport_cache.refresh(original_snapshot), std::invalid_argument);
+    shared_transport_cache.refresh(transport_cache.shared_geometry());
+    EXPECT_EQ(&shared_transport_cache.assembly_geometry(), &transport_cache.assembly_geometry());
+    EXPECT_EQ(original_snapshot->assembly.volumes, old_transport_volumes);
     alias_transport_cache.refresh();
     gradient_cache.refresh();
     flux_workspace.refresh_geometry();
