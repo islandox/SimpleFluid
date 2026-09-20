@@ -150,16 +150,13 @@ auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
         throw std::overflow_error("Annular mixed XY cell count exceeds supported IDs.");
     count.xy_cells = count.mixed_xy_cells;
     count.xy_nodes = checked_product(angular, count.radial_cells + 1, index_limit, "XY node count");
-    const auto coarse_edges = checked_product(angular, 2 * count.radial_cells + 1, index_limit, "coarse XY edge count");
     const auto mixed_edges = checked_product(angular, 3 * count.radial_cells - wall_bands + 1, index_limit, "mixed XY edge count");
     count.bottom_axial_cells = layers(o.refine_bottom);
     count.top_axial_cells = layers(o.refine_top);
     count.bulk_axial_cells = count.axial_cells - count.bottom_axial_cells - count.top_axial_cells;
-    count.hex_cells = checked_product(count.coarse_xy_cells, count.bottom_axial_cells + count.top_axial_cells,
-        std::numeric_limits<size_t>::max(), "axial wall cell count");
-    checked_add(count.hex_cells, checked_product(wall_xy, count.bulk_axial_cells,
-        std::numeric_limits<size_t>::max(), "radial wall cell count"), "hexahedron count");
-    count.prism_cells = checked_product(2 * bulk_xy, count.bulk_axial_cells,
+    count.hex_cells = checked_product(wall_xy, count.axial_cells,
+        std::numeric_limits<size_t>::max(), "radial wall cell count");
+    count.prism_cells = checked_product(2 * bulk_xy, count.axial_cells,
         std::numeric_limits<size_t>::max(), "prism count");
     count.cells = count.hex_cells;
     checked_add(count.cells, count.prism_cells, "cell count");
@@ -174,12 +171,12 @@ auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
         checked_add(count.faces, checked_product(edges, nz,
             std::numeric_limits<size_t>::max(), "side face count"), "face count");
     };
-    add_slab(count.coarse_xy_cells, coarse_edges, count.bottom_axial_cells);
+    add_slab(count.mixed_xy_cells, mixed_edges, count.bottom_axial_cells);
     add_slab(count.mixed_xy_cells, mixed_edges, count.bulk_axial_cells);
-    add_slab(count.coarse_xy_cells, coarse_edges, count.top_axial_cells);
-    // Fine faces survive each coarse/fine seam; one coarse face disappears
-    // per base sector. Region-qualified nodes deliberately remain distinct.
-    count.faces -= checked_product(count.coarse_xy_cells, count.regions - 1,
+    add_slab(count.mixed_xy_cells, mixed_edges, count.top_axial_cells);
+    // Matching seam faces are merged one-to-one. Region-qualified nodes
+    // deliberately remain distinct.
+    count.faces -= checked_product(count.mixed_xy_cells, count.regions - 1,
         std::numeric_limits<size_t>::max(), "interface face count");
     layout.radial_apothems = subdivide_bulk(radial,
         layers(o.refine_inner), layers(o.refine_outer), o.xy_spacing);
@@ -221,11 +218,8 @@ auto AnnularSemiStructuredMeshFactory::build() const -> Result
             }
         }
         const auto id = [n](size_t ring, size_t angle) { return static_cast<unsigned>(ring * n + angle % n); };
-        Arr<Arr<unsigned>> coarse_cells, mixed_cells;
-        coarse_cells.reserve(layout.counts.coarse_xy_cells);
+        Arr<Arr<unsigned>> mixed_cells;
         mixed_cells.reserve(layout.counts.mixed_xy_cells);
-        std::vector<std::vector<unsigned>> fine_xy;
-        fine_xy.reserve(layout.counts.coarse_xy_cells);
         const auto inner_layers = o.refine_inner ? o.wall_layers : size_t{0};
         const auto outer_layers = o.refine_outer ? o.wall_layers : size_t{0};
         for (size_t ring = 0; ring < layout.counts.radial_cells; ++ring)
@@ -235,18 +229,14 @@ auto AnnularSemiStructuredMeshFactory::build() const -> Result
                 const auto b = id(ring + 1, j);
                 const auto c = id(ring + 1, j + 1);
                 const auto d = id(ring, j + 1);
-                coarse_cells.push_back({a, b, c, d});
-                const auto first = static_cast<unsigned>(mixed_cells.size());
                 if (ring < inner_layers || ring >= layout.counts.radial_cells - outer_layers)
                 {
                     mixed_cells.push_back({a, b, c, d});
-                    fine_xy.push_back({first});
                 }
                 else
                 {
                     mixed_cells.push_back({a, b, c});
                     mixed_cells.push_back({a, c, d});
-                    fine_xy.push_back({first, first + 1});
                 }
             }
         Arr<Meshes::SemiStructuredXY_Z::BoundaryEdge> boundaries;
@@ -265,38 +255,33 @@ auto AnnularSemiStructuredMeshFactory::build() const -> Result
             regions.emplace_back(Meshes::native_region(name, std::move(native)));
         };
         if (layout.counts.bottom_axial_cells)
-            add_region("bottom_layers", coarse_cells, 0, layout.counts.bottom_axial_cells);
+            add_region("bottom_layers", mixed_cells, 0, layout.counts.bottom_axial_cells);
         middle_region = regions.size();
         add_region("bulk", mixed_cells, layout.counts.bottom_axial_cells,
             layout.counts.axial_cells - layout.counts.top_axial_cells);
         if (layout.counts.top_axial_cells)
-            add_region("top_layers", coarse_cells, layout.counts.axial_cells - layout.counts.top_axial_cells,
+            add_region("top_layers", mixed_cells, layout.counts.axial_cells - layout.counts.top_axial_cells,
                 layout.counts.axial_cells);
 
-        const auto seam = [&](size_t coarse_region, bool coarse_top, bool fine_top)
+        for (size_t upper_region = 1; upper_region < natives.size(); ++upper_region)
         {
-            const auto& coarse = *natives[coarse_region];
-            const auto& fine = *natives[middle_region];
-            const auto coarse_z = static_cast<unsigned>(coarse_top ? coarse.z_edges().size() - 1 : 0);
-            const auto fine_z = static_cast<unsigned>(fine_top ? fine.z_edges().size() - 1 : 0);
-            Meshes::NonconformingInterface interface;
-            interface.coarse_region = coarse_region;
-            interface.fine_region = middle_region;
-            interface.coarse_boundary = coarse.boundary_id({0, coarse_z, Native::Z_FACE});
-            interface.fine_boundary = fine.boundary_id({0, fine_z, Native::Z_FACE});
-            interface.faces.reserve(coarse_cells.size());
-            for (size_t xy = 0; xy < coarse_cells.size(); ++xy)
+            const auto& lower = *natives[upper_region - 1];
+            const auto& upper = *natives[upper_region];
+            const auto lower_z = static_cast<unsigned>(lower.z_edges().size() - 1);
+            Meshes::ExplicitConformingInterface interface;
+            interface.first_region = upper_region - 1;
+            interface.second_region = upper_region;
+            interface.first_boundary = lower.boundary_id({0, lower_z, Native::Z_FACE});
+            interface.second_boundary = upper.boundary_id({0, 0, Native::Z_FACE});
+            interface.faces.reserve(mixed_cells.size());
+            for (size_t xy = 0; xy < mixed_cells.size(); ++xy)
             {
-                Meshes::CoarseFineFaceMapping mapping;
-                mapping.coarse_face = coarse.indexer().face_ordinal({static_cast<unsigned>(xy), coarse_z, Native::Z_FACE});
-                for (const auto fine_cell : fine_xy[xy])
-                    mapping.fine_faces.push_back(fine.indexer().face_ordinal({fine_cell, fine_z, Native::Z_FACE}));
-                interface.faces.push_back(std::move(mapping));
+                interface.faces.emplace_back(
+                    lower.indexer().face_ordinal({static_cast<unsigned>(xy), lower_z, Native::Z_FACE}),
+                    upper.indexer().face_ordinal({static_cast<unsigned>(xy), 0, Native::Z_FACE}));
             }
             interfaces.emplace_back(std::move(interface));
-        };
-        if (layout.counts.bottom_axial_cells) seam(0, true, false);
-        if (layout.counts.top_axial_cells) seam(natives.size() - 1, false, true);
+        }
     }
     catch (...) { local_error = std::current_exception(); }
     const auto comm = Tpetra::getDefaultComm();

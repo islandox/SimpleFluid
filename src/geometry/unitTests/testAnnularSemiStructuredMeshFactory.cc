@@ -89,7 +89,6 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
     EXPECT_GE(result.angular_cells, 8U);
     EXPECT_LE(2 * std::numbers::pi * options.outer_radius / result.angular_cells, options.xy_spacing);
 
-    const auto middle = result.counts.bottom_axial_cells ? 1U : 0U;
     for (size_t region = 0; region < mesh.regions().size(); ++region)
     {
         const auto& native = child(mesh, region);
@@ -103,7 +102,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
         for (const auto& cell : native.xy_cell_nodes())
         {
             const auto ring = *std::min_element(cell.begin(), cell.end()) / result.angular_cells;
-            const bool wall = region != middle || ring < options.wall_layers
+            const bool wall = ring < options.wall_layers
                 || ring >= result.counts.radial_cells - options.wall_layers;
             ASSERT_EQ(cell.size(), wall ? 4U : 3U);
             double signed_area = 0;
@@ -160,31 +159,29 @@ TEST(AnnularSemiStructuredMeshFactoryTest, PreservesWallNormalGrowthAndDetermini
         EXPECT_EQ(child(*result.mesh, r).xy_nodes(), child(*repeated.mesh, r).xy_nodes());
         EXPECT_EQ(child(*result.mesh, r).xy_cell_nodes(), child(*repeated.mesh, r).xy_cell_nodes());
         EXPECT_EQ(child(*result.mesh, r).z_edges(), child(*repeated.mesh, r).z_edges());
+        EXPECT_EQ(child(*result.mesh, r).xy_cell_nodes(), child(*result.mesh, 0).xy_cell_nodes());
+        EXPECT_EQ(child(*result.mesh, r).xy_cell_nodes().size(), result.counts.mixed_xy_cells);
     }
     ASSERT_EQ(result.mesh->interfaces().size(), 2U);
     for (const auto& declared : result.mesh->interfaces())
     {
-        const auto& interface = std::get<SimpleFluid::Meshes::NonconformingInterface>(declared);
-        const auto& coarse = child(*result.mesh, interface.coarse_region);
-        const auto& fine = child(*result.mesh, interface.fine_region);
-        ASSERT_EQ(interface.faces.size(), result.counts.coarse_xy_cells);
-        size_t fine_count = 0;
-        for (const auto& xy : coarse.xy_cell_nodes()) EXPECT_EQ(xy.size(), 4U);
-        for (const auto& mapping : interface.faces)
+        const auto& interface = std::get<SimpleFluid::Meshes::ExplicitConformingInterface>(declared);
+        const auto& lower = child(*result.mesh, interface.first_region);
+        const auto& upper = child(*result.mesh, interface.second_region);
+        ASSERT_EQ(interface.faces.size(), result.counts.mixed_xy_cells);
+        std::set<uint64_t> lower_faces, upper_faces;
+        for (const auto& [first, second] : interface.faces)
         {
-            ASSERT_TRUE(mapping.fine_faces.size() == 1 || mapping.fine_faces.size() == 2);
-            const auto coarse_face = coarse.indexer().face_id(mapping.coarse_face);
-            double fine_area = 0;
-            for (const auto native_face : mapping.fine_faces)
-            {
-                const auto fine_face = fine.indexer().face_id(native_face);
-                fine_area += fine.face_area(fine_face);
-                EXPECT_LT(coarse.face_normal(coarse_face).dot(fine.face_normal(fine_face)), -0.999999);
-            }
-            EXPECT_NEAR(coarse.face_area(coarse_face), fine_area, 1e-14);
-            fine_count += mapping.fine_faces.size();
+            const auto lower_face = lower.indexer().face_id(first);
+            const auto upper_face = upper.indexer().face_id(second);
+            EXPECT_TRUE(lower_faces.insert(first).second);
+            EXPECT_TRUE(upper_faces.insert(second).second);
+            EXPECT_EQ(lower_face.ij, upper_face.ij);
+            EXPECT_LT(lower.face_normal(lower_face).dot(upper.face_normal(upper_face)), -0.999999);
+            EXPECT_NEAR(lower.face_area(lower_face), upper.face_area(upper_face), 1e-14);
+            EXPECT_EQ(lower.face_centroid(lower_face), upper.face_centroid(upper_face));
         }
-        EXPECT_EQ(fine_count, result.counts.mixed_xy_cells);
+        EXPECT_EQ(lower_faces.size(), upper_faces.size());
     }
     EXPECT_EQ(result.axial_fractions, repeated.axial_fractions);
     const auto& radial = result.radial_apothems;
@@ -239,9 +236,10 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CanDisableLayersAndPlanTheCentimetreR
     EXPECT_EQ(counts.bottom_axial_cells, 8U);
     EXPECT_EQ(counts.bulk_axial_cells, 47U);
     EXPECT_EQ(counts.top_axial_cells, 0U);
-    EXPECT_EQ(counts.hex_cells, 156736U);
-    EXPECT_EQ(counts.prism_cells, 207928U);
-    EXPECT_EQ(counts.cells, 364664U);
+    EXPECT_EQ(counts.hex_cells, 139040U);
+    EXPECT_EQ(counts.prism_cells, 243320U);
+    EXPECT_EQ(counts.cells, 382360U);
+    EXPECT_EQ(counts.cells, counts.xy_cells * counts.axial_cells);
     EXPECT_GT(counts.radial_cells, 2 * r100.wall_layers);
     EXPECT_GT(counts.axial_cells, r100.wall_layers);
 }
