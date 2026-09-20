@@ -81,6 +81,7 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
     TransportGeometryCache<Handle> geometry(*mesh);
     Plan plan;
     Teuchos::RCP<Pack::matrix_type> matrix;
+    Teuchos::RCP<Pack::vector_type> rhs;
     for (int generation = 0; generation < 4; ++generation)
     {
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -99,7 +100,8 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
         storage.sync_ghosts();
         diffusion.sync_ghosts();
         flux.sync_ghosts();
-        const auto assemble = [&](Teuchos::RCP<Pack::matrix_type> cached, Plan* selected_plan)
+        const auto assemble = [&](Teuchos::RCP<Pack::matrix_type> cached, Plan* selected_plan,
+                                  Teuchos::RCP<Pack::vector_type> cached_rhs = Teuchos::null)
         {
             return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, Handle>{
                 .old_values = values,
@@ -120,10 +122,12 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
                 .correction_field = &values,
                 .cached_matrix = std::move(cached),
                 .geometry_cache = &geometry,
-                .symbolic_plan = selected_plan});
+                .symbolic_plan = selected_plan,
+                .cached_rhs = std::move(cached_rhs)});
         };
         const auto fresh = assemble(Teuchos::null, nullptr);
-        const auto reused = assemble(matrix, &plan);
+        const auto reused = assemble(matrix, &plan, rhs);
+        if (!rhs.is_null()) EXPECT_EQ(rhs.get(), reused.rhs.get());
         EXPECT_TRUE(reused.matrix->isStaticGraph());
         if (!matrix.is_null())
         {
@@ -131,6 +135,15 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
         }
         expect_same_system(reused, fresh);
         matrix = reused.matrix;
+        rhs = reused.rhs;
+        if (generation == 0)
+        {
+            const auto foreign_mesh = make_mesh();
+            auto foreign_rhs = Teuchos::rcp(new Pack::vector_type(foreign_mesh->owned_cell_map()));
+            if (mesh->owned_cell_map()->getComm()->getRank() != 0) foreign_rhs = rhs;
+            EXPECT_THROW(assemble(matrix, &plan, foreign_rhs), std::invalid_argument);
+            expect_same_system(reused, fresh);
+        }
     }
 }
 
@@ -172,7 +185,9 @@ TEST(StoredTransportReuseTest, SymbolicPlanValidatesChangedGraphsEpochsAndRankCa
         EXPECT_EQ(applied.getData()[row], 3.25);
     }
     ++epoch_mesh.epoch;
-    EXPECT_FALSE(plan.matches(epoch_mesh, matrix, rows));
+    // Motion changes coefficients, not row slots. Required columns and exact
+    // map/graph identities still guard every symbolic reuse.
+    EXPECT_TRUE(plan.matches(epoch_mesh, matrix, rows));
     matrix = FVM::detail::finish_stored_transport_matrix<Pack>(epoch_mesh, matrix, 2, rows, &plan);
     EXPECT_TRUE(plan.matches(epoch_mesh, matrix, rows));
 

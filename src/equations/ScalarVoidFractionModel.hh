@@ -226,11 +226,11 @@ public:
 
     void restore(const StateSnapshot& snapshot);
 
-    void refresh_geometry()
+    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry = {})
     {
         if (d_transport_geometry_cache)
         {
-            d_transport_geometry_cache->refresh();
+            d_transport_geometry_cache->refresh(std::move(geometry));
         }
         d_diffusion_solver.reset();
     }

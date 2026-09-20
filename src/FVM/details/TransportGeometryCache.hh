@@ -9,42 +9,45 @@ namespace SimpleFluid::FVM
 {
 
 template<class MeshType>
-TransportGeometryCache<MeshType>::TransportGeometryCache(const MeshType& mesh)
-    : d_mesh(&mesh), d_geometry_epoch(mesh_geometry_epoch(mesh)),
-      d_interior_stencils(detail::least_squares_gradient_stencils(mesh)),
-      d_boundary_locations(detail::boundary_face_locations(mesh)),
-      d_boundary_geometry(detail::boundary_aware_gradient_geometry(mesh, d_boundary_locations)),
-      d_assembly_geometry(detail::transport_assembly_geometry(mesh)),
-      d_has_non_orthogonal_faces(detail::stored_transport_has_non_orthogonal_faces(mesh))
+TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(const MeshType& source)
+    : mesh(&source), identity(detail::ale_geometry_identity(source)), epoch(mesh_geometry_epoch(source)),
+      interior(detail::least_squares_gradient_stencils(source)),
+      locations(detail::boundary_face_locations(source)),
+      boundary(detail::boundary_aware_gradient_geometry(source, locations)),
+      assembly(detail::transport_assembly_geometry(source)),
+      has_non_orthogonal_faces(detail::stored_transport_has_non_orthogonal_faces(source))
 {
+}
+
+template<class MeshType>
+TransportGeometryCache<MeshType>::TransportGeometryCache(const MeshType& mesh) : d_mesh(&mesh)
+{
+    refresh();
 }
 
 template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(const MeshType& mesh) const
 {
     if (&mesh != d_mesh)
-    {
         throw std::invalid_argument("transport geometry cache belongs to another mesh.");
-    }
-    if (mesh_geometry_epoch(mesh) != d_geometry_epoch)
-    {
+    if (mesh_geometry_epoch(mesh) != d_geometry->epoch ||
+        detail::ale_geometry_identity(mesh) != d_geometry->identity)
         throw std::invalid_argument("transport geometry cache is stale for the mesh geometry epoch.");
-    }
 }
 
-template<class MeshType> void TransportGeometryCache<MeshType>::refresh()
+template<class MeshType>
+void TransportGeometryCache<MeshType>::refresh(shared_geometry_type geometry)
 {
     const auto execution = acquire_mesh_execution(*d_mesh);
-    auto interior = detail::least_squares_gradient_stencils(*d_mesh);
-    auto locations = detail::boundary_face_locations(*d_mesh);
-    auto boundary = detail::boundary_aware_gradient_geometry(*d_mesh, locations);
-    auto assembly = detail::transport_assembly_geometry(*d_mesh);
-    const auto has_non_orthogonal_faces = detail::stored_transport_has_non_orthogonal_faces(*d_mesh);
-    d_interior_stencils = std::move(interior);
-    d_boundary_locations = std::move(locations);
-    d_boundary_geometry = std::move(boundary);
-    d_assembly_geometry = std::move(assembly);
-    d_has_non_orthogonal_faces = has_non_orthogonal_faces;
-    d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+    if (geometry)
+    {
+        if (geometry->mesh != d_mesh || geometry->epoch != mesh_geometry_epoch(*d_mesh) ||
+            geometry->identity != detail::ale_geometry_identity(*d_mesh))
+            throw std::invalid_argument("Cannot share foreign or stale transport geometry.");
+        d_geometry = std::move(geometry);
+    }
+    else if (!d_geometry || d_geometry->epoch != mesh_geometry_epoch(*d_mesh) ||
+             d_geometry->identity != detail::ale_geometry_identity(*d_mesh))
+        d_geometry = std::make_shared<SharedGeometry>(*d_mesh);
 }
 
 template<class MeshType>
@@ -52,7 +55,7 @@ const typename TransportGeometryCache<MeshType>::interior_stencils_type&
 TransportGeometryCache<MeshType>::interior_stencils() const
 {
     require_mesh(*d_mesh);
-    return d_interior_stencils;
+    return d_geometry->interior;
 }
 
 template<class MeshType>
@@ -60,7 +63,7 @@ const typename TransportGeometryCache<MeshType>::boundary_locations_type&
 TransportGeometryCache<MeshType>::boundary_locations() const
 {
     require_mesh(*d_mesh);
-    return d_boundary_locations;
+    return d_geometry->locations;
 }
 
 template<class MeshType>
@@ -68,7 +71,7 @@ const typename TransportGeometryCache<MeshType>::boundary_geometry_type&
 TransportGeometryCache<MeshType>::boundary_geometry() const
 {
     require_mesh(*d_mesh);
-    return d_boundary_geometry;
+    return d_geometry->boundary;
 }
 
 template<class MeshType>
@@ -76,14 +79,14 @@ const typename TransportGeometryCache<MeshType>::assembly_geometry_type&
 TransportGeometryCache<MeshType>::assembly_geometry() const
 {
     require_mesh(*d_mesh);
-    return d_assembly_geometry;
+    return d_geometry->assembly;
 }
 
 template<class MeshType>
 bool TransportGeometryCache<MeshType>::has_non_orthogonal_faces() const
 {
     require_mesh(*d_mesh);
-    return d_has_non_orthogonal_faces;
+    return d_geometry->has_non_orthogonal_faces;
 }
 
 template<class MeshType>
@@ -94,7 +97,7 @@ TransportGeometryCache<MeshType>::scalar_affine_stencils(
 {
     require_mesh(*d_mesh);
     return detail::materialize_scalar_affine_gradient_stencils<MeshType>(
-        d_boundary_geometry, std::move(boundary_condition), std::move(boundary_value));
+        d_geometry->boundary, std::move(boundary_condition), std::move(boundary_value));
 }
 
 template<class MeshType>
@@ -104,7 +107,7 @@ TransportGeometryCache<MeshType>::vector_affine_stencils(
 {
     require_mesh(*d_mesh);
     return detail::materialize_vector_affine_gradient_stencils<MeshType>(
-        d_boundary_geometry, std::move(boundary_value));
+        d_geometry->boundary, std::move(boundary_value));
 }
 
 } // namespace SimpleFluid::FVM

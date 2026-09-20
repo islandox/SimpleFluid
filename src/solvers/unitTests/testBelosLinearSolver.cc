@@ -47,6 +47,11 @@ struct BelosLinearSolverTestAccess
         return solver.d_preconditioner_setup_count;
     }
 
+    static std::size_t configuration_count(const BelosLinearSolver<Pack>& solver)
+    {
+        return solver.d_muelu_configuration_count;
+    }
+
     static Teuchos::RCP<const typename Pack::operator_type> preconditioner(
         const BelosLinearSolver<Pack>& solver)
     {
@@ -1163,6 +1168,57 @@ TEST(BelosLinearSolverTest, ChangedOperatorValuesInvalidateReusedPreconditioners
         for (const auto value : values) EXPECT_NEAR(value, 1.5, 1.0e-12);
         ASSERT_TRUE(solver.solve_from_zero_with_statistics(op, rhs, solution, options).converged);
         EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+        if (kind == SimpleFluid::LinearPreconditioner::MueLu)
+        {
+            EXPECT_EQ(SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::configuration_count(solver), 1U);
+            solver.reset();
+            ASSERT_TRUE(solver.solve_from_zero_with_statistics(op, rhs, solution, options).converged);
+            EXPECT_EQ(SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::configuration_count(solver), 2U);
+        }
+    }
+}
+
+TEST(BelosLinearSolverTest, CachedMueLuConfigurationMatchesFreshMultilevelSetup)
+{
+    using GO = Pack::global_ordinal_type;
+    auto map = Teuchos::rcp(new Pack::map_type(
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), 128, 0, Tpetra::getDefaultComm()));
+    SimpleFluid::BelosLinearSolver<Pack> cached;
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
+    options.tolerance = 1e-12;
+    Pack::vector_type rhs(map), actual(map), expected(map), cached_action(map), fresh_action(map);
+    rhs.putScalar(1.0);
+    for (int generation = 0; generation < 3; ++generation)
+    {
+        SCOPED_TRACE(generation);
+        auto matrix = Teuchos::rcp(new Pack::matrix_type(map, 3));
+        for (size_t row = 0; row < map->getLocalNumElements(); ++row)
+        {
+            const GO gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(row));
+            Teuchos::Array<GO> columns{gid};
+            Teuchos::Array<double> values{2.5 + 0.1 * generation + 0.001 * gid};
+            if (gid > 0) { columns.push_back(gid - 1); values.push_back(-1.0); }
+            if (gid + 1 < static_cast<GO>(map->getGlobalNumElements()) && (generation != 2 || gid % 3))
+            { columns.push_back(gid + 1); values.push_back(-1.0); }
+            matrix->insertGlobalValues(gid, columns(), values());
+        }
+        matrix->fillComplete();
+        SimpleFluid::BelosLinearSolver<Pack> fresh;
+        ASSERT_TRUE(cached.solve_from_zero_with_statistics(matrix, rhs, actual, options).converged);
+        ASSERT_TRUE(fresh.solve_from_zero_with_statistics(matrix, rhs, expected, options).converged);
+        using Access = SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+        Access::preconditioner(cached)->apply(rhs, cached_action);
+        Access::preconditioner(fresh)->apply(rhs, fresh_action);
+        const auto actual_values = actual.getData(), expected_values = expected.getData();
+        const auto actual_action = cached_action.getData(), expected_action = fresh_action.getData();
+        for (size_t row = 0; row < map->getLocalNumElements(); ++row)
+        {
+            EXPECT_DOUBLE_EQ(actual_values[row], expected_values[row]);
+            EXPECT_DOUBLE_EQ(actual_action[row], expected_action[row]);
+        }
+        EXPECT_EQ(Access::configuration_count(cached), 1U);
+        EXPECT_EQ(preconditioner_setup_count(cached), static_cast<size_t>(generation + 1));
     }
 }
 
