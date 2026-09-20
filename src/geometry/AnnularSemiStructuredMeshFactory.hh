@@ -5,6 +5,7 @@
 #pragma once
 
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/mesh/MultiRegionMesh.hh"
 
 #include <cstddef>
 
@@ -12,7 +13,7 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Build an annular quadrilateral XY cross section and axial extrusion.
+ * @brief Build triangular bulk prisms surrounded by hexahedral wall layers.
  *
  * All lengths are in mesh coordinate units (metres in the SI solvers). The
  * inner polygon circumscribes the inner circle and the outer polygon is
@@ -26,10 +27,20 @@ namespace SimpleFluid
  * its outer circumference spacing is no greater than xy_spacing. Bulk
  * radial and axial intervals are split evenly, independently of wall layers.
  * Inner-ring tangential spacing is consequently smaller than xy_spacing.
+ * Only radial bulk sectors are split into two CCW triangles. Inner/outer
+ * wall bands remain quadrilateral, producing hexahedral wall cells. Bottom
+ * and optional top wall stacks use separate all-quadrilateral XY slabs.
+ * Planar coarse/fine interfaces join their quadrilateral faces to the middle
+ * slab's matching quadrilaterals or pairs of triangles without transition
+ * volume cells. Every selected boundary-layer cell is a hexahedron.
+ * The mesher retains the inner hole, which the convex-polygon/disk Delaunay
+ * entry points cannot represent. Custom spacing and wall widths must satisfy
+ * the solver's existing mesh-quality gate; skinny triangular cells can exceed
+ * its non-orthogonality limit even when all native volumes remain positive.
  *
- * Build before constructing fields or handles. The returned native geometry
- * is serial; a native_region inside MultiRegionMesh supplies the existing MPI
- * and composite planar-ALE path without changing the XY topology.
+ * Build collectively on the default Tpetra communicator before constructing
+ * fields or handles. The returned MultiRegionMesh owns immutable native
+ * SemiStructuredXY_Z children and supports distributed common affine Z motion.
  */
 class AnnularSemiStructuredMeshFactory
 {
@@ -43,8 +54,8 @@ public:
         real_t xy_spacing = 0.01;
         real_t z_spacing = 0.01;
         size_t wall_layers = 8; ///< Zero disables all boundary-layer stacks.
-        real_t first_layer_height = 0.001;
-        real_t growth_ratio = 1.3;
+        real_t first_layer_height = 0.002;
+        real_t growth_ratio = 1.25;
         bool refine_inner = true;
         bool refine_outer = true;
         bool refine_bottom = true;
@@ -56,8 +67,16 @@ public:
         size_t angular_cells = 0;
         size_t radial_cells = 0;
         size_t axial_cells = 0;
-        size_t xy_cells = 0;
+        size_t xy_cells = 0; ///< Alias of mixed_xy_cells; not a whole-mesh multiplier.
+        size_t coarse_xy_cells = 0;
+        size_t mixed_xy_cells = 0;
         size_t xy_nodes = 0;
+        size_t bottom_axial_cells = 0;
+        size_t bulk_axial_cells = 0;
+        size_t top_axial_cells = 0;
+        size_t hex_cells = 0;
+        size_t prism_cells = 0;
+        size_t regions = 0;
         size_t cells = 0;
         size_t faces = 0;
         size_t nodes = 0;
@@ -66,7 +85,7 @@ public:
 
     struct Result
     {
-        SP<Meshes::SemiStructuredXY_Z> mesh;
+        SP<Meshes::MultiRegionMesh> mesh;
         real_t cross_section_area = 0.0; ///< Actual native polygonal area.
         ArrReal axial_fractions; ///< Reference Z edges normalized to [0,1].
         ArrReal radial_apothems; ///< Normal distances of ring sides from axis.
