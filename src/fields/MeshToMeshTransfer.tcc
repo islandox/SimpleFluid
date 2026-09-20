@@ -2,6 +2,7 @@
 
 #include "fields/MeshToMeshTransfer.hh"
 #include "fields/details/MeshTransferGeometry.hh"
+#include "fields/details/MeshTransferSearch.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultMpiComm.hpp>
@@ -10,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <numeric>
+#include <optional>
 #include <vector>
 
 namespace SimpleFluid
@@ -107,8 +109,7 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         "Mesh transfer requires source and target communicators congruent to the construction context.");
 
     const bool conservative = options.method == MeshToMeshTransferMethod::ConservativeCellAverage;
-    const bool cylindrical =
-        std::holds_alternative<typename mesh_type::CylindricalPtr>(d_source->variant());
+    const auto source_kind = geometry_kind(*d_source), target_kind = geometry_kind(*d_target);
     const bool partial = options.coverage_mode == MeshToMeshCoverageMode::AllowPartial;
     require_all(*comm,
         (options.coverage_mode == MeshToMeshCoverageMode::RequireFull || partial)
@@ -121,27 +122,30 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         && std::isfinite(options.coverage_tolerance)
         && options.coverage_tolerance >= 0 && options.coverage_tolerance <= 1e-6,
         "Invalid mesh transfer options.");
-    const std::array<double, 6> local_options{
+    const std::array<double, 7> local_options{
         static_cast<double>(options.method), static_cast<double>(options.neighbors),
         options.max_distance, options.coverage_tolerance,
-        static_cast<double>(options.coverage_mode), conservative ? double(cylindrical) : 0.0};
-    std::array<double, 6> minimum{}, maximum{};
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 6, local_options.data(), minimum.data());
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 6, local_options.data(), maximum.data());
+        static_cast<double>(options.coverage_mode),
+        conservative ? static_cast<double>(source_kind) : 0.0,
+        conservative ? static_cast<double>(target_kind) : 0.0};
+    std::array<double, 7> minimum{}, maximum{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 7, local_options.data(), minimum.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 7, local_options.data(), maximum.data());
     require_all(*comm, minimum == maximum,
                 "Mesh transfer options must agree on every rank.");
     require_all(*comm, !conservative
-        || (std::holds_alternative<typename mesh_type::CartesianPtr>(d_source->variant())
-            && std::holds_alternative<typename mesh_type::CartesianPtr>(d_target->variant()))
-        || (cylindrical
-            && std::holds_alternative<typename mesh_type::CylindricalPtr>(d_target->variant())),
-        "Conservative mesh transfer requires two Cartesian or two coaxial cylindrical meshes.");
+        || (source_kind == GeometryKind::Cartesian && target_kind == GeometryKind::Cartesian)
+        || (source_kind == GeometryKind::Cylindrical && target_kind == GeometryKind::Cylindrical)
+        || (source_kind == GeometryKind::Cylindrical && target_kind == GeometryKind::PolygonPrism)
+        || (source_kind == GeometryKind::PolygonPrism && target_kind == GeometryKind::Cylindrical),
+        "Conservative transfer requires two Cartesian meshes, two cylindrical meshes, "
+        "or one cylindrical mesh and one straight convex XY polygon extrusion.");
     // Both checks are collective and must execute even if the first fails.
     const bool source_unique = source_map->isOneToOne();
     const bool target_unique = target_map->isOneToOne();
     require_all(*comm, source_unique && target_unique
         && source_map->getGlobalNumElements() > 0 && target_map->getGlobalNumElements() > 0
-        && source_map->getGlobalNumElements() <= static_cast<size_t>(std::numeric_limits<int>::max() / 10),
+        && source_map->getGlobalNumElements() <= static_cast<size_t>(std::numeric_limits<int>::max() / 12),
         "Mesh transfer requires nonempty one-to-one cell maps within the geometry gather limit.");
 
     bool valid = true;
@@ -157,7 +161,11 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
     {
         valid = false;
     }
-    require_all(*comm, valid, "Mesh transfer requires finite geometry and positive cell volumes.");
+    size_t source_coordinates = 0;
+    for (const auto& g : source_geometry) source_coordinates += serialized_size(g);
+    valid = valid && source_coordinates <= static_cast<size_t>(std::numeric_limits<int>::max());
+    require_all(*comm, valid, "Mesh transfer requires finite positive native volumes and supported "
+        "geometry; polygon cells must be convex straight XY extrusions within the geometry gather limit.");
 
     std::vector<GO> donor_ids;
     std::vector<Geometry> donors;
@@ -168,36 +176,40 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
     {
         int count = static_cast<int>(source_geometry.size());
         Teuchos::broadcast(*comm, rank, 1, &count);
+        int coordinate_count = static_cast<int>(source_coordinates);
+        Teuchos::broadcast(*comm, rank, 1, &coordinate_count);
         std::vector<GO> ids(count);
-        std::vector<double> coordinates(static_cast<size_t>(count) * 10);
+        std::vector<double> coordinates;
         if (comm->getRank() == rank)
         {
+            coordinates.reserve(coordinate_count);
             for (int c = 0; c < count; ++c)
             {
                 ids[c] = source_map->getGlobalElement(static_cast<LO>(c));
-                std::copy(source_geometry[c].begin(), source_geometry[c].end(),
-                          coordinates.begin() + static_cast<size_t>(c) * 10);
+                append_geometry(source_geometry[c], coordinates);
             }
         }
+        else coordinates.resize(coordinate_count);
         if (count)
         {
             Teuchos::broadcast(*comm, rank, count, ids.data());
-            Teuchos::broadcast(*comm, rank, count * 10, coordinates.data());
+            Teuchos::broadcast(*comm, rank, coordinate_count, coordinates.data());
         }
         if (rank == comm->getRank()) source_offset = donors.size();
         donor_ids.insert(donor_ids.end(), ids.begin(), ids.end());
-        for (int c = 0; c < count; ++c)
-        {
-            Geometry g;
-            std::copy_n(coordinates.begin() + static_cast<size_t>(c) * 10, 10, g.begin());
-            donors.push_back(g);
-        }
+        size_t coordinate_offset = 0;
+        for (int c = 0; c < count; ++c) donors.push_back(read_geometry(coordinates, coordinate_offset));
     }
 
     std::vector<std::vector<GO>> columns(target_geometry.size());
     std::vector<std::vector<Scalar>> weights(target_geometry.size());
     std::vector<double> source_coverage(conservative ? donors.size() : 0, 0);
     std::vector<std::pair<double, size_t>> distances(conservative ? 0 : donors.size());
+    // Geometry remains replicated, but exact intersections only visit BVH
+    // candidates rather than every source cell for each target cell.
+    std::optional<OverlapCandidates> search;
+    if (conservative) search.emplace(donors);
+    std::vector<size_t> candidates;
     const auto covered_is_valid = [&](double covered, double volume) {
         const double residual = covered / volume - 1.0;
         return std::isfinite(covered) && covered >= 0
@@ -217,9 +229,11 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         if (conservative)
         {
             double coverage = 0;
-            for (size_t s = 0; s < donors.size(); ++s)
+            search->find(target_cell, candidates);
+            for (const size_t s : candidates)
             {
-                const double overlap = intersection(target_cell, donors[s], cylindrical);
+                const double overlap = intersection(target_cell, donors[s]);
+                valid = valid && std::isfinite(overlap) && overlap >= 0;
                 if (overlap <= 0) continue;
                 columns[row].push_back(donor_ids[s]);
                 weights[row].push_back(static_cast<Scalar>(overlap));

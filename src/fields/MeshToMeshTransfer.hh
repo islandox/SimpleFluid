@@ -90,7 +90,13 @@ struct MeshToMeshTransferOptions
  * nearest k cells with inverse-square weights and reproduces coincident data.
  * Neither interpolator promises integral conservation or linear exactness.
  * ConservativeCellAverage builds exact Cartesian or coaxial cylindrical
- * annular-sector overlaps. Full coverage is required by default. project()
+ * annular-sector overlaps, and mixed cylindrical/convex XY-polygon prism
+ * overlaps. Polygon prisms may be direct SemiStructuredXY_Z cells or composite
+ * NativeIsoRegion<SemiStructuredXY_Z>/ExtrudedRegion cells, including current
+ * affine Z motion. Other composite providers and nonconvex cells are rejected.
+ * Direct semi-structured handles are serial; composite extrusion handles may
+ * be distributed. Polygon/polygon and Cartesian/polygon pairs are unsupported.
+ * Full coverage is required by default. project()
  * distinguishes cell averages/densities from cell inventories and returns a
  * conservation report. Partial coverage must be explicitly enabled; no
  * extrapolation, inventory clipping or covered-volume renormalization occurs.
@@ -98,8 +104,9 @@ struct MeshToMeshTransferOptions
  *
  * Meshes are retained by shared ownership. Reconstruct after geometry motion,
  * repartitioning or topology changes; changed geometry epochs are rejected.
- * Setup replicates source geometry and searches every source cell for each
- * owned target cell. Applications use a sparse distributed Tpetra matrix.
+ * Setup replicates source geometry. Conservative setup uses an XYZ/RZ bounding
+ * hierarchy to restrict exact overlap candidates; interpolation searches all
+ * donors. Applications use a sparse distributed Tpetra matrix.
  * See docs/mesh_to_mesh_transfer.md for usage and limits.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
