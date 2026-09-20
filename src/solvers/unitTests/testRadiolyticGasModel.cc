@@ -557,8 +557,12 @@ TEST(RadiolyticGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
     {
         SCOPED_TRACE(step);
         const auto accepted = model.snapshot();
-        // Force a new numeric system/graph for the reference at every step.
-        fresh.refresh_geometry();
+        // configure() clears every transport cache; restore only this model's
+        // own physical snapshot, retaining independent checkpoint ownership.
+        const auto fresh_accepted = fresh.snapshot();
+        fresh.configure(options);
+        fresh.set_transport_linear_solver_options(linear);
+        fresh.restore(fresh_accepted);
         const double speed = step % 2 == 0 ? 0.1 : -0.2;
         const double dt = (step + 1) * 1.0e-4;
         for (const auto face : flux.owned_face_ids())

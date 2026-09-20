@@ -63,7 +63,7 @@ public:
     /**
      * @brief Refresh numeric geometry and discard operator-dependent solve state.
      */
-    void refresh_geometry();
+    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry = {});
 
     void advance_explicit(const std::vector<scalar_type>& old_temperature, scalar_type time_step,
         scalar_type thermal_diffusivity, field_type& temperature) const;

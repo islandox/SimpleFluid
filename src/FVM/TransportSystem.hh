@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <type_traits>
@@ -169,16 +170,32 @@ public:
     using boundary_locations_type = std::vector<detail::BoundaryFaceLocation<MeshType>>;
     using boundary_geometry_type = std::vector<detail::BoundaryAwareGradientCellGeometry<MeshType>>;
     using assembly_geometry_type = detail::TransportAssemblyGeometry<MeshType>;
+    /** Immutable mesh metrics; field and boundary values are never retained. */
+    struct SharedGeometry
+    {
+        explicit SharedGeometry(const MeshType& mesh);
+        const MeshType* const mesh;
+        const void* const identity;
+        const std::uint64_t epoch;
+        const interior_stencils_type interior;
+        const boundary_locations_type locations;
+        const boundary_geometry_type boundary;
+        const assembly_geometry_type assembly;
+        const bool has_non_orthogonal_faces;
+    };
+    using shared_geometry_type = std::shared_ptr<const SharedGeometry>;
+
     explicit TransportGeometryCache(const MeshType& mesh);
 
     /** @brief Throw if this cache was built for another mesh instance. */
     void require_mesh(const MeshType& mesh) const;
 
-    /** @brief Rebuild all geometry-dependent data at the mesh's current epoch. */
-    void refresh();
+    /** Refresh once per epoch, or adopt a validated snapshot of the same mesh. */
+    void refresh(shared_geometry_type geometry = {});
+    const shared_geometry_type& shared_geometry() const noexcept { return d_geometry; }
 
     /** @brief Geometry epoch represented by this cache. */
-    std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
+    std::uint64_t geometry_epoch() const noexcept { return d_geometry->epoch; }
 
     const interior_stencils_type& interior_stencils() const;
 
@@ -201,12 +218,7 @@ public:
 
 private:
     const MeshType* d_mesh;
-    std::uint64_t d_geometry_epoch = 0;
-    interior_stencils_type d_interior_stencils;
-    boundary_locations_type d_boundary_locations;
-    boundary_geometry_type d_boundary_geometry;
-    assembly_geometry_type d_assembly_geometry;
-    bool d_has_non_orthogonal_faces = true;
+    shared_geometry_type d_geometry;
 };
 
 /**
@@ -264,6 +276,8 @@ struct BasicWeightedScalarTransportRequest
     const ALEControlVolumeState* ale = nullptr;
     /** Optional mapped owned-graph plan; external matrices retain full validation. */
     detail::StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr;
+    /** Optional mapped RHS storage with the exact owned map; values are reset. */
+    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null;
 };
 
 } // namespace detail
@@ -358,7 +372,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(
         request.treatment, request.correction_field, std::move(request.cached_matrix), std::move(request.implicit_sink),
         std::move(request.fixed_cell_value), request.boundary_diffusivity, request.geometry_cache,
         request.coefficient_interpolation, request.discretization, request.older_values, request.old_storage_weight,
-        request.ale, request.symbolic_plan);
+        request.ale, request.symbolic_plan, std::move(request.cached_rhs));
 }
 
 /**

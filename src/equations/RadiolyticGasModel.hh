@@ -362,7 +362,7 @@ public:
     [[nodiscard]] StateSnapshot snapshot() const;
     void restore(const StateSnapshot& snapshot);
     /** Refresh reconstruction geometry and discard retained numeric transport state. */
-    void refresh_geometry();
+    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry = {});
 
     /** Build the owner-oriented raw bubble-volume slip flux [m^3/s]. */
     void bubble_slip_volume_flux(const field_type& temperature,

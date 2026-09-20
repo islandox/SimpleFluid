@@ -312,6 +312,8 @@ public:
         d_preconditioner = Teuchos::null;
         d_preconditioner_operator = Teuchos::null;
         d_preconditioner_kind.reset();
+        d_muelu_factory = Teuchos::null;
+        d_muelu_map = Teuchos::null;
     }
 
     bool solve(
@@ -845,25 +847,40 @@ private:
                 break;
             case LinearPreconditioner::MueLu:
             {
-                Teuchos::ParameterList parameters;
-                parameters.set("verbosity", "none");
-                parameters.set("coarse: max size", 64);
-                parameters.set("smoother: type", "RELAXATION");
-                parameters.sublist("smoother: params").set(
-                    "relaxation: type", "Jacobi");
-                parameters.set("coarse: type", "RELAXATION");
-                parameters.sublist("coarse: params").set(
-                    "relaxation: type", "Jacobi");
-                parameters.sublist("coarse: params").set(
-                    "relaxation: sweeps", 4);
+                // The policy is fixed, but parsing it builds a sizeable factory
+                // tree. Retain that configuration for the exact same map/comm;
+                // every numeric setup still gets a fresh hierarchy and factors.
+                if (d_muelu_factory.is_null() ||
+                    d_muelu_map.get() != crs_matrix->getDomainMap().get())
+                {
+                    Teuchos::ParameterList parameters;
+                    parameters.set("verbosity", "none");
+                    parameters.set("coarse: max size", 64);
+                    parameters.set("smoother: type", "RELAXATION");
+                    parameters.sublist("smoother: params").set(
+                        "relaxation: type", "Jacobi");
+                    parameters.set("coarse: type", "RELAXATION");
+                    parameters.sublist("coarse: params").set(
+                        "relaxation: type", "Jacobi");
+                    parameters.sublist("coarse: params").set(
+                        "relaxation: sweeps", 4);
+                    d_muelu_factory = Teuchos::rcp(new muelu_factory_type(
+                        parameters, crs_matrix->getDomainMap()->getComm()));
+                    d_muelu_map = crs_matrix->getDomainMap();
+                    ++d_muelu_configuration_count;
+                }
 
                 auto mutable_matrix =
                     Teuchos::rcp_const_cast<matrix_type>(crs_matrix);
-                Teuchos::RCP<operator_type> mutable_operator =
-                    mutable_matrix;
-                d_preconditioner =
-                    MueLu::CreateTpetraPreconditioner(
-                        mutable_operator, parameters);
+                auto xpetra_matrix = Xpetra::toXpetra(mutable_matrix);
+                auto hierarchy = d_muelu_factory->CreateHierarchy(xpetra_matrix->getObjectLabel());
+                hierarchy->setlib(xpetra_matrix->getDomainMap()->lib());
+                hierarchy->GetLevel(0)->Set("A", xpetra_matrix);
+                hierarchy->SetProcRankVerbose(xpetra_matrix->getDomainMap()->getComm()->getRank());
+                d_muelu_factory->SetupHierarchy(*hierarchy);
+                d_preconditioner = Teuchos::rcp(new MueLu::TpetraOperator<scalar_type,
+                    typename Pack::local_ordinal_type, typename Pack::global_ordinal_type,
+                    typename Pack::node_type>(hierarchy));
                 break;
             }
             case LinearPreconditioner::None:
@@ -1047,6 +1064,12 @@ private:
     Teuchos::RCP<const operator_type> d_preconditioner_operator;
     std::optional<LinearPreconditioner> d_preconditioner_kind;
     std::size_t d_preconditioner_setup_count = 0;
+    using muelu_factory_type = MueLu::ParameterListInterpreter<scalar_type,
+        typename Pack::local_ordinal_type, typename Pack::global_ordinal_type,
+        typename Pack::node_type>;
+    Teuchos::RCP<muelu_factory_type> d_muelu_factory;
+    Teuchos::RCP<const typename Pack::map_type> d_muelu_map;
+    std::size_t d_muelu_configuration_count = 0;
 };
 
 /**

@@ -75,7 +75,6 @@ public:
         const std::vector<row_type>& rows) const
     {
         if (!owns(matrix) || !matrix->isFillComplete() || d_mesh != &mesh ||
-            d_geometry_epoch != mesh_geometry_epoch(mesh) ||
             matrix->getCrsGraph().get() != d_graph.get() ||
             matrix->getRowMap().get() != mesh.owned_cell_map().get() ||
             matrix->getColMap().get() != mesh.overlap_cell_map().get() ||
@@ -112,7 +111,6 @@ private:
         d_matrix = std::move(matrix);
         d_graph = d_matrix->getCrsGraph();
         d_mesh = &mesh;
-        d_geometry_epoch = mesh_geometry_epoch(mesh);
         d_columns.resize(rows.size());
         d_slots.resize(rows.size());
         // Views stay local to this validated graph snapshot.
@@ -162,7 +160,6 @@ private:
     Teuchos::RCP<matrix_type> d_matrix;
     Teuchos::RCP<const typename matrix_type::crs_graph_type> d_graph;
     const void* d_mesh = nullptr;
-    std::uint64_t d_geometry_epoch = 0;
     std::vector<std::vector<typename Pack::local_ordinal_type>> d_columns;
     std::vector<std::vector<size_t>> d_slots;
 };
@@ -1090,7 +1087,8 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     ScalarTransportDiscretization discretization,
     const ScalarCellFieldStored<Pack, MeshType>* older_values,
     const ALEControlVolumeState* ale,
-    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr)
+    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr,
+    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1103,13 +1101,16 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
     validate_scalar_transport_discretization(
         mesh, discretization, older_field_state, context);
-    const std::array<int, 4> local_optional_state{
+    const std::array<int, 5> local_optional_state{
         has_distinct_old_storage ? 1 : 0,
         has_distinct_old_storage ? -1 : 0,
         ale == nullptr ? 0 : 1,
-        ale == nullptr ? 0 : -1};
+        ale == nullptr ? 0 : -1,
+        !cached_rhs.is_null() && cached_rhs->getMap().get() != mesh.owned_cell_map().get() ? 1 : 0};
     const auto optional_state =
         reduce_stored_validation_state<Pack>(mesh, local_optional_state);
+    if (optional_state[4] != 0)
+        throw std::invalid_argument("Cached transport RHS must use the exact owned map.");
     if (optional_state[0] != -optional_state[1])
     {
         throw std::invalid_argument(std::string(context)
@@ -1489,7 +1490,9 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             old_values, gradient_stencils, *convection_gradients);
     }
 
-    auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
+    auto rhs = cached_rhs.is_null()
+        ? Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true)) : std::move(cached_rhs);
+    rhs->putScalar(scalar_type{});
     FlatMatrixRow<local_ordinal_type, scalar_type> row_values(mesh.num_local_cells(), 64);
     std::vector<StoredTransportMatrixRow<Pack>> rows;
     rows.reserve(mesh.num_owned_cells());
@@ -1737,7 +1740,8 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
     const ScalarCellFieldStored<Pack, MeshType>* older_values,
     const ScalarCellFieldStored<Pack, MeshType>* old_storage_weight,
     const ALEControlVolumeState* ale,
-    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr)
+    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr,
+    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null)
 {
     const auto incompatible_fields = old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
                                              old_values.mesh_ptr().get() != storage_weight.mesh_ptr().get() ||
@@ -1766,7 +1770,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
         std::move(boundary_value), std::move(source), treatment,
         correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
         boundary_diffusivity, geometry_cache, coefficient_interpolation, incompatible_fields,
-        "weighted_scalar_transport_system", discretization, older_values, ale, symbolic_plan);
+        "weighted_scalar_transport_system", discretization, older_values, ale, symbolic_plan, std::move(cached_rhs));
 }
 
 /** Assemble mapped conservative physical temperature transport. */

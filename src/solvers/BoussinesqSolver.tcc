@@ -3048,8 +3048,11 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature_equation(
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::refresh_geometry_dependent_state()
 {
-    boussinesq_momentum_equation().refresh_geometry();
-    temperature_equation().refresh_geometry();
+    if (!d_shared_transport_geometry) d_shared_transport_geometry.emplace(*d_mesh);
+    else d_shared_transport_geometry->refresh();
+    const auto& geometry = d_shared_transport_geometry->shared_geometry();
+    boussinesq_momentum_equation().refresh_geometry(geometry);
+    temperature_equation().refresh_geometry(geometry);
     if (uses_legacy_backend())
     {
         boussinesq_pressure_face_flux_workspace().refresh_geometry();
@@ -3058,11 +3061,11 @@ void BoussinesqSolver<Pack>::refresh_geometry_dependent_state()
     this->refresh_pressure_velocity_geometry_state();
     if (d_radiolytic_gas_model)
     {
-        d_radiolytic_gas_model->refresh_geometry();
+        d_radiolytic_gas_model->refresh_geometry(geometry);
     }
     if (d_scalar_void_fraction_model)
     {
-        d_scalar_void_fraction_model->refresh_geometry();
+        d_scalar_void_fraction_model->refresh_geometry(geometry);
     }
     if (d_liquid_mass_inventory)
     {

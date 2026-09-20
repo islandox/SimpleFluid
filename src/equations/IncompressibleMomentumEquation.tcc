@@ -37,14 +37,15 @@ IncompressibleMomentumEquation<Pack, MeshType>::IncompressibleMomentumEquation(
 
 /** Refresh geometry-dependent transport data after fixed-topology motion. */
 template<TpetraTypePack Pack, class MeshType>
-void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry()
+void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry(
+    typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {
     d_cached_transport_matrix = Teuchos::null;
     d_cached_graph_supports_non_orthogonal_correction = false;
     d_cached_physical_transport_matrix = Teuchos::null;
     d_cached_physical_graph_supports_non_orthogonal_correction = false;
     d_linear_solver.reset();
-    d_transport_geometry_cache.refresh();
+    d_transport_geometry_cache.refresh(std::move(geometry));
 }
 
 /**

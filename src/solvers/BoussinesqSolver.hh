@@ -660,6 +660,7 @@ private:
     std::unique_ptr<ale_motion_type> d_ale_motion;
     std::unique_ptr<ale_boundary_type> d_ale_boundary;
     std::unique_ptr<volume_continuity_model_type> d_volume_continuity_model;
+    std::optional<FVM::TransportGeometryCache<MeshHandle<Pack>>> d_shared_transport_geometry;
     std::unique_ptr<face_flux_field_type> d_mesh_relative_face_flux;
     std::unique_ptr<face_flux_field_type> d_bubble_slip_volume_flux;
     std::unique_ptr<field_type> d_mesh_volume_rate;
