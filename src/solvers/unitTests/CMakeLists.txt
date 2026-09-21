@@ -31,6 +31,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
 endforeach()
 
+simplefluid_add_mpi_test(
+    NAME BelosAccurateResidual_2procs
+    TARGET testBelosLinearSolver
+    PROCS 2
+    ARGS "--gtest_filter=BelosLinearSolverTest.AccurateStoredCrsResidual*:BelosLinearSolverTest.RefinesGmresLossOfAccuracyAgainstOriginalTrueResidualGate:BelosLinearSolverTest.GmresLossOfAccuracyRefinementKeepsIterationAndRestartBounds:BelosLinearSolverTest.GmresDoesNotRetryOrdinaryFailureLargeGapOrNonfiniteResidual:BelosLinearSolverTest.GmresDefectCorrectionRestoresOriginalVectorsAfterException"
+    LABELS "mpi;linear_solver;accuracy"
+    TIMEOUT 120)
+
 target_sources(testBoussinesqSolver PRIVATE
   PressureGradientStencilTestSupport.cc)
 
