@@ -226,7 +226,13 @@ public:
 
     void restore(const StateSnapshot& snapshot);
 
-    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry = {})
+    void refresh_geometry()
+    {
+        refresh_geometry({});
+    }
+
+    /** Refresh using an optional validated geometry snapshot of this mesh. */
+    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
     {
         if (d_transport_geometry_cache)
         {
