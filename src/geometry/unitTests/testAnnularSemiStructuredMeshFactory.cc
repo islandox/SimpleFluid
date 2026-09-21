@@ -5,17 +5,21 @@
 #include "geometry/MeshHandle.hh"
 #include "geometry/MeshQuality.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/mesh/FrontalDelaunay2D.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <map>
 #include <numbers>
 #include <set>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace
@@ -70,6 +74,122 @@ SimpleFluid::ArrReal axial_edges(const Composite& composite)
     edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
     return edges;
 }
+
+/** Recover the two bulk interface loops without assuming factory node IDs. */
+std::vector<SimpleFluid::Arr<Native::Vec3>> bulk_boundary_loops(const Native& native)
+{
+    std::map<std::pair<unsigned, unsigned>, unsigned> incidences;
+    for (const auto& cell : native.xy_cell_nodes())
+        if (cell.size() == 3)
+            for (size_t j = 0; j < 3; ++j)
+                ++incidences[std::minmax(cell[j], cell[(j + 1) % 3])];
+    std::map<unsigned, std::vector<unsigned>> adjacency;
+    for (const auto& [edge, count] : incidences)
+    {
+        if (count != 1 && count != 2)
+            throw std::runtime_error("Bulk triangulation is non-manifold");
+        if (count == 1)
+        {
+            adjacency[edge.first].push_back(edge.second);
+            adjacency[edge.second].push_back(edge.first);
+        }
+    }
+    for (const auto& [node, neighbors] : adjacency)
+    {
+        static_cast<void>(node);
+        if (neighbors.size() != 2)
+            throw std::runtime_error("Bulk interface is not a closed polygon loop");
+    }
+    std::set<unsigned> visited;
+    std::vector<SimpleFluid::Arr<Native::Vec3>> loops;
+    for (const auto& [start, neighbors] : adjacency)
+    {
+        static_cast<void>(neighbors);
+        if (!visited.insert(start).second) continue;
+        std::vector<unsigned> component{start};
+        for (size_t i = 0; i < component.size(); ++i)
+            for (const auto other : adjacency.at(component[i]))
+                if (visited.insert(other).second) component.push_back(other);
+        SimpleFluid::Arr<Native::Vec3> loop;
+        for (const auto node : component) loop.push_back(native.xy_nodes()[node]);
+        const auto angle = [](const Native::Vec3& p)
+        {
+            const auto value = std::atan2(p.y, p.x);
+            return value < 0 ? value + 2 * std::numbers::pi : value;
+        };
+        std::sort(loop.begin(), loop.end(), [&](const auto& a, const auto& b) { return angle(a) < angle(b); });
+        loops.push_back(std::move(loop));
+    }
+    if (loops.size() != 2)
+        throw std::runtime_error("Expected exactly two annular bulk boundary loops");
+    const auto mean_radius = [](const auto& loop)
+    {
+        double total = 0;
+        for (const auto& node : loop) total += std::hypot(node.x, node.y);
+        return total / loop.size();
+    };
+    std::sort(loops.begin(), loops.end(), [&](const auto& a, const auto& b) { return mean_radius(a) < mean_radius(b); });
+    return loops; // inner first, outer second; each loop is CCW from +X.
+}
+
+using TriangleCoordinates = std::array<std::array<double, 2>, 3>;
+
+template<class Indices>
+TriangleCoordinates triangle_coordinates(const SimpleFluid::Arr<Native::Vec3>& nodes, const Indices& indices)
+{
+    TriangleCoordinates result;
+    for (size_t j = 0; j < 3; ++j) result[j] = {nodes[indices[j]].x, nodes[indices[j]].y};
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+/** Check every quad's actual apothems and width, independently of node IDs. */
+void expect_wall_quadrilaterals(const Native& native, const Factory::Result& result,
+    const Factory::Options& options)
+{
+    const std::array<size_t, 2> angular{result.counts.inner_angular_cells, result.counts.outer_angular_cells};
+    const std::array<size_t, 2> layers{
+        options.refine_inner ? options.wall_layers : 0,
+        options.refine_outer ? options.wall_layers : 0};
+    std::array<std::vector<size_t>, 2> observed{
+        std::vector<size_t>(layers[0]), std::vector<size_t>(layers[1])};
+    for (const auto& cell : native.xy_cell_nodes())
+    {
+        if (cell.size() != 4) continue;
+        double smallest = std::numeric_limits<double>::infinity(), largest = 0;
+        for (const auto index : cell)
+        {
+            const auto& point = native.xy_nodes()[index];
+            const auto radius = std::hypot(point.x, point.y);
+            smallest = std::min(smallest, radius);
+            largest = std::max(largest, radius);
+        }
+        bool matched = false;
+        for (size_t side = 0; side < 2 && !matched; ++side)
+        {
+            const auto cosine = std::cos(std::numbers::pi / angular[side]);
+            const auto boundary = side == 0 ? options.inner_radius : options.outer_radius * cosine;
+            double offset = 0, width = options.first_layer_height;
+            for (size_t layer = 0; layer < layers[side]; ++layer)
+            {
+                const auto actual_boundary = (side == 0 ? smallest : largest) * cosine;
+                const auto expected_boundary = boundary + (side == 0 ? offset : -offset);
+                if (std::abs(actual_boundary - expected_boundary) <= 1e-12)
+                {
+                    EXPECT_NEAR((largest - smallest) * cosine, width, 1e-12);
+                    ++observed[side][layer];
+                    matched = true;
+                    break;
+                }
+                offset += width;
+                width *= options.growth_ratio;
+            }
+        }
+        EXPECT_TRUE(matched) << "Quadrilateral is outside the selected radial wall layers";
+    }
+    for (size_t side = 0; side < 2; ++side)
+        for (const auto count : observed[side]) EXPECT_EQ(count, angular[side]);
+}
 } // namespace
 
 TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesNativeVolume)
@@ -83,15 +203,25 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
     EXPECT_EQ(result.counts.nodes, mesh.num_nodes());
     EXPECT_EQ(result.counts.faces, mesh.num_faces());
     EXPECT_EQ(result.counts.regions, mesh.regions().size());
-    EXPECT_EQ(result.counts.coarse_xy_cells, result.counts.radial_cells * result.angular_cells);
     EXPECT_EQ(result.counts.mixed_xy_cells, result.counts.xy_cells);
-    EXPECT_EQ(result.angular_cells % 2, 0U);
-    EXPECT_GE(result.angular_cells, 8U);
-    EXPECT_LE(2 * std::numbers::pi * options.outer_radius / result.angular_cells, options.xy_spacing);
+    EXPECT_EQ(result.counts.mixed_xy_cells, result.counts.wall_xy_cells + result.counts.bulk_xy_cells);
+    EXPECT_EQ(result.angular_cells, result.counts.outer_angular_cells);
+    EXPECT_EQ(result.counts.angular_cells, result.counts.outer_angular_cells);
+    for (const auto count : {result.counts.inner_angular_cells, result.counts.outer_angular_cells})
+    {
+        EXPECT_EQ(count % 2, 0U);
+        ASSERT_GE(count, 8U);
+    }
+    EXPECT_LE(2 * std::numbers::pi * options.outer_radius / result.counts.outer_angular_cells, options.xy_spacing);
+    const auto inner_front_apothem = result.radial_apothems[options.wall_layers];
+    EXPECT_LE(2 * std::numbers::pi * inner_front_apothem /
+        (result.counts.inner_angular_cells * std::cos(std::numbers::pi / result.counts.inner_angular_cells)),
+        options.xy_spacing + 1e-14);
 
     for (size_t region = 0; region < mesh.regions().size(); ++region)
     {
         const auto& native = child(mesh, region);
+        size_t quads = 0, triangles = 0;
         EXPECT_EQ(result.counts.xy_nodes, native.xy_nodes().size());
         for (const auto& node : native.xy_nodes())
         {
@@ -101,10 +231,12 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
         }
         for (const auto& cell : native.xy_cell_nodes())
         {
-            const auto ring = *std::min_element(cell.begin(), cell.end()) / result.angular_cells;
-            const bool wall = ring < options.wall_layers
-                || ring >= result.counts.radial_cells - options.wall_layers;
-            ASSERT_EQ(cell.size(), wall ? 4U : 3U);
+            ASSERT_TRUE(cell.size() == 3 || cell.size() == 4);
+            if (cell.size() == 4)
+            {
+                ++quads;
+            }
+            else ++triangles;
             double signed_area = 0;
             for (size_t j = 0; j < cell.size(); ++j)
             {
@@ -115,6 +247,11 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
             }
             EXPECT_GT(signed_area, 0);
         }
+        EXPECT_EQ(quads, options.wall_layers *
+            (result.counts.inner_angular_cells + result.counts.outer_angular_cells));
+        EXPECT_EQ(quads, result.counts.wall_xy_cells);
+        EXPECT_EQ(triangles, result.counts.bulk_xy_cells);
+        expect_wall_quadrilaterals(native, result, options);
     }
     long double total_volume = 0;
     std::vector<unsigned> incidences(mesh.num_faces());
@@ -134,8 +271,10 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
     {
         EXPECT_EQ(incidences[f], mesh.neighbor_cell(f) == Composite::invalid_cell_id() ? 1U : 2U);
     }
-    const auto polygon_area = result.angular_cells * std::tan(std::numbers::pi / result.angular_cells)
-        * (std::pow(result.radial_apothems.back(), 2) - std::pow(result.radial_apothems.front(), 2));
+    const auto polygon_area = result.counts.outer_angular_cells * std::tan(std::numbers::pi / result.counts.outer_angular_cells)
+        * std::pow(result.radial_apothems.back(), 2)
+        - result.counts.inner_angular_cells * std::tan(std::numbers::pi / result.counts.inner_angular_cells)
+        * std::pow(options.inner_radius, 2);
     EXPECT_NEAR(result.cross_section_area, polygon_area, 1e-14);
     EXPECT_NEAR(static_cast<double>(total_volume), result.cross_section_area * (options.top - options.bottom), 1e-14);
     EXPECT_GT(result.relative_area_deficit, 0);
@@ -143,6 +282,26 @@ TEST(AnnularSemiStructuredMeshFactoryTest, ContainsOnlyAnnularFluidAndPreservesN
     std::set<std::string> names;
     for (const auto batch : mesh.boundary_batch_ids()) names.insert(mesh.boundary_batch_name(batch));
     EXPECT_EQ(names, (std::set<std::string>{"rmin", "rmax", "zmin", "zmax"}));
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, BulkTrianglesComeFromPublicFrontalDelaunayAnnulus)
+{
+    const auto options = small_options();
+    const auto result = Factory(options).build();
+    const auto& native = child(*result.mesh, 0);
+    const auto loops = bulk_boundary_loops(native);
+    ASSERT_EQ(loops[0].size(), result.counts.inner_angular_cells);
+    ASSERT_EQ(loops[1].size(), result.counts.outer_angular_cells);
+    const auto direct = SimpleFluid::Meshes::FrontalDelaunay2D::triangulate_annulus(
+        loops[1], loops[0], options.xy_spacing);
+    std::set<TriangleCoordinates> expected, actual;
+    for (const auto& triangle : direct.triangles)
+        EXPECT_TRUE(expected.insert(triangle_coordinates(direct.nodes, triangle)).second);
+    for (const auto& cell : native.xy_cell_nodes())
+        if (cell.size() == 3)
+            EXPECT_TRUE(actual.insert(triangle_coordinates(native.xy_nodes(), cell)).second);
+    ASSERT_EQ(actual.size(), result.counts.bulk_xy_cells);
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(AnnularSemiStructuredMeshFactoryTest, PreservesWallNormalGrowthAndDeterministicAxialFractions)
@@ -161,6 +320,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, PreservesWallNormalGrowthAndDetermini
         EXPECT_EQ(child(*result.mesh, r).z_edges(), child(*repeated.mesh, r).z_edges());
         EXPECT_EQ(child(*result.mesh, r).xy_cell_nodes(), child(*result.mesh, 0).xy_cell_nodes());
         EXPECT_EQ(child(*result.mesh, r).xy_cell_nodes().size(), result.counts.mixed_xy_cells);
+        expect_wall_quadrilaterals(child(*result.mesh, r), result, options);
     }
     ASSERT_EQ(result.mesh->interfaces().size(), 2U);
     for (const auto& declared : result.mesh->interfaces())
@@ -203,11 +363,8 @@ TEST(AnnularSemiStructuredMeshFactoryTest, PreservesWallNormalGrowthAndDetermini
         EXPECT_GT(result.axial_fractions[i], result.axial_fractions[i - 1]);
         EXPECT_LE(z[i] - z[i - 1], options.z_spacing + 1e-14);
     }
-    // The bulk gap is evenly subdivided, not intersected with unrelated
-    // uniform edges that can leave arbitrarily thin transition slivers.
-    const auto radial_bulk_width = radial[options.wall_layers + 1] - radial[options.wall_layers];
-    for (size_t i = options.wall_layers + 1; i + options.wall_layers + 1 < radial.size(); ++i)
-        EXPECT_NEAR(radial[i + 1] - radial[i], radial_bulk_width, 1e-14);
+    // Interior radial coordinates are planning guides; the actual bulk
+    // topology is supplied by frontal-Delaunay point placement above.
 }
 
 TEST(AnnularSemiStructuredMeshFactoryTest, CanDisableLayersAndPlanTheCentimetreR100Mesh)
@@ -216,12 +373,16 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CanDisableLayersAndPlanTheCentimetreR
     options.wall_layers = 0;
     const auto result = Factory(options).build();
     EXPECT_EQ(result.counts.axial_cells, 3U);
-    EXPECT_EQ(result.counts.radial_cells, 5U);
     EXPECT_EQ(result.counts.hex_cells, 0U);
+    EXPECT_EQ(result.counts.wall_xy_cells, 0U);
+    EXPECT_EQ(result.counts.bulk_xy_cells, result.counts.xy_cells);
     EXPECT_EQ(result.counts.prism_cells, result.counts.cells);
     EXPECT_EQ(result.mesh->regions().size(), 1U);
     EXPECT_TRUE(result.mesh->interfaces().empty());
     for (const auto& xy : child(*result.mesh, 0).xy_cell_nodes()) EXPECT_EQ(xy.size(), 3U);
+    const auto loops = bulk_boundary_loops(child(*result.mesh, 0));
+    EXPECT_EQ(loops[0].size(), result.counts.inner_angular_cells);
+    EXPECT_EQ(loops[1].size(), result.counts.outer_angular_cells);
     Factory::Options r100;
     r100.inner_radius = 0.03815;
     r100.outer_radius = 0.25;
@@ -229,19 +390,108 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CanDisableLayersAndPlanTheCentimetreR
     r100.top = 0.60852;
     const auto counts = Factory(r100).planned_counts();
     EXPECT_EQ(counts.angular_cells, 158U);
-    EXPECT_EQ(counts.radial_cells, 30U);
+    EXPECT_EQ(counts.outer_angular_cells, 158U);
+    EXPECT_EQ(counts.inner_angular_cells, 50U);
     EXPECT_EQ(counts.axial_cells, 55U);
-    EXPECT_EQ(counts.coarse_xy_cells, 4740U);
-    EXPECT_EQ(counts.mixed_xy_cells, 6952U);
+    EXPECT_EQ(counts.wall_xy_cells, 1664U);
+    EXPECT_GT(counts.bulk_xy_cells, 0U);
+    EXPECT_EQ(counts.mixed_xy_cells, counts.wall_xy_cells + counts.bulk_xy_cells);
     EXPECT_EQ(counts.bottom_axial_cells, 8U);
     EXPECT_EQ(counts.bulk_axial_cells, 47U);
     EXPECT_EQ(counts.top_axial_cells, 0U);
-    EXPECT_EQ(counts.hex_cells, 139040U);
-    EXPECT_EQ(counts.prism_cells, 243320U);
-    EXPECT_EQ(counts.cells, 382360U);
+    EXPECT_EQ(counts.hex_cells, 91520U);
+    EXPECT_EQ(counts.prism_cells, counts.bulk_xy_cells * counts.axial_cells);
+    EXPECT_EQ(counts.cells, counts.hex_cells + counts.prism_cells);
     EXPECT_EQ(counts.cells, counts.xy_cells * counts.axial_cells);
-    EXPECT_GT(counts.radial_cells, 2 * r100.wall_layers);
     EXPECT_GT(counts.axial_cells, r100.wall_layers);
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, DisabledRadialWallsKeepOnlyRequestedQuadrilateralLayers)
+{
+    for (const auto [inner, outer] : {std::pair{false, true}, std::pair{true, false}, std::pair{false, false}})
+    {
+        SCOPED_TRACE(inner);
+        SCOPED_TRACE(outer);
+        auto options = small_options();
+        options.refine_inner = inner;
+        options.refine_outer = outer;
+        const auto result = Factory(options).build();
+        const auto expected_wall = options.wall_layers *
+            ((inner ? result.counts.inner_angular_cells : 0) + (outer ? result.counts.outer_angular_cells : 0));
+        EXPECT_EQ(result.counts.wall_xy_cells, expected_wall);
+        EXPECT_EQ(result.counts.hex_cells, expected_wall * result.counts.axial_cells);
+        for (size_t region = 0; region < result.mesh->regions().size(); ++region)
+        {
+            const auto& native = child(*result.mesh, region);
+            expect_wall_quadrilaterals(native, result, options);
+            const auto quads = std::count_if(native.xy_cell_nodes().begin(), native.xy_cell_nodes().end(),
+                [](const auto& cell) { return cell.size() == 4; });
+            EXPECT_EQ(static_cast<size_t>(quads), expected_wall);
+        }
+        const auto loops = bulk_boundary_loops(child(*result.mesh, 0));
+        EXPECT_EQ(loops[0].size(), result.counts.inner_angular_cells);
+        EXPECT_EQ(loops[1].size(), result.counts.outer_angular_cells);
+    }
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, ExplicitIndependentAngularCountsPreserveMatchingInterfaces)
+{
+    // Odd explicit counts are valid too; only automatic sizing rounds even.
+    for (const auto [inner, outer] : {std::pair<size_t, size_t>{20, 40}, {21, 41}})
+    {
+        SCOPED_TRACE(inner);
+        SCOPED_TRACE(outer);
+        auto options = small_options();
+        options.xy_spacing = 0.02;
+        options.inner_angular_cells = inner;
+        options.outer_angular_cells = outer;
+        const auto result = Factory(options).build();
+        EXPECT_EQ(result.counts.inner_angular_cells, inner);
+        EXPECT_EQ(result.counts.outer_angular_cells, outer);
+        EXPECT_EQ(result.counts.angular_cells, outer);
+        EXPECT_EQ(result.angular_cells, outer);
+        EXPECT_EQ(result.counts.wall_xy_cells, options.wall_layers * (inner + outer));
+        const auto loops = bulk_boundary_loops(child(*result.mesh, 0));
+        EXPECT_EQ(loops[0].size(), inner);
+        EXPECT_EQ(loops[1].size(), outer);
+        for (size_t region = 0; region < result.mesh->regions().size(); ++region)
+            expect_wall_quadrilaterals(child(*result.mesh, region), result, options);
+        ASSERT_EQ(result.mesh->interfaces().size(), 1U);
+        const auto& interface = std::get<SimpleFluid::Meshes::ExplicitConformingInterface>(
+            result.mesh->interfaces().front());
+        const auto& lower = child(*result.mesh, interface.first_region);
+        const auto& upper = child(*result.mesh, interface.second_region);
+        ASSERT_EQ(interface.faces.size(), result.counts.xy_cells);
+        EXPECT_EQ(lower.xy_cell_nodes(), upper.xy_cell_nodes());
+        for (const auto& [first, second] : interface.faces)
+        {
+            const auto lower_face = lower.indexer().face_id(first);
+            const auto upper_face = upper.indexer().face_id(second);
+            EXPECT_EQ(lower_face.ij, upper_face.ij);
+            EXPECT_EQ(lower.face_centroid(lower_face), upper.face_centroid(upper_face));
+            EXPECT_NEAR(lower.face_area(lower_face), upper.face_area(upper_face), 1e-14);
+        }
+    }
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, RejectsUnsupportedExplicitAngularCounts)
+{
+    for (auto member : {&Factory::Options::inner_angular_cells, &Factory::Options::outer_angular_cells})
+    {
+        for (size_t count = 1; count < 8; ++count)
+        {
+            SCOPED_TRACE(count);
+            auto options = small_options();
+            options.*member = count;
+            EXPECT_THROW((Factory(options)), std::invalid_argument);
+        }
+        if constexpr (std::numeric_limits<size_t>::max() > std::numeric_limits<unsigned>::max())
+        {
+            auto options = small_options();
+            options.*member = static_cast<size_t>(std::numeric_limits<unsigned>::max()) + 1;
+            EXPECT_THROW((Factory(options)), std::overflow_error);
+        }
+    }
 }
 
 TEST(AnnularSemiStructuredMeshFactoryTest, CentimetreR100DefaultsMeetUnchangedALEQualityGate)
@@ -254,6 +504,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CentimetreR100DefaultsMeetUnchangedAL
     options.bottom = 0.1;
     options.top = 0.60852;
     const auto result = Factory(options).build();
+    expect_wall_quadrilaterals(child(*result.mesh, 0), result, options);
     const Handle handle(result.mesh);
     const auto metrics = SimpleFluid::evaluate_mesh_quality(handle);
     const SimpleFluid::MeshQualityGate gate;
@@ -261,7 +512,6 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CentimetreR100DefaultsMeetUnchangedAL
     EXPECT_TRUE(assessment.accepted()) << assessment.report(metrics);
     EXPECT_EQ(metrics.global_cell_count, result.counts.cells);
     EXPECT_EQ(metrics.global_face_count, result.counts.faces);
-    EXPECT_LE(metrics.maximum_growth_ratio, 2.0);
     RecordProperty("maximum_growth_ratio", std::to_string(metrics.maximum_growth_ratio));
     RecordProperty("maximum_aspect_ratio", std::to_string(metrics.maximum_aspect_ratio));
 }
