@@ -22,6 +22,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/RegionProviders.cc
     mesh/ConservativeInterface.cc
     mesh/ExtrudedRegionProviders.cc
+    mesh/SweptRZRegionProviders.cc
     mesh/MultiRegionMesh.cc
 )
 
@@ -45,7 +46,8 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     explicit_instantiation/SolidSubdomain.cc
     explicit_instantiation/OrthogonalLocalGlobalIndexer.cc
     explicit_instantiation/PartitionedMeshBase.cc
-    mesh/SemiStructuredXY_Z.cc)
+    mesh/SemiStructuredXY_Z.cc
+    mesh/SweptRZRegionProviders.cc)
 simplefluid_absolute_sources(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES)
 set(SIMPLEFLUID_SHIRI_PROFILED_MESH_SOURCES ${SIMPLEFLUID_MESH_SOURCES})
 list(REMOVE_ITEM SIMPLEFLUID_SHIRI_PROFILED_MESH_SOURCES

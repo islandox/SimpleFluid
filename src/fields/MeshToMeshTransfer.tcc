@@ -137,9 +137,11 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         || (source_kind == GeometryKind::Cartesian && target_kind == GeometryKind::Cartesian)
         || (source_kind == GeometryKind::Cylindrical && target_kind == GeometryKind::Cylindrical)
         || (source_kind == GeometryKind::Cylindrical && target_kind == GeometryKind::PolygonPrism)
-        || (source_kind == GeometryKind::PolygonPrism && target_kind == GeometryKind::Cylindrical),
+        || (source_kind == GeometryKind::PolygonPrism && target_kind == GeometryKind::Cylindrical)
+        || (source_kind == GeometryKind::Cylindrical && target_kind == GeometryKind::Composite)
+        || (source_kind == GeometryKind::Composite && target_kind == GeometryKind::Cylindrical),
         "Conservative transfer requires two Cartesian meshes, two cylindrical meshes, "
-        "or one cylindrical mesh and one straight convex XY polygon extrusion.");
+        "or one cylindrical mesh and supported convex XY/Z or angular RZ polygon cells.");
     // Both checks are collective and must execute even if the first fails.
     const bool source_unique = source_map->isOneToOne();
     const bool target_unique = target_map->isOneToOne();
@@ -165,7 +167,7 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
     for (const auto& g : source_geometry) source_coordinates += serialized_size(g);
     valid = valid && source_coordinates <= static_cast<size_t>(std::numeric_limits<int>::max());
     require_all(*comm, valid, "Mesh transfer requires finite positive native volumes and supported "
-        "geometry; polygon cells must be convex straight XY extrusions within the geometry gather limit.");
+        "geometry; polygon cells must be supported convex XY/Z or angular RZ extrusions within the geometry gather limit.");
 
     std::vector<GO> donor_ids;
     std::vector<Geometry> donors;

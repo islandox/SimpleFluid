@@ -1,6 +1,8 @@
 #pragma once
 
 #include "fields/details/MeshTransferPolygon.hh"
+#include "fields/details/RZAngularOverlap.hh"
+#include "geometry/mesh/SweptRZRegionProviders.hh"
 
 #include <algorithm>
 #include <array>
@@ -17,7 +19,7 @@ namespace SimpleFluid::mesh_transfer_detail
 // Cartesian centroid, native cell volume, then lower/upper bounds for either
 // x,y,z or r,theta,z. Theta lower bounds are reduced modulo 2 pi; upper bounds
 // may cross that seam. All records follow the owned field-map order.
-enum class GeometryKind { Interpolation, Cartesian, Cylindrical, PolygonPrism };
+enum class GeometryKind { Interpolation, Cartesian, Cylindrical, PolygonPrism, RZAngular, Composite };
 
 struct Geometry
 {
@@ -25,6 +27,8 @@ struct Geometry
     GeometryKind kind = GeometryKind::Interpolation;
     // CCW physical XY vertices. Polygon records use entries 4/5 for enclosing
     // radii, 6 for polygon area, and 8/9 for the actual axial bounds.
+    // RZAngular instead stores CCW (apothem,physical Z), enclosing radii in
+    // 4/5, angular bounds in 6/7, and enclosing axial bounds in 8/9.
     std::vector<PolygonPoint> polygon;
     double& operator[](size_t i) { return values[i]; }
     double operator[](size_t i) const { return values[i]; }
@@ -41,9 +45,10 @@ GeometryKind geometry_kind(const Mesh& mesh)
         return GeometryKind::Cartesian;
     if (std::holds_alternative<typename Mesh::CylindricalPtr>(mesh.variant()))
         return GeometryKind::Cylindrical;
-    if (std::holds_alternative<typename Mesh::SemiStructuredPtr>(mesh.variant())
-        || std::holds_alternative<typename Mesh::MultiRegionPtr>(mesh.variant()))
+    if (std::holds_alternative<typename Mesh::SemiStructuredPtr>(mesh.variant()))
         return GeometryKind::PolygonPrism;
+    if (std::holds_alternative<typename Mesh::MultiRegionPtr>(mesh.variant()))
+        return GeometryKind::Composite;
     return GeometryKind::Interpolation;
 }
 
@@ -73,10 +78,12 @@ std::vector<Geometry> geometry(const Mesh& mesh, bool conservative, bool& valid)
     if (conservative && composite)
     {
         // A cell reported as a hexahedron may still have curved cylindrical
-        // faces. Only these providers guarantee straight axial extrusion.
+        // faces. Each allowed provider supplies one explicitly supported
+        // geometry contract; cell type alone is not sufficient recognition.
         for (const auto& region : (**composite).regions())
             valid = valid && (std::holds_alternative<Meshes::NativeIsoRegion<Meshes::SemiStructuredXY_Z>>(region)
-                || std::holds_alternative<Meshes::ExtrudedRegion>(region));
+                || std::holds_alternative<Meshes::ExtrudedRegion>(region)
+                || std::holds_alternative<Meshes::SweptRZRegion>(region));
         if (!valid) return {};
     }
 
@@ -160,18 +167,62 @@ std::vector<Geometry> geometry(const Mesh& mesh, bool conservative, bool& valid)
                 const auto nodes = native.cell_nodes(id);
                 if (nodes.size() < 6 || nodes.size() % 2 != 0) { valid = false; continue; }
                 const auto count = nodes.size() / 2;
-                g[8] = native.node_coordinates(nodes[0]).z;
-                g[9] = native.node_coordinates(nodes[count]).z;
-                g.polygon.reserve(count);
-                for (size_t i = 0; i < count; ++i)
+                const auto [region_id, region_cell] = native.native_cell(id);
+                if (const auto* swept = std::get_if<Meshes::SweptRZRegion>(&native.regions()[region_id]))
                 {
-                    // Canonical queries include the current composite affine
-                    // transform; region coordinates alone remain reference Z.
-                    const auto bottom = native.node_coordinates(nodes[i]);
-                    const auto top = native.node_coordinates(nodes[count + i]);
-                    valid = valid && bottom.z == g[8] && top.z == g[9]
-                        && bottom.x == top.x && bottom.y == top.y;
-                    g.polygon.push_back({bottom.x, bottom.y});
+                    g.kind = GeometryKind::RZAngular;
+                    const auto cell = swept->topology().indexer().cell_id(region_cell);
+                    const auto base_nodes = swept->topology().base_cell_nodes(cell.ij);
+                    const auto& angles = swept->geometry().theta_edges();
+                    const auto width = angles[cell.k + 1] - angles[cell.k];
+                    valid = valid && base_nodes.size() == count && width > 0 && width < std::numbers::pi_v<double>;
+                    if (!valid) continue;
+                    const auto cosine = std::cos(width / 2);
+                    g[6] = normalized_angle(angles[cell.k]);
+                    g[7] = g[6] + width;
+                    g[8] = std::numeric_limits<double>::infinity();
+                    g[9] = -g[8];
+                    g[4] = std::numeric_limits<double>::infinity();
+                    g[5] = 0;
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        const auto first = native.node_coordinates(nodes[i]);
+                        const auto second = native.node_coordinates(nodes[count + i]);
+                        valid = valid && first.z == second.z;
+                        const auto radius = swept->geometry().rz_nodes()[base_nodes[i]].x;
+                        const auto apothem = radius * cosine;
+                        g.polygon.push_back({apothem, first.z});
+                        g[4] = std::min(g[4], apothem);
+                        g[5] = std::max(g[5], radius);
+                        g[8] = std::min(g[8], first.z);
+                        g[9] = std::max(g[9], first.z);
+                    }
+                    // Swept native templates are clockwise in radius/Z;
+                    // overlap moment integration uses CCW apothem/Z loops.
+                    std::reverse(g.polygon.begin(), g.polygon.end());
+                    valid = valid && convex_polygon(g.polygon) && g[9] > g[8] && g[4] > 0;
+                    if (!valid) continue;
+                    const auto volume = rz_angular_volume(g.polygon, g[6], g[7]);
+                    valid = valid && std::abs(volume - g[3]) <= 1e-10L * g[3];
+                    g[4] = std::max(0.0, std::nextafter(g[4], -std::numeric_limits<double>::infinity()));
+                    g[5] = std::nextafter(g[5], std::numeric_limits<double>::infinity());
+                }
+                else
+                {
+                    g.kind = GeometryKind::PolygonPrism;
+                    g[8] = native.node_coordinates(nodes[0]).z;
+                    g[9] = native.node_coordinates(nodes[count]).z;
+                    g.polygon.reserve(count);
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        // Canonical queries include the current composite affine
+                        // transform; region coordinates alone remain reference Z.
+                        const auto bottom = native.node_coordinates(nodes[i]);
+                        const auto top = native.node_coordinates(nodes[count + i]);
+                        valid = valid && bottom.z == g[8] && top.z == g[9]
+                            && bottom.x == top.x && bottom.y == top.y;
+                        g.polygon.push_back({bottom.x, bottom.y});
+                    }
                 }
             }
             if (g.kind == GeometryKind::PolygonPrism)
@@ -238,6 +289,15 @@ inline double intersection(const Geometry& a, const Geometry& b)
     const double zlo = std::max(a[8], b[8]);
     const double zhi = std::min(a[9], b[9]);
     if (rhi <= rlo || zhi <= zlo) return 0;
+    if (a.kind == GeometryKind::RZAngular || b.kind == GeometryKind::RZAngular)
+    {
+        const auto& swept = a.kind == GeometryKind::RZAngular ? a : b;
+        const auto& cylinder = a.kind == GeometryKind::Cylindrical ? a : b;
+        if (cylinder.kind != GeometryKind::Cylindrical)
+            throw std::invalid_argument("RZ angular conservative overlap requires a cylindrical partner.");
+        return rz_angular_sector_volume(swept.polygon, swept[6], swept[7],
+            cylinder[4], cylinder[5], cylinder[6], cylinder[7], zlo, zhi);
+    }
     if (a.kind == GeometryKind::PolygonPrism || b.kind == GeometryKind::PolygonPrism)
     {
         const auto& polygon = a.kind == GeometryKind::PolygonPrism ? a : b;
