@@ -59,7 +59,8 @@ quantitative bubbly-flow validation remain open.
 | Fixed-grid planar volume budget and weak Boussinesq integration | 🚧 |
 | Structured planar geometry-motion/GCL substrate | ✅ |
 | Constrained solver-integrated planar ALE and generalized continuity | 🚧 |
-| Conservative pool occupancy and cross-mesh mapping | ⬜ |
+| Reusable scalar/vector/tensor cell transfer, including conservative supported overlaps | ✅ |
+| Conservative phase occupancy and coupled inventory mapping | ⬜ |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
 | In-memory TH/neutronics feedback and coupling scaffold | 🚧 |
 
@@ -154,10 +155,17 @@ Segregated momentum, temperature, turbulence-scalar, and pressure equations
 use RHS-norm-scaled convergence. Momentum, temperature, and turbulence
 scalars retain the preceding accepted field as the next initial guess.
 `LinearSolverOptions` selects `gmres`, `bicgstab`, or `cg` and the `none`,
-`jacobi`, `ilu0`, `ilut`, or `MueLu` preconditioner. CG must only be selected
-when both the matrix and preconditioner preserve a symmetric positive-definite
-system; ILU0 and ILUT are not generally CG-compatible. The general transport
-operators and the row-gauge-fixed pressure operator can be nonsymmetric.
+`jacobi`, `ilu0`, `ilut`, `dic`, `gaussSeidel`, `symmetricGaussSeidel`, or
+`MueLu` preconditioner. CG requires a symmetric positive-definite matrix and
+compatible preconditioner; ILU0, ILUT, and forward Gauss–Seidel are rejected
+with CG. DIC requires a symmetric matrix and positive incomplete pivots.
+The general transport operators and the row-gauge-fixed pressure operator can
+be nonsymmetric.
+
+Acceptance uses the recomputed true residual against the requested tolerance.
+Near-roundoff GMRES residual gaps can trigger compensated CRS residual checks
+and bounded defect correction within the original iteration budget. These
+checks do not relax the linear tolerance or physical conservation gates.
 
 `FluidSolver::set_linear_solver_options()` changes subsequent momentum and
 transported-scalar solves. Pressure projection has an independent policy
@@ -183,6 +191,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
     `MeshPartitioner`/`PartitionedMesh` adaptation
   - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms,
     currently serial-only
+  - **Compact multi-region** — conforming/coarse-fine composition, including
+    distributed extruded and swept R–Z providers with common affine Z motion
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
     other volume topologies are rejected during assembly
 - Owned + ghost cell decomposition for distributed-memory assembly
@@ -197,6 +207,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - Programmatic mesh generation for **box**, **cylinder**, and **sphere** domains
 - External `HEX_8` and `WEDGE_6` mesh loading through Trilinos/STK
 - Configuration-driven via the built-in typed key-value `Database`
+- [`AnnularSemiStructuredMeshFactory`](docs/annular_meshes.md) — programmatic
+  graded annular meshes with independent inner/outer wall rings, Delaunay
+  triangular-prism bulk, hex wall layers, and optional swept bottom corners;
+  returns a serial/MPI `MultiRegionMesh` with native polygonal volumes
 
 ### Fields
 
@@ -207,6 +221,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - Mesh-aware owned/overlap maps, component and bulk host views, owned-face
   indexing, and ghosted data exchange
 - `BoundaryFaceField` compatibility storage for sideset-indexed boundary data
+- [`MeshToMeshTransfer`](docs/mesh_to_mesh_transfer.md) — reusable scalar,
+  vector, and tensor cell transfer with centroid interpolation or conservative
+  supported overlaps, explicit intensive/extensive quantities, partial-coverage
+  reports, MPI donor exchange, and geometry-epoch validation
 
 ### Solvers & Equations
 
@@ -441,6 +459,12 @@ properties, saturation data, and a liquid material-field adapter through
 `SimpleFluid::IF97`. CMake fetches a pinned CoolProp IF97 release if no local
 header is supplied. See [IF97 water properties](docs/modeling/if97_water.md)
 for offline configuration, usage, and solver integration boundaries.
+
+The optional NOX/Thyra velocity-pressure solve is enabled with
+`-DSIMPLEFLUID_ENABLE_NOX=ON` (default `OFF`) and requires the corresponding
+Trilinos packages and adapters. See the
+[nonlinear solver guide](docs/architecture/coupled_nonlinear_solver.md) for
+configuration and supported mesh/physics combinations.
 
 ### Run Tests
 
@@ -806,13 +830,27 @@ submerged steam; the inventory is never silently discarded.
 
 ## Compact region meshes
 
-`MultiRegionMesh` composes Cartesian, cylindrical, straight-extruded and native
-unstructured regions through the existing `MeshHandle`/FVM path. Compact implicit
-regions support MPI ownership, axial affine ALE, conforming/coarse-fine seams,
-and translated periodic patches. Explicit unstructured constituents remain
+`MultiRegionMesh` composes Cartesian, cylindrical, straight-extruded, swept R–Z,
+and native unstructured regions through the existing `MeshHandle`/FVM path.
+Compact implicit regions support MPI ownership, axial affine ALE,
+conforming/coarse-fine seams, and translated periodic patches. Explicit unstructured constituents remain
 serial-only in composites. Implicit traversal uses allocation-free ranges;
 regular interfaces retain descriptor-sized correspondence. See [region mesh contracts,
 example and storage accounting](docs/region_meshes.md).
+
+## Documentation
+
+| Topic | Guide |
+| --- | --- |
+| Development, builds, tests, and ABI boundaries | [Maintainer guide](MAINTENANCE.md) and [CMake guide](cmake/README.md) |
+| Implementation status and remaining acceptance gates | [Roadmap](TODO.md) |
+| Annular wall layers and swept corners | [Annular mesh guide](docs/annular_meshes.md) |
+| Region composition, MPI, and ALE | [Region meshes](docs/region_meshes.md) |
+| Conservative cell-field projection | [Mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md) |
+| Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
+| SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
+| Radiolysis, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/radiolytic_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
+| External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |
 
 ## License
 

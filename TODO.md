@@ -1,6 +1,9 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Status date:** September 3, 2026
+**Documentation review date:** September 22, 2026
+
+This refresh reconciles the current source, public APIs, and checked-in test
+coverage. It does not represent a new runtime qualification or full-suite run.
 
 **Near-term goal:** finish validation and integration of the implemented RANS,
 radiolytic-gas, boiling, void-fraction, and thermal-feedback stack; close the
@@ -29,7 +32,9 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
    RANS-plus-bubble user example.
 6. Physically validate and harden the constrained Phase 20.1 planar-ALE path,
    then add conservative steam transport/escape, composition-resolved liquid
-   transport, and cross-mesh mapping before widening its support matrix.
+   transport, and phase-aware conservative coupling before widening its support
+   matrix. Reusable cell-field overlap transfer already exists; geometric
+   occupancy and coupled inventory acceptance remain open.
 7. Close the remaining foundational validation gaps: Ghia profile checks and
    bundled OpenFOAM centerline tolerances.
 
@@ -48,8 +53,8 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 | Phase 17, focused tests | Complete for supported scope | Reopen when model scope expands |
 | Phase 18, documentation | Partial | Complete key/default/unit/validity reference |
 | Phase 19, precursors | Implemented and focused-tested | No open items for the supported transport scope |
-| Phase 20, TH/neutronics map | In-memory scaffold implemented and focused-tested | Production external-neutronics protocol and validation |
-| Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, and conservative cross-mesh mapping remain open |
+| Phase 20, TH/neutronics map | In-memory scaffold and reusable conservative cell transfer implemented | Production external-neutronics protocol and validation |
+| Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 
 ### Checklist conventions
@@ -174,6 +179,11 @@ verification items below mean the foundation as a whole is not yet complete.
 
 ### Compact region composition
 
+The current annular factory and swept-provider APIs are documented in
+[annular meshes](docs/annular_meshes.md). Their checked-in regressions cover
+geometry, transfer, and motion contracts; they do not establish physical
+pool-flow validation.
+
 - [x] Separate topology and geometry contracts with shared Cartesian topology
       and independent coordinate providers.
 - [x] Add static conforming serial composition through `MeshHandle`, canonical
@@ -208,6 +218,12 @@ verification items below mean the foundation as a whole is not yet complete.
 - [x] Resolved-face and transformed region-native scalar diffusion assembly,
       with a generic reference and motion/periodic/coarse-fine parity checks.
 - [x] Remove per-cell exact-reserve allocation from explicit compatibility CSR.
+- [x] Build graded polygonal annuli with independently sized radial wall rings,
+      fixed-boundary Delaunay bulk triangles, hex wall layers, and conforming
+      bottom/top prism stacks.
+- [x] Coarsen eligible bottom wall intersections with compact swept R–Z
+      mitered regions, preserving native volumes, canonical interfaces,
+      distributed ownership, and common affine Z motion.
 - [ ] Distributed explicit region packets and region-aware load balancing.
 - [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
       wider polygonal volume/output types and rotated periodic field transforms.
@@ -1316,7 +1332,8 @@ deterministic mapped snapshots, and a callback-driven placeholder outer loop
 with thermal-hydraulic subcycles and power exchange. Reusable cell-field
 transfer adds centroid interpolation on supported mesh families and conservative
 cell-average/inventory projection between Cartesian or coaxial annular grids,
-including explicit partial coverage and conservation reports; see
+and between a native cylindrical mesh and supported XY/Z or swept R–Z
+polygonal regions, including explicit partial coverage and conservation reports; see
 [mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md). This is not a production
 external-neutronics interface or a neutronics solver.
 
@@ -1331,6 +1348,9 @@ external-neutronics interface or a neutronics solver.
       nearest-cell and inverse-distance interpolation, conservative Cartesian
       and cylindrical overlap projection, explicit intensive/extensive quantities,
       coverage/inventory diagnostics, MPI donor exchange, and geometry/map invalidation.
+- [x] Extend cylindrical conservative transfer to convex XY/Z extrusions and
+      mixed composites with swept R–Z corners, using analytic intersections
+      and native volumes with explicit uncovered-inventory reporting.
 - [x] Add import path for externally supplied fission power density.
 - [x] Add deterministic in-memory snapshot export for mapped
       thermal-hydraulic feedback.
@@ -1516,6 +1536,11 @@ void-reduced mixture density does not own sensible-energy storage.
       satisfy this gate.
 
 #### Milestone C — feedback and conservative mapping
+
+The reusable [cell-field transfer](docs/mesh_to_mesh_transfer.md) supplies
+supported geometric overlaps and intensive/extensive inventory reports.
+The remaining tasks below concern phase occupancy, composition, and integrated
+physical closure; generic cell transfer alone does not complete them.
 
 - [ ] Replace or augment the diagnostic cell-centre occupancy with geometric
       cut fractions or a demonstrably conservative mapper; do not call the

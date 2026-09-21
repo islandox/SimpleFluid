@@ -12,7 +12,7 @@ coupling schedule and the physical meaning of the transferred quantities.
 | --- | --- | --- | --- |
 | `NearestCell` | Copy the value at the closest source-cell centroid. | Every `MeshHandle` family. | Preserves constants and donor bounds; discontinuous and generally not conservative. |
 | `InverseDistance` | Average the nearest source-cell centroids with normalized inverse-square distance weights. | Every `MeshHandle` family. | Preserves constants and donor bounds; generally neither linear-exact nor conservative. |
-| `ConservativeCellAverage` | Build exact cell-overlap volumes for conservative projection. | Two native orthogonal Cartesian handles; two coaxial native cylindrical handles; or a cylindrical handle paired with a straight convex XY polygon extrusion. Independent partitions and reordered cells are supported. | Preserves fully covered constants and inventories; partial transfers explicitly report uncovered inventory. |
+| `ConservativeCellAverage` | Build exact cell-overlap volumes for conservative projection. | Two native orthogonal Cartesian handles; two coaxial native cylindrical handles; or a native cylindrical handle paired with supported convex XY/Z extrusions or swept R–Z regions. Independent partitions and supported reordered cells are accepted. | Preserves fully covered constants and inventories; partial transfers explicitly report uncovered inventory. |
 
 Nearest and inverse-distance methods use Euclidean distances between physical
 cell centroids. A centroid match returns its donor value directly; equal-distance
@@ -52,22 +52,25 @@ rejects partial mode. Significant excess coverage is rejected in either mode.
 No overlap weights are renormalized to conceal uncovered volume.
 
 The map uses piecewise-constant source averages and does not reconstruct a
-linear profile inside a cell. Cartesian/cylindrical, Cartesian/polygon and
-polygon/polygon intersections, general unstructured intersections, and arbitrary
-multi-region providers are not implemented. Interpolation still supports all
-handle families.
+linear profile inside a cell. Cartesian/cylindrical, Cartesian/polygon,
+polygon/polygon, swept/swept, and composite/composite intersections, general
+unstructured intersections, and arbitrary multi-region providers are not
+implemented. A supported composite conservative endpoint must be paired with a
+native cylindrical handle. Interpolation still supports all handle families.
 
 ### Cylindrical cells and polygonal extrusions
 
 A cylindrical endpoint may be paired in either direction with a direct
 `SemiStructuredXY_Z` handle or a `MultiRegionMesh` containing only
-`NativeIsoRegion<SemiStructuredXY_Z>` and/or `ExtrudedRegion` providers. Direct
-semi-structured handles retain their serial-only contract; composite extrusions
-support distributed maps. Each XY polygon must be convex and counter-clockwise.
+`NativeIsoRegion<SemiStructuredXY_Z>`, `ExtrudedRegion`, and/or `SweptRZRegion`
+providers. Direct semi-structured handles retain their serial-only contract;
+composite extrusions support distributed maps. Each XY polygon must be convex
+and counter-clockwise.
 Curved cylindrical providers inside a composite and general unstructured
 providers are rejected, even if they report a hexahedron or prism cell type.
 
-Overlap is the polygon/annular-sector intersection area times the axial overlap.
+For XY/Z cells, overlap is the polygon/annular-sector intersection area times
+the axial overlap. Swept R–Z cells use the separate construction below.
 Sector spans are split into wedges no wider than pi, clipped by straight radial
 half-planes, and integrated against the circular arcs analytically in extended
 precision. Curved boundaries are not replaced by polygons or bounding boxes.
@@ -81,6 +84,32 @@ Use `AllowPartial` and inspect the uncovered inventories, or supply genuinely
 matching domains. Constant values are preserved only on fully covered target
 cells; a partly covered target averages the mapped inventory over its whole
 native volume. A domain mismatch is not corrected by normalizing weights.
+
+### Cylindrical cells and swept R–Z regions
+
+`SweptRZRegion` uses a convex radius-height template swept between angular
+planes, with straight planar faces. It supports sloping corner transitions
+that cannot be represented as constant XY polygons extruded along Z.
+`MultiRegionMesh` may mix these cells with the supported XY/Z providers in one
+conservative transfer to or from a native cylindrical handle. This includes
+the corner-coarsened output of
+[`AnnularSemiStructuredMeshFactory`](annular_meshes.md).
+
+Overlap uses the actual planar cell, represented internally by a convex
+counter-clockwise polygon in apothem/physical-Z coordinates. Native swept
+templates instead use clockwise radius-height loops; the transfer performs
+the orientation and radius-to-apothem conversion. Each angular interval must
+be strictly between zero and pi. Axial clipping and analytic angular/circular
+integration handle sloping faces and wrapped sectors without angular
+quadrature, circle polygonization, or volume rescaling.
+
+Current composite affine Z coordinates are included. A transfer becomes stale
+after motion or rollback changes the geometry epoch and must be rebuilt.
+The cylindrical and polygonal domains generally differ, so `AllowPartial`
+plus `project()` and its inventory report remains the appropriate contract.
+Focused tests in `testMeshToMeshTransferRZ.cc` cover signed multicomponent
+transfer in both directions, mixed providers, affine motion, and stale-map
+rejection; CMake also registers `MeshToMeshTransferRZ_2procs`.
 
 ### Cylindrical geometry and angular measure
 
@@ -321,9 +350,9 @@ This does not establish empty-rank support for unrelated solver paths.
 Construction temporarily gathers owned source-cell geometry on every rank.
 Geometry memory remains proportional to source geometry (including polygon
 vertices). Conservative construction builds a bounding-volume hierarchy in XYZ
-for Cartesian boxes and RZ for cylindrical/polygonal cells, then evaluates only
-candidate overlaps. Donors are restored to their original order before overlap
-accumulation. Interpolation still searches all source centroids for each local
+for Cartesian boxes and RZ for cylindrical, XY-polygon, and swept R–Z cells,
+then evaluates only candidate overlaps. Donors are restored to their original
+order before overlap accumulation. Interpolation still searches all source centroids for each local
 target. The reusable result is a sparse Tpetra transfer matrix; repeated
 application imports required donor values rather than gathering the whole
 source field. Very large production meshes may still require distributed

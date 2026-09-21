@@ -37,6 +37,15 @@ Focused native regressions cover unstructured geometry, operators,
 faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
 partitioned-unstructured coverage.
 
+`AnnularSemiStructuredMeshFactory` returns a `MultiRegionMesh` that combines
+immutable native XY/Z and optional `SweptRZRegion` children. Its distributed
+ownership comes from the composite handle. Build collectively on the default
+Tpetra communicator before binding fields. Keep independently sized wall
+rings, fixed Delaunay boundary segments, and one-to-one corner interfaces
+intact; do not normalize polygonal volumes to an analytic annulus. See the
+[annular mesh guide](docs/annular_meshes.md) for options, counts, quality limits,
+and focused regression commands.
+
 ### Compact region composition
 
 `MultiRegionMesh` is a compact serial/MPI backend of `MeshHandle`. Preserve its
@@ -64,6 +73,14 @@ Serial IDs are arithmetic and distributed lookup reuses required Tpetra maps;
 `indexer()` remains an opt-in compatibility allocation. Arbitrary native
 reordering is explicit and retains its permutation; composite reordering is
 currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
+
+Conservative `MeshToMeshTransfer` supports a native cylindrical endpoint paired
+with a composite containing native XY/Z, `ExtrudedRegion`, and `SweptRZRegion`
+providers. A transfer captures both geometry epochs and maps; rebuild it after
+motion or rollback. Preserve explicit partial-coverage accounting and the
+intensive/extensive quantity distinction. This spatial utility does not own
+phase occupancy or the coupling schedule. See
+[transfer contracts and limitations](docs/mesh_to_mesh_transfer.md).
 
 ### Liquid-mass inventory transactions
 
@@ -128,6 +145,14 @@ provide an explicit refresh/invalidation path. Raw mutation through
 `MeshHandle::visit_mutable()` does not publish an epoch and is unsupported
 after field/cache construction.
 
+`TransportGeometryCache::refresh()` retains a geometry snapshot when its mesh
+identity and epoch still match. The overload taking `shared_geometry_type`
+allows equations on that exact mesh and epoch to share immutable geometry;
+foreign or stale snapshots are rejected. Keep the no-argument `refresh()` and
+equation/model `refresh_geometry()` overloads as real exported entry points.
+Replacing them with a defaulted argument changes the mangled symbols and
+breaks existing consumers; the export tests check both signatures.
+
 Treat one ALE step as an accepted-state transaction:
 
 1. Snapshot every mutable field, model ledger, diagnostic/history cursor, and
@@ -186,6 +211,30 @@ geometry-cache refresh, complete snapshot/restore coverage, one contribution
 to the shared `VolumeContinuityTarget` when it changes material volume, and
 serial/MPI conservation plus forced-rejection tests. A fixed-volume operator
 followed by an inventory or level correction is not an ALE implementation.
+
+### Linear-solver acceptance and reuse
+
+`BelosLinearSolver` accepts only a finite recomputed true residual meeting the
+original tolerance. Near-roundoff GMRES gaps can use compensated stored-CRS
+residual evaluation and up to four zero-start defect corrections, including
+eligible Belos loss-of-accuracy returns. Corrections share the original total
+iteration budget and RHS scaling. Ordinary unconverged solves, large residual
+gaps, and nonfinite residuals are not retried through that path. The gap ceiling
+selects eligible refinement; it is not an acceptance tolerance. Keep physical
+mass/energy gates independent of this linear-solver policy.
+
+`reuse_preconditioner` requires the same operator object and unchanged numeric
+values. After in-place coefficient changes, call
+`notify_operator_values_changed()` collectively before solving again.
+Compatible Krylov storage can survive that invalidation. MueLu retains its
+parameter/factory configuration for an identical map, but each required numeric
+setup constructs a fresh hierarchy and factors. Configuration reuse does not
+authorize stale numeric state. `solve_from_zero_with_statistics()` explicitly
+zeros the supplied solution and retains the ordinary final-residual contract.
+
+`testBelosLinearSolver` and the registered `BelosAccurateResidual_2procs` case
+cover residual precision, bounded refinement, failure paths, and vector
+restoration after exceptions.
 
 ## Repository map and dependency direction
 
@@ -314,6 +363,7 @@ Useful configuration switches are:
 | `SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT` | `30` | Bound Google Test discovery time in seconds |
 | `SIMPLEFLUID_BUILD_DOCS` | `OFF` | Require Doxygen and enable the `docs` target |
 | `SIMPLEFLUID_ENABLE_IF97` | `OFF` | Build the optional water material library; [usage and limits](docs/modeling/if97_water.md) |
+| `SIMPLEFLUID_ENABLE_NOX` | `OFF` | Enable the optional NOX/Thyra nonlinear flow solver; [dependencies and scope](docs/architecture/coupled_nonlinear_solver.md) |
 
 The project uses one shared precompiled header. Add only stable, frequently
 included third-party or standard-library headers to

@@ -4,7 +4,7 @@
 `MeshHandle`, `FieldStored` and the existing FVM/solver stack. It supports compact
 MPI ownership, controlled composite axial ALE, conforming and nested coarse/fine
 interfaces, cylindrical regions, explicit translated periodic patches, and
-independent Cartesian/extruded geometry. Topology regions, materials and MPI
+independent Cartesian/extruded/swept geometry. Topology regions, materials and MPI
 partitions are separate concepts.
 
 Bulk execution, per-region interface indexing, provider-aware validation and
@@ -28,6 +28,21 @@ XY coordinates and axial edges. It caches base-cell and base-edge metrics once;
 it never expands them through layers. Both geometry types can share one topology
 with other independently located/scaled regions. Composite extrusion cells are
 currently triangles or strictly convex quadrilaterals in the base plane (WEDGE_6/HEX_8).
+
+`SweptRZGeometry` shares `ExtrudedTopology` but interprets its layers as angular
+intervals. It retains a clockwise, strictly convex radius-height triangle or
+quadrilateral template and angular edges, with O(base + angles) storage.
+Positive radii and angular widths in `(0, pi)` are required; straight segments
+between angular planes produce planar WEDGE_6/HEX_8 cells, not curved
+cylindrical metrics. `swept_rz_region()` creates the corresponding
+`SweptRZRegion`. Its nonperiodic angular caps can be joined with a coincident
+explicit self-interface, retaining the usual face-matching checks. Physical Z
+motion belongs to the enclosing composite's affine map.
+
+[`AnnularSemiStructuredMeshFactory`](annular_meshes.md) assembles native XY/Z
+wall/bulk regions and optional swept R–Z bottom corners into a distributed
+composite with matching interfaces. The [transfer guide](mesh_to_mesh_transfer.md)
+describes conservative overlap with a native cylindrical endpoint.
 
 `native_region()` also provides zero-copy adapters for Cartesian, cylindrical,
 `SemiStructuredXY_Z` and `UnstructuredMesh` objects. A native adapter retains the
