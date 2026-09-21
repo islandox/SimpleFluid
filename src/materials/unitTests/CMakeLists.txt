@@ -1,3 +1,17 @@
+add_executable(testMaterialCAPI testMaterialCAPI.c)
+target_link_libraries(testMaterialCAPI PRIVATE SimpleFluid::Materials)
+set_target_properties(testMaterialCAPI PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+add_test(NAME MaterialCAPI_CHeader COMMAND testMaterialCAPI)
+set_tests_properties(MaterialCAPI_CHeader PROPERTIES LABELS "material;abi")
+
+add_executable(testMaterialProvider testMaterialProvider.cc)
+target_link_libraries(testMaterialProvider PRIVATE SimpleFluid::Materials GTest::gtest_main)
+simplefluid_discover_tests(testMaterialProvider PROPERTIES LABELS "material\\;abi")
+
+if(NOT SIMPLEFLUID_ENABLE_IF97)
+    return()
+endif()
+
 add_executable(testIF97Water testIF97Water.cc)
 target_link_libraries(testIF97Water PRIVATE SimpleFluid::IF97 GTest::gtest_main)
 simplefluid_discover_tests(testIF97Water PROPERTIES LABELS "material\\;if97")
