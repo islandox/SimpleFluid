@@ -2,11 +2,14 @@
 #include "geometry/AnnularSemiStructuredMeshFactory.hh"
 #include "geometry/BoundaryLayerMeshFactory.hh"
 #include "geometry/mesh/FrontalDelaunay2D.hh"
+#include "geometry/mesh/MiteredCornerPatch.hh"
+#include "geometry/mesh/SweptRZRegionProviders.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -274,30 +277,186 @@ auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
     count.bottom_axial_cells = layers(o.refine_bottom);
     count.top_axial_cells = layers(o.refine_top);
     count.bulk_axial_cells = count.axial_cells - count.bottom_axial_cells - count.top_axial_cells;
-    count.hex_cells = checked_product(wall_xy, count.axial_cells,
-        std::numeric_limits<size_t>::max(), "radial wall cell count");
-    count.prism_cells = checked_product(count.bulk_xy_cells, count.axial_cells,
-        std::numeric_limits<size_t>::max(), "prism count");
+    // Coarsen only the overlap of fine radial and bottom-normal layers.
+    // Outside this small square the original XY/Z connectivity is retained.
+    size_t corner_layers = 0;
+    ArrReal offsets{0};
+    const real_t cutoff = .5 * std::min(o.xy_spacing, o.z_spacing);
+    if (o.coarsen_bottom_corners && count.bottom_axial_cells && (inner_layers || layers(o.refine_outer)))
+    {
+        real_t width = o.first_layer_height;
+        while (corner_layers < o.wall_layers && width < cutoff)
+        {
+            offsets.push_back(offsets.back() + width);
+            ++corner_layers;
+            width *= o.growth_ratio;
+        }
+    }
+    Meshes::MiteredCornerPatch corner;
+    if (corner_layers >= 2)
+    {
+        corner = Meshes::mitered_corner_patch(offsets, std::min(o.xy_spacing, o.z_spacing));
+        if (corner.cells.size() >= corner_layers * corner_layers) corner_layers = 0;
+    }
+    else corner_layers = 0;
+    count.corner_layers = corner_layers;
+    const auto append_full_slab = [&](std::string name, size_t begin, size_t end)
+    {
+        if (begin == end) return;
+        layout.regions.push_back({std::move(name), false, layout.xy_nodes, layout.xy_cells,
+            layout.boundaries, ArrReal(layout.z_edges.begin() + begin, layout.z_edges.begin() + end + 1)});
+    };
+    if (!corner_layers)
+    {
+        append_full_slab("bottom_layers", 0, count.bottom_axial_cells);
+        append_full_slab("bulk", count.bottom_axial_cells, count.axial_cells - count.top_axial_cells);
+        append_full_slab("top_layers", count.axial_cells - count.top_axial_cells, count.axial_cells);
+        for (size_t upper = 1; upper < layout.regions.size(); ++upper)
+            layout.joins.push_back({upper - 1, upper, "zmax", "zmin"});
+    }
+    else
+    {
+        const auto ni = count.inner_angular_cells, no = count.outer_angular_cells;
+        const auto inner_cut = inner_layers ? corner_layers * ni : 0;
+        const auto outer_cut = layers(o.refine_outer) ? corner_layers * no : 0;
+        const auto outer_end = count.wall_xy_cells;
+        std::array<Arr<Arr<unsigned>>, 3> groups; // central, inner, outer
+        for (size_t cell = 0; cell < layout.xy_cells.size(); ++cell)
+        {
+            const auto group = cell < inner_cut ? 1 :
+                (cell >= outer_end - outer_cut && cell < outer_end ? 2 : 0);
+            groups[group].push_back(layout.xy_cells[cell]);
+        }
+        // Name the complete radial cuts before compacting the selected nodes.
+        using Edge = std::pair<unsigned, unsigned>;
+        std::map<Edge, std::string> edge_names;
+        for (const auto& b : layout.boundaries) edge_names[std::minmax(b.node0, b.node1)] = b.batch_name;
+        for (size_t group = 1; group < groups.size(); ++group)
+        {
+            std::map<Edge, unsigned> incidence;
+            for (const auto& cell : groups[group])
+                for (size_t j = 0; j < cell.size(); ++j)
+                    ++incidence[std::minmax(cell[j], cell[(j + 1) % cell.size()])];
+            for (const auto& [edge, n] : incidence)
+                if (n == 1 && !edge_names.contains(edge))
+                    edge_names[edge] = group == 1 ? "inner_join" : "outer_join";
+        }
+        const auto append_subset = [&](std::string name, size_t group, size_t begin, size_t end)
+        {
+            const auto id = layout.regions.size();
+            Layout::Region region;
+            region.name = std::move(name);
+            region.edges.assign(layout.z_edges.begin() + begin, layout.z_edges.begin() + end + 1);
+            std::map<unsigned, unsigned> node_map;
+            std::map<Edge, unsigned> incidence;
+            for (const auto& cell : groups[group])
+            {
+                auto& local = region.cells.emplace_back();
+                for (size_t j = 0; j < cell.size(); ++j)
+                {
+                    const auto old = cell[j];
+                    auto [where, inserted] = node_map.emplace(old, node_map.size());
+                    if (inserted) region.nodes.push_back(layout.xy_nodes[old]);
+                    local.push_back(where->second);
+                    ++incidence[std::minmax(old, cell[(j + 1) % cell.size()])];
+                }
+            }
+            for (const auto& [edge, n] : incidence)
+                if (n == 1) region.boundaries.push_back({node_map.at(edge.first), node_map.at(edge.second),
+                    edge_names.at(edge)});
+            layout.regions.push_back(std::move(region));
+            return id;
+        };
+        const auto lower = append_subset("central_lower", 0, 0, corner_layers);
+        const auto upper = append_subset("central_upper", 0, corner_layers, count.axial_cells);
+        layout.joins.push_back({lower, upper, "zmax", "zmin"});
+        const auto append_corner = [&](bool inner)
+        {
+            const size_t angular_count = inner ? ni : no;
+            const auto upper_wall = append_subset(inner ? "inner_wall_upper" : "outer_wall_upper",
+                inner ? 1 : 2, corner_layers, count.axial_cells);
+            const std::string join_name = inner ? "inner_join" : "outer_join";
+            layout.joins.push_back({upper_wall, upper, join_name, join_name});
+            Layout::Region region;
+            region.name = inner ? "inner_corner" : "outer_corner";
+            region.swept = true;
+            region.nodes = corner.nodes;
+            region.cells = corner.cells;
+            // Local x points into the fluid. Radius-height loops must be CW:
+            // inner x->+r reverses the CCW template; outer x->-r reverses it itself.
+            if (inner) for (auto& cell : region.cells) std::reverse(cell.begin(), cell.end());
+            const real_t cosine = std::cos(std::numbers::pi_v<real_t> / angular_count);
+            for (auto& point : region.nodes)
+            {
+                point.x = (inner ? o.inner_radius + point.x : outer_apothem - point.x) / cosine;
+                point.y += o.bottom;
+            }
+            for (size_t theta = 0; theta <= angular_count; ++theta)
+                region.edges.push_back(2 * std::numbers::pi_v<real_t> * theta / angular_count);
+            std::map<Edge, unsigned> incidence;
+            for (const auto& cell : corner.cells)
+                for (size_t j = 0; j < cell.size(); ++j)
+                    ++incidence[std::minmax(cell[j], cell[(j + 1) % cell.size()])];
+            for (const auto& [edge, n] : incidence)
+            {
+                if (n != 1) continue;
+                const auto& a = corner.nodes[edge.first];
+                const auto& b = corner.nodes[edge.second];
+                std::string name;
+                if (a.x == 0 && b.x == 0) name = inner ? "rmin" : "rmax";
+                else if (a.y == 0 && b.y == 0) name = "bottom_wall";
+                else if (a.x == offsets.back() && b.x == offsets.back()) name = join_name;
+                else if (a.y == offsets.back() && b.y == offsets.back()) name = "corner_top";
+                else throw std::logic_error("Mitered corner has an unexpected open edge.");
+                region.boundaries.push_back({edge.first, edge.second, std::move(name)});
+            }
+            const auto corner_id = layout.regions.size();
+            layout.regions.push_back(std::move(region));
+            layout.joins.push_back({corner_id, upper_wall, "corner_top", "zmin"});
+            layout.joins.push_back({corner_id, lower, join_name, join_name});
+            layout.joins.push_back({corner_id, corner_id, "theta_min", "theta_max"}); // coincident angular seam
+            checked_add(count.corner_cells, checked_product(corner.cells.size(), angular_count,
+                std::numeric_limits<size_t>::max(), "corner count"), "corner count");
+            checked_add(count.removed_corner_cells, checked_product(
+                corner_layers * corner_layers - corner.cells.size(), angular_count,
+                std::numeric_limits<size_t>::max(), "removed corner count"), "removed corner count");
+        };
+        if (inner_cut) append_corner(true);
+        if (outer_cut) append_corner(false);
+    }
+    // Exact region-qualified storage counts, including duplicate seam nodes.
+    std::vector<std::map<std::string, size_t>> patch_sizes;
+    for (const auto& region : layout.regions)
+    {
+        const auto nz = region.edges.size() - 1;
+        std::set<std::pair<unsigned, unsigned>> unique_edges;
+        for (const auto& cell : region.cells)
+        {
+            checked_add(cell.size() == 4 ? count.hex_cells : count.prism_cells, nz, "cell type count");
+            for (size_t j = 0; j < cell.size(); ++j)
+                unique_edges.insert(std::minmax(cell[j], cell[(j + 1) % cell.size()]));
+        }
+        checked_add(count.nodes, checked_product(region.nodes.size(), nz + 1,
+            std::numeric_limits<size_t>::max(), "region node count"), "node count");
+        checked_add(count.faces, checked_product(region.cells.size(), nz + 1,
+            std::numeric_limits<size_t>::max(), "cap face count"), "face count");
+        checked_add(count.faces, checked_product(unique_edges.size(), nz,
+            std::numeric_limits<size_t>::max(), "side face count"), "face count");
+        auto& sizes = patch_sizes.emplace_back();
+        sizes[region.swept ? "theta_min" : "zmin"] =
+            sizes[region.swept ? "theta_max" : "zmax"] = region.cells.size();
+        for (const auto& b : region.boundaries) checked_add(sizes[b.batch_name], nz, "patch face count");
+    }
+    for (const auto& join : layout.joins)
+    {
+        const auto n = patch_sizes.at(join.first).at(join.first_boundary);
+        if (n != patch_sizes.at(join.second).at(join.second_boundary))
+            throw std::logic_error("Annular region interface sizes do not match.");
+        count.faces -= n;
+    }
+    count.regions = layout.regions.size();
     count.cells = count.hex_cells;
     checked_add(count.cells, count.prism_cells, "cell count");
-    const auto add_slab = [&](size_t xy, size_t edges, size_t nz)
-    {
-        if (!nz) return;
-        ++count.regions;
-        checked_add(count.nodes, checked_product(count.xy_nodes, nz + 1,
-            std::numeric_limits<size_t>::max(), "region node count"), "node count");
-        checked_add(count.faces, checked_product(xy, nz + 1,
-            std::numeric_limits<size_t>::max(), "axial face count"), "face count");
-        checked_add(count.faces, checked_product(edges, nz,
-            std::numeric_limits<size_t>::max(), "side face count"), "face count");
-    };
-    add_slab(count.mixed_xy_cells, mixed_edges, count.bottom_axial_cells);
-    add_slab(count.mixed_xy_cells, mixed_edges, count.bulk_axial_cells);
-    add_slab(count.mixed_xy_cells, mixed_edges, count.top_axial_cells);
-    // Matching seam faces are merged one-to-one. Region-qualified nodes
-    // deliberately remain distinct.
-    count.faces -= checked_product(count.mixed_xy_cells, count.regions - 1,
-        std::numeric_limits<size_t>::max(), "interface face count");
     return layout;
 }
 
@@ -311,50 +470,75 @@ auto AnnularSemiStructuredMeshFactory::build() const -> Result
     Layout layout;
     using Native = Meshes::SemiStructuredXY_Z;
     using Composite = Meshes::MultiRegionMesh;
-    std::vector<SP<Native>> natives;
     std::vector<Composite::Region> regions;
     std::vector<Composite::Interface> interfaces;
-    size_t middle_region = 0;
     std::exception_ptr local_error;
     try
     {
         layout = plan_layout();
-        const auto& nodes = layout.xy_nodes;
-        const auto& mixed_cells = layout.xy_cells;
-        const auto& boundaries = layout.boundaries;
-
-        const auto add_region = [&](const char* name, const Arr<Arr<unsigned>>& cells, size_t begin, size_t end)
+        for (const auto& plan : layout.regions)
         {
-            ArrReal z(layout.z_edges.begin() + begin, layout.z_edges.begin() + end + 1);
-            auto native = std::make_shared<Native>(nodes, cells, z, boundaries);
-            natives.push_back(native);
-            regions.emplace_back(Meshes::native_region(name, std::move(native)));
-        };
-        if (layout.counts.bottom_axial_cells)
-            add_region("bottom_layers", mixed_cells, 0, layout.counts.bottom_axial_cells);
-        middle_region = regions.size();
-        add_region("bulk", mixed_cells, layout.counts.bottom_axial_cells,
-            layout.counts.axial_cells - layout.counts.top_axial_cells);
-        if (layout.counts.top_axial_cells)
-            add_region("top_layers", mixed_cells, layout.counts.axial_cells - layout.counts.top_axial_cells,
-                layout.counts.axial_cells);
-
-        for (size_t upper_region = 1; upper_region < natives.size(); ++upper_region)
-        {
-            const auto& lower = *natives[upper_region - 1];
-            const auto& upper = *natives[upper_region];
-            const auto lower_z = static_cast<unsigned>(lower.z_edges().size() - 1);
-            Meshes::ExplicitConformingInterface interface;
-            interface.first_region = upper_region - 1;
-            interface.second_region = upper_region;
-            interface.first_boundary = lower.boundary_id({0, lower_z, Native::Z_FACE});
-            interface.second_boundary = upper.boundary_id({0, 0, Native::Z_FACE});
-            interface.faces.reserve(mixed_cells.size());
-            for (size_t xy = 0; xy < mixed_cells.size(); ++xy)
+            if (plan.swept)
             {
-                interface.faces.emplace_back(
-                    lower.indexer().face_ordinal({static_cast<unsigned>(xy), lower_z, Native::Z_FACE}),
-                    upper.indexer().face_ordinal({static_cast<unsigned>(xy), 0, Native::Z_FACE}));
+                auto topology = std::make_shared<Meshes::ExtrudedTopology>(
+                    static_cast<unsigned>(plan.nodes.size()), plan.cells,
+                    static_cast<unsigned>(plan.edges.size() - 1), plan.boundaries,
+                    std::map<std::string, std::string>{{"zmin", "theta_min"}, {"zmax", "theta_max"},
+                                                       {"bottom_wall", "zmin"}});
+                regions.emplace_back(Meshes::swept_rz_region(plan.name, std::move(topology), plan.nodes, plan.edges));
+            }
+            else regions.emplace_back(Meshes::native_region(plan.name,
+                std::make_shared<Native>(plan.nodes, plan.cells, plan.edges, plan.boundaries)));
+        }
+        // Match complete patches by physical centroids. The composite then
+        // independently validates nodes, areas, orientation and bijectivity.
+        using Vec3 = Native::Vec3;
+        struct Patch { int id; std::vector<std::pair<uint64_t, Vec3>> faces; };
+        const auto patch = [&](size_t region, const std::string& name)
+        {
+            return std::visit([&](const auto& child)
+            {
+                Patch result{-1, {}};
+                for (const int id : child.topology().boundary_batch_ids())
+                    if (child.topology().boundary_batch_name(id) == name) result.id = id;
+                if (result.id < 0) throw std::logic_error("Annular region has no boundary " + name);
+                for (size_t face = 0; face < child.layout().faces; ++face)
+                    if (child.topology().boundary_id(face) == result.id)
+                        result.faces.emplace_back(face, child.geometry().face_centroid(face));
+                return result;
+            }, regions.at(region));
+        };
+        const auto& o = d_options;
+        const double length_tolerance = 1e-12 + 1e-10 * std::max({o.outer_radius, std::abs(o.bottom), std::abs(o.top)});
+        for (const auto& join : layout.joins)
+        {
+            const auto first = patch(join.first, join.first_boundary);
+            const auto second = patch(join.second, join.second_boundary);
+            if (first.faces.size() != second.faces.size())
+                throw std::logic_error("Annular interface patches have different face counts.");
+            Meshes::ExplicitConformingInterface interface;
+            interface.first_region = join.first;
+            interface.second_region = join.second;
+            interface.first_boundary = first.id;
+            interface.second_boundary = second.id;
+            std::multimap<double, std::pair<uint64_t, Vec3>> candidates;
+            for (const auto& face : second.faces) candidates.emplace(face.second.x, face);
+            for (const auto& [id, center] : first.faces)
+            {
+                auto match = candidates.end();
+                for (auto next = candidates.lower_bound(center.x - length_tolerance);
+                     next != candidates.end() && next->first <= center.x + length_tolerance; ++next)
+                {
+                    if ((next->second.second - center).norm() <= length_tolerance)
+                    {
+                        if (match != candidates.end())
+                            throw std::logic_error("Annular interface face matching is ambiguous.");
+                        match = next;
+                    }
+                }
+                if (match == candidates.end()) throw std::logic_error("Annular interface face has no matching centroid.");
+                interface.faces.emplace_back(id, match->second.first);
+                candidates.erase(match);
             }
             interfaces.emplace_back(std::move(interface));
         }
@@ -373,12 +557,16 @@ auto AnnularSemiStructuredMeshFactory::build() const -> Result
     Result result;
     result.mesh = std::make_shared<Composite>(std::move(regions), std::move(interfaces),
         Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
-    // Use the mesh's own polygon metrics as the coupling reference area.
-    long double area = 0;
-    const auto& middle = *natives[middle_region];
-    const auto first_height = middle.z_edges()[1] - middle.z_edges()[0];
-    for (size_t xy = 0; xy < layout.counts.mixed_xy_cells; ++xy)
-        area += middle.cell_volume({static_cast<unsigned>(xy), 0}) / first_height;
+    // Native reference XY area; the miter patches partition the same vessel.
+    long double twice_area = 0;
+    for (const auto& cell : layout.xy_cells)
+        for (size_t j = 0; j < cell.size(); ++j)
+        {
+            const auto& a = layout.xy_nodes[cell[j]];
+            const auto& b = layout.xy_nodes[cell[(j + 1) % cell.size()]];
+            twice_area += static_cast<long double>(a.x) * b.y - static_cast<long double>(a.y) * b.x;
+        }
+    const auto area = twice_area / 2;
     const auto& o = d_options;
     result.cross_section_area = static_cast<real_t>(area);
     result.analytic_cross_section_area = static_cast<real_t>(std::numbers::pi_v<long double>

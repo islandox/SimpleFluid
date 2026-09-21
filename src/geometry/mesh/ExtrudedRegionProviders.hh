@@ -8,6 +8,7 @@
  */
 #pragma once
 #include "geometry/mesh/RegionProviders.hh"
+#include <map>
 namespace SimpleFluid::Meshes
 {
 /** @brief A single immutable base template, factored through the existing axial indexer. */
@@ -16,16 +17,18 @@ class ExtrudedTopology
 public:
     using index_type_pack=UnstructuredMeshIndexTypes;
     using ID=uint64_t;
-    explicit ExtrudedTopology(SemiStructMeshTopo topology);
+    explicit ExtrudedTopology(SemiStructMeshTopo topology,
+        std::map<std::string,std::string> boundary_aliases={});
     ExtrudedTopology(unsigned nodes, const Arr<Arr<unsigned>>& cells, unsigned layers,
-        const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries={});
+        const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries={},
+        std::map<std::string,std::string> boundary_aliases={});
     ExtrudedTopology& operator=(const ExtrudedTopology&)=delete;
     ExtrudedTopology& operator=(ExtrudedTopology&&)=delete;
     RegionLayout layout() const;
     const SemiStructuredIndexer& indexer() const { return d_topology.indexer(); }
     const SemiStructMeshTopo& native_topology() const { return d_topology; }
     const void* storage_identity() const { return this; }
-    MeshStorageReport storage_report() const { return {.topology=d_topology.storage_bytes()-sizeof(d_topology)}; }
+    MeshStorageReport storage_report() const;
     EntityRange<ID> base_cell_nodes(size_t c) const;
     EntityRange<ID> cell_faces(size_t c) const;
     EntityRange<ID> cell_nodes(size_t c) const;
@@ -35,9 +38,10 @@ public:
     MeshUtils::CellType cell_type(size_t c) const;
     int boundary_id(size_t f) const { return d_topology.boundary_id(indexer().face_id(f)); }
     auto boundary_batch_ids() const { return d_topology.boundary_batch_ids(); }
-    const std::string& boundary_batch_name(int b) const { return d_topology.boundary_batch_name(b); }
+    const std::string& boundary_batch_name(int b) const;
 private:
     SemiStructMeshTopo d_topology;
+    Arr<std::pair<int,std::string>> d_boundary_aliases;
 };
 /**
  * @brief Independent straight-extruded geometry with O(base + layers) storage.

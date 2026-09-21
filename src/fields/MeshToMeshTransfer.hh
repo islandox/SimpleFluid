@@ -93,7 +93,11 @@ struct MeshToMeshTransferOptions
  * annular-sector overlaps, and mixed cylindrical/convex XY-polygon prism
  * overlaps. Polygon prisms may be direct SemiStructuredXY_Z cells or composite
  * NativeIsoRegion<SemiStructuredXY_Z>/ExtrudedRegion cells, including current
- * affine Z motion. Other composite providers and nonconvex cells are rejected.
+ * affine Z motion. Composite SweptRZRegion cells use exact cylindrical-sector
+ * overlaps of their convex radius-height polygons swept between angular
+ * planes; the polygon is converted to bisector-apothem/physical-Z coordinates.
+ * A composite may mix both supported cell kinds. Other composite providers
+ * and nonconvex cells are rejected.
  * Direct semi-structured handles are serial; composite extrusion handles may
  * be distributed. Polygon/polygon and Cartesian/polygon pairs are unsupported.
  * Full coverage is required by default. project()

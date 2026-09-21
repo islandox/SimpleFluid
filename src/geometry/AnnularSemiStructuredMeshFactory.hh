@@ -31,17 +31,18 @@ namespace SimpleFluid
  * Its advancing fronts generate interior points independently of the radial
  * wall bands, and its constrained edges preserve the annular hole. Inner/outer
  * wall bands remain quadrilateral, producing hexahedral wall cells. Bottom
- * and optional top stacks retain this same mixed XY topology: bulk cells
- * remain triangular prisms, including the bottom refinement, while corners
- * next to the radial walls remain hexahedra. Each axial interface matches
- * faces one-to-one without subdivisions or transition volume cells.
+ * and optional top stacks retain bulk triangular prisms. Where radial and
+ * bottom widths are both below half the requested spacing, mitered R-Z
+ * quadrilaterals replace the fine tensor-product overlap and sweep into
+ * hexahedra. Every regional interface matches faces one-to-one.
  * Custom spacing and wall widths must satisfy
  * the solver's existing mesh-quality gate; skinny triangular cells can exceed
  * its non-orthogonality limit even when all native volumes remain positive.
  *
  * Build collectively on the default Tpetra communicator before constructing
  * fields or handles. The returned MultiRegionMesh owns immutable native
- * SemiStructuredXY_Z children and supports distributed common affine Z motion.
+ * SemiStructuredXY_Z and SweptRZRegion children and supports distributed common
+ * affine Z motion.
  */
 class AnnularSemiStructuredMeshFactory
 {
@@ -63,6 +64,7 @@ public:
         bool refine_outer = true;
         bool refine_bottom = true;
         bool refine_top = false;
+        bool coarsen_bottom_corners = true;
     };
 
     struct Counts
@@ -72,7 +74,7 @@ public:
         size_t outer_angular_cells = 0;
         size_t radial_cells = 0; ///< Reference radial guide intervals, not bulk topology.
         size_t axial_cells = 0;
-        size_t xy_cells = 0; ///< Same mixed XY template in every axial layer.
+        size_t xy_cells = 0; ///< Reference mixed XY template above corner transitions.
         size_t coarse_xy_cells = 0; ///< Unsplit parent sectors; not a region cell count.
         size_t mixed_xy_cells = 0;
         size_t wall_xy_cells = 0; ///< Quadrilaterals in radial wall layers.
@@ -83,6 +85,9 @@ public:
         size_t top_axial_cells = 0;
         size_t hex_cells = 0;
         size_t prism_cells = 0;
+        size_t corner_layers = 0;
+        size_t corner_cells = 0;
+        size_t removed_corner_cells = 0;
         size_t regions = 0;
         size_t cells = 0;
         size_t faces = 0;
@@ -123,12 +128,28 @@ public:
 private:
     struct Layout
     {
+        struct Region
+        {
+            std::string name;
+            bool swept = false;
+            Arr<Meshes::SemiStructuredXY_Z::Vec3> nodes;
+            Arr<Arr<unsigned>> cells;
+            Arr<Meshes::SemiStructuredXY_Z::BoundaryEdge> boundaries;
+            ArrReal edges;
+        };
+        struct Join
+        {
+            size_t first, second;
+            std::string first_boundary, second_boundary;
+        };
         ArrReal radial_apothems;
         ArrReal z_edges;
         Arr<Meshes::SemiStructuredXY_Z::Vec3> xy_nodes;
         Arr<Arr<unsigned>> xy_cells;
         Arr<Meshes::SemiStructuredXY_Z::BoundaryEdge> boundaries;
         Counts counts;
+        std::vector<Region> regions;
+        std::vector<Join> joins;
     };
     Layout plan_layout() const;
     Options d_options;

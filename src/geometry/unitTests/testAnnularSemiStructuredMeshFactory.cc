@@ -46,6 +46,9 @@ Factory::Options small_options()
     // eight layers with growth 1.25 and are checked separately below.
     options.first_layer_height = 0.002;
     options.growth_ratio = 1.5;
+    // These compatibility checks exercise the original tensor-product wall
+    // stacks. Dedicated tests below enable the unstructured corner patch.
+    options.coarsen_bottom_corners = false;
     return options;
 }
 
@@ -388,6 +391,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CanDisableLayersAndPlanTheCentimetreR
     r100.outer_radius = 0.25;
     r100.bottom = 0.1;
     r100.top = 0.60852;
+    r100.coarsen_bottom_corners = false;
     const auto counts = Factory(r100).planned_counts();
     EXPECT_EQ(counts.angular_cells, 158U);
     EXPECT_EQ(counts.outer_angular_cells, 158U);
@@ -504,7 +508,33 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CentimetreR100DefaultsMeetUnchangedAL
     options.bottom = 0.1;
     options.top = 0.60852;
     const auto result = Factory(options).build();
-    expect_wall_quadrilaterals(child(*result.mesh, 0), result, options);
+    EXPECT_EQ(result.counts.corner_layers, 5U);
+    EXPECT_EQ(result.counts.corner_cells, 14U * (50U + 158U));
+    EXPECT_EQ(result.counts.removed_corner_cells, 11U * (50U + 158U));
+    EXPECT_EQ(result.counts.regions, 6U);
+    EXPECT_EQ(result.counts.hex_cells, 89232U);
+    EXPECT_EQ(result.counts.prism_cells, 178420U);
+    EXPECT_EQ(result.counts.cells, 267652U);
+    EXPECT_EQ(result.mesh->num_cells(), result.counts.cells);
+    EXPECT_EQ(result.mesh->num_faces(), result.counts.faces);
+    EXPECT_EQ(result.mesh->num_nodes(), result.counts.nodes);
+    size_t swept_regions = 0, swept_cells = 0;
+    for (const auto& region : result.mesh->regions())
+        if (const auto* swept = std::get_if<SimpleFluid::Meshes::SweptRZRegion>(&region))
+        {
+            ++swept_regions;
+            swept_cells += swept->layout().cells;
+            EXPECT_EQ(swept->topology().indexer().num_cells_per_layer, 14U);
+            EXPECT_NEAR(swept->geometry().axial_bounds()[0], options.bottom, 1e-14);
+            EXPECT_NEAR(swept->geometry().axial_bounds()[1] - options.bottom, 0.0164140625, 1e-14);
+            for (const auto& loop : swept->geometry().rz_cell_nodes()) EXPECT_EQ(loop.size(), 4U);
+        }
+    EXPECT_EQ(swept_regions, 2U);
+    EXPECT_EQ(swept_cells, result.counts.corner_cells);
+    long double volume = 0;
+    for (size_t cell = 0; cell < result.mesh->num_cells(); ++cell)
+        volume += result.mesh->cell_volume(cell);
+    EXPECT_NEAR(static_cast<double>(volume), result.cross_section_area * (options.top - options.bottom), 2e-13);
     const Handle handle(result.mesh);
     const auto metrics = SimpleFluid::evaluate_mesh_quality(handle);
     const SimpleFluid::MeshQualityGate gate;
@@ -594,5 +624,138 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CompositeWrapperPartitionsAndMovesWit
         EXPECT_NEAR(global_volume, result.cross_section_area * (options.top + 0.01 - options.bottom), 1e-13);
         motion.rollback_trial();
         EXPECT_EQ(axial_edges(*result.mesh), original_z);
+    }
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, CornerSelectionUsesStrictHalfOfTheSmallerRequestedSpacing)
+{
+    auto options = small_options();
+    options.coarsen_bottom_corners = true;
+    options.first_layer_height = 0.00125;
+    options.growth_ratio = 2;
+    // 1.25 and 2.5 mm qualify; exactly 5 mm does not.
+    auto counts = Factory(options).planned_counts();
+    EXPECT_EQ(counts.corner_layers, 2U);
+    EXPECT_GT(counts.removed_corner_cells, 0U);
+    options.z_spacing = 0.005;
+    // The 2.5 mm threshold now leaves only one layer, with no coarsening.
+    counts = Factory(options).planned_counts();
+    EXPECT_EQ(counts.corner_layers, 0U);
+    EXPECT_EQ(counts.corner_cells, 0U);
+    EXPECT_EQ(counts.removed_corner_cells, 0U);
+    options.coarsen_bottom_corners = false;
+    EXPECT_EQ(counts, Factory(options).planned_counts());
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, CornerCoarseningDoesNothingWithoutAnEligibleWallIntersection)
+{
+    for (unsigned scenario = 0; scenario < 5; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        auto options = small_options();
+        options.coarsen_bottom_corners = true;
+        if (scenario == 0) options.refine_bottom = false;
+        if (scenario == 1) options.refine_inner = options.refine_outer = false;
+        if (scenario == 2) options.wall_layers = 0;
+        if (scenario == 3) options.wall_layers = 1;
+        if (scenario == 4) options.first_layer_height = 0.005; // None is strictly below 5 mm.
+        const auto enabled = Factory(options).planned_counts();
+        EXPECT_EQ(enabled.corner_layers, 0U);
+        EXPECT_EQ(enabled.corner_cells, 0U);
+        EXPECT_EQ(enabled.removed_corner_cells, 0U);
+        options.coarsen_bottom_corners = false;
+        EXPECT_EQ(enabled, Factory(options).planned_counts());
+    }
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, CornerTransitionsPreserveConformingFacesAndAffineMotion)
+{
+    auto options = small_options();
+    options.coarsen_bottom_corners = true;
+    options.z_spacing = 0.01;
+    const auto result = Factory(options).build();
+    EXPECT_EQ(result.counts.corner_layers, 3U);
+    EXPECT_EQ(result.counts.corner_cells,
+        5U * (result.counts.inner_angular_cells + result.counts.outer_angular_cells));
+    EXPECT_EQ(result.counts.removed_corner_cells,
+        4U * (result.counts.inner_angular_cells + result.counts.outer_angular_cells));
+    EXPECT_EQ(result.counts.cells + result.counts.removed_corner_cells,
+        result.counts.xy_cells * result.counts.axial_cells);
+    EXPECT_EQ(result.counts.cells, result.mesh->num_cells());
+    EXPECT_EQ(result.counts.faces, result.mesh->num_faces());
+    EXPECT_EQ(result.counts.nodes, result.mesh->num_nodes());
+
+    std::set<uint64_t> canonical_interfaces;
+    for (const auto& declaration : result.mesh->interfaces())
+    {
+        const auto* interface = std::get_if<SimpleFluid::Meshes::ExplicitConformingInterface>(&declaration);
+        ASSERT_NE(interface, nullptr);
+        std::set<uint64_t> first_faces, second_faces;
+        for (const auto& [first, second] : interface->faces)
+        {
+            EXPECT_TRUE(first_faces.insert(first).second);
+            EXPECT_TRUE(second_faces.insert(second).second);
+            const auto canonical = result.mesh->canonical_face({interface->first_region, first});
+            EXPECT_EQ(canonical, result.mesh->canonical_face({interface->second_region, second}));
+            EXPECT_TRUE(canonical_interfaces.insert(canonical).second);
+            EXPECT_NE(result.mesh->neighbor_cell(canonical), Composite::invalid_cell_id());
+            const auto metrics = [&](size_t region, uint64_t face)
+            {
+                return std::visit([&](const auto& child)
+                {
+                    return std::pair{child.geometry().face_centroid(face), child.geometry().face_area_vector(face)};
+                }, result.mesh->regions()[region]);
+            };
+            const auto [first_center, first_vector] = metrics(interface->first_region, first);
+            const auto [second_center, second_vector] = metrics(interface->second_region, second);
+            EXPECT_NEAR((first_center - second_center).norm(), 0, 2e-13);
+            EXPECT_NEAR((first_vector + second_vector).norm(), 0, 2e-13);
+        }
+    }
+    std::set<std::string> boundaries;
+    for (const auto id : result.mesh->boundary_batch_ids()) boundaries.insert(result.mesh->boundary_batch_name(id));
+    EXPECT_EQ(boundaries, (std::set<std::string>{"rmin", "rmax", "zmin", "zmax"}));
+
+    auto handle = std::make_shared<Handle>(result.mesh);
+    const auto comm = Tpetra::getDefaultComm();
+    const auto global_volume = [&]()
+    {
+        double local = 0, total = 0;
+        for (size_t cell = 0; cell < handle->num_owned_cells(); ++cell) local += handle->cell_volume(cell);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local, &total);
+        return total;
+    };
+    EXPECT_NEAR(global_volume(), result.cross_section_area * (options.top - options.bottom), 1e-13);
+    const auto signature = result.mesh->configuration_signature();
+    SimpleFluid::PlanarALEMeshMotion<> motion(handle);
+    motion.begin_trial(options.top + 0.005, 0.1);
+    EXPECT_NEAR(global_volume(), result.cross_section_area * (options.top + 0.005 - options.bottom), 1e-13);
+    EXPECT_EQ(result.mesh->configuration_signature(), signature);
+    motion.rollback_trial();
+    EXPECT_EQ(result.mesh->axial_edges(), (SimpleFluid::ArrReal{options.bottom, options.top}));
+    EXPECT_NEAR(global_volume(), result.cross_section_area * (options.top - options.bottom), 1e-13);
+}
+
+TEST(AnnularSemiStructuredMeshFactoryTest, CornerCoarseningTracksIndependentlySelectedRadialWalls)
+{
+    for (const bool inner : {false, true})
+    {
+        auto options = small_options();
+        options.coarsen_bottom_corners = true;
+        options.refine_inner = inner;
+        options.refine_outer = !inner;
+        const auto result = Factory(options).build();
+        const auto angular = inner ? result.counts.inner_angular_cells : result.counts.outer_angular_cells;
+        EXPECT_EQ(result.counts.corner_layers, 3U);
+        EXPECT_EQ(result.counts.corner_cells, 5U * angular);
+        EXPECT_EQ(result.counts.removed_corner_cells, 4U * angular);
+        size_t swept_regions = 0;
+        for (const auto& region : result.mesh->regions())
+            swept_regions += std::holds_alternative<SimpleFluid::Meshes::SweptRZRegion>(region);
+        EXPECT_EQ(swept_regions, 1U);
+        long double volume = 0;
+        for (size_t cell = 0; cell < result.mesh->num_cells(); ++cell)
+            volume += result.mesh->cell_volume(cell);
+        EXPECT_NEAR(static_cast<double>(volume), result.cross_section_area * (options.top - options.bottom), 1e-13);
     }
 }

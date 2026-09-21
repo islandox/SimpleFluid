@@ -11,6 +11,7 @@
 #include "geometry/mesh/RegionProviders.hh"
 #include "geometry/mesh/ConservativeInterface.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
+#include "geometry/mesh/SweptRZRegionProviders.hh"
 #include "io/VTUWriter.hh"
 #include <optional>
 #include <variant>
@@ -89,7 +90,7 @@ public:
     using Indexer = UnstructuredMesh::Indexer;
     using ID = uint64_t;
     using Region = std::variant<CartesianRegion, NativeIsoRegion<OrthogonalCartesian3D>,
-        NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>, NativeIsoRegion<OrthogonalCylindrial3D>, ExtrudedRegion>;
+        NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>, NativeIsoRegion<OrthogonalCylindrial3D>, ExtrudedRegion, SweptRZRegion>;
     using Interface = std::variant<StructuredPatchInterface, ExplicitConformingInterface, NonconformingInterface>;
     enum class BoundaryNamePolicy { NamespaceRegions, MergeMatchingNames };
     static constexpr ID invalid_cell_id() noexcept { return UnstructuredMesh::invalid_ordinal; }
