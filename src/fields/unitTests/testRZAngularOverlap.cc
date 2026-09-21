@@ -97,6 +97,28 @@ TEST(RZAngularOverlapTest, AngularWrapAndTargetSplitsAreAdditive)
     EXPECT_EQ(volume(0.2, 0.3), 0);
 }
 
+TEST(RZAngularOverlapTest, ConvexityAcceptsObliqueEdgesAndRejectsInvalidWinding)
+{
+    // On binary64 long-double targets, FMA can make an oblique edge's
+    // determinant with itself negative even though the polygon is convex.
+    Polygon polygon{{0.04, 0.1}, {0.0564140625, 0.1}, {0.051, 0.1164140625}, {0.04, 0.11}};
+    for (size_t start = 0; start < polygon.size(); ++start)
+    {
+        SCOPED_TRACE(start);
+        EXPECT_TRUE(Geometry::convex_polygon(polygon));
+        auto reversed = polygon;
+        std::reverse(reversed.begin(), reversed.end());
+        EXPECT_FALSE(Geometry::convex_polygon(reversed));
+        std::rotate(polygon.begin(), polygon.begin() + 1, polygon.end());
+    }
+
+    auto repeated = polygon;
+    repeated.insert(repeated.end(), polygon.begin(), polygon.end());
+    EXPECT_FALSE(Geometry::convex_polygon(repeated));
+    const Polygon concave{{1, 0}, {3, 0}, {2, 0.5}, {3, 2}, {1, 2}};
+    EXPECT_FALSE(Geometry::convex_polygon(concave));
+}
+
 TEST(RZAngularOverlapTest, RejectsUnsupportedGeometryAndReturnsZeroForEmptyCuts)
 {
     const Polygon polygon{{1, 0}, {2, 0}, {2, 1}, {1, 1}};
