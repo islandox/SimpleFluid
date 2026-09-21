@@ -1,6 +1,7 @@
 /** @file AnnularSemiStructuredMeshFactory.cc */
 #include "geometry/AnnularSemiStructuredMeshFactory.hh"
 #include "geometry/BoundaryLayerMeshFactory.hh"
+#include "geometry/mesh/FrontalDelaunay2D.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -8,9 +9,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <exception>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -85,6 +88,13 @@ void AnnularSemiStructuredMeshFactory::validate_options(const Options& options)
         throw std::invalid_argument("Annular mesh spacing and first layer height must be positive; growth ratio must be >= 1.");
     if (options.wall_layers > (index_limit - 2) / 2)
         throw std::overflow_error("Annular mesh boundary-layer count exceeds supported IDs.");
+    for (const auto count : {options.inner_angular_cells, options.outer_angular_cells})
+    {
+        if (count != 0 && count < 8)
+            throw std::invalid_argument("Annular angular counts must be zero (automatic) or at least eight.");
+        if (count > index_limit - 1)
+            throw std::overflow_error("Annular angular count exceeds supported IDs.");
+    }
     const auto area = std::numbers::pi_v<long double>
         * (static_cast<long double>(options.outer_radius) - options.inner_radius)
         * (static_cast<long double>(options.outer_radius) + options.inner_radius);
@@ -102,13 +112,17 @@ AnnularSemiStructuredMeshFactory::AnnularSemiStructuredMeshFactory(Options optio
 auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
 {
     const auto& o = d_options;
-    auto angular = std::max(size_t{8}, interval_count(
-        2 * std::numbers::pi_v<long double> * o.outer_radius, o.xy_spacing));
-    if (angular % 2) ++angular;
+    auto angular = o.outer_angular_cells;
+    if (!angular)
+    {
+        angular = std::max(size_t{8}, interval_count(
+            2 * std::numbers::pi_v<long double> * o.outer_radius, o.xy_spacing));
+        if (angular % 2) ++angular;
+    }
     const auto half_angle = std::numbers::pi_v<real_t> / angular;
     const auto outer_apothem = o.outer_radius * std::cos(half_angle);
     if (!(outer_apothem > o.inner_radius))
-        throw std::invalid_argument("Annular XY spacing is too coarse for an inscribed outer polygon outside the inner circle.");
+        throw std::invalid_argument("Annular outer angular resolution is too coarse for a polygon outside the inner circle.");
 
     using Cylindrical = Meshes::OrthogonalCylindrial3D;
     // R temporarily stores polygon apothems. The existing factory therefore
@@ -132,6 +146,7 @@ auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
     const auto& axial = axes.cell_edges()[Cylindrical::AXIAL];
     auto& count = layout.counts;
     count.angular_cells = angular;
+    count.outer_angular_cells = angular;
     count.radial_cells = layers(o.refine_inner) + layers(o.refine_outer)
         + interval_count(static_cast<long double>(radial[layers(o.refine_inner) + 1])
             - radial[layers(o.refine_inner)], o.xy_spacing);
@@ -141,22 +156,127 @@ auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
     if (count.axial_cells >= index_limit)
         throw std::overflow_error("Annular axial node count exceeds supported IDs.");
     count.coarse_xy_cells = checked_product(angular, count.radial_cells, index_limit, "XY sector count");
-    const auto wall_bands = layers(o.refine_inner) + layers(o.refine_outer);
-    const auto wall_xy = checked_product(angular, wall_bands, index_limit, "wall XY cell count");
-    const auto bulk_xy = checked_product(angular, count.radial_cells - wall_bands, index_limit, "bulk XY sector count");
-    count.mixed_xy_cells = wall_xy;
-    checked_add(count.mixed_xy_cells, checked_product(bulk_xy, 2, index_limit, "bulk XY triangle count"), "mixed XY cell count");
-    if (count.mixed_xy_cells > index_limit)
-        throw std::overflow_error("Annular mixed XY cell count exceeds supported IDs.");
-    count.xy_cells = count.mixed_xy_cells;
-    count.xy_nodes = checked_product(angular, count.radial_cells + 1, index_limit, "XY node count");
-    const auto mixed_edges = checked_product(angular, 3 * count.radial_cells - wall_bands + 1, index_limit, "mixed XY edge count");
+    layout.radial_apothems = subdivide_bulk(radial,
+        layers(o.refine_inner), layers(o.refine_outer), o.xy_spacing);
+    layout.z_edges = subdivide_bulk(axial,
+        layers(o.refine_bottom), layers(o.refine_top), o.z_spacing);
+
+    // Keep only the structured wall fronts. Bulk guide rings do not become
+    // nodes: FrontalDelaunay2D supplies the complete interior point placement.
+    const auto inner_layers = layers(o.refine_inner);
+    const auto outer_first = count.radial_cells - layers(o.refine_outer);
+    auto inner_angular = o.inner_angular_cells;
+    if (!inner_angular)
+    {
+        // The inner polygon circumscribes its circle. Size from the largest
+        // ring in that stack, including its circumradius correction, so its
+        // bulk-facing edges also respect the requested circumferential size.
+        const long double apothem = layout.radial_apothems[inner_layers];
+        inner_angular = std::max(size_t{8}, interval_count(
+            2 * std::numbers::pi_v<long double> * apothem, o.xy_spacing));
+        if (inner_angular % 2) ++inner_angular;
+        while (2 * std::numbers::pi_v<long double> * apothem /
+               (inner_angular * std::cos(std::numbers::pi_v<long double> / inner_angular)) > o.xy_spacing)
+        {
+            if (inner_angular > index_limit - 3)
+                throw std::overflow_error("Annular inner angular count exceeds supported IDs.");
+            inner_angular += 2;
+        }
+    }
+    count.inner_angular_cells = inner_angular;
+    auto wall_xy = checked_product(inner_angular, inner_layers, index_limit, "inner wall XY cell count");
+    checked_add(wall_xy, checked_product(angular, layers(o.refine_outer), index_limit,
+        "outer wall XY cell count"), "wall XY cell count");
+    auto wall_nodes = checked_product(inner_angular, inner_layers + 1, index_limit, "inner wall XY node count");
+    checked_add(wall_nodes, checked_product(angular, layers(o.refine_outer) + 1, index_limit,
+        "outer wall XY node count"), "wall XY node count");
+    if (wall_xy > index_limit || wall_nodes > index_limit)
+        throw std::overflow_error("Annular wall topology exceeds supported XY IDs.");
+    layout.xy_nodes.reserve(wall_nodes);
+    std::map<size_t, unsigned> ring_start;
+    const auto ring_count = [&](size_t ring) { return ring <= inner_layers ? inner_angular : angular; };
+    const auto add_ring = [&](size_t ring)
+    {
+        const auto n = ring_count(ring);
+        ring_start.emplace(ring, static_cast<unsigned>(layout.xy_nodes.size()));
+        const auto radius = layout.radial_apothems[ring] / std::cos(std::numbers::pi_v<real_t> / n);
+        for (size_t j = 0; j < n; ++j)
+        {
+            const auto angle = 2 * std::numbers::pi_v<real_t> * j / n;
+            layout.xy_nodes.push_back({radius * std::cos(angle), radius * std::sin(angle), 0});
+        }
+    };
+    for (size_t ring = 0; ring <= inner_layers; ++ring) add_ring(ring);
+    for (size_t ring = outer_first; ring <= count.radial_cells; ++ring) add_ring(ring);
+    const auto node = [&](size_t ring, size_t angle)
+    { return static_cast<unsigned>(ring_start.at(ring) + angle % ring_count(ring)); };
+    const auto add_wall_band = [&](size_t ring)
+    {
+        for (size_t j = 0; j < ring_count(ring); ++j)
+            layout.xy_cells.push_back({node(ring, j), node(ring + 1, j),
+                                       node(ring + 1, j + 1), node(ring, j + 1)});
+    };
+    for (size_t ring = 0; ring < inner_layers; ++ring) add_wall_band(ring);
+    for (size_t ring = outer_first; ring < count.radial_cells; ++ring) add_wall_band(ring);
+
+    Arr<Meshes::SemiStructuredXY_Z::Vec3> outer_interface, inner_interface;
+    outer_interface.reserve(angular);
+    inner_interface.reserve(inner_angular);
+    for (size_t j = 0; j < angular; ++j)
+        outer_interface.push_back(layout.xy_nodes[node(outer_first, j)]);
+    for (size_t j = 0; j < inner_angular; ++j)
+        inner_interface.push_back(layout.xy_nodes[node(inner_layers, j)]);
+    const auto bulk = Meshes::FrontalDelaunay2D::triangulate_annulus(
+        outer_interface, inner_interface, o.xy_spacing);
+    const auto interface_nodes = angular + inner_angular;
+    if (bulk.nodes.size() < interface_nodes)
+        throw std::logic_error("Frontal bulk lost its prescribed interface vertices.");
+    const auto extra_nodes = bulk.nodes.size() - interface_nodes;
+    if (extra_nodes > index_limit - layout.xy_nodes.size()
+        || bulk.triangles.size() > index_limit - wall_xy)
+        throw std::overflow_error("Annular frontal mesh exceeds supported XY IDs.");
+    std::vector<unsigned> bulk_node_ids(bulk.nodes.size());
+    for (size_t j = 0; j < angular; ++j)
+    {
+        if (bulk.nodes[j] != outer_interface[j])
+            throw std::logic_error("Frontal bulk changed a prescribed interface vertex.");
+        bulk_node_ids[j] = node(outer_first, j);
+    }
+    for (size_t j = 0; j < inner_angular; ++j)
+    {
+        if (bulk.nodes[angular + j] != inner_interface[j])
+            throw std::logic_error("Frontal bulk changed a prescribed interface vertex.");
+        bulk_node_ids[angular + j] = node(inner_layers, j);
+    }
+    for (size_t j = interface_nodes; j < bulk.nodes.size(); ++j)
+    {
+        bulk_node_ids[j] = static_cast<unsigned>(layout.xy_nodes.size());
+        layout.xy_nodes.push_back(bulk.nodes[j]);
+    }
+    for (const auto& triangle : bulk.triangles)
+        layout.xy_cells.push_back({bulk_node_ids.at(triangle[0]), bulk_node_ids.at(triangle[1]),
+                                   bulk_node_ids.at(triangle[2])});
+    for (size_t j = 0; j < inner_angular; ++j)
+        layout.boundaries.push_back({node(0, j + 1), node(0, j), "rmin"});
+    for (size_t j = 0; j < angular; ++j)
+        layout.boundaries.push_back({node(count.radial_cells, j), node(count.radial_cells, j + 1), "rmax"});
+    count.wall_xy_cells = wall_xy;
+    count.bulk_xy_cells = bulk.triangles.size();
+    count.mixed_xy_cells = count.xy_cells = layout.xy_cells.size();
+    count.xy_nodes = layout.xy_nodes.size();
+    std::set<std::pair<unsigned, unsigned>> edges;
+    for (const auto& cell : layout.xy_cells)
+        for (size_t j = 0; j < cell.size(); ++j)
+            edges.insert(std::minmax(cell[j], cell[(j + 1) % cell.size()]));
+    const auto mixed_edges = edges.size();
+    if (mixed_edges > index_limit)
+        throw std::overflow_error("Annular frontal mesh exceeds supported XY edge IDs.");
     count.bottom_axial_cells = layers(o.refine_bottom);
     count.top_axial_cells = layers(o.refine_top);
     count.bulk_axial_cells = count.axial_cells - count.bottom_axial_cells - count.top_axial_cells;
     count.hex_cells = checked_product(wall_xy, count.axial_cells,
         std::numeric_limits<size_t>::max(), "radial wall cell count");
-    count.prism_cells = checked_product(2 * bulk_xy, count.axial_cells,
+    count.prism_cells = checked_product(count.bulk_xy_cells, count.axial_cells,
         std::numeric_limits<size_t>::max(), "prism count");
     count.cells = count.hex_cells;
     checked_add(count.cells, count.prism_cells, "cell count");
@@ -178,10 +298,6 @@ auto AnnularSemiStructuredMeshFactory::plan_layout() const -> Layout
     // deliberately remain distinct.
     count.faces -= checked_product(count.mixed_xy_cells, count.regions - 1,
         std::numeric_limits<size_t>::max(), "interface face count");
-    layout.radial_apothems = subdivide_bulk(radial,
-        layers(o.refine_inner), layers(o.refine_outer), o.xy_spacing);
-    layout.z_edges = subdivide_bulk(axial,
-        layers(o.refine_bottom), layers(o.refine_top), o.z_spacing);
     return layout;
 }
 
@@ -203,49 +319,9 @@ auto AnnularSemiStructuredMeshFactory::build() const -> Result
     try
     {
         layout = plan_layout();
-        const auto& o = d_options;
-        const auto n = layout.counts.angular_cells;
-        const auto cosine = std::cos(std::numbers::pi_v<real_t> / n);
-        Arr<Meshes::SemiStructuredXY_Z::Vec3> nodes;
-        nodes.reserve(layout.counts.xy_nodes);
-        for (const auto apothem : layout.radial_apothems)
-        {
-            const auto radius = apothem / cosine;
-            for (size_t j = 0; j < n; ++j)
-            {
-                const auto theta = 2 * std::numbers::pi_v<real_t> * j / n;
-                nodes.push_back({radius * std::cos(theta), radius * std::sin(theta), 0});
-            }
-        }
-        const auto id = [n](size_t ring, size_t angle) { return static_cast<unsigned>(ring * n + angle % n); };
-        Arr<Arr<unsigned>> mixed_cells;
-        mixed_cells.reserve(layout.counts.mixed_xy_cells);
-        const auto inner_layers = o.refine_inner ? o.wall_layers : size_t{0};
-        const auto outer_layers = o.refine_outer ? o.wall_layers : size_t{0};
-        for (size_t ring = 0; ring < layout.counts.radial_cells; ++ring)
-            for (size_t j = 0; j < n; ++j)
-            {
-                const auto a = id(ring, j);
-                const auto b = id(ring + 1, j);
-                const auto c = id(ring + 1, j + 1);
-                const auto d = id(ring, j + 1);
-                if (ring < inner_layers || ring >= layout.counts.radial_cells - outer_layers)
-                {
-                    mixed_cells.push_back({a, b, c, d});
-                }
-                else
-                {
-                    mixed_cells.push_back({a, b, c});
-                    mixed_cells.push_back({a, c, d});
-                }
-            }
-        Arr<Meshes::SemiStructuredXY_Z::BoundaryEdge> boundaries;
-        boundaries.reserve(2 * n);
-        for (size_t j = 0; j < n; ++j)
-        {
-            boundaries.push_back({id(0, j + 1), id(0, j), "rmin"});
-            boundaries.push_back({id(layout.counts.radial_cells, j), id(layout.counts.radial_cells, j + 1), "rmax"});
-        }
+        const auto& nodes = layout.xy_nodes;
+        const auto& mixed_cells = layout.xy_cells;
+        const auto& boundaries = layout.boundaries;
 
         const auto add_region = [&](const char* name, const Arr<Arr<unsigned>>& cells, size_t begin, size_t end)
         {
