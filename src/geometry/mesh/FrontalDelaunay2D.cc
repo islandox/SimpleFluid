@@ -18,6 +18,7 @@
 #include <map>
 #include <numbers>
 #include <queue>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -418,6 +419,270 @@ void verify_boundary_edges(const FrontalDelaunay2D::Result& mesh)
     }
 }
 
+/** @brief Validate a fixed strictly convex CCW loop and return twice its area. */
+long double validate_fixed_loop(const Arr<Vec3>& loop)
+{
+    if (loop.size() < 3)
+    {
+        throw std::invalid_argument(
+            "FrontalDelaunay2D fixed loops require at least three vertices.");
+    }
+    for (const auto& point : loop)
+    {
+        if (!finite_xy(point))
+        {
+            throw std::invalid_argument(
+                "FrontalDelaunay2D fixed loop has a non-finite coordinate.");
+        }
+    }
+    long double area = 0.0L;
+    for (size_t edge = 0; edge < loop.size(); ++edge)
+    {
+        const auto& a = loop[edge];
+        const auto& b = loop[(edge + 1) % loop.size()];
+        if (!(squared_distance(a, b) > 0.0))
+        {
+            throw std::invalid_argument(
+                "FrontalDelaunay2D fixed loop has a repeated vertex.");
+        }
+        // Checking every vertex also rejects multiply wound star polygons.
+        for (size_t vertex = 0; vertex < loop.size(); ++vertex)
+        {
+            if (vertex != edge && vertex != (edge + 1) % loop.size()
+                && !(orient2d(a, b, loop[vertex]) > 0.0L))
+            {
+                throw std::invalid_argument(
+                    "FrontalDelaunay2D fixed loops must be strictly convex and CCW.");
+            }
+        }
+        area += orient2d(loop.front(), a, b);
+    }
+    if (!(area > 0.0L) || !std::isfinite(area))
+    {
+        throw std::invalid_argument(
+            "FrontalDelaunay2D fixed loop area must be positive and finite.");
+    }
+    return area;
+}
+
+/** @brief Whether two open segments cross away from their endpoints. */
+bool proper_segment_crossing(const Vec3& a, const Vec3& b,
+                             const Vec3& c, const Vec3& d)
+{
+    const auto abc = orient2d(a, b, c);
+    const auto abd = orient2d(a, b, d);
+    const auto cda = orient2d(c, d, a);
+    const auto cdb = orient2d(c, d, b);
+    return ((abc > 0.0L && abd < 0.0L) || (abc < 0.0L && abd > 0.0L))
+        && ((cda > 0.0L && cdb < 0.0L) || (cda < 0.0L && cdb > 0.0L));
+}
+
+/** @brief Triangulate one simple constraint-cavity side by removing ears. */
+Arr<Triangle> triangulate_cavity(Arr<unsigned> polygon, const Arr<Vec3>& nodes)
+{
+    Arr<Triangle> result;
+    if (polygon.size() < 3) return result;
+    long double area = 0.0L;
+    for (size_t i = 0; i < polygon.size(); ++i)
+    {
+        area += orient2d(nodes[polygon.front()], nodes[polygon[i]],
+                         nodes[polygon[(i + 1) % polygon.size()]]);
+    }
+    if (area < 0.0L) std::reverse(polygon.begin(), polygon.end());
+    while (polygon.size() > 3)
+    {
+        bool removed = false;
+        for (size_t i = 0; i < polygon.size(); ++i)
+        {
+            const auto a = polygon[(i + polygon.size() - 1) % polygon.size()];
+            const auto b = polygon[i];
+            const auto c = polygon[(i + 1) % polygon.size()];
+            if (!(orient2d(nodes[a], nodes[b], nodes[c]) > 0.0L)) continue;
+            bool contains_node = false;
+            for (const auto node : polygon)
+            {
+                if (node != a && node != b && node != c
+                    && in_triangle(nodes[a], nodes[b], nodes[c], nodes[node]))
+                {
+                    contains_node = true;
+                    break;
+                }
+            }
+            if (contains_node) continue;
+            result.push_back({a, b, c});
+            polygon.erase(polygon.begin() + static_cast<ptrdiff_t>(i));
+            removed = true;
+            break;
+        }
+        if (!removed)
+        {
+            throw std::runtime_error(
+                "FrontalDelaunay2D could not triangulate a fixed-segment cavity.");
+        }
+    }
+    if (!(orient2d(nodes[polygon[0]], nodes[polygon[1]], nodes[polygon[2]])
+          > 0.0L))
+    {
+        throw std::runtime_error(
+            "FrontalDelaunay2D fixed-segment cavity is degenerate.");
+    }
+    result.push_back({polygon[0], polygon[1], polygon[2]});
+    return result;
+}
+
+/** @brief Insert a missing fixed edge by retriangulating its crossed cavity. */
+void recover_fixed_edge(Arr<Triangle>& triangles, const Arr<Vec3>& nodes,
+                        const Edge& fixed)
+{
+    ArrBool remove(triangles.size(), false);
+    bool crossed = false;
+    for (size_t t = 0; t < triangles.size(); ++t)
+    {
+        for (unsigned side = 0; side < 3; ++side)
+        {
+            const auto edge = normalized_edge(
+                triangles[t][side], triangles[t][(side + 1U) % 3U]);
+            if (edge == fixed) return;
+            if (proper_segment_crossing(nodes[fixed.node0], nodes[fixed.node1],
+                                         nodes[edge.node0], nodes[edge.node1]))
+            {
+                remove[t] = true;
+                crossed = true;
+            }
+        }
+    }
+    if (!crossed)
+    {
+        throw std::runtime_error(
+            "FrontalDelaunay2D cannot recover a fixed boundary segment.");
+    }
+
+    std::map<Edge, unsigned> cavity_edges;
+    Arr<Triangle> retained;
+    for (size_t t = 0; t < triangles.size(); ++t)
+    {
+        if (!remove[t])
+        {
+            retained.push_back(triangles[t]);
+            continue;
+        }
+        for (unsigned side = 0; side < 3; ++side)
+        {
+            ++cavity_edges[normalized_edge(
+                triangles[t][side], triangles[t][(side + 1U) % 3U])];
+        }
+    }
+    std::map<unsigned, Arr<unsigned>> neighbors;
+    for (const auto& [edge, count] : cavity_edges)
+    {
+        if (count == 1)
+        {
+            neighbors[edge.node0].push_back(edge.node1);
+            neighbors[edge.node1].push_back(edge.node0);
+        }
+    }
+    for (const auto& [node, adjacent] : neighbors)
+    {
+        (void)node;
+        if (adjacent.size() != 2)
+        {
+            throw std::runtime_error(
+                "FrontalDelaunay2D fixed-segment cavity is not a simple loop.");
+        }
+    }
+    if (!neighbors.contains(fixed.node0) || !neighbors.contains(fixed.node1))
+    {
+        throw std::runtime_error(
+            "FrontalDelaunay2D fixed-segment endpoint is missing from its cavity.");
+    }
+    for (const auto first : neighbors.at(fixed.node0))
+    {
+        Arr<unsigned> polygon{fixed.node0};
+        auto previous = fixed.node0;
+        auto current = first;
+        while (current != fixed.node1)
+        {
+            if (polygon.size() >= neighbors.size())
+            {
+                throw std::runtime_error(
+                    "FrontalDelaunay2D fixed-segment cavity traversal failed.");
+            }
+            polygon.push_back(current);
+            const auto& adjacent = neighbors.at(current);
+            const auto next = adjacent[0] == previous ? adjacent[1] : adjacent[0];
+            previous = current;
+            current = next;
+        }
+        polygon.push_back(fixed.node1);
+        const auto replacement = triangulate_cavity(std::move(polygon), nodes);
+        retained.insert(retained.end(), replacement.begin(), replacement.end());
+    }
+    triangles = std::move(retained);
+}
+
+/** @brief Restore the Delaunay criterion without flipping fixed segments. */
+void legalize_free_edges(Arr<Triangle>& triangles, const Arr<Vec3>& nodes,
+                        const std::set<Edge>& fixed_edges)
+{
+    // Only edges affected by segment recovery can need legalization. Rebuild
+    // adjacency after each flip to keep stale triangle references impossible.
+    const auto flip_limit = 16.0L * triangles.size() * triangles.size();
+    size_t flips = 0;
+    while (true)
+    {
+        std::map<Edge, Arr<size_t>> adjacency;
+        for (size_t t = 0; t < triangles.size(); ++t)
+        {
+            for (unsigned side = 0; side < 3; ++side)
+            {
+                adjacency[normalized_edge(triangles[t][side],
+                           triangles[t][(side + 1U) % 3U])].push_back(t);
+            }
+        }
+        bool flipped = false;
+        for (const auto& [edge, adjacent] : adjacency)
+        {
+            if (adjacent.size() != 2 || fixed_edges.contains(edge)) continue;
+            const auto& first = triangles[adjacent[0]];
+            const auto& second = triangles[adjacent[1]];
+            const auto opposite = [&](const Triangle& triangle)
+            {
+                for (const auto node : triangle)
+                {
+                    if (node != edge.node0 && node != edge.node1) return node;
+                }
+                throw std::runtime_error("FrontalDelaunay2D has a degenerate edge.");
+            };
+            const auto c = opposite(first);
+            const auto d = opposite(second);
+            if (!proper_segment_crossing(nodes[edge.node0], nodes[edge.node1],
+                                          nodes[c], nodes[d])
+                || !in_circumcircle(nodes[first[0]], nodes[first[1]],
+                                    nodes[first[2]], nodes[d])) continue;
+            Triangle replacement0{c, d, edge.node0};
+            Triangle replacement1{d, c, edge.node1};
+            for (auto* triangle : {&replacement0, &replacement1})
+            {
+                if (orient2d(nodes[(*triangle)[0]], nodes[(*triangle)[1]],
+                             nodes[(*triangle)[2]]) < 0.0L)
+                {
+                    std::swap((*triangle)[0], (*triangle)[1]);
+                }
+            }
+            triangles[adjacent[0]] = replacement0;
+            triangles[adjacent[1]] = replacement1;
+            flipped = true;
+            if (++flips > flip_limit)
+            {
+                throw std::runtime_error(
+                    "FrontalDelaunay2D fixed-edge legalization did not terminate.");
+            }
+            break;
+        }
+        if (!flipped) return;
+    }
+}
+
 } // namespace
 
 FrontalDelaunay2D::Result FrontalDelaunay2D::triangulate(
@@ -588,6 +853,168 @@ FrontalDelaunay2D::Result FrontalDelaunay2D::triangulate(
 
     result.triangles = delaunay_triangulate(result.nodes);
     verify_boundary_edges(result);
+    return result;
+}
+
+FrontalDelaunay2D::Result FrontalDelaunay2D::triangulate_annulus(
+    const Arr<Vec3>& outer_boundary,
+    const Arr<Vec3>& inner_boundary,
+    real_t target_edge_length,
+    const std::string& outer_name,
+    const std::string& inner_name)
+{
+    validate_target_length(target_edge_length);
+    validate_boundary_name(outer_name);
+    validate_boundary_name(inner_name);
+    const auto outer_area = validate_fixed_loop(outer_boundary);
+    const auto inner_area = validate_fixed_loop(inner_boundary);
+    for (const auto& point : inner_boundary)
+    {
+        for (size_t edge = 0; edge < outer_boundary.size(); ++edge)
+        {
+            if (!(orient2d(outer_boundary[edge],
+                           outer_boundary[(edge + 1) % outer_boundary.size()],
+                           point) > 0.0L))
+            {
+                throw std::invalid_argument(
+                    "FrontalDelaunay2D inner loop must lie strictly inside the outer loop.");
+            }
+        }
+    }
+    const auto twice_area = outer_area - inner_area;
+    const auto boundary_count = outer_boundary.size() + inner_boundary.size();
+    const auto estimated_nodes = static_cast<long double>(boundary_count)
+        + 16.0L * std::ceil(twice_area
+            / (static_cast<long double>(target_edge_length) * target_edge_length));
+    if (!std::isfinite(estimated_nodes)
+        || estimated_nodes > std::numeric_limits<unsigned>::max() - 3U)
+    {
+        throw std::overflow_error(
+            "FrontalDelaunay2D requested annular spacing exceeds its node ID range.");
+    }
+    const auto maximum_nodes = static_cast<size_t>(estimated_nodes);
+    Result result;
+    result.nodes.reserve(boundary_count);
+    result.boundary_edges.reserve(boundary_count);
+    for (const auto* loop : {&outer_boundary, &inner_boundary})
+    {
+        const auto offset = static_cast<unsigned>(result.nodes.size());
+        const auto count = static_cast<unsigned>(loop->size());
+        const bool inner = loop == &inner_boundary;
+        for (unsigned node = 0; node < count; ++node)
+        {
+            result.nodes.push_back({(*loop)[node].x, (*loop)[node].y, 0.0});
+            const auto a = offset + node;
+            const auto b = offset + (node + 1U) % count;
+            result.boundary_edges.push_back(
+                inner ? BoundaryEdge{b, a, inner_name}
+                      : BoundaryEdge{a, b, outer_name});
+        }
+    }
+
+    std::queue<unsigned> active_front;
+    const auto minimum_spacing_squared = std::pow(0.58 * target_edge_length, 2);
+    const auto try_insert = [&](const Vec3& candidate)
+    {
+        if (!finite_xy(candidate)
+            || !inside_convex_polygon(outer_boundary, candidate)
+            || inside_convex_polygon(inner_boundary, candidate)) return false;
+        // Interior points cannot subdivide a caller-owned interface segment.
+        // A small clearance also avoids sliver triangles along long segments.
+        for (const auto& edge : result.boundary_edges)
+        {
+            const auto& a = result.nodes[edge.node0];
+            const auto& b = result.nodes[edge.node1];
+            const auto dx = b.x - a.x;
+            const auto dy = b.y - a.y;
+            const auto length_squared = dx * dx + dy * dy;
+            const auto fraction = std::clamp(
+                ((candidate.x - a.x) * dx + (candidate.y - a.y) * dy)
+                / length_squared, 0.0, 1.0);
+            const Vec3 nearest{a.x + fraction * dx, a.y + fraction * dy, 0.0};
+            const auto clearance = 0.2 * std::min(
+                target_edge_length, std::sqrt(length_squared));
+            if (squared_distance(candidate, nearest) <= clearance * clearance)
+                return false;
+        }
+        for (const auto& node : result.nodes)
+        {
+            if (squared_distance(candidate, node) < minimum_spacing_squared)
+                return false;
+        }
+        if (result.nodes.size() >= maximum_nodes)
+        {
+            throw std::runtime_error(
+                "FrontalDelaunay2D annular front exceeded its point-placement bound.");
+        }
+        result.nodes.push_back(candidate);
+        active_front.push(static_cast<unsigned>(result.nodes.size() - 1));
+        return true;
+    };
+    for (const auto& edge : result.boundary_edges)
+    {
+        // Copy coordinates: accepting this point may reallocate result.nodes.
+        const auto a = result.nodes[edge.node0];
+        const auto b = result.nodes[edge.node1];
+        const auto dx = b.x - a.x;
+        const auto dy = b.y - a.y;
+        const auto length = std::hypot(dx, dy);
+        const auto offset = std::max(0.5 * std::sqrt(3.0) * length,
+                                     0.65 * target_edge_length);
+        try_insert({0.5 * (a.x + b.x) - offset * dy / length,
+                    0.5 * (a.y + b.y) + offset * dx / length, 0.0});
+    }
+    while (!active_front.empty())
+    {
+        const auto point = result.nodes[active_front.front()];
+        active_front.pop();
+        for (unsigned direction = 0; direction < 6; ++direction)
+        {
+            const auto angle = std::numbers::pi_v<real_t> * direction / 3.0;
+            try_insert({point.x + target_edge_length * std::cos(angle),
+                        point.y + target_edge_length * std::sin(angle), 0.0});
+        }
+    }
+
+    result.triangles = delaunay_triangulate(result.nodes);
+    std::set<Edge> fixed_edges;
+    for (const auto& boundary : result.boundary_edges)
+    {
+        const auto edge = normalized_edge(boundary.node0, boundary.node1);
+        recover_fixed_edge(result.triangles, result.nodes, edge);
+        fixed_edges.insert(edge);
+    }
+    std::erase_if(result.triangles, [&](const Triangle& triangle)
+    {
+        const auto& a = result.nodes[triangle[0]];
+        const auto& b = result.nodes[triangle[1]];
+        const auto& c = result.nodes[triangle[2]];
+        return inside_convex_polygon(inner_boundary,
+            {(a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0, 0.0});
+    });
+    legalize_free_edges(result.triangles, result.nodes, fixed_edges);
+    verify_boundary_edges(result);
+    long double triangle_area = 0.0L;
+    for (const auto& triangle : result.triangles)
+    {
+        const auto area = orient2d(result.nodes[triangle[0]],
+                                   result.nodes[triangle[1]],
+                                   result.nodes[triangle[2]]);
+        if (!(area > 0.0L))
+        {
+            throw std::runtime_error(
+                "FrontalDelaunay2D annular triangle has non-positive area.");
+        }
+        triangle_area += area;
+    }
+    const auto area_tolerance = 4096.0L * std::numeric_limits<real_t>::epsilon()
+                            * twice_area;
+    if (std::abs(triangle_area - twice_area) > area_tolerance
+        || result.triangles.size() != 2U * result.nodes.size() - boundary_count)
+    {
+        throw std::runtime_error(
+            "FrontalDelaunay2D annular triangulation does not cover its polygon domain.");
+    }
     return result;
 }
 
