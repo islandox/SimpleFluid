@@ -29,10 +29,10 @@ simplefluid_add_abi_tests()
 # Preserve the original target as an umbrella for downstream users.
 add_library(SimpleFluid INTERFACE)
 add_library(SimpleFluid::SimpleFluid ALIAS SimpleFluid)
-target_link_libraries(SimpleFluid INTERFACE SimpleFluidSolvers)
+add_subdirectory(materials)
+target_link_libraries(SimpleFluid INTERFACE SimpleFluidSolvers SimpleFluidMaterials)
 
 if(SIMPLEFLUID_ENABLE_IF97)
-    add_subdirectory(materials)
     target_link_libraries(SimpleFluid INTERFACE SimpleFluidIF97)
 endif()
 
@@ -63,9 +63,7 @@ if(BUILD_TESTING)
     add_subdirectory(equations/unitTests)
     add_subdirectory(solvers/unitTests)
     add_subdirectory(io/unitTests)
-    if(SIMPLEFLUID_ENABLE_IF97)
-        add_subdirectory(materials/unitTests)
-    endif()
+    add_subdirectory(materials/unitTests)
 endif()
 
 if(SIMPLEFLUID_BUILD_BENCHMARKS)

@@ -1,3 +1,13 @@
+# The provider ABI and validating C++ consumer have no optional dependency.
+add_library(SimpleFluidMaterials INTERFACE)
+add_library(SimpleFluid::Materials ALIAS SimpleFluidMaterials)
+target_include_directories(SimpleFluidMaterials INTERFACE "${PROJECT_SOURCE_DIR}/src")
+target_compile_features(SimpleFluidMaterials INTERFACE cxx_std_20)
+
+if(NOT SIMPLEFLUID_ENABLE_IF97)
+    return()
+endif()
+
 # The upstream dependency is private to one translation unit. Existing builds
 # neither search for nor download IF97 unless SIMPLEFLUID_ENABLE_IF97 is ON.
 find_path(SIMPLEFLUID_IF97_INCLUDE_DIR NAMES IF97.h PATH_SUFFIXES IF97
