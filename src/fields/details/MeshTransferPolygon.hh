@@ -52,8 +52,12 @@ inline bool convex_polygon(std::span<const PolygonPoint> polygon)
         const auto a = wide(polygon[i]), b = wide(polygon[(i + 1) % polygon.size()]);
         const WidePoint edge{b[0] - a[0], b[1] - a[1]};
         if (!(dot(edge, edge) > 0)) return false;
-        for (const auto vertex : polygon)
+        for (size_t j = 0; j < polygon.size(); ++j)
         {
+            // The edge's endpoints are on its supporting line by construction.
+            // Fused multiply-subtract can round cross(edge, edge) below zero.
+            if (j == i || j == (i + 1) % polygon.size()) continue;
+            const auto vertex = polygon[j];
             const WidePoint displacement{static_cast<long double>(vertex[0]) - a[0],
                                          static_cast<long double>(vertex[1]) - a[1]};
             if (cross(edge, displacement) < 0) return false;
