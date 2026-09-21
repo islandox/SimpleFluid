@@ -37,6 +37,13 @@ IncompressibleMomentumEquation<Pack, MeshType>::IncompressibleMomentumEquation(
 
 /** Refresh geometry-dependent transport data after fixed-topology motion. */
 template<TpetraTypePack Pack, class MeshType>
+void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry()
+{
+    refresh_geometry({});
+}
+
+/** Refresh transport data using an optional shared geometry snapshot. */
+template<TpetraTypePack Pack, class MeshType>
 void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {

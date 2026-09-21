@@ -190,8 +190,10 @@ public:
     /** @brief Throw if this cache was built for another mesh instance. */
     void require_mesh(const MeshType& mesh) const;
 
+    /** Refresh once per epoch, retaining the compiled no-argument entry point. */
+    void refresh();
     /** Refresh once per epoch, or adopt a validated snapshot of the same mesh. */
-    void refresh(shared_geometry_type geometry = {});
+    void refresh(shared_geometry_type geometry);
     const shared_geometry_type& shared_geometry() const noexcept { return d_geometry; }
 
     /** @brief Geometry epoch represented by this cache. */

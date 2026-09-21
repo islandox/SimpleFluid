@@ -34,6 +34,13 @@ template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(con
         throw std::invalid_argument("transport geometry cache is stale for the mesh geometry epoch.");
 }
 
+/** Refresh without a caller-supplied geometry snapshot. */
+template<class MeshType>
+void TransportGeometryCache<MeshType>::refresh()
+{
+    refresh({});
+}
+
 template<class MeshType>
 void TransportGeometryCache<MeshType>::refresh(shared_geometry_type geometry)
 {
