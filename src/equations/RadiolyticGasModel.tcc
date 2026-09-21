@@ -3155,6 +3155,14 @@ void RadiolyticGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
     refresh_geometry();
 }
 
+/** Refresh reconstruction geometry without a caller-supplied snapshot. */
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::refresh_geometry()
+{
+    refresh_geometry({});
+}
+
+/** Refresh transport state using an optional shared geometry snapshot. */
 template<TpetraTypePack Pack, class MeshType>
 void RadiolyticGasModel<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)

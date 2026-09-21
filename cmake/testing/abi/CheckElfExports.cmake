@@ -424,9 +424,19 @@ foreach(simplefluid_exact_mesh_specialization_pattern
     # Geometry refresh, continuity-target projection/assembly, and fixed-flux
     # control are public for both explicit mesh specializations.
     foreach(simplefluid_geometry_equation
-            IN ITEMS IncompressibleMomentumEquation PressureProjectionEquation TemperatureDiffusionEquation)
+            IN ITEMS IncompressibleMomentumEquation PressureProjectionEquation TemperatureDiffusionEquation
+                     RadiolyticGasModel ScalarVoidFractionModel)
         simplefluid_require_exact_api(
             "^SimpleFluid::${simplefluid_geometry_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::refresh_geometry[(][)]$"
+            1)
+    endforeach()
+    # Shared-cache overloads must coexist with the no-argument entry points.
+    # A default argument preserves call syntax, but replaces the exported symbol.
+    foreach(simplefluid_geometry_equation
+            IN ITEMS IncompressibleMomentumEquation TemperatureDiffusionEquation
+                     RadiolyticGasModel ScalarVoidFractionModel)
+        simplefluid_require_exact_api(
+            "^SimpleFluid::${simplefluid_geometry_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::refresh_geometry[(].*shared_ptr<SimpleFluid::FVM::TransportGeometryCache<${simplefluid_exact_mesh_specialization_pattern}[ ]*::SharedGeometry const>[)]$"
             1)
     endforeach()
     simplefluid_require_exact_api(

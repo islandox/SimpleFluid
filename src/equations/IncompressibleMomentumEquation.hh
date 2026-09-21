@@ -79,7 +79,10 @@ public:
      * but no matrix values or preconditioner prepared for an older geometry
      * epoch survive this call.
      */
-    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry = {});
+    void refresh_geometry();
+
+    /** Refresh using an optional validated geometry snapshot of this mesh. */
+    void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry);
 
     /** Protect a coupled generation across subsequent equation assemblies. */
     void protect_numeric_generation(const std::shared_ptr<FVM::NumericAssemblyLease>& lease) const
