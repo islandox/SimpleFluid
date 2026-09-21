@@ -26,8 +26,9 @@ namespace SimpleFluid::Meshes
  * boundary at approximately the requested edge length, after which a
  * Bowyer-Watson Delaunay triangulation supplies the connectivity.  The
  * polygon overload currently accepts convex, counter-clockwise boundaries;
- * the disk overload additionally accepts prescribed radial fronts so a
- * cylinder can retain radial boundary-layer spacing.
+ * the annular overload preserves two supplied polygon loops for conforming
+ * boundary-layer attachment. The disk overload additionally accepts
+ * prescribed radial fronts so a cylinder can retain radial layer spacing.
  */
 class FrontalDelaunay2D
 {
@@ -70,6 +71,33 @@ public:
         const Arr<Vec3>& boundary,
         real_t target_edge_length,
         const std::string& boundary_name = "side");
+
+    /**
+     * @brief Mesh the region between two fixed convex polygon loops.
+     *
+     * Both loops must be strictly convex, counter-clockwise, and supplied
+     * without repeating their first vertex.  The inner loop must lie strictly
+     * inside the outer loop.  No boundary point is moved or added: this permits
+     * one-to-one attachment to quadrilateral boundary layers.  Output nodes
+     * begin with the outer loop, followed by the inner loop, followed by the
+     * advancing-front interior points.  Their Z coordinates are zero.
+     *
+     * Bowyer-Watson triangulation, fixed-segment recovery, and unconstrained
+     * edge legalization produce a constrained Delaunay triangulation.  Boundary
+     * segments are oriented with the domain on their left: outer CCW, inner CW.
+     * The requested spacing controls interior point placement; the supplied
+     * boundary segment lengths remain unchanged.
+     *
+     * @throws std::invalid_argument If loops, spacing, or names are invalid.
+     * @throws std::overflow_error If generated node IDs exceed their type.
+     * @throws std::runtime_error If triangulation invariants cannot be satisfied.
+     */
+    static Result triangulate_annulus(
+        const Arr<Vec3>& outer_boundary,
+        const Arr<Vec3>& inner_boundary,
+        real_t target_edge_length,
+        const std::string& outer_name = "outer",
+        const std::string& inner_name = "inner");
 
     /**
      * @brief Mesh a disk using circular fronts at prescribed radii.
