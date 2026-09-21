@@ -20,6 +20,8 @@
 
 #include <array>
 #include <limits>
+#include <utility>
+#include <vector>
 
 namespace SimpleFluid::detail
 {
@@ -58,6 +60,15 @@ struct BelosLinearSolverTestAccess
         return solver.d_preconditioner;
     }
 
+    static bool has_original_problem_vectors(const BelosLinearSolver<Pack>& solver,
+        const typename Pack::multi_vector_type& rhs, const typename Pack::multi_vector_type& solution)
+    {
+        return solver.d_problem->getLHS().get() == &solution
+            && solver.d_problem->getRHS().get() == &rhs
+            && solver.d_problem->getInitResVec().get() == solver.d_residual_workspace.get()
+            && solver.d_problem->getInitPrecResVec().get() == solver.d_residual_workspace.get();
+    }
+
     static real_t true_relative_residual(
         const BelosLinearSolver<Pack>& solver,
         const Teuchos::RCP<const typename Pack::operator_type>& matrix,
@@ -67,6 +78,19 @@ struct BelosLinearSolverTestAccess
     {
         return solver.true_relative_residual(
             matrix, rhs, solution, residual_scaling);
+    }
+
+    static real_t accurate_relative_residual(
+        const BelosLinearSolver<Pack>& solver,
+        const Teuchos::RCP<const typename Pack::operator_type>& matrix,
+        const typename Pack::multi_vector_type& rhs,
+        const typename Pack::multi_vector_type& solution,
+        LinearResidualScaling residual_scaling = {},
+        real_t* maximum_rhs_norm = nullptr)
+    {
+        if (!solver.accurate_crs_residual(matrix, rhs, solution))
+            throw std::logic_error("Accurate residual fixture requires a supported CRS operator.");
+        return solver.residual_relative_norm(rhs, residual_scaling, maximum_rhs_norm);
     }
 };
 
@@ -183,6 +207,8 @@ struct ResidualGap
     double relative_error;
     int remaining_injections = 1;
     int solve_calls = 0;
+    std::vector<double> rhs_norms{};
+    int throw_on_call = 0;
 };
 
 /**
@@ -237,6 +263,68 @@ void inject_residual_gap(
             Pack::scalar_type, Pack::multi_vector_type, Pack::operator_type>;
         Access::replace_solver<ResidualGapSolver<Manager>>(solver, gap);
     }
+}
+
+/** @brief Reproduce GMRES LOA after a real Krylov solve, without relying on roundoff. */
+class GmresResidualGapSolver final : public Belos::PseudoBlockGmresSolMgr<
+    Pack::scalar_type, Pack::multi_vector_type, Pack::operator_type>
+{
+    using Manager = Belos::PseudoBlockGmresSolMgr<
+        Pack::scalar_type, Pack::multi_vector_type, Pack::operator_type>;
+public:
+    GmresResidualGapSolver(
+        const Teuchos::RCP<SimpleFluid::BelosLinearSolver<Pack>::problem_type>& problem,
+        const Teuchos::RCP<Teuchos::ParameterList>& parameters,
+        ResidualGap& gap, bool report_unconverged, bool report_loa)
+        : Manager(problem, parameters), d_gap(gap),
+          d_report_unconverged(report_unconverged), d_report_loa(report_loa) {}
+
+    Belos::ReturnType solve() override
+    {
+        d_injected = false;
+        Teuchos::Array<double> norms(this->getProblem().getRHS()->getNumVectors());
+        this->getProblem().getRHS()->norm2(norms());
+        d_gap.rhs_norms.push_back(*std::max_element(norms.begin(), norms.end()));
+        if (d_gap.throw_on_call == d_gap.solve_calls + 1)
+            throw std::runtime_error("Injected GMRES correction failure");
+        const auto status = Manager::solve();
+        ++d_gap.solve_calls;
+        if (status == Belos::Converged && d_gap.remaining_injections > 0)
+        {
+            --d_gap.remaining_injections;
+            if (d_reference_solution.is_null())
+            {
+                const auto solution = this->getProblem().getLHS();
+                d_reference_solution = Teuchos::rcp(new Pack::multi_vector_type(
+                    solution->getMap(), solution->getNumVectors()));
+                d_reference_solution->update(1.0, *solution, 0.0);
+            }
+            // Keep the injected absolute error tied to the original problem.
+            // Scaling a tiny correction itself would no longer model a
+            // persistent gap in the final original-system residual.
+            this->getProblem().getLHS()->update(-d_gap.relative_error, *d_reference_solution, 1.0);
+            d_injected = true;
+            return d_report_unconverged ? Belos::Unconverged : status;
+        }
+        return status;
+    }
+
+    bool isLOADetected() const override
+    {
+        return d_injected ? d_report_loa : Manager::isLOADetected();
+    }
+
+private:
+    ResidualGap& d_gap;
+    bool d_report_unconverged, d_report_loa, d_injected = false;
+    Teuchos::RCP<Pack::multi_vector_type> d_reference_solution;
+};
+
+void inject_gmres_residual_gap(SimpleFluid::BelosLinearSolver<Pack>& solver,
+                               ResidualGap& gap, bool unconverged = true, bool loa = true)
+{
+    using Access = SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+    Access::replace_solver<GmresResidualGapSolver>(solver, gap, unconverged, loa);
 }
 
 } // namespace
@@ -690,6 +778,100 @@ TEST(BelosLinearSolverTest, UsesReferenceNormFloorForTinyRhs)
     EXPECT_NEAR(scaled, 0.5 * relative, 1.0e-15);
 }
 
+TEST(BelosLinearSolverTest, AccurateStoredCrsResidualPreservesCancellationAndOriginalScaling)
+{
+    // The exact product of the stored coefficients is 1, including the
+    // middle coefficient lost by an ordinary left-to-right double sum.
+    const auto matrix = block_matrix<3>({{
+        {{1.0e16, 1.0, -1.0e16}}, {{0.0, 1.0, 0.0}}, {{0.0, 0.0, 1.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::multi_vector_type rhs(map, 2, true), solution(map, 2, true);
+    for (std::size_t column = 0; column < 2; ++column)
+    {
+        const double scale = static_cast<double>(column + 1);
+        auto x = solution.getDataNonConst(column);
+        auto b = rhs.getDataNonConst(column);
+        std::fill(x.begin(), x.end(), scale);
+        std::fill(b.begin(), b.end(), scale);
+    }
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    using Access = SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+    EXPECT_DOUBLE_EQ(Access::accurate_relative_residual(solver, matrix, rhs, solution), 0.0);
+
+    for (std::size_t column = 0; column < 2; ++column)
+    {
+        auto b = rhs.getDataNonConst(column);
+        b[0] = 2.0 * static_cast<double>(column + 1);
+    }
+    // Per rank residuals are [1,0,0] and [2,0,0]; both RHS-relative
+    // residuals equal 1/sqrt(6), independent of MPI rank count.
+    double maximum_rhs_norm = 0.0;
+    const double expected_rhs_norm = 2.0 * std::sqrt(6.0 * map->getComm()->getSize());
+    EXPECT_NEAR(Access::accurate_relative_residual(
+        solver, matrix, rhs, solution, {}, &maximum_rhs_norm), 1.0 / std::sqrt(6.0), 2.0e-15);
+    EXPECT_NEAR(maximum_rhs_norm, expected_rhs_norm, 2.0e-14);
+
+    SimpleFluid::LinearResidualScaling scaling;
+    scaling.rhs_norm_floor = 2.0 * expected_rhs_norm;
+    EXPECT_NEAR(Access::accurate_relative_residual(
+        solver, matrix, rhs, solution, scaling), 0.5 / std::sqrt(6.0), 2.0e-15);
+
+    // Reusing scratch storage must not retain the preceding nonzero residual.
+    for (std::size_t column = 0; column < 2; ++column)
+    {
+        auto b = rhs.getDataNonConst(column);
+        b[0] = static_cast<double>(column + 1);
+    }
+    EXPECT_DOUBLE_EQ(Access::accurate_relative_residual(solver, matrix, rhs, solution), 0.0);
+}
+
+TEST(BelosLinearSolverTest, AccurateStoredCrsResidualImportsAndRefreshesRemoteColumnValues)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto map = Teuchos::rcp(new Pack::map_type(
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), 3, 0, comm));
+    auto matrix = Teuchos::rcp(new Pack::matrix_type(map, 3));
+    const int next_rank = (comm->getRank() + 1) % comm->getSize();
+    const auto next_begin = static_cast<Pack::global_ordinal_type>(3 * next_rank);
+    const Teuchos::Array<Pack::global_ordinal_type> remote_columns{
+        next_begin, next_begin + 1, next_begin + 2};
+    const Teuchos::Array<double> cancellation_values{1.0e16, 1.0, -1.0e16};
+    matrix->insertGlobalValues(map->getGlobalElement(0), remote_columns(), cancellation_values());
+    for (const Pack::local_ordinal_type row : {1, 2})
+    {
+        const Teuchos::Array<Pack::global_ordinal_type> column{map->getGlobalElement(row)};
+        const Teuchos::Array<double> value{1.0};
+        matrix->insertGlobalValues(map->getGlobalElement(row), column(), value());
+    }
+    matrix->fillComplete();
+    if (comm->getSize() > 1)
+        ASSERT_GT(matrix->getColMap()->getLocalNumElements(), map->getLocalNumElements());
+
+    Pack::vector_type rhs(map, true), solution(map, true);
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    using Access = SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+    for (const double offset : {0.0, 4.0})
+    {
+        SCOPED_TRACE(offset);
+        {
+            auto x = solution.getDataNonConst(0);
+            x[0] = x[2] = 1.0 + comm->getRank() + offset;
+            x[1] = 2.0 + comm->getRank() + offset;
+            auto b = rhs.getDataNonConst(0);
+            b[0] = 2.0 + next_rank + offset;
+            b[1] = x[1];
+            b[2] = x[2];
+        }
+        EXPECT_DOUBLE_EQ(Access::accurate_relative_residual(solver, matrix, rhs, solution), 0.0);
+        {
+            auto b = rhs.getDataNonConst(0);
+            b[0] += 1.0;
+        }
+        const double expected = std::sqrt(static_cast<double>(comm->getSize())) / rhs.norm2();
+        EXPECT_NEAR(Access::accurate_relative_residual(solver, matrix, rhs, solution), expected, 2.0e-15);
+    }
+}
+
 /** @brief Near-threshold recurrence drift is corrected at the original norm. */
 TEST(BelosLinearSolverTest, RefinesNearThresholdTrueResidual)
 {
@@ -822,6 +1004,143 @@ TEST(BelosLinearSolverTest, DoesNotRefineInvalidOrLargeResidualGap)
             EXPECT_GT(statistics.achieved_tolerance, options.tolerance);
         }
     }
+}
+
+TEST(BelosLinearSolverTest, RefinesGmresLossOfAccuracyAgainstOriginalTrueResidualGate)
+{
+    const auto matrix = block_matrix<3>({{
+        {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}, {{0.0, 0.0, 1.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1e-15);
+    for (const bool loa : {false, true})
+        for (const double norm_multiplier : {1.0, 2.0})
+        {
+            SCOPED_TRACE(loa);
+            SCOPED_TRACE(norm_multiplier);
+            SimpleFluid::LinearSolverOptions options;
+            options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+            options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
+            options.reuse_preconditioner = true;
+            options.tolerance = 1e-14;
+            options.max_iterations = 8;
+            SimpleFluid::LinearResidualScaling scaling{norm_multiplier * rhs.norm2()};
+            SimpleFluid::BelosLinearSolver<Pack> solver;
+            ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options, scaling).converged);
+            const auto preconditioner =
+                SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::preconditioner(solver);
+            // Exceeds the old 2x eligibility bound. Exercise both a reported
+            // convergence gap and an Unconverged result specifically due to LOA.
+            ResidualGap gap{norm_multiplier * 2.705 * options.tolerance};
+            inject_gmres_residual_gap(solver, gap, loa, loa);
+            const auto statistics = solver.solve_from_zero_with_statistics(
+                matrix, rhs, solution, options, scaling);
+            EXPECT_TRUE(statistics.converged);
+            EXPECT_EQ(gap.solve_calls, 2);
+            EXPECT_EQ(statistics.iterations, 2);
+            EXPECT_LE(statistics.iterations, options.max_iterations);
+            ASSERT_EQ(gap.rhs_norms.size(), 2U);
+            EXPECT_DOUBLE_EQ(gap.rhs_norms[0], rhs.norm2());
+            EXPECT_GT(gap.rhs_norms[1], options.tolerance * scaling.rhs_norm_floor);
+            EXPECT_LT(gap.rhs_norms[1], 8 * options.tolerance * scaling.rhs_norm_floor);
+            EXPECT_LE(statistics.achieved_tolerance, options.tolerance);
+            EXPECT_DOUBLE_EQ(statistics.achieved_tolerance,
+                true_relative_residual(solver, matrix, rhs, solution, scaling));
+            EXPECT_DOUBLE_EQ(statistics.rhs_norm, rhs.norm2());
+            EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+            EXPECT_EQ(SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::preconditioner(solver).get(),
+                      preconditioner.get());
+            EXPECT_TRUE(SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::has_original_problem_vectors(
+                solver, rhs, solution));
+            // The caller's normal parameters and RHS remain usable after the
+            // stricter internal restart target and injected LOA have cleared.
+            const auto next = solver.solve_from_zero_with_statistics(matrix, rhs, solution, options, scaling);
+            EXPECT_TRUE(next.converged);
+            EXPECT_EQ(next.iterations, 1);
+            EXPECT_LE(next.achieved_tolerance, options.tolerance);
+            EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+        }
+}
+
+TEST(BelosLinearSolverTest, GmresLossOfAccuracyRefinementKeepsIterationAndRestartBounds)
+{
+    const auto matrix = block_matrix<3>({{
+        {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}, {{0.0, 0.0, 1.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1.0);
+    for (const int budget : {1, 2, 8})
+    {
+        SCOPED_TRACE(budget);
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        // Keep every deliberately persistent injection above roundoff;
+        // this case tests the total iteration and four-correction bounds.
+        options.tolerance = 1e-11;
+        options.max_iterations = budget;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
+        ResidualGap gap{2.705 * options.tolerance, 100};
+        inject_gmres_residual_gap(solver, gap);
+        const auto statistics = solver.solve_from_zero_with_statistics(matrix, rhs, solution, options);
+        EXPECT_FALSE(statistics.converged);
+        EXPECT_GT(statistics.achieved_tolerance, options.tolerance);
+        EXPECT_EQ(gap.solve_calls, std::min(budget, 5));
+        EXPECT_EQ(statistics.iterations, gap.solve_calls);
+        EXPECT_LE(statistics.iterations, options.max_iterations);
+        EXPECT_DOUBLE_EQ(statistics.achieved_tolerance,
+            true_relative_residual(solver, matrix, rhs, solution));
+    }
+}
+
+TEST(BelosLinearSolverTest, GmresDoesNotRetryOrdinaryFailureLargeGapOrNonfiniteResidual)
+{
+    const auto matrix = block_matrix<3>({{
+        {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}, {{0.0, 0.0, 1.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1.0);
+    for (const auto [factor, loa] : std::array<std::pair<double, bool>, 3>{{
+             {2.705, false}, {1.0e12, true}, {std::numeric_limits<double>::quiet_NaN(), true}}})
+    {
+        SCOPED_TRACE(factor);
+        SCOPED_TRACE(loa);
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+        options.tolerance = 1e-14;
+        options.max_iterations = 8;
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
+        ResidualGap gap{factor * options.tolerance};
+        inject_gmres_residual_gap(solver, gap, true, loa);
+        const auto statistics = solver.solve_from_zero_with_statistics(matrix, rhs, solution, options);
+        EXPECT_FALSE(statistics.converged);
+        EXPECT_EQ(gap.solve_calls, 1);
+        EXPECT_EQ(statistics.iterations, 1);
+        EXPECT_GT(statistics.achieved_tolerance, options.tolerance);
+    }
+}
+
+TEST(BelosLinearSolverTest, GmresDefectCorrectionRestoresOriginalVectorsAfterException)
+{
+    const auto matrix = block_matrix<3>({{
+        {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}, {{0.0, 0.0, 1.0}}}});
+    const auto map = matrix->getRowMap();
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    options.tolerance = 1e-14;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
+    ResidualGap gap{2.705 * options.tolerance};
+    gap.throw_on_call = 2;
+    inject_gmres_residual_gap(solver, gap);
+    EXPECT_THROW((void)solver.solve_from_zero_with_statistics(matrix, rhs, solution, options), std::runtime_error);
+    EXPECT_TRUE(SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>::has_original_problem_vectors(
+        solver, rhs, solution));
+    gap.throw_on_call = 0;
+    EXPECT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
 }
 
 /** @brief Invalid explicit-residual norm floors are rejected before solving. */

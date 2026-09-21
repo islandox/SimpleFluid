@@ -24,11 +24,13 @@
 #include <Ifpack2_Preconditioner.hpp>
 #include <MueLu_CreateTpetraPreconditioner.hpp>
 #include <Teuchos_Array.hpp>
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_ParameterList.hpp>
 #include <Teuchos_RCP.hpp>
 #include <Teuchos_ScalarTraits.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <iostream>
@@ -38,6 +40,7 @@
 #include <string>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 namespace SimpleFluid
@@ -493,40 +496,129 @@ private:
         auto return_status = d_solver->solve();
         int iterations = d_solver->getNumIters();
         real_t rhs_norm{};
-        auto achieved_tolerance = true_relative_residual(
-            matrix, rhs, solution, residual_scaling, &rhs_norm);
+        bool accurate_residual = false;
+        // The ceiling identifies a floating-point residual gap, not an
+        // acceptance tolerance. Dense pressure systems can exceed a small
+        // multiple of a 1e-14 target while remaining near roundoff.
+        const auto gmres_gap_ceiling = std::max(real_t{8} * options.tolerance,
+            static_cast<real_t>(std::sqrt(std::numeric_limits<magnitude_type>::epsilon())));
+        const auto checked_residual = [&] {
+            if (accurate_residual && accurate_crs_residual(matrix, rhs, solution))
+                return residual_relative_norm(rhs, residual_scaling, &rhs_norm);
+            const auto standard = true_relative_residual(matrix, rhs, solution, residual_scaling, &rhs_norm);
+            if (options.backend == LinearSolverBackend::Gmres
+                && std::isfinite(standard) && standard > options.tolerance
+                && standard <= gmres_gap_ceiling && accurate_crs_residual(matrix, rhs, solution))
+            {
+                accurate_residual = true; // use the same operator evaluation for later defects/checks
+                const auto checked = residual_relative_norm(rhs, residual_scaling, &rhs_norm);
+                if (!d_reported_accurate_residual)
+                {
+                    if (rhs.getMap()->getComm()->getRank() == 0 && (options.verbosity & Belos::Warnings))
+                    {
+                        std::ostringstream message;
+                        message.precision(std::numeric_limits<real_t>::max_digits10);
+                        message << "BelosLinearSolver CRS residual precision check: standard=" << standard
+                                << " compensated=" << checked << " tolerance=" << options.tolerance << '\n';
+                        std::cerr << message.str();
+                    }
+                    d_reported_accurate_residual = true;
+                }
+                return checked;
+            }
+            return standard;
+        };
+        auto achieved_tolerance = checked_residual();
 
-        // CG and BiCGStab stop on a recurrence residual, which can drift just
-        // below the requested tolerance while b - A*x is still just above it.
-        // Restart from that recomputed residual with a stricter internal target.
+        // Recurrence residuals can pass while b - A*x is still just above the
+        // requested tolerance. GMRES may instead report loss of accuracy (LOA)
+        // and stop early with the same small residual gap. CG/BiCGStab restart
+        // from the recomputed residual; GMRES solves a zero-start defect
+        // correction so its explicit check does not subtract the full A*x
+        // inside every Krylov convergence test. The gap bounds select eligible
+        // retries only; final acceptance remains <= tolerance.
+        // An ordinary unconverged solve without LOA is never retried here.
         // Keep both the original iteration budget and a separate restart cap:
         // a zero-iteration or stagnating retry must still terminate. The
         // preconditioner and original RHS scaling remain unchanged.
         auto refinement_options = options;
-        constexpr int maximum_refinements = 2;
+        const int maximum_refinements = options.backend == LinearSolverBackend::Gmres ? 4 : 2;
+        std::array<real_t, 5> refinement_residuals{achieved_tolerance};
+        size_t refinement_count = 1;
         for (int refinement = 0;
              refinement < maximum_refinements
-                 && options.backend != LinearSolverBackend::Gmres
-                 && return_status == Belos::Converged
+                 && (return_status == Belos::Converged
+                     || (options.backend == LinearSolverBackend::Gmres
+                         && d_solver->isLOADetected()))
                  && std::isfinite(achieved_tolerance)
                  && achieved_tolerance > options.tolerance
-                 && achieved_tolerance / options.tolerance <= real_t{2}
+                 && (options.backend == LinearSolverBackend::Gmres
+                     ? achieved_tolerance <= gmres_gap_ceiling
+                     : achieved_tolerance / options.tolerance <= real_t{2})
                  && iterations < options.max_iterations;
              ++refinement)
         {
             refinement_options.max_iterations =
                 options.max_iterations - iterations;
-            refinement_options.tolerance *= real_t{0.1};
-            if (refinement_options.tolerance <= real_t{})
-                break;
-            configure(refinement_options);
-            d_solver->setParameters(d_parameters);
-            if (!set_problem_with_prepared_residual())
-                break;
-            return_status = d_solver->solve();
-            iterations += d_solver->getNumIters();
-            achieved_tolerance = true_relative_residual(
-                matrix, rhs, solution, residual_scaling, &rhs_norm);
+            if (options.backend == LinearSolverBackend::Gmres)
+            {
+                auto defect = Teuchos::rcp(new multi_vector_type(rhs.getMap(), rhs.getNumVectors()));
+                defect->update(scalar_type{1}, residual_workspace(rhs), scalar_type{});
+                auto correction = Teuchos::rcp(new multi_vector_type(solution.getMap(), solution.getNumVectors()));
+                correction->putScalar(scalar_type{});
+                // This target is relative to the defect RHS, not the original
+                // RHS. It requests at most half the original absolute target
+                // for every column; only the original final residual accepts.
+                refinement_options.tolerance = std::min(real_t{0.1},
+                    real_t{0.5} / (achieved_tolerance / options.tolerance));
+                const auto restore_original_vectors = [&] {
+                    d_problem->setLHS(x);
+                    d_problem->setRHS(b);
+                    d_problem->setInitResVec(d_residual_workspace);
+                    d_problem->setInitPrecResVec(Teuchos::null);
+                    // Clear any current-system views of the correction and
+                    // defect, including if a manager threw before setCurrLS.
+                    // The prepared original residual avoids another SpMV.
+                    (void)d_problem->setProblem();
+                };
+                try
+                {
+                    configure(refinement_options);
+                    d_solver->setParameters(d_parameters);
+                    d_problem->setLHS(correction);
+                    d_problem->setRHS(defect);
+                    d_problem->setInitResVec(defect); // zero-start residual is exactly r
+                    d_problem->setInitPrecResVec(Teuchos::null);
+                    if (!d_problem->setProblem())
+                    {
+                        restore_original_vectors();
+                        break;
+                    }
+                    return_status = d_solver->solve();
+                    iterations += d_solver->getNumIters();
+                }
+                catch (...)
+                {
+                    restore_original_vectors();
+                    throw;
+                }
+                restore_original_vectors();
+                solution.update(scalar_type{1}, *correction, scalar_type{1});
+            }
+            else
+            {
+                refinement_options.tolerance *= real_t{0.1};
+                if (refinement_options.tolerance <= real_t{})
+                    break;
+                configure(refinement_options);
+                d_solver->setParameters(d_parameters);
+                if (!set_problem_with_prepared_residual())
+                    break;
+                return_status = d_solver->solve();
+                iterations += d_solver->getNumIters();
+            }
+            achieved_tolerance = checked_residual();
+            refinement_residuals[refinement_count++] = achieved_tolerance;
         }
 
         const bool converged = std::isfinite(achieved_tolerance)
@@ -534,6 +626,15 @@ private:
         // Belos::Errors is zero and denotes diagnostics that are always printed.
         if (!converged)
         {
+            if (options.backend == LinearSolverBackend::Gmres && refinement_count > 1
+                && rhs.getMap()->getComm()->getRank() == 0 && (options.verbosity & Belos::Warnings))
+            {
+                std::ostringstream message;
+                message.precision(std::numeric_limits<real_t>::max_digits10);
+                message << "GMRES defect residuals at original RHS scaling:";
+                for (size_t i = 0; i < refinement_count; ++i) message << ' ' << refinement_residuals[i];
+                std::cerr << message.str() << '\n';
+            }
             report_failed_solve(
                 rhs, options, residual_scaling, return_status, iterations);
         }
@@ -917,6 +1018,67 @@ private:
             preconditioner);
     }
 
+    /** @brief Recompute the stored real CRS operator with extended accumulation.
+     * This does not replace the diagonal, reconstruct fluxes, or change scaling.
+     * Other operators/map layouts retain their existing apply-based residual.
+     */
+    bool accurate_crs_residual(const Teuchos::RCP<const operator_type>& matrix,
+        const multi_vector_type& rhs, const multi_vector_type& solution) const
+    {
+        if constexpr (!std::is_floating_point_v<scalar_type>) return false;
+        else
+        {
+            const auto crs = Teuchos::rcp_dynamic_cast<const matrix_type>(matrix);
+            const auto comm = rhs.getMap()->getComm();
+            int local_supported = !crs.is_null() && crs->isFillComplete();
+            int supported = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_supported, &supported);
+            if (!supported) return false;
+            if (!crs->getRowMap()->isSameAs(*rhs.getMap())
+                || !crs->getRangeMap()->isSameAs(*rhs.getMap())
+                || !crs->getDomainMap()->isSameAs(*solution.getMap())) return false;
+            const auto importer = crs->getCrsGraph()->getImporter();
+            const int has_importer = !importer.is_null();
+            int minimum_importer = 0, maximum_importer = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &has_importer, &minimum_importer);
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &has_importer, &maximum_importer);
+            if (minimum_importer != maximum_importer) return false;
+            Teuchos::RCP<multi_vector_type> imported;
+            const multi_vector_type* column_solution = &solution;
+            if (has_importer)
+            {
+                imported = Teuchos::rcp(new multi_vector_type(crs->getColMap(), solution.getNumVectors()));
+                imported->doImport(solution, *importer, Tpetra::INSERT);
+                column_solution = imported.get();
+            }
+            else if (!crs->getColMap()->isSameAs(*solution.getMap())) return false;
+            auto& residual = residual_workspace(rhs);
+            const auto local = crs->getLocalMatrixHost();
+            for (size_t column = 0; column < rhs.getNumVectors(); ++column)
+            {
+                // Logical-column access also handles nonconstant-stride views.
+                const auto x_values = column_solution->getData(column);
+                const auto b_values = rhs.getData(column);
+                auto r_values = residual.getDataNonConst(column);
+                for (size_t row = 0; row < rhs.getLocalLength(); ++row)
+                {
+                    long double sum = b_values[row], correction = 0;
+                    for (auto entry = local.graph.row_map(row); entry < local.graph.row_map(row + 1); ++entry)
+                    {
+                        const auto term = -static_cast<long double>(local.values(entry))
+                            * static_cast<long double>(x_values[local.graph.entries(entry)]);
+                        const auto next = sum + term;
+                        correction += std::abs(sum) >= std::abs(term)
+                            ? (sum - next) + term : (term - next) + sum;
+                        sum = next;
+                    }
+                    r_values[row] = static_cast<scalar_type>(sum + correction);
+                }
+            }
+            return true;
+        }
+    }
+
     real_t true_relative_residual(
         const Teuchos::RCP<const operator_type>& matrix,
         const multi_vector_type& rhs,
@@ -931,6 +1093,15 @@ private:
         matrix->apply(
             solution, residual, Teuchos::NO_TRANS,
             scalar_type{-1}, scalar_type{1});
+
+        return residual_relative_norm(rhs, residual_scaling, maximum_rhs_norm);
+    }
+
+    real_t residual_relative_norm(const multi_vector_type& rhs,
+        LinearResidualScaling residual_scaling = {}, real_t* maximum_rhs_norm = nullptr) const
+    {
+        validate_residual_scaling(residual_scaling);
+        const auto& residual = residual_workspace(rhs);
 
         Teuchos::Array<magnitude_type> rhs_norms(
             rhs.getNumVectors());
@@ -1058,6 +1229,7 @@ private:
     Teuchos::RCP<solver_type> d_solver;
     std::optional<LinearSolverBackend> d_backend;
     mutable Teuchos::RCP<multi_vector_type> d_residual_workspace;
+    bool d_reported_accurate_residual = false;
     Teuchos::RCP<multi_vector_type> d_bicgstab_rhs_workspace;
     Teuchos::RCP<multi_vector_type> d_bicgstab_solution_workspace;
     Teuchos::RCP<const operator_type> d_preconditioner;
