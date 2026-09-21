@@ -843,6 +843,7 @@ example and storage accounting](docs/region_meshes.md).
 | Topic | Guide |
 | --- | --- |
 | Development, builds, tests, and ABI boundaries | [Maintainer guide](MAINTENANCE.md) and [CMake guide](cmake/README.md) |
+| External material providers and C ABI | [Material provider guide](docs/material-c-api.md) |
 | Implementation status and remaining acceptance gates | [Roadmap](TODO.md) |
 | Annular wall layers and swept corners | [Annular mesh guide](docs/annular_meshes.md) |
 | Region composition, MPI, and ALE | [Region meshes](docs/region_meshes.md) |
