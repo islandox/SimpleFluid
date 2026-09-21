@@ -9,15 +9,50 @@
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include <cmath>
 #include <numeric>
+#include <set>
 namespace SimpleFluid::Meshes
 {
-ExtrudedTopology::ExtrudedTopology(SemiStructMeshTopo topology):d_topology(std::move(topology))
+ExtrudedTopology::ExtrudedTopology(SemiStructMeshTopo topology,
+    std::map<std::string,std::string> aliases):d_topology(std::move(topology))
 {
     if(indexer().axial_periodic || !indexer().num_layers || !indexer().num_cells_per_layer)
         throw std::invalid_argument("Extrusion templates require nonempty nonperiodic axial layers.");
+    std::set<std::string> source_names, resolved_names;
+    for (const auto boundary : d_topology.boundary_batch_ids())
+    {
+        const auto& name = d_topology.boundary_batch_name(boundary);
+        source_names.insert(name);
+        const auto alias = aliases.find(name);
+        const auto& resolved = alias == aliases.end() ? name : alias->second;
+        if (resolved.empty() || !resolved_names.insert(resolved).second)
+            throw std::invalid_argument("Extruded boundary aliases require unique nonempty final names.");
+        if (alias != aliases.end()) d_boundary_aliases.emplace_back(boundary, resolved);
+    }
+    for (const auto& [source, target] : aliases)
+    {
+        (void)target;
+        if (!source_names.contains(source))
+            throw std::invalid_argument("Extruded boundary alias refers to an unknown source name.");
+    }
 }
 ExtrudedTopology::ExtrudedTopology(unsigned nodes,const Arr<Arr<unsigned>>& cells,unsigned layers,
-    const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries):ExtrudedTopology(SemiStructMeshTopo(nodes,cells,layers,boundaries)) {}
+    const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries,
+    std::map<std::string,std::string> aliases)
+    :ExtrudedTopology(SemiStructMeshTopo(nodes,cells,layers,boundaries),std::move(aliases)) {}
+const std::string& ExtrudedTopology::boundary_batch_name(int boundary) const
+{
+    for (const auto& [id, name] : d_boundary_aliases)
+        if (id == boundary) return name;
+    return d_topology.boundary_batch_name(boundary);
+}
+MeshStorageReport ExtrudedTopology::storage_report() const
+{
+    size_t bytes = d_topology.storage_bytes() - sizeof(d_topology)
+                 + d_boundary_aliases.capacity() * sizeof(decltype(d_boundary_aliases)::value_type);
+    for (const auto& [id, name] : d_boundary_aliases)
+    { (void)id; bytes += name.capacity(); }
+    return {.topology=bytes};
+}
 RegionLayout ExtrudedTopology::layout() const
 {
     const auto& i=indexer();

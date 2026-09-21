@@ -10,6 +10,14 @@ target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testFields)
 simplefluid_discover_tests(testFields)
 
+simplefluid_add_mpi_test(
+  NAME MeshToMeshTransferRZ_2procs
+  TARGET testFields
+  PROCS 2
+  ARGS "--gtest_filter=MeshToMeshTransferRZTest.*"
+  TIMEOUT 120
+  LABELS "mpi;field_transfer;ale")
+
 add_executable(testMeshToMeshTransferMultiRank testMeshToMeshTransferMultiRank.cc)
 target_link_libraries(testMeshToMeshTransferMultiRank SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testMeshToMeshTransferMultiRank)

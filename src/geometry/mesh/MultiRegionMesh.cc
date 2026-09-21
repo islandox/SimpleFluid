@@ -612,11 +612,15 @@ EntityRange<ID> MultiRegionMesh::face_nodes(ID f) const
 
 void MultiRegionMesh::validate_pair(RegionFace a, RegionFace b, std::optional<Vec3> translation) const
 {
-    if ((!translation && a.region == b.region) || a.face >= region_layout(a.region).faces || b.face >= region_layout(b.region).faces)
-        throw std::invalid_argument("Conforming interface requires valid faces in distinct regions.");
-    if (translation && (!std::isfinite(translation->norm()) || (a.region==b.region
-        && topology(a.region,[&](const auto& t){return t.owner_cell(a.face);})==topology(b.region,[&](const auto& t){return t.owner_cell(b.face);}))))
-        throw std::invalid_argument("Periodic interfaces require finite translations and distinct incident cells.");
+    if (a.region >= d_regions.size() || b.region >= d_regions.size()
+        || a.face >= region_layout(a.region).faces || b.face >= region_layout(b.region).faces)
+        throw std::invalid_argument("Conforming interface requires valid region faces.");
+    if (a.region == b.region
+        && (a.face == b.face || topology(a.region,[&](const auto& t){return t.owner_cell(a.face);})
+            == topology(b.region,[&](const auto& t){return t.owner_cell(b.face);})))
+        throw std::invalid_argument("Self interfaces require distinct faces and incident cells.");
+    if (translation && !std::isfinite(translation->norm()))
+        throw std::invalid_argument("Periodic interfaces require finite translations.");
     const auto periodic_shift=translation.value_or(Vec3{});
     for (auto f : {a, b})
         if (topology(f.region, [&](const auto& t) { return t.neighbor_cell(f.face); }) != invalid_cell_id())
@@ -729,6 +733,26 @@ void MultiRegionMesh::validate_regions() const
                 validate_volume(g.cell_volume(indexer.cell_ordinal({minimum[0], minimum[1], minimum[2]})));
                 validate_volume(g.cell_volume(indexer.cell_ordinal({maximum[0], maximum[1], maximum[2]})));
                 validate_type(0);
+            }
+            else if constexpr (std::same_as<Source, SweptRZGeometry>)
+            {
+                const auto& angles = source.theta_edges();
+                size_t minimum = 0, maximum = 0;
+                real_t smallest = 1, largest = 0;
+                for (size_t k = 0; k < l.extents[2]; ++k)
+                {
+                    const auto factor = std::sin(angles[k + 1] - angles[k]);
+                    if (factor < smallest) { smallest = factor; minimum = k; }
+                    if (factor > largest) { largest = factor; maximum = k; }
+                    validate_center(g.cell_centroid(k * l.extents[0]));
+                }
+                for (ID base = 0; base < l.extents[0]; ++base)
+                {
+                    validate_volume(g.cell_volume(minimum * l.extents[0] + base));
+                    validate_volume(g.cell_volume(maximum * l.extents[0] + base));
+                    validate_center(g.cell_centroid(base));
+                    validate_type(base);
+                }
             }
             else if constexpr (std::same_as<Source, ExtrudedGeometry> || std::same_as<Source, SemiStructuredXY_Z>)
             {
@@ -887,8 +911,12 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
         }
         sort_unique(lookup.first_to_second); sort_unique(lookup.second_to_first);
         const auto* structured=std::get_if<StructuredPatchInterface>(&d_interfaces[i]);
-        if(first==second && (!structured || !structured->periodic_translation))
-            throw std::invalid_argument("Self interfaces require an explicit periodic mapping.");
+        // A full angular sweep has distinct caps at identical physical
+        // coordinates. Explicit self-pairs need no translation; the same
+        // complete-patch, unique-face and opposing-normal checks still apply.
+        const bool coincident_self = std::holds_alternative<ExplicitConformingInterface>(d_interfaces[i]);
+        if(first==second && !coincident_self && (!structured || !structured->periodic_translation))
+            throw std::invalid_argument("Self interfaces require a periodic mapping or coincident conforming caps.");
         component[root(first)]=root(second);
     }
     for(size_t r=1;r<d_regions.size();++r)
@@ -997,7 +1025,9 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
         {
             const auto bounds = [&](const auto& source)
             {
-                if constexpr (requires { source.cell_edges(); })
+                if constexpr (requires { source.axial_bounds(); })
+                { const auto bounds = source.axial_bounds(); bottom = std::min(bottom, bounds[0]); top = std::max(top, bounds[1]); }
+                else if constexpr (requires { source.cell_edges(); })
                 { bottom = std::min(bottom, source.cell_edges()[2].front()); top = std::max(top, source.cell_edges()[2].back()); }
                 else if constexpr (requires { source.z_edges(); })
                 { bottom = std::min(bottom, source.z_edges().front()); top = std::max(top, source.z_edges().back()); }
@@ -1146,7 +1176,14 @@ std::string MultiRegionMesh::configuration_signature() const
         {
             const auto append = [&](const auto& native)
             {
-                if constexpr (requires { native.cell_edges(); })
+                if constexpr (requires { native.rz_nodes(); native.theta_edges(); })
+                {
+                    out << "swept-rz ";
+                    for (const auto& p : native.rz_nodes()) out << p.x << ' ' << p.y << ' ';
+                    for (const auto& row : native.rz_cell_nodes()) values(row);
+                    values(native.theta_edges());
+                }
+                else if constexpr (requires { native.cell_edges(); })
                     for (size_t a = 0; a < 3; ++a) values(native.cell_edges()[a]);
                 else if constexpr (requires { native.xy_nodes(); native.z_edges(); })
                 {
@@ -1157,6 +1194,13 @@ std::string MultiRegionMesh::configuration_signature() const
             };
             if constexpr (requires { g.native(); }) append(g.native());
             else append(g);
+        });
+        topology(r, [&](const auto& provider)
+        {
+            auto boundaries = provider.boundary_batch_ids();
+            std::sort(boundaries.begin(), boundaries.end());
+            for (const auto boundary : boundaries)
+                out << boundary << ' ' << std::quoted(provider.boundary_batch_name(boundary)) << ' ';
         });
     }
     for (const auto& b : d_boundaries) out << b.region << ' ' << b.native_id << ' ' << b.id << ' ' << std::quoted(b.name) << ' ';

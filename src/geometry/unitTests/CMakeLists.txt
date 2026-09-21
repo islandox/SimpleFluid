@@ -13,10 +13,18 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME SweptRZRegionProviders_2procs
+    TARGET testSweptRZRegionProviders
+    PROCS 2
+    ARGS "--gtest_filter=SweptRZRegionProvidersTest.CoincidentSelfSeamRetainsChecksAndCanonicalIncidence:SweptRZRegionProvidersTest.CompactOwnershipAndAffineMotionPreserveGCLAndRollback:SweptRZRegionProvidersTest.RankDivergentSweepDescriptorsFailCollectively"
+    LABELS "mpi;multi_region;swept;ale"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME AnnularSemiStructuredMeshFactory_2procs
     TARGET testAnnularSemiStructuredMeshFactory
     PROCS 2
-    ARGS "--gtest_filter=AnnularSemiStructuredMeshFactoryTest.CompositeWrapperPartitionsAndMovesWithoutMutatingChild"
+    ARGS "--gtest_filter=AnnularSemiStructuredMeshFactoryTest.CompositeWrapperPartitionsAndMovesWithoutMutatingChild:AnnularSemiStructuredMeshFactoryTest.CornerTransitionsPreserveConformingFacesAndAffineMotion"
     LABELS "mpi;mesh;semi_structured;ale"
     TIMEOUT 120)
 
