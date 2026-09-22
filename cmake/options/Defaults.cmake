@@ -9,6 +9,10 @@ option(SIMPLEFLUID_BUILD_BENCHMARKS
        "Build performance and solver-regression benchmarks" ON)
 option(SIMPLEFLUID_BUILD_DOCS
        "Enable the Doxygen API-documentation target" OFF)
+option(SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS
+       "Render local PlantUML diagrams in the Doxygen documentation" OFF)
+set(SIMPLEFLUID_PLANTUML_JAR "" CACHE FILEPATH
+    "PlantUML JAR used when SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS is ON")
 option(SIMPLEFLUID_ENABLE_IF97
        "Build the optional IAPWS-IF97 water material library" OFF)
 option(SIMPLEFLUID_ENABLE_NOX

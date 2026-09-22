@@ -331,6 +331,54 @@ template<TpetraTypePack Pack> class CoupledSchurPreconditioner;
  * instances sequential-use objects; concurrent assembly or solve calls on the
  * same instance are unsupported.
  *
+ * Public pressure fields are physical gauge pressure in Pa. Assembly and the
+ * Krylov vector use normalized pressure `q = p / reference_density`; solve()
+ * converts back to Pa when it unpacks the accepted result. The `Assembled`
+ * backend builds the full coupled CRS matrix. `BlockComposite` delegates
+ * application to CoupledBlockOperator while retaining assembled block
+ * operators; it is not described as a generic matrix-free discretization.
+ *
+ * @par Algorithm
+ * @if SIMPLEFLUID_DIAGRAMS
+ * @startuml
+ * start
+ * :FluidSolver reconstructs predictor face flux;
+ * :assemble(..., CoupledAssemblyPurpose::LinearSolve);
+ * :Refresh geometry/adjacency caches when epoch changed;
+ * :Assemble or refresh momentum system A;
+ * :Validate velocity/pressure boundaries\nand volume-continuity target;
+ * if (Physical pressure Dirichlet exists?) then (yes)
+ *   :Use physical pressure boundary rows;
+ * else (all Neumann)
+ *   :Fix minimum global cell GID\nas the normalized-pressure gauge;
+ * endif
+ * :Assemble/refresh G, D, stabilization C, and RHS\nfor q = p / reference_density;
+ * if (coupled_operator_backend == Assembled?) then (yes)
+ *   :Assemble full coupled CRS operator;
+ * else (BlockComposite)
+ *   :Build/reuse CoupledBlockOperator\nfrom assembled block operators;
+ * endif
+ * :Build/refresh Schur approximation\nC - sum(D_i diag(A)^-1 G_i);
+ * :Return CoupledPressureVelocitySystem;
+ * :solve(system, velocity, physical pressure, options);
+ * :Pack warm start [u, p/reference_density];
+ * if (operator graphs reusable and\nCoupledRebuildPolicy allows?) then (yes)
+ *   :Refresh numeric Schur preconditioner state;
+ * else (no)
+ *   :Build Jacobi momentum and\nMueLu Schur preconditioners;
+ * endif
+ * :Delegate inner iteration to Belos flexible block GMRES;
+ * :Compute algebraic continuity diagnostics;
+ * :Unpack velocity and\npressure = reference_density * q;
+ * :Synchronize periodic field ghosts;
+ * :Return convergence status and Krylov statistics;
+ * stop
+ * @enduml
+ * @endif
+ *
+ * @see CoupledPressureVelocitySystem
+ * @see CoupledRebuildPolicy
+ *
  * @tparam Pack Tpetra type pack defining distributed algebra types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>>

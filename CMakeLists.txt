@@ -143,9 +143,91 @@ if(SIMPLEFLUID_ENABLE_NOX)
     endif()
 endif()
 
+if(SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS AND NOT SIMPLEFLUID_BUILD_DOCS)
+    message(FATAL_ERROR
+        "SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS requires SIMPLEFLUID_BUILD_DOCS=ON.")
+endif()
+
 if(SIMPLEFLUID_BUILD_DOCS)
     find_package(Doxygen REQUIRED)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+    set(SIMPLEFLUID_DOXYGEN_ENABLED_SECTIONS "")
+    set(SIMPLEFLUID_DOXYGEN_HAVE_DOT "NO")
+    set(SIMPLEFLUID_DOXYGEN_DOT_PATH "")
+    set(SIMPLEFLUID_DOXYGEN_DOT_IMAGE_FORMAT "png")
+    set(SIMPLEFLUID_DOXYGEN_PLANTUML_JAR_PATH "")
+    set(_simplefluid_doxygen_command Doxygen::doxygen "${CMAKE_BINARY_DIR}/Doxyfile")
+    set(_simplefluid_docs_smoke_arguments "${CMAKE_BINARY_DIR}/docs/doxygen/html")
+
+    if(SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS)
+        execute_process(
+            COMMAND "${DOXYGEN_EXECUTABLE}" -g -
+            OUTPUT_VARIABLE _simplefluid_doxygen_defaults
+            ERROR_QUIET
+            RESULT_VARIABLE _simplefluid_doxygen_defaults_result
+        )
+        if(NOT _simplefluid_doxygen_defaults_result EQUAL 0 OR
+           NOT _simplefluid_doxygen_defaults MATCHES "PLANTUML_JAR_PATH" OR
+           NOT _simplefluid_doxygen_defaults MATCHES "PLANTUML_CFG_FILE" OR
+           NOT _simplefluid_doxygen_defaults MATCHES "DOT_IMAGE_FORMAT")
+            message(FATAL_ERROR
+                "The selected Doxygen does not expose the PlantUML/SVG "
+                "configuration used by diagram-enabled documentation.")
+        endif()
+        find_package(Java REQUIRED COMPONENTS Runtime)
+        find_program(_simplefluid_dot_executable NAMES dot)
+        if(NOT _simplefluid_dot_executable)
+            message(FATAL_ERROR
+                "Diagram-enabled documentation requires Graphviz 'dot'.")
+        endif()
+
+        if(SIMPLEFLUID_PLANTUML_JAR)
+            if(NOT EXISTS "${SIMPLEFLUID_PLANTUML_JAR}")
+                message(FATAL_ERROR
+                    "SIMPLEFLUID_PLANTUML_JAR does not exist: "
+                    "${SIMPLEFLUID_PLANTUML_JAR}")
+            endif()
+            set(_simplefluid_plantuml_jar "${SIMPLEFLUID_PLANTUML_JAR}")
+        else()
+            find_file(_simplefluid_plantuml_jar
+                NAMES plantuml.jar
+                HINTS ENV PLANTUML_HOME
+                PATHS
+                    /usr/share/java
+                    /usr/local/share/java
+                    /usr/share/plantuml
+                    /usr/local/share/plantuml
+                    /opt/plantuml
+                PATH_SUFFIXES plantuml
+            )
+        endif()
+        if(NOT _simplefluid_plantuml_jar OR
+           NOT EXISTS "${_simplefluid_plantuml_jar}" OR
+           IS_DIRECTORY "${_simplefluid_plantuml_jar}")
+            message(FATAL_ERROR
+                "Diagram-enabled documentation requires a local PlantUML JAR. "
+                "Set SIMPLEFLUID_PLANTUML_JAR=/path/to/plantuml.jar.")
+        endif()
+
+        get_filename_component(
+            SIMPLEFLUID_DOXYGEN_PLANTUML_JAR_PATH
+            "${_simplefluid_plantuml_jar}" DIRECTORY)
+        get_filename_component(
+            SIMPLEFLUID_DOXYGEN_DOT_PATH
+            "${_simplefluid_dot_executable}" DIRECTORY)
+        set(SIMPLEFLUID_DOXYGEN_ENABLED_SECTIONS "SIMPLEFLUID_DIAGRAMS")
+        set(SIMPLEFLUID_DOXYGEN_HAVE_DOT "YES")
+        # The selected Doxygen was checked for this setting; PlantUML output is
+        # validated as genuine SVG by the post-build documentation smoke test.
+        set(SIMPLEFLUID_DOXYGEN_DOT_IMAGE_FORMAT "svg")
+        set(_simplefluid_doxygen_command
+            "${CMAKE_COMMAND}" -E env
+            "JAVA_TOOL_OPTIONS=-Djava.awt.headless=true"
+            "${DOXYGEN_EXECUTABLE}" "${CMAKE_BINARY_DIR}/Doxyfile")
+        list(APPEND _simplefluid_docs_smoke_arguments --expect-diagrams)
+    endif()
+
     configure_file(
         "${PROJECT_SOURCE_DIR}/docs/Doxyfile.in"
         "${CMAKE_BINARY_DIR}/Doxyfile"
@@ -154,7 +236,10 @@ if(SIMPLEFLUID_BUILD_DOCS)
     add_custom_target(docs
         COMMAND "${CMAKE_COMMAND}" -E make_directory
                 "${CMAKE_BINARY_DIR}/docs/doxygen"
-        COMMAND Doxygen::doxygen "${CMAKE_BINARY_DIR}/Doxyfile"
+        COMMAND ${_simplefluid_doxygen_command}
+        COMMAND "${Python3_EXECUTABLE}"
+                "${PROJECT_SOURCE_DIR}/docs/check_doxygen_output.py"
+                ${_simplefluid_docs_smoke_arguments}
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
         COMMENT "Generating SimpleFluid API documentation"
         VERBATIM

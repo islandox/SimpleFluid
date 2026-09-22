@@ -362,6 +362,8 @@ Useful configuration switches are:
 | `SIMPLEFLUID_MAX_TEST_PROCS` | `0` | Limit generated MPI tests; CI commonly uses `2` |
 | `SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT` | `30` | Bound Google Test discovery time in seconds |
 | `SIMPLEFLUID_BUILD_DOCS` | `OFF` | Require Doxygen and enable the `docs` target |
+| `SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS` | `OFF` | Render local PlantUML solver diagrams; requires Java, Graphviz, and a PlantUML JAR |
+| `SIMPLEFLUID_PLANTUML_JAR` | empty | Optional explicit path to the PlantUML JAR used by diagram-enabled docs |
 | `SIMPLEFLUID_ENABLE_IF97` | `OFF` | Build the optional water material library; [usage and limits](docs/modeling/if97_water.md) |
 | `SIMPLEFLUID_ENABLE_NOX` | `OFF` | Enable the optional NOX/Thyra nonlinear flow solver; [dependencies and scope](docs/architecture/coupled_nonlinear_solver.md) |
 
@@ -601,12 +603,42 @@ forwarders uncommented. Do not restate an identifier in prose or add
 speculative `@throws` tags.
 Update comments in the same change as an interface or invariant.
 
-Generate the API reference with Doxygen installed:
+Generate the plain API reference with Doxygen installed. This mode does not
+require Java, PlantUML, or Graphviz:
 
 ```bash
-cmake --preset GCC-ninja-multi -DSIMPLEFLUID_BUILD_DOCS=ON
+cmake --preset GCC-ninja-multi \
+  -DSIMPLEFLUID_BUILD_DOCS=ON \
+  -DSIMPLEFLUID_DOCS_ENABLE_DIAGRAMS=OFF
 cmake --build --preset GCC-Debug --target docs
 ```
+
+To render the solver activity diagrams, install a Java runtime, Graphviz
+(`dot`), and PlantUML locally, then configure:
+
+```bash
+cmake --preset GCC-ninja-multi \
+  -DSIMPLEFLUID_BUILD_DOCS=ON \
+  -DSIMPLEFLUID_DOCS_ENABLE_DIAGRAMS=ON
+cmake --build --preset GCC-Debug --target docs
+```
+
+CMake searches common cross-platform installation prefixes for
+`plantuml.jar`. If it is elsewhere, use a quoted explicit override:
+
+```bash
+cmake --preset GCC-ninja-multi \
+  -DSIMPLEFLUID_BUILD_DOCS=ON \
+  -DSIMPLEFLUID_DOCS_ENABLE_DIAGRAMS=ON \
+  -DSIMPLEFLUID_PLANTUML_JAR="/path with spaces/plantuml.jar"
+```
+
+An explicitly requested diagram build fails during configuration when Java,
+`dot`, or the JAR is unavailable. PlantUML runs locally in headless mode; the
+build uses no remote rendering server or remote theme. Diagram-enabled builds
+use SVG output and keep Doxygen's automatically generated relationship graphs
+disabled. The `docs` target runs a small smoke check for the solver overview,
+local links, raw PlantUML leakage, and missing diagram assets.
 
 The HTML entry point is `build/gcc/docs/doxygen/html/index.html`; warnings are
 written to `build/gcc/docs/doxygen/warnings.log`. Review them for malformed
@@ -614,6 +646,11 @@ commands, stale parameter tags, and unresolved links. Missing documentation
 alone is not a reason to narrate an otherwise obvious API.
 The documentation target filters GitHub-style inline and display math into
 Doxygen formulas; keep Markdown math in GitHub-compatible syntax.
+The solver workflow index is
+`build/gcc/docs/doxygen/html/solver_algorithms.html`. Review its diagrams when
+control flow, loop bounds, optional-model ordering, or rollback ownership
+changes; the canonical PlantUML definitions remain in API comments on the
+documented symbols.
 
 The ELF export-boundary test checks symbol presence and visibility; it is not
 a class-layout ABI checker. Public solver/equation templates and by-value

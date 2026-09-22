@@ -166,6 +166,82 @@ struct SteadyStateStepStatistics
 
 /**
  * @brief Adapt pseudo-time steps and enforce sustained steady convergence.
+ *
+ * This class observes accepted steps; it has no `run()` method and does not
+ * own the solver, field snapshots, retries, or output. The implemented search
+ * loops live in the `pitz_daily` and `natural_convection_shiri` example
+ * drivers. SteadyStateFieldMonitor owns the previous accepted field sample,
+ * while AdaptiveLinearToleranceController independently tightens transport
+ * linear tolerances.
+ *
+ * On the ordinary retry path, IncompressibleMomentumEquation solves into a
+ * private candidate and publishes velocity only after convergence. The driver
+ * does not take or restore a general solver checkpoint. Broader state rollback
+ * is available only when the selected solver step itself enables a documented
+ * transactional path (for example active SST-SAS).
+ *
+ * @par Driver algorithm
+ * @if SIMPLEFLUID_DIAGRAMS
+ * @startuml
+ * start
+ * partition "example driver" {
+ *   :Construct solver and optional turbulence;
+ *   :Construct adaptive timestep controller;
+ *   :Optionally construct adaptive linear-tolerance controller;
+ *   :SteadyStateFieldMonitor::initialize()\nsnapshots accepted physical fields;
+ * }
+ * while (iteration < maximum_steps?) is (yes)
+ *   partition "example driver" {
+ *     :Apply requested transport linear tolerance;
+ *     :accepted = false; retries = 0;
+ *     while (accepted == false?) is (yes)
+ *       :accepted_time_step = solver.time_step();
+ *       :solver.step();
+ *       if (RetryableMomentumNonconvergence?) then (yes)
+ *         partition "controller" {
+ *           :rejected_time_step()\nreduces dt and learns a ceiling;
+ *         }
+ *         :Write retry progress;
+ *         if (retry limit reached or\ndt cannot decrease?) then (yes)
+ *           :Record failure and leave search loop;
+ *           stop
+ *         else (retry)
+ *           :solver.set_time_step(reduced dt);
+ *         endif
+ *       else (step accepted)
+ *         :accepted = true;
+ *       endif
+ *     endwhile (no)
+ *   }
+ *   partition "field monitor" {
+ *     :Compare current fields with previous\naccepted sample; reduce RMS update rates;
+ *     :Replace monitor sample with current fields;
+ *   }
+ *   partition "controllers" {
+ *     :Tighten next linear tolerance only if\nlinear solves converged;
+ *     :observe(time, dt, max_Co, updates,\nsolver_converged, sample_eligible);
+ *     note right
+ *       Physical steady convergence requires
+ *       minimum_steps, full-accuracy eligibility,
+ *       converged linear solves, update tolerance,
+ *       and required_consecutive_steps.
+ *     end note
+ *   }
+ *   :Write accepted-step progress;
+ *   if (required consecutive physical\nsteady samples reached?) then (yes)
+ *     :Exit success;
+ *     stop
+ *   else (no)
+ *     :solver.set_time_step(next_time_step);
+ *   endif
+ * endwhile (maximum reached)
+ * :Exit without steady convergence;
+ * stop
+ * @enduml
+ * @endif
+ *
+ * @see SteadyStateFieldMonitor
+ * @see AdaptiveLinearToleranceController
  */
 class SIMPLEFLUID_SOLVERS_EXPORT AdaptiveSteadyStateController
 {

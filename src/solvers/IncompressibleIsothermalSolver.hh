@@ -64,6 +64,55 @@ public:
     using base_type::velocity;
     using base_type::write_solution_vtu;
 
+    /**
+     * @brief Advance isothermal flow and optional turbulence one step.
+     *
+     * The molecular MaterialPropertyFields are initialized by the constructor
+     * and remain the laminar viscosity source. When turbulence is enabled,
+     * effective properties are refreshed before flow coupling and transported
+     * turbulence fields are advanced afterward. No temperature equation is
+     * allocated or solved by this class.
+     *
+     * @par Algorithm
+     * @if SIMPLEFLUID_DIAGRAMS
+     * @startuml
+     * start
+     * :Validate pressure-velocity selection;
+     * :Detect active SST-SAS and CoupledNonlinear paths;
+     * if (Transactional path?) then (yes)
+     *   :Snapshot accepted primary fields, material,\nturbulence, clocks, and statistics;
+     *   note right
+     *     The enclosing catch restores these snapshots
+     *     before propagating an exception.
+     *   end note
+     * endif
+     * if (CoupledNonlinear?) then (yes)
+     *   :Preserve accepted reports until private solve commits;
+     * else (no)
+     *   :begin_step();
+     * endif
+     * if (turbulence enabled?) then (yes)
+     *   :refresh_effective_properties(material, reference_density);
+     *   note right
+     *     Momentum uses effective dynamic viscosity
+     *     and the turbulent-kinetic-energy gradient.
+     *   end note
+     * else (laminar)
+     *   :Use constant molecular dynamic_viscosity;
+     * endif
+     * :solve_pressure_velocity_coupling();
+     * if (turbulence enabled?) then (yes)
+     *   :TurbulenceModel::advance() with\nprojected_face_fluxes;
+     *   :Accumulate turbulence linear statistics;
+     * endif
+     * :finish_step();
+     * stop
+     * @enduml
+     * @endif
+     *
+     * @see FluidSolver::solve_pressure_velocity_coupling()
+     * @see BoussinesqSolver
+     */
     void step() override;
 
     /** @brief Constant density used to normalize pressure and momentum. */

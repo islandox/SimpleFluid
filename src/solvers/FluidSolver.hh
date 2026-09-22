@@ -99,6 +99,55 @@ public:
     virtual void step();
     /** @brief Advance one step and print rank-zero convergence progress. */
     void step(ProgressStream& progress_output);
+    /**
+     * @brief Advance a requested number of physical or pseudo-time steps.
+     *
+     * The loop belongs to `run()`. `step()` owns accepted-state advancement;
+     * output is emitted only by the overload that receives a ProgressStream.
+     * Derived solvers override `step()` to place their model updates around the
+     * shared pressure--velocity coupling.
+     *
+     * @par Algorithm
+     * @if SIMPLEFLUID_DIAGRAMS
+     * @startuml
+     * start
+     * :Validate steps >= 0;
+     * :final_step = step_index() + steps\n(progress overload only);
+     * while (another requested step?) is (yes)
+     *   :virtual step();
+     *   note right
+     *     Base FluidSolver::step():
+     *     validate coupling selection
+     *   end note
+     *   if (CoupledNonlinear?) then (yes)
+     *     :solve_coupled_nonlinear()\non private trial fields;
+     *   else (no)
+     *     :begin_step();
+     *     note right
+     *       Clear per-step statistics;
+     *       synchronize initial velocity ghosts
+     *       on the first accepted step.
+     *     end note
+     *     :solve_pressure_velocity_coupling();
+     *   endif
+     *   :finish_step();
+     *   note right
+     *     Publish residual statistics;
+     *     synchronize velocity;
+     *     time += TimeStepperOptions::time_step;
+     *     ++step_index.
+     *   end note
+     *   if (ProgressStream overload?) then (yes)
+     *     :write_step_progress();
+     *   endif
+     * endwhile (no)
+     * stop
+     * @enduml
+     * @endif
+     *
+     * @see step()
+     * @see solve_pressure_velocity_coupling()
+     */
     void run(int steps);
     /** @brief Advance @p steps and print one rank-zero line per step. */
     void run(int steps, ProgressStream& progress_output);
@@ -244,6 +293,89 @@ protected:
 
     void begin_step();
     void finish_step();
+    /**
+     * @brief Dispatch the configured pressure--velocity coupling algorithm.
+     *
+     * `SIMPLE`, `PISO`, and `PIMPLE` use fixed counts from
+     * TimeStepperOptions::n_pressure_correctors and
+     * TimeStepperOptions::n_outer_correctors. These are bounded `for` loops,
+     * not convergence-controlled iterations. Explicit non-orthogonal momentum
+     * correction uses `1 + n_non_orthogonal_correctors` solves; the default
+     * FVM::NonOrthogonalTreatment::Implicit path performs one solve with the
+     * correction in the operator.
+     *
+     * @par Algorithm
+     * @if SIMPLEFLUID_DIAGRAMS
+     * @startuml
+     * start
+     * :Read TimeStepperOptions::pressure_velocity_coupling;
+     * if (CoupledNonlinear?) then (yes)
+     *   :Validate NOX, native backend,\ndriver, pack, and geometry support;
+     *   :Pack accepted fields into\nprivate nonlinear state;
+     *   :Delegate nonlinear and inner Krylov\niterations to NOXNonlinearSolver;
+     *   if (NOX converged and physical\ncontinuity/gauge gates pass?) then (yes)
+     *     :Commit velocity, pressure,\nand projected_face_flux;
+     *     :Publish nonlinear statistics;
+     *   else (no)
+     *     :Throw without committing accepted fields;
+     *     stop
+     *   endif
+     * elseif (CoupledKrylov?) then (yes)
+     *   :Reconstruct predictor face flux;
+     *   :assemble_coupled_system();
+     *   :CoupledPressureVelocitySolver::solve();
+     *   if (linear solve converged?) then (yes)
+     *     :Reconstruct final projected face flux;
+     *     :Evaluate physical continuity residual;
+     *   else (no)
+     *     :Throw nonconvergence;
+     *     stop
+     *   endif
+     * else (SIMPLE / PISO / PIMPLE)
+     *   :Run fixed-count segregated correctors\n(see detail diagram below);
+     * endif
+     * stop
+     * @enduml
+     * @endif
+     *
+     * @par Segregated corrector detail
+     * @if SIMPLEFLUID_DIAGRAMS
+     * @startuml
+     * start
+     * :Select fixed corrector counts;
+     * note right
+     *   SIMPLE: outer=1, pressure=1
+     *   PISO: outer=1,
+     *     pressure=n_pressure_correctors
+     *   PIMPLE: outer=n_outer_correctors,
+     *     pressure=n_pressure_correctors
+     * end note
+     * while (outer < fixed outer count?) is (yes)
+     *   :run_momentum_predictor();
+     *   if (Implicit non-orthogonal treatment?) then (yes)
+     *     :One momentum solve;
+     *   else (explicit)
+     *     repeat
+     *       :Assemble/solve momentum with\nlagged correction field;
+     *     repeat while (corrector <\nn_non_orthogonal_correctors?) is (yes)
+     *   endif
+     *   while (corrector < fixed pressure count?) is (yes)
+     *     :PressureProjectionEquation::project();
+     *     note right
+     *       Solve pressure correction;
+     *       accumulate physical pressure;
+     *       correct velocity and face flux.
+     *     end note
+     *   endwhile (no)
+     * endwhile (no)
+     * :Publish last correction residuals\nand aggregate linear statistics;
+     * stop
+     * @enduml
+     * @endif
+     *
+     * @see CoupledPressureVelocitySolver
+     * @see PressureProjectionEquation
+     */
     void solve_pressure_velocity_coupling();
     /** Validate mode collectively before a driver mutates timestep state. */
     void validate_pressure_velocity_selection() const;
