@@ -191,6 +191,74 @@ public:
         scalar_type hot_temperature, scalar_type cold_temperature, scalar_type initial_pressure = 0.0);
 
     using base_type::step;
+    /**
+     * @brief Advance buoyant flow, temperature, and configured physical models.
+     *
+     * The fixed-grid path below shows one timestep. Planar ALE delegates to
+     * `step_planar_ale()`, whose geometry-trial correctors and rollback contract
+     * are separate from this fixed-grid ordering. A configured
+     * FissionPowerSource supplies a local power-density field or interval
+     * energy budget; this solver does not execute an external neutronics code.
+     *
+     * @par Algorithm
+     * @if SIMPLEFLUID_DIAGRAMS
+     * @startuml
+     * start
+     * :Validate coupling mode and collective model state;
+     * if (Interval fission energy supplied?) then (yes)
+     *   :Refresh local power density for current interval;
+     * endif
+     * if (FreeSurfaceMode::PlanarALE?) then (yes)
+     *   :begin_step();
+     *   :step_planar_ale()\n(geometry trials, coupled acceptance, rollback);
+     *   stop
+     * endif
+     * if (active SST-SAS?) then (yes)
+     *   :Snapshot accepted multiphysics state;
+     *   note right
+     *     The enclosing catch restores these snapshots
+     *     before propagating an exception.
+     *   end note
+     * endif
+     * if (CoupledNonlinear?) then (yes)
+     *   :Preserve accepted reports until private flow solve commits;
+     * else (no)
+     *   :begin_step();
+     * endif
+     * if (first accepted step?) then (yes)
+     *   :Synchronize temperature ghosts;
+     * endif
+     * if (physical model enabled?) then (yes)
+     *   :refresh_physical_models();
+     *   note right
+     *     Material updater, gas initialization,
+     *     material feedback, and registered
+     *     temperature-source refresh use accepted fields.
+     *   end note
+     * endif
+     * :Initialize free-surface state if configured;
+     * if (turbulence enabled?) then (yes)
+     *   :Refresh effective viscosity/conductivity;
+     * endif
+     * :solve_pressure_velocity_coupling()\nwith temperature buoyancy;
+     * :advance_turbulence(time_step);
+     * :advance_pre_temperature_models(time_step);
+     * :advance_temperature_transport(time_step);
+     * :advance_post_temperature_models(time_step);
+     * if (legacy backend?) then (yes)
+     *   :Publish temperature to legacy storage;
+     * endif
+     * :finish_step();
+     * if (free surface configured?) then (yes)
+     *   :Record accepted free-surface history;
+     * endif
+     * stop
+     * @enduml
+     * @endif
+     *
+     * @see FluidSolver::solve_pressure_velocity_coupling()
+     * @see advance_pre_temperature_models()
+     */
     void step() override;
 
     /** Move-only, reusable interval checkpoint. No destructor performs MPI work. */
@@ -582,6 +650,58 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     void advance_turbulence(scalar_type time_step);
     SIMPLEFLUID_SOLVERS_LOCAL
+    /**
+     * @brief Order optional model updates around temperature transport.
+     *
+     * This diagram combines this helper, advance_temperature_transport(), and
+     * advance_post_temperature_models(). Ideal radiolysis and boiling consume
+     * the temperature accepted at the start of the step. Sheng radiolysis is
+     * intentionally delayed until after temperature transport because it owns
+     * the authoritative gas void fraction. All branches are sequential.
+     *
+     * @par Algorithm
+     * @if SIMPLEFLUID_DIAGRAMS
+     * @startuml
+     * start
+     * if (Radiolytic gas enabled and\nnot Sheng void owner?) then (yes)
+     *   :RadiolyticGasModel::advance()\nwith lagged temperature;
+     * endif
+     * if (Sheng void owner?) then (yes)
+     *   :Defer gas/void update;
+     * else (no)
+     *   if (BoilingSourceModel configured?) then (yes)
+     *     :update() boiling source\nfrom lagged temperature;
+     *   endif
+     *   if (ScalarVoidFractionModel configured?) then (yes)
+     *     :Mirror radiolytic alpha_g or\nupdate_explicit(gas + boiling sources);
+     *     :Complete boiling void/inventory update;
+     *   endif
+     * endif
+     * :Solve temperature transport with projected flux,\nregistered sources, and optional boiling sink;
+     * note right
+     *   Uses effective thermal conductivity when turbulent;
+     *   otherwise material conductivity or legacy diffusivity.
+     * end note
+     * if (Sheng void owner?) then (yes)
+     *   :RadiolyticGasModel::advance()\nwith updated temperature;
+     *   :Mirror authoritative alpha_g into scalar void model;
+     * endif
+     * if (DelayedNeutronPrecursorModel configured?) then (yes)
+     *   :Advance precursors with liquid fraction,\nprojected flux, and optional fission field;
+     * endif
+     * if (MaterialFeedbackModel configured?) then (yes)
+     *   :Apply feedback at time + time_step\nusing updated temperature/void state;
+     * endif
+     * if (free surface configured?) then (yes)
+     *   :Advance liquid inventory and free-surface state;
+     * endif
+     * if (turbulence enabled?) then (yes)
+     *   :Refresh effective properties for next step;
+     * endif
+     * stop
+     * @enduml
+     * @endif
+     */
     bool advance_pre_temperature_models(scalar_type time_step);
     SIMPLEFLUID_SOLVERS_LOCAL
     void advance_temperature_transport(scalar_type time_step);
