@@ -16,6 +16,23 @@ simplefluid_add_mpi_test(
   LABELS mpi
   TIMEOUT 60)
 
+add_executable(testCompositePartition testCompositePartition.cc)
+target_link_libraries(testCompositePartition SimpleFluid::Fields GTest::gtest_main)
+simplefluid_configure_test_executable(testCompositePartition)
+simplefluid_discover_tests(testCompositePartition)
+simplefluid_add_mpi_test(
+  NAME CompositePartition_2procs
+  TARGET testCompositePartition
+  PROCS 2
+  LABELS mpi
+  TIMEOUT 120)
+simplefluid_add_mpi_test(
+  NAME CompositePartition_4procs
+  TARGET testCompositePartition
+  PROCS 4
+  LABELS mpi
+  TIMEOUT 120)
+
 add_executable(testMPIInterface testMPIInterface.cc)
 target_link_libraries(testMPIInterface SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testMPIInterface)

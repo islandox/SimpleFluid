@@ -523,6 +523,41 @@ TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
     std::filesystem::remove(unstructured_file);
 }
 
+TEST(MeshHandleTest, PolygonalXY_ZExportUsesOrientedPolyhedra)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Standalone XY-Z geometry is serial.";
+    const auto mesh = std::make_shared<SemiStructured>(
+        SimpleFluid::Arr<SemiStructured::Vec3>{{0,0,0},{2,0,0},{3,1,0},{1.5,2,0},{0,1,0}},
+        SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0,1,2,3,4}}, SimpleFluid::ArrReal{0,1,3});
+    const Handle handle(mesh);
+    const auto output = handle.vtu_topology();
+    EXPECT_EQ(output->cell_types, (SimpleFluid::VTUWriter::UInt8Data{42,42}));
+    EXPECT_EQ(output->face_offsets, (SimpleFluid::VTUWriter::Int64Data{38,76}));
+    size_t cursor = 0;
+    for (size_t c = 0; c < 2; ++c)
+    {
+        ASSERT_EQ(output->faces.at(cursor++), 7);
+        double volume = 0;
+        for (size_t f = 0; f < 7; ++f)
+        {
+            const auto count = static_cast<size_t>(output->faces.at(cursor++));
+            EXPECT_EQ(count, f < 2 ? 5U : 4U);
+            SimpleFluid::Arr<SemiStructured::Vec3> loop;
+            for (size_t i = 0; i < count; ++i)
+                loop.push_back(output->points.at(output->faces.at(cursor++)));
+            if (f == 0) EXPECT_LT(SimpleFluid::MeshUtils::face_area_vector(loop).z, 0);
+            if (f == 1) EXPECT_GT(SimpleFluid::MeshUtils::face_area_vector(loop).z, 0);
+            for (size_t i = 1; i + 1 < count; ++i)
+                volume += loop[0].dot(loop[i].cross(loop[i + 1])) / 6;
+        }
+        EXPECT_EQ(output->face_offsets[c], cursor);
+        EXPECT_NEAR(volume, mesh->cell_volume(mesh->cell_id(c)), 1e-13);
+    }
+    const auto path = std::filesystem::temp_directory_path() / "simplefluid_polygonal_xy_z.vtu";
+    handle.export_vtu(path.string());
+    std::filesystem::remove(path);
+}
+
 TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
 {
     const auto visible_native_faces = [](const Handle& mesh, const auto& native_mesh, size_t cell)

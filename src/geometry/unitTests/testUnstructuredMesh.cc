@@ -278,6 +278,50 @@ TEST(UnstructuredMeshTest, ExplicitFacesRetainOwnerOrderAndNeighborIncidence)
     EXPECT_THROW(mesh.cell_face_orientation(1, 0), std::invalid_argument);
 }
 
+TEST(UnstructuredMeshTest, PolyhedronOutputRetainsConcaveLoopsAndOutwardSharedFaces)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Serial topology export regression.";
+    const auto source = make_two_hex_mesh();
+    Mesh::PolyhedralTopology cubes{source.num_cells(), {}};
+    for (size_t f = 0; f < source.num_faces(); ++f)
+        cubes.faces.push_back({source.face_nodes(f), source.owner_cell(f), source.neighbor_cell(f)});
+    for (const auto& mesh : {std::make_shared<Mesh>(source.nodes(), cubes),
+             std::make_shared<Mesh>(concave_prism_nodes(), prism_topology(6))})
+    {
+        const Handle handle(mesh);
+        const auto output = handle.vtu_topology();
+        ASSERT_EQ(output->face_offsets.size(), mesh->num_cells());
+        size_t cursor = 0;
+        for (size_t c = 0; c < mesh->num_cells(); ++c)
+        {
+            EXPECT_EQ(output->cell_types[c], 42);
+            ASSERT_EQ(output->faces.at(cursor++), mesh->faces(c).size());
+            double volume = 0;
+            for (const auto f : mesh->faces(c))
+            {
+                const auto count = static_cast<size_t>(output->faces.at(cursor++));
+                ASSERT_EQ(count, mesh->face_nodes(f).size());
+                SimpleFluid::Arr<Mesh::Vec3> loop;
+                for (size_t i = 0; i < count; ++i)
+                    loop.push_back(output->points.at(output->faces.at(cursor++)));
+                const auto area = SimpleFluid::MeshUtils::face_area_vector(loop);
+                const auto outward = mesh->face_area_vector(f) * mesh->cell_face_orientation(c, f);
+                EXPECT_NEAR((area - outward).norm(), 0.0, 1e-13);
+                for (size_t i = 1; i + 1 < loop.size(); ++i)
+                    volume += loop[0].dot(loop[i].cross(loop[i + 1])) / 6;
+            }
+            EXPECT_EQ(output->face_offsets[c], cursor);
+            EXPECT_NEAR(volume, mesh->cell_volume(c), 1e-13);
+        }
+        EXPECT_EQ(cursor, output->faces.size());
+        const auto path = std::filesystem::temp_directory_path() / "simplefluid_polyhedron_handle.vtu";
+        handle.export_vtu(path.string());
+        EXPECT_NE(read_file(path).find("Name=\"faces\""), std::string::npos);
+        EXPECT_NE(read_file(path).find("Name=\"faceoffsets\""), std::string::npos);
+        std::filesystem::remove(path);
+    }
+}
+
 TEST(UnstructuredMeshTest, RejectsOpenMisOrientedAndDegeneratePolyhedra)
 {
     auto nodes = concave_prism_nodes();
