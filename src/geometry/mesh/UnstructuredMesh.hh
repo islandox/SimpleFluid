@@ -33,10 +33,11 @@ using UnstructuredMeshIndexTypes = MeshIndexTypes<
 /**
  * @brief Unstructured mesh backed by explicit node and cell lists.
  *
- * The mesh supports the same volume element families currently handled by
- * STKMesh: hexahedra and triangular prisms. Faces are derived from cell
- * connectivity, deduplicated by node set, and tagged with optional boundary
- * batches supplied by node set.
+ * Hexahedra and triangular prisms accept ordered element-node connectivity.
+ * General polyhedra accept ordered planar face loops, oriented outward from
+ * their owner. Polyhedral cells must have a closed, connected, orientable
+ * manifold surface and positive signed volume. Concave cells and faces are
+ * supported; face loops must be simple and cell surfaces must not intersect.
  */
 class UnstructuredMesh
     : public GeometryExecutionGuard, public MeshBase<UnstructuredMesh, UnstructuredMeshIndexTypes>
@@ -69,6 +70,8 @@ public:
     {
         CellType type = CellType::INVALID;
         Arr<NodeID> node_ids;
+        /// Outward face loops for POLYHEDRON; node_ids may be omitted.
+        Arr<Arr<NodeID>> face_node_ids;
     };
 
     /** @brief Input boundary face connectivity, ID, and display name. */
@@ -77,6 +80,23 @@ public:
         Arr<NodeID> node_ids;
         int boundary_id = invalid_boundary_id;
         std::string name;
+    };
+
+    /** @brief Explicit face loop, oriented outward from owner. */
+    struct FaceDefinition
+    {
+        Arr<NodeID> node_ids;
+        CellID owner = invalid_ordinal;
+        CellID neighbor = invalid_ordinal;
+        int boundary_id = invalid_boundary_id;
+        std::string name;
+    };
+
+    /** @brief Face-based topology retaining input face order and adjacency. */
+    struct PolyhedralTopology
+    {
+        size_t num_cells = 0;
+        Arr<FaceDefinition> faces;
     };
 
     /** @brief Identity mapping between compact IDs and local ordinals. */
@@ -142,6 +162,14 @@ public:
         size_t num_owned_cells,
         size_t num_owned_faces);
 
+    UnstructuredMesh(const Arr<Vec3>& nodes, const PolyhedralTopology& topology);
+
+    UnstructuredMesh(
+        const Arr<Vec3>& nodes,
+        const PolyhedralTopology& topology,
+        size_t num_owned_cells,
+        size_t num_owned_faces);
+
     UnstructuredMesh(const UnstructuredMesh&) = default;
     UnstructuredMesh(UnstructuredMesh&&) = default;
     UnstructuredMesh& operator=(const UnstructuredMesh&) = delete;
@@ -167,6 +195,8 @@ public:
     const Arr<NodeID>& cell_nodes(CellID cell_id) const;
     const Arr<NodeID>& face_nodes(FaceID face_id) const;
     CellType cell_type(CellID cell_id) const;
+    /// +1 for the face owner, -1 for its neighbor; aligned with faces(cell).
+    int cell_face_orientation(CellID cell_id, FaceID face_id) const;
 
 private:
     friend Base;
@@ -234,8 +264,11 @@ private:
         const Arr<BoundaryFaceDefinition>& boundary_faces) const;
     void initialize_cells(const Arr<CellDefinition>& cells);
     void build_faces(
-        const Arr<BoundaryFaceDefinition>& boundary_faces);
+        const Arr<BoundaryFaceDefinition>& boundary_faces,
+        const Arr<CellDefinition>& cells);
     void compute_face_geometry();
+    void compute_polyhedral_cell_geometry();
+    void set_owned_counts(size_t num_owned_cells, size_t num_owned_faces);
     void update_counts();
 
     size_t cached_geometry_bytes() const noexcept
