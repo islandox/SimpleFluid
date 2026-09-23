@@ -12,5 +12,6 @@
 #include "parallel/MeshPartitioner.hh"
 
 #include "parallel/MeshPartitioner.tcc"
+#include "parallel/CompositePartition.tcc"
 
 template class SimpleFluid::MeshPartitioner<SimpleFluid::TpetraTypes<>>;

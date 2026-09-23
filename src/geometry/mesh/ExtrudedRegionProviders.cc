@@ -112,7 +112,7 @@ uint64_t ExtrudedTopology::neighbor_cell(size_t f) const
 MeshUtils::CellType ExtrudedTopology::cell_type(size_t c) const
 {
     const auto n=base_cell_nodes(indexer().cell_id(c).ij).size();
-    return n==3?MeshUtils::CellType::TRIPRISM:n==4?MeshUtils::CellType::HEXAHEDRON:MeshUtils::CellType::INVALID;
+    return n==3?MeshUtils::CellType::TRIPRISM:n==4?MeshUtils::CellType::HEXAHEDRON:MeshUtils::CellType::POLYHEDRON;
 }
 ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,Arr<Vec3> nodes,ArrReal z)
     :d_topology(std::move(topology)),d_nodes(std::move(nodes)),d_z(std::move(z))
