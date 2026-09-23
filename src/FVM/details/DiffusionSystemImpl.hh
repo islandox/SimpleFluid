@@ -5,6 +5,7 @@
 #pragma once
 
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/FaceStencilMatrix.hh"
 #include "FVM/details/ResolvedDiffusionGeometry.hh"
 #include "dataclass/TpetraTypes.hh"
 
@@ -34,7 +35,6 @@ DiffusionSystem<Pack> diffusion_system_reference_impl(const MeshType& mesh, type
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
     const auto execution = acquire_mesh_execution(mesh);
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -43,7 +43,7 @@ DiffusionSystem<Pack> diffusion_system_reference_impl(const MeshType& mesh, type
         throw std::invalid_argument("diffusion_system requires non-negative diffusivity.");
     }
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto matrix = make_face_stencil_matrix<Pack>(mesh);
     auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
     Teuchos::Array<local_ordinal_type> columns;
     Teuchos::Array<scalar_type> values;
@@ -127,14 +127,13 @@ DiffusionSystem<Pack> region_diffusion_system_impl(const MeshType& mesh, typenam
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
     const auto execution = acquire_mesh_execution(mesh);
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     if (diffusivity < scalar_type{})
         throw std::invalid_argument("diffusion_system requires non-negative diffusivity.");
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto matrix = make_face_stencil_matrix<Pack>(mesh);
     auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
     Teuchos::Array<local_ordinal_type> columns;
     Teuchos::Array<scalar_type> values;
@@ -224,7 +223,6 @@ VectorDiffusionSystem<Pack> vector_diffusion_system_impl(const MeshType& mesh, t
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
     const auto execution = acquire_mesh_execution(mesh);
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t num_components = 3;
@@ -234,7 +232,7 @@ VectorDiffusionSystem<Pack> vector_diffusion_system_impl(const MeshType& mesh, t
         throw std::invalid_argument("vector_diffusion_system requires non-negative diffusivity.");
     }
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto matrix = make_face_stencil_matrix<Pack>(mesh);
     auto rhs = Teuchos::rcp(new typename Pack::multi_vector_type(mesh.owned_cell_map(), num_components, true));
     Teuchos::Array<local_ordinal_type> columns;
     Teuchos::Array<scalar_type> values;

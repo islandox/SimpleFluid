@@ -5,6 +5,7 @@
 #pragma once
 
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/FaceStencilMatrix.hh"
 #include "dataclass/TpetraTypes.hh"
 
 #include <Teuchos_Array.hpp>
@@ -25,11 +26,10 @@ template<TpetraTypePack Pack, class MeshType>
 Teuchos::RCP<typename Pack::matrix_type> diffusion_matrix_impl(
     const MeshType& mesh, typename Pack::scalar_type diffusivity)
 {
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto matrix = make_face_stencil_matrix<Pack>(mesh);
     Teuchos::Array<local_ordinal_type> columns;
     Teuchos::Array<scalar_type> values;
     columns.reserve(32);
@@ -68,11 +68,10 @@ template<TpetraTypePack Pack, class MeshType, class IsOwnedFace, class FaceValue
 Teuchos::RCP<typename Pack::matrix_type> upwind_convection_matrix_impl(
     const MeshType& mesh, IsOwnedFace is_owned_face, FaceValue face_value)
 {
-    using matrix_type = typename Pack::matrix_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto matrix = make_face_stencil_matrix<Pack>(mesh);
     Teuchos::Array<local_ordinal_type> columns;
     Teuchos::Array<scalar_type> values;
     columns.reserve(32);
@@ -186,8 +185,7 @@ template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
 Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const MeshType& mesh,
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid, BoundaryConditionProvider boundary_condition)
 {
-    auto matrix = Teuchos::rcp(new typename Pack::matrix_type(
-        mesh.owned_cell_map(), mesh.overlap_cell_map(), 8));
+    auto matrix = make_face_stencil_matrix<Pack>(mesh);
     visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
         [&](auto row, const auto& columns, const auto& values)
         {
