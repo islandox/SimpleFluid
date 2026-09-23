@@ -43,11 +43,27 @@ TEST(CompositePartitionOperatorsTest, MixedRegionDiffusionAndGradientMatchSerial
             analytic(reference->face_centroid(reference->boundary_face_batch(b).face_lids[i]))};
     };
     const auto serial = FVM::diffusion_system<Pack>(*reference, 1.0, reference_boundary);
+    for (const bool distributed_source : {false, true})
     for (const auto policy : {Policy::TopologyAware, Policy::CellGraph, Policy::ContiguousCanonical})
     {
+        SCOPED_TRACE(distributed_source ? "distributed source" : "root source");
         CompositePartitionOptions partition_options; partition_options.policy = policy;
-        const auto source = comm->getRank() == 0 ? test::mixed_partition_source() : nullptr;
-        const auto partition = Partitioner::partition(CompositeMeshSource(source), partition_options, comm);
+        const auto partition = [&]
+        {
+            auto initial_options = partition_options;
+            if (distributed_source) initial_options.policy = policy == Policy::ContiguousCanonical
+                ? Policy::TopologyAware : Policy::ContiguousCanonical;
+            auto first = [&]
+            {
+                const auto source = comm->getRank() == 0 ? test::mixed_partition_source() : nullptr;
+                return Partitioner::partition(CompositeMeshSource(source), initial_options, comm);
+            }();
+            if (!distributed_source) return first;
+            const auto owned = first.plan().owned_cells();
+            const auto source = CompositeMeshSource::distributed(first.geometry(),
+                std::vector<uint64_t>(owned.begin(), owned.end()), comm->getSize() - 1);
+            return Partitioner::partition(source, partition_options, comm);
+        }();
         SP<const Handle> mesh = std::make_shared<Handle>(partition);
         ScalarCellFieldStored<Pack> scalar(mesh, "phi");
         VectorCellFieldStored<Pack> gradient(mesh, "gradient");

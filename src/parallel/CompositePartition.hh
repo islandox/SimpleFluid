@@ -33,18 +33,36 @@ struct CompositeBalanceReport
     bool tolerance_satisfied = true;
 };
 
-/** @brief A complete source is held by one rank; other ranks may pass nullptr. */
+/**
+ * @brief Root-owned or distributed composite input.
+ *
+ * Root-owned input requires a complete source only on source_rank(). Distributed
+ * input requires the same global catalog on every rank, local visible geometry,
+ * and exactly one supplying rank for each canonical cell ID.
+ */
 class CompositeMeshSource
 {
 public:
+    enum class Mode { Root, Distributed };
     explicit CompositeMeshSource(std::shared_ptr<const Meshes::MultiRegionMesh> mesh,
                              int source_rank = 0)
         : d_mesh(std::move(mesh)), d_source_rank(source_rank) {}
     const std::shared_ptr<const Meshes::MultiRegionMesh>& mesh() const noexcept { return d_mesh; }
     int source_rank() const noexcept { return d_source_rank; }
+    Mode mode() const noexcept { return d_mode; }
+    const std::vector<uint64_t>& owned_cells() const noexcept { return d_owned_cells; }
+    static CompositeMeshSource distributed(std::shared_ptr<const Meshes::MultiRegionMesh> mesh,
+                                            std::span<const uint64_t> owned_cells, int source_rank = 0)
+    {
+        CompositeMeshSource result(std::move(mesh),source_rank);
+        result.d_mode = Mode::Distributed; result.d_owned_cells.assign(owned_cells.begin(),owned_cells.end());
+        return result;
+    }
 private:
     std::shared_ptr<const Meshes::MultiRegionMesh> d_mesh;
     int d_source_rank;
+    Mode d_mode = Mode::Root;
+    std::vector<uint64_t> d_owned_cells;
 };
 using CompositeSource = CompositeMeshSource;
 
@@ -74,6 +92,9 @@ struct CompositeRegionFragment
  * cells in cell_ids(); cell_owner_ranks() uses this local order. A plan pins its
  * source geometry revision and communicator and cannot be applied to a different
  * source. No global cell-to-rank array is retained on the destination ranks.
+ * Every collective operation requires all ranks to participate on this same
+ * communicator. Mixing plans from different communicators violates MPI's
+ * collective participation precondition.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class CompositePartitionPlan
@@ -106,6 +127,7 @@ private:
     size_t d_owned_cells = 0, d_owned_faces = 0;
     ID d_global_cells = 0, d_global_faces = 0, d_global_nodes = 0;
     int d_source_rank = 0;
+    uint64_t d_collective_id = 0;
     CompositePartitionOptions d_options;
     CompositeBalanceReport d_balance;
     Teuchos::RCP<const comm_type> d_comm;
@@ -113,6 +135,9 @@ private:
     std::shared_ptr<const std::vector<std::vector<ID>>> d_destination_cells;
     std::weak_ptr<const Meshes::MultiRegionMesh> d_source;
     uint64_t d_source_epoch = 0;
+    CompositeMeshSource::Mode d_source_mode = CompositeMeshSource::Mode::Root;
+    std::vector<ID> d_original_owned_cells;
+    std::shared_ptr<const Meshes::MultiRegionMesh> d_assembled_source;
 };
 
 /** @brief Rank-local native geometry plus a completed ownership plan. */

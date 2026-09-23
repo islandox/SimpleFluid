@@ -4,10 +4,12 @@
 #pragma once
 #include "parallel/MeshPartitioner.hh"
 #include <cmath>
+#include <atomic>
 #include <map>
 #include <numeric>
 #include <set>
 #include <Teuchos_CommHelpers.hpp>
+#include <Teuchos_DefaultSerialComm.hpp>
 
 namespace SimpleFluid::composite_partition_detail
 {
@@ -94,6 +96,46 @@ std::vector<char> scatter_bytes(const Comm& comm, int root,
     collective_check(comm, [&] { incoming.resize(static_cast<size_t>(count)); });
     MPI_Scatterv(flattened.data(), counts.data(), offsets.data(), MPI_CHAR,
                  incoming.data(), count, MPI_CHAR, root, raw);
+    return incoming;
+}
+
+template<class Comm>
+std::vector<std::vector<char>> gather_bytes(const Comm& comm,int root,const std::vector<char>& outgoing)
+{
+    if (comm.getSize() == 1) return {outgoing};
+    collective_check(comm,[&]
+    {
+        if (outgoing.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+            throw std::overflow_error("Composite source packet exceeds MPI count capacity.");
+    });
+    const auto* mpi = dynamic_cast<const Teuchos::MpiComm<int>*>(&comm);
+    if (!mpi) throw std::invalid_argument("Distributed composite input requires an MPI communicator.");
+    const MPI_Comm raw = *mpi->getRawMpiComm();
+    const int count = static_cast<int>(outgoing.size());
+    std::vector<int> counts(comm.getSize()), offsets(comm.getSize());
+    MPI_Gather(&count,1,MPI_INT,counts.data(),1,MPI_INT,root,raw);
+    std::vector<char> flat;
+    collective_check(comm,[&]
+    {
+        if (comm.getRank() != root) return;
+        size_t total = 0;
+        for (size_t rank = 0; rank < counts.size(); ++rank)
+        {
+            if (counts[rank] < 0 || static_cast<size_t>(counts[rank]) > static_cast<size_t>(std::numeric_limits<int>::max())-total)
+                throw std::overflow_error("Distributed composite source exceeds MPI count capacity.");
+            offsets[rank] = static_cast<int>(total); total += static_cast<size_t>(counts[rank]);
+        }
+        flat.resize(total);
+    });
+    MPI_Gatherv(outgoing.data(),count,MPI_CHAR,flat.data(),counts.data(),offsets.data(),MPI_CHAR,root,raw);
+    std::vector<std::vector<char>> incoming;
+    collective_check(comm,[&]
+    {
+        if (comm.getRank() != root) return;
+        incoming.reserve(counts.size());
+        for (size_t rank = 0; rank < counts.size(); ++rank)
+            incoming.emplace_back(flat.begin()+offsets[rank],flat.begin()+offsets[rank]+counts[rank]);
+    });
     return incoming;
 }
 
@@ -254,6 +296,71 @@ CompositePartitionPlan<Pack> MeshPartitioner<Pack>::make_plan(
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &root, &root_max);
     if (root_min != root_max || root < 0 || root >= ranks)
         throw std::invalid_argument("Composite source rank must be valid and identical on all ranks.");
+    int mode = static_cast<int>(source.mode()), mode_min = 0, mode_max = 0;
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MIN,1,&mode,&mode_min);
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&mode,&mode_max);
+    if (mode_min != mode_max) throw std::invalid_argument("Composite source modes differ across ranks.");
+    if (source.mode() == CompositeMeshSource::Mode::Distributed)
+    {
+        detail::Writer packet;
+        uint64_t original_epoch = 0;
+        detail::collective_check(*comm,[&]
+        {
+            if (!source.mesh()) throw std::invalid_argument("Every distributed source rank requires its global catalog and local geometry.");
+            const auto execution = source.mesh()->acquire_execution_view();
+            original_epoch = source.mesh()->geometry_epoch();
+            std::unordered_set<ID> unique;
+            for (const auto cell : source.owned_cells())
+            {
+                if (cell >= source.mesh()->num_cells() || !unique.insert(cell).second)
+                    throw std::invalid_argument("Distributed source owned cell IDs are invalid or duplicated locally.");
+                if (source.mesh()->cell_faces(cell).size() < 4 || source.mesh()->cell_nodes(cell).size() < 4)
+                    throw std::invalid_argument("Distributed owned cell requires resident topology, not only outer-halo metrics.");
+            }
+            packet.vector(source.owned_cells());
+            const auto geometry = source.mesh()->serialize_partition(source.owned_cells());
+            packet.bytes.insert(packet.bytes.end(),geometry.begin(),geometry.end());
+        });
+        auto incoming = detail::gather_bytes(*comm,root,packet.bytes);
+        std::shared_ptr<Meshes::MultiRegionMesh> assembled;
+        detail::collective_check(*comm,[&]
+        {
+            if (rank != root) return;
+            const Teuchos::RCP<const Teuchos::Comm<int>> serial = Teuchos::rcp(new Teuchos::SerialComm<int>);
+            std::vector<std::shared_ptr<Meshes::MultiRegionMesh>> shards;
+            std::vector<unsigned char> supplied;
+            for (const auto& message : incoming)
+            {
+                detail::Reader reader{message};
+                const auto owned = reader.template vector<ID>();
+                auto shard = Meshes::MultiRegionMesh::deserialize_partition(reader.bytes,serial);
+                if (shards.empty()) supplied.resize(shard->num_cells());
+                if (shard->num_cells() != supplied.size())
+                    throw std::invalid_argument("Distributed composite cell catalogs differ across ranks.");
+                for (const auto cell : owned)
+                {
+                    if (cell >= supplied.size() || supplied[cell])
+                        throw std::invalid_argument("Distributed canonical cell has duplicate or invalid supplying rank.");
+                    supplied[cell] = 1;
+                }
+                shards.push_back(std::move(shard));
+            }
+            if (std::find(supplied.begin(),supplied.end(),0) != supplied.end())
+                throw std::invalid_argument("Distributed source ownership does not cover the global composite domain.");
+            assembled = Meshes::MultiRegionMesh::merge_partitions(shards,serial);
+        });
+        // Release gather buffers and shard payloads before building the graph.
+        incoming.clear(); incoming.shrink_to_fit(); packet.bytes.clear(); packet.bytes.shrink_to_fit();
+        auto result = make_plan(CompositeMeshSource(assembled,root),options,comm);
+        detail::collective_check(*comm,[&]
+        {
+            if (source.mesh()->geometry_epoch() != original_epoch)
+                throw std::invalid_argument("Distributed source changed while its partition was planned.");
+        });
+        result.d_source_mode = source.mode(); result.d_source = source.mesh(); result.d_source_epoch = original_epoch;
+        result.d_original_owned_cells = source.owned_cells(); result.d_assembled_source = std::move(assembled);
+        return result;
+    }
     detail::collective_check(*comm, [&]
     {
         if (!options.ghost_layers || !options.target_cells_per_fragment
@@ -283,6 +390,19 @@ CompositePartitionPlan<Pack> MeshPartitioner<Pack>::make_plan(
     });
     CompositePartitionPlan<Pack> result;
     result.d_comm = comm; result.d_options = options; result.d_source_rank = root;
+    detail::collective_check(*comm,[&]
+    {
+        if (rank != root) return;
+        static std::atomic<uint64_t> next_collective_id{0};
+        auto previous = next_collective_id.load();
+        do
+        {
+            if (previous == std::numeric_limits<uint64_t>::max())
+                throw std::overflow_error("Composite collective plan ID capacity exhausted.");
+        } while (!next_collective_id.compare_exchange_weak(previous,previous+1));
+        result.d_collective_id = previous+1;
+    });
+    Teuchos::broadcast(*comm,root,1,&result.d_collective_id);
     std::vector<detail::Unit> units;
     std::vector<ID> cell_unit;
     PartitionGraph graph;
@@ -420,7 +540,7 @@ CompositePartitionPlan<Pack> MeshPartitioner<Pack>::make_plan(
             cells = owned_by_rank[destination]; const auto owned_count = cells.size();
             std::unordered_set<ID> seen(cells.begin(), cells.end());
             std::vector<ID> frontier = cells, ghosts;
-            for (size_t layer = 0; layer < options.ghost_layers; ++layer)
+            for (size_t layer = 0; layer < options.ghost_layers && !frontier.empty(); ++layer)
             {
                 std::vector<ID> next;
                 for (auto cell : frontier)
@@ -498,20 +618,36 @@ CompositePartition<Pack> MeshPartitioner<Pack>::distribute(
     namespace detail = composite_partition_detail;
     const auto& comm = plan.communicator();
     const auto root = plan.source_rank();
+    if (comm.is_null()) throw std::invalid_argument("Composite plan has no communicator.");
+    int root_min = 0, root_max = 0;
+    uint64_t id_min = 0, id_max = 0;
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MIN,1,&root,&root_min);
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&root,&root_max);
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MIN,1,&plan.d_collective_id,&id_min);
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_MAX,1,&plan.d_collective_id,&id_max);
+    if (root_min != root_max || !id_min || id_min != id_max)
+        throw std::invalid_argument("All ranks must distribute the same collective composite partition plan.");
     std::vector<std::vector<char>> outgoing;
     detail::collective_check(*comm, [&]
     {
-        if (source.source_rank() != root) throw std::invalid_argument("Composite plan belongs to another source rank.");
+        if (source.source_rank() != root || source.mode() != plan.d_source_mode)
+            throw std::invalid_argument("Composite plan belongs to another source rank or mode.");
+        if (comm->getRank() == root || source.mode() == CompositeMeshSource::Mode::Distributed)
+        {
+            const auto pinned = plan.d_source.lock();
+            if (!source.mesh() || pinned.get() != source.mesh().get()
+                || source.mesh()->geometry_epoch() != plan.d_source_epoch
+                || source.owned_cells() != plan.d_original_owned_cells)
+                throw std::invalid_argument("Composite partition source changed after planning.");
+        }
         if (comm->getRank() != root) return;
-        const auto pinned = plan.d_source.lock();
-        if (!source.mesh() || pinned.get() != source.mesh().get()
-            || source.mesh()->geometry_epoch() != plan.d_source_epoch)
-            throw std::invalid_argument("Composite partition source changed after planning.");
-        const auto execution = source.mesh()->acquire_execution_view();
+        const auto& geometry = source.mode() == CompositeMeshSource::Mode::Distributed ? plan.d_assembled_source : source.mesh();
+        if (!geometry) throw std::invalid_argument("Composite plan lost its assembled distributed source.");
+        const auto execution = geometry->acquire_execution_view();
         if (!plan.d_destination_cells) throw std::invalid_argument("Composite plan has no source distribution payload.");
         outgoing.reserve(plan.d_destination_cells->size());
         for (const auto& cells : *plan.d_destination_cells)
-            outgoing.push_back(source.mesh()->serialize_partition(cells));
+            outgoing.push_back(geometry->serialize_partition(cells));
     });
     const auto incoming = detail::scatter_bytes(*comm, root, outgoing);
     std::shared_ptr<Meshes::MultiRegionMesh> geometry;
@@ -522,6 +658,8 @@ CompositePartition<Pack> MeshPartitioner<Pack>::distribute(
     auto local_plan = plan;
     local_plan.d_destination_cells.reset();
     local_plan.d_source.reset();
+    local_plan.d_assembled_source.reset();
+    local_plan.d_original_owned_cells.clear(); local_plan.d_original_owned_cells.shrink_to_fit();
     return CompositePartition<Pack>(std::move(geometry), std::move(local_plan));
 }
 
