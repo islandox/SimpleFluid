@@ -286,6 +286,10 @@ public:
     std::vector<char> serialize_partition(std::span<const ID> visible_cells) const;
     static std::shared_ptr<MultiRegionMesh> deserialize_partition(
         std::span<const char> packet, Teuchos::RCP<const Teuchos::Comm<int>> comm);
+    /** @brief Assemble consistent sparse shards into an independent full serial source. */
+    static std::shared_ptr<MultiRegionMesh> merge_partitions(
+        const std::vector<std::shared_ptr<MultiRegionMesh>>& shards,
+        Teuchos::RCP<const Teuchos::Comm<int>> serial_comm);
     /** @brief Descriptor counts for storage/scaling diagnostics; a self seam has two sides. */
     size_t region_interface_side_count(size_t r) const
     {

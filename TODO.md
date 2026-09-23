@@ -224,7 +224,10 @@ pool-flow validation.
 - [x] Coarsen eligible bottom wall intersections with compact swept R–Z
       mitered regions, preserving native volumes, canonical interfaces,
       distributed ownership, and common affine Z motion.
-- [ ] Distributed explicit region packets and region-aware load balancing.
+- [x] Distributed explicit region packets and region-aware load balancing via
+      `CompositeMeshSource`/`MeshPartitioner`; native topology and canonical
+      interfaces retained. Source union and graph construction remain centralized
+      on the source rank; see `docs/composite_partitioning.md`.
 - [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
       wider polygonal volume/output types and rotated periodic field transforms.
 - [ ] Nonaffine composite motion and moving periodic lengths: require consistent

@@ -37,6 +37,27 @@ identity and geometry revision. Keep the source alive until distribution ends.
 The completed partition owns its native geometry independently of the source.
 Failures are propagated collectively before subsequent communication or map
 publication. Every rank participates, including ranks with no owned cells.
+All ranks must call each operation on the same communicator and collective
+plan. Distribution rejects mixed plan IDs and differing source ranks before
+starting payload exchange.
+
+Already distributed geometry can supply a new partition directly:
+
+```cpp
+auto owned = partition.plan().owned_cells();
+auto distributed = CompositeMeshSource::distributed(
+    partition.geometry(),
+    std::vector<uint64_t>(owned.begin(), owned.end()));
+auto next = Partitioner::partition(distributed, options, comm);
+```
+
+Each rank supplies authoritative canonical cell IDs and local visible geometry.
+Their lists must cover the global cell domain exactly once. The source rank
+assembles and validates the union of explicit records, including agreement of
+overlapping geometry and complete interface coverage. A distributed plan pins
+each original shard's identity, geometry revision and supplied ownership list.
+Keep those shards alive until distribution completes. Fields still require
+explicit transfer to the new maps.
 
 ## Ownership policy
 
@@ -77,13 +98,17 @@ partition's `MeshHandle` supplies local iteration. Construct that handle from
 the partition result, since automatic arithmetic distribution of a resident
 geometry would discard its ownership plan.
 
-Compact descriptors are transmitted as axis/base data. Explicit geometry uses
+Compact descriptors are transmitted as axis/base data. Axis arrays and XY base
+templates remain replicated compact metadata; shared immutable topology is
+interned within each decoded composite while geometry stays independent.
+Explicit geometry uses
 versioned variable-length cell/face/node records; it is not replicated globally
 on destination ranks. Transfer preserves ordered loops separately from identity
 matching. The source rank currently constructs the complete planning graph and
 destination metadata before distributing graph rows to Zoltan2/ParMETIS. This
-root planning storage remains a scaling limit; local mesh residency does not
-imply fully distributed mesh ingestion or graph construction.
+root planning storage remains a scaling limit. Distributed source ingestion
+also assembles its explicit union on that rank; it does not replicate the union
+on destination ranks.
 
 Fields are constructed against the completed partition. Repartitioning produces
 new maps and handles; existing fields/operators are not mutated or migrated

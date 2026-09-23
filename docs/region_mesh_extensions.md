@@ -1,5 +1,10 @@
 # Region mesh extensions
 
+This report records the original compact-region delivery. The subsequent
+[composite partitioner](composite_partitioning.md) adds topology-aware graph
+ownership and distributed explicit polyhedral regions; the original automatic
+constructor retains the restrictions described below.
+
 This implementation continues the compact region work on the current branch.
 The existing coupled-backend tests and their uncommitted documentation updates
 remain part of the checkout.

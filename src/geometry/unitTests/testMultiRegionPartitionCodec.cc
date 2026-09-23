@@ -107,6 +107,132 @@ PacketOffsets inspect_cartesian_packet(const std::vector<char>& packet)
 }
 } // namespace
 
+TEST(MultiRegionPartitionCodecTest, MergesOverlappingShardsWithoutRetainingInputs)
+{
+    const auto native = explicit_chain(8);
+    MultiRegionMesh source({native_region("explicit", native)}, {}, serial_comm());
+    std::vector<std::shared_ptr<MultiRegionMesh>> shards;
+    for (auto owned : {std::array<ID,4>{0,1,2,3}, std::array<ID,4>{4,5,6,7}})
+        shards.push_back(MultiRegionMesh::deserialize_partition(source.serialize_partition(owned), serial_comm()));
+    const auto expected_catalog = shards.front()->serialize_partition({});
+    std::weak_ptr<MultiRegionMesh> first = shards[0], second = shards[1];
+    const auto merged = MultiRegionMesh::merge_partitions(shards, serial_comm());
+    EXPECT_FALSE(merged->partition_resident());
+    EXPECT_EQ(merged->serialize_partition({}), expected_catalog);
+    EXPECT_NE(std::get<DistributedExplicitRegion>(merged->regions()[0]).topology().storage_identity(),
+              std::get<DistributedExplicitRegion>(shards[0]->regions()[0]).topology().storage_identity());
+    shards.clear();
+    EXPECT_TRUE(first.expired()); EXPECT_TRUE(second.expired());
+    for (ID cell = 0; cell < source.num_cells(); ++cell)
+    {
+        EXPECT_EQ(merged->cell_centroid(cell), source.cell_centroid(cell));
+        EXPECT_EQ(merged->cell_volume(cell), source.cell_volume(cell));
+        EXPECT_TRUE(std::ranges::equal(merged->faces(cell), source.faces(cell)));
+    }
+}
+
+TEST(MultiRegionPartitionCodecTest, MergeRejectsMissingCoverageAndDuplicateGeometryConflicts)
+{
+    const auto native = explicit_chain(8);
+    MultiRegionMesh source({native_region("explicit", native)}, {}, serial_comm());
+    const std::array<ID,4> left{0,1,2,3}, right{4,5,6,7};
+    const auto left_shard = MultiRegionMesh::deserialize_partition(source.serialize_partition(left), serial_comm());
+    EXPECT_THROW(MultiRegionMesh::merge_partitions({left_shard}, serial_comm()), std::invalid_argument);
+    EXPECT_THROW(MultiRegionMesh::merge_partitions({}, serial_comm()), std::invalid_argument);
+    EXPECT_THROW(MultiRegionMesh::merge_partitions({nullptr}, serial_comm()), std::invalid_argument);
+
+    auto nodes = native->nodes();
+    nodes[16].x += 0.125;
+    Arr<UnstructuredMesh::CellDefinition> cells;
+    for (ID cell = 0; cell < native->num_cells(); ++cell)
+        cells.push_back({native->cell_type(cell), native->cell_nodes(cell)});
+    MultiRegionMesh different_geometry({native_region("explicit", std::make_shared<UnstructuredMesh>(nodes, cells))}, {}, serial_comm());
+    const auto right_shard = MultiRegionMesh::deserialize_partition(different_geometry.serialize_partition(right), serial_comm());
+    EXPECT_EQ(left_shard->serialize_partition({}), right_shard->serialize_partition({}));
+    EXPECT_THROW(MultiRegionMesh::merge_partitions({left_shard, right_shard}, serial_comm()), std::invalid_argument);
+    MultiRegionMesh different_catalog({native_region("renamed", native)}, {}, serial_comm());
+    const auto renamed_shard = MultiRegionMesh::deserialize_partition(different_catalog.serialize_partition(right), serial_comm());
+    EXPECT_THROW(MultiRegionMesh::merge_partitions({left_shard, renamed_shard}, serial_comm()), std::invalid_argument);
+}
+
+TEST(MultiRegionPartitionCodecTest, MergeClonesCompactProvidersAndKeepsBoundaryPolicy)
+{
+    MultiRegionMesh source({cartesian_region("left", {{{0,1},{0,1},{0,1}}}),
+                            cartesian_region("right", {{{1,2},{0,1},{0,1}}})},
+                           {StructuredPatchInterface{{0,1},{1,0}}}, serial_comm(), {},
+                           MultiRegionMesh::BoundaryNamePolicy::MergeMatchingNames);
+    std::vector<std::shared_ptr<MultiRegionMesh>> shards;
+    for (auto owned : {std::array<ID,1>{0}, std::array<ID,1>{1}})
+        shards.push_back(MultiRegionMesh::deserialize_partition(source.serialize_partition(owned), serial_comm()));
+    const auto merged = MultiRegionMesh::merge_partitions(shards, serial_comm());
+    EXPECT_EQ(merged->serialize_partition({}), shards.front()->serialize_partition({}));
+    EXPECT_NE(std::get<CartesianRegion>(merged->regions()[0]).topology().storage_identity(),
+              std::get<CartesianRegion>(shards[0]->regions()[0]).topology().storage_identity());
+    for (auto boundary : source.boundary_batch_ids())
+        EXPECT_EQ(merged->boundary_batch_name(boundary), source.boundary_batch_name(boundary));
+}
+
+TEST(MultiRegionPartitionCodecTest, MergePreservesNodeOrdinalSpaceWhenUnusedNodesWereNotTransferred)
+{
+    const auto native = explicit_chain(1);
+    auto nodes = native->nodes(); nodes.push_back({0,0,3});
+    const Arr<UnstructuredMesh::CellDefinition> cells{{native->cell_type(0), native->cell_nodes(0)}};
+    MultiRegionMesh source({native_region("explicit", std::make_shared<UnstructuredMesh>(nodes, cells))}, {}, serial_comm());
+    const std::array<ID,1> owned{0};
+    const auto shard = MultiRegionMesh::deserialize_partition(source.serialize_partition(owned), serial_comm());
+    const auto merged = MultiRegionMesh::merge_partitions({shard}, serial_comm());
+    EXPECT_EQ(merged->num_nodes(), 9U);
+    EXPECT_EQ(std::get<DistributedExplicitRegion>(merged->regions()[0]).topology().resident_nodes(), 8U);
+    EXPECT_EQ(merged->serialize_partition({}), shard->serialize_partition({}));
+    EXPECT_DOUBLE_EQ(merged->cell_volume(0), source.cell_volume(0));
+}
+
+TEST(MultiRegionPartitionCodecTest, DecodeInternsCartesianTopologyWithIndependentGeometry)
+{
+    MultiRegionMesh source({cartesian_region("left", {{{0,1},{0,1},{0,1}}}),
+                            cartesian_region("right", {{{1,3},{0,1},{0,1}}})},
+                           {StructuredPatchInterface{{0,1},{1,0}}}, serial_comm());
+    const auto decoded = MultiRegionMesh::deserialize_partition(source.serialize_partition({}), serial_comm());
+    const auto& left = std::get<CartesianRegion>(decoded->regions()[0]);
+    const auto& right = std::get<CartesianRegion>(decoded->regions()[1]);
+    EXPECT_EQ(left.topology().storage_identity(), right.topology().storage_identity());
+    EXPECT_NE(left.geometry().storage_identity(), right.geometry().storage_identity());
+    EXPECT_DOUBLE_EQ(decoded->cell_volume(0), 1.0);
+    EXPECT_DOUBLE_EQ(decoded->cell_volume(1), 2.0);
+}
+
+TEST(MultiRegionPartitionCodecTest, DecodeInternsExtrudedAndSweptTopologyWithIndependentGeometry)
+{
+    const auto topology = std::make_shared<const ExtrudedTopology>(4, Arr<Arr<unsigned>>{{0,1,2,3}}, 1);
+    for (bool sweep : {false, true})
+    {
+        std::vector<MultiRegionMesh::Region> regions;
+        if (sweep)
+        {
+            const Arr<MeshUtils::Vec3> base{{1,0,0},{1,1,0},{2,1,0},{2,0,0}};
+            regions.emplace_back(swept_rz_region("first", topology, base, {0,0.2}));
+            regions.emplace_back(swept_rz_region("second", topology, base, {0.2,0.6}));
+        }
+        else
+        {
+            const Arr<MeshUtils::Vec3> base{{0,0,0},{1,0,0},{1,1,0},{0,1,0}};
+            regions.emplace_back(extruded_region("first", topology, base, {0,1}));
+            regions.emplace_back(extruded_region("second", topology, base, {1,3}));
+        }
+        const auto first_cap = topology->indexer().face_ordinal({0,1,SemiStructuredIndexer::AXIAL});
+        const auto second_cap = topology->indexer().face_ordinal({0,0,SemiStructuredIndexer::AXIAL});
+        ExplicitConformingInterface interface{0,1,1,0,{{first_cap,second_cap}}};
+        MultiRegionMesh source(std::move(regions), {interface}, serial_comm());
+        const auto decoded = MultiRegionMesh::deserialize_partition(source.serialize_partition({}), serial_comm());
+        const auto identity = [](const auto& region) { return region.topology().storage_identity(); };
+        const auto geometry = [](const auto& region) { return region.geometry().storage_identity(); };
+        EXPECT_EQ(std::visit(identity, decoded->regions()[0]), std::visit(identity, decoded->regions()[1]));
+        EXPECT_NE(std::visit(geometry, decoded->regions()[0]), std::visit(geometry, decoded->regions()[1]));
+        EXPECT_DOUBLE_EQ(decoded->cell_volume(0), source.cell_volume(0));
+        EXPECT_DOUBLE_EQ(decoded->cell_volume(1), source.cell_volume(1));
+    }
+}
+
 TEST(MultiRegionPartitionCodecTest, SparseExplicitClosureRetainsNativeAdjacencyAndMetrics)
 {
     const auto native = explicit_chain(8);
