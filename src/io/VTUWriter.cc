@@ -25,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 
 namespace SimpleFluid
@@ -247,13 +248,17 @@ auto VTUWriter::make_topology(
     VectorData points,
     Int64Data connectivity,
     Int64Data offsets,
-    UInt8Data cell_types) -> TopologyHandle
+    UInt8Data cell_types,
+    Int64Data faces,
+    Int64Data face_offsets) -> TopologyHandle
 {
     return std::make_shared<const Topology>(Topology{
         std::move(points),
         std::move(connectivity),
         std::move(offsets),
-        std::move(cell_types)});
+        std::move(cell_types),
+        std::move(faces),
+        std::move(face_offsets)});
 }
 
 /** @brief Return the collision-free filename for one MPI rank's piece. */
@@ -414,15 +419,21 @@ void VTUWriter::set_points(VectorData points)
  * @param connectivity Flat array of node indices for all cells.
  * @param offsets Cumulative end-of-cell offsets into the connectivity array.
  * @param cell_types VTK cell type for each cell (e.g., 12 for HEXAHEDRON).
+ * @param faces Optional VTK polyhedron face stream with ordered vertex loops.
+ * @param face_offsets End of each polyhedron stream, or -1 for ordinary cells.
  */
 void VTUWriter::set_cells(Int64Data connectivity,
                           Int64Data offsets,
-                          UInt8Data cell_types)
+                          UInt8Data cell_types,
+                          Int64Data faces,
+                          Int64Data face_offsets)
 {
     auto& topology_data = mutable_topology();
     topology_data.connectivity = std::move(connectivity);
     topology_data.cell_offsets = std::move(offsets);
     topology_data.cell_types = std::move(cell_types);
+    topology_data.faces = std::move(faces);
+    topology_data.face_offsets = std::move(face_offsets);
 }
 
 /**
@@ -551,6 +562,62 @@ void VTUWriter::validate() const
         }
     }
 
+    constexpr std::uint8_t polyhedron_type = 42;
+    const bool has_polyhedra = std::find(topology_data.cell_types.begin(),
+        topology_data.cell_types.end(), polyhedron_type) != topology_data.cell_types.end();
+    if (has_polyhedra || !topology_data.faces.empty() || !topology_data.face_offsets.empty())
+    {
+        if (topology_data.face_offsets.size() != num_cells())
+            throw std::runtime_error("VTUWriter requires one face offset per cell when faces are supplied.");
+
+        size_t cursor = 0;
+        for (size_t cell = 0; cell < num_cells(); ++cell)
+        {
+            const auto offset = topology_data.face_offsets[cell];
+            if (topology_data.cell_types[cell] != polyhedron_type)
+            {
+                if (offset != -1)
+                    throw std::runtime_error("VTUWriter ordinary cells require a face offset of -1.");
+                continue;
+            }
+            if (offset < 0 || static_cast<size_t>(offset) <= cursor
+                || static_cast<size_t>(offset) > topology_data.faces.size())
+                throw std::runtime_error("VTUWriter polyhedron face offset is invalid.");
+
+            const auto end = static_cast<size_t>(offset);
+            const auto face_count = topology_data.faces[cursor++];
+            if (face_count < 4 || static_cast<size_t>(face_count) > (end - cursor) / 4)
+                throw std::runtime_error("VTUWriter polyhedron face count is invalid.");
+
+            const auto cell_begin = cell == 0 ? global_index_t{0} : topology_data.cell_offsets[cell - 1];
+            const auto cell_end = topology_data.cell_offsets[cell];
+            const std::unordered_set<global_index_t> cell_nodes(
+                topology_data.connectivity.begin() + cell_begin,
+                topology_data.connectivity.begin() + cell_end);
+            std::unordered_set<global_index_t> used_nodes;
+            for (global_index_t face = 0; face < face_count; ++face)
+            {
+                if (cursor == end)
+                    throw std::runtime_error("VTUWriter polyhedron face stream is truncated.");
+                const auto node_count = topology_data.faces[cursor++];
+                if (node_count < 3 || static_cast<size_t>(node_count) > end - cursor)
+                    throw std::runtime_error("VTUWriter polygon vertex count is invalid.");
+                std::unordered_set<global_index_t> face_nodes;
+                for (global_index_t node = 0; node < node_count; ++node)
+                {
+                    const auto point = topology_data.faces[cursor++];
+                    if (!cell_nodes.contains(point) || !face_nodes.insert(point).second)
+                        throw std::runtime_error("VTUWriter polygon has invalid cell-point connectivity.");
+                    used_nodes.insert(point);
+                }
+            }
+            if (cursor != end || used_nodes != cell_nodes)
+                throw std::runtime_error("VTUWriter polyhedron faces do not match its connectivity or offset.");
+        }
+        if (cursor != topology_data.faces.size())
+            throw std::runtime_error("VTUWriter polyhedron face stream contains trailing entries.");
+    }
+
     for (const auto& data_array : d_cell_data)
     {
         if (data_array_size(data_array) != num_cells())
@@ -626,6 +693,15 @@ void VTUWriter::write_ascii(std::ostream& out) const
             << (cell + 1 == num_cells() ? "" : " ");
     }
     out << "\n        </DataArray>\n";
+    if (!topology_data.face_offsets.empty())
+    {
+        out << "        <DataArray type=\"Int64\" Name=\"faces\" format=\"ascii\">\n";
+        write_int64_values(out, topology_data.faces, "        ");
+        out << "        </DataArray>\n";
+        out << "        <DataArray type=\"Int64\" Name=\"faceoffsets\" format=\"ascii\">\n";
+        write_int64_values(out, topology_data.face_offsets, "        ");
+        out << "        </DataArray>\n";
+    }
     out << "      </Cells>\n";
     out << "    </Piece>\n";
     out << "  </UnstructuredGrid>\n";
@@ -705,6 +781,11 @@ void VTUWriter::write_appended_binary(std::ostream& out) const
     const auto connectivity_offset = reserve_block(connectivity_bytes);
     const auto offsets_offset = reserve_block(offsets_bytes);
     const auto types_offset = reserve_block(types_bytes);
+    const bool has_faces = !topology_data.face_offsets.empty();
+    const auto faces_bytes = checked_bytes(topology_data.faces.size(), sizeof(global_index_t));
+    const auto face_offsets_bytes = checked_bytes(topology_data.face_offsets.size(), sizeof(global_index_t));
+    const auto faces_offset = has_faces ? reserve_block(faces_bytes) : 0;
+    const auto face_offsets_offset = has_faces ? reserve_block(face_offsets_bytes) : 0;
 
     out << "<?xml version=\"1.0\"?>\n";
     out << "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" "
@@ -746,6 +827,13 @@ void VTUWriter::write_appended_binary(std::ostream& out) const
     out << "        <DataArray type=\"UInt8\" Name=\"types\" "
            "format=\"appended\" offset=\""
         << types_offset << "\"/>\n";
+    if (has_faces)
+    {
+        out << "        <DataArray type=\"Int64\" Name=\"faces\" "
+               "format=\"appended\" offset=\"" << faces_offset << "\"/>\n";
+        out << "        <DataArray type=\"Int64\" Name=\"faceoffsets\" "
+               "format=\"appended\" offset=\"" << face_offsets_offset << "\"/>\n";
+    }
     out << "      </Cells>\n";
     out << "    </Piece>\n";
     out << "  </UnstructuredGrid>\n";
@@ -771,6 +859,11 @@ void VTUWriter::write_appended_binary(std::ostream& out) const
     write_block(connectivity_bytes, topology_data.connectivity);
     write_block(offsets_bytes, topology_data.cell_offsets);
     write_block(types_bytes, topology_data.cell_types);
+    if (has_faces)
+    {
+        write_block(faces_bytes, topology_data.faces);
+        write_block(face_offsets_bytes, topology_data.face_offsets);
+    }
 
     out << "\n  </AppendedData>\n";
     out << "</VTKFile>\n";

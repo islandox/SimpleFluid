@@ -56,6 +56,10 @@ public:
         Int64Data connectivity;
         Int64Data cell_offsets;
         UInt8Data cell_types;
+        /** Polyhedron stream: face count, then vertex count and IDs per face. */
+        Int64Data faces;
+        /** Stream end per polyhedron; -1 for ordinary cells. Empty if absent. */
+        Int64Data face_offsets;
     };
     using TopologyHandle = std::shared_ptr<const Topology>;
 
@@ -66,7 +70,9 @@ public:
         VectorData points,
         Int64Data connectivity,
         Int64Data offsets,
-        UInt8Data cell_types);
+        UInt8Data cell_types,
+        Int64Data faces = {},
+        Int64Data face_offsets = {});
 
     static std::string rank_piece_filename(
         const std::string& filename,
@@ -78,7 +84,9 @@ public:
     void set_points(VectorData points);
     void set_cells(Int64Data connectivity,
                    Int64Data offsets,
-                   UInt8Data cell_types);
+                   UInt8Data cell_types,
+                   Int64Data faces = {},
+                   Int64Data face_offsets = {});
 
     void add_scalar_cell_data(std::string name, ScalarData values);
     void add_vector_cell_data(std::string name, VectorData values);
