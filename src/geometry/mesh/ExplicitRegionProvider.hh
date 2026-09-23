@@ -158,6 +158,21 @@ public:
     size_t resident_faces() const noexcept { return d_faces.size(); }
     size_t resident_nodes() const noexcept { return d_nodes.size(); }
     bool has_face(ID face) const noexcept { return d_faces.contains(face); }
+    const std::map<ID, Cell>& cell_records() const noexcept { return d_cells; }
+    const std::map<ID, Face>& face_records() const noexcept { return d_faces; }
+    const std::map<ID, Vec3>& node_records() const noexcept { return d_nodes; }
+    const std::map<int, std::string>& boundary_names() const noexcept { return d_boundaries; }
+    std::array<real_t, 2> axial_bounds() const noexcept
+    {
+        std::array<real_t, 2> result{std::numeric_limits<real_t>::infinity(),
+                                  -std::numeric_limits<real_t>::infinity()};
+        for (const auto& [id, point] : d_nodes)
+        {
+            result[0] = std::min(result[0], point.z);
+            result[1] = std::max(result[1], point.z);
+        }
+        return result;
+    }
     MeshStorageReport storage_report() const
     {
         MeshStorageReport report;

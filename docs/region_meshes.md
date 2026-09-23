@@ -143,8 +143,8 @@ exact serialized compact description, excluding process-local pointers. A
 changed constituent is rejected collectively when constructing a handle.
 No maps are published after a failed preflight.
 
-Raw `MultiRegionMesh` counts/IDs describe the global logical domain. `MeshHandle`
-partitions contiguous canonical cell-ordinal ranges using communicator rank and
+Raw `MultiRegionMesh` counts/IDs describe the global logical domain. Automatic `MeshHandle`
+construction partitions contiguous canonical cell-ordinal ranges using communicator rank and
 size. A rank can own several regions, and a region can span several ranks. The
 handle builds local owned/ghost IDs and face maps, with one face owner selected
 by its canonical owner cell. Halo construction follows canonical adjacency,
@@ -154,10 +154,18 @@ manual rank/count overrides are rejected for composites.
 Global compact axis/base/interface descriptions are replicated. Expanded 3D
 geometry, connectivity, fields and operators are not replicated as a substitute
 for distribution. Global explicit `UnstructuredMesh` constituents are therefore
-rejected in multi-rank composites; existing single-region partitioned-unstructured
+rejected by the automatic multi-rank composite constructor; existing single-region partitioned-unstructured
 MPI remains supported. The direct `SemiStructuredXY_Z` handle keeps its serial
-contract; wrap it in a composite to use compact MPI. Distributed explicit region packets and arbitrary
-region-aware load balancing are later work.
+contract; wrap it in a composite to use compact MPI.
+
+For topology-aware graph ownership or mixed explicit polyhedral regions, use
+[`MeshPartitioner` and `CompositeMeshSource`](composite_partitioning.md).
+That path accepts a root-owned source or distributed native fragments, builds a
+validated ownership plan, and transfers only local explicit connectivity and
+halo geometry. Construct `MeshHandle` from the completed partition result.
+Orthogonal and XY-Z providers retain their native topology; region execution
+supports noncontiguous canonical selections. Source union and graph planning
+currently use one source rank, while the resulting geometry/fields are distributed.
 
 Physical names default to `region/native_patch`; collisions are rejected.
 Intentional name merging requires `BoundaryNamePolicy::MergeMatchingNames`.

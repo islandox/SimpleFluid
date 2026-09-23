@@ -216,7 +216,13 @@ void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<
         }
     }
 }
-MultiRegionMesh::Region read_region(Reader& r)
+struct TopologyCache
+{
+    std::map<std::vector<char>, std::shared_ptr<const RectilinearTopology>> cartesian;
+    std::map<std::vector<char>, std::shared_ptr<const ExtrudedTopology>> extruded;
+};
+
+MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
 {
     const auto tag = r.value<uint32_t>(); auto name = r.string(); const auto layout = read_layout(r);
     const auto checked = [&layout](MultiRegionMesh::Region result)
@@ -241,8 +247,21 @@ MultiRegionMesh::Region read_region(Reader& r)
             if (!layout.extents[axis] || layout.extents[axis] >= std::numeric_limits<unsigned>::max()
                 || edges[axis].size() != layout.extents[axis] + 1 || layout.periodic[axis])
                 throw std::invalid_argument("Invalid rectilinear partition descriptor extents.");
-        auto topology = std::make_shared<const RectilinearTopology>(std::make_shared<const OrthoMeshTopo>(
-            layout.extents[0], layout.extents[1], layout.extents[2], false, false, false, std::move(names)));
+        std::shared_ptr<const RectilinearTopology> topology;
+        Writer key;
+        for (auto extent : layout.extents) key.value(uint64_t(extent));
+        for (const auto& boundary_name : names) key.string(boundary_name);
+        if (cache)
+        {
+            const auto entry = cache->cartesian.find(key.data);
+            if (entry != cache->cartesian.end()) topology = entry->second;
+        }
+        if (!topology)
+        {
+            topology = std::make_shared<const RectilinearTopology>(std::make_shared<const OrthoMeshTopo>(
+                layout.extents[0], layout.extents[1], layout.extents[2], false, false, false, std::move(names)));
+            if (cache) cache->cartesian.emplace(std::move(key.data), topology);
+        }
         return checked(CartesianRegion(std::move(name), std::move(topology), std::make_shared<const RectilinearGeometry>(std::move(edges))));
     }
     if (tag != 2 && tag != 5 && tag != 6) throw std::invalid_argument("Unknown partition region provider tag.");
@@ -268,7 +287,26 @@ MultiRegionMesh::Region read_region(Reader& r)
         if (!aliases.empty()) throw std::invalid_argument("Native extrusion cannot carry boundary aliases.");
         return checked(native_region(std::move(name), std::make_shared<SemiStructuredXY_Z>(base, loops, layers, boundaries)));
     }
-    auto topology = std::make_shared<const ExtrudedTopology>(base.size(), loops, layers.size() - 1, boundaries, std::move(aliases));
+    std::shared_ptr<const ExtrudedTopology> topology;
+    Writer key;
+    key.value(uint64_t(base.size())); key.value(uint64_t(layers.size() - 1));
+    key.value(uint64_t(loops.size()));
+    for (const auto& loop : loops) key.array(loop);
+    key.value(uint64_t(boundaries.size()));
+    for (const auto& boundary : boundaries)
+    { key.value(boundary.node0); key.value(boundary.node1); key.string(boundary.batch_name); }
+    key.value(uint64_t(aliases.size()));
+    for (const auto& [source, target] : aliases) { key.string(source); key.string(target); }
+    if (cache)
+    {
+        const auto entry = cache->extruded.find(key.data);
+        if (entry != cache->extruded.end()) topology = entry->second;
+    }
+    if (!topology)
+    {
+        topology = std::make_shared<const ExtrudedTopology>(base.size(), loops, layers.size() - 1, boundaries, std::move(aliases));
+        if (cache) cache->extruded.emplace(std::move(key.data), topology);
+    }
     if (tag == 5) return checked(ExtrudedRegion(std::move(name), topology,
         std::make_shared<const ExtrudedGeometry>(topology, std::move(base), std::move(layers))));
     return checked(SweptRZRegion(std::move(name), topology,
@@ -393,7 +431,8 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     if (r.value<uint64_t>() != partition_magic) throw std::invalid_argument("Unsupported composite partition packet version.");
     auto mesh = std::shared_ptr<MultiRegionMesh>(new MultiRegionMesh(PartitionTag{}));
     mesh->d_comm = std::move(comm);
-    for (size_t count = r.count(); count; --count) mesh->d_regions.push_back(read_region(r));
+    TopologyCache topology_cache;
+    for (size_t count = r.count(); count; --count) mesh->d_regions.push_back(read_region(r, &topology_cache));
     for (size_t count = r.count(); count; --count) mesh->d_interfaces.push_back(read_interface(r));
     mesh->d_tolerance = r.value<InterfaceTolerance>();
     mesh->d_cells = r.array<ID>(); mesh->d_faces = r.array<ID>(); mesh->d_nodes = r.array<ID>(); mesh->d_native_faces = r.array<ID>();
@@ -579,5 +618,128 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     mesh->d_partition_resident = true;
     mesh->validate_static();
     return mesh;
+}
+std::shared_ptr<MultiRegionMesh> MultiRegionMesh::merge_partitions(
+    const std::vector<std::shared_ptr<MultiRegionMesh>>& shards,
+    Teuchos::RCP<const Teuchos::Comm<int>> serial_comm)
+{
+    if (serial_comm.is_null() || serial_comm->getSize() != 1 || shards.empty())
+        throw std::invalid_argument("Merging composite partitions requires shards and a serial communicator.");
+    struct Views
+    {
+        std::vector<std::unique_ptr<ExecutionView>> values;
+        ~Views() { while (!values.empty()) values.pop_back(); }
+    } views;
+    for (const auto& shard : shards)
+    {
+        if (!shard || !shard->partition_resident())
+            throw std::invalid_argument("Composite merge requires deserialized partition shards.");
+        views.values.push_back(std::make_unique<ExecutionView>(shard.get()));
+    }
+    const std::span<const ID> empty;
+    const auto& reference = *shards.front();
+    // This contains complete compact providers and global catalogs, but no
+    // sparse explicit geometry. It also compares the affine map and revision.
+    const auto catalog = reference.serialize_partition(empty);
+    for (size_t shard = 1; shard < shards.size(); ++shard)
+        if (shards[shard]->serialize_partition(empty) != catalog)
+            throw std::invalid_argument("Composite partition shards have different global catalogs or transforms.");
+
+    TopologyCache topology_cache;
+    std::vector<Region> regions;
+    regions.reserve(reference.d_regions.size());
+    for (size_t region = 0; region < reference.d_regions.size(); ++region)
+    {
+        if (reference.region_layout(region).family != RegionLayout::Family::Explicit)
+        {
+            // Reconstruct ownership-independent descriptors so the merged
+            // source retains no providers or borrowed data from input shards.
+            Writer writer;
+            std::visit([&](const auto& r) { write_region(writer, r, reference.d_regions[region].index(), {}); },
+                       reference.d_regions[region]);
+            Reader reader{writer.data};
+            regions.push_back(read_region(reader, &topology_cache));
+            continue;
+        }
+        using Provider = ExplicitRegionProvider;
+        std::map<ID, Provider::Cell> cells;
+        std::map<ID, Provider::Face> faces;
+        std::map<ID, Vec3> nodes;
+        const auto& first = std::get<DistributedExplicitRegion>(reference.d_regions[region]).topology();
+        for (const auto& shard : shards)
+        {
+            const auto& provider = std::get<DistributedExplicitRegion>(shard->d_regions[region]).topology();
+            for (const auto& [id, record] : provider.cell_records())
+            {
+                auto [it, inserted] = cells.emplace(id, record);
+                if (inserted) continue;
+                auto& previous = it->second;
+                if (previous.type != record.type || previous.centroid != record.centroid || previous.volume != record.volume)
+                    throw std::invalid_argument("Composite shards disagree on native cell geometry.");
+                if (previous.faces.empty())
+                {
+                    if (!record.faces.empty()) previous = record;
+                }
+                else if (!record.faces.empty() && (previous.faces != record.faces || previous.nodes != record.nodes))
+                    throw std::invalid_argument("Composite shards disagree on native cell connectivity.");
+            }
+            for (const auto& [id, record] : provider.face_records())
+            {
+                const auto [it, inserted] = faces.emplace(id, record);
+                if (!inserted)
+                {
+                    const auto& previous = it->second;
+                    if (previous.owner != record.owner || previous.neighbor != record.neighbor || previous.nodes != record.nodes
+                        || previous.centroid != record.centroid || previous.area_vector != record.area_vector
+                        || previous.boundary != record.boundary)
+                        throw std::invalid_argument("Composite shards disagree on native face topology or geometry.");
+                }
+            }
+            for (const auto& [id, point] : provider.node_records())
+            {
+                const auto [it, inserted] = nodes.emplace(id, point);
+                if (!inserted && it->second != point)
+                    throw std::invalid_argument("Composite shards disagree on native node coordinates.");
+            }
+        }
+        const auto layout = reference.region_layout(region);
+        if (cells.size() != layout.cells || faces.size() != layout.faces)
+            throw std::invalid_argument("Composite shards do not cover all native cells and faces.");
+        std::vector<Provider::Cell> cell_records;
+        std::vector<Provider::Face> face_records;
+        std::vector<Provider::Node> node_records;
+        cell_records.reserve(cells.size()); face_records.reserve(faces.size()); node_records.reserve(nodes.size());
+        for (auto& [id, record] : cells)
+        {
+            if (record.faces.empty()) throw std::invalid_argument("Composite shards lack full native cell topology.");
+            cell_records.push_back(std::move(record));
+        }
+        for (auto& [id, record] : faces) face_records.push_back(std::move(record));
+        for (auto [id, point] : nodes) node_records.push_back({id, point});
+        // Unreferenced source nodes need not have been transmitted. Their
+        // ordinal space is retained while every referenced node is validated.
+        auto provider = std::make_shared<const Provider>(layout, std::move(cell_records), std::move(face_records),
+                                                        std::move(node_records), first.boundary_names());
+        regions.emplace_back(DistributedExplicitRegion(reference.region_name(region), provider, provider));
+    }
+    bool namespaced = true, merged = true;
+    for (const auto& boundary : reference.d_boundaries)
+    {
+        const auto native_name = reference.topology(boundary.region,
+            [&](const auto& t) { return std::string(t.boundary_batch_name(boundary.native_id)); });
+        namespaced = namespaced && boundary.name == reference.region_name(boundary.region) + "/" + native_name;
+        merged = merged && boundary.name == native_name;
+    }
+    if (!namespaced && !merged) throw std::invalid_argument("Composite shard boundary names have no consistent policy.");
+    // The ordinary constructor rechecks region connectivity, complete native
+    // interface coverage, coincident geometry, orientation and conservation.
+    auto result = std::make_shared<MultiRegionMesh>(std::move(regions), reference.d_interfaces, std::move(serial_comm),
+        reference.d_tolerance, namespaced ? BoundaryNamePolicy::NamespaceRegions : BoundaryNamePolicy::MergeMatchingNames);
+    result->d_reference_axial_edges = reference.d_reference_axial_edges;
+    result->d_axial_edges = reference.d_axial_edges;
+    result->d_geometry_state.epoch = reference.d_geometry_state.epoch;
+    if (result->serialize_partition(empty) != catalog)
+        throw std::invalid_argument("Merged composite source does not preserve the global catalog.");
+    return result;
 }
 } // namespace SimpleFluid::Meshes

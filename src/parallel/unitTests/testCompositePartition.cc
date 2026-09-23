@@ -223,3 +223,82 @@ TEST(CompositePartitionTest, ReportsActualBalanceAndCanRequireFeasibleTolerance)
     if (comm->getSize() > 1) EXPECT_THROW(Partitioner::make_plan(source,strict,comm),std::invalid_argument);
     else EXPECT_NO_THROW(Partitioner::make_plan(source,strict,comm));
 }
+
+TEST(CompositePartitionTest, DistributedSourceRepartitionsNativeShards)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    CompositeMeshSource rooted(comm->getRank() == 0 ? test::mixed_partition_source() : nullptr);
+    CompositePartitionOptions contiguous; contiguous.policy = Policy::ContiguousCanonical;
+    const auto initial = Partitioner::partition(rooted,contiguous,comm);
+    const auto source = CompositeMeshSource::distributed(initial.geometry(),initial.plan().owned_cells(),comm->getSize()-1);
+    CompositePartitionOptions options; options.ghost_layers = 2;
+    const auto plan = Partitioner::make_plan(source,options,comm);
+    const auto repartitioned = Partitioner::distribute(source,plan);
+    check_partition(repartitioned,8);
+}
+
+TEST(CompositePartitionTest, DistributedSourceRequiresUniqueCompleteOwnershipAndConsistentMode)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    CompositeMeshSource rooted(comm->getRank() == 0 ? one_box(8) : nullptr);
+    CompositePartitionOptions options; options.policy = Policy::ContiguousCanonical;
+    const auto initial = Partitioner::partition(rooted,options,comm);
+    const auto owned_span = initial.plan().owned_cells();
+    std::vector<ID> owned(owned_span.begin(),owned_span.end());
+    auto missing = owned;
+    if (comm->getRank() == 0) missing.erase(missing.begin());
+    EXPECT_THROW(Partitioner::make_plan(CompositeMeshSource::distributed(initial.geometry(),missing),{},comm),std::invalid_argument);
+    auto duplicated = owned;
+    if (comm->getRank() == (comm->getSize() == 1 ? 0 : 1)) duplicated.push_back(0);
+    EXPECT_THROW(Partitioner::make_plan(CompositeMeshSource::distributed(initial.geometry(),duplicated),{},comm),std::invalid_argument);
+    if (comm->getSize() > 1)
+    {
+        auto inconsistent = comm->getRank() == 0 ? CompositeMeshSource(initial.geometry())
+            : CompositeMeshSource::distributed(initial.geometry(),owned);
+        EXPECT_THROW(Partitioner::make_plan(inconsistent,{},comm),std::invalid_argument);
+    }
+}
+
+TEST(CompositePartitionTest, DistributedPlanPinsEveryOriginalShardAndOwnedSelection)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    CompositeMeshSource rooted(comm->getRank() == 0 ? one_box(8) : nullptr);
+    CompositePartitionOptions options; options.policy = Policy::ContiguousCanonical;
+    const auto initial = Partitioner::partition(rooted,options,comm);
+    auto source = CompositeMeshSource::distributed(initial.geometry(),initial.plan().owned_cells());
+    const auto plan = Partitioner::make_plan(source,{},comm);
+    auto changed = source;
+    if (comm->getRank() == comm->getSize()-1)
+        changed = CompositeMeshSource::distributed(one_box(8),initial.plan().owned_cells());
+    EXPECT_THROW(Partitioner::distribute(changed,plan),std::invalid_argument);
+    std::vector<ID> changed_owned(initial.plan().owned_cells().begin(),initial.plan().owned_cells().end());
+    if (comm->getRank() == 0) changed_owned.clear();
+    auto changed_selection = CompositeMeshSource::distributed(initial.geometry(),changed_owned);
+    EXPECT_THROW(Partitioner::distribute(changed_selection,plan),std::invalid_argument);
+}
+
+TEST(CompositePartitionTest, MixingCollectivePlansFailsBeforeRootTraffic)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() == 1) GTEST_SKIP() << "Requires multiple ranks.";
+    CompositeMeshSource source(comm->getRank() == 0 ? one_box(8) : nullptr);
+    CompositePartitionOptions options; options.policy = Policy::ContiguousCanonical;
+    const auto first = Partitioner::make_plan(source,options,comm);
+    options.policy = Policy::CellGraph;
+    const auto second = Partitioner::make_plan(source,options,comm);
+    EXPECT_THROW(Partitioner::distribute(source,comm->getRank() == 0 ? first : second),std::invalid_argument);
+    const int other_root = comm->getSize()-1;
+    CompositeMeshSource other_source(comm->getRank() == other_root ? one_box(8) : nullptr,other_root);
+    const auto other_plan = Partitioner::make_plan(other_source,options,comm);
+    EXPECT_THROW(Partitioner::distribute(comm->getRank() == 0 ? source : other_source,
+        comm->getRank() == 0 ? first : other_plan),std::invalid_argument);
+}
+
+TEST(CompositePartitionTest, ExhaustedHaloFrontierStopsRegardlessOfRequestedDepth)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    CompositeMeshSource source(comm->getRank() == 0 ? one_box(1) : nullptr);
+    CompositePartitionOptions options; options.ghost_layers = std::numeric_limits<size_t>::max();
+    const auto partition = Partitioner::partition(source,options,comm);
+    EXPECT_EQ(partition.plan().cell_ids().size(),comm->getRank() == 0 ? 1U : 0U);
+}
