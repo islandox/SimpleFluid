@@ -12,7 +12,9 @@
 #include "geometry/mesh/ConservativeInterface.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include "geometry/mesh/SweptRZRegionProviders.hh"
+#include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "io/VTUWriter.hh"
+#include <Teuchos_Comm.hpp>
 #include <optional>
 #include <variant>
 
@@ -90,7 +92,7 @@ public:
     using Indexer = UnstructuredMesh::Indexer;
     using ID = uint64_t;
     using Region = std::variant<CartesianRegion, NativeIsoRegion<OrthogonalCartesian3D>,
-        NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>, NativeIsoRegion<OrthogonalCylindrial3D>, ExtrudedRegion, SweptRZRegion>;
+        NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>, NativeIsoRegion<OrthogonalCylindrial3D>, ExtrudedRegion, SweptRZRegion, DistributedExplicitRegion>;
     using Interface = std::variant<StructuredPatchInterface, ExplicitConformingInterface, NonconformingInterface>;
     enum class BoundaryNamePolicy { NamespaceRegions, MergeMatchingNames };
     static constexpr ID invalid_cell_id() noexcept { return UnstructuredMesh::invalid_ordinal; }
@@ -266,6 +268,10 @@ public:
 
     MultiRegionMesh(std::vector<Region> regions, std::vector<Interface> interfaces,
         InterfaceTolerance tolerance = {}, BoundaryNamePolicy names = BoundaryNamePolicy::NamespaceRegions);
+    /** @brief Construct on an explicit communicator; a serial communicator permits a root-only explicit source. */
+    MultiRegionMesh(std::vector<Region> regions, std::vector<Interface> interfaces,
+        Teuchos::RCP<const Teuchos::Comm<int>> comm,
+        InterfaceTolerance tolerance = {}, BoundaryNamePolicy names = BoundaryNamePolicy::NamespaceRegions);
     MultiRegionMesh(const MultiRegionMesh&) = delete;
     MultiRegionMesh& operator=(const MultiRegionMesh&) = delete;
     MultiRegionMesh(MultiRegionMesh&&) = delete;
@@ -274,6 +280,12 @@ public:
     const Indexer& indexer() const { return d_indexer; }
     const std::vector<Region>& regions() const { return d_regions; }
     const std::vector<Interface>& interfaces() const { return d_interfaces; }
+    const Teuchos::RCP<const Teuchos::Comm<int>>& communicator() const noexcept { return d_comm; }
+    /** Global catalog counts are retained; explicit geometry queries require local residency. */
+    bool partition_resident() const noexcept { return d_partition_resident; }
+    std::vector<char> serialize_partition(std::span<const ID> visible_cells) const;
+    static std::shared_ptr<MultiRegionMesh> deserialize_partition(
+        std::span<const char> packet, Teuchos::RCP<const Teuchos::Comm<int>> comm);
     /** @brief Descriptor counts for storage/scaling diagnostics; a self seam has two sides. */
     size_t region_interface_side_count(size_t r) const
     {
@@ -323,6 +335,8 @@ public:
     }
 
 private:
+    struct PartitionTag {};
+    explicit MultiRegionMesh(PartitionTag) {}
     friend Base;
     friend class PlanarALEGeometryAccess;
     void replace_axial_edges_fixed_topology(ArrReal edges);
@@ -466,6 +480,8 @@ private:
     Indexer d_indexer;
     ArrReal d_reference_axial_edges, d_axial_edges;
     GeometryEpochState d_geometry_state;
+    Teuchos::RCP<const Teuchos::Comm<int>> d_comm;
+    bool d_partition_resident = false;
 };
 static_assert(MeshClass<MultiRegionMesh>);
 } // namespace SimpleFluid::Meshes

@@ -15,6 +15,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME CompositePartitionOperators_2procs
+    TARGET testCompositePartitionOperators
+    PROCS 2
+    LABELS "mpi;multi_region;partition;transport"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME ALETransport_2procs
     TARGET testALETransport
     PROCS 2

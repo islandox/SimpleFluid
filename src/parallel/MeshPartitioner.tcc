@@ -880,7 +880,57 @@ auto MeshPartitioner<Pack>::solve_partition_graph(
         Teuchos::ParameterList parameters;
         parameters.set("algorithm", "parmetis");
         parameters.set("num_global_parts", nranks);
-        adapter_type adapter(graph);
+        int weighted = partition_graph.row_weights.empty() ? 0 : 1, any_weighted = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &weighted, &any_weighted);
+        int edge_weighted = partition_graph.row_edge_weights.empty() ? 0 : 1, any_edge_weighted = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &edge_weighted, &any_edge_weighted);
+        if (any_weighted) parameters.set("imbalance_tolerance", partition_graph.imbalance_tolerance);
+        using weight_type = typename adapter_type::scalar_t;
+        std::vector<weight_type> weights(
+            partition_graph.row_weights.begin(), partition_graph.row_weights.end());
+        std::vector<weight_type> edge_weights;
+        if (any_edge_weighted)
+        {
+            edge_weights.reserve(graph->getLocalNumEntries());
+            for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
+            {
+                typename graph_type::local_inds_host_view_type columns;
+                graph->getLocalRowView(static_cast<LO>(row),columns);
+                for (size_t edge = 0; edge < columns.extent(0); ++edge)
+                {
+                    const auto column = columns(edge);
+                    const auto gid = graph->getColMap()->getGlobalElement(column);
+                    const auto& neighbors = partition_graph.row_adjacency[row];
+                    const auto found = std::find(neighbors.begin(),neighbors.end(),gid);
+                    if (found == neighbors.end()) throw std::logic_error("Partition graph edge weight is missing.");
+                    edge_weights.push_back(static_cast<weight_type>(
+                        partition_graph.row_edge_weights[row].at(found-neighbors.begin())));
+                }
+            }
+        }
+        // The installed Zoltan2 pointer setters instantiate invalid code. Its
+        // ParMETIS GraphModel consumes these documented virtual host views;
+        // retain their data here without relying on those broken setters.
+        class WeightedAdapter final : public adapter_type
+        {
+        public:
+            WeightedAdapter(const Teuchos::RCP<const graph_type>& input, int vertex_count, int edge_count,
+                            std::vector<weight_type> vertices, std::vector<weight_type> edges)
+                : adapter_type(input,vertex_count,edge_count), d_vertices(std::move(vertices)), d_edges(std::move(edges)) {}
+            void getVertexWeightsView(const weight_type*& values,int& stride,int index) const override
+            {
+                if (index != 0) throw std::out_of_range("Invalid partition vertex-weight index.");
+                values = d_vertices.data(); stride = 1;
+            }
+            void getEdgeWeightsView(const weight_type*& values,int& stride,int index) const override
+            {
+                if (index != 0) throw std::out_of_range("Invalid partition edge-weight index.");
+                values = d_edges.data(); stride = 1;
+            }
+        private:
+            std::vector<weight_type> d_vertices, d_edges;
+        };
+        WeightedAdapter adapter(graph,any_weighted,any_edge_weighted,std::move(weights),std::move(edge_weights));
         Zoltan2::PartitioningProblem<adapter_type> problem(
             &adapter,
             &parameters,
@@ -1305,6 +1355,17 @@ auto MeshPartitioner<Pack>::rebuild(
         for (const auto node_id : mesh.cell_nodes(source_id))
         {
             cell.node_ids.push_back(local_node_by_global.at(node_id));
+        }
+        if (cell.type == MeshUtils::CellType::POLYHEDRON)
+        {
+            for (const auto face : mesh.faces(source_id))
+            {
+                Arr<NodeID> nodes;
+                for (const auto node_id : mesh.face_nodes(face))
+                    nodes.push_back(local_node_by_global.at(node_id));
+                if (mesh.owner_cell(face) != source_id) std::ranges::reverse(nodes);
+                cell.face_node_ids.push_back(std::move(nodes));
+            }
         }
         local_cells.push_back(std::move(cell));
     }

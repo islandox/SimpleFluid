@@ -24,6 +24,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/ExtrudedRegionProviders.cc
     mesh/SweptRZRegionProviders.cc
     mesh/MultiRegionMesh.cc
+    mesh/MultiRegionMeshPartition.cc
 )
 
 simplefluid_absolute_sources(SIMPLEFLUID_MESH_SOURCES)

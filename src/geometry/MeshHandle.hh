@@ -23,6 +23,7 @@
 #include "geometry/mesh/UnstructuredMesh.hh"
 #include "geometry/mesh/EntityRange.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
+#include "parallel/CompositePartition.hh"
 #include "io/VTUWriter.hh"
 #include "utils/debug_check.hh"
 
@@ -165,6 +166,8 @@ public:
     explicit MeshHandle(MutableMultiRegionPtr mesh);
     explicit MeshHandle(MultiRegionPtr mesh, DistributionOptions options);
     explicit MeshHandle(MutableMultiRegionPtr mesh, DistributionOptions options);
+    /** @brief Adapt a completed native composite partition without repartitioning. */
+    explicit MeshHandle(const CompositePartition<Pack>& partition);
 
     /** @brief Build a distributed handle for a Cartesian mesh. */
     explicit MeshHandle(CartesianPtr mesh,
@@ -451,7 +454,7 @@ public:
         return Meshes::MultiRegionMesh::ExecutionView(composite ? composite->get() : nullptr);
     }
 
-    /** @brief Whether owned cells retain the contiguous canonical region order. */
+    /** @brief Whether owned cells retain increasing canonical region order. */
     bool supports_region_execution() const noexcept
     {
         return std::holds_alternative<MultiRegionPtr>(d_mesh)
@@ -474,14 +477,19 @@ public:
         const auto execution = composite.acquire_execution_view();
         const auto count = num_owned_cells();
         if (!count) return;
-        const auto begin = static_cast<MultiRegion::ID>(geometry_cell_lid(0));
-        const auto end = begin + count;
+        size_t local = 0;
         execution.visit_region_geometry([&](size_t, MultiRegion::ID offset, const auto& geometry)
         {
-            const auto first = std::max(begin, offset);
-            const auto last = std::min(end, offset + geometry.layout().cells);
-            for (auto cell = first; cell < last; ++cell)
-                visitor(checked_local(cell - begin), cell, cell - offset, geometry);
+            const auto end = offset + geometry.layout().cells;
+            while (local < count)
+            {
+                const auto field_lid = checked_local(local);
+                const auto cell = static_cast<MultiRegion::ID>(geometry_cell_lid(field_lid));
+                if (cell >= end) break;
+                if (cell < offset) throw std::logic_error("Owned region cells are not in canonical order.");
+                visitor(field_lid, cell, cell - offset, geometry);
+                ++local;
+            }
         });
     }
 

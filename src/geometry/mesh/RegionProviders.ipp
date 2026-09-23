@@ -91,7 +91,7 @@ MeshUtils::CellType NativeRegionProvider<Native>::cell_type(size_t c) const
         const auto count = d_mesh->xy_cell_nodes().at(d_mesh->cell_id(c).ij).size();
         if (count == 3) return MeshUtils::CellType::TRIPRISM;
         if (count == 4) return MeshUtils::CellType::HEXAHEDRON;
-        return MeshUtils::CellType::INVALID;
+        return MeshUtils::CellType::POLYHEDRON;
     }
 }
 

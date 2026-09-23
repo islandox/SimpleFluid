@@ -161,6 +161,84 @@ TEST(MultiRegionMeshTest, OutputIsTemporaryAndLabelsRegionCells)
     EXPECT_FALSE(handle.has_materialized_connectivity());
     std::filesystem::remove(file);
 }
+
+TEST(MultiRegionMeshTest, PolyhedronOutputPreservesNativeFacesAndRegionTypes)
+{
+    const auto hexes = test::explicit_reference(*test::two_regions(1));
+    UnstructuredMesh::PolyhedralTopology shell{hexes->num_cells(), {}};
+    uint64_t seam = 0;
+    int seam_boundary = UnstructuredMesh::invalid_boundary_id;
+    for (size_t f = 0; f < hexes->num_faces(); ++f)
+    {
+        const auto boundary = hexes->boundary_id(f);
+        shell.faces.push_back({hexes->face_nodes(f), hexes->owner_cell(f), hexes->neighbor_cell(f), boundary,
+            boundary == UnstructuredMesh::invalid_boundary_id ? "" : hexes->boundary_batch_name(boundary)});
+        if (hexes->face_centroid(f).x == 0) { seam = f; seam_boundary = boundary; }
+    }
+    const auto polyhedra = std::make_shared<UnstructuredMesh>(hexes->nodes(), shell);
+    auto regular = cartesian_region("regular", {{{-1,0},{0,1},{0,1}}});
+    uint64_t regular_seam = 0;
+    for (const auto f : regular.topology().cell_faces(0))
+        if (regular.topology().boundary_id(f) == 1) regular_seam = f;
+    MultiRegionMesh mesh({regular, native_region("polyhedra", polyhedra)},
+        {ExplicitConformingInterface{0, 1, 1, seam_boundary, {{regular_seam, seam}}}});
+    const auto output = mesh.vtu_topology();
+    EXPECT_EQ(output->cell_types, (VTUWriter::UInt8Data{12, 42, 42}));
+    EXPECT_EQ(output->face_offsets, (VTUWriter::Int64Data{-1, 31, 62}));
+    size_t cursor = 0;
+    for (size_t c = 0; c < polyhedra->num_cells(); ++c)
+    {
+        ASSERT_EQ(output->faces.at(cursor++), polyhedra->faces(c).size());
+        for (const auto f : polyhedra->faces(c))
+        {
+            const auto count = static_cast<size_t>(output->faces.at(cursor++));
+            Arr<MeshUtils::Vec3> loop;
+            for (size_t i = 0; i < count; ++i)
+                loop.push_back(output->points.at(output->faces.at(cursor++)));
+            const auto expected = polyhedra->face_area_vector(f) * polyhedra->cell_face_orientation(c, f);
+            EXPECT_NEAR((MeshUtils::face_area_vector(loop) - expected).norm(), 0.0, 1e-13);
+        }
+        EXPECT_EQ(output->face_offsets[c + 1], cursor);
+    }
+    EXPECT_EQ(mesh.region_layout(0).family, RegionLayout::Family::Rectilinear);
+    EXPECT_EQ(mesh.region_layout(1).family, RegionLayout::Family::Explicit);
+    const auto path = std::filesystem::temp_directory_path() / "simplefluid_composite_polyhedra.vtu";
+    VTUWriter(output).write(path.string());
+    std::filesystem::remove(path);
+}
+
+TEST(MultiRegionMeshTest, PolygonalExtrusionOutputRetainsLayerFamilyAndOutwardCaps)
+{
+    const Arr<MeshUtils::Vec3> xy{{0,0,0},{1,0,0},{1.5,1,0},{0.5,2,0},{-0.5,1,0}};
+    const auto template_topology = std::make_shared<const ExtrudedTopology>(5, Arr<Arr<unsigned>>{{0,1,2,3,4}}, 2);
+    const auto native = std::make_shared<SemiStructuredXY_Z>(xy, Arr<Arr<unsigned>>{{0,1,2,3,4}}, ArrReal{0,1,3});
+    for (const auto& region : std::vector<MultiRegionMesh::Region>{
+             extruded_region("independent", template_topology, xy, {0,1,3}), native_region("native", native)})
+    {
+        MultiRegionMesh mesh({region}, {});
+        const auto output = mesh.vtu_topology();
+        EXPECT_EQ(mesh.region_layout(0).family, RegionLayout::Family::Extruded);
+        EXPECT_EQ(output->cell_types, (VTUWriter::UInt8Data{42,42}));
+        ASSERT_EQ(output->face_offsets.size(), 2U);
+        size_t cursor = 0;
+        for (size_t c = 0; c < 2; ++c)
+        {
+            ASSERT_EQ(output->faces.at(cursor++), 7);
+            double volume = 0;
+            for (size_t f = 0; f < 7; ++f)
+            {
+                const auto count = static_cast<size_t>(output->faces.at(cursor++));
+                Arr<MeshUtils::Vec3> loop;
+                for (size_t i = 0; i < count; ++i)
+                    loop.push_back(output->points.at(output->faces.at(cursor++)));
+                for (size_t i = 1; i + 1 < count; ++i)
+                    volume += loop[0].dot(loop[i].cross(loop[i + 1])) / 6;
+            }
+            EXPECT_EQ(output->face_offsets[c], cursor);
+            EXPECT_NEAR(volume, mesh.cell_volume(c), 1e-13);
+        }
+    }
+}
 TEST(MultiRegionMeshTest, StructuredCorrespondenceStorageIsDescriptorSized)
 {
     const auto small = test::two_regions(2), larger = test::two_regions(7);

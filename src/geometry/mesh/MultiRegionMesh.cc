@@ -806,9 +806,15 @@ void MultiRegionMesh::validate_regions() const
 
 MultiRegionMesh::MultiRegionMesh(std::vector<Region> regions, std::vector<Interface> interfaces,
     InterfaceTolerance tolerance, BoundaryNamePolicy names)
-    : d_regions(std::move(regions)), d_interfaces(std::move(interfaces)), d_tolerance(tolerance)
+    : MultiRegionMesh(std::move(regions), std::move(interfaces), Tpetra::getDefaultComm(), tolerance, names)
+{}
+
+MultiRegionMesh::MultiRegionMesh(std::vector<Region> regions, std::vector<Interface> interfaces,
+    Teuchos::RCP<const Teuchos::Comm<int>> construction_comm, InterfaceTolerance tolerance, BoundaryNamePolicy names)
+    : d_regions(std::move(regions)), d_interfaces(std::move(interfaces)), d_tolerance(tolerance), d_comm(std::move(construction_comm))
 {
-    const auto comm = Tpetra::getDefaultComm();
+    const auto& comm = d_comm;
+    if (comm.is_null()) throw std::invalid_argument("Composite construction requires a communicator.");
     std::exception_ptr error;
     try
     {
@@ -1240,7 +1246,7 @@ VTUWriter::TopologyHandle MultiRegionMesh::vtu_topology() const
 VTUWriter::TopologyHandle MultiRegionMesh::vtu_topology(const EntityRange<ID>& owned_cells) const
 {
     const auto execution = acquire_execution_view();
-    VTUWriter::VectorData points; VTUWriter::Int64Data connectivity, offsets; VTUWriter::UInt8Data types;
+    VTUWriter::VectorData points; VTUWriter::Int64Data connectivity, offsets, faces, face_offsets; VTUWriter::UInt8Data types;
     std::unordered_map<ID, global_index_t> local_nodes;
     offsets.reserve(owned_cells.size()); types.reserve(owned_cells.size());
     for (const auto c : owned_cells)
@@ -1252,8 +1258,42 @@ VTUWriter::TopologyHandle MultiRegionMesh::vtu_topology(const EntityRange<ID>& o
             connectivity.push_back(it->second);
         }
         offsets.push_back(static_cast<global_index_t>(connectivity.size()));
-        types.push_back(MeshUtils::vtu_cell_type_code(cell_type(c)));
+        const auto type = cell_type(c);
+        types.push_back(MeshUtils::vtu_cell_type_code(type));
+        if (type == MeshUtils::CellType::POLYHEDRON)
+        {
+            const auto [region, native] = native_cell(c);
+            topology(region, [&](const auto& t)
+            {
+                // Export the original cell shell. Logical coarse/fine subfaces
+                // belong to assembly and need not change the cell's geometry.
+                const auto native_faces = t.cell_faces(native);
+                faces.push_back(static_cast<global_index_t>(native_faces.size()));
+                for (const auto f : native_faces)
+                {
+                    const auto nodes = t.face_nodes(f);
+                    Arr<Vec3> coordinates;
+                    coordinates.reserve(nodes.size());
+                    for (const auto node : nodes)
+                        coordinates.push_back(points.at(local_nodes.at(d_nodes[region] + node)));
+                    const auto owner_area = transformed_area_vector(
+                        geometry(region, [&](const auto& g) { return g.face_area_vector(f); }));
+                    const bool reverse = (MeshUtils::face_area_vector(coordinates).dot(owner_area) < 0)
+                        != (t.owner_cell(f) != native);
+                    faces.push_back(static_cast<global_index_t>(nodes.size()));
+                    for (size_t i = 0; i < nodes.size(); ++i)
+                    {
+                        const auto index = reverse ? nodes.size() - 1 - i : i;
+                        faces.push_back(local_nodes.at(d_nodes[region] + nodes[index]));
+                    }
+                }
+            });
+            face_offsets.push_back(static_cast<global_index_t>(faces.size()));
+        }
+        else face_offsets.push_back(-1);
     }
-    return VTUWriter::make_topology(std::move(points), std::move(connectivity), std::move(offsets), std::move(types));
+    if (faces.empty()) face_offsets.clear();
+    return VTUWriter::make_topology(std::move(points), std::move(connectivity), std::move(offsets), std::move(types),
+        std::move(faces), std::move(face_offsets));
 }
 } // namespace SimpleFluid::Meshes

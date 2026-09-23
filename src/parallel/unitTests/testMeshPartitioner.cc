@@ -22,6 +22,7 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -140,6 +141,41 @@ make_unstructured_hex_line(unsigned cells)
         nodes,
         cell_defs,
         boundaries);
+}
+
+/** @brief Graded pentagonal prisms exercise polygonal partition faces. */
+UnstructuredMesh make_polyhedral_column()
+{
+    using Node = UnstructuredMesh::NodeID;
+    const SimpleFluid::Arr<UnstructuredMesh::Vec3> base{{0,0,0},{2,0,0},{3,1,0},{1.5,2,0},{0,1,0}};
+    const SimpleFluid::ArrReal layers{0,0.2,0.6,1.3,2.1,3.2,4.5};
+    SimpleFluid::Arr<UnstructuredMesh::Vec3> nodes;
+    for (const auto z : layers)
+        for (const auto& p : base) nodes.push_back({p.x, p.y, z});
+    SimpleFluid::Arr<UnstructuredMesh::CellDefinition> cells;
+    for (Node k = 0; k + 1 < layers.size(); ++k)
+    {
+        UnstructuredMesh::CellDefinition cell;
+        cell.type = UnstructuredMesh::CellType::POLYHEDRON;
+        const auto lo = k * 5, hi = lo + 5;
+        cell.face_node_ids = {{lo+4,lo+3,lo+2,lo+1,lo}, {hi,hi+1,hi+2,hi+3,hi+4}};
+        for (Node i = 0; i < 5; ++i)
+        {
+            const auto next = (i + 1) % 5;
+            cell.face_node_ids.push_back({lo+i,lo+next,hi+next,hi+i});
+        }
+        cells.push_back(std::move(cell));
+    }
+    const UnstructuredMesh untagged(nodes, cells);
+    SimpleFluid::Arr<UnstructuredMesh::BoundaryFaceDefinition> boundaries;
+    for (size_t f = 0; f < untagged.num_faces(); ++f)
+        if (untagged.is_boundary_face(f))
+        {
+            const auto z = untagged.face_centroid(f).z;
+            const int id = z == layers.front() ? 21 : z == layers.back() ? 22 : 23;
+            boundaries.push_back({untagged.face_nodes(f), id, id == 21 ? "inlet" : id == 22 ? "outlet" : "wall"});
+        }
+    return UnstructuredMesh(nodes, cells, boundaries);
 }
 
 /** @brief Minimal mesh exposing contiguous-ID assignment for MPI tests. */
@@ -1118,6 +1154,69 @@ TEST(MeshPartitionerTest, RepeatedPartitioning)
     EXPECT_EQ(mesh->num_owned_cells(), owned_after_first);
     const auto all_gids_after_second = gather_all_owned_gids(*mesh);
     EXPECT_EQ(all_gids_after_second, all_gids_after_first);
+}
+
+/** @brief Native reconstruction retains polygon identity, winding and physical data. */
+TEST(MeshPartitionerTest, NativePolyhedraRetainPolygonLoopsMetricsAndBoundaryIds)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() > 2) GTEST_SKIP() << "Regression covers serial and two-rank native partitioning.";
+    const auto source = make_polyhedral_column();
+    auto local = source;
+    const auto partition = SimpleFluid::MeshPartitioner<Pack>::partition(local, comm);
+    const auto& indexer = partition.indexer;
+    EXPECT_EQ(local.num_cells(), indexer.num_local_cells());
+    int local_owned = static_cast<int>(local.num_owned_cells()), total_owned = 0;
+    my_mpi::allreduce(&local_owned, &total_owned, 1, MPI_SUM);
+    EXPECT_EQ(total_owned, source.num_cells());
+    for (size_t c = 0; c < local.num_cells(); ++c)
+    {
+        const auto gid = indexer.cell_global_id(c);
+        EXPECT_EQ(indexer.cell_local_id(gid), c);
+        EXPECT_EQ(local.cell_type(c), UnstructuredMesh::CellType::POLYHEDRON);
+        EXPECT_EQ(local.faces(c).size(), 7U);
+        EXPECT_NEAR(local.cell_volume(c), source.cell_volume(gid), 1e-12);
+        EXPECT_NEAR((local.cell_centroid(c) - source.cell_centroid(gid)).norm(), 0.0, 1e-12);
+        if (c < local.num_owned_cells()) EXPECT_EQ(partition.cell_owner_ranks.at(gid), comm->getRank());
+    }
+    size_t polygon_faces = 0;
+    for (size_t f = 0; f < local.num_faces(); ++f)
+    {
+        const auto gid = indexer.face_global_id(f);
+        EXPECT_EQ(indexer.face_local_id(gid), f);
+        auto expected_loop = source.face_nodes(gid);
+        const bool same_owner = indexer.cell_global_id(local.owner_cell(f)) == source.owner_cell(gid);
+        if (!same_owner) std::ranges::reverse(expected_loop);
+        std::vector<UnstructuredMesh::NodeID> actual_loop;
+        for (const auto n : local.face_nodes(f)) actual_loop.push_back(indexer.node_global_id(n));
+        ASSERT_EQ(actual_loop.size(), expected_loop.size());
+        const auto first = std::find(expected_loop.begin(), expected_loop.end(), actual_loop.front());
+        ASSERT_NE(first, expected_loop.end());
+        const auto shift = static_cast<size_t>(first - expected_loop.begin());
+        for (size_t i = 0; i < actual_loop.size(); ++i)
+            EXPECT_EQ(actual_loop[i], expected_loop[(shift + i) % expected_loop.size()]);
+        if (actual_loop.size() > 4) ++polygon_faces;
+        EXPECT_NEAR(local.face_area(f), source.face_area(gid), 1e-12);
+        EXPECT_NEAR((local.face_centroid(f) - source.face_centroid(gid)).norm(), 0.0, 1e-12);
+        const auto expected_area = source.face_area_vector(gid) * (same_owner ? 1.0 : -1.0);
+        EXPECT_NEAR((local.face_area_vector(f) - expected_area).norm(), 0.0, 1e-12);
+        EXPECT_EQ(local.boundary_id(f), source.boundary_id(gid));
+        if (source.boundary_id(gid) != UnstructuredMesh::invalid_boundary_id)
+            EXPECT_EQ(local.boundary_name(f), source.boundary_name(gid));
+    }
+    EXPECT_GT(polygon_faces, 0U);
+    for (size_t n = 0; n < local.num_nodes(); ++n)
+    {
+        const auto gid = indexer.node_global_id(n);
+        EXPECT_EQ(indexer.node_local_id(gid), n);
+        EXPECT_EQ(local.node_coordinates(n), source.node_coordinates(gid));
+    }
+    if (comm->getSize() == 2)
+    {
+        EXPECT_GT(local.num_owned_cells(), 0U);
+        EXPECT_LT(local.num_owned_cells(), source.num_cells());
+        EXPECT_GT(local.num_cells(), local.num_owned_cells());
+    }
 }
 
 /**

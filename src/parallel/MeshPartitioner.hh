@@ -14,6 +14,7 @@
 #include "geometry/mesh/LocalGlobalIndexer.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
 #include "parallel/MPI_interface.hh"
+#include "parallel/CompositePartition.hh"
 
 #include <algorithm>
 #include <array>
@@ -789,6 +790,22 @@ public:
         Meshes::UnstructuredMesh& mesh,
         const Teuchos::RCP<const comm_type>& comm);
 
+    /** @brief Collectively plan ownership without changing source geometry. */
+    static CompositePartitionPlan<Pack> make_plan(
+        const CompositeMeshSource& source,
+        const CompositePartitionOptions& options,
+        const Teuchos::RCP<const comm_type>& comm);
+
+    /** @brief Apply a plan, retaining compact regions and local explicit payloads. */
+    static CompositePartition<Pack> distribute(
+        const CompositeMeshSource& source,
+        const CompositePartitionPlan<Pack>& plan);
+
+    static CompositePartition<Pack> partition(
+        const CompositeMeshSource& source,
+        const CompositePartitionOptions& options,
+        const Teuchos::RCP<const comm_type>& comm);
+
 private:
     /**
      * @brief Distributed graph rows and referenced column cell IDs.
@@ -801,6 +818,9 @@ private:
         std::vector<GO> row_gids;
         std::vector<std::vector<GO>> row_adjacency;
         std::vector<GO> column_gids;
+        std::vector<double> row_weights;
+        std::vector<std::vector<double>> row_edge_weights;
+        double imbalance_tolerance = 1.1;
     };
 
     /**

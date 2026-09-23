@@ -48,8 +48,8 @@ MeshHandle<Pack>::MeshHandle(MultiRegionPtr mesh, DistributionOptions options) :
 template<TpetraTypePack Pack>
 void MeshHandle<Pack>::initialize_composite(MultiRegionPtr mesh, DistributionOptions options)
 {
-    const auto comm = Tpetra::getDefaultComm();
-    int invalid = !mesh || options.partition.has_value() || options.partitions.has_value() || options.ghost_layers == 0;
+    const auto comm = mesh ? mesh->communicator() : Tpetra::getDefaultComm();
+    int invalid = !mesh || mesh->partition_resident() || options.partition.has_value() || options.partitions.has_value() || options.ghost_layers == 0;
     int any_invalid = 0;
     std::exception_ptr geometry_error;
     try { if (mesh) mesh->validate_static(); }
@@ -104,6 +104,37 @@ void MeshHandle<Pack>::initialize_composite(MultiRegionPtr mesh, DistributionOpt
     std::vector<size_t> local_nodes(nodes.begin(), nodes.end()); std::sort(local_nodes.begin(), local_nodes.end());
     d_indexer.set_nodes(checked_global_ids(std::move(local_nodes)));
     initialize_boundary_batches(*mesh);
+    create_maps(comm);
+}
+
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(const CompositePartition<Pack>& partition)
+    : d_mesh(MultiRegionPtr(partition.geometry()))
+{
+    d_mutable_mesh.emplace(partition.geometry());
+    const auto& plan = partition.plan();
+    const auto& comm = plan.communicator();
+    std::exception_ptr error;
+    try
+    {
+        if (!partition.geometry() || comm.is_null())
+            throw std::invalid_argument("Composite partition requires live geometry and communicator.");
+        partition.geometry()->validate_static();
+        const auto copy = [](auto values) { return std::vector<size_t>(values.begin(), values.end()); };
+        initialize_cells(copy(plan.owned_cells()), copy(plan.ghost_cells()));
+        initialize_faces(copy(plan.owned_faces()), copy(plan.overlap_faces()));
+        d_indexer.set_nodes(checked_global_ids(copy(plan.node_ids())));
+        initialize_boundary_batches(*partition.geometry());
+    }
+    catch (...) { error = std::current_exception(); }
+    if (comm.is_null()) std::rethrow_exception(error);
+    int failed = error ? 1 : 0, any_failed = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+    if (any_failed)
+    {
+        if (error) std::rethrow_exception(error);
+        throw std::invalid_argument("Composite partition handle failed on another rank.");
+    }
     create_maps(comm);
 }
 
@@ -626,7 +657,8 @@ void MeshHandle<Pack>::initialize_serial(const MeshType& mesh)
     d_serial_identity = true;
     d_serial_counts = {mesh.num_cells(), mesh.num_faces(), mesh.num_nodes()};
     initialize_boundary_batches(mesh);
-    create_maps(Tpetra::getDefaultComm());
+    if constexpr (std::same_as<MeshType, MultiRegion>) create_maps(mesh.communicator());
+    else create_maps(Tpetra::getDefaultComm());
 }
 
 /**
@@ -1163,7 +1195,7 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::orthogonal_vtu_topology(
  * @brief Export owned semi-structured cells using their extruded topology.
  *
  * Triangular base cells become wedges, quadrilateral base cells become
- * hexahedra, and other polygons use VTK convex point sets.
+ * hexahedra, and other polygons retain their face loops as VTK polyhedra.
  *
  * @param mesh Semi-structured mesh providing layered node connectivity.
  * @param filename Requested output filename.
@@ -1174,6 +1206,8 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
 {
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
+    VTUWriter::Int64Data faces;
+    VTUWriter::Int64Data face_offsets;
     VTUWriter::UInt8Data cell_types;
     offsets.reserve(num_owned_cells());
     cell_types.reserve(num_owned_cells());
@@ -1201,22 +1235,45 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
         if (xy_nodes.size() == 3)
         {
             cell_types.push_back(13); // VTK_WEDGE
+            face_offsets.push_back(-1);
         }
         else if (xy_nodes.size() == 4)
         {
             cell_types.push_back(12); // VTK_HEXAHEDRON
+            face_offsets.push_back(-1);
         }
         else
         {
-            cell_types.push_back(41); // VTK_CONVEX_POINT_SET
+            cell_types.push_back(42); // VTK_POLYHEDRON
+            const auto node = [&](size_t i, auto layer)
+            {
+                return static_cast<global_index_t>(mesh.node_local_id(
+                    SemiStructured::NodeID{xy_nodes[i], layer}));
+            };
+            faces.push_back(static_cast<global_index_t>(xy_nodes.size() + 2));
+            // Base loops are counter-clockwise; the lower cap points down.
+            faces.push_back(static_cast<global_index_t>(xy_nodes.size()));
+            for (size_t i = xy_nodes.size(); i > 0; --i) faces.push_back(node(i - 1, cell.k));
+            faces.push_back(static_cast<global_index_t>(xy_nodes.size()));
+            for (size_t i = 0; i < xy_nodes.size(); ++i) faces.push_back(node(i, top_layer));
+            for (size_t i = 0; i < xy_nodes.size(); ++i)
+            {
+                const auto next = (i + 1) % xy_nodes.size();
+                faces.insert(faces.end(), {4, node(i, cell.k), node(next, cell.k),
+                    node(next, top_layer), node(i, top_layer)});
+            }
+            face_offsets.push_back(static_cast<global_index_t>(faces.size()));
         }
     }
+    if (faces.empty()) face_offsets.clear();
 
     return VTUWriter::make_topology(
         collect_vtu_points(mesh),
         std::move(connectivity),
         std::move(offsets),
-        std::move(cell_types));
+        std::move(cell_types),
+        std::move(faces),
+        std::move(face_offsets));
 }
 
 /**
@@ -1231,6 +1288,8 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::unstructured_vtu_topology(
 {
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
+    VTUWriter::Int64Data faces;
+    VTUWriter::Int64Data face_offsets;
     VTUWriter::UInt8Data cell_types;
     offsets.reserve(num_owned_cells());
     cell_types.reserve(num_owned_cells());
@@ -1246,15 +1305,35 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::unstructured_vtu_topology(
         }
         offsets.push_back(static_cast<global_index_t>(
             connectivity.size()));
-        cell_types.push_back(static_cast<std::uint8_t>(
-            MeshUtils::vtu_cell_type_code(mesh.cell_type(cell))));
+        const auto type = mesh.cell_type(cell);
+        cell_types.push_back(static_cast<std::uint8_t>(MeshUtils::vtu_cell_type_code(type)));
+        if (type == MeshUtils::CellType::POLYHEDRON)
+        {
+            const auto& cell_faces = mesh.faces(cell);
+            faces.push_back(static_cast<global_index_t>(cell_faces.size()));
+            for (const auto face : cell_faces)
+            {
+                const auto& nodes = mesh.face_nodes(face);
+                faces.push_back(static_cast<global_index_t>(nodes.size()));
+                for (size_t i = 0; i < nodes.size(); ++i)
+                {
+                    const auto index = mesh.owner_cell(face) == cell ? i : nodes.size() - 1 - i;
+                    faces.push_back(static_cast<global_index_t>(mesh.node_local_id(nodes[index])));
+                }
+            }
+            face_offsets.push_back(static_cast<global_index_t>(faces.size()));
+        }
+        else face_offsets.push_back(-1);
     }
+    if (faces.empty()) face_offsets.clear();
 
     return VTUWriter::make_topology(
         collect_vtu_points(mesh),
         std::move(connectivity),
         std::move(offsets),
-        std::move(cell_types));
+        std::move(cell_types),
+        std::move(faces),
+        std::move(face_offsets));
 }
 
 } // namespace SimpleFluid
