@@ -32,7 +32,8 @@ enum class CellType : uint8_t
     INVALID = 0,
     TETRAHEDRON = 1,
     HEXAHEDRON = 2,
-    TRIPRISM = 3
+    TRIPRISM = 3,
+    POLYHEDRON = 4
 };
 
 /**
@@ -42,7 +43,8 @@ enum class FaceType : uint8_t
 {
     INVALID = 0,
     TRIANGLE = 1,
-    QUAD = 2
+    QUAD = 2,
+    POLYGON = 3
 };
 
 using Vec3 = vec3<real_t>;
@@ -64,6 +66,8 @@ inline int vtu_cell_type_code(CellType type)
             return 12;
         case CellType::TRIPRISM:
             return 13;
+        case CellType::POLYHEDRON:
+            return 42;
         default:
             break;
     }
@@ -299,15 +303,37 @@ inline Vec3 face_centroid(const std::vector<Vec3>& x)
 template <class Vec3>
 inline Vec3 face_area_vector(const std::vector<Vec3>& x)
 {
-    CHECK(x.size() == 3 || x.size() == 4);
+    CHECK(x.size() >= 3);
+    Vec3 area{};
+    for (size_t i = 1; i + 1 < x.size(); ++i)
+        area = area + (x[i] - x[0]).cross(x[i + 1] - x[0]) * 0.5;
+    return area;
+}
 
-    if (x.size() == 3)
+/**
+ * @brief Signed-fan centroid of a simple planar polygon, including concavity.
+ * The caller validates planarity and simplicity. Signed triangle weights are
+ * essential: a fan from a concave polygon vertex can extend outside the face.
+ */
+template <class Vec3>
+inline Vec3 polygon_centroid(const std::vector<Vec3>& x)
+{
+    if (x.size() < 3)
+        throw std::invalid_argument("A polygon requires at least three nodes.");
+    const auto area_vector = face_area_vector(x);
+    const auto area = area_vector.norm();
+    if (!(area > 0.0) || !std::isfinite(area))
+        throw std::invalid_argument("Cannot compute a degenerate polygon centroid.");
+    const auto normal = area_vector / area;
+    Vec3 moment{};
+    for (size_t i = 1; i + 1 < x.size(); ++i)
     {
-        return (x[1] - x[0]).cross(x[2] - x[0]) * 0.5;
+        const auto a = x[i] - x[0];
+        const auto b = x[i + 1] - x[0];
+        const auto weight = a.cross(b).dot(normal) * 0.5;
+        moment = moment + (a + b) * (weight / 3.0);
     }
-
-    return ((x[1] - x[0]).cross(x[2] - x[0])
-          + (x[2] - x[0]).cross(x[3] - x[0])) * 0.5;
+    return x[0] + moment / area;
 }
 
 /**
