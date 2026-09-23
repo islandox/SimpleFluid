@@ -90,6 +90,21 @@ struct TwoTriangles
     }
 };
 
+/** @brief Interleave ordinary triangles with polyhedra having a pentagonal face. */
+VTUWriter::Topology mixed_polyhedra_topology()
+{
+    VTUWriter::Int64Data pyramid_faces{
+        6, 5, 0, 4, 3, 2, 1,
+        3, 0, 1, 5, 3, 1, 2, 5, 3, 2, 3, 5,
+        3, 3, 4, 5, 3, 4, 0, 5};
+    VTUWriter::Topology topology{
+        {{0, 0, 0}, {2, 0, 0}, {3, 1, 0}, {1, 3, 0}, {-1, 1, 0}, {1, 1, 2}},
+        {0, 1, 2, 0, 1, 2, 3, 4, 5, 2, 3, 4, 0, 1, 2, 3, 4, 5},
+        {3, 9, 12, 18}, {5, 42, 5, 42}, pyramid_faces, {-1, 27, -1, 54}};
+    topology.faces.insert(topology.faces.end(), pyramid_faces.begin(), pyramid_faces.end());
+    return topology;
+}
+
 // ===========================================================================
 // Construction & basic accessors
 // ===========================================================================
@@ -334,6 +349,87 @@ TEST(VTUWriter, AppendedBinaryOutput)
         read_little_endian<double>(
             content, payload + sizeof(std::uint64_t) + sizeof(double)),
         350.0);
+}
+
+/** @brief Polygon winding and mixed-cell offsets survive both output encodings. */
+TEST(VTUWriter, MixedPolyhedraPreserveFacesInAsciiAndBinary)
+{
+    const auto topology = mixed_polyhedra_topology();
+    VTUWriter writer(VTUWriter::make_topology(topology.points, topology.connectivity,
+        topology.cell_offsets, topology.cell_types, topology.faces, topology.face_offsets));
+    const std::string filename = "test_vtu_mixed_polyhedra.vtu";
+    writer.write(filename);
+    const auto ascii = read_file(filename);
+    const auto ascii_array = [&](const std::string& name)
+    {
+        const auto begin = ascii.find("Name=\"" + name + "\"");
+        EXPECT_NE(begin, std::string::npos);
+        const auto values_begin = ascii.find('>', begin) + 1;
+        std::istringstream values(ascii.substr(values_begin, ascii.find("</DataArray>", values_begin) - values_begin));
+        VTUWriter::Int64Data result;
+        global_index_t value;
+        while (values >> value) result.push_back(value);
+        return result;
+    };
+    EXPECT_EQ(ascii_array("faces"), topology.faces);
+    EXPECT_EQ(ascii_array("faceoffsets"), topology.face_offsets);
+    EXPECT_EQ(ascii_array("connectivity"), topology.connectivity);
+
+    writer.write(filename, VTUWriter::Encoding::AppendedBinary);
+    const auto binary = read_file(filename);
+    const std::string marker = "<AppendedData encoding=\"raw\">\n_";
+    const auto appended = binary.find(marker);
+    ASSERT_NE(appended, std::string::npos);
+    const auto payload = appended + marker.size();
+    for (const auto& [name, expected] :
+         std::vector<std::pair<std::string, VTUWriter::Int64Data>>{
+             {"faces", topology.faces}, {"faceoffsets", topology.face_offsets}})
+    {
+        const auto declaration = binary.find("Name=\"" + name + "\"");
+        ASSERT_LT(declaration, appended);
+        const auto offset_begin = binary.find("offset=\"", declaration) + 8;
+        const auto offset = std::stoull(binary.substr(offset_begin));
+        const auto begin = payload + offset;
+        ASSERT_LE(begin + sizeof(std::uint64_t) + expected.size() * sizeof(global_index_t), binary.size());
+        EXPECT_EQ(read_little_endian<std::uint64_t>(binary, begin), expected.size() * sizeof(global_index_t));
+        for (size_t i = 0; i < expected.size(); ++i)
+            EXPECT_EQ(read_little_endian<global_index_t>(binary,
+                begin + sizeof(std::uint64_t) + i * sizeof(global_index_t)), expected[i]);
+    }
+
+    // Mutable cell replacement must also discard the old shared face stream.
+    writer.set_cells({0, 1, 2}, {3}, {5});
+    writer.write(filename);
+    EXPECT_EQ(read_file(filename).find("Name=\"faces\""), std::string::npos);
+    std::filesystem::remove(filename);
+}
+
+/** @brief Reject inconsistent polyhedron streams before opening output files. */
+TEST(VTUWriter, RejectsInvalidPolyhedronFaceStreams)
+{
+    const auto rejects = [](auto modify)
+    {
+        auto topology = mixed_polyhedra_topology();
+        modify(topology);
+        VTUWriter writer;
+        writer.set_points(std::move(topology.points));
+        writer.set_cells(std::move(topology.connectivity), std::move(topology.cell_offsets),
+            std::move(topology.cell_types), std::move(topology.faces), std::move(topology.face_offsets));
+        EXPECT_THROW(writer.write("invalid_polyhedron.vtu"), std::runtime_error);
+    };
+    rejects([](auto& t) { t.faces.clear(); t.face_offsets.clear(); });
+    rejects([](auto& t) { t.face_offsets.pop_back(); });
+    rejects([](auto& t) { t.face_offsets[0] = 0; });
+    rejects([](auto& t) { t.face_offsets[1] = -1; });
+    rejects([](auto& t) { t.face_offsets[3] = 100; });
+    rejects([](auto& t) { t.face_offsets[1] = 26; });
+    rejects([](auto& t) { t.faces[0] = 3; });
+    rejects([](auto& t) { t.faces[1] = 2; });
+    rejects([](auto& t) { t.faces[1] = 100; });
+    rejects([](auto& t) { t.faces[2] = 100; });
+    rejects([](auto& t) { t.faces[3] = t.faces[2]; });
+    rejects([](auto& t) { t.connectivity[3] = 2; });
+    rejects([](auto& t) { t.faces.push_back(0); });
 }
 
 /** @brief Verifies PVTU schemas and collision-free piece references. */
