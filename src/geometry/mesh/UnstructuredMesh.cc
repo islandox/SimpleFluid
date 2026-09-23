@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -94,6 +95,10 @@ auto face_type_from_node_count(size_t node_count)
     if (node_count == 4)
     {
         return UnstructuredMesh::FaceType::QUAD;
+    }
+    if (node_count > 4)
+    {
+        return UnstructuredMesh::FaceType::POLYGON;
     }
     throw std::invalid_argument(
         "UnstructuredMesh face has unsupported node count.");
@@ -189,12 +194,10 @@ make_boundary_tags(
                 "UnstructuredMesh boundary face uses the invalid "
                 "boundary ID.");
         }
-        if (boundary.node_ids.size() != 3
-            && boundary.node_ids.size() != 4)
+        if (boundary.node_ids.size() < 3)
         {
             throw std::invalid_argument(
-                "UnstructuredMesh boundary face must have three or "
-                "four nodes.");
+                "UnstructuredMesh boundary face must have at least three nodes.");
         }
 
         const auto name = boundary.name.empty()
@@ -227,6 +230,78 @@ make_boundary_tags(
     return tags;
 }
 
+bool opposite_loops(const Arr<Ordinal>& a, const Arr<Ordinal>& b)
+{
+    if (a.size() != b.size()) return false;
+    const auto first = std::ranges::find(b, a.front());
+    if (first == b.end()) return false;
+    const auto start = static_cast<size_t>(first - b.begin());
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i] != b[(start + b.size() - i) % b.size()]) return false;
+    return true;
+}
+
+/** Validate a simple planar loop in its dominant coordinate projection. */
+void validate_polygon(const Arr<UnstructuredMesh::Vec3>& x)
+{
+    using Vec = UnstructuredMesh::Vec3;
+    real_t scale = 0.0;
+    for (const auto& p : x) scale = std::max(scale, (p - x[0]).norm());
+    const auto area_vector = MeshUtils::face_area_vector(x);
+    const auto area = area_vector.norm();
+    constexpr auto relative = 256.0 * std::numeric_limits<real_t>::epsilon();
+    const auto distance_tolerance = relative * scale;
+    const auto area_tolerance = relative * scale * scale;
+    if (!(area > area_tolerance) || !std::isfinite(area))
+        throw std::invalid_argument("UnstructuredMesh contains a degenerate polygon.");
+    const auto normal = area_vector / area;
+    size_t drop = 0;
+    for (size_t k = 1; k < 3; ++k)
+        if (std::abs(normal.component(k)) > std::abs(normal.component(drop))) drop = k;
+    const auto u = (drop + 1) % 3, v = (drop + 2) % 3;
+    const auto turn = [u, v](const Vec& a, const Vec& b, const Vec& c) {
+        return (b.component(u) - a.component(u)) * (c.component(v) - a.component(v))
+             - (b.component(v) - a.component(v)) * (c.component(u) - a.component(u));
+    };
+    const auto within = [u, v, distance_tolerance](const Vec& a, const Vec& b, const Vec& p) {
+        return p.component(u) >= std::min(a.component(u), b.component(u)) - distance_tolerance
+            && p.component(u) <= std::max(a.component(u), b.component(u)) + distance_tolerance
+            && p.component(v) >= std::min(a.component(v), b.component(v)) - distance_tolerance
+            && p.component(v) <= std::max(a.component(v), b.component(v)) + distance_tolerance;
+    };
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const auto& a = x[i];
+        const auto& b = x[(i + 1) % x.size()];
+        if (std::abs((a - x[0]).dot(normal)) > distance_tolerance)
+            throw std::invalid_argument("UnstructuredMesh polyhedral face is not planar.");
+        if (!((b - a).norm() > distance_tolerance))
+            throw std::invalid_argument("UnstructuredMesh polygon has a zero-length edge.");
+        const auto& previous = x[(i + x.size() - 1) % x.size()];
+        if (std::abs(turn(previous, a, b)) <= area_tolerance
+            && (previous - a).dot(b - a) > 0.0)
+            throw std::invalid_argument("UnstructuredMesh polygon backtracks along an edge.");
+        for (size_t j = i + 1; j < x.size(); ++j)
+        {
+            if (j == i + 1 || (i == 0 && j + 1 == x.size())) continue;
+            const auto& c = x[j];
+            const auto& d = x[(j + 1) % x.size()];
+            const auto ab_c = turn(a, b, c), ab_d = turn(a, b, d);
+            const auto cd_a = turn(c, d, a), cd_b = turn(c, d, b);
+            const auto straddles = [area_tolerance](real_t p, real_t q) {
+                return (p > area_tolerance && q < -area_tolerance)
+                    || (p < -area_tolerance && q > area_tolerance);
+            };
+            if ((straddles(ab_c, ab_d) && straddles(cd_a, cd_b))
+                || (std::abs(ab_c) <= area_tolerance && within(a, b, c))
+                || (std::abs(ab_d) <= area_tolerance && within(a, b, d))
+                || (std::abs(cd_a) <= area_tolerance && within(c, d, a))
+                || (std::abs(cd_b) <= area_tolerance && within(c, d, b)))
+                throw std::invalid_argument("UnstructuredMesh polygon loop intersects itself.");
+        }
+    }
+}
+
 } // namespace
 
 /**
@@ -245,8 +320,9 @@ UnstructuredMesh::UnstructuredMesh(
 {
     validate_input(cells, boundary_faces);
     initialize_cells(cells);
-    build_faces(boundary_faces);
+    build_faces(boundary_faces, cells);
     compute_face_geometry();
+    compute_polyhedral_cell_geometry();
     update_counts();
 }
 
@@ -268,6 +344,11 @@ UnstructuredMesh::UnstructuredMesh(
     size_t num_owned_faces)
     : UnstructuredMesh(nodes, cells, boundary_faces)
 {
+    set_owned_counts(num_owned_cells, num_owned_faces);
+}
+
+void UnstructuredMesh::set_owned_counts(size_t num_owned_cells, size_t num_owned_faces)
+{
     if (num_owned_cells > Base::d_num_cells
         || num_owned_faces > Base::d_num_faces)
     {
@@ -276,6 +357,72 @@ UnstructuredMesh::UnstructuredMesh(
     }
     Base::d_num_owned_cells = num_owned_cells;
     Base::d_num_owned_faces = num_owned_faces;
+}
+
+UnstructuredMesh::UnstructuredMesh(
+    const Arr<Vec3>& nodes, const PolyhedralTopology& topology)
+    : d_nodes(nodes)
+{
+    validate_count(nodes.size(), "node");
+    validate_count(topology.num_cells, "cell");
+    validate_count(topology.faces.size(), "face");
+    for (const auto& node : nodes)
+        if (!std::isfinite(node.x) || !std::isfinite(node.y) || !std::isfinite(node.z))
+            throw std::invalid_argument("UnstructuredMesh contains non-finite coordinates.");
+    d_cells.resize(topology.num_cells);
+    for (auto& cell : d_cells) cell.type = CellType::POLYHEDRON;
+    std::unordered_set<FaceKey, FaceKeyHash> unique_faces;
+    for (const auto& input : topology.faces)
+    {
+        if (input.node_ids.size() < 3 || input.owner >= topology.num_cells
+            || (input.neighbor != invalid_ordinal && input.neighbor >= topology.num_cells)
+            || input.owner == input.neighbor)
+            throw std::invalid_argument("UnstructuredMesh explicit face has invalid connectivity.");
+        const auto key = face_key(input.node_ids);
+        if (key.back() >= nodes.size() || std::ranges::adjacent_find(key) != key.end()
+            || !unique_faces.insert(key).second)
+            throw std::invalid_argument("UnstructuredMesh explicit face has repeated or invalid connectivity.");
+        if (input.neighbor != invalid_ordinal && input.boundary_id != invalid_boundary_id)
+            throw std::invalid_argument("UnstructuredMesh interior face cannot have a boundary tag.");
+        FaceInfo face;
+        face.type = face_type_from_node_count(input.node_ids.size());
+        face.node_ids = input.node_ids;
+        face.owner = input.owner;
+        face.neighbor = input.neighbor;
+        face.boundary_id = input.boundary_id;
+        const auto face_id = static_cast<FaceID>(d_faces.size());
+        d_cells[face.owner].face_ids.push_back(face_id);
+        if (face.neighbor != invalid_ordinal) d_cells[face.neighbor].face_ids.push_back(face_id);
+        if (face.boundary_id != invalid_boundary_id)
+        {
+            const auto name = input.name.empty() ? default_boundary_name(face.boundary_id) : input.name;
+            const auto [it, inserted] = d_boundary_names.emplace(face.boundary_id, name);
+            if (!inserted && it->second != name)
+                throw std::invalid_argument("UnstructuredMesh boundary ID is assigned multiple names.");
+            auto& batch = d_boundary_batches[face.boundary_id];
+            batch.id = face.boundary_id;
+            batch.face_lids.push_back(face_id);
+        }
+        d_faces.push_back(std::move(face));
+    }
+    for (auto& cell : d_cells)
+    {
+        std::unordered_set<NodeID> seen;
+        for (const auto face : cell.face_ids)
+            for (const auto node : d_faces[face].node_ids)
+                if (seen.insert(node).second) cell.node_ids.push_back(node);
+    }
+    compute_face_geometry();
+    compute_polyhedral_cell_geometry();
+    update_counts();
+}
+
+UnstructuredMesh::UnstructuredMesh(
+    const Arr<Vec3>& nodes, const PolyhedralTopology& topology,
+    size_t num_owned_cells, size_t num_owned_faces)
+    : UnstructuredMesh(nodes, topology)
+{
+    set_owned_counts(num_owned_cells, num_owned_faces);
 }
 
 /**
@@ -350,6 +497,29 @@ void UnstructuredMesh::validate_input(
 
     for (const auto& cell : cells)
     {
+        if (cell.type == CellType::POLYHEDRON)
+        {
+            if (cell.face_node_ids.size() < 4)
+                throw std::invalid_argument("UnstructuredMesh polyhedron requires at least four faces.");
+            std::unordered_set<NodeID> face_nodes;
+            for (const auto& loop : cell.face_node_ids)
+            {
+                auto key = face_key(loop);
+                if (key.size() < 3 || key.back() >= d_nodes.size()
+                    || std::ranges::adjacent_find(key) != key.end())
+                    throw std::invalid_argument("UnstructuredMesh polyhedron has invalid face nodes.");
+                face_nodes.insert(loop.begin(), loop.end());
+            }
+            if (!cell.node_ids.empty())
+            {
+                const std::unordered_set<NodeID> supplied(cell.node_ids.begin(), cell.node_ids.end());
+                if (supplied.size() != cell.node_ids.size() || supplied != face_nodes)
+                    throw std::invalid_argument("UnstructuredMesh polyhedron node list does not match its faces.");
+            }
+            continue;
+        }
+        if (!cell.face_node_ids.empty())
+            throw std::invalid_argument("UnstructuredMesh element cell cannot specify polyhedral faces.");
         const auto expected_nodes = expected_node_count(cell.type);
         if (cell.node_ids.size() != expected_nodes)
         {
@@ -403,6 +573,18 @@ void UnstructuredMesh::initialize_cells(
         CellInfo info;
         info.type = cell.type;
         info.node_ids = cell.node_ids;
+        if (info.type == CellType::POLYHEDRON)
+        {
+            if (info.node_ids.empty())
+            {
+                std::unordered_set<NodeID> seen;
+                for (const auto& face : cell.face_node_ids)
+                    for (const auto node : face)
+                        if (seen.insert(node).second) info.node_ids.push_back(node);
+            }
+            d_cells.push_back(std::move(info));
+            continue;
+        }
 
         Arr<Vec3> coords;
         coords.reserve(info.node_ids.size());
@@ -410,15 +592,15 @@ void UnstructuredMesh::initialize_cells(
         {
             coords.push_back(d_nodes[node_id]);
         }
-        info.center = MeshUtils::average(coords);
-
         if (info.type == CellType::HEXAHEDRON)
         {
             info.volume = MeshUtils::hex_volume(coords);
+            if (info.volume > 0.0) info.center = MeshUtils::hex_centroid(coords);
         }
         else if (info.type == CellType::TRIPRISM)
         {
             info.volume = MeshUtils::wedge_volume(coords);
+            if (info.volume > 0.0) info.center = MeshUtils::wedge_centroid(coords);
         }
 
         if (!(info.volume > 0.0) || !std::isfinite(info.volume))
@@ -440,7 +622,8 @@ void UnstructuredMesh::initialize_cells(
  * @param boundary_faces Boundary face definitions.
  */
 void UnstructuredMesh::build_faces(
-    const Arr<BoundaryFaceDefinition>& boundary_faces)
+    const Arr<BoundaryFaceDefinition>& boundary_faces,
+    const Arr<CellDefinition>& cells)
 {
     d_faces.clear();
     d_boundary_names.clear();
@@ -454,17 +637,26 @@ void UnstructuredMesh::build_faces(
     {
         auto& cell = d_cells[cell_id];
         cell.face_ids.clear();
-        const auto side_ordinals = side_node_ordinals(cell.type);
-        cell.face_ids.reserve(side_ordinals.size());
-
-        for (const auto& side : side_ordinals)
+        auto loops = cells[cell_id].face_node_ids;
+        if (cell.type != CellType::POLYHEDRON)
         {
-            Arr<NodeID> face_nodes;
-            face_nodes.reserve(side.size());
-            for (const auto ordinal : side)
+            for (const auto& side : side_node_ordinals(cell.type))
             {
-                face_nodes.push_back(cell.node_ids[ordinal]);
+                Arr<NodeID> loop;
+                Arr<Vec3> points;
+                for (const auto ordinal : side)
+                {
+                    loop.push_back(cell.node_ids[ordinal]);
+                    points.push_back(d_nodes[cell.node_ids[ordinal]]);
+                }
+                if (MeshUtils::face_area_vector(points).dot(MeshUtils::average(points) - cell.center) < 0.0)
+                    std::ranges::reverse(loop);
+                loops.push_back(std::move(loop));
             }
+        }
+        cell.face_ids.reserve(loops.size());
+        for (auto& face_nodes : loops)
+        {
 
             const auto key = face_key(face_nodes);
             const auto existing = face_ids.find(key);
@@ -485,11 +677,13 @@ void UnstructuredMesh::build_faces(
             }
 
             auto& face = d_faces[existing->second];
-            if (face.neighbor != invalid_ordinal)
+            if (face.neighbor != invalid_ordinal || face.owner == cell_id)
             {
                 throw std::invalid_argument(
                     "UnstructuredMesh contains a non-manifold face.");
             }
+            if (!opposite_loops(face.node_ids, face_nodes))
+                throw std::invalid_argument("UnstructuredMesh shared face loops have inconsistent orientation.");
             face.neighbor = cell_id;
             cell.face_ids.push_back(existing->second);
         }
@@ -547,7 +741,10 @@ void UnstructuredMesh::compute_face_geometry()
             coords.push_back(d_nodes[node_id]);
         }
 
-        face.center = MeshUtils::average(coords);
+        const bool polyhedral = d_cells[face.owner].type == CellType::POLYHEDRON
+            || (face.neighbor != invalid_ordinal && d_cells[face.neighbor].type == CellType::POLYHEDRON);
+        if (polyhedral) validate_polygon(coords);
+        face.center = polyhedral ? MeshUtils::polygon_centroid(coords) : MeshUtils::face_centroid(coords);
         auto area_vector = MeshUtils::face_area_vector(coords);
         face.area = area_vector.norm();
         if (!(face.area > 0.0) || !std::isfinite(face.area))
@@ -557,13 +754,113 @@ void UnstructuredMesh::compute_face_geometry()
         }
 
         auto normal = area_vector / face.area;
-        const auto owner_to_face =
-            face.center - d_cells[face.owner].center;
-        if (normal.dot(owner_to_face) < 0.0)
+        if (!polyhedral && normal.dot(face.center - d_cells[face.owner].center) < 0.0)
         {
             normal = normal * -1.0;
         }
         face.normal = normal;
+    }
+}
+
+void UnstructuredMesh::compute_polyhedral_cell_geometry()
+{
+    using Edge = std::pair<NodeID, NodeID>;
+    struct Incidence
+    {
+        int balance = 0;
+        Arr<size_t> faces;
+    };
+    for (CellID cell_id = 0; cell_id < d_cells.size(); ++cell_id)
+    {
+        auto& cell = d_cells[cell_id];
+        if (cell.type != CellType::POLYHEDRON) continue;
+        if (cell.face_ids.size() < 4 || cell.node_ids.size() < 4)
+            throw std::invalid_argument("UnstructuredMesh polyhedron requires at least four faces and nodes.");
+
+        std::map<Edge, Incidence> edges;
+        std::unordered_map<NodeID, Arr<size_t>> vertex_faces;
+        Arr<Vec3> nodes;
+        for (const auto node : cell.node_ids) nodes.push_back(d_nodes[node]);
+        // Shift all moment calculations near the cell to limit cancellation.
+        const auto reference = nodes[0] + [&] {
+            Vec3 sum{};
+            for (const auto& node : nodes) sum = sum + (node - nodes[0]);
+            return sum / static_cast<real_t>(nodes.size());
+        }();
+        real_t scale = 0.0;
+        for (const auto& node : nodes) scale = std::max(scale, (node - reference).norm());
+        long double volume = 0.0L;
+        std::array<long double, 3> moment{};
+        for (size_t local_face = 0; local_face < cell.face_ids.size(); ++local_face)
+        {
+            const auto& face = d_faces[cell.face_ids[local_face]];
+            const int orientation = face.owner == cell_id ? 1 : -1;
+            const auto& loop = face.node_ids;
+            for (size_t i = 0; i < loop.size(); ++i)
+            {
+                auto a = loop[i], b = loop[(i + 1) % loop.size()];
+                const auto key = std::minmax(a, b);
+                auto& edge = edges[{key.first, key.second}];
+                edge.balance += (a < b ? 1 : -1) * orientation;
+                edge.faces.push_back(local_face);
+                vertex_faces[a].push_back(local_face);
+            }
+            const auto a = d_nodes[loop[0]] - reference;
+            for (size_t i = 1; i + 1 < loop.size(); ++i)
+            {
+                const auto b = d_nodes[loop[i]] - reference;
+                const auto c = d_nodes[loop[i + 1]] - reference;
+                const long double tetra = static_cast<long double>(a.dot(b.cross(c)))
+                                        * orientation / 6.0L;
+                volume += tetra;
+                for (size_t k = 0; k < 3; ++k)
+                    moment[k] += tetra * (static_cast<long double>(a.component(k))
+                                          + b.component(k) + c.component(k)) / 4.0L;
+            }
+        }
+        Arr<Arr<size_t>> adjacent(cell.face_ids.size());
+        for (const auto& [edge, incidence] : edges)
+        {
+            if (incidence.faces.size() != 2 || incidence.balance != 0)
+                throw std::invalid_argument("UnstructuredMesh polyhedron is not a closed oriented edge manifold.");
+            const auto a = incidence.faces[0], b = incidence.faces[1];
+            adjacent[a].push_back(b);
+            adjacent[b].push_back(a);
+        }
+        const auto visit = [&adjacent](size_t first, const std::unordered_set<size_t>& allowed) {
+            std::unordered_set<size_t> reached{first};
+            Arr<size_t> stack{first};
+            while (!stack.empty())
+            {
+                const auto current = stack.back();
+                stack.pop_back();
+                for (const auto next : adjacent[current])
+                    if (allowed.contains(next) && reached.insert(next).second) stack.push_back(next);
+            }
+            return reached.size();
+        };
+        std::unordered_set<size_t> all;
+        for (size_t f = 0; f < cell.face_ids.size(); ++f) all.insert(f);
+        if (visit(0, all) != all.size())
+            throw std::invalid_argument("UnstructuredMesh polyhedron surface is disconnected.");
+        // Two disks meeting only at a vertex pass the edge test but do not form
+        // a vertex manifold. Every incident-face fan must also be connected.
+        for (const auto& [vertex, incident] : vertex_faces)
+        {
+            std::unordered_set<size_t> allowed(incident.begin(), incident.end());
+            if (visit(incident.front(), allowed) != allowed.size())
+                throw std::invalid_argument("UnstructuredMesh polyhedron has a non-manifold vertex.");
+        }
+        const auto tolerance = 256.0L * std::numeric_limits<real_t>::epsilon()
+                             * scale * scale * scale;
+        if (!(volume > tolerance) || !std::isfinite(volume))
+            throw std::invalid_argument("UnstructuredMesh polyhedron has non-positive or degenerate signed volume.");
+        cell.volume = static_cast<real_t>(volume);
+        for (size_t k = 0; k < 3; ++k)
+            cell.center.component(k) = reference.component(k) + static_cast<real_t>(moment[k] / volume);
+        if (!std::isfinite(cell.volume) || !std::isfinite(cell.center.x)
+            || !std::isfinite(cell.center.y) || !std::isfinite(cell.center.z))
+            throw std::invalid_argument("UnstructuredMesh polyhedral geometry is not finite.");
     }
 }
 

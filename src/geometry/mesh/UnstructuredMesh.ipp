@@ -14,6 +14,15 @@
 namespace SimpleFluid::Meshes
 {
 
+inline int UnstructuredMesh::cell_face_orientation(CellID cell, FaceID face) const
+{
+    check_cell_id(cell);
+    check_face_id(face);
+    if (d_faces[face].owner == cell) return 1;
+    if (d_faces[face].neighbor == cell) return -1;
+    throw std::invalid_argument("UnstructuredMesh face is not incident to cell.");
+}
+
 /**
  * @brief Validate a compact cell ID.
  * @param id Cell ID to validate.
