@@ -18,6 +18,7 @@
 
 #include "utils/testing_environment.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -441,11 +442,33 @@ TEST(MeshUtilsTest, FaceAreaVector)
     }
 }
 
-/** @brief Verifies invalid polygon vertex counts are rejected in debug builds. */
+/** @brief Verifies polygon faces beyond quads retain their signed area vector. */
+TEST(MeshUtilsTest, FaceAreaVectorSupportsPentagonWinding)
+{
+    using Vec3 = SimpleFluid::MeshUtils::Vec3;
+    // A 2-by-1 rectangle plus a triangular roof of base 2 and height 1.
+    std::vector<Vec3> pentagon = {{0, 0, 0}, {2, 0, 0}, {2, 1, 0}, {1, 2, 0}, {0, 1, 0}};
+    const auto forward = SimpleFluid::MeshUtils::face_area_vector(pentagon);
+    EXPECT_DOUBLE_EQ(forward.x, 0.0);
+    EXPECT_DOUBLE_EQ(forward.y, 0.0);
+    EXPECT_DOUBLE_EQ(forward.z, 3.0);
+
+    std::reverse(pentagon.begin(), pentagon.end());
+    const auto reverse = SimpleFluid::MeshUtils::face_area_vector(pentagon);
+    EXPECT_DOUBLE_EQ(reverse.x, 0.0);
+    EXPECT_DOUBLE_EQ(reverse.y, 0.0);
+    EXPECT_DOUBLE_EQ(reverse.z, -3.0);
+}
+
+/** @brief Verifies fewer than three polygon vertices are rejected in debug builds. */
 TEST(MeshUtilsTest, FaceAreaVectorThrowsForWrongSize)
 {
     using Vec3 = SimpleFluid::MeshUtils::Vec3;
-    std::vector<Vec3> bad = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}};
-    EXPECT_THROW_WHEN_DEBUG(SimpleFluid::MeshUtils::face_area_vector(bad),
-                 std::runtime_error); // from CHECK macro (default exception type)
+    for (size_t count = 0; count < 3; ++count)
+    {
+        SCOPED_TRACE(count);
+        const std::vector<Vec3> bad(count);
+        EXPECT_THROW_WHEN_DEBUG(SimpleFluid::MeshUtils::face_area_vector(bad),
+                               std::runtime_error);
+    }
 }
