@@ -95,12 +95,31 @@ public:
 
     MenterBlendedCoefficients blended_coefficients(real_t f1) const
     {
-        return {turbulence_detail::blend(d_coefficients.sigma_k_1, d_coefficients.sigma_k_2, f1),
-                turbulence_detail::blend(d_coefficients.sigma_omega_1, d_coefficients.sigma_omega_2,
-                                         f1),
-                turbulence_detail::blend(d_coefficients.beta_1, d_coefficients.beta_2, f1),
-                turbulence_detail::blend(gamma_1(), gamma_2(), f1)};
+        turbulence_detail::validate_blending_factor(f1);
+        return blended_coefficients_unchecked(f1);
     }
+
+private:
+    MenterBlendedCoefficients blended_coefficients_unchecked(real_t f1) const
+    {
+        return {turbulence_detail::blend_unchecked(d_coefficients.sigma_k_1, d_coefficients.sigma_k_2, f1),
+                turbulence_detail::blend_unchecked(d_coefficients.sigma_omega_1, d_coefficients.sigma_omega_2,
+                                         f1),
+                turbulence_detail::blend_unchecked(d_coefficients.beta_1, d_coefficients.beta_2, f1),
+                turbulence_detail::blend_unchecked(gamma_1(), gamma_2(), f1)};
+    }
+
+    real_t turbulent_kinematic_viscosity_unchecked(const KOmegaState& state,
+        const MenterKOmegaInvariants& invariants) const
+    {
+        const auto f2 = turbulence_detail::menter_blending_function_2_unchecked(
+            state, invariants, d_coefficients.beta_star);
+        const auto denominator =
+            std::max(d_coefficients.a_one * state.omega, invariants.vorticity_magnitude * f2);
+        return d_coefficients.a_one * state.k / denominator;
+    }
+
+public:
 
     real_t cross_diffusion_source(const KOmegaState& state,
                                   const MenterKOmegaInvariants& invariants, real_t f1) const
@@ -116,10 +135,7 @@ public:
         turbulence_detail::validate_menter_wall_inputs(invariants);
         turbulence_detail::require_non_negative(invariants.vorticity_magnitude,
                                                 "Vorticity magnitude");
-        const auto f2 = blending_function_2(state, invariants);
-        const auto denominator =
-            std::max(d_coefficients.a_one * state.omega, invariants.vorticity_magnitude * f2);
-        return d_coefficients.a_one * state.k / denominator;
+        return turbulent_kinematic_viscosity_unchecked(state, invariants);
     }
 
     real_t production_limit(const KOmegaState& state) const
@@ -138,9 +154,12 @@ public:
     KOmegaDiffusivities effective_diffusivities(const KOmegaState& state,
                                                 const MenterKOmegaInvariants& invariants) const
     {
-        const auto f1 = blending_function_1(state, invariants);
-        const auto coefficients = blended_coefficients(f1);
-        const auto nu_t = turbulent_kinematic_viscosity(state, invariants);
+        turbulence_detail::validate(state);
+        turbulence_detail::validate(invariants);
+        const auto f1 = turbulence_detail::menter_blending_function_1_unchecked(state, invariants,
+            d_coefficients.beta_star, d_coefficients.sigma_omega_2, d_coefficients.cross_diffusion_floor);
+        const auto coefficients = blended_coefficients_unchecked(f1);
+        const auto nu_t = turbulent_kinematic_viscosity_unchecked(state, invariants);
         return {invariants.kinematic_viscosity + coefficients.sigma_k * nu_t,
                 invariants.kinematic_viscosity + coefficients.sigma_omega * nu_t};
     }
@@ -157,14 +176,17 @@ public:
         turbulence_detail::validate(state);
         turbulence_detail::validate(invariants);
         turbulence_detail::validate_production(production);
-        const auto f1 = blending_function_1(state, invariants);
-        const auto coefficients = blended_coefficients(f1);
-        const auto nu_t = turbulent_kinematic_viscosity(state, invariants);
-        return {limited_production(state, production) -
+        const auto f1 = turbulence_detail::menter_blending_function_1_unchecked(state, invariants,
+            d_coefficients.beta_star, d_coefficients.sigma_omega_2, d_coefficients.cross_diffusion_floor);
+        const auto coefficients = blended_coefficients_unchecked(f1);
+        const auto nu_t = turbulent_kinematic_viscosity_unchecked(state, invariants);
+        return {std::min(production, d_coefficients.production_limit_factor * d_coefficients.beta_star * state.k *
+                    state.omega) -
                     d_coefficients.beta_star * state.k * state.omega,
                 coefficients.gamma * production / nu_t -
                     coefficients.beta * state.omega * state.omega +
-                    cross_diffusion_source(state, invariants, f1)};
+                    turbulence_detail::menter_cross_diffusion_source_unchecked(
+                        state, invariants, d_coefficients.sigma_omega_2, f1)};
     }
 
 private:

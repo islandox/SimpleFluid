@@ -11,8 +11,11 @@
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/ScalarTransportDiscretization.hh"
+#include "FVM/details/NonOrthogonalSelection.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/StoredScalarGradientKernel.hh"
 #include "FVM/details/TransportAssemblyGeometry.hh"
+#include "FVM/details/TransportValidation.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/GeometryEpoch.hh"
 
@@ -20,6 +23,7 @@
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_RCP.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -50,11 +54,7 @@ template<TpetraTypePack Pack> struct StoredPreparedTransportMatrix
     bool symbolic_reuse = false;
 };
 
-template<TpetraTypePack Pack> struct StoredTransportMatrixRow
-{
-    std::vector<typename Pack::local_ordinal_type> columns;
-    std::vector<typename Pack::scalar_type> values;
-};
+template<TpetraTypePack Pack> using StoredTransportMatrixRow = TransportMatrixRow<Pack>;
 
 /**
  * @brief Row slots for a matrix whose graph was created and frozen by assembly.
@@ -164,97 +164,15 @@ private:
     std::vector<std::vector<size_t>> d_slots;
 };
 
-template<class Scalar> struct StoredNonOrthogonalWeights
-{
-    Scalar implicit{};
-    Scalar explicit_{};
-};
+template<class Scalar> using StoredNonOrthogonalWeights = NonOrthogonalWeights<Scalar>;
 
-template<TpetraTypePack Pack, class MeshType, size_t StateCount>
-std::array<int, StateCount> reduce_stored_validation_state(
-    const MeshType& mesh, const std::array<int, StateCount>& local_state)
-{
-    auto global_state = local_state;
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    if (communicator->getSize() > 1)
-    {
-        Teuchos::reduceAll(
-            *communicator, Teuchos::REDUCE_MAX, static_cast<int>(StateCount), local_state.data(), global_state.data());
-    }
-    return global_state;
-}
-
-/** Header-visible mapped equivalent of the compiled legacy validator. */
+/** Collectively validate mapped treatment and correction-field selection. */
 template<TpetraTypePack Pack, class MeshType, class Field>
 StoredNonOrthogonalWeights<typename Pack::scalar_type> validate_stored_non_orthogonal_selection(
     const MeshType& mesh, NonOrthogonalTreatment treatment, const Field* correction_field, std::string_view context)
 {
-    using scalar_type = typename Pack::scalar_type;
-
-    int treatment_state = 3;
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            treatment_state = 0;
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            treatment_state = 1;
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            treatment_state = 2;
-            break;
-    }
-
-    const int correction_state = correction_field == nullptr ? 0 : correction_field->mesh_ptr().get() == &mesh ? 1 : 2;
-    const int local_state[] = {treatment_state, -treatment_state, correction_state, -correction_state};
-    int maximum_state[] = {local_state[0], local_state[1], local_state[2], local_state[3]};
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    if (communicator->getSize() > 1)
-    {
-        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 4, local_state, maximum_state);
-    }
-
-    const auto prefix = std::string(context);
-    if (maximum_state[0] == 3)
-    {
-        throw std::invalid_argument(prefix + " received an unknown non-orthogonal treatment.");
-    }
-    if (-maximum_state[1] != maximum_state[0])
-    {
-        throw std::invalid_argument(prefix + " requires every rank to use the same "
-                                             "non-orthogonal treatment.");
-    }
-    if (-maximum_state[3] != maximum_state[2])
-    {
-        throw std::invalid_argument(prefix + " requires every rank to select the same category "
-                                             "of correction field.");
-    }
-    if (maximum_state[2] == 2)
-    {
-        throw std::invalid_argument(prefix + " requires the correction field on the "
-                                             "transported-field mesh.");
-    }
-
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            return {scalar_type{}, scalar_type{1}};
-        case NonOrthogonalTreatment::Implicit:
-            return {scalar_type{1}, scalar_type{}};
-        case NonOrthogonalTreatment::Hybrid:
-            return {scalar_type{0.5}, scalar_type{0.5}};
-    }
-    throw std::invalid_argument(prefix + " received an unknown non-orthogonal treatment.");
-}
-
-template<TpetraTypePack Pack>
-StoredTransportMatrixRow<Pack> capture_stored_transport_row(
-    const FlatMatrixRow<typename Pack::local_ordinal_type, typename Pack::scalar_type>& row_values)
-{
-    StoredTransportMatrixRow<Pack> row;
-    row.columns.assign(row_values.column_data(), row_values.column_data() + row_values.size());
-    row.values.assign(row_values.value_data(), row_values.value_data() + row_values.size());
-    return row;
+    const int field_state = correction_field == nullptr ? 0 : correction_field->mesh_ptr().get() == &mesh ? 1 : 2;
+    return validate_non_orthogonal_selection<typename Pack::scalar_type>(mesh, treatment, field_state, context);
 }
 
 /** Allocate a fresh mapped matrix or reset a collectively validated cached graph. */
@@ -270,7 +188,7 @@ StoredPreparedTransportMatrix<Pack> prepare_stored_transport_matrix(const MeshTy
     const int cache_state = cached_matrix.is_null() ? 0 : 1;
     const int plan_state = symbolic_plan == nullptr ? 0 : 1;
     const int needs_validation = symbolic_plan != nullptr && symbolic_plan->matches(mesh, cached_matrix, rows) ? 0 : 1;
-    const auto cache_states = reduce_stored_validation_state<Pack>(mesh,
+    const auto cache_states = reduce_transport_validation_state(mesh,
         std::array<int, 5>{cache_state, -cache_state, plan_state, -plan_state, needs_validation});
     if (cache_states[0] != -cache_states[1])
     {
@@ -289,31 +207,8 @@ StoredPreparedTransportMatrix<Pack> prepare_stored_transport_matrix(const MeshTy
         return {Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), entries_per_row)), false};
     }
 
-    const auto row_map = cached_matrix->getRowMap();
-    const auto column_map = cached_matrix->getColMap();
-    const auto domain_map = cached_matrix->getDomainMap();
-    const auto range_map = cached_matrix->getRangeMap();
-    const auto structural_state = reduce_stored_validation_state<Pack>(mesh,
-        std::array<int, 1>{!cached_matrix->isFillComplete() || row_map.is_null() || column_map.is_null() ||
-                                   domain_map.is_null() || range_map.is_null() || rows.size() != mesh.num_owned_cells()
-                               ? 1
-                               : 0});
-    if (structural_state[0] != 0)
-    {
+    if (!compatible_present_transport_matrix_maps<Pack>(mesh, *cached_matrix, rows.size()))
         throw std::invalid_argument("transport_system cached matrix is incompatible with the mesh.");
-    }
-
-    const int incompatible_row_map = !row_map->isSameAs(*mesh.owned_cell_map()) ? 1 : 0;
-    const int incompatible_column_map = !column_map->isSameAs(*mesh.overlap_cell_map()) ? 1 : 0;
-    const int incompatible_domain_map = !domain_map->isSameAs(*mesh.owned_cell_map()) ? 1 : 0;
-    const int incompatible_range_map = !range_map->isSameAs(*mesh.owned_cell_map()) ? 1 : 0;
-    const int incompatible_maps =
-        incompatible_row_map || incompatible_column_map || incompatible_domain_map || incompatible_range_map;
-    const auto map_state = reduce_stored_validation_state<Pack>(mesh, std::array<int, 1>{incompatible_maps});
-    if (map_state[0] != 0)
-    {
-        throw std::invalid_argument("transport_system cached matrix is incompatible with the mesh.");
-    }
 
     int incompatible_graph = 0;
     try
@@ -338,7 +233,7 @@ StoredPreparedTransportMatrix<Pack> prepare_stored_transport_matrix(const MeshTy
     {
         incompatible_graph = 1;
     }
-    const auto graph_state = reduce_stored_validation_state<Pack>(mesh, std::array<int, 1>{incompatible_graph});
+    const auto graph_state = reduce_transport_validation_state(mesh, std::array<int, 1>{incompatible_graph});
     if (graph_state[0] != 0)
     {
         throw std::invalid_argument("transport_system cached matrix graph is incompatible with the operator.");
@@ -373,6 +268,15 @@ void add_stored_transport_values(const StoredPreparedTransportMatrix<Pack>& prep
 }
 
 /** Complete assembly, reusing validated immutable row slots when available. */
+template<TpetraTypePack Pack>
+void complete_stored_transport_matrix(const StoredPreparedTransportMatrix<Pack>& prepared)
+{
+    if (prepared.reused)
+        prepared.matrix->fillComplete(prepared.matrix->getDomainMap(), prepared.matrix->getRowMap());
+    else
+        prepared.matrix->fillComplete();
+}
+
 template<TpetraTypePack Pack, class MeshType>
 Teuchos::RCP<typename Pack::matrix_type> finish_stored_transport_matrix(const MeshType& mesh,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
@@ -391,7 +295,7 @@ Teuchos::RCP<typename Pack::matrix_type> finish_stored_transport_matrix(const Me
     {
         add_stored_transport_values<Pack>(prepared, static_cast<typename Pack::local_ordinal_type>(row), rows[row]);
     }
-    matrix->fillComplete();
+    complete_stored_transport_matrix(prepared);
     if (symbolic_plan != nullptr && !prepared.reused)
     {
         // Freeze a graph created here, before any caller can retain a mutable
@@ -491,12 +395,7 @@ void evaluate_stored_scalar_gradients(const ScalarCellFieldStored<Pack, MeshType
         for (size_t owned = 0; owned < stencils.size(); ++owned)
         {
             const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            const auto& stencil = stencils[owned];
-            auto gradient = stencil.constant;
-            for (const auto& entry : stencil.entries)
-            {
-                gradient = gradient + entry.coefficient * field_data(entry.cell_lid, 0);
-            }
+            const auto gradient = apply_stored_scalar_gradient<typename MeshType::Vec3>(stencils[owned], field_data);
             for (size_t component = 0; component < 3; ++component)
             {
                 gradient_data(cell_lid, component) = gradient.component(component);
@@ -517,7 +416,7 @@ TransportSystem<Pack> stored_scalar_transport_system(const ScalarCellFieldStored
 
     const auto& mesh = old_values.mesh();
     const auto execution = acquire_mesh_execution(mesh);
-    const auto validation_state = reduce_stored_validation_state<Pack>(
+    const auto validation_state = reduce_transport_validation_state(
         mesh, std::array<int, 3>{old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ? 1 : 0,
                   !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
                   !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0});
@@ -613,7 +512,7 @@ TransportSystem<Pack> stored_scalar_transport_system(const ScalarCellFieldStored
             }
         }
 
-        rows.push_back(capture_stored_transport_row<Pack>(row_values));
+        rows.push_back(capture_transport_row<Pack>(row_values));
         rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
@@ -623,7 +522,7 @@ TransportSystem<Pack> stored_scalar_transport_system(const ScalarCellFieldStored
     {
         add_stored_transport_values<Pack>(prepared, static_cast<local_ordinal_type>(row), rows[row]);
     }
-    matrix->fillComplete();
+    complete_stored_transport_matrix(prepared);
     return {matrix, rhs};
 }
 
@@ -773,7 +672,7 @@ TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
             invalid_geometry_cache = 1;
         }
     }
-    const auto validation_state = reduce_stored_validation_state<Pack>(
+    const auto validation_state = reduce_transport_validation_state(
         mesh, std::array<int, 4>{old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ? 1 : 0,
                   !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
                   !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0, invalid_geometry_cache});
@@ -932,7 +831,7 @@ TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
             }
         }
 
-        rows.push_back(capture_stored_transport_row<Pack>(row_values));
+        rows.push_back(capture_transport_row<Pack>(row_values));
         rhs->replaceLocalValue(cell_lid, rhs_value);
     }
 
@@ -948,7 +847,7 @@ TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
     {
         add_stored_transport_values<Pack>(prepared, static_cast<local_ordinal_type>(row), rows[row]);
     }
-    matrix->fillComplete();
+    complete_stored_transport_matrix(prepared);
     return {matrix, rhs};
 }
 
@@ -1099,16 +998,27 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         older_values == nullptr
             ? 0
             : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
-    validate_scalar_transport_discretization(
-        mesh, discretization, older_field_state, context);
+    const auto policy_state = scalar_transport_discretization_state(discretization, older_field_state);
     const std::array<int, 5> local_optional_state{
         has_distinct_old_storage ? 1 : 0,
         has_distinct_old_storage ? -1 : 0,
         ale == nullptr ? 0 : 1,
         ale == nullptr ? 0 : -1,
         !cached_rhs.is_null() && cached_rhs->getMap().get() != mesh.owned_cell_map().get() ? 1 : 0};
-    const auto optional_state =
-        reduce_stored_validation_state<Pack>(mesh, local_optional_state);
+    const int correction_state = correction_field == nullptr ? 0
+        : correction_field->mesh_ptr().get() == &mesh ? 1 : 2;
+    const auto treatment_state = non_orthogonal_selection_state(treatment, correction_state);
+    std::array<int, 15> local_preflight{};
+    std::copy(policy_state.begin(), policy_state.end(), local_preflight.begin());
+    std::copy(local_optional_state.begin(), local_optional_state.end(), local_preflight.begin() + 6);
+    std::copy(treatment_state.begin(), treatment_state.end(), local_preflight.begin() + 11);
+    const auto global_preflight = reduce_transport_validation_state(mesh, local_preflight);
+    report_scalar_transport_discretization_state(
+        {global_preflight[0], global_preflight[1], global_preflight[2],
+         global_preflight[3], global_preflight[4], global_preflight[5]}, context);
+    const std::array<int, 5> optional_state{
+        global_preflight[6], global_preflight[7], global_preflight[8],
+        global_preflight[9], global_preflight[10]};
     if (optional_state[4] != 0)
         throw std::invalid_argument("Cached transport RHS must use the exact owned map.");
     if (optional_state[0] != -optional_state[1])
@@ -1138,7 +1048,9 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     }
     const auto transient_coefficients =
         scalar_transient_coefficients<scalar_type>(discretization.time);
-    const auto weights = validate_stored_non_orthogonal_selection<Pack>(mesh, treatment, correction_field, context);
+    report_non_orthogonal_selection_state(
+        {global_preflight[11], global_preflight[12], global_preflight[13], global_preflight[14]}, context);
+    const auto weights = non_orthogonal_weights<scalar_type>(treatment);
 
     int invalid_boundary_cache = 0;
     try
@@ -1200,7 +1112,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             interpolation_state = 1;
             break;
     }
-    const auto validation_state = reduce_stored_validation_state<Pack>(
+    const auto validation_state = reduce_transport_validation_state(
         mesh, std::array<int, 9>{incompatible_fields, !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
                   invalid_boundary_cache, invalid_geometry_cache, invalid_coefficients, interpolation_state,
                   -interpolation_state, source ? 0 : 1, has_nonzero_diffusivity});
@@ -1289,7 +1201,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         local_callback_error = std::current_exception();
     }
     const auto callback_validation =
-        reduce_stored_validation_state<Pack>(
+        reduce_transport_validation_state(
             mesh,
             std::array<int, 4>{
                 local_callback_error ? 1 : 0,
@@ -1386,7 +1298,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         local_boundary_callback_error = std::current_exception();
     }
     const auto boundary_callback_validation =
-        reduce_stored_validation_state<Pack>(
+        reduce_transport_validation_state(
             mesh,
             std::array<int, 5>{
                 local_boundary_callback_error ? 1 : 0,
@@ -1450,7 +1362,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         const auto local_non_orthogonal = geometry_cache == nullptr
             ? stored_transport_has_non_orthogonal_faces(mesh)
             : geometry_cache->has_non_orthogonal_faces();
-        needs_non_orthogonal_correction = reduce_stored_validation_state<Pack>(
+        needs_non_orthogonal_correction = reduce_transport_validation_state(
             mesh, std::array<int, 1>{local_non_orthogonal ? 1 : 0})[0] != 0;
     }
 
@@ -1698,7 +1610,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
             row_values.set(cell_lid, scalar_type{1});
             rhs_value = *fixed_values[owned];
         }
-        rows.push_back(capture_stored_transport_row<Pack>(row_values));
+        rows.push_back(capture_transport_row<Pack>(row_values));
         rhs->replaceLocalValue(cell_lid, rhs_value);
     });
 
@@ -1797,7 +1709,7 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
         old_density == nullptr ? 0 : -1,
         old_specific_heat_capacity == nullptr ? 0 : 1,
         old_specific_heat_capacity == nullptr ? 0 : -1};
-    const auto old_property_state = reduce_stored_validation_state<Pack>(
+    const auto old_property_state = reduce_transport_validation_state(
         old_temperature.mesh(), local_old_property_state);
     if (old_property_state[0] != -old_property_state[1]
         || old_property_state[2] != -old_property_state[3])
@@ -1928,7 +1840,7 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
     const std::array<int, 2> local_ale_state{
         ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
     const auto ale_state =
-        reduce_stored_validation_state<Pack>(mesh, local_ale_state);
+        reduce_transport_validation_state(mesh, local_ale_state);
     if (ale_state[0] != -ale_state[1])
     {
         throw std::invalid_argument(
@@ -1952,7 +1864,7 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
             invalid_geometry_cache = 1;
         }
     }
-    const auto validation_state = reduce_stored_validation_state<Pack>(
+    const auto validation_state = reduce_transport_validation_state(
         mesh, std::array<int, 4>{old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ? 1 : 0,
                   !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
                   !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0, invalid_geometry_cache});
@@ -2137,7 +2049,7 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
                 add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
             }
 
-            rows.push_back(capture_stored_transport_row<Pack>(row_values));
+            rows.push_back(capture_transport_row<Pack>(row_values));
         }
     }
 
@@ -2153,7 +2065,7 @@ VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellField
     {
         add_stored_transport_values<Pack>(prepared, static_cast<local_ordinal_type>(row), rows[row]);
     }
-    matrix->fillComplete();
+    complete_stored_transport_matrix(prepared);
     return {matrix, rhs};
 }
 
@@ -2363,7 +2275,7 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     const std::array<int, 2> local_ale_state{
         ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
     const auto ale_state =
-        reduce_stored_validation_state<Pack>(mesh, local_ale_state);
+        reduce_transport_validation_state(mesh, local_ale_state);
     if (ale_state[0] != -ale_state[1])
     {
         throw std::invalid_argument(
@@ -2426,7 +2338,7 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
             interpolation_state = 1;
             break;
     }
-    const auto validation_state = reduce_stored_validation_state<Pack>(
+    const auto validation_state = reduce_transport_validation_state(
         mesh, std::array<int, 7>{incompatible_fields,
                   !std::isfinite(time_step) || time_step <= scalar_type{} || !std::isfinite(reference_density) ||
                           reference_density <= scalar_type{}
@@ -2658,7 +2570,7 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
                 add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_kinematic_viscosity, tangential_area);
             });
 
-            rows.push_back(capture_stored_transport_row<Pack>(row_values));
+            rows.push_back(capture_transport_row<Pack>(row_values));
         });
     }
 
@@ -2679,7 +2591,7 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     {
         add_stored_transport_values<Pack>(prepared, static_cast<local_ordinal_type>(row), rows[row]);
     }
-    matrix->fillComplete();
+    complete_stored_transport_matrix(prepared);
     return {matrix, rhs};
 }
 

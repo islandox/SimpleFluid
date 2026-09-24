@@ -131,7 +131,7 @@ inline long double integrate(const Profile& profile, long double lo, long double
     }
     std::sort(cuts.begin(), cuts.end());
     cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
-    long double total = 0, compensation = 0;
+    SimpleFluid::detail::CompensatedSum<long double> total;
     for (size_t i = 1; i < cuts.size(); ++i)
     {
         const auto a = cuts[i - 1], b = cuts[i];
@@ -149,11 +149,9 @@ inline long double integrate(const Profile& profile, long double lo, long double
             : first.cubic * outer * outer * outer - second.cubic * inner * inner * inner;
         const auto term = (first.constant - second.constant) * tangent_difference
             + cubic * sine_difference + quadratic * width;
-        const auto next = total + term;
-        compensation += std::abs(total) >= std::abs(term) ? (total - next) + term : (term - next) + total;
-        total = next;
+        total += term;
     }
-    return total + compensation;
+    return total.value();
 }
 
 inline void validate(std::span<const PolygonPoint> polygon, double theta_lower, double theta_upper)
@@ -168,15 +166,21 @@ inline void validate(std::span<const PolygonPoint> polygon, double theta_lower, 
 }
 } // namespace rz_overlap_detail
 
-/** Exact planar swept-cell volume from its CCW (apothem, physical-Z) polygon. */
-inline long double rz_angular_volume(std::span<const PolygonPoint> polygon,
-                                     double theta_lower, double theta_upper)
+/** Internal kernel: polygon and angular span passed validate and remain unchanged. */
+inline long double rz_angular_volume_validated(std::span<const PolygonPoint> polygon,
+                                               double theta_lower, double theta_upper)
 {
-    rz_overlap_detail::validate(polygon, theta_lower, theta_upper);
     std::vector<WidePoint> points;
     for (const auto p : polygon) points.push_back(wide(p));
     return 2 * std::tan((static_cast<long double>(theta_upper) - theta_lower) / 2)
         * rz_overlap_detail::profile(points).moment;
+}
+
+inline long double rz_angular_volume(std::span<const PolygonPoint> polygon,
+                                     double theta_lower, double theta_upper)
+{
+    rz_overlap_detail::validate(polygon, theta_lower, theta_upper);
+    return rz_angular_volume_validated(polygon, theta_lower, theta_upper);
 }
 
 /**
@@ -185,11 +189,12 @@ inline long double rz_angular_volume(std::span<const PolygonPoint> polygon,
  * radius. Angular and circular boundaries are integrated analytically; no
  * angular quadrature, polygonal circle approximation or volume rescaling is used.
  */
-inline double rz_angular_sector_volume(std::span<const PolygonPoint> polygon,
+// Internal kernel for geometry validated at extraction or after MPI exchange.
+// Bounds supplied for this candidate remain checked below.
+inline double rz_angular_sector_volume_validated(std::span<const PolygonPoint> polygon,
     double theta_lower, double theta_upper, double inner_radius, double outer_radius,
     double sector_lower, double sector_upper, double z_lower, double z_upper)
 {
-    rz_overlap_detail::validate(polygon, theta_lower, theta_upper);
     for (const auto value : {inner_radius, outer_radius, sector_lower, sector_upper, z_lower, z_upper})
         if (!std::isfinite(value)) throw std::invalid_argument("RZ overlap bounds must be finite.");
     if (inner_radius < 0) throw std::invalid_argument("RZ overlap inner radius must be nonnegative.");
@@ -218,5 +223,14 @@ inline double rz_angular_sector_volume(std::span<const PolygonPoint> polygon,
         * profile.moment * 2 * std::tan(half_width) * (polygon.size() + 4);
     if (volume < 0 && volume >= -roundoff) volume = 0;
     return static_cast<double>(volume);
+}
+
+inline double rz_angular_sector_volume(std::span<const PolygonPoint> polygon,
+    double theta_lower, double theta_upper, double inner_radius, double outer_radius,
+    double sector_lower, double sector_upper, double z_lower, double z_upper)
+{
+    rz_overlap_detail::validate(polygon, theta_lower, theta_upper);
+    return rz_angular_sector_volume_validated(polygon, theta_lower, theta_upper,
+        inner_radius, outer_radius, sector_lower, sector_upper, z_lower, z_upper);
 }
 } // namespace SimpleFluid::mesh_transfer_detail

@@ -703,6 +703,10 @@ TEST(FieldStoredOperatorsTest, MappedTransportValidationAndCachedGraphFailuresAr
     EXPECT_THROW(assemble_orthogonal_scalar(rank == 0 ? other_fluxes : fluxes, 0.5, 0.2), std::invalid_argument);
     EXPECT_THROW(assemble_orthogonal_scalar(fluxes, rank == 0 ? -0.5 : 0.5, 0.2), std::invalid_argument);
     EXPECT_THROW(assemble_orthogonal_scalar(fluxes, 0.5, rank == 0 ? -0.2 : 0.2), std::invalid_argument);
+    EXPECT_THROW(assemble_orthogonal_scalar(fluxes,
+                     rank == 0 ? std::numeric_limits<double>::quiet_NaN() : 0.5, 0.2), std::invalid_argument);
+    EXPECT_THROW(assemble_orthogonal_scalar(fluxes, 0.5,
+                     rank == 0 ? std::numeric_limits<double>::infinity() : 0.2), std::invalid_argument);
     EXPECT_THROW(assemble(rank == 0 ? -0.5 : 0.5, Teuchos::null, &geometry_cache), std::invalid_argument);
     EXPECT_THROW(
         assemble(0.5, Teuchos::null, rank == 0 ? &other_geometry_cache : &geometry_cache), std::invalid_argument);
@@ -774,6 +778,61 @@ TEST(FieldStoredOperatorsTest, MappedTransportValidationAndCachedGraphFailuresAr
         {
             EXPECT_EQ(columns[entry], before[row].columns[entry]);
             EXPECT_DOUBLE_EQ(values[entry], before[row].values[entry]);
+        }
+    }
+}
+
+TEST(FieldStoredOperatorsTest, MappedExternalEquivalentMapsReuseCollectively)
+{
+    const auto mesh = make_cartesian_handle();
+    const auto rank = mesh->owned_cell_map()->getComm()->getRank();
+    SimpleFluid::ScalarCellFieldStored<Pack> values(
+        SimpleFluid::ScalarCellFieldDescriptor<Pack>("external_map_values"), mesh, 2.0);
+    SimpleFluid::ScalarFaceFieldStored<Pack> fluxes(
+        SimpleFluid::ScalarFaceFieldDescriptor<Pack>("external_map_fluxes"), mesh, 0.0);
+    auto boundary = [](int, size_t)
+    { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, 0.0}; };
+    auto boundary_value = [](int, size_t) { return 0.0; };
+    auto source = [](Pack::local_ordinal_type) { return 0.0; };
+    auto assemble = [&](Teuchos::RCP<Pack::matrix_type> cache)
+    {
+        return SimpleFluid::FVM::transport_system<Pack>(
+            values, fluxes, 0.5, 0.2, boundary, boundary_value, source, std::move(cache));
+    };
+    const auto first = assemble(Teuchos::null);
+    const auto row_map = Teuchos::rcp(new Pack::map_type(*first.matrix->getRowMap()));
+    const auto col_map = Teuchos::rcp(new Pack::map_type(*first.matrix->getColMap()));
+    const auto domain_map = Teuchos::rcp(new Pack::map_type(*first.matrix->getDomainMap()));
+    const auto range_map = Teuchos::rcp(new Pack::map_type(*first.matrix->getRangeMap()));
+    auto external = Teuchos::rcp(new Pack::matrix_type(
+        row_map, col_map, first.matrix->getLocalMaxNumRowEntries()));
+    for (size_t row = 0; row < first.matrix->getLocalNumRows(); ++row)
+    {
+        Pack::matrix_type::local_inds_host_view_type columns;
+        Pack::matrix_type::values_host_view_type coefficients;
+        first.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), columns, coefficients);
+        external->insertLocalValues(static_cast<Pack::local_ordinal_type>(row),
+            Teuchos::arrayView(columns.data(), static_cast<int>(columns.extent(0))),
+            Teuchos::arrayView(coefficients.data(), static_cast<int>(coefficients.extent(0))));
+    }
+    external->fillComplete(domain_map, range_map);
+    const auto reused = assemble(rank == 0 ? external : first.matrix);
+    const auto reference = assemble(Teuchos::null);
+    EXPECT_EQ(reused.matrix.get(), rank == 0 ? external.get() : first.matrix.get());
+    const auto reused_rhs = reused.rhs->getData();
+    const auto reference_rhs = reference.rhs->getData();
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+    {
+        EXPECT_DOUBLE_EQ(reused_rhs[row], reference_rhs[row]);
+        Pack::matrix_type::local_inds_host_view_type reused_columns, reference_columns;
+        Pack::matrix_type::values_host_view_type reused_values, reference_values;
+        reused.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), reused_columns, reused_values);
+        reference.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), reference_columns, reference_values);
+        ASSERT_EQ(reused_columns.extent(0), reference_columns.extent(0));
+        for (size_t entry = 0; entry < reused_columns.extent(0); ++entry)
+        {
+            EXPECT_EQ(reused_columns[entry], reference_columns[entry]);
+            EXPECT_DOUBLE_EQ(reused_values[entry], reference_values[entry]);
         }
     }
 }

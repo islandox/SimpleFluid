@@ -2514,6 +2514,98 @@ TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
     }
 }
 
+/** Rank-local legacy preflight errors must reach every rank before assembly. */
+TEST(FvmOperatorsTest, LegacyTransportCacheAndScalarFailuresAreCollective)
+{
+    auto mesh = make_mesh();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    const int rank = comm->getRank();
+    FieldType scalar(mesh, 2.0, "scalar");
+    SimpleFluid::FaceField<Pack> fluxes(mesh, 0.0, "fluxes");
+    const auto boundary = [](int, size_t) { return 0.0; };
+    const auto assemble = [&](double dt, double diffusivity, Teuchos::RCP<Pack::matrix_type> matrix)
+    {
+        return SimpleFluid::FVM::transport_system<Pack>(scalar, fluxes, dt, diffusivity, boundary, matrix);
+    };
+
+    const auto good = assemble(1.0, 0.2, Teuchos::null);
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+    const auto infinity = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(assemble(rank == 0 ? nan : 1.0, 0.2, Teuchos::null), std::invalid_argument);
+    EXPECT_THROW(assemble(1.0, rank == 0 ? infinity : 0.2, Teuchos::null), std::invalid_argument);
+    if (comm->getSize() > 1)
+        EXPECT_THROW(assemble(1.0, 0.2, rank == 0 ? good.matrix : Teuchos::null), std::invalid_argument);
+
+    auto unfinished = Teuchos::rcp(new Pack::matrix_type(
+        mesh->owned_cell_map(), mesh->overlap_cell_map(), 12));
+    EXPECT_THROW(assemble(1.0, 0.2, rank == 0 ? unfinished : good.matrix), std::invalid_argument);
+
+    const auto wrong_map = Teuchos::rcp(new Pack::map_type(
+        mesh->owned_cell_map()->getGlobalNumElements() + 1, 0, comm));
+    auto wrong_maps = Teuchos::rcp(new Pack::matrix_type(wrong_map, wrong_map, 1));
+    wrong_maps->fillComplete();
+    EXPECT_THROW(assemble(1.0, 0.2, rank == 0 ? wrong_maps : good.matrix), std::invalid_argument);
+
+    auto incompatible = Teuchos::rcp(new Pack::matrix_type(
+        mesh->owned_cell_map(), mesh->overlap_cell_map(), good.matrix->getLocalMaxNumRowEntries()));
+    for (size_t row = 0; row < good.matrix->getLocalNumRows(); ++row)
+    {
+        Pack::matrix_type::local_inds_host_view_type columns;
+        Pack::matrix_type::values_host_view_type values;
+        good.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), columns, values);
+        Teuchos::Array<Pack::local_ordinal_type> selected_columns;
+        Teuchos::Array<Pack::scalar_type> selected_values;
+        for (size_t entry = 0; entry < columns.extent(0); ++entry)
+        {
+            if (rank == 0 && row == 0 && entry == 0) continue;
+            selected_columns.push_back(columns[entry]);
+            selected_values.push_back(values[entry]);
+        }
+        incompatible->insertLocalValues(static_cast<Pack::local_ordinal_type>(row),
+            selected_columns(), selected_values());
+    }
+    incompatible->fillComplete();
+    EXPECT_THROW(assemble(1.0, 0.2, rank == 0 ? incompatible : good.matrix), std::invalid_argument);
+    EXPECT_TRUE(incompatible->isFillComplete());
+
+    // The accepted external graph may use equivalent, separately allocated maps.
+    const auto copied_row = Teuchos::rcp(new Pack::map_type(*good.matrix->getRowMap()));
+    const auto copied_col = Teuchos::rcp(new Pack::map_type(*good.matrix->getColMap()));
+    const auto copied_domain = Teuchos::rcp(new Pack::map_type(*good.matrix->getDomainMap()));
+    const auto copied_range = Teuchos::rcp(new Pack::map_type(*good.matrix->getRangeMap()));
+    auto external = Teuchos::rcp(new Pack::matrix_type(copied_row, copied_col,
+        good.matrix->getLocalMaxNumRowEntries()));
+    for (size_t row = 0; row < good.matrix->getLocalNumRows(); ++row)
+    {
+        Pack::matrix_type::local_inds_host_view_type columns;
+        Pack::matrix_type::values_host_view_type values;
+        good.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), columns, values);
+        external->insertLocalValues(static_cast<Pack::local_ordinal_type>(row),
+            Teuchos::arrayView(columns.data(), static_cast<int>(columns.extent(0))),
+            Teuchos::arrayView(values.data(), static_cast<int>(values.extent(0))));
+    }
+    external->fillComplete(copied_domain, copied_range);
+    auto reused = assemble(0.5, 0.2, rank == 0 ? external : good.matrix);
+    EXPECT_EQ(reused.matrix.get(), rank == 0 ? external.get() : good.matrix.get());
+    const auto fresh = assemble(0.5, 0.2, Teuchos::null);
+    const auto reused_rhs = reused.rhs->getData();
+    const auto fresh_rhs = fresh.rhs->getData();
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+    {
+        EXPECT_DOUBLE_EQ(reused_rhs[row], fresh_rhs[row]);
+        Pack::matrix_type::local_inds_host_view_type reused_columns, fresh_columns;
+        Pack::matrix_type::values_host_view_type reused_values, fresh_values;
+        reused.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), reused_columns, reused_values);
+        fresh.matrix->getLocalRowView(static_cast<Pack::local_ordinal_type>(row), fresh_columns, fresh_values);
+        ASSERT_EQ(reused_columns.extent(0), fresh_columns.extent(0));
+        for (size_t entry = 0; entry < reused_columns.extent(0); ++entry)
+        {
+            EXPECT_EQ(reused_columns[entry], fresh_columns[entry]);
+            EXPECT_DOUBLE_EQ(reused_values[entry], fresh_values[entry]);
+        }
+    }
+}
+
 /**
  * @brief Reversing zero-diffusivity upwind flow preserves cached graph reuse.
  *

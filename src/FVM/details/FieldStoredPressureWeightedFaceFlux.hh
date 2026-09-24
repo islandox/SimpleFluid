@@ -9,6 +9,7 @@
 #include "FVM/details/ResolvedTransportGeometry.hh"
 #include "fields/FieldStored.hh"
 
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -289,11 +290,8 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                 {
                     continue;
                 }
-                if (condition.type != BoundaryConditionType::Dirichlet)
-                {
-                    throw std::invalid_argument("pressure_weighted_face_fluxes supports only Dirichlet "
-                                                "and Neumann pressure boundary conditions.");
-                }
+                // The unchanged map was checked at entry; an absent entry defaults to Neumann.
+                assert(condition.type == BoundaryConditionType::Dirichlet);
 
                 const vec_type owner_gradient{
                     gradient_values(owner_lid, 0), gradient_values(owner_lid, 1), gradient_values(owner_lid, 2)};

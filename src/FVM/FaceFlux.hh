@@ -22,6 +22,7 @@
 #include "FVM/details/FieldStoredVelocityBoundaryCache.hh"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
@@ -1109,12 +1110,8 @@ void pressure_weighted_face_fluxes_impl(
             {
                 continue;
             }
-            if (condition.type != BoundaryConditionType::Dirichlet)
-            {
-                throw std::invalid_argument(
-                    "pressure_weighted_face_fluxes supports only Dirichlet "
-                    "and Neumann pressure boundary conditions.");
-            }
+            // The unchanged map was checked at entry; an absent entry defaults to Neumann.
+            assert(condition.type == BoundaryConditionType::Dirichlet);
 
             const auto& area_vector =
                 face_geometry.area_vector[face];

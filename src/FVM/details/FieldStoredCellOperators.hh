@@ -6,6 +6,8 @@
 
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/ResolvedDiffusionGeometry.hh"
+#include "FVM/details/StoredMeshIdentity.hh"
+#include "FVM/details/StoredScalarGradientKernel.hh"
 #include "fields/FieldStored.hh"
 
 #include <array>
@@ -18,16 +20,6 @@
 
 namespace SimpleFluid::FVM::detail
 {
-
-/** @brief Require two stored fields to reference the same mesh object. */
-template<class InputField, class OutputField>
-void require_same_stored_mesh(const InputField& input, const OutputField& output, const char* operation)
-{
-    if (input.mesh_ptr().get() != output.mesh_ptr().get())
-    {
-        throw std::invalid_argument(std::string(operation) + " requires input and output fields on one mesh.");
-    }
-}
 
 /** @brief Evaluate interior least-squares scalar-gradient stencils. */
 template<TpetraTypePack Pack, class MeshType>
@@ -43,11 +35,7 @@ void stored_scalar_cell_gradient(
     auto gradient_values = gradients.owned_write_view();
     for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
-        vec_type gradient{};
-        for (const auto& entry : stencils[owned])
-        {
-            gradient = gradient + entry.coefficient * local_values(entry.cell_lid, 0);
-        }
+        const auto gradient = apply_stored_scalar_gradient<vec_type>(stencils[owned], local_values);
         gradient_values(static_cast<local_ordinal_type>(owned), 0) = gradient.x;
         gradient_values(static_cast<local_ordinal_type>(owned), 1) = gradient.y;
         gradient_values(static_cast<local_ordinal_type>(owned), 2) = gradient.z;
