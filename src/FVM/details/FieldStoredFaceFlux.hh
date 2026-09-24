@@ -6,6 +6,7 @@
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/StoredMeshIdentity.hh"
 #include "fields/FieldStored.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -39,16 +40,6 @@ auto stored_interior_face_linear_weights(const MeshType& mesh, LocalOrdinal face
     return {neighbor_distance / total_distance, owner_distance / total_distance};
 }
 
-/** @brief Validate the mesh identity shared by stored face-flux fields. */
-template<class InputField, class OutputField>
-void require_same_face_flux_mesh(const InputField& input, const OutputField& output, const char* operation)
-{
-    if (input.mesh_ptr().get() != output.mesh_ptr().get())
-    {
-        throw std::invalid_argument(std::string(operation) + " requires input and output fields on one mesh.");
-    }
-}
-
 /** @brief Tangential owner-cell velocity at a slip boundary face. */
 template<TpetraTypePack Pack, class MeshType>
 auto stored_slip_face_velocity(const VectorCellFieldStored<Pack, MeshType>& velocity,
@@ -72,7 +63,7 @@ void assemble_stored_face_velocities(const VectorCellFieldStored<Pack, MeshType>
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using vec_type = typename VectorCellFieldStored<Pack, MeshType>::value_type;
 
-    require_same_face_flux_mesh(velocity, face_velocity, "face_velocities");
+    require_same_stored_mesh(velocity, face_velocity, "face_velocities");
     if (boundary_cache != nullptr && boundary_cache->mesh.get() != velocity.mesh_ptr().get())
     {
         throw std::invalid_argument("face_velocities received a boundary cache for another mesh.");
@@ -132,7 +123,7 @@ void stored_normal_face_fluxes(
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using scalar_type = typename Pack::scalar_type;
 
-    require_same_face_flux_mesh(face_velocity, fluxes, "normal_face_fluxes");
+    require_same_stored_mesh(face_velocity, fluxes, "normal_face_fluxes");
     const auto& mesh = face_velocity.mesh();
     const auto execution = acquire_mesh_execution(mesh);
     fluxes.put_value(scalar_type{});
@@ -158,7 +149,7 @@ void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshTy
     using scalar_type = typename Pack::scalar_type;
     using vec_type = typename VectorCellFieldStored<Pack, MeshType>::value_type;
 
-    require_same_face_flux_mesh(velocity, fluxes, "face_fluxes");
+    require_same_stored_mesh(velocity, fluxes, "face_fluxes");
     if (boundary_cache != nullptr && boundary_cache->mesh.get() != velocity.mesh_ptr().get())
     {
         throw std::invalid_argument("face_fluxes received a boundary cache for another mesh.");

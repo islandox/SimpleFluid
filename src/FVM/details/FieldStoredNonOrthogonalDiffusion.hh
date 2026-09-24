@@ -9,6 +9,8 @@
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/details/OperatorDetails.hh"
+#include "FVM/details/NonOrthogonalSelection.hh"
+#include "FVM/details/StoredScalarGradientKernel.hh"
 #include "FVM/details/SteadyDiffusionConvergence.hh"
 #include "fields/FieldStored.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -29,11 +31,7 @@
 namespace SimpleFluid::FVM::detail
 {
 
-template<class Scalar> struct StoredDiffusionWeights
-{
-    Scalar implicit{};
-    Scalar explicit_{};
-};
+template<class Scalar> using StoredDiffusionWeights = NonOrthogonalWeights<Scalar>;
 
 /** Collectively validate mapped non-orthogonal diffusion inputs. */
 template<TpetraTypePack Pack, class MeshType>
@@ -42,63 +40,15 @@ StoredDiffusionWeights<typename Pack::scalar_type> validate_stored_diffusion_sel
     const ScalarCellFieldStored<Pack, MeshType>* correction_field, std::string_view context)
 {
     using scalar_type = typename Pack::scalar_type;
-
-    int treatment_state = 3;
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            treatment_state = 0;
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            treatment_state = 1;
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            treatment_state = 2;
-            break;
-    }
-    const int correction_state = correction_field == nullptr ? 0 : correction_field->mesh_ptr().get() == &mesh ? 1 : 2;
-    const std::array<int, 5> local_state{!std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0,
-        treatment_state, -treatment_state, correction_state, -correction_state};
-    auto global_state = local_state;
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    if (communicator->getSize() > 1)
-    {
-        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_state.size()), local_state.data(),
-            global_state.data());
-    }
-
-    const auto prefix = std::string(context);
-    if (global_state[0] != 0)
-    {
-        throw std::invalid_argument(prefix + " requires finite non-negative diffusivity.");
-    }
-    if (global_state[1] == 3)
-    {
-        throw std::invalid_argument(prefix + " received an unknown non-orthogonal treatment.");
-    }
-    if (-global_state[2] != global_state[1])
-    {
-        throw std::invalid_argument(prefix + " requires every rank to use the same treatment.");
-    }
-    if (-global_state[4] != global_state[3])
-    {
-        throw std::invalid_argument(prefix + " requires every rank to supply the same correction-field category.");
-    }
-    if (global_state[3] == 2)
-    {
-        throw std::invalid_argument(prefix + " requires the correction field on the target mesh.");
-    }
-
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            return {scalar_type{}, scalar_type{1}};
-        case NonOrthogonalTreatment::Implicit:
-            return {scalar_type{1}, scalar_type{}};
-        case NonOrthogonalTreatment::Hybrid:
-            return {scalar_type{0.5}, scalar_type{0.5}};
-    }
-    throw std::invalid_argument(prefix + " received an unknown non-orthogonal treatment.");
+    const int field_state = correction_field == nullptr ? 0 : correction_field->mesh_ptr().get() == &mesh ? 1 : 2;
+    const auto selection = non_orthogonal_selection_state(treatment, field_state);
+    const auto state = reduce_transport_validation_state(mesh, std::array<int, 5>{
+        !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0,
+        selection[0], selection[1], selection[2], selection[3]});
+    if (state[0])
+        throw std::invalid_argument(std::string(context) + " requires finite non-negative diffusivity.");
+    report_non_orthogonal_selection_state({state[1], state[2], state[3], state[4]}, context);
+    return non_orthogonal_weights<scalar_type>(treatment);
 }
 
 /** Evaluate interior least-squares gradients and synchronize overlap values. */
@@ -113,14 +63,17 @@ void evaluate_stored_diffusion_gradients(const ScalarCellFieldStored<Pack, MeshT
     {
         throw std::invalid_argument("Stored diffusion-gradient stencils are incompatible with the mesh.");
     }
-    for (size_t owned = 0; owned < stencils.size(); ++owned)
     {
-        vec_type gradient{};
-        for (const auto& entry : stencils[owned])
+        const auto values = field.local_read_view();
+        auto output = gradients.owned_write_view();
+        for (size_t owned = 0; owned < stencils.size(); ++owned)
         {
-            gradient = gradient + entry.coefficient * field.local_value(entry.cell_lid);
+            const auto gradient = apply_stored_scalar_gradient<vec_type>(stencils[owned], values);
+            const auto row = static_cast<local_ordinal_type>(owned);
+            output(row, 0) = gradient.x;
+            output(row, 1) = gradient.y;
+            output(row, 2) = gradient.z;
         }
-        gradients.set_owned_value(static_cast<local_ordinal_type>(owned), gradient);
     }
     gradients.sync_ghosts();
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "utils/CompensatedSum.hh"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -157,15 +159,13 @@ inline long double disk_polygon_area(std::span<const WidePoint> polygon,
                                      long double radius)
 {
     if (!(radius > 0) || polygon.size() < 3) return 0;
-    long double sum = 0, correction = 0;
+    SimpleFluid::detail::CompensatedSum<long double> sum;
     for (size_t i = 0; i < polygon.size(); ++i)
     {
         const auto term = disk_edge_area(polygon[i], polygon[(i + 1) % polygon.size()], radius);
-        const auto next = sum + term;
-        correction += std::abs(sum) >= std::abs(term) ? (sum - next) + term : (term - next) + sum;
-        sum = next;
+        sum += term;
     }
-    return sum + correction;
+    return sum.value();
 }
 
 inline double polygon_sector_area(std::span<const PolygonPoint> polygon,

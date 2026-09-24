@@ -11,6 +11,7 @@
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/TransportSystem.hh"
+#include "FVM/details/TransportValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -29,46 +30,6 @@ namespace SimpleFluid::FVM
 {
 namespace detail
 {
-
-template<class MeshType, size_t StateCount>
-std::array<int, StateCount> reduce_transport_validation_state(
-    const MeshType& mesh,
-    const std::array<int, StateCount>& local_state)
-{
-    auto global_state = local_state;
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    if (communicator->getSize() > 1)
-    {
-        Teuchos::reduceAll(
-            *communicator,
-            Teuchos::REDUCE_MAX,
-            static_cast<int>(StateCount),
-            local_state.data(),
-            global_state.data());
-    }
-    return global_state;
-}
-
-template<TpetraTypePack Pack> struct TransportMatrixRow
-{
-    std::vector<typename Pack::local_ordinal_type> columns;
-    std::vector<typename Pack::scalar_type> values;
-};
-
-template<TpetraTypePack Pack>
-TransportMatrixRow<Pack> capture_transport_row(
-    const FlatMatrixRow<typename Pack::local_ordinal_type,
-        typename Pack::scalar_type>& row_values)
-{
-    TransportMatrixRow<Pack> row;
-    row.columns.assign(
-        row_values.column_data(),
-        row_values.column_data() + row_values.size());
-    row.values.assign(
-        row_values.value_data(),
-        row_values.value_data() + row_values.size());
-    return row;
-}
 
 template<TpetraTypePack Pack, class MeshType>
 void validate_transport_matrix_graph(
@@ -129,85 +90,46 @@ template<TpetraTypePack Pack, class Field>
 NonOrthogonalTransportWeights<typename Pack::scalar_type> validate_non_orthogonal_transport_selection(
     const Mesh<Pack>& mesh, NonOrthogonalTreatment treatment, const Field* correction_field, std::string_view context)
 {
-    using scalar_type = typename Pack::scalar_type;
-
-    int treatment_state = 3;
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            treatment_state = 0;
-            break;
-        case NonOrthogonalTreatment::Implicit:
-            treatment_state = 1;
-            break;
-        case NonOrthogonalTreatment::Hybrid:
-            treatment_state = 2;
-            break;
-    }
-
-    const int correction_state = correction_field == nullptr ? 0 : (&correction_field->mesh() == &mesh ? 1 : 2);
-    const int local_state[] = {treatment_state, -treatment_state, correction_state, -correction_state};
-    int maximum_state[4] = {local_state[0], local_state[1], local_state[2], local_state[3]};
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    if (communicator->getSize() > 1)
-    {
-        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 4, local_state, maximum_state);
-    }
-
-    const auto prefix = std::string(context);
-    if (maximum_state[0] == 3)
-    {
-        throw std::invalid_argument(prefix + " received an unknown non-orthogonal treatment.");
-    }
-    if (-maximum_state[1] != maximum_state[0])
-    {
-        throw std::invalid_argument(prefix + " requires every rank to use the same "
-                                             "non-orthogonal treatment.");
-    }
-    if (-maximum_state[3] != maximum_state[2])
-    {
-        throw std::invalid_argument(prefix + " requires every rank to select the same category "
-                                             "of correction field.");
-    }
-    if (maximum_state[2] == 2)
-    {
-        throw std::invalid_argument(prefix + " requires the correction field on the "
-                                             "transported-field mesh.");
-    }
-
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            return {scalar_type{}, scalar_type{1}};
-        case NonOrthogonalTreatment::Implicit:
-            return {scalar_type{1}, scalar_type{}};
-        case NonOrthogonalTreatment::Hybrid:
-            return {scalar_type{0.5}, scalar_type{0.5}};
-    }
-
-    throw std::invalid_argument(prefix + " received an unknown non-orthogonal treatment.");
+    const int field_state = correction_field == nullptr ? 0 : (&correction_field->mesh() == &mesh ? 1 : 2);
+    return validate_non_orthogonal_selection<typename Pack::scalar_type>(mesh, treatment, field_state, context);
 }
 
 template<TpetraTypePack Pack, class MeshType>
 PreparedTransportMatrix<Pack> prepare_transport_matrix(
-    const MeshType& mesh, Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row)
+    const MeshType& mesh, Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
+    const std::vector<TransportMatrixRow<Pack>>* required_rows)
 {
     using matrix_type = typename Pack::matrix_type;
 
+    validate_transport_matrix_maps<Pack>(mesh, cached_matrix, mesh.num_owned_cells());
     if (cached_matrix.is_null())
     {
         return {Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), entries_per_row)), false};
     }
-    if (!cached_matrix->isFillComplete() || !cached_matrix->getRowMap()->isSameAs(*mesh.owned_cell_map()) ||
-        cached_matrix->getColMap().is_null() || !cached_matrix->getColMap()->isSameAs(*mesh.overlap_cell_map()) ||
-        !cached_matrix->getDomainMap()->isSameAs(*mesh.owned_cell_map()))
-    {
-        throw std::invalid_argument("transport_system cached matrix is incompatible with the mesh.");
-    }
+
+    if (required_rows != nullptr)
+        validate_transport_matrix_graph<Pack>(mesh, cached_matrix, *required_rows);
 
     cached_matrix->resumeFill();
     cached_matrix->setAllToScalar(typename Pack::scalar_type{});
     return {cached_matrix, true};
+}
+
+template<TpetraTypePack Pack>
+std::vector<TransportMatrixRow<Pack>> basic_transport_rows(const Mesh<Pack>& mesh)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    std::vector<TransportMatrixRow<Pack>> rows(mesh.num_owned_cells());
+    for (size_t owned = 0; owned < rows.size(); ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        auto& columns = rows[owned].columns;
+        columns.push_back(cell);
+        for (const auto face : mesh.faces(cell))
+            if (mesh.is_interior_face(face))
+                columns.push_back(mesh.opposite_or_periodic_neighbor_cell(face, cell));
+    }
+    return rows;
 }
 
 template<TpetraTypePack Pack>
@@ -225,6 +147,23 @@ void add_transport_values(const PreparedTransportMatrix<Pack>& prepared, typenam
     if (updated != static_cast<typename Pack::local_ordinal_type>(columns.size()))
     {
         throw std::invalid_argument("transport_system cached matrix graph is incompatible with the operator.");
+    }
+}
+
+template<TpetraTypePack Pack>
+void finish_transport_matrix(const PreparedTransportMatrix<Pack>& prepared)
+{
+    if (prepared.reused)
+    {
+        // Keep the existing domain/import and make the range identical to
+        // this graph's row map on every rank. Tpetra otherwise branches on
+        // local map pointer identity while rebuilding its exporter.
+        prepared.matrix->fillComplete(
+            prepared.matrix->getDomainMap(), prepared.matrix->getRowMap());
+    }
+    else
+    {
+        prepared.matrix->fillComplete();
     }
 }
 
@@ -250,22 +189,15 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_values.mesh();
-    if (&face_fluxes.mesh() != &mesh)
-    {
-        throw std::invalid_argument("transport_system requires face fluxes on the old-value mesh.");
-    }
-    if (time_step <= 0.0)
-    {
-        throw std::invalid_argument("transport_system requires a positive time step.");
-    }
-    if (diffusivity < 0.0)
-    {
-        throw std::invalid_argument("transport_system requires non-negative diffusivity.");
-    }
+    detail::validate_transport_scalar_inputs(mesh, &face_fluxes.mesh() == &mesh, time_step, diffusivity);
 
     // Row map = owned cells; domain map = owned + ghost cells
     // so that neighbour columns on other ranks are valid.
-    const auto prepared = detail::prepare_transport_matrix<Pack>(mesh, std::move(cached_matrix), 12);
+    const auto required_rows = cached_matrix.is_null()
+        ? std::vector<detail::TransportMatrixRow<Pack>>{}
+        : detail::basic_transport_rows<Pack>(mesh);
+    const auto prepared = detail::prepare_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 12, &required_rows);
     const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
     const auto old_value_data = old_values.owned_read_view();
@@ -392,7 +324,7 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
         }
     }
 
-    matrix->fillComplete();
+    detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 
@@ -506,20 +438,13 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
     constexpr size_t num_components = 3;
 
     const auto& mesh = old_values.mesh();
-    if (&face_fluxes.mesh() != &mesh)
-    {
-        throw std::invalid_argument("transport_system requires face fluxes on the old-value mesh.");
-    }
-    if (time_step <= 0.0)
-    {
-        throw std::invalid_argument("transport_system requires a positive time step.");
-    }
-    if (diffusivity < 0.0)
-    {
-        throw std::invalid_argument("transport_system requires non-negative diffusivity.");
-    }
+    detail::validate_transport_scalar_inputs(mesh, &face_fluxes.mesh() == &mesh, time_step, diffusivity);
 
-    const auto prepared = detail::prepare_transport_matrix<Pack>(mesh, std::move(cached_matrix), 12);
+    const auto required_rows = cached_matrix.is_null()
+        ? std::vector<detail::TransportMatrixRow<Pack>>{}
+        : detail::basic_transport_rows<Pack>(mesh);
+    const auto prepared = detail::prepare_transport_matrix<Pack>(
+        mesh, std::move(cached_matrix), 12, &required_rows);
     const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(new typename Pack::multi_vector_type(mesh.owned_cell_map(), num_components, true));
     const auto old_value_data = old_values.owned_read_view();
@@ -654,7 +579,7 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
         }
     }
 
-    matrix->fillComplete();
+    detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 
@@ -702,18 +627,21 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     const auto& mesh = old_values.mesh();
     const auto non_orthogonal_weights = detail::validate_non_orthogonal_transport_selection<Pack>(
         mesh, treatment, correction_field, "non_orthogonal_transport_system");
-    if (&face_fluxes.mesh() != &mesh)
+    int invalid_geometry_cache = 0;
+    if (geometry_cache != nullptr)
     {
-        throw std::invalid_argument("non_orthogonal_transport_system requires face fluxes on the old-value mesh.");
+        try { geometry_cache->require_mesh(mesh); }
+        catch (const std::invalid_argument&) { invalid_geometry_cache = 1; }
     }
-    if (time_step <= scalar_type{0})
-    {
-        throw std::invalid_argument("non_orthogonal_transport_system requires a positive time step.");
-    }
-    if (diffusivity < scalar_type{0})
-    {
-        throw std::invalid_argument("non_orthogonal_transport_system requires non-negative diffusivity.");
-    }
+    const auto state = detail::reduce_transport_validation_state(mesh, std::array<int, 4>{
+        &face_fluxes.mesh() != &mesh ? 1 : 0,
+        !std::isfinite(time_step) || time_step <= scalar_type{} ? 1 : 0,
+        !std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0,
+        invalid_geometry_cache});
+    if (state[0]) throw std::invalid_argument("non_orthogonal_transport_system requires face fluxes on the old-value mesh.");
+    if (state[1]) throw std::invalid_argument("non_orthogonal_transport_system requires a finite positive time step.");
+    if (state[2]) throw std::invalid_argument("non_orthogonal_transport_system requires finite non-negative diffusivity.");
+    if (state[3]) throw std::invalid_argument("non_orthogonal_transport_system received a geometry cache on the wrong mesh.");
 
     const auto implicit_weight = non_orthogonal_weights.implicit;
     const auto explicit_weight = non_orthogonal_weights.explicit_;
@@ -725,10 +653,6 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     {
         local_gradient_stencils = detail::least_squares_gradient_stencils(mesh);
         local_boundary_locations = detail::boundary_face_locations(mesh);
-    }
-    else
-    {
-        geometry_cache->require_mesh(mesh);
     }
     const auto& gradient_stencils =
         geometry_cache == nullptr ? local_gradient_stencils : geometry_cache->interior_stencils();
@@ -903,7 +827,7 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
             *correction_field, diffusivity, *rhs, explicit_weight, boundary_diffusion, &gradient_stencils);
     }
 
-    matrix->fillComplete();
+    detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 
@@ -1694,7 +1618,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
             Teuchos::arrayView(rows[row].values.data(), row_size));
     }
 
-    matrix->fillComplete();
+    detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 
@@ -1915,7 +1839,7 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
             coefficient_interpolation);
     }
 
-    matrix->fillComplete();
+    detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 
@@ -2145,7 +2069,7 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
         boundary_value, *rhs, boundary_diffusion, boundary_viscosity, &gradient_stencils, &boundary_locations,
         coefficient_interpolation);
 
-    matrix->fillComplete();
+    detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 

@@ -95,31 +95,19 @@ constexpr int scalar_convection_scheme_code(ScalarConvectionScheme scheme) noexc
     return 2;
 }
 
-/**
- * @brief Collectively validate a scalar policy and older-field selection.
- *
- * @param mesh Mesh providing the communicator.
- * @param discretization Local policy selection.
- * @param older_field_state Zero for absent, one for compatible, two for a
- *        field on another mesh.
- * @param context Assembly routine name used in diagnostics.
- */
-template<class MeshType>
-void validate_scalar_transport_discretization(
-    const MeshType& mesh, ScalarTransportDiscretization discretization, int older_field_state, std::string_view context)
+/** Classify local policy and older-field selection without communication. */
+inline std::array<int, 6> scalar_transport_discretization_state(
+    ScalarTransportDiscretization discretization, int older_field_state) noexcept
 {
     const auto time_state = scalar_time_scheme_code(discretization.time);
     const auto convection_state = scalar_convection_scheme_code(discretization.convection);
-    const std::array<int, 6> local_state{
-        time_state, -time_state, convection_state, -convection_state, older_field_state, -older_field_state};
-    auto global_state = local_state;
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    if (communicator->getSize() > 1)
-    {
-        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_state.size()), local_state.data(),
-            global_state.data());
-    }
+    return {time_state, -time_state, convection_state, -convection_state,
+        older_field_state, -older_field_state};
+}
 
+inline void report_scalar_transport_discretization_state(
+    const std::array<int, 6>& global_state, std::string_view context)
+{
     const auto prefix = std::string(context);
     if (global_state[0] == 2)
     {
@@ -153,6 +141,20 @@ void validate_scalar_transport_discretization(
     {
         throw std::invalid_argument(prefix + " requires an older field for BDF2.");
     }
+}
+
+/** Collectively validate a policy and older-field selection. */
+template<class MeshType>
+void validate_scalar_transport_discretization(
+    const MeshType& mesh, ScalarTransportDiscretization discretization, int older_field_state, std::string_view context)
+{
+    const auto local_state = scalar_transport_discretization_state(discretization, older_field_state);
+    auto global_state = local_state;
+    const auto communicator = mesh.owned_cell_map()->getComm();
+    if (communicator->getSize() > 1)
+        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_state.size()),
+            local_state.data(), global_state.data());
+    report_scalar_transport_discretization_state(global_state, context);
 }
 
 /** @brief Return whether every rank supplied the same scalar value. */

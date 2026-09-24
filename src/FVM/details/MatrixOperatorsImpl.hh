@@ -6,6 +6,7 @@
 
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/FaceStencilMatrix.hh"
+#include "FVM/details/TransportValidation.hh"
 #include "dataclass/TpetraTypes.hh"
 
 #include <Teuchos_Array.hpp>
@@ -213,15 +214,9 @@ bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
     using local_ordinal_type = typename Pack::local_ordinal_type;
     const auto communicator = mesh.owned_cell_map()->getComm();
     values_changed = false;
-    int local_invalid = matrix.isFillComplete() ? 0 : 1;
+    if (!compatible_present_transport_matrix_maps<Pack>(mesh, matrix, mesh.num_owned_cells())) return false;
+    int local_invalid = 0;
     int global_invalid = 0;
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_invalid, &global_invalid);
-    if (global_invalid != 0) return false;
-    // isSameAs is collective; all ranks follow the same short-circuit path.
-    if (!matrix.getRowMap()->isSameAs(*mesh.owned_cell_map()) ||
-        !matrix.getColMap()->isSameAs(*mesh.overlap_cell_map()) ||
-        !matrix.getDomainMap()->isSameAs(*mesh.owned_cell_map()) ||
-        !matrix.getRangeMap()->isSameAs(*mesh.owned_cell_map())) return false;
 
     std::vector<Teuchos::Array<scalar_type>> staged(mesh.num_owned_cells());
     int local_changed = 0;

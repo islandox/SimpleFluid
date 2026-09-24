@@ -203,6 +203,19 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         for (int c = 0; c < count; ++c) donors.push_back(read_geometry(coordinates, coordinate_offset));
     }
 
+    // Donor records are immutable for this transfer and may have crossed MPI.
+    // Validate them once before the candidate loop uses the internal kernel.
+    if (conservative)
+    {
+        for (const auto& donor : donors)
+        {
+            if (donor.kind != GeometryKind::RZAngular) continue;
+            try { rz_overlap_detail::validate(donor.polygon, donor[6], donor[7]); }
+            catch (const std::invalid_argument&) { valid = false; }
+        }
+        require_all(*comm, valid, "Mesh transfer received invalid RZ angular geometry.");
+    }
+
     std::vector<std::vector<GO>> columns(target_geometry.size());
     std::vector<std::vector<Scalar>> weights(target_geometry.size());
     std::vector<double> source_coverage(conservative ? donors.size() : 0, 0);
