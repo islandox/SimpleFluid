@@ -16,6 +16,7 @@
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/ScalarTransportDiscretization.hh"
 #include "FVM/details/FieldStoredTransportSystem.hh"
+#include "FVM/details/TransportValidation.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "SimpleFluidExport.hh"
 #include "fields/CellField.hh"
@@ -56,11 +57,7 @@ template<TpetraTypePack Pack> struct PreparedTransportMatrix
  * @brief Validated matrix/RHS fractions for a non-orthogonal treatment.
  * @tparam Scalar Scalar type used by the transport system.
  */
-template<class Scalar> struct NonOrthogonalTransportWeights
-{
-    Scalar implicit{};
-    Scalar explicit_{};
-};
+template<class Scalar> using NonOrthogonalTransportWeights = NonOrthogonalWeights<Scalar>;
 
 /**
  * @brief Collectively validate the lagged-field and treatment selection.
@@ -94,12 +91,14 @@ NonOrthogonalTransportWeights<typename Pack::scalar_type> validate_non_orthogona
  * @param mesh Mesh defining row, column, and domain maps.
  * @param cached_matrix Optional fill-complete matrix to reuse.
  * @param entries_per_row Initial graph allocation estimate.
+ * @param required_rows Optional operator rows to check before mutating a cached graph.
  * @return Prepared matrix and whether its existing graph is being reused.
  * @throws std::invalid_argument if @p cached_matrix is incompatible.
  */
 template<TpetraTypePack Pack, class MeshType>
 PreparedTransportMatrix<Pack> prepare_transport_matrix(
-    const MeshType& mesh, Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row);
+    const MeshType& mesh, Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
+    const std::vector<TransportMatrixRow<Pack>>* required_rows = nullptr);
 
 /**
  * @brief Insert a row on a fresh graph or sum values into a reused graph.

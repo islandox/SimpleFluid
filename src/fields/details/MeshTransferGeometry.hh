@@ -200,9 +200,10 @@ std::vector<Geometry> geometry(const Mesh& mesh, bool conservative, bool& valid)
                     // Swept native templates are clockwise in radius/Z;
                     // overlap moment integration uses CCW apothem/Z loops.
                     std::reverse(g.polygon.begin(), g.polygon.end());
-                    valid = valid && convex_polygon(g.polygon) && g[9] > g[8] && g[4] > 0;
+                    valid = valid && g[9] > g[8] && g[4] > 0;
                     if (!valid) continue;
-                    const auto volume = rz_angular_volume(g.polygon, g[6], g[7]);
+                    rz_overlap_detail::validate(g.polygon, g[6], g[7]);
+                    const auto volume = rz_angular_volume_validated(g.polygon, g[6], g[7]);
                     valid = valid && std::abs(volume - g[3]) <= 1e-10L * g[3];
                     g[4] = std::max(0.0, std::nextafter(g[4], -std::numeric_limits<double>::infinity()));
                     g[5] = std::nextafter(g[5], std::numeric_limits<double>::infinity());
@@ -295,7 +296,7 @@ inline double intersection(const Geometry& a, const Geometry& b)
         const auto& cylinder = a.kind == GeometryKind::Cylindrical ? a : b;
         if (cylinder.kind != GeometryKind::Cylindrical)
             throw std::invalid_argument("RZ angular conservative overlap requires a cylindrical partner.");
-        return rz_angular_sector_volume(swept.polygon, swept[6], swept[7],
+        return rz_angular_sector_volume_validated(swept.polygon, swept[6], swept[7],
             cylinder[4], cylinder[5], cylinder[6], cylinder[7], zlo, zhi);
     }
     if (a.kind == GeometryKind::PolygonPrism || b.kind == GeometryKind::PolygonPrism)

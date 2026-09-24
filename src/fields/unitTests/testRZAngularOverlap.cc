@@ -126,6 +126,10 @@ TEST(RZAngularOverlapTest, RejectsUnsupportedGeometryAndReturnsZeroForEmptyCuts)
     std::reverse(clockwise.begin(), clockwise.end());
     EXPECT_THROW(Geometry::rz_angular_volume(clockwise, 0, 0.1), std::invalid_argument);
     EXPECT_THROW(Geometry::rz_angular_volume(polygon, 0, pi), std::invalid_argument);
+    EXPECT_THROW(Geometry::rz_angular_sector_volume(clockwise, 0, 0.1, 0, 2, 0, 0.1, 0, 1),
+                 std::invalid_argument);
+    EXPECT_DOUBLE_EQ(Geometry::rz_angular_sector_volume(polygon, 0, 0.1, 0, 2, 0, 0.1, 0, 1),
+                     Geometry::rz_angular_sector_volume_validated(polygon, 0, 0.1, 0, 2, 0, 0.1, 0, 1));
     EXPECT_EQ(Geometry::rz_angular_sector_volume(polygon, 0, 0.1, 0, 10, 0, 0.1, 1, 2), 0);
     EXPECT_EQ(Geometry::rz_angular_sector_volume(polygon, 0, 0.1, 0, 0.5, 0, 0.1, 0, 1), 0);
     EXPECT_EQ(Geometry::rz_angular_sector_volume(polygon, 0, 0.1, 3, 4, 0, 0.1, 0, 1), 0);

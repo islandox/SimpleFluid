@@ -250,6 +250,11 @@ inline void validate_production(real_t production)
  * @return Linearly blended coefficient.
  * @throws std::invalid_argument If @p f1 is outside [0, 1] or not finite.
  */
+inline real_t blend_unchecked(real_t inner, real_t outer, real_t f1)
+{
+    return f1 * inner + (1.0 - f1) * outer;
+}
+
 inline real_t blend(real_t inner, real_t outer, real_t f1)
 {
     require_finite(f1, "Menter blending factor");
@@ -257,7 +262,7 @@ inline real_t blend(real_t inner, real_t outer, real_t f1)
     {
         throw std::invalid_argument("Menter blending factor must be in [0, 1].");
     }
-    return f1 * inner + (1.0 - f1) * outer;
+    return blend_unchecked(inner, outer, f1);
 }
 
 /**
@@ -292,6 +297,12 @@ inline real_t menter_gamma(real_t beta, real_t beta_star, real_t sigma_omega, re
  * @return Cross-diffusion coefficient limited from below by @p floor.
  * @throws std::invalid_argument If any input is outside its required domain.
  */
+inline real_t menter_cross_diffusion_coefficient_unchecked(const KOmegaState& state,
+    const MenterKOmegaInvariants& invariants, real_t sigma_omega_2, real_t floor)
+{
+    return std::max(2.0 * sigma_omega_2 * invariants.grad_k_dot_grad_omega / state.omega, floor);
+}
+
 inline real_t menter_cross_diffusion_coefficient(const KOmegaState& state,
                                                  const MenterKOmegaInvariants& invariants,
                                                  real_t sigma_omega_2, real_t floor)
@@ -300,7 +311,7 @@ inline real_t menter_cross_diffusion_coefficient(const KOmegaState& state,
     require_finite(invariants.grad_k_dot_grad_omega, "Gradient dot product");
     require_positive(sigma_omega_2, "Outer omega diffusion coefficient");
     require_positive(floor, "Cross-diffusion floor");
-    return std::max(2.0 * sigma_omega_2 * invariants.grad_k_dot_grad_omega / state.omega, floor);
+    return menter_cross_diffusion_coefficient_unchecked(state, invariants, sigma_omega_2, floor);
 }
 
 /**
@@ -313,16 +324,12 @@ inline real_t menter_cross_diffusion_coefficient(const KOmegaState& state,
  * @return First blending function in the interval [0, 1].
  * @throws std::invalid_argument If any input is outside its required domain.
  */
-inline real_t menter_blending_function_1(const KOmegaState& state,
-                                         const MenterKOmegaInvariants& invariants, real_t beta_star,
-                                         real_t sigma_omega_2, real_t cross_diffusion_floor)
+inline real_t menter_blending_function_1_unchecked(const KOmegaState& state,
+    const MenterKOmegaInvariants& invariants, real_t beta_star,
+    real_t sigma_omega_2, real_t cross_diffusion_floor)
 {
-    validate(state);
-    validate_menter_wall_inputs(invariants);
-    require_finite(invariants.grad_k_dot_grad_omega, "Gradient dot product");
-    require_positive(beta_star, "Menter beta-star");
-    const auto cd =
-        menter_cross_diffusion_coefficient(state, invariants, sigma_omega_2, cross_diffusion_floor);
+    const auto cd = menter_cross_diffusion_coefficient_unchecked(
+        state, invariants, sigma_omega_2, cross_diffusion_floor);
     const auto y2 = invariants.wall_distance * invariants.wall_distance;
     const auto viscous = 500.0 * invariants.kinematic_viscosity / (y2 * state.omega);
     const auto turbulent =
@@ -333,6 +340,20 @@ inline real_t menter_blending_function_1(const KOmegaState& state,
     return std::tanh(argument_squared * argument_squared);
 }
 
+inline real_t menter_blending_function_1(const KOmegaState& state,
+                                         const MenterKOmegaInvariants& invariants, real_t beta_star,
+                                         real_t sigma_omega_2, real_t cross_diffusion_floor)
+{
+    validate(state);
+    validate_menter_wall_inputs(invariants);
+    require_finite(invariants.grad_k_dot_grad_omega, "Gradient dot product");
+    require_positive(beta_star, "Menter beta-star");
+    require_positive(sigma_omega_2, "Outer omega diffusion coefficient");
+    require_positive(cross_diffusion_floor, "Cross-diffusion floor");
+    return menter_blending_function_1_unchecked(
+        state, invariants, beta_star, sigma_omega_2, cross_diffusion_floor);
+}
+
 /**
  * @brief Evaluate Menter's second blending function.
  * @param state Local k-omega state.
@@ -341,17 +362,23 @@ inline real_t menter_blending_function_1(const KOmegaState& state,
  * @return Second blending function in the interval [0, 1].
  * @throws std::invalid_argument If any input is outside its required domain.
  */
+inline real_t menter_blending_function_2_unchecked(const KOmegaState& state,
+    const MenterKOmegaInvariants& invariants, real_t beta_star)
+{
+    const auto y2 = invariants.wall_distance * invariants.wall_distance;
+    const auto argument =
+        std::max(2.0 * std::sqrt(state.k) / (beta_star * state.omega * invariants.wall_distance),
+                 500.0 * invariants.kinematic_viscosity / (y2 * state.omega));
+    return std::tanh(argument * argument);
+}
+
 inline real_t menter_blending_function_2(const KOmegaState& state,
                                          const MenterKOmegaInvariants& invariants, real_t beta_star)
 {
     validate(state);
     validate_menter_wall_inputs(invariants);
     require_positive(beta_star, "Menter beta-star");
-    const auto y2 = invariants.wall_distance * invariants.wall_distance;
-    const auto argument =
-        std::max(2.0 * std::sqrt(state.k) / (beta_star * state.omega * invariants.wall_distance),
-                 500.0 * invariants.kinematic_viscosity / (y2 * state.omega));
-    return std::tanh(argument * argument);
+    return menter_blending_function_2_unchecked(state, invariants, beta_star);
 }
 
 /**
@@ -363,6 +390,12 @@ inline real_t menter_blending_function_2(const KOmegaState& state,
  * @return Cross-diffusion source for the omega equation.
  * @throws std::invalid_argument If any input is outside its required domain.
  */
+inline real_t menter_cross_diffusion_source_unchecked(const KOmegaState& state,
+    const MenterKOmegaInvariants& invariants, real_t sigma_omega_2, real_t f1)
+{
+    return 2.0 * (1.0 - f1) * sigma_omega_2 * invariants.grad_k_dot_grad_omega / state.omega;
+}
+
 inline real_t menter_cross_diffusion_source(const KOmegaState& state,
                                             const MenterKOmegaInvariants& invariants,
                                             real_t sigma_omega_2, real_t f1)
@@ -371,7 +404,7 @@ inline real_t menter_cross_diffusion_source(const KOmegaState& state,
     require_finite(invariants.grad_k_dot_grad_omega, "Gradient dot product");
     require_positive(sigma_omega_2, "Outer omega diffusion coefficient");
     validate_blending_factor(f1);
-    return 2.0 * (1.0 - f1) * sigma_omega_2 * invariants.grad_k_dot_grad_omega / state.omega;
+    return menter_cross_diffusion_source_unchecked(state, invariants, sigma_omega_2, f1);
 }
 
 } // namespace turbulence_detail

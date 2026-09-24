@@ -40,8 +40,16 @@ simplefluid_add_mpi_test(
     NAME FieldStoredTransportValidation_2procs
     TARGET testFieldStoredOperators
     PROCS 2
-    ARGS "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective:FieldStoredOperatorsTest.WeightedTransportCachedTopologyMatchesFreshAssembly:FieldStoredOperatorsTest.ZeroDiffusionNeumannTransportRetainsValidationAndReusableGraph:FieldStoredOperatorsTest.WeightedScalarZeroDiffusionRetainsBoundaryCorrections"
+    ARGS "--gtest_filter=FieldStoredOperatorsTest.MappedTransportValidationAndCachedGraphFailuresAreCollective:FieldStoredOperatorsTest.MappedExternalEquivalentMapsReuseCollectively:FieldStoredOperatorsTest.WeightedTransportCachedTopologyMatchesFreshAssembly:FieldStoredOperatorsTest.ZeroDiffusionNeumannTransportRetainsValidationAndReusableGraph:FieldStoredOperatorsTest.WeightedScalarZeroDiffusionRetainsBoundaryCorrections"
     LABELS "mpi;non_orthogonal;field_stored"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME LegacyTransportValidation_2procs
+    TARGET testFvmOperators
+    PROCS 2
+    ARGS "--gtest_filter=FvmOperatorsTest.LegacyTransportCacheAndScalarFailuresAreCollective"
+    LABELS "mpi;transport;legacy"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
