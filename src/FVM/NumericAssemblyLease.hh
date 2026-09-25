@@ -1,3 +1,6 @@
+/** @file NumericAssemblyLease.hh
+ * @brief Keeps coupled momentum coefficients stable across equation assembly.
+ */
 #pragma once
 
 namespace SimpleFluid::FVM

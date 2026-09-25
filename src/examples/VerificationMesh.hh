@@ -1,4 +1,6 @@
-/** Shared explicit Cartesian cell edges for paired verification cases. */
+/** @file VerificationMesh.hh
+ * @brief Supplies shared Cartesian mesh construction for paired verification cases.
+ */
 #pragma once
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include <algorithm>

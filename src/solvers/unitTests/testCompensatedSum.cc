@@ -1,3 +1,6 @@
+/** @file testCompensatedSum.cc
+ * @brief Checks compensated accumulation of large mesh inventories.
+ */
 #include "utils/CompensatedSum.hh"
 
 #include <gtest/gtest.h>

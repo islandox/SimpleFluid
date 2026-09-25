@@ -765,10 +765,13 @@ SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<Pack> transport_system(const Vector
  * two-point stencil plus Phase 2/3 non-orthogonal treatment selected by
  * @p treatment.
  *
+ * @param old_values Old-time vector field.
  * @param face_fluxes Oriented volumetric fluxes on the @p old_values mesh.
  * @param time_step Must be positive.
  * @param diffusivity Must be non-negative.
+ * @param boundary_value Vector boundary values used by diffusion and gradient reconstruction.
  * @param right_hand_source Volumetric vector-source provider.
+ * @param treatment Selected non-orthogonal viscous-diffusion treatment.
  * @param correction_field Optional lagged field for explicit correction terms.
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_diffusion Selects boundary faces with viscous diffusion.
@@ -808,15 +811,22 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(
  * derivative; historical storage values are not part of this API.
  *
  * @param face_fluxes Oriented volumetric fluxes on the @p old_values mesh.
+ * @param old_values Old-time scalar field.
  * @param time_step Must be positive.
  * @param storage_weight Must be positive and share the transported-field mesh.
  * @param advection_weight Must be non-negative and share that mesh.
+ * @param diffusivity Cell-centered non-negative diffusion coefficient.
+ * @param boundary_condition Boundary condition for scalar diffusion.
+ * @param boundary_value Boundary values used by diffusion and gradient reconstruction.
+ * @param source Cell-centered scalar source provider.
+ * @param treatment Selected non-orthogonal diffusion treatment.
  * @param correction_field Optional lagged field for explicit correction terms.
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param implicit_sink Optional finite, non-negative cell-centered sink.
  * @param fixed_cell_value Optional finite values imposed as exact identity rows.
  * @param boundary_diffusivity Optional compatible boundary-face coefficients.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
+ * @param coefficient_interpolation Rule for interpolating diffusivity to faces.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or a
  *         validated time step, coefficient, sink, fixed value, boundary
@@ -871,12 +881,21 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(co
  * Storage and advection use volumetric heat capacity rho*cp, diffusion uses
  * distance-weighted harmonic conductivity, and the source is power density.
  *
+ * @param old_temperature Old-time temperature field.
  * @param face_fluxes Oriented volumetric fluxes on the temperature mesh.
  * @param time_step Must be positive.
+ * @param density Positive cell-centered mass density.
+ * @param specific_heat_capacity Positive cell-centered specific heat capacity.
+ * @param thermal_conductivity Non-negative cell-centered conductivity.
+ * @param boundary_condition Temperature boundary-condition provider.
+ * @param boundary_value Temperature boundary-value provider.
+ * @param power_density Volumetric heat-source provider.
+ * @param treatment Selected non-orthogonal diffusion treatment.
  * @param correction_field Optional lagged temperature for explicit correction.
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_thermal_conductivity Optional compatible boundary-face values.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
+ * @param coefficient_interpolation Rule for interpolating conductivity to faces.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or the
  *         time step, boundary condition, or boundary value is invalid. Robin
@@ -898,15 +917,20 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
 /**
  * @brief Assemble incompressible momentum transport with a variable dynamic
  *        viscosity field and constant reference density.
+ * @param old_velocity Old-time vector velocity field.
  * @param face_fluxes Oriented volumetric fluxes on the velocity mesh.
  * @param time_step Must be positive.
+ * @param dynamic_viscosity Non-negative cell-centered dynamic-viscosity field.
  * @param reference_density Must be positive.
+ * @param boundary_value Velocity boundary-value provider.
  * @param acceleration_source Volumetric acceleration provider.
+ * @param treatment Selected non-orthogonal viscous-diffusion treatment.
  * @param correction_field Optional lagged velocity for explicit correction.
  * @param[in,out] cached_matrix Optional compatible matrix to reuse.
  * @param boundary_diffusion Selects boundary faces with viscous diffusion.
  * @param boundary_dynamic_viscosity Optional compatible boundary-face values.
  * @param geometry_cache Optional mesh-bound reconstruction geometry cache.
+ * @param coefficient_interpolation Rule for interpolating viscosity to faces.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or the
  *         time step or reference density is not positive.

@@ -1,3 +1,6 @@
+/** @file CoupledOperatorBackend.hh
+ * @brief Describes backend choices for coupled pressure-velocity operators.
+ */
 #pragma once
 
 #include <cstdint>

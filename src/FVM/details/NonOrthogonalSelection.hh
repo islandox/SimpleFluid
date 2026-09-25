@@ -1,3 +1,6 @@
+/** @file NonOrthogonalSelection.hh
+ * @brief Resolves non-orthogonal correction selectors for transport assembly.
+ */
 #pragma once
 
 #include "FVM/NonOrthogonalTreatment.hh"

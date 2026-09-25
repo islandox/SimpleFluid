@@ -268,6 +268,11 @@ public:
     /**
      * @brief Observe one accepted step with an external steady-sample gate.
      *
+     * @param time New pseudo-time after the step.
+     * @param time_step Time step used for this observation.
+     * @param maximum_courant_number Maximum cell Courant number for the step.
+     * @param update_rates Physical relative update rates.
+     * @param solver_converged Whether every linear solve reported convergence.
      * @param steady_sample_eligible Whether this step may extend the steady
      *        window. This does not affect time-step adaptation.
      */

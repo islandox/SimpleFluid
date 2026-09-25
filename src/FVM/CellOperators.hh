@@ -1462,6 +1462,7 @@ void gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& fie
  * @tparam Pack The Tpetra type pack.
  * @param mesh The computational mesh.
  * @param face_fluxes FaceField of scalar fluxes.
+ * @param face_values Face-value accessor used to read the scalar flux value.
  * @param cell_lid Local ID of the cell whose balance is computed.
  * @return Sum of outward-positive fluxes around @p cell_lid.
  */

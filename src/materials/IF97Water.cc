@@ -1,3 +1,6 @@
+/** @file IF97Water.cc
+ * @brief Implements SI-unit water properties backed by the IF97 dependency.
+ */
 #include "materials/IF97Water.hh"
 
 // This private dependency must never change the public SI-unit contract.

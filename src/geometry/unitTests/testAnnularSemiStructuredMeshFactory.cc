@@ -1,4 +1,6 @@
-/** @file testAnnularSemiStructuredMeshFactory.cc */
+/** @file testAnnularSemiStructuredMeshFactory.cc
+ * @brief Checks annular mesh dimensions, wall layers, and boundary geometry.
+ */
 #include <gtest/gtest.h>
 
 #include "geometry/AnnularSemiStructuredMeshFactory.hh"

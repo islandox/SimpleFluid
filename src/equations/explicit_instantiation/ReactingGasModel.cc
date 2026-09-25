@@ -1,3 +1,6 @@
+/** @file ReactingGasModel.cc
+ * @brief Instantiates reacting gas models for supported mesh types.
+ */
 #include "equations/ReactingGasModel.tcc"
 
 namespace SimpleFluid

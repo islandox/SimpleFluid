@@ -1,3 +1,6 @@
+/** @file MeshTransferPolygon.hh
+ * @brief Provides polygon clipping and area operations for mesh overlap.
+ */
 #pragma once
 
 #include "utils/CompensatedSum.hh"

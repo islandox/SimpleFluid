@@ -1,3 +1,6 @@
+/** @file NoxNonlinearSolver.hh
+ * @brief Declares the reusable nonlinear solver interface and diagnostics.
+ */
 #pragma once
 
 #include "SimpleFluidExport.hh"
@@ -40,9 +43,19 @@ struct NonlinearCallbacks
     std::function<bool(const DefaultTpetraTypes::vector_type&)> convergence_gate;
 };
 
+/** @brief Outcome, work counts, and rank-maximum timings for one nonlinear solve.
+ *
+ * `converged` is true only when NOX's scaled residual component checks and any
+ * configured physical convergence gate pass. For returned non-convergence or
+ * a caught solver exception, `reason` describes the failure; validation errors
+ * can throw before a result is returned. A failed solve leaves the caller's
+ * physical state vector unchanged. Iteration/evaluation counters describe
+ * this solve. `native_*` counters and setup time are populated by the physical
+ * driver when native timestep setup is involved, and otherwise remain zero.
+ */
 struct NonlinearSolveResult
 {
-    // Native timestep setup diagnostics; populated by the physical driver.
+    /** Native timestep setup counts, populated by a physical driver when applicable. */
     std::size_t native_workspace_builds = 0;
     std::size_t native_workspace_reuses = 0;
     std::size_t native_geometry_builds = 0;
@@ -52,6 +65,7 @@ struct NonlinearSolveResult
     std::size_t native_preconditioner_builds = 0;
     std::size_t native_preconditioner_refreshes = 0;
     double native_setup_seconds = 0.0;
+    /** True only after algebraic convergence and the optional physical gate. */
     bool converged = false;
     int nonlinear_iterations = 0;
     int linear_solves = 0;
@@ -68,6 +82,7 @@ struct NonlinearSolveResult
     double residual_seconds = 0.0;
     double linearization_seconds = 0.0;
     double linear_solve_seconds = 0.0;
+    /** Human-readable convergence result or returned non-convergence/caught solver failure. */
     std::string reason;
 };
 
@@ -104,6 +119,20 @@ public:
      * Invalid replacement metadata leaves the existing callbacks unchanged.
      */
     void set_callbacks(NonlinearCallbacks callbacks);
+    /**
+     * @brief Solve for a physical state using the owned collective callbacks.
+     *
+     * The linear backend override in `nonlinear` takes precedence over
+     * `linear.backend`. On success, `physical_x` is replaced by the accepted
+     * physical state; validation failures, callback/solver failures, and
+     * non-convergence leave it unchanged. All participating ranks must call
+     * this method with compatible vectors and options on the callback map's
+     * communicator. Returned phase and total durations are rank maxima.
+     * @param physical_x In/out state in physical units and on the callback map.
+     * @param nonlinear Nonlinear tolerances and optional linear backend override.
+     * @param linear Linear solver controls; the nonlinear override may replace its backend.
+     * @return Per-solve convergence status, diagnostics, and timings.
+     */
     NonlinearSolveResult solve(
         vector_type& physical_x, const NonlinearSolverOptions& nonlinear, const LinearSolverOptions& linear);
     NonlinearSolverCacheStatistics cache_statistics() const noexcept;

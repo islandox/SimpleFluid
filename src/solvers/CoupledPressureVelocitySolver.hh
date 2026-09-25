@@ -297,6 +297,8 @@ template<TpetraTypePack Pack> struct CoupledSchurWorkspace
  * @param cached_schur Optional compatible Schur matrix to refresh.
  * @param workspace Optional persistent scaled-gradient and product storage.
  * @param reused_products Optional output set when every product was reused.
+ * @param policy Selects whether sparse products are cached or streamed.
+ * @param statistics Optional counters for product construction and reuse.
  * @return Assembled Schur-complement approximation.
  * @throws std::runtime_error if the momentum diagonal is singular.
  */
@@ -462,7 +464,13 @@ public:
 
     /**
      * @brief Assemble an isothermal incompressible coupled system.
+     * @param momentum_equation Momentum operator and forcing data.
+     * @param velocity Current velocity field.
      * @param pressure Current physical pressure in Pa.
+     * @param face_fluxes Current owner-oriented face flux field.
+     * @param velocity_boundary_cache Cached velocity boundary values.
+     * @param boundary_conditions Boundary conditions for coupled fields.
+     * @param time_options Physical timestep and discretization controls.
      * @param reference_density Positive density used to normalize pressure.
      */
     system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
@@ -493,10 +501,19 @@ public:
     /**
      * @brief Assemble isothermal momentum with variable effective viscosity
      *        and isotropic Reynolds stress.
+     * @param momentum_equation Momentum operator and forcing data.
+     * @param velocity Current velocity field.
+     * @param pressure Current physical pressure in Pa.
+     * @param face_fluxes Current owner-oriented face flux field.
+     * @param velocity_boundary_cache Cached velocity boundary values.
+     * @param boundary_conditions Boundary conditions for coupled fields.
+     * @param time_options Physical timestep and discretization controls.
+     * @param reference_density Positive density used to normalize pressure.
      * @param dynamic_viscosity_override Optional molecular-plus-turbulent
      *        dynamic viscosity used by the momentum block.
      * @param turbulent_kinetic_energy_gradient Optional gradient contributing
      *        the isotropic Reynolds-stress acceleration.
+     * @param boundary_dynamic_viscosity Optional boundary cache for dynamic viscosity.
      */
     system_type assemble(const momentum_equation_type& momentum_equation, const velocity_field_type& velocity,
         const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -533,8 +550,20 @@ public:
 
     /**
      * @brief Assemble a thermally buoyant coupled system.
+     * @param momentum_equation Boussinesq momentum operator and forcing data.
+     * @param velocity Current velocity field.
      * @param pressure Current physical pressure in Pa.
+     * @param temperature Current temperature field.
+     * @param face_fluxes Current owner-oriented face flux field.
+     * @param velocity_boundary_cache Cached velocity boundary values.
+     * @param boundary_conditions Boundary conditions for coupled fields.
+     * @param time_options Physical timestep and discretization controls.
+     * @param material Optional frozen material-property fields.
      * @param reference_density Positive density used to normalize pressure.
+     * @param density_feedback_enabled Whether density variation feeds back into momentum.
+     * @param dynamic_viscosity_override Optional effective dynamic-viscosity field.
+     * @param turbulent_kinetic_energy_gradient Optional isotropic Reynolds-stress gradient.
+     * @param boundary_dynamic_viscosity Optional boundary cache for dynamic viscosity.
      * @throws std::invalid_argument If supplied fields are incompatible.
      */
     system_type assemble(const boussinesq_momentum_equation_type& momentum_equation,
@@ -630,8 +659,10 @@ private:
 public:
     /**
      * @brief Solve a coupled system and update velocity and physical pressure.
+     * @param system Assembled coupled linear system.
      * @param velocity Velocity field updated on convergence or termination.
      * @param pressure Physical pressure field updated in Pa.
+     * @param options Linear solver controls.
      * @return Convergence status and Krylov statistics.
      * @throws std::invalid_argument If the pressure normalization is invalid.
      * @throws std::runtime_error If the Belos problem cannot be initialized.

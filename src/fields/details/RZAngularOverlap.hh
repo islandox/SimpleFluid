@@ -1,3 +1,6 @@
+/** @file RZAngularOverlap.hh
+ * @brief Computes angular overlap measures for swept RZ mesh cells.
+ */
 #pragma once
 
 #include "fields/details/MeshTransferPolygon.hh"

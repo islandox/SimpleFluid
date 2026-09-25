@@ -1,3 +1,6 @@
+/** @file testRegionMaterialization.cc
+ * @brief Verifies lazy region geometry materialization and storage behavior.
+ */
 #include <gtest/gtest.h>
 #include "geometry/MeshHandle.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"

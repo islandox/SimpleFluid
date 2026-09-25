@@ -1,3 +1,6 @@
+/** @file StoredMeshIdentity.hh
+ * @brief Records stable mesh identity for reusable stored operators.
+ */
 #pragma once
 
 #include <stdexcept>

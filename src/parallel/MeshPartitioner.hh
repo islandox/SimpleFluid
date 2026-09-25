@@ -878,6 +878,8 @@ private:
 
     /**
      * @brief Collectively partition a distributed adjacency graph with Zoltan2.
+     * @param graph Global-cell adjacency graph distributed across the communicator.
+     * @param comm Communicator containing all graph participants.
      * @param gather_root Rank that receives the complete result, or -1 to
      *        replicate it on all ranks.
      * @return Destination rank indexed by global cell identifier on the

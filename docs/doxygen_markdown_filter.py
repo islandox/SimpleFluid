@@ -12,6 +12,12 @@ FENCE = re.compile(
     r"(?P<info>[^\r\n]*)(?P<eol>\r?\n)?$"
 )
 DISPLAY_MATH_DELIMITER = re.compile(r"^ {0,3}\$\$[ \t]*(?:\r?\n)?$")
+DISPLAY_MATH_OPEN = re.compile(r"^ {0,3}\\\[[ \t]*(?:\r?\n)?$")
+DISPLAY_MATH_CLOSE = re.compile(r"^ {0,3}\\\][ \t]*(?:\r?\n)?$")
+DOXYGEN_HEADER_PAGES = {
+    "../src/materials/MaterialCAPI.h": "MaterialCAPI_8h.html",
+    "../src/materials/MaterialProvider.hh": "MaterialProvider_8hh.html",
+}
 
 
 def fence(line: str) -> Optional[Tuple[str, int, str]]:
@@ -91,6 +97,64 @@ def translate_inline_math(line: str) -> str:
             index = end
             continue
 
+        if (line[index] == "[" and not escaped(line, index)
+                and (index == 0 or line[index - 1] != "!")):
+            label_end = line.find("]", index + 1)
+            if label_end > index + 1 and label_end + 1 < len(line) and line[label_end + 1] == "(":
+                target_end = line.find(")", label_end + 2)
+                if target_end > label_end + 2:
+                    target = line[label_end + 2:target_end]
+                    target_path = target.split(maxsplit=1)[0]
+                    path_without_fragment = target_path.split("#", 1)[0].split("?", 1)[0]
+                    suffix = Path(path_without_fragment).suffix.lower()
+                    artifact_marker = "build/verification/"
+                    artifact_offset = path_without_fragment.find(artifact_marker)
+                    is_local = (
+                        not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target_path)
+                        and not target_path.startswith(("/", "//"))
+                        and "://" not in target_path
+                    )
+                    is_data_asset = suffix in {".csv", ".json", ".jsonl", ".txt", ".log"}
+                    if is_local and path_without_fragment in DOXYGEN_HEADER_PAGES:
+                        label = line[index + 1:label_end]
+                        generated_page = DOXYGEN_HEADER_PAGES[path_without_fragment]
+                        output.extend(("[", label, "](", generated_page, ")"))
+                        index = target_end + 1
+                        continue
+
+                    if is_local and (artifact_offset >= 0 or is_data_asset
+                                     or path_without_fragment.endswith("/")):
+                        label = line[index + 1:label_end]
+                        artifact = (path_without_fragment[artifact_offset:]
+                                    if artifact_offset >= 0 else path_without_fragment)
+                        output.append(label)
+                        output.append(" (`")
+                        output.append(artifact)
+                        output.append("`)")
+                        index = target_end + 1
+                        continue
+
+        # Doxygen does not resolve Markdown file links with an anchor to its
+        # generated page. Strip only the fragment in the filtered Doxygen copy;
+        # the checked-in Markdown keeps the anchor for GitHub navigation.
+        if line.startswith("](", index) and not escaped(line, index):
+            end = line.find(")", index + 2)
+            if end > index + 2:
+                destination = line[index + 2:end]
+                path, marker, _ = destination.partition("#")
+                if (marker and path.endswith(".md") and "://" not in path
+                        and not path.startswith(("/", "//"))):
+                    output.extend(("](", path, ")"))
+                    index = end + 1
+                    continue
+
+        if line.startswith(r"\(", index) and not escaped(line, index):
+            end = line.find(r"\)", index + 2)
+            if end > index + 2:
+                output.extend((r"\f$", line[index + 2:end], r"\f$"))
+                index = end + 2
+                continue
+
         if line.startswith("$`", index) and not escaped(line, index):
             end = line.find("`$", index + 2)
             if end > index + 2:
@@ -121,6 +185,7 @@ def transform(text: str) -> str:
     output: List[str] = []
     pending_math: Optional[List[str]] = None
     math_fence: Optional[Tuple[str, int]] = None
+    math_delimiter: Optional[str] = None
     ordinary_fence: Optional[Tuple[str, int]] = None
 
     for line in text.splitlines(keepends=True):
@@ -132,9 +197,11 @@ def transform(text: str) -> str:
 
         if pending_math is not None:
             closes_math = (
-                DISPLAY_MATH_DELIMITER.fullmatch(line) is not None
-                if math_fence is None
-                else closes_fence(line, *math_fence)
+                closes_fence(line, *math_fence)
+                if math_fence is not None
+                else (DISPLAY_MATH_DELIMITER.fullmatch(line) is not None
+                      if math_delimiter == "$$"
+                      else DISPLAY_MATH_CLOSE.fullmatch(line) is not None)
             )
             if not closes_math:
                 pending_math.append(line)
@@ -148,11 +215,14 @@ def transform(text: str) -> str:
             output.append("\\f]\n" if line.endswith(("\n", "\r")) else "\\f]")
             pending_math = None
             math_fence = None
+            math_delimiter = None
             continue
 
-        if DISPLAY_MATH_DELIMITER.fullmatch(line):
+        if (DISPLAY_MATH_DELIMITER.fullmatch(line) is not None
+                or DISPLAY_MATH_OPEN.fullmatch(line) is not None):
             pending_math = [line]
             math_fence = None
+            math_delimiter = "$$" if DISPLAY_MATH_DELIMITER.fullmatch(line) else r"\["
             continue
 
         parsed = fence(line)
@@ -164,6 +234,7 @@ def transform(text: str) -> str:
         if marker == "`" and info == "math":
             pending_math = [line]
             math_fence = (marker, length)
+            math_delimiter = None
         else:
             output.append(line)
             ordinary_fence = (marker, length)

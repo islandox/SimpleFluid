@@ -35,6 +35,13 @@ private:
     std::unique_ptr<Impl> d_impl;
 };
 
+/** @brief Cumulative work counters for a coupled nonlinear problem instance.
+ *
+ * Counts accumulate over callbacks and solves using that instance; they do
+ * not describe only the most recent solve. Workspace, geometry, operator,
+ * graph, Schur, and preconditioner fields distinguish construction from reuse
+ * or refresh as named. These are local counters, not MPI-reduced totals.
+ */
 struct CoupledNonlinearProblemStatistics
 {
     size_t residual_evaluations = 0;

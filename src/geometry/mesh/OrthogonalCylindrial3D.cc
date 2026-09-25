@@ -73,7 +73,6 @@ void validate_edges(
 
 /**
  * @brief Construct and precompute cylindrical geometry and topology.
- * @param cell_edges Strictly increasing radial, angular, and axial edges.
  * @throws std::invalid_argument If coordinates or the angular domain are invalid.
  * @throws std::overflow_error If entity counts exceed supported ID ranges.
  */

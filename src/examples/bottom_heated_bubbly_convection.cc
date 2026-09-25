@@ -1,4 +1,6 @@
-/** Bottom-localized heat and H2 production with solved buoyant circulation. */
+/** @file bottom_heated_bubbly_convection.cc
+ * @brief Demonstrates buoyant circulation with localized heat and hydrogen sources.
+ */
 #include "IF97ReferenceWater.hh"
 #include "VerificationBackends.hh"
 #include "VerificationLinearSolvers.hh"

@@ -22,6 +22,7 @@ public:
     using index_type_pack = UnstructuredMeshIndexTypes;
     using ID = uint64_t;
     using Vec3 = MeshUtils::Vec3;
+    /** @brief Resident cell topology and metrics keyed by native global cell ordinal within the region. */
     struct Cell
     {
         ID id{};
@@ -30,6 +31,7 @@ public:
         Vec3 centroid{};
         real_t volume{};
     };
+    /** @brief Resident face geometry with native global owner and optional neighbor IDs. */
     struct Face
     {
         ID id{}, owner{}, neighbor = UnstructuredMesh::invalid_ordinal;
@@ -37,6 +39,7 @@ public:
         Vec3 centroid{}, area_vector{};
         int boundary = -1;
     };
+    /** @brief Resident node coordinate keyed by its native global ordinal. */
     struct Node { ID id{}; Vec3 point{}; };
 
     ExplicitRegionProvider(RegionLayout layout, std::vector<Cell> cells,
