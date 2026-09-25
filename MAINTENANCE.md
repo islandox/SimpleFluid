@@ -589,11 +589,14 @@ Public interfaces should be understandable without opening their
 implementation. C++ files use Doxygen comments:
 
 - each non-empty `.cc`, `.hh`, `.hpp`, `.ipp`, and `.tcc` file has a top-level
-  `@file`, `@author`, `@brief`, `@version`, `@date`, and `@copyright` block;
+  `@file` and a `@brief` that describes the file's role; use Git history for
+  authorship and revision dates and `LICENSE` for copyright rather than
+  duplicating that metadata in file headers;
 - classes, structs, concepts, and enums explain their role and template
   parameters;
 - non-inline out-of-class functions document parameters, return values, and
-  only exceptions that can actually be thrown;
+  only exceptions that can actually be thrown; put each contract on the
+  declaration or definition once so Doxygen does not merge duplicate tags;
 - units, ownership, collective behavior, and valid ranges are stated when they
   affect correct use;
 - test comments explain behavior and regression intent, not line-by-line setup.

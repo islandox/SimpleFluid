@@ -283,7 +283,32 @@ public:
     const Teuchos::RCP<const Teuchos::Comm<int>>& communicator() const noexcept { return d_comm; }
     /** Global catalog counts are retained; explicit geometry queries require local residency. */
     bool partition_resident() const noexcept { return d_partition_resident; }
+    /**
+     * @brief Encode local geometry for selected visible composite cells.
+     *
+     * The packet retains the complete region/interface catalog and global
+     * counts. Structured and product regions encode their full native
+     * descriptors; explicit-region geometry is limited to selected cells and
+     * incident cells needed to describe their faces. This does not enlarge the
+     * caller's field halo. Cell IDs must be canonical IDs resident in this
+     * mesh. With an empty selection, descriptors remain complete while
+     * explicit-region geometry payloads are empty.
+     * @param visible_cells Canonical composite cell IDs whose local geometry is included.
+     * @return Versioned packet suitable for `deserialize_partition`.
+     */
     std::vector<char> serialize_partition(std::span<const ID> visible_cells) const;
+    /**
+     * @brief Reconstruct a sparse geometry shard from a serialized packet.
+     *
+     * The supplied communicator becomes the shard communicator. The packet's
+     * descriptors and trailing data are checked while reconstructing the mesh;
+     * malformed or unsupported input is rejected with a standard exception.
+     * The resulting mesh retains global catalog counts, while geometry queries
+     * are valid only for locally resident entities.
+     * @param packet Bytes produced by `serialize_partition`.
+     * @param comm Non-null communicator for the reconstructed shard.
+     * @return Sparse partition-resident mesh.
+     */
     static std::shared_ptr<MultiRegionMesh> deserialize_partition(
         std::span<const char> packet, Teuchos::RCP<const Teuchos::Comm<int>> comm);
     /** @brief Assemble consistent sparse shards into an independent full serial source. */

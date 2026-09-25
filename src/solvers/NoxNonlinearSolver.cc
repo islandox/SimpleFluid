@@ -1,3 +1,6 @@
+/** @file NoxNonlinearSolver.cc
+ * @brief Implements the NOX and Belos nonlinear solver adapter.
+ */
 #include "solvers/NoxNonlinearSolver.hh"
 #include "solvers/BelosLinearSolver.hh"
 

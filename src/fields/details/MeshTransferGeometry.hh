@@ -1,3 +1,6 @@
+/** @file MeshTransferGeometry.hh
+ * @brief Computes geometric overlap measures for conservative mesh transfer.
+ */
 #pragma once
 
 #include "fields/details/MeshTransferPolygon.hh"

@@ -1,3 +1,6 @@
+/** @file testResolvedRegionGeometry.cc
+ * @brief Checks resolved region geometry across handles and mesh motion.
+ */
 #include <gtest/gtest.h>
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"

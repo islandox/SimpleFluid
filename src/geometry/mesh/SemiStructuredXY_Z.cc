@@ -74,10 +74,6 @@ void validate_z_edges(const Arr<real_t>& edges)
 
 /**
  * @brief Construct an extruded polygonal finite-volume mesh.
- * @param xy_nodes Base-topology XY node coordinates.
- * @param xy_cell_nodes Counter-clockwise node loops for base cells.
- * @param z_edges Strictly increasing axial edge coordinates.
- * @param boundary_edges Named exterior edges in the base topology.
  * @throws std::invalid_argument If geometry or topology is invalid.
  * @throws std::overflow_error If entity counts exceed supported ID ranges.
  */
@@ -162,10 +158,6 @@ void SemiStructuredXY_Z::replace_axial_edges_fixed_topology(Arr<real_t> edges)
 
 /**
  * @brief Triangulate a convex XY polygon and extrude it through Z.
- * @param xy_boundary Convex counter-clockwise polygon vertices.
- * @param z_edges Strictly increasing axial edge coordinates.
- * @param target_edge_length Requested XY mesh spacing.
- * @param side_batch_name Boundary name assigned to polygon sides.
  * @return Constructed triangular-prism mesh.
  * @throws std::invalid_argument If source geometry or spacing is invalid.
  * @throws std::overflow_error If generated connectivity exceeds its ID type.

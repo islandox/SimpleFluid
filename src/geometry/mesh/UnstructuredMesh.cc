@@ -620,6 +620,7 @@ void UnstructuredMesh::initialize_cells(
  * the per-face owner/neighbor adjacency and boundary batch maps.
  *
  * @param boundary_faces Boundary face definitions.
+ * @param cells Cell connectivity from which interior faces are derived.
  */
 void UnstructuredMesh::build_faces(
     const Arr<BoundaryFaceDefinition>& boundary_faces,

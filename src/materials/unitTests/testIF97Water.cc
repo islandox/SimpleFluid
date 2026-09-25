@@ -1,3 +1,6 @@
+/** @file testIF97Water.cc
+ * @brief Verifies IF97 water properties, units, and supported input ranges.
+ */
 #include "materials/IF97Water.hh"
 
 #include <gtest/gtest.h>

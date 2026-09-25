@@ -1,4 +1,6 @@
-/** Solver-integrated uniform thermal expansion, compared with OpenFOAM FV. */
+/** @file planar_ale_comparison.cc
+ * @brief Compares solver-integrated uniform thermal expansion with OpenFOAM.
+ */
 #include "IF97ReferenceWater.hh"
 #include "VerificationLinearSolvers.hh"
 #include "VerificationMesh.hh"

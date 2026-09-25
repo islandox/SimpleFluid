@@ -82,7 +82,6 @@ int checked_index(size_t index)
 
 /**
  * @brief Construct and precompute Cartesian geometry and topology.
- * @param cell_edges Strictly increasing X, Y, and Z edge coordinates.
  * @throws std::invalid_argument If any coordinate array is invalid.
  * @throws std::overflow_error If entity counts exceed supported ID ranges.
  */

@@ -1,4 +1,6 @@
-/** Export native BoundaryLayerMeshFactory coordinates for both CFD solvers. */
+/** @file verification_boundary_layer_mesh.cc
+ * @brief Exports shared boundary-layer mesh coordinates for CFD comparisons.
+ */
 #include "geometry/BoundaryLayerMeshFactory.hh"
 #include <cmath>
 #include <filesystem>

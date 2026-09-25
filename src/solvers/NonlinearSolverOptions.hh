@@ -1,3 +1,6 @@
+/** @file NonlinearSolverOptions.hh
+ * @brief Defines convergence and globalization controls for nonlinear solves.
+ */
 #pragma once
 
 #include <optional>

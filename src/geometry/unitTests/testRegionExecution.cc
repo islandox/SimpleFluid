@@ -1,3 +1,6 @@
+/** @file testRegionExecution.cc
+ * @brief Checks region execution views, geometry access, and motion guards.
+ */
 #include <gtest/gtest.h>
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"

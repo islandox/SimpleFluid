@@ -75,7 +75,11 @@ SIMPLEFLUID_FVM_EXPORT void add_explicit_non_orthogonal_correction(const CellFie
  * gradient reconstruction. Boundary faces are treated as prescribed-value
  * diffusion faces, matching vector transport-system assembly.
  *
+ * @param correction_field Lagged vector field used for gradient reconstruction.
+ * @param diffusivity Non-negative constant diffusivity.
+ * @param rhs Owned three-component cell RHS receiving the correction.
  * @param correction_weight Fraction of the correction added to @p rhs.
+ * @param boundary_diffusion Selects boundary faces that receive diffusion.
  * @param gradient_stencils Optional cached interior reconstruction stencil.
  * @throws std::invalid_argument if @p rhs is incompatible with the mesh or
  *         does not contain three component vectors.
@@ -91,11 +95,16 @@ SIMPLEFLUID_FVM_EXPORT void add_explicit_non_orthogonal_correction(const VectorC
  * @brief Add a scalar explicit non-orthogonal correction using a
  *        cell-centered variable diffusion coefficient and boundary samples.
  *
+ * @param correction_field Lagged scalar field used for gradient reconstruction.
+ * @param coefficient_field Cell-centered diffusion coefficient.
+ * @param boundary_condition Boundary condition for scalar diffusion.
  * @param boundary_value Boundary-value provider used by gradient reconstruction.
+ * @param rhs Owned-cell RHS receiving the correction.
  * @param correction_weight Fraction of the correction added to @p rhs.
  * @param boundary_coefficient Boundary-face coefficient provider receiving
  *        the owner-cell value as its fallback.
  * @param gradient_stencils Optional materialized affine reconstruction.
+ * @param coefficient_interpolation Rule for interpolating cell coefficients to faces.
  * @throws std::invalid_argument if fields use different meshes, @p rhs uses
  *         an incompatible map, or a cell coefficient is negative.
  */
@@ -118,12 +127,17 @@ SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(cons
  * @brief Add a vector explicit non-orthogonal correction using a
  *        cell-centered variable diffusion coefficient and boundary samples.
  *
+ * @param correction_field Lagged vector field used for gradient reconstruction.
+ * @param coefficient_field Cell-centered diffusion coefficient.
  * @param boundary_value Boundary-value provider used by gradient reconstruction.
+ * @param rhs Owned three-component cell RHS receiving the correction.
  * @param correction_weight Fraction of the correction added to @p rhs.
+ * @param boundary_diffusion Selects boundary faces that receive diffusion.
  * @param boundary_coefficient Boundary-face coefficient provider receiving
  *        the owner-cell value as its fallback.
  * @param gradient_stencils Optional materialized affine reconstruction.
  * @param cached_boundary_locations Optional mesh-bound boundary lookup.
+ * @param coefficient_interpolation Rule for interpolating cell coefficients to faces.
  * @throws std::invalid_argument if fields use different meshes, @p rhs is
  *         incompatible, or a cell coefficient is negative.
  */
@@ -167,8 +181,10 @@ SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(
  * @param boundary_value Boundary-face velocity provider.
  * @param[in,out] rhs Three-component owned-cell momentum RHS.
  * @param boundary_stress Boundary-face stress selector.
+ * @param boundary_coefficient Face coefficient provider for viscous stress.
  * @param gradient_stencils Optional materialized affine reconstruction.
  * @param cached_boundary_locations Optional mesh-bound boundary lookup.
+ * @param coefficient_interpolation Rule for interpolating viscosity to faces.
  */
 template<TpetraTypePack Pack>
 SIMPLEFLUID_FVM_EXPORT void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pack>& old_velocity,
@@ -208,6 +224,10 @@ SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_s
  * diffusion_system(). The non-orthogonal part linearizes the same
  * least-squares gradient reconstruction used by cell_gradient().
  *
+ * @param mesh Computational mesh.
+ * @param diffusivity Non-negative constant scalar diffusivity.
+ * @param boundary_condition Boundary condition for scalar diffusion.
+ * @param right_hand_source Cell-centered source provider.
  * @param non_orthogonal_implicit_weight Fraction of the tangential term to
  *        place in the matrix. Use 1.0 for a fully implicit operator and
  *        0.5 for the built-in hybrid treatment.

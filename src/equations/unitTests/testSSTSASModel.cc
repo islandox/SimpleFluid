@@ -1,3 +1,6 @@
+/** @file testSSTSASModel.cc
+ * @brief Checks SAS model integration, source diagnostics, and accepted-step behavior.
+ */
 #include <gtest/gtest.h>
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "equations/CollectiveValidation.hh"

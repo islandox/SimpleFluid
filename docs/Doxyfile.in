@@ -7,7 +7,9 @@ OUTPUT_DIRECTORY       = "@CMAKE_BINARY_DIR@/docs/doxygen"
 
 INPUT                  = "@PROJECT_SOURCE_DIR@/README.md" \
                          "@PROJECT_SOURCE_DIR@/MAINTENANCE.md" \
+                         "@PROJECT_SOURCE_DIR@/TODO.md" \
                          "@PROJECT_SOURCE_DIR@/docs" \
+                         "@PROJECT_SOURCE_DIR@/verification/openfoam" \
                          "@PROJECT_SOURCE_DIR@/src" \
                          "@PROJECT_SOURCE_DIR@/cmake"
 RECURSIVE              = YES

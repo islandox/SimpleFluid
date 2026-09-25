@@ -1,4 +1,6 @@
-/** Clear diagnostic for optional water verification in default-OFF builds. */
+/** @file if97_verification_unavailable.cc
+ * @brief Reports that water verification requires the optional IF97 dependency.
+ */
 #include <iostream>
 
 int main()

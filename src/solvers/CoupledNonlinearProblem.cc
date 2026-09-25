@@ -1,3 +1,6 @@
+/** @file CoupledNonlinearProblem.cc
+ * @brief Implements the coupled nonlinear problem and reusable workspace.
+ */
 #include "solvers/CoupledNonlinearProblem.hh"
 
 #include "FVM/CellOperators.hh"

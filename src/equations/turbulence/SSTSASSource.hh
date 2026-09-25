@@ -38,6 +38,14 @@ struct SSTSASInputs
     real_t kappa = 0.41; ///< The active parent coefficient, also coordinated with walls.
 };
 
+/** @brief Evaluated local SAS length scales, source terms, and limiter flags.
+ *
+ * Lengths are in metres and `production`, `damping`, `Q_raw`, and
+ * `Q_applied` are in 1/s2. `Q_raw` already uses the grid-limited length scale
+ * `Lvk`; `Q_applied` adds the optional timestep cap to that source.
+ * `values()` returns the eleven values in declaration order, with limiter
+ * booleans converted to 0/1.
+ */
 struct SSTSASResult
 {
     real_t L{}, Lvk_flow{}, Lvk_grid{}, Lvk{}, delta{};

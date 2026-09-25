@@ -47,6 +47,11 @@ namespace SimpleFluid
 class AnnularSemiStructuredMeshFactory
 {
 public:
+    /** @brief Geometry bounds, spacing, wall-layer, and refinement controls for annular construction.
+     *
+     * Lengths use the mesh coordinate units. Zero angular counts request
+     * automatic sizing; zero wall layers disables boundary-layer stacks.
+     */
     struct Options
     {
         real_t inner_radius = 0.0;
@@ -67,6 +72,12 @@ public:
         bool coarsen_bottom_corners = true;
     };
 
+    /** @brief Planned topology sizes, including both reference guides and actual cell totals.
+     *
+     * `cells`, `faces`, `nodes`, `hex_cells`, and `prism_cells` describe the
+     * constructed regions; guide counts describe construction subdivisions
+     * and should not be summed as regional cells.
+     */
     struct Counts
     {
         size_t angular_cells = 0; ///< Outer count, retained for compatibility.
@@ -95,6 +106,12 @@ public:
         bool operator==(const Counts&) const = default;
     };
 
+    /** @brief Constructed mesh with its geometric comparison and planning data.
+     *
+     * The polygonal mesh area is reported separately from the analytic annulus
+     * area; their relative deficit records polygon approximation without
+     * rescaling native cell volumes.
+     */
     struct Result
     {
         SP<Meshes::MultiRegionMesh> mesh;

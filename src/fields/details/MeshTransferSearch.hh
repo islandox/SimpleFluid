@@ -1,3 +1,6 @@
+/** @file MeshTransferSearch.hh
+ * @brief Searches candidate source cells for conservative mesh transfer.
+ */
 #pragma once
 
 #include "fields/details/MeshTransferGeometry.hh"

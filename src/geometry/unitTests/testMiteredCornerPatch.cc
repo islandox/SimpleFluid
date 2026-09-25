@@ -1,3 +1,6 @@
+/** @file testMiteredCornerPatch.cc
+ * @brief Tests mitered-corner patch construction and geometric bounds.
+ */
 #include <gtest/gtest.h>
 
 #include "geometry/mesh/MiteredCornerPatch.hh"

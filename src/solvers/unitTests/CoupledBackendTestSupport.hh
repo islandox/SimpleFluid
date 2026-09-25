@@ -1,3 +1,6 @@
+/** @file CoupledBackendTestSupport.hh
+ * @brief Shared fixtures for coupled linear and nonlinear backend tests.
+ */
 #pragma once
 
 #include "equations/TimeStepperOptions.hh"

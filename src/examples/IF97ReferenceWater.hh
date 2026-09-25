@@ -1,4 +1,6 @@
-/** Shared, verified material inputs for the OpenFOAM comparison examples. */
+/** @file IF97ReferenceWater.hh
+ * @brief Shares verified water-property inputs across OpenFOAM comparisons.
+ */
 #pragma once
 
 #include "materials/IF97Water.hh"

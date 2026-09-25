@@ -1,4 +1,6 @@
-/** Explicit mesh and coupled-operator choices for matched verification runs. */
+/** @file VerificationBackends.hh
+ * @brief Selects explicit mesh and coupled-operator backends for verification runs.
+ */
 #pragma once
 
 #include "VerificationMesh.hh"

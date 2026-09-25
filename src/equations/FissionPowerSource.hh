@@ -105,7 +105,7 @@ inline void validate_non_negative_fission_value(
 
 /**
  * @brief Read a finite three-component fission-source option.
- * @param database Source database.
+ * @param reader Database-backed source-option reader.
  * @param key Required array option name.
  * @return The option converted to a three-component vector.
  * @throws std::invalid_argument If the option is absent, malformed, or non-finite.

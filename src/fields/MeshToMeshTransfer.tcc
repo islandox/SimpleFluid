@@ -1,3 +1,6 @@
+/** @file MeshToMeshTransfer.tcc
+ * @brief Implements conservative cell-field mapping between supported meshes.
+ */
 #pragma once
 
 #include "fields/MeshToMeshTransfer.hh"

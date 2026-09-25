@@ -970,8 +970,11 @@ namespace detail
  *        stored in Pa, this is normally the time step divided by the
  *        reference density.
  * @param boundary_cache Pre-computed velocity-boundary cache.
+ * @param pressure_boundary_conditions Optional pressure boundary map; null uses no pressure-boundary reconstruction.
  * @param[in,out] workspace Scratch storage tied to the field mesh.
+ * @param precomputed_pressure_gradient Optional supplied cell pressure gradient.
  * @param[out] fluxes Pre-allocated FaceField to receive stabilized fluxes.
+ * @param gradient_scheme Cell-gradient reconstruction used for pressure correction.
  */
 template<TpetraTypePack Pack>
 void pressure_weighted_face_fluxes_impl(
@@ -1190,6 +1193,7 @@ void pressure_weighted_face_fluxes_impl(
  * @param boundary_cache Pre-computed velocity-boundary cache.
  * @param[in,out] workspace Scratch storage tied to the field mesh.
  * @param[out] fluxes Pre-allocated face-flux output.
+ * @param gradient_scheme Cell-gradient reconstruction used for pressure correction.
  */
 template<TpetraTypePack Pack>
 void pressure_weighted_face_fluxes(
@@ -1246,6 +1250,7 @@ void pressure_weighted_face_fluxes(
  * @param pressure_boundary_conditions Pressure boundary-condition map.
  * @param[in,out] workspace Scratch storage tied to the field mesh.
  * @param[out] fluxes Pre-allocated face-flux output.
+ * @param gradient_scheme Cell-gradient reconstruction used for pressure correction.
  */
 template<TpetraTypePack Pack>
 void pressure_weighted_face_fluxes(

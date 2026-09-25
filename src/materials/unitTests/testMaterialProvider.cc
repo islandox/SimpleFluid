@@ -1,3 +1,6 @@
+/** @file testMaterialProvider.cc
+ * @brief Tests material-provider callbacks, validation, and concurrent access.
+ */
 #include <gtest/gtest.h>
 #include "materials/MaterialProvider.hh"
 

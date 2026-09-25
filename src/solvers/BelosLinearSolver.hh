@@ -330,7 +330,11 @@ public:
     }
 
     /**
+     * @param matrix Linear operator to solve with.
+     * @param rhs Right-hand-side multivector.
      * @param solution Initial guesses replaced by computed solutions.
+     * @param options Linear solver and preconditioner controls.
+     * @param residual_scaling Optional component scaling for residual checks.
      * @return Convergence flag, iteration count, and achieved tolerance.
      */
     LinearSolveStatistics solve_with_statistics(
@@ -371,7 +375,11 @@ public:
     }
 
     /**
+     * @param matrix Linear operator to solve with.
+     * @param rhs Right-hand-side vector.
      * @param solution Initial guess replaced by the computed solution.
+     * @param options Linear solver and preconditioner controls.
+     * @param residual_scaling Optional component scaling for residual checks.
      * @return Convergence flag, iteration count, and achieved tolerance.
      */
     LinearSolveStatistics solve_with_statistics(

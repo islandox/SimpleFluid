@@ -1,4 +1,6 @@
-/** @file AnnularSemiStructuredMeshFactory.cc */
+/** @file AnnularSemiStructuredMeshFactory.cc
+ * @brief Builds annular semi-structured meshes with configured wall layers.
+ */
 #include "geometry/AnnularSemiStructuredMeshFactory.hh"
 #include "geometry/BoundaryLayerMeshFactory.hh"
 #include "geometry/mesh/FrontalDelaunay2D.hh"

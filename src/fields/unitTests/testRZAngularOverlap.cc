@@ -1,3 +1,6 @@
+/** @file testRZAngularOverlap.cc
+ * @brief Verifies circular-sector overlap across angular wrap and orientation.
+ */
 #include <gtest/gtest.h>
 
 #include "fields/details/RZAngularOverlap.hh"

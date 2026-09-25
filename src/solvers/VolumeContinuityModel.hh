@@ -29,6 +29,12 @@
 namespace SimpleFluid
 {
 
+/** @brief Global balance diagnostics for one previewed material-volume ledger step.
+ *
+ * Volume entries are in m^3 and rates/residuals are in m^3/s. These values
+ * report the source, carrier transport, bubble slip, and pool closure used to
+ * build a candidate continuity target.
+ */
 template<class Scalar> struct VolumeSourceDiagnostics
 {
     Scalar old_material_volume = {};           ///< [m^3]
@@ -69,6 +75,13 @@ public:
     using target_type = VolumeContinuityTarget<Pack, mesh_type>;
     using diagnostics_type = VolumeSourceDiagnostics<scalar_type>;
 
+    /** @brief Borrowed step data consumed collectively by a non-mutating preview.
+     *
+     * Material-volume and carrier-fraction spans follow local cell order,
+     * including ghost cells; `previous_target` alone follows owned-cell order.
+     * Optional exact carrier and bubble-slip fluxes override their documented
+     * fallbacks, and the ALE state supplies current and trial geometry.
+     */
     struct Inputs
     {
         const FVM::ALEControlVolumeState& ale;
@@ -94,6 +107,12 @@ public:
         std::span<const scalar_type> previous_target; ///< Optional owned order [m^3/s]
     };
 
+    /** @brief Candidate target and diagnostics that can be committed once by this model.
+     *
+     * A later preview or snapshot restore invalidates this trial. Its exposed
+     * fields are read-only views of the candidate and do not mutate accepted
+     * ledger state.
+     */
     class Trial
     {
     public:

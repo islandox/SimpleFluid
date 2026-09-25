@@ -112,7 +112,6 @@ BoundaryLayerMeshFactory::BoundaryLayerMeshFactory(
 
 /**
  * @brief Read parallel boundary-layer configuration arrays from a database.
- * @param database Configuration database.
  * @return Parsed boundary-layer specifications, or an empty array when none
  *         of the boundary-layer keys is present.
  * @throws std::invalid_argument If the database is null, configuration keys

@@ -1,3 +1,6 @@
+/** @file StoredScalarGradientKernel.hh
+ * @brief Applies cached scalar-gradient stencils to field values.
+ */
 #pragma once
 
 namespace SimpleFluid::FVM::detail

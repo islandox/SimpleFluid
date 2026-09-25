@@ -1,3 +1,6 @@
+/** @file testNoxLinearizationRetirement.cc
+ * @brief Verifies retained NOX linearizations are retired safely between solves.
+ */
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/NoxNonlinearSolver.hh"
 #include "utils/testing_environment.hh"
