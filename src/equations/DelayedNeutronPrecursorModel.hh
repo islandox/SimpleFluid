@@ -353,6 +353,9 @@ public:
     /**
      * @brief Advance conserved precursor inventories by one reaction/transport step.
      *
+     * @param time_step Positive physical timestep in seconds.
+     * @param alpha_l Current liquid volume fraction.
+     * @param fission_power_density Optional fission power-density source field.
      * @param liquid_face_flux Optional owner-oriented volumetric liquid flux.
      *        When absent, the transport solve contains diffusion only.
      */
@@ -403,6 +406,9 @@ private:
 
     /**
      * @brief Finish the replicated step balance after transport.
+     * @param time_step Physical timestep in seconds.
+     * @param alpha_l Liquid volume fraction used for inventory conversion.
+     * @param liquid_face_flux Optional owner-oriented liquid flux used by transport.
      * @param reaction_inventory_reference Direct post-reaction inventories
      *        before positivity clipping.
      */

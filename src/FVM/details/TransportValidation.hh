@@ -1,3 +1,6 @@
+/** @file TransportValidation.hh
+ * @brief Shared validation for transport operators and cached inputs.
+ */
 #pragma once
 
 #include "FVM/details/OperatorDetails.hh"

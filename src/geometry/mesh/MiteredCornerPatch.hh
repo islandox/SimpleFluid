@@ -1,3 +1,6 @@
+/** @file MiteredCornerPatch.hh
+ * @brief Defines clipped patch geometry for mitered annular corners.
+ */
 #pragma once
 
 #include "geometry/MeshUtils.hh"

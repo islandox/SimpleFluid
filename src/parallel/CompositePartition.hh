@@ -26,10 +26,22 @@ struct CompositePartitionOptions
     bool require_balance = false;
 };
 
+/** @brief Cell ownership balance and its indivisible-unit lower bound.
+ *
+ * `measured_imbalance` is maximum owned cells divided by the mean owned cells
+ * per rank. `minimum_imbalance_bound` is a lower bound formed from the larger
+ * of the ideal ceiling load and largest indivisible partition unit, divided
+ * by that same mean; it is not necessarily attainable. The tolerance flag
+ * compares the measured value with the requested tolerance.
+ */
 struct CompositeBalanceReport
 {
-    uint64_t total_cells = 0, max_owned_cells = 0, largest_unit = 0;
-    double measured_imbalance = 1, minimum_imbalance_bound = 1;
+    uint64_t total_cells = 0; ///< Number of globally partitioned cells.
+    uint64_t max_owned_cells = 0; ///< Largest owned-cell count on any rank.
+    uint64_t largest_unit = 0; ///< Largest indivisible graph unit in the partition.
+    double measured_imbalance = 1; ///< Maximum load divided by average rank load.
+    double minimum_imbalance_bound = 1; ///< Lower bound on the ratio given indivisible units.
+    /** Whether measured_imbalance is at most the requested policy tolerance. */
     bool tolerance_satisfied = true;
 };
 
@@ -69,10 +81,12 @@ using CompositeSource = CompositeMeshSource;
 /** @brief An owned native region selection. IDs are independent of rank and field order. */
 struct CompositeRegionFragment
 {
+    /** @brief Half-open axis-aligned cell box in a structured region. */
     struct OrthogonalBox
     {
         std::array<size_t, 3> begin{}, extent{};
     };
+    /** @brief Selected base cells extruded through a contiguous layer interval. */
     struct ExtrudedProduct
     {
         std::vector<uint64_t> base_cells;

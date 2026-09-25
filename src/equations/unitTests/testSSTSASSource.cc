@@ -1,3 +1,6 @@
+/** @file testSSTSASSource.cc
+ * @brief Verifies SAS source equations, length scales, and limiter behavior.
+ */
 #include <gtest/gtest.h>
 #include "equations/turbulence/SSTSASSource.hh"
 #include <fstream>

@@ -186,6 +186,8 @@ public:
 
     /**
      * @param initial_pressure Physical gauge pressure in Pa.
+     * @param hot_temperature Hot-side temperature in kelvin.
+     * @param cold_temperature Cold-side temperature in kelvin.
      */
     void initialize_bottom_hot_top_cold(
         scalar_type hot_temperature, scalar_type cold_temperature, scalar_type initial_pressure = 0.0);

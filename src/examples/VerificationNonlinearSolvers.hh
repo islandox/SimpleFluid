@@ -1,4 +1,6 @@
-/** Per-step nonlinear work and physical acceptance diagnostics. */
+/** @file VerificationNonlinearSolvers.hh
+ * @brief Records per-step nonlinear work and physical acceptance diagnostics.
+ */
 #pragma once
 
 #include "solvers/NoxNonlinearSolver.hh"

@@ -1,3 +1,6 @@
+/** @file RadiolyticGasModel.cc
+ * @brief Instantiates radiolytic gas models for supported mesh types.
+ */
 #include "equations/RadiolyticGasModel.tcc"
 
 namespace SimpleFluid

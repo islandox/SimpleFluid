@@ -65,6 +65,13 @@ struct MeshToMeshConservationReport
     std::vector<double> conservation_error; ///< target + uncovered - source
 };
 
+/** @brief Method and coverage controls captured when a transfer is constructed.
+ *
+ * Inverse-distance interpolation uses `neighbors`; centroid interpolation
+ * checks `max_distance`. Conservative averaging uses `coverage_mode` and
+ * `coverage_tolerance`, relative to each checked source or target cell volume;
+ * partial overlaps are not renormalized.
+ */
 struct MeshToMeshTransferOptions
 {
     MeshToMeshTransferMethod method = MeshToMeshTransferMethod::InverseDistance;

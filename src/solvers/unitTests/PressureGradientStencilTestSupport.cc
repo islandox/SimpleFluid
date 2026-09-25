@@ -1,3 +1,6 @@
+/** @file PressureGradientStencilTestSupport.cc
+ * @brief Instantiates pressure-gradient stencil helpers for test coverage.
+ */
 #include "solvers/CoupledPressureVelocitySolver.tcc"
 
 namespace SimpleFluid
