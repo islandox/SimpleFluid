@@ -79,77 +79,35 @@ real_t henry_equilibrium_concentration(real_t henry_coefficient, real_t liquid_p
     return henry_coefficient * (liquid_pressure + 2.0 * surface_tension / bubble_radius);
 }
 
-real_t pressure_nucleation_correction(real_t liquid_pressure, real_t atmospheric_pressure)
+real_t surface_tension(const RadiolyticGasOptions& options, real_t temperature_kelvin)
 {
-    require_positive(liquid_pressure, "liquid pressure");
-    require_positive(atmospheric_pressure, "atmospheric pressure");
-    const auto ratio = liquid_pressure / atmospheric_pressure;
-    return 5.165e-5 * std::pow(ratio, 4) - 1.732e-3 * std::pow(ratio, 3) +
-           0.02245 * std::pow(ratio, 2) - 0.1554 * ratio + 1.134;
-}
-
-real_t mean_fission_fragment_let(real_t temperature_kelvin, real_t uranium_concentration_mol_per_m3)
-{
-    require_positive(temperature_kelvin, "temperature");
-    require_non_negative(uranium_concentration_mol_per_m3, "uranyl nitrate concentration");
-    return (-1.3387e-6 * temperature_kelvin - 3.4319e-5) * uranium_concentration_mol_per_m3 -
-           6.6431e-3 * temperature_kelvin + 8.8142;
-}
-
-real_t pure_water_nucleation_radius(real_t temperature_kelvin, real_t mean_let)
-{
-    require_positive(temperature_kelvin, "temperature");
-    require_positive(mean_let, "mean LET");
-    const auto t = temperature_kelvin;
-    return (-2.862e-15 * t * t + 7.3996e-13 * t - 9.9925e-11) * mean_let * mean_let +
-           (8.7909e-14 * t * t - 9.7928e-13 * t + 3.4558e-9) * mean_let + 9.7683e-14 * t * t -
-           4.0125e-11 * t + 4.9092e-9;
-}
-
-real_t atmospheric_nucleation_radius(real_t pure_water_radius,
-                                     real_t hydrogen_yield_molecules_per_100_ev)
-{
-    require_positive(pure_water_radius, "pure-water nucleation radius");
-    require_non_negative(hydrogen_yield_molecules_per_100_ev, "hydrogen yield");
-    if (hydrogen_yield_molecules_per_100_ev <= 0.5 || hydrogen_yield_molecules_per_100_ev >= 4.5)
+    switch (options.surface_tension_mode)
     {
-        throw std::invalid_argument("Winter's yield correction requires "
-                                    "0.5 < G_H2 < 4.5 molecules per 100 eV.");
+    case SurfaceTensionMode::Constant:
+        return require_positive(options.surface_tension, "surface tension");
+    case SurfaceTensionMode::External:
+        require_positive(temperature_kelvin, "temperature");
+        if (!options.surface_tension_correlation)
+            throw std::invalid_argument("External surface tension requires a correlation callback.");
+        return require_positive(options.surface_tension_correlation(temperature_kelvin), "surface tension");
     }
-    const auto yield = hydrogen_yield_molecules_per_100_ev;
-    return (0.3554 + 0.4264 * yield - 0.0400 * yield * yield) * pure_water_radius;
+    throw std::invalid_argument("Unknown surface tension mode.");
 }
 
-real_t sheng2024_nucleation_radius(real_t temperature_kelvin,
-                                   real_t uranium_concentration_mol_per_m3,
-                                   real_t hydrogen_yield_molecules_per_100_ev,
-                                   real_t liquid_pressure, real_t atmospheric_pressure)
+real_t nucleation_radius(const RadiolyticGasOptions& options, real_t temperature_kelvin, real_t absolute_pressure)
 {
-    const auto mean_let =
-        mean_fission_fragment_let(temperature_kelvin, uranium_concentration_mol_per_m3);
-    const auto water_radius = pure_water_nucleation_radius(temperature_kelvin, mean_let);
-    const auto atmospheric_radius =
-        atmospheric_nucleation_radius(water_radius, hydrogen_yield_molecules_per_100_ev);
-    return pressure_nucleation_correction(liquid_pressure, atmospheric_pressure) *
-           atmospheric_radius;
-}
-
-real_t sheng2024_surface_tension(real_t temperature_celsius,
-                                 real_t uranium_concentration_mol_per_m3)
-{
-    if (!std::isfinite(temperature_celsius))
+    switch (options.nucleation_radius_mode)
     {
-        throw std::invalid_argument("temperature must be finite.");
+    case NucleationRadiusMode::Constant:
+        return require_positive(options.nucleation_radius, "nucleation radius");
+    case NucleationRadiusMode::External:
+        require_positive(temperature_kelvin, "temperature");
+        require_positive(absolute_pressure, "absolute pressure");
+        if (!options.nucleation_radius_correlation)
+            throw std::invalid_argument("External nucleation radius requires a correlation callback.");
+        return require_positive(options.nucleation_radius_correlation(temperature_kelvin, absolute_pressure), "nucleation radius");
     }
-    require_non_negative(uranium_concentration_mol_per_m3, "uranyl nitrate concentration");
-    return 1.7160e-7 * temperature_celsius * temperature_celsius - 1.4427e-4 * temperature_celsius +
-           2.0163e-6 * uranium_concentration_mol_per_m3 + 7.5725e-2;
-}
-
-real_t sheng2024_hydrogen_diffusivity(real_t temperature_kelvin)
-{
-    require_positive(temperature_kelvin, "temperature");
-    return std::pow(10.0, -1.46551 - 8.4259e2 / temperature_kelvin) * 1.0e-4;
+    throw std::invalid_argument("Unknown nucleation radius mode.");
 }
 
 real_t hydrogen_diffusivity(const RadiolyticGasOptions& options, real_t temperature_kelvin)
@@ -158,8 +116,6 @@ real_t hydrogen_diffusivity(const RadiolyticGasOptions& options, real_t temperat
     {
     case HydrogenDiffusivityMode::Constant:
         return require_positive(options.hydrogen_diffusivity, "hydrogen diffusivity");
-    case HydrogenDiffusivityMode::Sheng2024:
-        return require_positive(sheng2024_hydrogen_diffusivity(temperature_kelvin), "hydrogen diffusivity");
     case HydrogenDiffusivityMode::External:
         require_positive(temperature_kelvin, "temperature");
         if (!options.hydrogen_diffusivity_correlation)

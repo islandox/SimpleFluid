@@ -140,8 +140,8 @@ SimpleFluid::RadiolyticGasOptions sheng_options()
     options.henry_coefficient = 1.0e-5;
     options.surface_tension = 0.07;
     options.hydrogen_diffusivity = 1.0e-8;
-    options.uranium_concentration_mol_per_m3 = 1000.0;
-    options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    options.nucleation_radius = 6.6359547089482127e-8;
+
     options.min_radius = 1.0e-12;
     options.max_radius = 1.0e-3;
     options.min_population = 1.0e-40;
@@ -368,13 +368,7 @@ double critical_concentration(
     double pressure,
     double temperature)
 {
-    const auto radius =
-        SimpleFluid::RadiolyticGasPhysics::sheng2024_nucleation_radius(
-            temperature,
-            options.uranium_concentration_mol_per_m3,
-            options.hydrogen_yield_molecules_per_100_ev,
-            pressure,
-            options.atmospheric_pressure);
+    const auto radius = SimpleFluid::RadiolyticGasPhysics::nucleation_radius(options, temperature, pressure);
     return SimpleFluid::RadiolyticGasPhysics::
         henry_equilibrium_concentration(
             options.henry_coefficient,

@@ -196,8 +196,8 @@ void run_gas(const Options& options)
     settings.henry_coefficient = 1.e-5;
     settings.surface_tension = 0.07;
     settings.hydrogen_diffusivity = 1.e-8;
-    settings.uranium_concentration_mol_per_m3 = 1000.0;
-    settings.hydrogen_yield_molecules_per_100_ev = 1.8;
+    settings.nucleation_radius = 6.6359547089482127e-8;
+
     settings.min_radius = 1.e-12;
     settings.max_radius = 1.e-3;
     settings.min_population = 1.e-40;
@@ -312,13 +312,13 @@ void run_ale(const Options& options)
     gas_options.constant_slip_velocity = 0.01;
     gas_options.hydrogen_yield_mol_per_j = yield;
     gas_options.gas_release_efficiency = 1.0;
-    gas_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+
     gas_options.max_source_alpha_rate = 10.0;
     gas_options.henry_coefficient = 1.e-5;
     gas_options.surface_tension = 0.07;
     gas_options.hydrogen_diffusivity = 4.5e-9;
     gas_options.transport_solver_tolerance = 1.e-14;
-    gas_options.uranium_concentration_mol_per_m3 = 1000.0;
+    gas_options.nucleation_radius = 6.6359547089482127e-8;
     gas_options.initial_dissolved_hydrogen = 0.0;
     gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};

@@ -100,66 +100,41 @@ TEST(RadiolyticGasPropertiesTest, HenryAndLaplaceTermsAreMonotone)
     EXPECT_GT(small_bubble, low_pressure);
 }
 
-/** @brief Verifies the radiolytic pressure correction against published reference data. */
-TEST(RadiolyticGasPropertiesTest, PublishedPressureCorrectionRegression)
+/** Material-specific correlations live in external libraries; test only the contract here. */
+TEST(RadiolyticGasPropertiesTest, ExternalSurfaceAndNucleationProperties)
 {
-    EXPECT_NEAR(
-        Physics::pressure_nucleation_correction(101325.0, 101325.0),
-        0.99936965,
-        1.0e-12);
-    EXPECT_LT(
-        Physics::pressure_nucleation_correction(2.0 * 101325.0, 101325.0),
-        Physics::pressure_nucleation_correction(101325.0, 101325.0));
+    SimpleFluid::RadiolyticGasOptions options;
+    options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::External;
+    options.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
+    EXPECT_THROW(Physics::surface_tension(options, 300), std::invalid_argument);
+    EXPECT_THROW(Physics::nucleation_radius(options, 300, 1e5), std::invalid_argument);
+    const double scale = 2e-10;
+    options.surface_tension_correlation = [](double t) { return .07 * t / 300; };
+    options.nucleation_radius_correlation = [scale](double t, double p) { return scale * t * 1e5 / p; };
+    EXPECT_DOUBLE_EQ(Physics::surface_tension(options, 350), .07 * 350 / 300);
+    EXPECT_DOUBLE_EQ(Physics::nucleation_radius(options, 300, 2e5), scale * 300 / 2);
+    EXPECT_THROW(Physics::surface_tension(options, 0), std::invalid_argument);
+    EXPECT_THROW(Physics::nucleation_radius(options, 300, 0), std::invalid_argument);
+    options.surface_tension_correlation = [](double) { return std::numeric_limits<double>::quiet_NaN(); };
+    options.nucleation_radius_correlation = [](double, double) { return -1.; };
+    EXPECT_THROW(Physics::surface_tension(options, 300), std::invalid_argument);
+    EXPECT_THROW(Physics::nucleation_radius(options, 300, 1e5), std::invalid_argument);
 }
 
-/** @brief Verifies SI concentration units in the Winter LET correlation. */
-TEST(RadiolyticGasPropertiesTest, WinterLetUsesMolPerCubicMetre)
+TEST(RadiolyticGasPropertiesTest, RemovedMaterialSelectorsAreRejected)
 {
-    constexpr double temperature = 298.15;
-    constexpr double concentration = 1000.0;
-    const auto expected =
-        (-1.3387e-6 * temperature - 3.4319e-5) * concentration
-      - 6.6431e-3 * temperature + 8.8142;
-
-    EXPECT_NEAR(
-        Physics::mean_fission_fragment_let(
-            temperature, concentration),
-        expected,
-        1.0e-13);
-    EXPECT_LT(
-        Physics::mean_fission_fragment_let(
-            temperature, concentration),
-        Physics::mean_fission_fragment_let(temperature, 1.0));
-}
-
-/** @brief Verifies SI concentration units in the Sheng surface-tension correlation. */
-TEST(RadiolyticGasPropertiesTest, ShengSurfaceTensionUsesMolPerCubicMetre)
-{
-    constexpr double temperature_celsius = 25.0;
-    constexpr double concentration = 1000.0;
-    const auto expected =
-        1.7160e-7 * temperature_celsius * temperature_celsius
-      - 1.4427e-4 * temperature_celsius
-      + 2.0163e-6 * concentration + 7.5725e-2;
-
-    EXPECT_NEAR(
-        Physics::sheng2024_surface_tension(
-            temperature_celsius, concentration),
-        expected,
-        1.0e-15);
-}
-
-/** @brief Verifies range checking in the Winter yield correction. */
-TEST(RadiolyticGasPropertiesTest, WinterYieldCorrectionChecksRange)
-{
-    EXPECT_THROW(
-        Physics::atmospheric_nucleation_radius(1.0e-9, 0.5),
-        std::invalid_argument);
-    EXPECT_NO_THROW(
-        Physics::atmospheric_nucleation_radius(1.0e-9, 1.8));
-    EXPECT_THROW(
-        Physics::atmospheric_nucleation_radius(1.0e-9, 4.5),
-        std::invalid_argument);
+    for (const auto* key : {"surface_tension_model", "hydrogen_diffusivity_model"})
+    {
+        SimpleFluid::Database database;
+        database.set(key, std::string{"sheng2024"});
+        EXPECT_THROW(SimpleFluid::radiolytic_gas_options_from_database(database), std::invalid_argument);
+    }
+    for (const auto* key : {"uranium_concentration_mol_per_m3", "hydrogen_yield_molecules_per_100_ev", "atmospheric_pressure"})
+    {
+        SimpleFluid::Database database;
+        database.set(key, SimpleFluid::real_t{1000});
+        EXPECT_THROW(SimpleFluid::radiolytic_gas_options_from_database(database), std::invalid_argument);
+    }
 }
 
 /** @brief Verifies Hughmark-correlation branches and validity constraints. */

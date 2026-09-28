@@ -765,11 +765,7 @@ evaluate_submerged_bubble_volume(
             const auto temperature =
                 d_previous_temperature.value(cell_lid);
             const auto surface_tension =
-                d_options.surface_tension_mode == SurfaceTensionMode::Constant
-                    ? d_options.surface_tension
-                    : RadiolyticGasPhysics::sheng2024_surface_tension(
-                          temperature - 273.15,
-                          d_options.uranium_concentration_mol_per_m3);
+                RadiolyticGasPhysics::surface_tension(d_options, temperature);
             if (!std::isfinite(pressure)
                 || pressure < d_options.minimum_absolute_pressure
                 || !std::isfinite(temperature) || temperature <= 0.0
@@ -781,12 +777,7 @@ evaluate_submerged_bubble_volume(
             }
 
             const auto nucleation_radius =
-                RadiolyticGasPhysics::sheng2024_nucleation_radius(
-                    temperature,
-                    d_options.uranium_concentration_mol_per_m3,
-                    d_options.hydrogen_yield_molecules_per_100_ev,
-                    pressure,
-                    d_options.atmospheric_pressure);
+                RadiolyticGasPhysics::nucleation_radius(d_options, temperature, pressure);
             if (!std::isfinite(nucleation_radius)
                 || nucleation_radius < d_options.min_radius
                 || nucleation_radius > d_options.max_radius)
@@ -1210,11 +1201,7 @@ void RadiolyticGasModel<Pack, MeshType>::bubble_slip_volume_flux(
             {
                 if (!(radius > scalar_type{}))
                     return scalar_type{};
-                const auto surface_tension = d_options.surface_tension_mode == SurfaceTensionMode::Constant
-                    ? d_options.surface_tension
-                    : RadiolyticGasPhysics::sheng2024_surface_tension(
-                          temperature_values(cell_lid, 0) - 273.15,
-                          d_options.uranium_concentration_mol_per_m3);
+                const auto surface_tension = RadiolyticGasPhysics::surface_tension(d_options, temperature_values(cell_lid, 0));
                 return rise_velocity(radius, density_values(cell_lid, 0),
                     viscosity_values(cell_lid, 0), surface_tension);
             };
@@ -2053,19 +2040,10 @@ auto RadiolyticGasModel<Pack, MeshType>::cell_properties(scalar_type pressure, s
     properties.density = density;
     properties.viscosity = dynamic_viscosity;
     properties.surface_tension =
-        d_options.surface_tension_mode == SurfaceTensionMode::Constant
-            ? d_options.surface_tension
-            : RadiolyticGasPhysics::sheng2024_surface_tension(
-                  properties.temperature - 273.15,
-                  d_options.uranium_concentration_mol_per_m3);
+        RadiolyticGasPhysics::surface_tension(d_options, properties.temperature);
     properties.diffusivity = RadiolyticGasPhysics::hydrogen_diffusivity(d_options, properties.temperature);
     properties.nucleation_radius =
-        RadiolyticGasPhysics::sheng2024_nucleation_radius(
-            properties.temperature,
-            d_options.uranium_concentration_mol_per_m3,
-            d_options.hydrogen_yield_molecules_per_100_ev,
-            properties.pressure,
-            d_options.atmospheric_pressure);
+        RadiolyticGasPhysics::nucleation_radius(d_options, properties.temperature, properties.pressure);
     if (!std::isfinite(properties.nucleation_radius)
         || properties.nucleation_radius < d_options.min_radius
         || properties.nucleation_radius > d_options.max_radius)
@@ -2598,6 +2576,14 @@ void RadiolyticGasModel<Pack, MeshType>::update_inertial_pressure(
         return;
     }
 
+    std::vector<scalar_type> surface_tensions(d_mesh->num_owned_cells());
+    collective_detail::collective_local_validation(*d_mesh, "Radiolytic inertial surface tension", [&]
+    {
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            surface_tensions[owned] = RadiolyticGasPhysics::surface_tension(
+                d_options, temperature.value(static_cast<local_ordinal_type>(owned)));
+    });
+
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
@@ -2611,12 +2597,7 @@ void RadiolyticGasModel<Pack, MeshType>::update_inertial_pressure(
         const auto radius =
             d_characteristic_radius.value(cell_lid);
         const auto surface_tension =
-            d_options.surface_tension_mode
-                    == SurfaceTensionMode::Constant
-                ? d_options.surface_tension
-                : RadiolyticGasPhysics::sheng2024_surface_tension(
-                      temperature_value - 273.15,
-                      d_options.uranium_concentration_mol_per_m3);
+            surface_tensions[owned];
         const auto laplace_term =
             radius > 0.0
                 ? 4.0 * surface_tension / (3.0 * radius)

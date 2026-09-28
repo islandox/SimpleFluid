@@ -359,8 +359,8 @@ void exercise_combined_rans_radiolysis(const SimpleFluid::SP<MeshType>& mesh,
     radiolysis_options.henry_coefficient = 1.0e-5;
     radiolysis_options.surface_tension = 0.07;
     radiolysis_options.hydrogen_diffusivity = 1.0e-8;
-    radiolysis_options.uranium_concentration_mol_per_m3 = 1000.0;
-    radiolysis_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    radiolysis_options.nucleation_radius = 6.6359547089482127e-8;
+
     radiolysis_options.microbubble_lifetime = 1.0e30;
     radiolysis_options.large_bubble_dissolution_time = 1.0e30;
     radiolysis_options.micro_to_large_conversion_coefficient = 0.0;

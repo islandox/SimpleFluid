@@ -8,6 +8,8 @@
 #include <fstream>
 #include <iomanip>
 
+extern "C" double thermal_solution_nucleation_radius(double, double, double, double, double);
+
 int main(int argc, char* argv[])
 {
     Foam::argList::addOption("steps","N","Run only N steps for a partial smoke check");
@@ -191,11 +193,9 @@ int main(int argc, char* argv[])
         scalar localProduced=0;
         forAll(T,cell)
         {
-            const scalar t=T[cell],G=par("yield_molecules_per_100_ev");
-            const scalar LET=(-1.3387e-6*t-3.4319e-5)*par("uranium_concentration")-6.6431e-3*t+8.8142;
-            const scalar waterRadius=(-2.862e-15*t*t+7.3996e-13*t-9.9925e-11)*LET*LET
-                +(8.7909e-14*t*t-9.7928e-13*t+3.4558e-9)*LET+9.7683e-14*t*t-4.0125e-11*t+4.9092e-9;
-            const scalar rn=(5.165e-5-1.732e-3+0.02245-0.1554+1.134)*(0.3554+0.4264*G-0.0400*G*G)*waterRadius;
+            const scalar t=T[cell];
+            const scalar rn=thermal_solution_nucleation_radius(t,par("uranium_concentration"),
+                par("yield_molecules_per_100_ev"),pressure,pressure);
             const scalar nb=fourPi*(pressure*pow3(rn)+2*sigma*sqr(rn))/(R*t);
             check(rn>1e-12&&rn<1e-3,"Nucleation radius outside supported range");
             const scalar source=q[cell]*par("yield_mol_per_j")*dt;

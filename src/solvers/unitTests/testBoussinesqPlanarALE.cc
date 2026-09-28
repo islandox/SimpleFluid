@@ -172,8 +172,8 @@ SimpleFluid::RadiolyticGasOptions gas_options()
     options.surface_tension = 0.07;
     // mu/(rho*D)=100, inside the implemented Hughmark Sc range.
     options.hydrogen_diffusivity = 1.0e-5;
-    options.uranium_concentration_mol_per_m3 = 1000.0;
-    options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    options.nucleation_radius = 6.6359547089482127e-8;
+
     options.reference_pressure = 101325.0;
     options.initial_dissolved_hydrogen = 1.0;
     options.free_surface_patches = {"zmax"};
@@ -2327,12 +2327,12 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     gas_options.constant_slip_velocity = 0.0;
     gas_options.hydrogen_yield_mol_per_j = hydrogen_yield;
     gas_options.gas_release_efficiency = 1.0;
-    gas_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+
     gas_options.max_source_alpha_rate = 10.0;
     gas_options.henry_coefficient = 1.e-5;
     gas_options.surface_tension = 0.07;
     gas_options.hydrogen_diffusivity = 4.5e-9;
-    gas_options.uranium_concentration_mol_per_m3 = 1000.0;
+    gas_options.nucleation_radius = 6.6359547089482127e-8;
     gas_options.initial_dissolved_hydrogen = 0.0;
     gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};
@@ -2506,13 +2506,13 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     gas_options.constant_slip_velocity = 0.01;
     gas_options.hydrogen_yield_mol_per_j = hydrogen_yield;
     gas_options.gas_release_efficiency = 1.0;
-    gas_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+
     gas_options.max_source_alpha_rate = 10.0;
     gas_options.henry_coefficient = 1.e-5;
     gas_options.surface_tension = 0.07;
     gas_options.hydrogen_diffusivity = 4.5e-9;
     gas_options.transport_solver_tolerance = 1.e-14;
-    gas_options.uranium_concentration_mol_per_m3 = 1000.0;
+    gas_options.nucleation_radius = 6.6359547089482127e-8;
     gas_options.initial_dissolved_hydrogen = 0.0;
     gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};

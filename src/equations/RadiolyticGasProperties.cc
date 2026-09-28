@@ -167,10 +167,8 @@ SurfaceTensionMode parse_surface_tension(std::string value)
     value = normalized(std::move(value));
     if (value == "constant")
         return SurfaceTensionMode::Constant;
-    if (value == "sheng2024")
-        return SurfaceTensionMode::Sheng2024;
     throw std::invalid_argument(
-        "Unknown surface_tension_model; expected constant or sheng2024.");
+        "Unknown surface_tension_model; only constant is configured from a database. Set external callbacks in C++.");
 }
 
 /**
@@ -184,11 +182,8 @@ HydrogenDiffusivityMode parse_diffusivity(std::string value)
     value = normalized(std::move(value));
     if (value == "constant")
         return HydrogenDiffusivityMode::Constant;
-    if (value == "sheng2024")
-        return HydrogenDiffusivityMode::Sheng2024;
     throw std::invalid_argument(
-        "Unknown hydrogen_diffusivity_model; expected constant or "
-        "sheng2024.");
+        "Unknown hydrogen_diffusivity_model; only constant is configured from a database. Set external callbacks in C++.");
 }
 
 /**
@@ -267,6 +262,9 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
     options.rise_velocity_mode =
         parse_rise_velocity(reader.value_or<std::string>(
             "bubble_rise_velocity_model", "zeroSlip"));
+    for (const auto* removed : {"uranium_concentration_mol_per_m3", "hydrogen_yield_molecules_per_100_ev", "atmospheric_pressure"})
+        if (database.contains(removed))
+            throw std::invalid_argument(std::string(removed) + " belongs to an external material provider; supply nucleation_radius or a C++ callback.");
     options.surface_tension_mode =
         parse_surface_tension(reader.value_or<std::string>(
             "surface_tension_model", "constant"));
@@ -292,14 +290,7 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
         surface_tension, "surface_tension");
     SIMPLEFLUID_RADIOLYTIC_REAL(
         hydrogen_diffusivity, "hydrogen_diffusivity");
-    SIMPLEFLUID_RADIOLYTIC_REAL(
-        atmospheric_pressure, "atmospheric_pressure");
-    SIMPLEFLUID_RADIOLYTIC_REAL(
-        uranium_concentration_mol_per_m3,
-        "uranium_concentration_mol_per_m3");
-    SIMPLEFLUID_RADIOLYTIC_REAL(
-        hydrogen_yield_molecules_per_100_ev,
-        "hydrogen_yield_molecules_per_100_ev");
+    SIMPLEFLUID_RADIOLYTIC_REAL(nucleation_radius, "nucleation_radius");
     SIMPLEFLUID_RADIOLYTIC_REAL(
         microbubble_lifetime, "microbubble_lifetime");
     SIMPLEFLUID_RADIOLYTIC_REAL(
@@ -440,22 +431,12 @@ void validate_radiolytic_gas_options(
             "hydrogen diffusivity");
     if (options.diffusivity_mode == HydrogenDiffusivityMode::External && !options.hydrogen_diffusivity_correlation)
         throw std::invalid_argument("External hydrogen diffusivity requires a correlation callback.");
-    require_positive(
-        options.atmospheric_pressure,
-        "atmospheric pressure");
-    require_positive(
-        options.uranium_concentration_mol_per_m3,
-        "uranyl nitrate concentration");
-    require_positive(
-        options.hydrogen_yield_molecules_per_100_ev,
-        "hydrogen yield in molecules per 100 eV");
-    if (options.hydrogen_yield_molecules_per_100_ev <= 0.5
-        || options.hydrogen_yield_molecules_per_100_ev >= 4.5)
-    {
-        throw std::invalid_argument(
-            "Winter's nucleation-radius yield correction requires "
-            "0.5 < G_H2 < 4.5 molecules per 100 eV.");
-    }
+    if (options.surface_tension_mode == SurfaceTensionMode::External && !options.surface_tension_correlation)
+        throw std::invalid_argument("External surface tension requires a correlation callback.");
+    if (options.nucleation_radius_mode == NucleationRadiusMode::Constant)
+        require_positive(options.nucleation_radius, "nucleation radius");
+    if (options.nucleation_radius_mode == NucleationRadiusMode::External && !options.nucleation_radius_correlation)
+        throw std::invalid_argument("External nucleation radius requires a correlation callback.");
     require_positive(
         options.microbubble_lifetime,
         "microbubble lifetime");
