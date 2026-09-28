@@ -552,7 +552,8 @@ private:
         const FVM::ALEControlVolumeState* ale,
         Dimension slip_axis,
         size_t operator_slot = 0,
-        bool reuse_population_operator = false);
+        bool reuse_population_operator = false,
+        const field_type* diffusivity_temperature = nullptr);
     SIMPLEFLUID_EQUATIONS_LOCAL
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;

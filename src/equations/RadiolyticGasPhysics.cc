@@ -152,6 +152,23 @@ real_t sheng2024_hydrogen_diffusivity(real_t temperature_kelvin)
     return std::pow(10.0, -1.46551 - 8.4259e2 / temperature_kelvin) * 1.0e-4;
 }
 
+real_t hydrogen_diffusivity(const RadiolyticGasOptions& options, real_t temperature_kelvin)
+{
+    switch (options.diffusivity_mode)
+    {
+    case HydrogenDiffusivityMode::Constant:
+        return require_positive(options.hydrogen_diffusivity, "hydrogen diffusivity");
+    case HydrogenDiffusivityMode::Sheng2024:
+        return require_positive(sheng2024_hydrogen_diffusivity(temperature_kelvin), "hydrogen diffusivity");
+    case HydrogenDiffusivityMode::External:
+        require_positive(temperature_kelvin, "temperature");
+        if (!options.hydrogen_diffusivity_correlation)
+            throw std::invalid_argument("External hydrogen diffusivity requires a correlation callback.");
+        return require_positive(options.hydrogen_diffusivity_correlation(temperature_kelvin), "hydrogen diffusivity");
+    }
+    throw std::invalid_argument("Unknown hydrogen diffusivity mode.");
+}
+
 real_t hughmark_sherwood(real_t reynolds, real_t schmidt)
 {
     require_non_negative(reynolds, "Reynolds number");

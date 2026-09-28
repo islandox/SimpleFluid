@@ -438,6 +438,8 @@ void validate_radiolytic_gas_options(
         require_positive(
             options.hydrogen_diffusivity,
             "hydrogen diffusivity");
+    if (options.diffusivity_mode == HydrogenDiffusivityMode::External && !options.hydrogen_diffusivity_correlation)
+        throw std::invalid_argument("External hydrogen diffusivity requires a correlation callback.");
     require_positive(
         options.atmospheric_pressure,
         "atmospheric pressure");

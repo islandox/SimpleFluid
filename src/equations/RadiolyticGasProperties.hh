@@ -95,7 +95,8 @@ enum class SurfaceTensionMode
 enum class HydrogenDiffusivityMode
 {
     Constant,
-    Sheng2024 ///< Evaluate the Sheng temperature correlation.
+    Sheng2024, ///< Evaluate the Sheng temperature correlation.
+    External   ///< Evaluate a caller-supplied temperature correlation.
 };
 
 /**
@@ -125,6 +126,9 @@ struct RadiolyticGasOptions
     real_t henry_coefficient = 0.0;
     real_t surface_tension = 0.0;           ///< Constant gas-liquid surface tension.
     real_t hydrogen_diffusivity = 0.0;      ///< Constant dissolved-hydrogen diffusivity.
+    // External mode: input K, output m2/s, finite and positive. The function
+    // must be reentrant and implement the same correlation on every MPI rank.
+    real_t (*hydrogen_diffusivity_correlation)(real_t) = nullptr;
     real_t atmospheric_pressure = 101325.0; ///< Pressure reference for nucleation correction.
     real_t uranium_concentration_mol_per_m3 = 0.0;
     real_t hydrogen_yield_molecules_per_100_ev =
@@ -235,6 +239,10 @@ sheng2024_surface_tension(real_t temperature_celsius,
 /** @brief Sheng 2024 hydrogen diffusivity correlation. */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t
 sheng2024_hydrogen_diffusivity(real_t temperature_kelvin);
+
+/** @brief Evaluate and validate the selected dissolved-hydrogen diffusivity. */
+SIMPLEFLUID_EQUATIONS_EXPORT real_t
+hydrogen_diffusivity(const RadiolyticGasOptions& options, real_t temperature_kelvin);
 
 /** @brief Hughmark Sherwood-number correlation. */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t
