@@ -12,12 +12,14 @@
 #include <gtest/gtest.h>
 
 #include "geometry/mesh/FrontalDelaunay2D.hh"
+#include "geometry/mesh/PredicateSigns2D.hh"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
 #include <numbers>
+#include <stdexcept>
 #include <unordered_set>
 
 namespace
@@ -25,6 +27,9 @@ namespace
 
 using Mesher = SimpleFluid::Meshes::FrontalDelaunay2D;
 using Vec3 = Mesher::Vec3;
+using SimpleFluid::Meshes::detail::PredicateSign;
+using SimpleFluid::Meshes::detail::orient2d_sign;
+using SimpleFluid::Meshes::detail::incircle_sign;
 
 long double orient2d(const Vec3& a, const Vec3& b, const Vec3& c)
 {
@@ -34,18 +39,37 @@ long double orient2d(const Vec3& a, const Vec3& b, const Vec3& c)
          * (static_cast<long double>(c.x) - a.x);
 }
 
-long double circumcircle_determinant(
-    const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& point)
+bool opposite_strict(PredicateSign a, PredicateSign b)
 {
-    const long double ax = static_cast<long double>(a.x) - point.x;
-    const long double ay = static_cast<long double>(a.y) - point.y;
-    const long double bx = static_cast<long double>(b.x) - point.x;
-    const long double by = static_cast<long double>(b.y) - point.y;
-    const long double cx = static_cast<long double>(c.x) - point.x;
-    const long double cy = static_cast<long double>(c.y) - point.y;
-    return (ax * ax + ay * ay) * (bx * cy - cx * by)
-         - (bx * bx + by * by) * (ax * cy - cx * ay)
-         + (cx * cx + cy * cy) * (ax * by - bx * ay);
+    return (a == PredicateSign::Positive && b == PredicateSign::Negative)
+        || (a == PredicateSign::Negative && b == PredicateSign::Positive);
+}
+
+unsigned opposite_vertex(const Mesher::Triangle& triangle,
+                         const std::pair<unsigned, unsigned>& edge)
+{
+    for (unsigned vertex : triangle)
+        if (vertex != edge.first && vertex != edge.second) return vertex;
+    throw std::runtime_error("Triangle has no vertex opposite an interior edge.");
+}
+
+void expect_local_legality(const Mesher::Result& mesh,
+                           const std::pair<unsigned, unsigned>& edge,
+                           const Mesher::Triangle& first,
+                           const Mesher::Triangle& second)
+{
+    const auto c = opposite_vertex(first, edge);
+    const auto d = opposite_vertex(second, edge);
+    const auto& u = mesh.nodes[edge.first];
+    const auto& v = mesh.nodes[edge.second];
+    if (!opposite_strict(orient2d_sign(u, v, mesh.nodes[c]),
+                         orient2d_sign(u, v, mesh.nodes[d]))
+        || !opposite_strict(orient2d_sign(mesh.nodes[c], mesh.nodes[d], u),
+                            orient2d_sign(mesh.nodes[c], mesh.nodes[d], v)))
+        return;
+    EXPECT_NE(incircle_sign(mesh.nodes[first[0]], mesh.nodes[first[1]],
+                           mesh.nodes[first[2]], mesh.nodes[d]),
+              PredicateSign::Positive);
 }
 
 void expect_complete_planar_triangulation(const Mesher::Result& mesh)
@@ -56,12 +80,13 @@ void expect_complete_planar_triangulation(const Mesher::Result& mesh)
               2U * mesh.nodes.size() - 2U - mesh.boundary_edges.size());
 
     std::unordered_set<unsigned> used_nodes;
-    std::map<std::pair<unsigned, unsigned>, unsigned> edge_counts;
-    for (const auto& triangle : mesh.triangles)
+    std::map<std::pair<unsigned, unsigned>, SimpleFluid::Arr<size_t>> adjacency;
+    for (size_t t = 0; t < mesh.triangles.size(); ++t)
     {
-        EXPECT_GT(orient2d(mesh.nodes[triangle[0]],
-                           mesh.nodes[triangle[1]],
-                           mesh.nodes[triangle[2]]), 0.0L);
+        const auto& triangle = mesh.triangles[t];
+        EXPECT_EQ(orient2d_sign(mesh.nodes[triangle[0]],
+                                mesh.nodes[triangle[1]],
+                                mesh.nodes[triangle[2]]), PredicateSign::Positive);
         used_nodes.insert(triangle[0]);
         used_nodes.insert(triangle[1]);
         used_nodes.insert(triangle[2]);
@@ -70,34 +95,24 @@ void expect_complete_planar_triangulation(const Mesher::Result& mesh)
             auto node0 = triangle[side];
             auto node1 = triangle[(side + 1U) % 3U];
             if (node1 < node0) std::swap(node0, node1);
-            ++edge_counts[{node0, node1}];
-        }
-
-        for (unsigned point = 0; point < mesh.nodes.size(); ++point)
-        {
-            if (point == triangle[0]
-                || point == triangle[1]
-                || point == triangle[2])
-            {
-                continue;
-            }
-            EXPECT_LE(circumcircle_determinant(
-                          mesh.nodes[triangle[0]], mesh.nodes[triangle[1]],
-                          mesh.nodes[triangle[2]], mesh.nodes[point]),
-                      1.0e-10L);
+            adjacency[{node0, node1}].push_back(t);
         }
     }
     EXPECT_EQ(used_nodes.size(), mesh.nodes.size());
     size_t exterior_edge_count = 0;
     size_t nonmanifold_edge_count = 0;
-    for (const auto& [edge, count] : edge_counts)
+    for (const auto& [edge, adjacent] : adjacency)
     {
-        (void)edge;
-        exterior_edge_count += count == 1U;
-        nonmanifold_edge_count += count > 2U;
+        exterior_edge_count += adjacent.size() == 1U;
+        nonmanifold_edge_count += adjacent.size() > 2U;
+        if (adjacent.size() == 2U)
+            expect_local_legality(mesh, edge, mesh.triangles[adjacent[0]],
+                                  mesh.triangles[adjacent[1]]);
     }
     EXPECT_EQ(exterior_edge_count, mesh.boundary_edges.size());
     EXPECT_EQ(nonmanifold_edge_count, 0U);
+    for (const auto& boundary : mesh.boundary_edges)
+        EXPECT_EQ(adjacency[std::minmax(boundary.node0, boundary.node1)].size(), 1U);
 }
 
 SimpleFluid::Arr<Vec3> regular_loop(unsigned count, double radius)
@@ -147,9 +162,10 @@ void expect_complete_annular_triangulation(
         const auto& triangle = mesh.triangles[t];
         const auto triangle_area = orient2d(mesh.nodes[triangle[0]],
             mesh.nodes[triangle[1]], mesh.nodes[triangle[2]]);
-        EXPECT_GT(triangle_area, 0.0L);
+        EXPECT_EQ(orient2d_sign(mesh.nodes[triangle[0]],
+                                mesh.nodes[triangle[1]], mesh.nodes[triangle[2]]),
+                  PredicateSign::Positive);
         area += triangle_area;
-        Vec3 centroid{};
         for (unsigned side = 0; side < 3; ++side)
         {
             const auto a = triangle[side];
@@ -157,14 +173,11 @@ void expect_complete_annular_triangulation(
             ASSERT_LT(a, mesh.nodes.size());
             used.insert(a);
             adjacency[std::minmax(a, b)].push_back(t);
-            centroid.x += mesh.nodes[a].x / 3.0;
-            centroid.y += mesh.nodes[a].y / 3.0;
         }
-        bool outside_hole = false;
-        for (size_t edge = 0; edge < inner.size(); ++edge)
-            outside_hole = outside_hole
-                || orient2d(inner[edge], inner[(edge + 1) % inner.size()], centroid) < 0.0L;
-        EXPECT_TRUE(outside_hole);
+        // Every triangle wholly on the strictly convex inner loop is in the hole.
+        EXPECT_FALSE(std::all_of(triangle.begin(), triangle.end(),
+            [&](unsigned node) { return node >= outer.size()
+                && node < outer.size() + inner.size(); }));
     }
     EXPECT_EQ(used.size(), mesh.nodes.size());
     EXPECT_NEAR(area, polygon_twice_area(outer) - polygon_twice_area(inner), 1.0e-12L);
@@ -174,16 +187,10 @@ void expect_complete_annular_triangulation(
         EXPECT_LE(adjacent.size(), 2U);
         exterior_edges += adjacent.size() == 1;
         if (adjacent.size() != 2) continue;
-        const auto& first = mesh.triangles[adjacent[0]];
-        const auto& second = mesh.triangles[adjacent[1]];
-        for (const auto opposite : second)
-        {
-            if (opposite == edge.first || opposite == edge.second) continue;
-            // Every retained interior edge is unconstrained and locally Delaunay.
-            EXPECT_LE(circumcircle_determinant(mesh.nodes[first[0]],
-                mesh.nodes[first[1]], mesh.nodes[first[2]], mesh.nodes[opposite]),
-                1.0e-12L);
-        }
+        // The constrained perimeter is exterior; only flippable free interior
+        // edges are subject to the local Delaunay legality check.
+        expect_local_legality(mesh, edge, mesh.triangles[adjacent[0]],
+                              mesh.triangles[adjacent[1]]);
     }
     EXPECT_EQ(exterior_edges, boundary_count);
     for (const auto& boundary : mesh.boundary_edges)
@@ -225,6 +232,42 @@ TEST(FrontalDelaunay2DTest, RejectsInvalidPolygonAndSizing)
             {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}},
             0.0),
         std::invalid_argument);
+    EXPECT_THROW(Mesher::triangulate(
+        {{0, 0, 0}, {1, 0, 0}, {1, 0, 0}, {0, 1, 0}}, 0.5),
+        std::invalid_argument);
+    // The former coordinate-scale-squared tolerance swallowed this real notch.
+    constexpr double origin = 1.0e8;
+    EXPECT_THROW(Mesher::triangulate(
+        {{origin, origin, 0}, {origin + 1, origin, 0},
+         {origin + 1, origin + 1, 0},
+         {origin + 0.5, origin + 0.75, 0},
+         {origin, origin + 1, 0}}, 0.5),
+        std::invalid_argument);
+}
+
+TEST(FrontalDelaunay2DTest, SmallScaleAndCollinearBoundaryAreConforming)
+{
+    for (double h : {1.0e-2, 1.0e-4, 1.0e-5})
+    {
+        const auto mesh = Mesher::triangulate(
+            {{0, 0, 0}, {h, 0, 0}, {0, h, 0}}, h / 2);
+        expect_complete_planar_triangulation(mesh);
+    }
+    const auto mesh = Mesher::triangulate(
+        {{0, 0, 0}, {0.5, 0, 0}, {1, 0, 0},
+         {1, 1, 0}, {0, 1, 0}}, 1.0);
+    expect_complete_planar_triangulation(mesh);
+    const auto repeat = Mesher::triangulate(
+        {{0, 0, 0}, {0.5, 0, 0}, {1, 0, 0},
+         {1, 1, 0}, {0, 1, 0}}, 1.0);
+    EXPECT_EQ(mesh.triangles, repeat.triangles);
+}
+
+TEST(FrontalDelaunay2DTest, RoundedObliqueBoundarySubdivisionsStayConforming)
+{
+    const auto mesh = Mesher::triangulate(
+        {{0, 0, 0}, {1, 0.3, 0}, {1.4, 1.3, 0}, {0.4, 1, 0}}, 0.23);
+    expect_complete_planar_triangulation(mesh);
 }
 
 /**

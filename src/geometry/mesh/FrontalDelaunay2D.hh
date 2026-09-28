@@ -29,6 +29,10 @@ namespace SimpleFluid::Meshes
  * the annular overload preserves two supplied polygon loops for conforming
  * boundary-layer attachment. The disk overload additionally accepts
  * prescribed radial fronts so a cylinder can retain radial layer spacing.
+ * Orientation and circumcircle topology use exact signs of the stored finite
+ * binary64 XY coordinates. Exact cocircular ties retain the existing diagonal;
+ * exact on-edge points split all incident containing triangles. Mesh spacing
+ * and area checks remain numerical measures rather than topology tolerances.
  */
 class FrontalDelaunay2D
 {
