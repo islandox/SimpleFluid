@@ -8,6 +8,8 @@ if ! command -v wmake >/dev/null 2>&1; then
     set -e
 fi
 set -eu
+test -f "${SIMPLEFLUID_REACTING_MATERIAL_LIBRARY:?Set the path to libthermal_reacting_properties.so}"
+export SIMPLEFLUID_REACTING_MATERIAL_LIBRARY
 mkdir -p "$output"
 output=$(CDPATH= cd -- "$output" && pwd)
 python3 "$case_dir/prepare_openfoam.py" --output "$output" --mesh "${SIMPLEFLUID_VERIFICATION_MESH:-$case_dir/mesh.dat}"

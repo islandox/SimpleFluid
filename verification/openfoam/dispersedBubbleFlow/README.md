@@ -123,9 +123,10 @@ alpha_g = N (4 pi r_nuc³ / 3)
 
 The reference radius `r_nuc = 6.6359547089482127e-8 m` was independently
 evaluated from the Sheng/Winter nucleation correlation at the shared
-temperature, concentration, yield, and pressure. SimpleFluid recomputes
-and checks this value to `1e-12` relative tolerance before running. Both
-initial moments use the same `n_b`; their ratio remains constant under
+temperature, concentration, yield, and pressure. Both implementations read
+the prescribed `nucleation_radius`; neither recomputes that correlation from
+the concentration and yield metadata. Both initial moments use the same
+`n_b`; their ratio remains constant under
 transport and production. OpenFOAM derives its own molar/number source
 and void from the shared physical parameters, without reading any
 SimpleFluid result. Its dimensioned fields represent mol/m³ and 1/m³.

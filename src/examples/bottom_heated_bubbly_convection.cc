@@ -22,6 +22,13 @@
 #include <stdexcept>
 #include <vector>
 
+// External Sheng/Winter uranyl-reference law, not a general material model.
+// C_U is uranium concentration in mol/m3; the returned radius is in metres.
+// Keep the external library's C symbol while making its reference inputs explicit.
+extern "C" double thermal_solution_nucleation_radius(double temperature_kelvin,
+    double uranium_concentration_mol_per_m3, double hydrogen_yield_molecules_per_100_ev,
+    double absolute_pressure_pa, double reference_pressure_pa);
+
 namespace
 {
 using Pack = SimpleFluid::DefaultTpetraTypes;
@@ -175,7 +182,7 @@ int run(int argc, char** argv)
     SimpleFluid::ReactingGasOptions gas;
     gas.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
     gas.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    gas.reference_pressure = gas.atmospheric_pressure = water.absolute_pressure;
+    gas.reference_pressure = water.absolute_pressure;
     gas.bubble_transport = SimpleFluid::BubbleTransportMode::General;
     gas.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
     gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
@@ -183,8 +190,11 @@ int run(int argc, char** argv)
     gas.surface_tension_mode = SimpleFluid::SurfaceTensionMode::Constant;
     gas.surface_tension = reference.surface_tension;
     gas.hydrogen_yield_mol_per_j = p("yield_mol_per_j");
-    gas.hydrogen_yield_molecules_per_100_ev = p("yield_molecules_per_100_ev");
-    gas.uranium_concentration_mol_per_m3 = p("uranium_concentration");
+    gas.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
+    gas.nucleation_radius_correlation = [concentration = p("uranium_concentration"),
+        yield = p("yield_molecules_per_100_ev"), reference_pressure = water.absolute_pressure]
+        (double temperature, double pressure)
+    { return thermal_solution_nucleation_radius(temperature, concentration, yield, pressure, reference_pressure); };
     gas.gas_constant = p("gas_constant");
     gas.henry_coefficient = 1e-5;
     gas.hydrogen_diffusivity = 1e-8;

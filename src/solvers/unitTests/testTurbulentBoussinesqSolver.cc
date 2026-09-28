@@ -359,8 +359,8 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     reaction_source_options.henry_coefficient = 1.0e-5;
     reaction_source_options.surface_tension = 0.07;
     reaction_source_options.hydrogen_diffusivity = 1.0e-8;
-    reaction_source_options.uranium_concentration_mol_per_m3 = 1000.0;
-    reaction_source_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    reaction_source_options.nucleation_radius = 6.6359547089482127e-8;
+
     reaction_source_options.microbubble_lifetime = 1.0e30;
     reaction_source_options.large_bubble_dissolution_time = 1.0e30;
     reaction_source_options.micro_to_large_conversion_coefficient = 0.0;
