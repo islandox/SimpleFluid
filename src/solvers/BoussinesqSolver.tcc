@@ -273,6 +273,7 @@ namespace
         scalar(static_cast<int>(gas->rise_velocity_mode));
         scalar(static_cast<int>(gas->surface_tension_mode));
         scalar(static_cast<int>(gas->diffusivity_mode));
+        scalar(gas->hydrogen_diffusivity_correlation != nullptr);
         scalar(gas->hydrogen_yield_mol_per_j);
         scalar(gas->gas_release_efficiency);
         scalar(gas->reference_pressure);
