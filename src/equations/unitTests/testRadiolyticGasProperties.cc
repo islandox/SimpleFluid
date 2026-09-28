@@ -23,6 +23,20 @@ namespace
 
 namespace Physics = SimpleFluid::RadiolyticGasPhysics;
 
+TEST(RadiolyticGasPropertiesTest, ExternalDiffusivityChecksCallbackAndValues)
+{
+    SimpleFluid::RadiolyticGasOptions options;
+    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 300), std::invalid_argument);
+    options.hydrogen_diffusivity_correlation = +[](double temperature) { return temperature * 1e-11; };
+    EXPECT_DOUBLE_EQ(Physics::hydrogen_diffusivity(options, 350), 350 * 1e-11);
+    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 0), std::invalid_argument);
+    options.hydrogen_diffusivity_correlation = +[](double) { return -1.0; };
+    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 300), std::invalid_argument);
+    options.hydrogen_diffusivity_correlation = +[](double) { return std::numeric_limits<double>::quiet_NaN(); };
+    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 300), std::invalid_argument);
+}
+
 /** @brief Verifies the expected scaling of the ideal-gas radiolytic source. */
 TEST(RadiolyticGasPropertiesTest, IdealGasSourceHasExpectedScaling)
 {

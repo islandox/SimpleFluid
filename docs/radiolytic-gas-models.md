@@ -51,6 +51,18 @@ is explicit rather than inferred from coefficient magnitudes.
 | Hydrogen diffusivity | Winter 2022, Eq. (45), PDF p. 8 | input K, output m2/s |
 | Bubble rise velocity | Winter 2022, Eqs. (15a-d), PDF p. 5 | SI implementation of the Celata relation |
 
+Applications can supply a diffusivity correlation through
+`RadiolyticGasOptions::hydrogen_diffusivity_correlation` and select
+`HydrogenDiffusivityMode::External`. The function takes kelvin and returns
+finite positive m2/s; it must be reentrant and implement the same model on
+every MPI rank. This callback is configured through the C++ API.
+Hydra-TF uses it to call the exported Winter (2022) Fortran property.
+
+Temperature-dependent diffusivity is evaluated per cell for both dissolved
+transport and bubble mass transfer. The dissolved transport operator uses
+`alpha_l*D(T)` and exchanges its coefficient field across partition boundaries.
+Provider failures are reported collectively before transport assembly.
+
 ## Phase 12
 
 The ideal-gas source is

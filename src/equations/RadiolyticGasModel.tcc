@@ -794,12 +794,7 @@ evaluate_submerged_bubble_volume(
                 local_invalid_state = 1;
                 continue;
             }
-            const auto diffusivity =
-                d_options.diffusivity_mode
-                        == HydrogenDiffusivityMode::Constant
-                    ? d_options.hydrogen_diffusivity
-                    : RadiolyticGasPhysics::sheng2024_hydrogen_diffusivity(
-                          temperature);
+            const auto diffusivity = RadiolyticGasPhysics::hydrogen_diffusivity(d_options, temperature);
             const auto density = d_previous_density.value(cell_lid);
             const auto viscosity =
                 d_previous_dynamic_viscosity.value(cell_lid);
@@ -1266,6 +1261,7 @@ void RadiolyticGasModel<Pack, MeshType>::bubble_slip_volume_flux(
  * @param liquid_face_flux Oriented liquid volumetric flux.
  * @param slip_velocity Optional cell slip speed added in the axial direction.
  * @param diffusivity Molecular diffusivity.
+ * @param diffusivity_temperature Optional cell temperatures for the selected correlation.
  * @param diffuse Whether diffusion is active.
  * @param liquid_weighted Whether storage and advection use liquid fraction.
  * @param[in,out] escape_rate Accumulated free-surface escape rate.
@@ -1285,7 +1281,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     const FVM::ALEControlVolumeState* ale,
     Dimension slip_axis,
     size_t operator_slot,
-    bool reuse_population_operator)
+    bool reuse_population_operator,
+    const field_type* diffusivity_temperature)
 {
     const auto started = std::chrono::steady_clock::now();
     const auto elapsed = [](auto begin)
@@ -1393,7 +1390,10 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
 
         storage_weight.put_scalar(1.0);
         diffusion_weight.put_scalar(0.0);
+        const auto assemble_weights = [&]
         {
+            const auto temperature_values = diffusivity_temperature ? diffusivity_temperature->owned_read_view()
+                : decltype(field.owned_read_view()){};
             const auto liquid_values = d_alpha_l.owned_read_view();
             const auto field_values = field.owned_read_view();
             const auto old = old_values.owned_write_view();
@@ -1406,9 +1406,15 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                                               : field_values(owned, 0);
                 if (liquid_weighted)
                     storage(owned, 0) = liquid_fraction;
-                diffusion(owned, 0) = diffuse ? liquid_fraction * diffusivity : 0.0;
+                const auto cell_diffusivity = diffuse && diffusivity_temperature
+                    ? RadiolyticGasPhysics::hydrogen_diffusivity(d_options, temperature_values(owned, 0)) : diffusivity;
+                diffusion(owned, 0) = diffuse ? liquid_fraction * cell_diffusivity : 0.0;
             }
-        }
+        };
+        if (diffuse)
+            collective_detail::collective_local_validation(*d_mesh, "Radiolytic diffusivity evaluation", assemble_weights);
+        else
+            assemble_weights();
         old_values.sync_ghosts();
         if (liquid_weighted)
             storage_weight.sync_ghosts();
@@ -1682,31 +1688,6 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
 
     d_escape_molar_rate.put_scalar(0.0);
     d_escape_number_rate.put_scalar(0.0);
-    scalar_type diffusivity = d_options.hydrogen_diffusivity;
-    if (d_options.diffusivity_mode
-        == HydrogenDiffusivityMode::Sheng2024)
-    {
-        scalar_type local_temperature_volume{};
-        scalar_type local_volume{};
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            const auto volume = d_mesh->cell_volume(cell_lid);
-            local_temperature_volume +=
-                temperature.value(cell_lid) * volume;
-            local_volume += volume;
-        }
-        const auto volume = global_sum(local_volume);
-        const auto mean_temperature =
-            global_sum(local_temperature_volume) / volume;
-        diffusivity =
-            RadiolyticGasPhysics::sheng2024_hydrogen_diffusivity(
-                mean_temperature);
-    }
-
     const auto& zero_flux = workspace.zero_flux;
     const auto& dissolved_flux =
         d_options.dissolved_transport
@@ -1718,12 +1699,12 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         time_step,
         dissolved_flux,
         nullptr,
-        diffusivity,
+        d_options.hydrogen_diffusivity,
         true,
         true,
         d_escape_molar_rate,
         ale,
-        slip_axis);
+        slip_axis, 0, false, &temperature);
 
     if (d_donor_tracking_enabled)
     {
@@ -2077,12 +2058,7 @@ auto RadiolyticGasModel<Pack, MeshType>::cell_properties(scalar_type pressure, s
             : RadiolyticGasPhysics::sheng2024_surface_tension(
                   properties.temperature - 273.15,
                   d_options.uranium_concentration_mol_per_m3);
-    properties.diffusivity =
-        d_options.diffusivity_mode
-                == HydrogenDiffusivityMode::Constant
-            ? d_options.hydrogen_diffusivity
-            : RadiolyticGasPhysics::sheng2024_hydrogen_diffusivity(
-                  properties.temperature);
+    properties.diffusivity = RadiolyticGasPhysics::hydrogen_diffusivity(d_options, properties.temperature);
     properties.nucleation_radius =
         RadiolyticGasPhysics::sheng2024_nucleation_radius(
             properties.temperature,
