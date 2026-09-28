@@ -64,9 +64,9 @@ int evaluate(const void* opaque, size_t count, const Input* inputs, Properties* 
     return SF_MATERIAL_SUCCESS;
 }
 
-sf_material_provider_v1 descriptor(const Context& context, size_t composition_count = 0)
+sf_material_provider descriptor(const Context& context, size_t composition_count = 0)
 {
-    return {SF_MATERIAL_ABI_VERSION_1, sizeof(sf_material_provider_v1), "test material", composition_count,
+    return {SF_MATERIAL_ABI_VERSION_1, sizeof(sf_material_provider), "test material", composition_count,
         SF_MATERIAL_CAP_AFFINE_DENSITY_TEMPERATURE | SF_MATERIAL_CAP_CONSTANT_CP_MU_K, &context, evaluate};
 }
 

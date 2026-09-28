@@ -17,13 +17,13 @@ extern "C" {
 
 #define SF_MATERIAL_ABI_VERSION_1 UINT32_C(1)
 
-typedef enum sf_material_status_v1
+typedef enum sf_material_status
 {
     SF_MATERIAL_SUCCESS = 0,
     SF_MATERIAL_INVALID_ARGUMENT = 1,
     SF_MATERIAL_UNSUPPORTED_ABI = 2,
     SF_MATERIAL_EVALUATION_FAILED = 3
-} sf_material_status_v1;
+} sf_material_status;
 
 /** Density is affine in temperature at fixed pressure and composition. */
 #define SF_MATERIAL_CAP_AFFINE_DENSITY_TEMPERATURE UINT64_C(1)
@@ -31,7 +31,7 @@ typedef enum sf_material_status_v1
  * pressure and composition. */
 #define SF_MATERIAL_CAP_CONSTANT_CP_MU_K UINT64_C(2)
 
-typedef struct sf_material_input_v1
+typedef struct sf_material_input
 {
     double temperature_kelvin;       /**< Absolute temperature, K; finite and >0. */
     double absolute_pressure_pascal; /**< Absolute pressure, Pa; finite and >0. */
@@ -40,9 +40,9 @@ typedef struct sf_material_input_v1
      * Borrowed for this synchronous call; required when composition_count>0. */
     const double* composition;
     size_t composition_count;
-} sf_material_input_v1;
+} sf_material_input;
 
-typedef struct sf_material_properties_v1
+typedef struct sf_material_properties
 {
     double density;                        /**< kg/m^3; finite and >0. */
     double specific_heat_capacity;         /**< J/(kg K); finite and >0. */
@@ -51,7 +51,7 @@ typedef struct sf_material_properties_v1
     /** Partial derivative d(rho)/dT at fixed absolute pressure and
      * composition, kg/(m^3 K); finite. */
     double density_temperature_derivative;
-} sf_material_properties_v1;
+} sf_material_properties;
 
 /**
  * Evaluate a synchronous batch. Implementations must be reentrant/thread-safe
@@ -65,21 +65,21 @@ typedef struct sf_material_properties_v1
  *
  * error may be NULL only when error_capacity==0. When capacity is positive,
  * write a bounded NUL-terminated diagnostic (an empty string on success).
- * Return one of sf_material_status_v1; no allocation crosses the ABI.
+ * Return one of sf_material_status; no allocation crosses the ABI.
  */
-typedef int (*sf_material_evaluate_v1)(const void* context, size_t count,
-    const sf_material_input_v1* inputs, sf_material_properties_v1* outputs,
+typedef int (*sf_material_evaluate)(const void* context, size_t count,
+    const sf_material_input* inputs, sf_material_properties* outputs,
     char* error, size_t error_capacity);
 
 /**
  * A borrowed provider description. Set abi_version=SF_MATERIAL_ABI_VERSION_1
- * and struct_size=sizeof(sf_material_provider_v1). Version-1 consumers accept
+ * and struct_size=sizeof(sf_material_provider). Version-1 consumers accept
  * a larger struct_size for appended extensions, but read only this prefix.
  * name is a nonempty NUL-terminated string; context may be NULL. Context data
  * shared between concurrent calls must be immutable or internally synchronized.
  * Capability bits are promises by the provider, not requests to modify physics.
  */
-typedef struct sf_material_provider_v1
+typedef struct sf_material_provider
 {
     uint32_t abi_version;
     size_t struct_size;
@@ -87,8 +87,8 @@ typedef struct sf_material_provider_v1
     size_t composition_count;
     uint64_t capabilities;
     const void* context;
-    sf_material_evaluate_v1 evaluate;
-} sf_material_provider_v1;
+    sf_material_evaluate evaluate;
+} sf_material_provider;
 
 #ifdef __cplusplus
 } /* extern "C" */
