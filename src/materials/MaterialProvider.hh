@@ -31,16 +31,16 @@ namespace SimpleFluid
 class MaterialProvider
 {
 public:
-    using Input = sf_material_input_v1;
-    using Properties = sf_material_properties_v1;
+    using Input = sf_material_input;
+    using Properties = sf_material_properties;
 
-    explicit MaterialProvider(const sf_material_provider_v1& descriptor)
+    explicit MaterialProvider(const sf_material_provider& descriptor)
     {
         const auto fail = [&](std::string_view reason)
         { throw std::invalid_argument(descriptor_label(descriptor) + std::string(reason)); };
         if (descriptor.abi_version != SF_MATERIAL_ABI_VERSION_1)
             fail("unsupported material ABI version " + std::to_string(descriptor.abi_version));
-        if (descriptor.struct_size < sizeof(sf_material_provider_v1))
+        if (descriptor.struct_size < sizeof(sf_material_provider))
             fail("descriptor is shorter than the version-1 ABI prefix");
         if (!descriptor.name || descriptor.name[0] == '\0') fail("name must be nonempty");
         if (!descriptor.evaluate) fail("evaluation callback is null");
@@ -52,7 +52,7 @@ public:
     uint64_t capabilities() const noexcept { return d_provider.capabilities; }
     bool has_capability(uint64_t capability) const noexcept
     { return (d_provider.capabilities & capability) == capability; }
-    const sf_material_provider_v1& descriptor() const noexcept { return d_provider; }
+    const sf_material_provider& descriptor() const noexcept { return d_provider; }
 
     /** @brief Evaluate and validate one material state. */
     Properties evaluate(const Input& input) const
@@ -116,9 +116,9 @@ public:
     }
 
 private:
-    static std::string descriptor_label(const sf_material_provider_v1& descriptor)
+    static std::string descriptor_label(const sf_material_provider& descriptor)
     {
-        const bool has_name = descriptor.struct_size >= offsetof(sf_material_provider_v1, name) + sizeof(descriptor.name)
+        const bool has_name = descriptor.struct_size >= offsetof(sf_material_provider, name) + sizeof(descriptor.name)
                            && descriptor.name && descriptor.name[0];
         return "Material provider '" + std::string(has_name ? descriptor.name : "<unnamed>") + "': ";
     }
@@ -148,6 +148,6 @@ private:
         if (!(p.thermal_conductivity > 0) || !std::isfinite(p.thermal_conductivity)) fail("thermal conductivity");
         if (!std::isfinite(p.density_temperature_derivative)) fail("density temperature derivative");
     }
-    sf_material_provider_v1 d_provider{};
+    sf_material_provider d_provider{};
 };
 } // namespace SimpleFluid

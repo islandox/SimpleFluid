@@ -7,7 +7,7 @@ _Static_assert(SF_MATERIAL_SUCCESS == 0 && SF_MATERIAL_INVALID_ARGUMENT == 1
     "stable callback status values");
 
 static int constant_material(const void* context, size_t count,
-    const sf_material_input_v1* inputs, sf_material_properties_v1* outputs,
+    const sf_material_input* inputs, sf_material_properties* outputs,
     char* error, size_t error_capacity)
 {
     size_t i;
@@ -17,7 +17,7 @@ static int constant_material(const void* context, size_t count,
         return SF_MATERIAL_INVALID_ARGUMENT;
     for (i = 0; i < count; ++i)
     {
-        const sf_material_properties_v1 properties = {1000, 4180, 0.001, 0.6, -0.3};
+        const sf_material_properties properties = {1000, 4180, 0.001, 0.6, -0.3};
         outputs[i] = properties;
     }
     return SF_MATERIAL_SUCCESS;
@@ -25,12 +25,12 @@ static int constant_material(const void* context, size_t count,
 
 int main(void)
 {
-    const sf_material_provider_v1 provider = {
-        SF_MATERIAL_ABI_VERSION_1, sizeof(sf_material_provider_v1), "C fixture", 0,
+    const sf_material_provider provider = {
+        SF_MATERIAL_ABI_VERSION_1, sizeof(sf_material_provider), "C fixture", 0,
         SF_MATERIAL_CAP_AFFINE_DENSITY_TEMPERATURE | SF_MATERIAL_CAP_CONSTANT_CP_MU_K,
         NULL, constant_material};
-    const sf_material_input_v1 input = {300, 101325, NULL, 0};
-    sf_material_properties_v1 output = {0, 0, 0, 0, 0};
+    const sf_material_input input = {300, 101325, NULL, 0};
+    sf_material_properties output = {0, 0, 0, 0, 0};
     char error[32] = {0};
     if (provider.evaluate(provider.context, 0, NULL, NULL, error, sizeof(error)) != SF_MATERIAL_SUCCESS)
         return 1;
