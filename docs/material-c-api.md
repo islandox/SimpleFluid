@@ -9,20 +9,20 @@ target is always available and has no IF97 dependency. The existing
 
 ## Provider contract
 
-Publish an `sf_material_provider_v1` with
+Publish an `sf_material_provider` with
 `abi_version = SF_MATERIAL_ABI_VERSION_1`,
-`struct_size = sizeof(sf_material_provider_v1)`, a nonempty name, the required
+`struct_size = sizeof(sf_material_provider)`, a nonempty name, the required
 composition count, capability bits, an optional context pointer, and an
-`sf_material_evaluate_v1` callback. Consumers accept a larger version-1
+`sf_material_evaluate` callback. Consumers accept a larger version-1
 descriptor and read only the known prefix.
 
-Each `sf_material_input_v1` contains positive finite temperature in kelvin,
+Each `sf_material_input` contains positive finite temperature in kelvin,
 positive finite **absolute** pressure in pascal, and a borrowed composition
 array. Its count must match the descriptor. The provider documents the
 composition ordering, meaning, SI units, and valid domain; the ABI does not
 normalize or infer concentrations or fractions.
 
-Each `sf_material_properties_v1` contains:
+Each `sf_material_properties` contains:
 
 | Field | SI units | Required values |
 | --- | --- | --- |
@@ -59,18 +59,19 @@ For example, this provider declares zero composition components:
 ```cpp
 #include "materials/MaterialProvider.hh"
 #include <array>
+#include <stdexcept>
 
-extern "C" const sf_material_provider_v1* example_liquid_provider_v1();
+extern "C" const sf_material_provider* example_liquid_provider();
 
 double reference_expansion()
 {
-    const auto* descriptor = example_liquid_provider_v1();
+    const auto* descriptor = example_liquid_provider();
     if (!descriptor) throw std::runtime_error("Material provider unavailable");
     const SimpleFluid::MaterialProvider material(*descriptor);
-    const std::array<sf_material_input_v1, 2> states{{
+    const std::array<sf_material_input, 2> states{{
         {300.0, 101325.0, nullptr, 0},
         {310.0, 101325.0, nullptr, 0}}};
-    std::array<sf_material_properties_v1, 2> properties{};
+    std::array<sf_material_properties, 2> properties{};
     material.evaluate(states, properties);
     return SimpleFluid::MaterialProvider::beta(properties[0]);
 }
