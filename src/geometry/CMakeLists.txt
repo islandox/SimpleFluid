@@ -16,6 +16,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/OrthogonalCartesian3D.cc
     mesh/OrthogonalCylindrial3D.cc
     mesh/FrontalDelaunay2D.cc
+    mesh/PredicateSigns2D.cc
     mesh/SemiStructMeshTopo.cc
     mesh/SemiStructuredXY_Z.cc
     mesh/UnstructuredMesh.cc
@@ -31,10 +32,21 @@ simplefluid_absolute_sources(SIMPLEFLUID_MESH_SOURCES)
 list(APPEND SIMPLEFLUID_MESH_SOURCES ${SIMPLEFLUID_IO_SOURCES} ${SIMPLEFLUID_PARALLEL_SOURCES})
 
 # Geometry, partitioning and mesh output retain one archive and type identity.
+find_package(Boost CONFIG REQUIRED)
 add_library(SimpleFluidMesh STATIC ${SIMPLEFLUID_MESH_SOURCES})
 add_library(SimpleFluid::Mesh ALIAS SimpleFluidMesh)
 simplefluid_configure_component(SimpleFluidMesh)
-target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore)
+target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore PRIVATE Boost::headers)
+
+# The certified predicate filter requires ordinary IEEE binary64 arithmetic.
+# Keep this isolated object out of IPO so link-time transforms cannot contract
+# its operations or import fast-math assumptions from unrelated code.
+set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION OFF)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
+endif()
 
 # Require profiles for every Mesh archive member linked into Shiri. The listed
 # alternate-path objects are compiled with ordinary LTO optimization in USE
