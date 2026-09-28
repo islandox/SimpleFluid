@@ -123,6 +123,7 @@ jobs:
         ${{ matrix.cmake_platform_options }}
         -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
         -DSIMPLEFLUID_MAX_TEST_PROCS=2
+        -DSIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY:FILEPATH=
         -G"Ninja Multi-Config"
         -S ${{ github.workspace }}
 
@@ -134,4 +135,5 @@ jobs:
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
       # Execute tests defined by the CMake configuration. Note that --build-config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
-      run: ctest --build-config ${{ matrix.build_type }} -j1 --output-on-failure
+      # thermal_lib_extract is an optional local dependency, unavailable in this matrix.
+      run: ctest --build-config ${{ matrix.build_type }} -j1 --output-on-failure --label-exclude '^external_material$'

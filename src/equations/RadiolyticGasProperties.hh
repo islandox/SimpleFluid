@@ -14,6 +14,7 @@
 #include "dataclass/Database.hh"
 #include "dataclass/typedefs.hh"
 
+#include <functional>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -86,7 +87,7 @@ enum class BubbleRiseVelocityMode
 enum class SurfaceTensionMode
 {
     Constant,
-    Sheng2024 ///< Evaluate the Sheng temperature/concentration correlation.
+    External ///< Evaluate a caller-supplied surface-tension correlation.
 };
 
 /**
@@ -95,8 +96,14 @@ enum class SurfaceTensionMode
 enum class HydrogenDiffusivityMode
 {
     Constant,
-    Sheng2024, ///< Evaluate the Sheng temperature correlation.
     External   ///< Evaluate a caller-supplied temperature correlation.
+};
+
+/** @brief Nucleation-radius property selection. */
+enum class NucleationRadiusMode
+{
+    Constant,
+    External
 };
 
 /**
@@ -112,6 +119,7 @@ struct RadiolyticGasOptions
     BubbleRiseVelocityMode rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;
     SurfaceTensionMode surface_tension_mode = SurfaceTensionMode::Constant;
     HydrogenDiffusivityMode diffusivity_mode = HydrogenDiffusivityMode::Constant;
+    NucleationRadiusMode nucleation_radius_mode = NucleationRadiusMode::Constant;
 
     real_t hydrogen_yield_mol_per_j = 0.0;
     real_t gas_release_efficiency = 1.0;  ///< Fraction of generated hydrogen released to gas.
@@ -129,10 +137,12 @@ struct RadiolyticGasOptions
     // External mode: input K, output m2/s, finite and positive. The function
     // must be reentrant and implement the same correlation on every MPI rank.
     real_t (*hydrogen_diffusivity_correlation)(real_t) = nullptr;
-    real_t atmospheric_pressure = 101325.0; ///< Pressure reference for nucleation correction.
-    real_t uranium_concentration_mol_per_m3 = 0.0;
-    real_t hydrogen_yield_molecules_per_100_ev =
-        0.0; ///< Radiation yield used by nucleation correlation.
+    // Material callbacks own any composition/model parameters they capture.
+    // Inputs are K and Pa; outputs are N/m and m. Captures must remain valid,
+    // reentrant and physically identical on every MPI rank.
+    std::function<real_t(real_t)> surface_tension_correlation;
+    std::function<real_t(real_t, real_t)> nucleation_radius_correlation;
+    real_t nucleation_radius = 0.0; ///< Required supplied value for Constant mode.
 
     real_t microbubble_lifetime = 10.0e-6;
     real_t large_bubble_dissolution_time = 50.0e-6;
@@ -198,47 +208,13 @@ henry_equilibrium_concentration(real_t henry_coefficient,
                                 real_t surface_tension,
                                 real_t bubble_radius);
 
-/** @brief Sheng pressure correction for the nucleation radius. */
+/** @brief Evaluate supplied surface tension (N/m) at temperature (K). */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t
-pressure_nucleation_correction(real_t liquid_pressure,
-                               real_t atmospheric_pressure);
+surface_tension(const RadiolyticGasOptions& options, real_t temperature_kelvin);
 
-/** @brief Mean fission-fragment LET from Sheng Eq. (13). */
+/** @brief Evaluate supplied nucleation radius (m) at temperature (K), pressure (Pa). */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t
-mean_fission_fragment_let(real_t temperature_kelvin,
-                          real_t uranium_concentration_mol_per_m3);
-
-/** @brief Pure-water nucleation radius correlation from Winter. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-pure_water_nucleation_radius(real_t temperature_kelvin, real_t mean_let);
-
-/** @brief Correct pure-water nucleation radius for H2 radiation yield. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-atmospheric_nucleation_radius(
-    real_t pure_water_radius,
-    real_t hydrogen_yield_molecules_per_100_ev);
-
-/** @brief Sheng 2024 nucleation radius assembled from LET and pressure terms. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-sheng2024_nucleation_radius(
-    real_t temperature_kelvin,
-    real_t uranium_concentration_mol_per_m3,
-    real_t hydrogen_yield_molecules_per_100_ev,
-    real_t liquid_pressure, real_t atmospheric_pressure);
-
-/**
- * @brief Sheng 2024 surface-tension correlation from Table 2.
- *
- * Sheng et al. (2024) Table 2 prints a positive quadratic term. Its cited
- * Winter sources print a negative term; this selector follows the Sheng table.
- */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-sheng2024_surface_tension(real_t temperature_celsius,
-                          real_t uranium_concentration_mol_per_m3);
-
-/** @brief Sheng 2024 hydrogen diffusivity correlation. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-sheng2024_hydrogen_diffusivity(real_t temperature_kelvin);
+nucleation_radius(const RadiolyticGasOptions& options, real_t temperature_kelvin, real_t absolute_pressure);
 
 /** @brief Evaluate and validate the selected dissolved-hydrogen diffusivity. */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t

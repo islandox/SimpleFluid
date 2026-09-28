@@ -141,7 +141,6 @@ int run(int argc, char** argv)
     options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     options.constant_slip_velocity = p("slip_velocity");
     options.reference_pressure = liquid.absolute_pressure;
-    options.atmospheric_pressure = p("atmospheric_pressure");
     options.gas_constant = p("gas_constant");
     options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::Constant;
     options.surface_tension = water.surface_tension;
@@ -150,8 +149,6 @@ int run(int argc, char** argv)
     options.hydrogen_yield_mol_per_j = p("yield_mol_per_j");
     options.gas_release_efficiency = p("release_efficiency");
     options.max_source_alpha_rate = 1.0;
-    options.uranium_concentration_mol_per_m3 = p("uranium_concentration");
-    options.hydrogen_yield_molecules_per_100_ev = p("yield_molecules_per_100_ev");
     options.microbubble_lifetime = options.large_bubble_dissolution_time = 1e100;
     options.micro_to_large_conversion_coefficient = 0.0;
     options.max_subcycles = 1;
@@ -160,10 +157,8 @@ int run(int argc, char** argv)
     options.max_radius = 1e-3;
     options.free_surface_patches = {"zmax"};
     const double radius = p("nucleation_radius");
-    const double nucleation =
-        SimpleFluid::RadiolyticGasPhysics::sheng2024_nucleation_radius(liquid.temperature, p("uranium_concentration"),
-            p("yield_molecules_per_100_ev"), liquid.absolute_pressure, p("atmospheric_pressure"));
-    require(std::abs(nucleation / radius - 1.0) < 1e-12, "Reference nucleation radius disagrees with configured state");
+    // Material reference value is supplied by the shared verification input.
+    options.nucleation_radius = radius;
     const double bubble_volume = 4.0 * std::numbers::pi / 3.0 * radius * radius * radius;
     const double moles_per_bubble = bubble_volume * (liquid.absolute_pressure + 2 * water.surface_tension / radius) /
                                     (p("gas_constant") * liquid.temperature);

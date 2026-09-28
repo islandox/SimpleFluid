@@ -28,40 +28,40 @@ All public options and fields use SI:
 | Density | kg/m3 |
 | Henry coefficient, `C = H p` | mol/(m3 Pa) |
 
-Published empirical conversions are isolated in
-`RadiolyticGasProperties.hh`. Winter et al. (2020) Eq. (32) explicitly
-defines `C_U` in mol/m3 and temperature in K, so
-`mean_fission_fragment_let` uses the public concentration directly. The
-surface-tension fit also uses `C_U` directly in mol/m3 and converts the
-public temperature from K to degrees Celsius at the call site.
+## External material properties
 
-There is a source discrepancy in that fit. Sheng et al. (2024) Table 2
-prints a positive `T_C^2` coefficient, while Winter et al. (2020) Eq. (24)
-and Winter et al. (2022) Eq. (13) print it as negative. The runtime
-`sheng2024` selector follows the governing Sheng table verbatim. The choice
-is explicit rather than inferred from coefficient magnitudes.
+SimpleFluid contains no fissile-solution diffusivity, surface-tension, LET or
+nucleation-radius correlations. Density, heat capacity, viscosity and thermal
+conductivity can be supplied through the external `MaterialProvider` API.
+Radiolytic material properties use `RadiolyticGasOptions`:
 
-## Property provenance
+| Property | Constant input | External callback | Callback inputs / output |
+| --- | --- | --- | --- |
+| Surface tension | `surface_tension` | `surface_tension_correlation` | K / N/m |
+| Hydrogen diffusivity | `hydrogen_diffusivity` | `hydrogen_diffusivity_correlation` | K / m2/s |
+| Nucleation radius | `nucleation_radius` | `nucleation_radius_correlation` | K, Pa / m |
 
-| Implementation | Primary location | Convention or guard |
-| --- | --- | --- |
-| Mean fission-fragment LET | Winter 2020, Eq. (32), PDF p. 12 | `C_U` in mol/m3, `T` in K |
-| Nucleation yield correction | Winter 2020, Eq. (30), PDF p. 10 | `0.5 < G_H2 < 4.5` molecules/100 eV |
-| Sheng surface tension | Sheng 2024, Table 2, PDF p. 8 | `C_U` in mol/m3, `T_C` in C |
-| Hydrogen diffusivity | Winter 2022, Eq. (45), PDF p. 8 | input K, output m2/s |
-| Bubble rise velocity | Winter 2022, Eqs. (15a-d), PDF p. 5 | SI implementation of the Celata relation |
+Select `SurfaceTensionMode::External`, `HydrogenDiffusivityMode::External` or
+`NucleationRadiusMode::External` when supplying the corresponding callback.
+Surface-tension and nucleation callbacks may capture material composition and
+model parameters by value. All callbacks must be reentrant, physically
+identical on each MPI rank, and return finite positive values. Runtime callback
+failures propagate collectively before MPI-dependent assembly or field exchange.
+The generic Henry equilibrium, ideal-gas, bubble drag and transfer equations
+operate on supplied material values.
 
-Applications can supply a diffusivity correlation through
-`RadiolyticGasOptions::hydrogen_diffusivity_correlation` and select
-`HydrogenDiffusivityMode::External`. The function takes kelvin and returns
-finite positive m2/s; it must be reentrant and implement the same model on
-every MPI rank. This callback is configured through the C++ API.
-Hydra-TF uses it to call the exported Winter (2022) Fortran property.
-
+Hydra-TF connects these callbacks to a submodule which owns Winter's
+hydrogen diffusivity and the relocated surface-tension and nucleation properties.
 Temperature-dependent diffusivity is evaluated per cell for both dissolved
-transport and bubble mass transfer. The dissolved transport operator uses
-`alpha_l*D(T)` and exchanges its coefficient field across partition boundaries.
-Provider failures are reported collectively before transport assembly.
+transport and bubble mass transfer. Dissolved transport uses `alpha_l*D(T)`.
+
+The old `sheng2024` surface-tension and diffusivity selectors are removed.
+Database configurations supply constant properties, including an explicit
+positive `nucleation_radius`; external callbacks are configured through C++.
+The former `uranium_concentration_mol_per_m3`,
+`hydrogen_yield_molecules_per_100_ev` and `atmospheric_pressure` keys are rejected:
+those parameters belong to the external material provider. The physical source
+yield `hydrogen_yield_mol_per_j` remains a solver input.
 
 ## Phase 12
 
@@ -243,9 +243,7 @@ max_source_alpha_rate
 henry_coefficient
 surface_tension
 hydrogen_diffusivity
-atmospheric_pressure
-uranium_concentration_mol_per_m3
-hydrogen_yield_molecules_per_100_ev
+nucleation_radius
 microbubble_lifetime
 large_bubble_dissolution_time
 micro_to_large_conversion_coefficient
@@ -299,8 +297,6 @@ properties, and diagnostic rates.
 - Full SILENE validation requires point kinetics or neutronics coupling.
 - Celata validity diagnostics use the experimental envelope in the primary
   paper; radiolytic microbubble use is an explicit extrapolation.
-- The positive quadratic surface-tension coefficient follows Sheng Table 2
-  despite the negative coefficient printed in both cited Winter papers.
 
 ## References
 

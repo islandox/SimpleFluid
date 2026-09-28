@@ -78,14 +78,25 @@ remain outside this model.
 
 ## Run and outputs
 
-From the repository root:
+Build `thermal_radiolytic_properties` shared-library
+target first. Both solvers call its C export for the temperature-dependent
+nucleation radius; the correlation is not embedded in either transport solver.
+From the SimpleFluid repository root:
 
 ```sh
-cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON
+export SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY=/absolute/path/to/libthermal_radiolytic_properties.so
+cmake --preset GCC-ninja-multi -DSIMPLEFLUID_ENABLE_IF97=ON \
+  -DSIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY="$SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY"
 SIMPLEFLUID_BUILD_CONFIG=Release \
   verification/openfoam/bottomHeatedBubblyConvection/run_comparison.sh \
   build/verification/bottom-convection
 ```
+
+The two short CTest fixtures (`bottom_convection_zero_source` and
+`bottom_convection_graded_transport`) carry the `external_material` label.
+GitHub CI excludes this label and configures without the external thermal
+material library. Local builds with the library configured can run them with
+`ctest --test-dir build/gcc -C Release -L '^external_material$' --output-on-failure`.
 
 The launcher creates a fresh run directory, builds a local OpenFOAM reference,
 checks its mesh, runs both solvers, compares complete matched histories, and

@@ -46,9 +46,15 @@ foreach(VERIFICATION_TARGET IN ITEMS dispersed_bubble_verification planar_ale_co
   endif()
 endforeach()
 
-if(SIMPLEFLUID_ENABLE_IF97)
+set(SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY "$ENV{SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY}" CACHE FILEPATH
+    "External shared library exporting thermal_solution_nucleation_radius for the bottom-convection verification")
+if(SIMPLEFLUID_ENABLE_IF97 AND SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY)
+  if(NOT EXISTS "${SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY}")
+    message(FATAL_ERROR "Missing external radiolytic material library: ${SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY}")
+  endif()
   add_executable(bottom_heated_bubbly_convection bottom_heated_bubbly_convection.cc)
-  target_link_libraries(bottom_heated_bubbly_convection PRIVATE SimpleFluid SimpleFluid::IF97)
+  target_link_libraries(bottom_heated_bubbly_convection PRIVATE SimpleFluid SimpleFluid::IF97
+    "${SIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY}")
   simplefluid_exe_reuse_precompiled_header(bottom_heated_bubbly_convection)
   simplefluid_exclude_from_pgo_sources(bottom_heated_bubbly_convection.cc)
   if(BUILD_TESTING)
@@ -58,7 +64,7 @@ if(SIMPLEFLUID_ENABLE_IF97)
         --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
         --output "${SIMPLEFLUID_EXAMPLE_OUTPUT_DIR}/verification/bottom_convection_zero_source")
     set_tests_properties(bottom_convection_zero_source PROPERTIES
-      LABELS "verification;conservation;small_fixture;turbulence" TIMEOUT 60
+      LABELS "verification;conservation;small_fixture;turbulence;external_material" TIMEOUT 60
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
     add_test(NAME bottom_convection_graded_transport
       COMMAND bottom_heated_bubbly_convection --steps 5
@@ -66,9 +72,11 @@ if(SIMPLEFLUID_ENABLE_IF97)
         --properties "${PROJECT_SOURCE_DIR}/verification/openfoam/bottomHeatedBubblyConvection/reference_scale1.properties"
         --output "${SIMPLEFLUID_EXAMPLE_OUTPUT_DIR}/verification/bottom_convection_graded_transport")
     set_tests_properties(bottom_convection_graded_transport PROPERTIES
-      LABELS "verification;conservation;small_fixture;turbulence" TIMEOUT 60
+      LABELS "verification;conservation;small_fixture;turbulence;external_material" TIMEOUT 60
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
   endif()
+elseif(SIMPLEFLUID_ENABLE_IF97)
+  add_executable(bottom_heated_bubbly_convection external_radiolytic_material_unavailable.cc)
 else()
   add_executable(bottom_heated_bubbly_convection if97_verification_unavailable.cc)
 endif()

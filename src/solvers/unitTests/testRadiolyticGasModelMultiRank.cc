@@ -57,8 +57,8 @@ SimpleFluid::RadiolyticGasOptions sheng_options()
     options.henry_coefficient = 1.0e-5;
     options.surface_tension = 0.07;
     options.hydrogen_diffusivity = 1.0e-8;
-    options.uranium_concentration_mol_per_m3 = 1000.0;
-    options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    options.nucleation_radius = 6.6359547089482127e-8;
+
     options.min_radius = 1.0e-12;
     options.max_radius = 1.0e-3;
     options.min_population = 1.0e-40;
@@ -212,10 +212,8 @@ TEST(RadiolyticGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInput
             const auto production = options.gas_release_efficiency * options.hydrogen_yield_mol_per_j
                 * std::max(power_at(gid), 0.);
             const auto cell_temperature = temperature_at(gid);
-            const auto radius = SimpleFluid::RadiolyticGasPhysics::sheng2024_nucleation_radius(
-                cell_temperature, options.uranium_concentration_mol_per_m3,
-                options.hydrogen_yield_molecules_per_100_ev, options.reference_pressure,
-                options.atmospheric_pressure);
+            const auto radius = SimpleFluid::RadiolyticGasPhysics::nucleation_radius(
+                options, cell_temperature, options.reference_pressure);
             const auto nucleation_moles = 4. * std::numbers::pi / 3.
                 * (options.reference_pressure * radius * radius * radius
                     + 2. * options.surface_tension * radius * radius)
@@ -329,6 +327,39 @@ TEST(RadiolyticGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     check_publication();
     model.restore(accepted);
     check_publication();
+}
+
+TEST(RadiolyticGasModelMultiRankTest, ExternalMaterialFailureIsCollective)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 2, 2, .25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2) GTEST_SKIP() << "Requires two ranks.";
+    for (const bool surface_failure : {true, false})
+    {
+        auto options = sheng_options();
+        options.pressure_mode = SimpleFluid::RadiolyticPressureMode::Inertial;
+        options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::External;
+        options.surface_tension_correlation = [surface_failure](double temperature)
+        {
+            if (surface_failure && temperature > 325) throw std::runtime_error("external surface tension failure");
+            return .07;
+        };
+        options.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
+        options.nucleation_radius_correlation = [surface_failure](double temperature, double)
+        {
+            if (!surface_failure && temperature > 325) throw std::runtime_error("external nucleation failure");
+            return 6.6359547089482127e-8;
+        };
+        RadiolyticModelType model(mesh, options);
+        FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+        FaceFieldType flux(mesh, 0., "flux");
+        auto material = make_water_properties(mesh);
+        model.initialize_state(0., temperature, pressure, velocity, material);
+        ASSERT_GT(mesh->num_owned_cells(), 0U);
+        if (comm->getRank() == 0) temperature.set_owned_value(0, 350.);
+        EXPECT_THROW(model.advance(.001, .001, temperature, pressure, velocity, flux, material, &power), std::exception);
+    }
 }
 
 /**

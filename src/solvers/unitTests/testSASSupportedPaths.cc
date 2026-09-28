@@ -328,7 +328,7 @@ RadiolyticGasOptions seeded_radiolysis_options(RadiolyticGasMode mode)
     options.hydrogen_yield_mol_per_j=2e-7; options.reference_pressure=1e5;
     // Unit-density fixture has molecular nu=.001; D=1e-5 gives admissible Sc=100.
     options.henry_coefficient=1e-5; options.surface_tension=.07; options.hydrogen_diffusivity=1e-5;
-    options.uranium_concentration_mol_per_m3=1000; options.hydrogen_yield_molecules_per_100_ev=1.8;
+    options.nucleation_radius = 6.6359547089482127e-8;
     options.dissolved_transport=RadiolyticTransportMode::Advective;
     options.rise_velocity_mode=BubbleRiseVelocityMode::ConstantSlip; options.constant_slip_velocity=.05;
     options.initial_dissolved_hydrogen=1e-5; options.initial_micro_number_density=1e10;

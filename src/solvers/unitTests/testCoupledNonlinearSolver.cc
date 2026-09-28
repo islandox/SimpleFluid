@@ -1493,8 +1493,8 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     gas_options.surface_tension = .07;
     gas_options.hydrogen_diffusivity = 4.e-4;
     gas_options.initial_dissolved_hydrogen = 1.;
-    gas_options.uranium_concentration_mol_per_m3 = 1000.;
-    gas_options.hydrogen_yield_molecules_per_100_ev = 1.8;
+    gas_options.nucleation_radius = 6.6359547089482127e-8;
+
     auto& gas = solver.configure_radiolytic_gas(gas_options);
     State::seed(solver.velocity(), solver.pressure());
     solver.set_material_updater([](const auto&, auto& properties) { properties.density.put_scalar(6.9); });

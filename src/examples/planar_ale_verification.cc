@@ -199,8 +199,8 @@ SimpleFluid::RadiolyticGasOptions gas_options(scalar_type slip_velocity)
     result.henry_coefficient = 1.0e-5;
     result.surface_tension = 0.07;
     result.hydrogen_diffusivity = 1.0e-5;
-    result.uranium_concentration_mol_per_m3 = 1000.0;
-    result.hydrogen_yield_molecules_per_100_ev = 1.8;
+    result.nucleation_radius = 6.6359547089482127e-8;
+
     result.reference_pressure = 101325.0;
     result.initial_dissolved_hydrogen = 1.0;
     result.free_surface_patches = {"zmax"};

@@ -284,9 +284,10 @@ namespace
         scalar(gas->henry_coefficient);
         scalar(gas->surface_tension);
         scalar(gas->hydrogen_diffusivity);
-        scalar(gas->atmospheric_pressure);
-        scalar(gas->uranium_concentration_mol_per_m3);
-        scalar(gas->hydrogen_yield_molecules_per_100_ev);
+        scalar(static_cast<int>(gas->nucleation_radius_mode));
+        scalar(gas->nucleation_radius);
+        scalar(static_cast<bool>(gas->surface_tension_correlation));
+        scalar(static_cast<bool>(gas->nucleation_radius_correlation));
         scalar(gas->microbubble_lifetime);
         scalar(gas->large_bubble_dissolution_time);
         scalar(gas->micro_to_large_conversion_coefficient);

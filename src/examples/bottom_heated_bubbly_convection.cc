@@ -22,6 +22,9 @@
 #include <stdexcept>
 #include <vector>
 
+// External material-library C ABI: K, mol/m3, molecules/100 eV, Pa -> m.
+extern "C" double thermal_solution_nucleation_radius(double, double, double, double, double);
+
 namespace
 {
 using Pack = SimpleFluid::DefaultTpetraTypes;
@@ -175,7 +178,7 @@ int run(int argc, char** argv)
     SimpleFluid::RadiolyticGasOptions gas;
     gas.mode = SimpleFluid::RadiolyticGasMode::Sheng2024TwoPopulation;
     gas.pressure_mode = SimpleFluid::RadiolyticPressureMode::Constant;
-    gas.reference_pressure = gas.atmospheric_pressure = water.absolute_pressure;
+    gas.reference_pressure = water.absolute_pressure;
     gas.bubble_transport = SimpleFluid::BubbleTransportMode::General;
     gas.dissolved_transport = SimpleFluid::RadiolyticTransportMode::Advective;
     gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
@@ -183,8 +186,11 @@ int run(int argc, char** argv)
     gas.surface_tension_mode = SimpleFluid::SurfaceTensionMode::Constant;
     gas.surface_tension = reference.surface_tension;
     gas.hydrogen_yield_mol_per_j = p("yield_mol_per_j");
-    gas.hydrogen_yield_molecules_per_100_ev = p("yield_molecules_per_100_ev");
-    gas.uranium_concentration_mol_per_m3 = p("uranium_concentration");
+    gas.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
+    gas.nucleation_radius_correlation = [concentration = p("uranium_concentration"),
+        yield = p("yield_molecules_per_100_ev"), reference_pressure = water.absolute_pressure]
+        (double temperature, double pressure)
+    { return thermal_solution_nucleation_radius(temperature, concentration, yield, pressure, reference_pressure); };
     gas.gas_constant = p("gas_constant");
     gas.henry_coefficient = 1e-5;
     gas.hydrogen_diffusivity = 1e-8;
