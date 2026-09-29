@@ -83,6 +83,19 @@ private:
     bool d_active = true;
 };
 
+template<class Action>
+void expect_collective_error(const Teuchos::Comm<int>& comm, Action&& action, const char* expected)
+{
+    std::string message;
+    try { action(); }
+    catch (const std::exception& error) { message = error.what(); }
+    EXPECT_EQ(message, expected);
+    const int arrived = 1;
+    int total_arrived = 0;
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, 1, &arrived, &total_arrived);
+    EXPECT_EQ(total_arrived, comm.getSize());
+}
+
 void check_gcl_face_order(const Handle& mesh, const FVM::ALEControlVolumeState& ale)
 {
     const auto execution = mesh.acquire_execution_view();
@@ -219,24 +232,64 @@ TEST(MultiRegionALETest, EmptyRanksParticipateInCollectiveGclValidation)
     motion.rollback_trial();
 }
 
+TEST(MultiRegionALETest, EmptyRanksReceiveCollectiveGclFailure)
+{
+    auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
+        std::vector<Meshes::MultiRegionMesh::Region>{
+            Meshes::cartesian_region("single", {{{0,1}, {0,1}, {0,1}}})},
+        std::vector<Meshes::MultiRegionMesh::Interface>{});
+    Handle::DistributionOptions options;
+    options.allow_empty_partitions = true;
+    auto mesh = std::make_shared<ThrowingHandle>(geometry, options);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    const int local_empty = mesh->num_owned_cells() == 0;
+    int global_empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &global_empty);
+    EXPECT_EQ(global_empty, comm->getSize() - 1);
+    MutableTestMotion motion(mesh);
+    const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+    if (!local_empty)
+    {
+        const auto face = static_cast<size_t>(mesh->faces(Handle::local_ordinal_type{0}).front());
+        motion.set_flux(face, 1.0);
+    }
+    const auto gcl_error = std::string("ALE control-volume state violates the cellwise geometric conservation law; maximum residual is ")
+        + std::to_string(1.0) + " m^3/s.";
+    expect_collective_error(*comm, [&] { ale.validate(*mesh); }, gcl_error.c_str());
+
+    auto fresh_mesh = std::make_shared<ThrowingHandle>(geometry, options);
+    MutableTestMotion fresh_motion(fresh_mesh);
+    const auto fresh_ale = FVM::make_ale_control_volume_state(*fresh_mesh, fresh_motion);
+    EXPECT_NO_THROW(fresh_ale.validate(*fresh_mesh));
+}
+
 TEST(MultiRegionALETest, RankLocalStaleChildFailsValidationCollectively)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
-    const Vec3D<ArrReal> left_edges{{{0,0.5,1}, {0,0.5,1}, {0,0.5,1}}};
-    const Vec3D<ArrReal> right_edges{{{1,1.5,2}, {0,0.5,1}, {0,0.5,1}}};
-    auto left = std::make_shared<Meshes::OrthogonalCartesian3D>(left_edges);
-    auto right = std::make_shared<Meshes::OrthogonalCartesian3D>(right_edges);
-    auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
-        std::vector<Meshes::MultiRegionMesh::Region>{
-            Meshes::native_region("left", left), Meshes::native_region("right", right)},
-        std::vector<Meshes::MultiRegionMesh::Interface>{Meshes::StructuredPatchInterface{{0,1}, {1,0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
-    PlanarALEMeshMotion<> motion(mesh);
-    motion.begin_trial(1.1, 0.2);
-    const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
-    if (comm->getRank() == 0) *left = Meshes::OrthogonalCartesian3D(left_edges);
-    EXPECT_THROW(ale.validate(*mesh), std::logic_error);
+    {
+        const Vec3D<ArrReal> left_edges{{{0,0.5,1}, {0,0.5,1}, {0,0.5,1}}};
+        const Vec3D<ArrReal> right_edges{{{1,1.5,2}, {0,0.5,1}, {0,0.5,1}}};
+        auto left = std::make_shared<Meshes::OrthogonalCartesian3D>(left_edges);
+        auto right = std::make_shared<Meshes::OrthogonalCartesian3D>(right_edges);
+        auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
+            std::vector<Meshes::MultiRegionMesh::Region>{
+                Meshes::native_region("left", left), Meshes::native_region("right", right)},
+            std::vector<Meshes::MultiRegionMesh::Interface>{Meshes::StructuredPatchInterface{{0,1}, {1,0}}});
+        auto mesh = std::make_shared<Handle>(geometry);
+        PlanarALEMeshMotion<> motion(mesh);
+        motion.begin_trial(1.1, 0.2);
+        const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+        if (comm->getRank() == 0) *left = Meshes::OrthogonalCartesian3D(left_edges);
+        expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+            "Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
+    }
+    auto fresh_mesh = std::make_shared<Handle>(test::two_regions());
+    PlanarALEMeshMotion<> fresh_motion(fresh_mesh);
+    fresh_motion.begin_trial(1.1, 0.2);
+    const auto fresh_ale = FVM::make_ale_control_volume_state(*fresh_mesh, fresh_motion);
+    EXPECT_NO_THROW(fresh_ale.validate(*fresh_mesh));
+    fresh_motion.rollback_trial();
 }
 
 TEST(MultiRegionALETest, RankLocalTraversalFailureReleasesLeaseAndFailsCollectively)
@@ -249,10 +302,12 @@ TEST(MultiRegionALETest, RankLocalTraversalFailureReleasesLeaseAndFailsCollectiv
     const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
 
     mesh->fail_faces = comm->getRank() == 0;
-    EXPECT_THROW(ale.validate(*mesh), std::logic_error);
+    expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+        "ALE control-volume state mesh traversal failed on at least one rank.");
     mesh->fail_faces = false;
     mesh->fail_owner = comm->getRank() == 0;
-    EXPECT_THROW(ale.validate(*mesh), std::logic_error);
+    expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+        "ALE control-volume state mesh traversal failed on at least one rank.");
     mesh->fail_owner = false;
     EXPECT_NO_THROW(ale.validate(*mesh));
     EXPECT_NO_THROW(motion.rollback_trial());
@@ -267,12 +322,7 @@ TEST(MultiRegionALETest, RankDivergentFaultsRetainCollectiveErrorPriority)
     const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
     const auto face = static_cast<size_t>(mesh->faces(Handle::local_ordinal_type{0}).front());
     const auto expect_error = [&](const char* expected)
-    {
-        std::string message;
-        try { ale.validate(*mesh); }
-        catch (const std::exception& error) { message = error.what(); }
-        EXPECT_EQ(message, expected);
-    };
+    { expect_collective_error(*comm, [&] { ale.validate(*mesh); }, expected); };
 
     motion.set_active(comm->getRank() != 0);
     if (comm->getRank() == 1) motion.set_new_epoch(ale.new_geometry_epoch() + 1);
@@ -286,6 +336,12 @@ TEST(MultiRegionALETest, RankDivergentFaultsRetainCollectiveErrorPriority)
     mesh->fail_epoch = false;
     motion.set_new_epoch(ale.new_geometry_epoch());
 
+    motion.set_flux(face, comm->getRank() == 0 ? 1.0 : 0.0);
+    const auto gcl_error = std::string("ALE control-volume state violates the cellwise geometric conservation law; maximum residual is ")
+        + std::to_string(1.0) + " m^3/s.";
+    expect_error(gcl_error.c_str());
+    motion.set_flux(face, 0.0);
+
     motion.set_flux(face, comm->getRank() == 0 ? std::numeric_limits<real_t>::quiet_NaN() : 1.0);
     expect_error("ALE control-volume state contains invalid volume, mesh-flux, or GCL data.");
     motion.set_flux(face, comm->getRank() == 1 ? 1.0 : 0.0);
@@ -294,7 +350,10 @@ TEST(MultiRegionALETest, RankDivergentFaultsRetainCollectiveErrorPriority)
     expect_error("ALE control-volume state mesh traversal failed on at least one rank.");
     mesh->fail_owner = false;
     motion.set_flux(face, 0.0);
-    EXPECT_NO_THROW(ale.validate(*mesh));
+    auto fresh_mesh = std::make_shared<ThrowingHandle>(test::two_regions());
+    MutableTestMotion fresh_motion(fresh_mesh);
+    const auto fresh_ale = FVM::make_ale_control_volume_state(*fresh_mesh, fresh_motion);
+    EXPECT_NO_THROW(fresh_ale.validate(*fresh_mesh));
 }
 TEST(MultiRegionALETest, ChangingThePeriodicLengthIsRejected)
 {
