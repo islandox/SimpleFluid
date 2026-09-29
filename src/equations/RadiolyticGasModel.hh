@@ -42,6 +42,18 @@ struct RadiolyticTransportWork
     double total_seconds = 0;
 };
 
+/** @brief Envelope of coefficients evaluated for active large populations. */
+struct BubbleMassTransferStepStatistics
+{
+    long long evaluations = 0;
+    long long low_peclet_evaluations = 0;
+    long long fit_evaluations = 0;
+    // Each member is independently minimized or maximized. These are not
+    // necessarily two physical states from the same cell.
+    RadiolyticGasPhysics::BubbleMassTransferResult minimum;
+    RadiolyticGasPhysics::BubbleMassTransferResult maximum;
+};
+
 /**
  * @brief Per-step global diagnostics from a radiolytic gas update.
  *
@@ -75,6 +87,7 @@ struct RadiolyticGasStepStatistics
     int clipped_cells = 0;
     int pressure_floor_cells = 0;
     int radius_solver_failures = 0;
+    BubbleMassTransferStepStatistics mass_transfer;
     LinearSolveSummary transport_linear; ///< All FV transport solves in this step.
     /** Dissolved inventory, micro number/moles, large number/moles. */
     std::array<RadiolyticTransportWork, 5> transport_work;
@@ -563,11 +576,22 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     CellKineticsResult integrate_cell_kinetics(
         const CellKineticsState& initial,
+        local_ordinal_type cell_lid,
+        RadiolyticGasPhysics::BubbleMassTransferEvaluator transfer_evaluator,
         scalar_type time_step,
         scalar_type production_rate,
         scalar_type liquid_fraction,
         const CellProperties& properties,
         const KineticsSubsteps& substeps);
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    RadiolyticGasPhysics::BubbleMassTransferResult evaluate_mass_transfer(
+        RadiolyticGasPhysics::BubbleMassTransferEvaluator transfer_evaluator,
+        local_ordinal_type cell_lid, std::string_view population,
+        scalar_type radius, scalar_type diffusivity, scalar_type density,
+        scalar_type viscosity, scalar_type relative_speed) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    void record_mass_transfer(
+        const RadiolyticGasPhysics::BubbleMassTransferResult& result);
     SIMPLEFLUID_EQUATIONS_LOCAL
     void reconstruct_derived_fields(const field_type& temperature, const field_type& density,
         const field_type& dynamic_viscosity, bool record_event_statistics = true);

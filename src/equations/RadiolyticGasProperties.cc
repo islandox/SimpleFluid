@@ -186,6 +186,23 @@ HydrogenDiffusivityMode parse_diffusivity(std::string value)
         "Unknown hydrogen_diffusivity_model; only constant is configured from a database. Set external callbacks in C++.");
 }
 
+/** @brief Parse the selected liquid-side bubble transfer law. */
+BubbleMassTransferMode parse_mass_transfer(std::string value)
+{
+    value = normalized(std::move(value));
+    if (value == "legacyhughmark" || value == "legacy_hughmark")
+        return BubbleMassTransferMode::LegacyHughmark;
+    if (value == "sphericaldiffusion" || value == "spherical_diffusion")
+        return BubbleMassTransferMode::SphericalDiffusion;
+    if (value == "fengmichaelidesclean" || value == "feng_michaelides_clean")
+        return BubbleMassTransferMode::FengMichaelidesClean;
+    if (value == "fengmichaelidesrigid" || value == "feng_michaelides_rigid")
+        return BubbleMassTransferMode::FengMichaelidesRigid;
+    throw std::invalid_argument(
+        "Unknown bubble_mass_transfer_model; expected legacyHughmark, sphericalDiffusion, "
+        "fengMichaelidesClean, or fengMichaelidesRigid.");
+}
+
 /**
  * @brief Validate a prescribed absolute-pressure history.
  * @param options Options containing the history arrays and pressure floor.
@@ -270,6 +287,8 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
             "surface_tension_model", "constant"));
     options.diffusivity_mode = parse_diffusivity(reader.value_or<std::string>(
         "hydrogen_diffusivity_model", "constant"));
+    options.mass_transfer_mode = parse_mass_transfer(reader.value_or<std::string>(
+        "bubble_mass_transfer_model", "legacyHughmark"));
 
 #define SIMPLEFLUID_RADIOLYTIC_REAL(member, key) \
     options.member = reader.value_or<real_t>(key, options.member)
@@ -421,6 +440,17 @@ void validate_radiolytic_gas_options(
     }
     if (options.mode == RadiolyticGasMode::IdealGasSource)
         return;
+
+    switch (options.mass_transfer_mode)
+    {
+    case BubbleMassTransferMode::LegacyHughmark:
+    case BubbleMassTransferMode::SphericalDiffusion:
+    case BubbleMassTransferMode::FengMichaelidesClean:
+    case BubbleMassTransferMode::FengMichaelidesRigid:
+        break;
+    default:
+        throw std::invalid_argument("Unknown bubble mass-transfer mode.");
+    }
 
     require_positive(options.henry_coefficient, "Henry coefficient");
     if (options.surface_tension_mode == SurfaceTensionMode::Constant)

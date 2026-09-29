@@ -194,7 +194,8 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
     SimpleFluid::CoupledOperatorBackend backend = SimpleFluid::CoupledOperatorBackend::Assembled,
     SimpleFluid::CoupledWorkspacePolicy workspace = SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
     SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares,
-    bool track_donor = false)
+    bool track_donor = false,
+    SimpleFluid::BubbleMassTransferMode mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::LegacyHughmark)
 {
     auto mesh = make_column();
     SimpleFluid::LinearSolverOptions linear_options;
@@ -213,6 +214,7 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
         solver->add_fission_power_source().initialize_constant(0.0);
         auto gas = gas_options();
         gas.pressure_mode = pressure_mode;
+        gas.mass_transfer_mode = mass_transfer_mode;
         if (bubble_slip_velocity > 0.0)
         {
             gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
@@ -955,11 +957,19 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionWritesCurrentParallelPiecesAndPvtuDi
 
 TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeometryAndClosesInventory)
 {
-    auto state = make_case(Coupling::PISO, 0.0, 8, true);
+    // This unchanged zero-slip fixture has Sc=100; selection checks ALE dispatch,
+    // accepted-state conservation and reconstruction, not high-Sc qualification.
+    auto state = make_case(Coupling::PISO, 0.0, 8, true, 0.0, false,
+        SimpleFluid::RadiolyticPressureMode::Constant, false,
+        SimpleFluid::CoupledOperatorBackend::Assembled,
+        SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+        SimpleFluid::FVM::CellGradientScheme::LeastSquares, false,
+        SimpleFluid::BubbleMassTransferMode::SphericalDiffusion);
     auto* gas = state.solver->find_radiolytic_gas_model();
     auto* fission = state.solver->find_fission_power_source();
     ASSERT_NE(gas, nullptr);
     ASSERT_NE(fission, nullptr);
+    EXPECT_EQ(gas->options().mass_transfer_mode, SimpleFluid::BubbleMassTransferMode::SphericalDiffusion);
     fission->initialize_constant(1.0e-3);
     const auto old_generated = gas->cumulative_hydrogen_produced();
     const auto old_epoch = state.mesh->geometry_epoch();
@@ -980,6 +990,17 @@ TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeomet
     EXPECT_EQ(ale.gas_state_residual_history.size(), static_cast<size_t>(ale.outer_correctors));
     EXPECT_NEAR(ale.volume_source.source_pool_closure_residual, 0.0, 1.0e-10);
     EXPECT_LE(ale.continuity.maximum, 3.0e-10);
+    const auto gas_fields = gas->output_fields();
+    const auto* characteristic_radius = gas_fields.at("r_characteristic");
+    const auto* coefficient = gas_fields.at("K_L");
+    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const auto radius = characteristic_radius->value(cell);
+        ASSERT_GT(radius, 0.0);
+        EXPECT_NEAR(coefficient->value(cell), 1.0e-5 / radius,
+                    1.0e-5 / radius * 1.0e-12);
+    }
     expect_zero_relative_top_flux(state);
 }
 
