@@ -14,6 +14,7 @@
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
+#include <array>
 #include <limits>
 namespace
 {
@@ -83,17 +84,38 @@ private:
     bool d_active = true;
 };
 
+enum class RejectionCategory { None, InvalidArgument, LogicError, Other };
+
 template<class Action>
-void expect_collective_error(const Teuchos::Comm<int>& comm, Action&& action, const char* expected)
+void expect_collective_error(const Teuchos::Comm<int>& comm, Action&& action,
+    RejectionCategory expected_category, const char* expected_message)
 {
     std::string message;
+    auto category = RejectionCategory::None;
     try { action(); }
-    catch (const std::exception& error) { message = error.what(); }
-    EXPECT_EQ(message, expected);
-    const int arrived = 1;
-    int total_arrived = 0;
-    Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, 1, &arrived, &total_arrived);
-    EXPECT_EQ(total_arrived, comm.getSize());
+    catch (const std::invalid_argument& error)
+    {
+        category = RejectionCategory::InvalidArgument;
+        message = error.what();
+    }
+    catch (const std::logic_error& error)
+    {
+        category = RejectionCategory::LogicError;
+        message = error.what();
+    }
+    catch (const std::exception& error)
+    {
+        category = RejectionCategory::Other;
+        message = error.what();
+    }
+    catch (...) { category = RejectionCategory::Other; }
+    EXPECT_EQ(category, expected_category);
+    EXPECT_EQ(message, expected_message);
+    const std::array<int, 2> local{1, category == expected_category && message == expected_message};
+    std::array<int, 2> global{};
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, static_cast<int>(local.size()), local.data(), global.data());
+    EXPECT_EQ(global[0], comm.getSize());
+    EXPECT_EQ(global[1], comm.getSize());
 }
 
 void check_gcl_face_order(const Handle& mesh, const FVM::ALEControlVolumeState& ale)
@@ -255,7 +277,8 @@ TEST(MultiRegionALETest, EmptyRanksReceiveCollectiveGclFailure)
     }
     const auto gcl_error = std::string("ALE control-volume state violates the cellwise geometric conservation law; maximum residual is ")
         + std::to_string(1.0) + " m^3/s.";
-    expect_collective_error(*comm, [&] { ale.validate(*mesh); }, gcl_error.c_str());
+    expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+        RejectionCategory::InvalidArgument, gcl_error.c_str());
 
     auto fresh_mesh = std::make_shared<ThrowingHandle>(geometry, options);
     MutableTestMotion fresh_motion(fresh_mesh);
@@ -282,6 +305,7 @@ TEST(MultiRegionALETest, RankLocalStaleChildFailsValidationCollectively)
         const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
         if (comm->getRank() == 0) *left = Meshes::OrthogonalCartesian3D(left_edges);
         expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+            RejectionCategory::LogicError,
             "Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
     }
     auto fresh_mesh = std::make_shared<Handle>(test::two_regions());
@@ -303,10 +327,12 @@ TEST(MultiRegionALETest, RankLocalTraversalFailureReleasesLeaseAndFailsCollectiv
 
     mesh->fail_faces = comm->getRank() == 0;
     expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+        RejectionCategory::LogicError,
         "ALE control-volume state mesh traversal failed on at least one rank.");
     mesh->fail_faces = false;
     mesh->fail_owner = comm->getRank() == 0;
     expect_collective_error(*comm, [&] { ale.validate(*mesh); },
+        RejectionCategory::LogicError,
         "ALE control-volume state mesh traversal failed on at least one rank.");
     mesh->fail_owner = false;
     EXPECT_NO_THROW(ale.validate(*mesh));
@@ -321,33 +347,37 @@ TEST(MultiRegionALETest, RankDivergentFaultsRetainCollectiveErrorPriority)
     MutableTestMotion motion(mesh);
     const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
     const auto face = static_cast<size_t>(mesh->faces(Handle::local_ordinal_type{0}).front());
-    const auto expect_error = [&](const char* expected)
-    { expect_collective_error(*comm, [&] { ale.validate(*mesh); }, expected); };
+    const auto expect_error = [&](RejectionCategory category, const char* expected)
+    { expect_collective_error(*comm, [&] { ale.validate(*mesh); }, category, expected); };
 
     motion.set_active(comm->getRank() != 0);
     if (comm->getRank() == 1) motion.set_new_epoch(ale.new_geometry_epoch() + 1);
-    expect_error("ALE control-volume state requires its originating motion trial to remain active.");
+    expect_error(RejectionCategory::LogicError,
+        "ALE control-volume state requires its originating motion trial to remain active.");
     motion.set_active(true);
     motion.set_new_epoch(ale.new_geometry_epoch());
 
     mesh->fail_epoch = comm->getRank() == 0;
     if (comm->getRank() == 1) motion.set_new_epoch(ale.new_geometry_epoch() + 1);
-    expect_error("Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
+    expect_error(RejectionCategory::LogicError,
+        "Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
     mesh->fail_epoch = false;
     motion.set_new_epoch(ale.new_geometry_epoch());
 
     motion.set_flux(face, comm->getRank() == 0 ? 1.0 : 0.0);
     const auto gcl_error = std::string("ALE control-volume state violates the cellwise geometric conservation law; maximum residual is ")
         + std::to_string(1.0) + " m^3/s.";
-    expect_error(gcl_error.c_str());
+    expect_error(RejectionCategory::InvalidArgument, gcl_error.c_str());
     motion.set_flux(face, 0.0);
 
     motion.set_flux(face, comm->getRank() == 0 ? std::numeric_limits<real_t>::quiet_NaN() : 1.0);
-    expect_error("ALE control-volume state contains invalid volume, mesh-flux, or GCL data.");
+    expect_error(RejectionCategory::InvalidArgument,
+        "ALE control-volume state contains invalid volume, mesh-flux, or GCL data.");
     motion.set_flux(face, comm->getRank() == 1 ? 1.0 : 0.0);
 
     mesh->fail_owner = comm->getRank() == 0;
-    expect_error("ALE control-volume state mesh traversal failed on at least one rank.");
+    expect_error(RejectionCategory::LogicError,
+        "ALE control-volume state mesh traversal failed on at least one rank.");
     mesh->fail_owner = false;
     motion.set_flux(face, 0.0);
     auto fresh_mesh = std::make_shared<ThrowingHandle>(test::two_regions());
