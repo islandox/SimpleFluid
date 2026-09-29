@@ -2,7 +2,7 @@
 #pragma once
 
 #include "FVM/ALEControlVolumeState.hh"
-#include "FVM/details/OperatorDetails.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 
 namespace SimpleFluid::FVM
 {
@@ -106,11 +106,11 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
             {
                 const auto cell_lid = static_cast<local_ordinal_type>(owned);
                 real_t mesh_flux_balance{};
-                detail::visit_cell_faces(mesh, cell_lid, [&](const auto face_lid)
+                for (const auto face_lid : mesh.faces(cell_lid))
                 {
                     const auto mesh_flux = d_face_mesh_fluxes[static_cast<size_t>(face_lid)];
                     mesh_flux_balance += mesh.owner_cell(face_lid) == cell_lid ? mesh_flux : -mesh_flux;
-                });
+                }
                 const auto volume_rate = (d_new_cell_volumes[owned] - d_old_cell_volumes[owned]) / d_time_step;
                 const auto residual = volume_rate - mesh_flux_balance;
                 const auto scale = std::max(std::abs(volume_rate), std::abs(mesh_flux_balance));
