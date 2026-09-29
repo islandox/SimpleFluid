@@ -351,6 +351,33 @@ TEST(RegionInterfaceIndexTest, IrregularDirectoryPreservesExplicitAndCoarseFineT
     check_reference_face_order(*refined);
 }
 
+TEST(RegionInterfaceIndexTest, MixedStructuredAndExplicitRemovalsKeepNativeOrder)
+{
+    auto center = cartesian_region("center", {{{0,0.5,1}, {0,0.5,1}, {0,0.5,1}}});
+    auto right = cartesian_region("right", {{{1,1.5,2}, {0,0.5,1}, {0,0.5,1}}});
+    auto upper = cartesian_region("upper", {{{0,0.5,1}, {1,1.5,2}, {0,0.5,1}}});
+    auto front = cartesian_region("front", {{{0,0.5,1}, {0,0.5,1}, {1,1.5,2}}});
+    const auto explicit_join = [](const auto& first, size_t first_region, int first_boundary,
+                                  const auto& second, size_t second_region, int second_boundary)
+    {
+        ExplicitConformingInterface join{first_region, second_region, first_boundary, second_boundary, {}};
+        for (size_t a = 0; a < first.layout().faces; ++a)
+            if (first.topology().boundary_id(a) == first_boundary)
+                for (size_t b = 0; b < second.layout().faces; ++b)
+                    if (second.topology().boundary_id(b) == second_boundary
+                        && (first.geometry().face_centroid(a) - second.geometry().face_centroid(b)).norm() < 1e-12)
+                        join.faces.emplace_back(a, b);
+        return join;
+    };
+    const auto x_join = explicit_join(right, 1, 0, center, 0, 1);
+    const auto z_join = explicit_join(front, 3, 4, center, 0, 5);
+    MultiRegionMesh mesh({center, right, upper, front},
+        {x_join, StructuredPatchInterface{{2,2}, {0,3}}, z_join});
+    EXPECT_EQ(mesh.removed_native_face_count(0), 12U);
+    check_reference_face_order(mesh);
+    check_canonical_incidence(mesh);
+}
+
 TEST(RegionInterfaceIndexTest, SelfPeriodicSidesPreserveAdjacentImageDistances)
 {
     auto region = cartesian_region("periodic", {{{0,0.5,1,1.5,2}, {0,0.5,1}, {0,0.5,1}}});
