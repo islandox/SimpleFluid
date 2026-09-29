@@ -31,7 +31,7 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
     {
         current_epoch = mesh_geometry_epoch(mesh);
     }
-    catch (const std::exception&)
+    catch (...)
     {
         local_static_error = 1;
     }
@@ -121,7 +121,7 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
                 local_maximum_gcl_residual = std::max(local_maximum_gcl_residual, std::abs(residual));
             }
         }
-        catch (const std::exception&)
+        catch (...)
         {
             local_traversal_error = 1;
         }
