@@ -14,6 +14,7 @@
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
+#include <limits>
 namespace
 {
 using namespace SimpleFluid;
@@ -25,7 +26,13 @@ class ThrowingHandle : public Handle
 {
 public:
     using Handle::Handle;
-    bool fail_faces = false, fail_owner = false;
+    bool fail_epoch = false, fail_faces = false, fail_owner = false;
+
+    std::uint64_t geometry_epoch() const
+    {
+        if (fail_epoch) throw std::runtime_error("Injected rank-local static geometry failure.");
+        return Handle::geometry_epoch();
+    }
 
     CellFaceRange faces(local_ordinal_type cell) const
     {
@@ -37,6 +44,43 @@ public:
         if (fail_owner) throw std::runtime_error("Injected rank-local owner lookup failure.");
         return Handle::owner_cell(face);
     }
+};
+
+class MutableTestMotion final : public MeshMotionModel
+{
+public:
+    explicit MutableTestMotion(std::shared_ptr<ThrowingHandle> mesh)
+        : d_mesh(std::move(mesh)), d_old(d_mesh->num_local_cells()), d_new(d_mesh->num_local_cells()),
+          d_flux(d_mesh->num_faces(), 0.0)
+    {
+        for (size_t local = 0; local < d_old.size(); ++local)
+        {
+            const auto lid = static_cast<Handle::local_ordinal_type>(local);
+            d_old[local] = d_new[local] = d_mesh->cell_volume(lid);
+        }
+        d_diagnostics.time_step = 1.0;
+        d_diagnostics.old_geometry_epoch = d_mesh->geometry_epoch();
+        d_diagnostics.new_geometry_epoch = d_mesh->geometry_epoch();
+        d_diagnostics.trial_active = true;
+    }
+    void begin_trial(real_t, real_t) override {}
+    void accept_trial() override { d_active = false; d_diagnostics.trial_active = false; }
+    void rollback_trial() override { d_active = false; d_diagnostics.trial_active = false; }
+    bool has_active_trial() const noexcept override { return d_active; }
+    std::string_view mesh_family() const noexcept override { return "test"; }
+    std::span<const real_t> old_cell_volumes() const noexcept override { return d_old; }
+    std::span<const real_t> new_cell_volumes() const noexcept override { return d_new; }
+    std::span<const real_t> face_mesh_fluxes() const noexcept override { return d_flux; }
+    const MeshMotionDiagnostics& diagnostics() const noexcept override { return d_diagnostics; }
+    const std::shared_ptr<ThrowingHandle>& mesh_ptr() const noexcept { return d_mesh; }
+    void set_active(bool active) { d_active = active; d_diagnostics.trial_active = active; }
+    void set_new_epoch(std::uint64_t epoch) { d_diagnostics.new_geometry_epoch = epoch; }
+    void set_flux(size_t face, real_t flux) { d_flux[face] = flux; }
+private:
+    std::shared_ptr<ThrowingHandle> d_mesh;
+    std::vector<real_t> d_old, d_new, d_flux;
+    MeshMotionDiagnostics d_diagnostics;
+    bool d_active = true;
 };
 
 void check_gcl_face_order(const Handle& mesh, const FVM::ALEControlVolumeState& ale)
@@ -212,6 +256,45 @@ TEST(MultiRegionALETest, RankLocalTraversalFailureReleasesLeaseAndFailsCollectiv
     mesh->fail_owner = false;
     EXPECT_NO_THROW(ale.validate(*mesh));
     EXPECT_NO_THROW(motion.rollback_trial());
+}
+
+TEST(MultiRegionALETest, RankDivergentFaultsRetainCollectiveErrorPriority)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    auto mesh = std::make_shared<ThrowingHandle>(test::two_regions());
+    MutableTestMotion motion(mesh);
+    const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+    const auto face = static_cast<size_t>(mesh->faces(Handle::local_ordinal_type{0}).front());
+    const auto expect_error = [&](const char* expected)
+    {
+        std::string message;
+        try { ale.validate(*mesh); }
+        catch (const std::exception& error) { message = error.what(); }
+        EXPECT_EQ(message, expected);
+    };
+
+    motion.set_active(comm->getRank() != 0);
+    if (comm->getRank() == 1) motion.set_new_epoch(ale.new_geometry_epoch() + 1);
+    expect_error("ALE control-volume state requires its originating motion trial to remain active.");
+    motion.set_active(true);
+    motion.set_new_epoch(ale.new_geometry_epoch());
+
+    mesh->fail_epoch = comm->getRank() == 0;
+    if (comm->getRank() == 1) motion.set_new_epoch(ale.new_geometry_epoch() + 1);
+    expect_error("Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
+    mesh->fail_epoch = false;
+    motion.set_new_epoch(ale.new_geometry_epoch());
+
+    motion.set_flux(face, comm->getRank() == 0 ? std::numeric_limits<real_t>::quiet_NaN() : 1.0);
+    expect_error("ALE control-volume state contains invalid volume, mesh-flux, or GCL data.");
+    motion.set_flux(face, comm->getRank() == 1 ? 1.0 : 0.0);
+
+    mesh->fail_owner = comm->getRank() == 0;
+    expect_error("ALE control-volume state mesh traversal failed on at least one rank.");
+    mesh->fail_owner = false;
+    motion.set_flux(face, 0.0);
+    EXPECT_NO_THROW(ale.validate(*mesh));
 }
 TEST(MultiRegionALETest, ChangingThePeriodicLengthIsRejected)
 {
