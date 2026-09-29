@@ -12,12 +12,38 @@
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
+#include <Tpetra_Core.hpp>
 namespace
 {
 using namespace SimpleFluid;
 using Pack=DefaultTpetraTypes;
 using Handle=MeshHandle<>;
 testing::Environment* const environment=testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+
+void check_gcl_face_order(const Handle& mesh, const FVM::ALEControlVolumeState& ale)
+{
+    const auto execution = mesh.acquire_execution_view();
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Handle::local_ordinal_type>(owned);
+        std::vector<Handle::local_ordinal_type> from_range, from_visit;
+        real_t range_balance = 0, visit_balance = 0;
+        for (const auto face : mesh.faces(cell))
+        {
+            from_range.push_back(face);
+            const auto flux = ale.face_mesh_fluxes()[static_cast<size_t>(face)];
+            range_balance += mesh.owner_cell(face) == cell ? flux : -flux;
+        }
+        mesh.visit_cell_faces(cell, [&](const auto face)
+        {
+            from_visit.push_back(face);
+            const auto flux = ale.face_mesh_fluxes()[static_cast<size_t>(face)];
+            visit_balance += mesh.owner_cell(face) == cell ? flux : -flux;
+        });
+        EXPECT_EQ(from_visit, from_range);
+        EXPECT_DOUBLE_EQ(visit_balance, range_balance);
+    }
+}
 }
 TEST(MultiRegionALETest, AffineMotionPreservesConstantsAndCanonicalGcl)
 {
@@ -73,12 +99,81 @@ TEST(MultiRegionALETest, ExtendedFamiliesPreserveAffineGcl)
         PlanarALEMeshMotion<> motion(mesh);
         motion.begin_trial(1.25,0.2);
         EXPECT_LT(motion.diagnostics().maximum_absolute_gcl_residual,2e-12);
+        const auto expansion = FVM::make_ale_control_volume_state(*mesh, motion);
+        EXPECT_NO_THROW(expansion.validate(*mesh));
+        check_gcl_face_order(*mesh, expansion);
         motion.rollback_trial();
         motion.begin_trial(0.75,0.2);
         EXPECT_LT(motion.diagnostics().maximum_absolute_gcl_residual,2e-12);
+        const auto contraction = FVM::make_ale_control_volume_state(*mesh, motion);
+        EXPECT_NO_THROW(contraction.validate(*mesh));
+        check_gcl_face_order(*mesh, contraction);
         motion.accept_trial();
         EXPECT_EQ(mesh->connectivity_storage_bytes(),0U);
     }
+}
+
+TEST(MultiRegionALETest, RetainedStateRejectsAcceptAndIdenticalTrialReplay)
+{
+    auto mesh = std::make_shared<Handle>(test::two_regions());
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.25, 0.2);
+    const auto accepted = FVM::make_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(accepted.validate(*mesh));
+    motion.accept_trial();
+    EXPECT_THROW(accepted.validate(*mesh), std::logic_error);
+
+    motion.begin_trial(1.25, 0.2);
+    const auto replayed = FVM::make_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(replayed.validate(*mesh));
+    motion.rollback_trial();
+    EXPECT_THROW(replayed.validate(*mesh), std::logic_error);
+    motion.begin_trial(1.25, 0.2);
+    EXPECT_THROW(replayed.validate(*mesh), std::invalid_argument);
+    const auto current = FVM::make_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(current.validate(*mesh));
+    motion.rollback_trial();
+}
+
+TEST(MultiRegionALETest, EmptyRanksParticipateInCollectiveGclValidation)
+{
+    auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
+        std::vector<Meshes::MultiRegionMesh::Region>{
+            Meshes::cartesian_region("single", {{{0,1}, {0,1}, {0,1}}})},
+        std::vector<Meshes::MultiRegionMesh::Interface>{});
+    Handle::DistributionOptions options;
+    options.allow_empty_partitions = true;
+    auto mesh = std::make_shared<Handle>(geometry, options);
+    const int local_empty = mesh->num_owned_cells() == 0;
+    int global_empty = 0;
+    const auto comm = mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &global_empty);
+    EXPECT_EQ(global_empty, comm->getSize() - 1);
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, 0.2);
+    const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(ale.validate(*mesh));
+    motion.rollback_trial();
+}
+
+TEST(MultiRegionALETest, RankLocalStaleChildFailsValidationCollectively)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    const Vec3D<ArrReal> left_edges{{{0,0.5,1}, {0,0.5,1}, {0,0.5,1}}};
+    const Vec3D<ArrReal> right_edges{{{1,1.5,2}, {0,0.5,1}, {0,0.5,1}}};
+    auto left = std::make_shared<Meshes::OrthogonalCartesian3D>(left_edges);
+    auto right = std::make_shared<Meshes::OrthogonalCartesian3D>(right_edges);
+    auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
+        std::vector<Meshes::MultiRegionMesh::Region>{
+            Meshes::native_region("left", left), Meshes::native_region("right", right)},
+        std::vector<Meshes::MultiRegionMesh::Interface>{Meshes::StructuredPatchInterface{{0,1}, {1,0}}});
+    auto mesh = std::make_shared<Handle>(geometry);
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, 0.2);
+    const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+    if (comm->getRank() == 0) *left = Meshes::OrthogonalCartesian3D(left_edges);
+    EXPECT_THROW(ale.validate(*mesh), std::logic_error);
 }
 TEST(MultiRegionALETest, ChangingThePeriodicLengthIsRejected)
 {

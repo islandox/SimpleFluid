@@ -1993,6 +1993,13 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     const auto accepted_hydrogen = gas->global_submerged_hydrogen_moles();
     const auto accepted_generation = gas->cumulative_hydrogen_produced();
     const auto advanced_epoch = state.mesh->geometry_epoch();
+    const auto accepted_geometry = capture_geometry(*state.mesh);
+    const auto accepted_primary = capture_primary(solver);
+    const auto accepted_absolute_flux = capture_owned_face_values(solver.pressure_corrected_face_fluxes());
+    const auto accepted_relative_flux = capture_owned_face_values(solver.mesh_relative_face_fluxes());
+    const auto accepted_mass = capture_owned_values(solver.liquid_mass_inventory().cellMassInventory());
+    const auto accepted_gas_fields = capture_gas_fields(*gas);
+    const auto accepted_history = solver.free_surface_history();
     std::vector<double> accepted_temperature;
     for (size_t owned = 0; owned < energy.size(); ++owned)
         accepted_temperature.push_back(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)));
@@ -2024,6 +2031,16 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     EXPECT_NEAR(gas->global_submerged_hydrogen_moles(), initial_hydrogen, 1.e-14);
     for (size_t owned = 0; owned < energy.size(); ++owned)
         EXPECT_DOUBLE_EQ(gas->donor_hydrogen_deficit().value(static_cast<Pack::local_ordinal_type>(owned)), 1.0);
+    auto alternate_energy = energy;
+    for (auto& value : alternate_energy) value *= 0.5;
+    solver.set_coupling_interval_energy(alternate_energy, 0.02);
+    solver.step();
+    solver.step();
+    EXPECT_LT(coupling_sensible_energy(state), accepted_energy);
+    solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_DOUBLE_EQ(solver.time(), 0.0);
+    EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
+    EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), 0.0);
     solver.set_coupling_interval_energy(energy, 0.02);
     solver.step();
     solver.step();
@@ -2032,6 +2049,20 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     EXPECT_NEAR(coupling_sensible_energy(state), accepted_energy, 2.e-8);
     EXPECT_NEAR(gas->cumulative_hydrogen_produced(), accepted_generation, 1.e-16);
     EXPECT_EQ(solver.free_surface_history().size(), initial_history + 2);
+    expect_geometry_restored(*state.mesh, accepted_geometry);
+    expect_primary_restored(solver, accepted_primary);
+    expect_owned_face_values(solver.pressure_corrected_face_fluxes(), accepted_absolute_flux);
+    expect_owned_face_values(solver.mesh_relative_face_fluxes(), accepted_relative_flux);
+    expect_owned_values(solver.liquid_mass_inventory().cellMassInventory(), accepted_mass);
+    expect_gas_fields_restored(*gas, accepted_gas_fields);
+    ASSERT_EQ(solver.free_surface_history().size(), accepted_history.size());
+    for (size_t step = 0; step < accepted_history.size(); ++step)
+    {
+        EXPECT_DOUBLE_EQ(solver.free_surface_history()[step].free_surface.pool_level,
+            accepted_history[step].free_surface.pool_level);
+        EXPECT_DOUBLE_EQ(solver.free_surface_history()[step].liquid_mass.total_mass,
+            accepted_history[step].liquid_mass.total_mass);
+    }
     for (size_t owned = 0; owned < energy.size(); ++owned)
         EXPECT_NEAR(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)),
             accepted_temperature[owned], 1.e-11);

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "FVM/ALEControlVolumeState.hh"
+#include "FVM/details/OperatorDetails.hh"
 
 namespace SimpleFluid::FVM
 {
@@ -22,11 +23,21 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
                                          d_face_mesh_fluxes.size() != mesh.num_faces()
                                      ? 1
                                      : 0;
-    const int local_epoch_error = mesh_geometry_epoch(mesh) != d_new_geometry_epoch ||
-                                          diagnostics.old_geometry_epoch != d_old_geometry_epoch ||
-                                          diagnostics.new_geometry_epoch != d_new_geometry_epoch
-                                      ? 1
-                                      : 0;
+    // A composite may reject a changed child while reading its epoch. Keep
+    // every rank in the first collective even when only one child is stale.
+    int local_static_error = 0;
+    std::uint64_t current_epoch = 0;
+    try
+    {
+        current_epoch = mesh_geometry_epoch(mesh);
+    }
+    catch (const std::exception&)
+    {
+        local_static_error = 1;
+    }
+    const int local_epoch_error = !local_static_error &&
+        (current_epoch != d_new_geometry_epoch || diagnostics.old_geometry_epoch != d_old_geometry_epoch ||
+            diagnostics.new_geometry_epoch != d_new_geometry_epoch);
     const int local_time_error =
         !std::isfinite(d_time_step) || d_time_step <= real_t{} || diagnostics.time_step != d_time_step ? 1 : 0;
     const int local_tolerance_error =
@@ -35,9 +46,9 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
             ? 1
             : 0;
 
-    std::array<int, 6> local_state{local_identity_error, local_trial_error, local_size_error, local_epoch_error,
-        local_time_error, local_tolerance_error};
-    std::array<int, 6> global_state{};
+    std::array<int, 7> local_state{local_identity_error, local_trial_error, local_size_error,
+        local_static_error, local_epoch_error, local_time_error, local_tolerance_error};
+    std::array<int, 7> global_state{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_state.size()), local_state.data(),
         global_state.data());
     if (global_state[0] != 0)
@@ -55,14 +66,18 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
     }
     if (global_state[3] != 0)
     {
-        throw std::invalid_argument(
-            "ALE control-volume state does not represent the mesh's current trial geometry epoch.");
+        throw std::logic_error("Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
     }
     if (global_state[4] != 0)
     {
-        throw std::invalid_argument("ALE control-volume state requires one finite positive trial time step.");
+        throw std::invalid_argument(
+            "ALE control-volume state does not represent the mesh's current trial geometry epoch.");
     }
     if (global_state[5] != 0)
+    {
+        throw std::invalid_argument("ALE control-volume state requires one finite positive trial time step.");
+    }
+    if (global_state[6] != 0)
     {
         throw std::invalid_argument("ALE control-volume state requires finite non-negative GCL tolerances.");
     }
@@ -80,31 +95,40 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
     }
 
     int local_gcl_failure = 0;
+    int local_traversal_error = 0;
     real_t local_maximum_gcl_residual{};
     if (local_non_finite == 0)
     {
-        for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+        try
         {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            real_t mesh_flux_balance{};
-            for (const auto face_lid : mesh.faces(cell_lid))
+            const auto execution = acquire_mesh_execution(mesh);
+            for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
             {
-                const auto mesh_flux = d_face_mesh_fluxes[static_cast<size_t>(face_lid)];
-                mesh_flux_balance += mesh.owner_cell(face_lid) == cell_lid ? mesh_flux : -mesh_flux;
+                const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                real_t mesh_flux_balance{};
+                detail::visit_cell_faces(mesh, cell_lid, [&](const auto face_lid)
+                {
+                    const auto mesh_flux = d_face_mesh_fluxes[static_cast<size_t>(face_lid)];
+                    mesh_flux_balance += mesh.owner_cell(face_lid) == cell_lid ? mesh_flux : -mesh_flux;
+                });
+                const auto volume_rate = (d_new_cell_volumes[owned] - d_old_cell_volumes[owned]) / d_time_step;
+                const auto residual = volume_rate - mesh_flux_balance;
+                const auto scale = std::max(std::abs(volume_rate), std::abs(mesh_flux_balance));
+                const auto tolerance = d_gcl_absolute_tolerance + d_gcl_relative_tolerance * scale;
+                local_non_finite = local_non_finite || !std::isfinite(volume_rate) ||
+                                   !std::isfinite(mesh_flux_balance) || !std::isfinite(residual);
+                local_gcl_failure = local_gcl_failure || std::abs(residual) > tolerance;
+                local_maximum_gcl_residual = std::max(local_maximum_gcl_residual, std::abs(residual));
             }
-            const auto volume_rate = (d_new_cell_volumes[owned] - d_old_cell_volumes[owned]) / d_time_step;
-            const auto residual = volume_rate - mesh_flux_balance;
-            const auto scale = std::max(std::abs(volume_rate), std::abs(mesh_flux_balance));
-            const auto tolerance = d_gcl_absolute_tolerance + d_gcl_relative_tolerance * scale;
-            local_non_finite = local_non_finite || !std::isfinite(volume_rate) ||
-                               !std::isfinite(mesh_flux_balance) || !std::isfinite(residual);
-            local_gcl_failure = local_gcl_failure || std::abs(residual) > tolerance;
-            local_maximum_gcl_residual = std::max(local_maximum_gcl_residual, std::abs(residual));
+        }
+        catch (const std::exception&)
+        {
+            local_traversal_error = 1;
         }
     }
 
-    std::array<int, 2> local_validation{local_non_finite, local_gcl_failure};
-    std::array<int, 2> global_validation{};
+    std::array<int, 3> local_validation{local_non_finite, local_traversal_error, local_gcl_failure};
+    std::array<int, 3> global_validation{};
     real_t global_maximum_gcl_residual{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_validation.size()),
         local_validation.data(), global_validation.data());
@@ -115,6 +139,10 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
         throw std::invalid_argument("ALE control-volume state contains invalid volume, mesh-flux, or GCL data.");
     }
     if (global_validation[1] != 0)
+    {
+        throw std::logic_error("ALE control-volume state mesh traversal failed on at least one rank.");
+    }
+    if (global_validation[2] != 0)
     {
         throw std::invalid_argument(
             "ALE control-volume state violates the cellwise geometric conservation law; maximum residual is " +
