@@ -15,6 +15,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -151,6 +152,206 @@ real_t hughmark_mass_transfer_coefficient(real_t diffusivity, real_t radius, rea
     const auto schmidt = dynamic_viscosity / (liquid_density * diffusivity);
     const auto reynolds = 2.0 * liquid_density * relative_speed * radius / dynamic_viscosity;
     return hughmark_sherwood(reynolds, schmidt) * diffusivity / (2.0 * radius);
+}
+
+namespace
+{
+BubbleMassTransferResult initialize_bubble_mass_transfer(
+    BubbleMassTransferMode model, real_t diffusivity, real_t radius,
+    real_t liquid_density, real_t dynamic_viscosity, real_t relative_speed)
+{
+    require_positive(diffusivity, "molecular hydrogen diffusivity");
+    require_positive(radius, "bubble radius");
+    require_positive(liquid_density, "liquid density");
+    require_positive(dynamic_viscosity, "liquid dynamic viscosity");
+    if (!std::isfinite(relative_speed))
+        throw std::invalid_argument("bubble-liquid relative speed must be finite.");
+
+    BubbleMassTransferResult result;
+    result.model = model;
+    result.diffusivity = diffusivity;
+    result.radius = radius;
+    result.diameter = 2.0 * radius;
+    result.liquid_density = liquid_density;
+    result.dynamic_viscosity = dynamic_viscosity;
+    result.relative_speed = std::abs(relative_speed);
+    result.reynolds = 2.0 * liquid_density * result.relative_speed * radius
+                    / dynamic_viscosity;
+    result.schmidt = dynamic_viscosity / (liquid_density * diffusivity);
+    result.peclet = result.reynolds * result.schmidt;
+    if (!std::isfinite(result.diameter) || !std::isfinite(result.reynolds)
+        || !std::isfinite(result.schmidt) || !std::isfinite(result.peclet))
+        throw std::invalid_argument("bubble transfer dimensionless groups must be finite.");
+    return result;
+}
+
+BubbleMassTransferResult finalize_bubble_mass_transfer(BubbleMassTransferResult result)
+{
+    result.coefficient = result.sherwood * result.diffusivity / result.diameter;
+    if (!std::isfinite(result.sherwood) || !std::isfinite(result.coefficient)
+        || result.sherwood <= 0.0 || result.coefficient <= 0.0)
+        throw std::invalid_argument("bubble mass-transfer result must be finite and positive.");
+    return result;
+}
+
+BubbleMassTransferResult feng_michaelides_bubble_mass_transfer(
+    BubbleMassTransferResult result)
+{
+    // Feng and Michaelides (2000), Powder Technology 112: p. 64 Eq. (4)
+    // quotes the earlier low-Pe steady asymptote; p. 67 Eq. (19) is the
+    // high-Pe numerical fit. Eq. (11) uses radius Pe_a = U R / D, while
+    // Eq. (A-12) uses diameter-averaged Sh.
+    // sigma = mu_l/mu_s: sigma -> infinity gives the inviscid mobile
+    // endpoint; sigma = 0 gives the rigid endpoint. The paper supplies
+    // no bridge between the small-Pe asymptote and high-Pe fit.
+    const auto radius_peclet = result.peclet / 2.0;
+    const bool clean = result.model == BubbleMassTransferMode::FengMichaelidesClean;
+    if (result.reynolds >= 1.0
+        || (result.peclet >= 1.0
+            && (radius_peclet < 100.0 || radius_peclet > 5000.0)))
+    {
+        std::ostringstream message;
+        message.precision(17);
+        message << (clean ? "fengMichaelidesClean" : "fengMichaelidesRigid")
+                << " requires Re_d < 1 and either 0 <= Pe_d < 1 "
+                   "(low-Pe asymptote) or 100 <= Pe_a <= 5000 "
+                   "(high-Pe fit, Pe_a = Pe_d/2): R="
+                << result.radius << " m, d=" << result.diameter << " m, u_rel="
+                << result.relative_speed << " m/s, rho_l=" << result.liquid_density
+                << " kg/m3, mu_l=" << result.dynamic_viscosity << " Pa s, D_m="
+                << result.diffusivity << " m2/s, Re_d=" << result.reynolds
+                << ", Sc=" << result.schmidt << ", Pe_d=" << result.peclet
+                << ", Pe_a=" << radius_peclet;
+        throw std::domain_error(message.str());
+    }
+    if (result.peclet < 1.0)
+    {
+        // Eq. (4) with sigma -> infinity (clean) or sigma = 0 (rigid).
+        // lim_{Pe->0} Pe^2 log(Pe) = 0; avoid log(0) explicitly.
+        const auto logarithmic = result.peclet == 0.0
+            ? 0.0 : result.peclet * result.peclet * std::log(result.peclet);
+        result.sherwood = 2.0 + 0.5 * result.peclet
+            + (clean ? 1.0 / 12.0 : 1.0 / 8.0) * logarithmic;
+        result.applicability = BubbleMassTransferApplicability::SourceLowPeAsymptotic;
+    }
+    else
+    {
+        // The Pe_a >= 100 gate is inferred from Table 1 fit residuals;
+        // Re_d < 1 is an operational Stokes assumption, not a source
+        // validation over a rectangular Re-by-Sc domain.
+        result.sherwood = 1.49 * std::pow(radius_peclet, clean ? 0.435 : 0.322);
+        result.applicability = BubbleMassTransferApplicability::SourceFitOperationalWindow;
+    }
+    return result;
+}
+
+template<BubbleMassTransferMode Model>
+BubbleMassTransferResult selected_bubble_mass_transfer(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed);
+
+template<>
+BubbleMassTransferResult
+selected_bubble_mass_transfer<BubbleMassTransferMode::LegacyHughmark>(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed)
+{
+    auto result = initialize_bubble_mass_transfer(
+        BubbleMassTransferMode::LegacyHughmark, diffusivity, radius,
+        liquid_density, dynamic_viscosity, relative_speed);
+    if (result.schmidt >= 250.0)
+    {
+        std::ostringstream message;
+        message.precision(17);
+        message << "legacyHughmark requires Sc < 250: R=" << result.radius
+                << " m, d=" << result.diameter << " m, u_rel="
+                << result.relative_speed << " m/s, rho_l=" << result.liquid_density
+                << " kg/m3, mu_l=" << result.dynamic_viscosity << " Pa s, D_m="
+                << result.diffusivity << " m2/s, Re=" << result.reynolds
+                << ", Sc=" << result.schmidt << ", Pe=" << result.peclet;
+        throw std::domain_error(message.str());
+    }
+    result.sherwood = hughmark_sherwood(result.reynolds, result.schmidt);
+    return finalize_bubble_mass_transfer(result);
+}
+
+template<>
+BubbleMassTransferResult
+selected_bubble_mass_transfer<BubbleMassTransferMode::SphericalDiffusion>(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed)
+{
+    auto result = initialize_bubble_mass_transfer(
+        BubbleMassTransferMode::SphericalDiffusion, diffusivity, radius,
+        liquid_density, dynamic_viscosity, relative_speed);
+    if (result.relative_speed != 0.0)
+    {
+        std::ostringstream message;
+        message.precision(17);
+        message << "sphericalDiffusion is a quiescent-liquid reference requiring Pe = 0: "
+                << "R=" << result.radius << " m, d=" << result.diameter
+                << " m, u_rel=" << result.relative_speed << " m/s, rho_l="
+                << result.liquid_density << " kg/m3, mu_l="
+                << result.dynamic_viscosity << " Pa s, D_m=" << result.diffusivity
+                << " m2/s, Re=" << result.reynolds << ", Sc=" << result.schmidt
+                << ", Pe=" << result.peclet;
+        throw std::domain_error(message.str());
+    }
+    result.applicability = BubbleMassTransferApplicability::DiffusionOnlyReference;
+    result.sherwood = 2.0;
+    return finalize_bubble_mass_transfer(result);
+}
+
+template<>
+BubbleMassTransferResult
+selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesClean>(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed)
+{
+    const auto result = initialize_bubble_mass_transfer(
+        BubbleMassTransferMode::FengMichaelidesClean, diffusivity, radius,
+        liquid_density, dynamic_viscosity, relative_speed);
+    return finalize_bubble_mass_transfer(
+        feng_michaelides_bubble_mass_transfer(result));
+}
+
+template<>
+BubbleMassTransferResult
+selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesRigid>(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed)
+{
+    const auto result = initialize_bubble_mass_transfer(
+        BubbleMassTransferMode::FengMichaelidesRigid, diffusivity, radius,
+        liquid_density, dynamic_viscosity, relative_speed);
+    return finalize_bubble_mass_transfer(
+        feng_michaelides_bubble_mass_transfer(result));
+}
+} // namespace
+
+BubbleMassTransferEvaluator select_bubble_mass_transfer_evaluator(
+    BubbleMassTransferMode model)
+{
+    switch (model)
+    {
+    case BubbleMassTransferMode::LegacyHughmark:
+        return &selected_bubble_mass_transfer<BubbleMassTransferMode::LegacyHughmark>;
+    case BubbleMassTransferMode::SphericalDiffusion:
+        return &selected_bubble_mass_transfer<BubbleMassTransferMode::SphericalDiffusion>;
+    case BubbleMassTransferMode::FengMichaelidesClean:
+        return &selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesClean>;
+    case BubbleMassTransferMode::FengMichaelidesRigid:
+        return &selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesRigid>;
+    }
+    throw std::invalid_argument("Unknown bubble mass-transfer mode.");
+}
+
+BubbleMassTransferResult bubble_mass_transfer(
+    BubbleMassTransferMode model, real_t diffusivity, real_t radius,
+    real_t liquid_density, real_t dynamic_viscosity, real_t relative_speed)
+{
+    return select_bubble_mass_transfer_evaluator(model)(
+        diffusivity, radius, liquid_density, dynamic_viscosity, relative_speed);
 }
 
 real_t celata2007_drag_coefficient(real_t reynolds, real_t eotvos)
