@@ -7,6 +7,7 @@
  * @copyright Copyright (c) 2026
  */
 #include <gtest/gtest.h>
+#include "FVM/ALEControlVolumeState.tcc"
 #include "FVM/Operators.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
@@ -19,6 +20,24 @@ using namespace SimpleFluid;
 using Pack=DefaultTpetraTypes;
 using Handle=MeshHandle<>;
 testing::Environment* const environment=testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+
+class ThrowingHandle : public Handle
+{
+public:
+    using Handle::Handle;
+    bool fail_faces = false, fail_owner = false;
+
+    CellFaceRange faces(local_ordinal_type cell) const
+    {
+        if (fail_faces) throw std::runtime_error("Injected rank-local face traversal failure.");
+        return Handle::faces(cell);
+    }
+    local_ordinal_type owner_cell(local_ordinal_type face) const
+    {
+        if (fail_owner) throw std::runtime_error("Injected rank-local owner lookup failure.");
+        return Handle::owner_cell(face);
+    }
+};
 
 void check_gcl_face_order(const Handle& mesh, const FVM::ALEControlVolumeState& ale)
 {
@@ -174,6 +193,25 @@ TEST(MultiRegionALETest, RankLocalStaleChildFailsValidationCollectively)
     const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
     if (comm->getRank() == 0) *left = Meshes::OrthogonalCartesian3D(left_edges);
     EXPECT_THROW(ale.validate(*mesh), std::logic_error);
+}
+
+TEST(MultiRegionALETest, RankLocalTraversalFailureReleasesLeaseAndFailsCollectively)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    auto mesh = std::make_shared<ThrowingHandle>(test::two_regions());
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, 0.2);
+    const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+
+    mesh->fail_faces = comm->getRank() == 0;
+    EXPECT_THROW(ale.validate(*mesh), std::logic_error);
+    mesh->fail_faces = false;
+    mesh->fail_owner = comm->getRank() == 0;
+    EXPECT_THROW(ale.validate(*mesh), std::logic_error);
+    mesh->fail_owner = false;
+    EXPECT_NO_THROW(ale.validate(*mesh));
+    EXPECT_NO_THROW(motion.rollback_trial());
 }
 TEST(MultiRegionALETest, ChangingThePeriodicLengthIsRejected)
 {
