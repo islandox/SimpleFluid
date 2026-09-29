@@ -190,7 +190,7 @@ void expect_constant_preservation(SimpleFluid::real_t target_elevation)
 class CorruptMotion final : public SimpleFluid::MeshMotionModel
 {
 public:
-    explicit CorruptMotion(std::shared_ptr<Handle> mesh)
+    explicit CorruptMotion(std::shared_ptr<Handle> mesh, bool corrupt_initially = true)
         : d_mesh(std::move(mesh)), d_old(d_mesh->num_local_cells()), d_new(d_mesh->num_local_cells()),
           d_flux(d_mesh->num_faces(), 0.0)
     {
@@ -200,19 +200,26 @@ public:
             d_old[local] = d_mesh->cell_volume(lid);
             d_new[local] = d_old[local];
         }
-        for (size_t face = 0; face < d_mesh->num_faces(); ++face)
-        {
-            const auto lid = static_cast<local_ordinal_type>(face);
-            if (d_mesh->is_boundary_face(lid))
-            {
-                d_flux[face] = 1.0;
-                break;
-            }
-        }
+        if (corrupt_initially) corrupt_flux();
         d_diagnostics.time_step = 1.0;
         d_diagnostics.old_geometry_epoch = d_mesh->geometry_epoch();
         d_diagnostics.new_geometry_epoch = d_mesh->geometry_epoch();
         d_diagnostics.trial_active = true;
+    }
+
+    void corrupt_flux()
+    {
+        if (d_mesh->num_owned_cells() == 0) return;
+        for (const auto face : d_mesh->faces(local_ordinal_type{0}))
+        {
+            if (d_mesh->is_boundary_face(face))
+            {
+                d_flux[static_cast<size_t>(face)] = 1.0;
+                return;
+            }
+        }
+        const auto first = d_mesh->faces(local_ordinal_type{0}).front();
+        d_flux[static_cast<size_t>(first)] = 1.0;
     }
 
     void begin_trial(SimpleFluid::real_t, SimpleFluid::real_t) override {}
@@ -467,4 +474,14 @@ TEST(ALETransportTest, RejectsWrongGclFluxMismatchedTimestepAndBdf2)
                          .older_values = &older_values,
                          .ale = &ale}),
         std::invalid_argument);
+}
+
+TEST(ALETransportTest, RechecksRankLocalMutableFluxAfterSuccessfulValidation)
+{
+    auto mesh = make_column();
+    CorruptMotion motion(mesh, false);
+    const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(ale.validate(*mesh));
+    if (mesh->owned_cell_map()->getComm()->getRank() == 0) motion.corrupt_flux();
+    EXPECT_THROW(ale.validate(*mesh), std::invalid_argument);
 }
