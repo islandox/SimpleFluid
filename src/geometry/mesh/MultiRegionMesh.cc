@@ -150,17 +150,7 @@ MultiRegionMesh::PatchFaceIndex MultiRegionMesh::patch_face_index(const Structur
     if (indexer.face_strides[p.boundary / 2][axes[fast]] > indexer.face_strides[p.boundary / 2][axes[slow]]) std::swap(fast, slow);
     const auto stride_fast = indexer.face_strides[p.boundary / 2][axes[fast]];
     const auto stride_slow = indexer.face_strides[p.boundary / 2][axes[slow]];
-    return {origin, origin + (p.extent[slow]-1) * stride_slow + (p.extent[fast]-1) * stride_fast + 1,
-        stride_fast, stride_slow, p.extent[fast], p.extent[slow], p.extent[0] * p.extent[1]};
-}
-size_t MultiRegionMesh::PatchFaceIndex::count_before(ID face) const noexcept
-{
-    if (face <= begin) return 0;
-    if (face >= end) return count;
-    const auto delta = face - begin;
-    const auto rows = std::min<size_t>(slow_extent, delta / slow_stride);
-    const auto remaining = delta - rows * slow_stride;
-    return rows * fast_extent + std::min<size_t>(fast_extent, remaining / fast_stride + (remaining % fast_stride != 0));
+    return {origin, stride_fast, stride_slow, p.extent[fast], p.extent[slow], p.extent[0] * p.extent[1]};
 }
 void MultiRegionMesh::initialize_interface_directory()
 {
@@ -241,7 +231,28 @@ void MultiRegionMesh::initialize_interface_directory()
     for (size_t r = 0; r < d_regions.size(); ++r)
     {
         auto& directory = d_region_interfaces[r];
-        if (!directory.direct_selection) continue;
+        if (!directory.direct_selection)
+        {
+            auto& removed = directory.removed_native_faces;
+            removed.reserve(directory.removed_faces);
+            for (size_t side = directory.offsets.front(); side < directory.offsets.back(); ++side)
+            {
+                const auto [i, first] = d_interface_sides[side];
+                if (first) continue;
+                if (const auto& patch = d_removed_patch_index[i]; patch.count)
+                    for (size_t slow = 0; slow < patch.slow_extent; ++slow)
+                        for (size_t fast = 0; fast < patch.fast_extent; ++fast)
+                            removed.push_back(patch.begin + slow * patch.slow_stride + fast * patch.fast_stride);
+                else
+                    for (const auto& entry : d_explicit[i].second_to_first)
+                        removed.push_back(entry.first);
+            }
+            std::sort(removed.begin(), removed.end());
+            if (removed.size() != directory.removed_faces
+                || std::adjacent_find(removed.begin(), removed.end()) != removed.end())
+                throw std::invalid_argument("A native face is stitched more than once.");
+            continue;
+        }
         const auto indexer = rectilinear_indexer(region_layout(r));
         ID retained_begin = 0;
         for (size_t orientation = 0; orientation < 3; ++orientation)
@@ -289,20 +300,8 @@ size_t MultiRegionMesh::removed_before(size_t r, ID face) const
             + (local / selection.native_run) * removed_per_run
             + (selection.skip_low && local % selection.native_run != 0);
     }
-    size_t count=0;
-    for (size_t side = directory.offsets.front(); side < directory.offsets.back(); ++side)
-    {
-        const auto [i, first] = d_interface_sides[side];
-        if (first) continue;
-        if(const auto& patch = d_removed_patch_index[i]; patch.count)
-            count += patch.count_before(face);
-        else
-        {
-            const auto& pairs=d_explicit[i].second_to_first;
-            count+=std::lower_bound(pairs.begin(),pairs.end(),face,[](const auto& p,ID f){return p.first<f;})-pairs.begin();
-        }
-    }
-    return count;
+    return std::lower_bound(directory.removed_native_faces.begin(),
+        directory.removed_native_faces.end(), face) - directory.removed_native_faces.begin();
 }
 std::optional<RegionFace> MultiRegionMesh::partner(RegionFace f, bool first) const
 {
@@ -423,15 +422,17 @@ RegionFace MultiRegionMesh::native_face(ID f) const
             + (local / selection.retained_run) * removed_per_run
             + selection.skip_low};
     }
-    ID lo = ordinal, hi = region_layout(r).faces;
-    // Rank/select through removed rectangular ranges or sorted irregular IDs.
+    const auto& removed = directory.removed_native_faces;
+    size_t lo = 0, hi = removed.size();
+    // The number of retained faces before removed[i] is removed[i] - i.
+    // Count removed faces preceding this retained ordinal, then add that count.
     while (lo < hi)
     {
         const auto mid = lo + (hi - lo) / 2;
-        if (mid + 1 - removed_before(r, mid + 1) <= ordinal) lo = mid + 1;
+        if (removed[mid] - mid <= ordinal) lo = mid + 1;
         else hi = mid;
     }
-    return {r, lo};
+    return {r, ordinal + lo};
 }
 std::pair<size_t, ID> MultiRegionMesh::native_cell(ID c) const
 {
@@ -1135,6 +1136,8 @@ MeshStorageReport MultiRegionMesh::storage_report() const
     result.indexing += d_region_interfaces.capacity() * sizeof(RegionInterfaceDirectory)
         + d_interface_sides.capacity() * sizeof(InterfaceSide)
         + d_removed_patch_index.capacity() * sizeof(PatchFaceIndex);
+    for (const auto& directory : d_region_interfaces)
+        result.indexing += directory.removed_native_faces.capacity() * sizeof(ID);
     result.interfaces = d_interfaces.capacity() * sizeof(Interface) + d_explicit.capacity() * sizeof(ExplicitLookup);
     for (size_t i = 0; i < d_interfaces.size(); ++i)
     {
