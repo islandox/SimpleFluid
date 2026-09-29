@@ -99,6 +99,15 @@ enum class HydrogenDiffusivityMode
     External   ///< Evaluate a caller-supplied temperature correlation.
 };
 
+/** @brief Liquid-side transfer law for the representative bubbles. */
+enum class BubbleMassTransferMode
+{
+    LegacyHughmark,   ///< Historical model, requiring Sc < 250.
+    SphericalDiffusion, ///< Steady diffusion-only reference: Sh = 2.
+    FengMichaelidesClean, ///< Feng 2000 inviscid, mobile-interface endpoint.
+    FengMichaelidesRigid ///< Feng 2000 rigid, immobilized-interface endpoint.
+};
+
 /** @brief Nucleation-radius property selection. */
 enum class NucleationRadiusMode
 {
@@ -119,6 +128,7 @@ struct RadiolyticGasOptions
     BubbleRiseVelocityMode rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;
     SurfaceTensionMode surface_tension_mode = SurfaceTensionMode::Constant;
     HydrogenDiffusivityMode diffusivity_mode = HydrogenDiffusivityMode::Constant;
+    BubbleMassTransferMode mass_transfer_mode = BubbleMassTransferMode::LegacyHughmark;
     NucleationRadiusMode nucleation_radius_mode = NucleationRadiusMode::Constant;
 
     real_t hydrogen_yield_mol_per_j = 0.0;
@@ -229,6 +239,60 @@ SIMPLEFLUID_EQUATIONS_EXPORT real_t
 hughmark_mass_transfer_coefficient(
     real_t diffusivity, real_t radius, real_t liquid_density,
     real_t dynamic_viscosity, real_t relative_speed);
+
+/** @brief How to interpret the selected transfer result. */
+enum class BubbleMassTransferApplicability
+{
+    LegacyScGuardPassed, ///< Existing Sc guard passed; no new Re qualification.
+    DiffusionOnlyReference, ///< Steady radial diffusion with Pe = 0.
+    SourceLowPeAsymptotic, ///< Feng 2000 p. 64 Eq. (4), Pe_d < 1.
+    SourceFitOperationalWindow, ///< Feng 2000 p. 67 Eq. (19), gated high Pe.
+    MixedSourceRegimes ///< Aggregate only: low-Pe and high-Pe evaluations occurred.
+};
+
+/** @brief Diameter-based dimensionless groups and liquid-side coefficient. */
+struct BubbleMassTransferResult
+{
+    BubbleMassTransferMode model = BubbleMassTransferMode::LegacyHughmark;
+    BubbleMassTransferApplicability applicability =
+        BubbleMassTransferApplicability::LegacyScGuardPassed;
+    real_t radius = 0.0;
+    real_t diameter = 0.0;
+    real_t relative_speed = 0.0;
+    real_t liquid_density = 0.0;
+    real_t dynamic_viscosity = 0.0;
+    real_t diffusivity = 0.0;
+    real_t reynolds = 0.0;
+    real_t schmidt = 0.0;
+    real_t peclet = 0.0;
+    real_t sherwood = 0.0;
+    real_t coefficient = 0.0;
+};
+
+/** @brief Pure, SI-input transfer evaluator selected once for a field operation. */
+using BubbleMassTransferEvaluator = BubbleMassTransferResult (*)(
+    real_t diffusivity, real_t radius, real_t liquid_density,
+    real_t dynamic_viscosity, real_t relative_speed);
+
+/**
+ * @brief Resolve the immutable model selector before traversing cells.
+ *
+ * The returned evaluator still validates each cell's physical state and
+ * correlation domain. Unknown model values throw invalid_argument here.
+ */
+SIMPLEFLUID_EQUATIONS_EXPORT BubbleMassTransferEvaluator
+select_bubble_mass_transfer_evaluator(BubbleMassTransferMode model);
+
+/**
+ * @brief Evaluate the selected liquid-side law using SI inputs and bubble-liquid slip.
+ *
+ * Re, Sc, Pe and Sh use bubble diameter. Invalid inputs throw invalid_argument;
+ * a finite state outside a correlation domain throws domain_error.
+ */
+SIMPLEFLUID_EQUATIONS_EXPORT BubbleMassTransferResult
+bubble_mass_transfer(BubbleMassTransferMode model, real_t diffusivity,
+                     real_t radius, real_t liquid_density,
+                     real_t dynamic_viscosity, real_t relative_speed);
 
 /** @brief Celata 2007 drag coefficient from Reynolds and Eotvos numbers. */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t

@@ -506,6 +506,74 @@ void RadiolyticGasModel<Pack, MeshType>::reduce_event_statistics()
     d_last_statistics.clipped_cells = global_counts[0];
     d_last_statistics.pressure_floor_cells = global_counts[1];
     d_last_statistics.radius_solver_failures = global_counts[2];
+
+    auto& transfer = d_last_statistics.mass_transfer;
+    const std::array<long long, 3> local_transfer_counts{
+        transfer.evaluations, transfer.low_peclet_evaluations,
+        transfer.fit_evaluations};
+    std::array<long long, 3> global_transfer_counts{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM,
+                       static_cast<int>(local_transfer_counts.size()),
+                       local_transfer_counts.data(), global_transfer_counts.data());
+    constexpr auto absent_min = std::numeric_limits<scalar_type>::infinity();
+    constexpr auto absent_max = -std::numeric_limits<scalar_type>::infinity();
+    const auto values = [](const RadiolyticGasPhysics::BubbleMassTransferResult& value)
+    {
+        return std::array<scalar_type, 11>{
+            value.radius, value.diameter, value.relative_speed,
+            value.liquid_density, value.dynamic_viscosity, value.diffusivity,
+            value.reynolds, value.schmidt, value.peclet,
+            value.sherwood, value.coefficient};
+    };
+    std::array<scalar_type, 11> local_minimum{}, local_maximum{};
+    local_minimum.fill(absent_min);
+    local_maximum.fill(absent_max);
+    if (transfer.evaluations > 0)
+    {
+        local_minimum = values(transfer.minimum);
+        local_maximum = values(transfer.maximum);
+    }
+    std::array<scalar_type, 11> global_minimum{}, global_maximum{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN,
+                       static_cast<int>(local_minimum.size()),
+                       local_minimum.data(), global_minimum.data());
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX,
+                       static_cast<int>(local_maximum.size()),
+                       local_maximum.data(), global_maximum.data());
+    transfer.evaluations = global_transfer_counts[0];
+    transfer.low_peclet_evaluations = global_transfer_counts[1];
+    transfer.fit_evaluations = global_transfer_counts[2];
+    if (transfer.evaluations > 0)
+    {
+        const auto assign = [&](RadiolyticGasPhysics::BubbleMassTransferResult& result,
+                                const std::array<scalar_type, 11>& data)
+        {
+            result.model = d_options.mass_transfer_mode;
+            if (d_options.mass_transfer_mode == BubbleMassTransferMode::SphericalDiffusion)
+                result.applicability = RadiolyticGasPhysics::BubbleMassTransferApplicability::DiffusionOnlyReference;
+            else if (d_options.mass_transfer_mode == BubbleMassTransferMode::LegacyHughmark)
+                result.applicability = RadiolyticGasPhysics::BubbleMassTransferApplicability::LegacyScGuardPassed;
+            else if (transfer.low_peclet_evaluations > 0 && transfer.fit_evaluations > 0)
+                result.applicability = RadiolyticGasPhysics::BubbleMassTransferApplicability::MixedSourceRegimes;
+            else if (transfer.low_peclet_evaluations > 0)
+                result.applicability = RadiolyticGasPhysics::BubbleMassTransferApplicability::SourceLowPeAsymptotic;
+            else
+                result.applicability = RadiolyticGasPhysics::BubbleMassTransferApplicability::SourceFitOperationalWindow;
+            result.radius = data[0];
+            result.diameter = data[1];
+            result.relative_speed = data[2];
+            result.liquid_density = data[3];
+            result.dynamic_viscosity = data[4];
+            result.diffusivity = data[5];
+            result.reynolds = data[6];
+            result.schmidt = data[7];
+            result.peclet = data[8];
+            result.sherwood = data[9];
+            result.coefficient = data[10];
+        };
+        assign(transfer.minimum, global_minimum);
+        assign(transfer.maximum, global_maximum);
+    }
 }
 
 /**
@@ -754,8 +822,22 @@ evaluate_submerged_bubble_volume(
     int local_invalid_state = 0;
     int local_radius_failure = 0;
     int local_evaluation_failure = 0;
+    std::string local_evaluation_detail;
+    RadiolyticGasPhysics::BubbleMassTransferEvaluator transfer_evaluator = nullptr;
+    try
+    {
+        transfer_evaluator = RadiolyticGasPhysics::select_bubble_mass_transfer_evaluator(
+            d_options.mass_transfer_mode);
+    }
+    catch (const std::exception& error)
+    {
+        local_evaluation_failure = 1;
+        local_evaluation_detail = error.what();
+    }
     for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
+        if (local_evaluation_failure)
+            break;
         const auto cell_lid =
             static_cast<local_ordinal_type>(owned);
         try
@@ -844,19 +926,19 @@ evaluate_submerged_bubble_volume(
                 equilibrium_radius);
             if (characteristic_radius > 0.0)
             {
-                (void)RadiolyticGasPhysics::
-                    hughmark_mass_transfer_coefficient(
-                        diffusivity,
-                        characteristic_radius,
-                        density,
-                        viscosity,
-                        rise_velocity(
-                            characteristic_radius,
-                            density,
-                            viscosity,
-                            surface_tension));
+                (void)evaluate_mass_transfer(
+                    transfer_evaluator, cell_lid, "characteristic-radius preflight",
+                    characteristic_radius, diffusivity, density, viscosity,
+                    rise_velocity(characteristic_radius, density, viscosity,
+                                  surface_tension));
             }
             local_volume += raw_void * d_mesh->cell_volume(cell_lid);
+        }
+        catch (const std::exception& error)
+        {
+            local_evaluation_failure = 1;
+            if (local_evaluation_detail.empty())
+                local_evaluation_detail = error.what();
         }
         catch (...)
         {
@@ -877,9 +959,16 @@ evaluate_submerged_bubble_volume(
     }
     if (global_max(local_evaluation_failure) != 0)
     {
-        throw std::runtime_error(
-            "Candidate pressure offset failed a local thermodynamic "
-            "correlation; the candidate was not accepted.");
+        const int local_rank = local_evaluation_failure
+            ? d_mesh->owned_cell_map()->getComm()->getRank()
+            : std::numeric_limits<int>::max();
+        int first_rank = 0;
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),
+            Teuchos::REDUCE_MIN, 1, &local_rank, &first_rank);
+        throw std::runtime_error(local_evaluation_detail.empty()
+            ? "Candidate pressure offset failed a local correlation on rank "
+                + std::to_string(first_rank) + "; the candidate was not accepted."
+            : "Candidate pressure offset rejected: " + local_evaluation_detail);
     }
     return global_sum(local_volume);
 }
@@ -2079,6 +2168,71 @@ auto RadiolyticGasModel<Pack, MeshType>::concentration(
     return state.dissolved_inventory / liquid_fraction;
 }
 
+/** @brief Add mesh identity to failures from the shared transfer evaluator. */
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::evaluate_mass_transfer(
+    RadiolyticGasPhysics::BubbleMassTransferEvaluator transfer_evaluator,
+    local_ordinal_type cell_lid, std::string_view population,
+    scalar_type radius, scalar_type diffusivity, scalar_type density,
+    scalar_type viscosity, scalar_type relative_speed) const
+    -> RadiolyticGasPhysics::BubbleMassTransferResult
+{
+    try
+    {
+        return transfer_evaluator(diffusivity, radius, density,
+                                  viscosity, relative_speed);
+    }
+    catch (const std::exception& error)
+    {
+        std::ostringstream message;
+        message.precision(17);
+        message << "Radiolytic " << population << " transfer at rank "
+                << d_mesh->owned_cell_map()->getComm()->getRank()
+                << ", cell " << d_mesh->cell_global_id(cell_lid)
+                << ": R=" << radius << " m, u_rel=" << relative_speed
+                << " m/s, rho_l=" << density << " kg/m3, mu_l=" << viscosity
+                << " Pa s, D_m=" << diffusivity << " m2/s: " << error.what();
+        if (dynamic_cast<const std::domain_error*>(&error))
+            throw std::domain_error(message.str());
+        if (dynamic_cast<const std::invalid_argument*>(&error))
+            throw std::invalid_argument(message.str());
+        throw std::runtime_error(message.str());
+    }
+}
+
+/** @brief Accumulate active-population ranges once per kinetics evaluation. */
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::record_mass_transfer(
+    const RadiolyticGasPhysics::BubbleMassTransferResult& result)
+{
+    auto& envelope = d_last_statistics.mass_transfer;
+    if (result.applicability == RadiolyticGasPhysics::BubbleMassTransferApplicability::SourceLowPeAsymptotic)
+        ++envelope.low_peclet_evaluations;
+    else if (result.applicability == RadiolyticGasPhysics::BubbleMassTransferApplicability::SourceFitOperationalWindow)
+        ++envelope.fit_evaluations;
+    if (envelope.evaluations++ == 0)
+    {
+        envelope.minimum = result;
+        envelope.maximum = result;
+        return;
+    }
+#define SIMPLEFLUID_TRANSFER_RANGE(member) \
+    envelope.minimum.member = std::min(envelope.minimum.member, result.member); \
+    envelope.maximum.member = std::max(envelope.maximum.member, result.member)
+    SIMPLEFLUID_TRANSFER_RANGE(radius);
+    SIMPLEFLUID_TRANSFER_RANGE(diameter);
+    SIMPLEFLUID_TRANSFER_RANGE(relative_speed);
+    SIMPLEFLUID_TRANSFER_RANGE(liquid_density);
+    SIMPLEFLUID_TRANSFER_RANGE(dynamic_viscosity);
+    SIMPLEFLUID_TRANSFER_RANGE(diffusivity);
+    SIMPLEFLUID_TRANSFER_RANGE(reynolds);
+    SIMPLEFLUID_TRANSFER_RANGE(schmidt);
+    SIMPLEFLUID_TRANSFER_RANGE(peclet);
+    SIMPLEFLUID_TRANSFER_RANGE(sherwood);
+    SIMPLEFLUID_TRANSFER_RANGE(coefficient);
+#undef SIMPLEFLUID_TRANSFER_RANGE
+}
+
 /**
  * @brief Integrate local hydrogen production, conversion, and dissolution.
  * @tparam Pack Tpetra type pack used by the model.
@@ -2095,6 +2249,8 @@ auto RadiolyticGasModel<Pack, MeshType>::concentration(
 template<TpetraTypePack Pack, class MeshType>
 auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
     const CellKineticsState& initial,
+    local_ordinal_type cell_lid,
+    RadiolyticGasPhysics::BubbleMassTransferEvaluator transfer_evaluator,
     scalar_type time_step,
     scalar_type production_rate,
     scalar_type liquid_fraction,
@@ -2182,7 +2338,9 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
         if (!radius_result.converged)
         {
             ++d_last_statistics.radius_solver_failures;
-            continue;
+            throw std::runtime_error("Active large-population bubble radius solve failed at rank "
+                + std::to_string(d_mesh->owned_cell_map()->getComm()->getRank())
+                + ", cell " + std::to_string(d_mesh->cell_global_id(cell_lid)) + ".");
         }
 
         const auto radius = radius_result.radius;
@@ -2198,13 +2356,11 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
                 properties.density,
                 properties.viscosity,
                 properties.surface_tension);
-        const auto transfer_coefficient =
-            RadiolyticGasPhysics::hughmark_mass_transfer_coefficient(
-                properties.diffusivity,
-                radius,
-                properties.density,
-                properties.viscosity,
-                relative_speed);
+        const auto transfer = evaluate_mass_transfer(
+            transfer_evaluator, cell_lid, "large-population", radius, properties.diffusivity,
+            properties.density, properties.viscosity, relative_speed);
+        record_mass_transfer(transfer);
+        const auto transfer_coefficient = transfer.coefficient;
         const auto interfacial_area =
             4.0 * std::numbers::pi * radius * radius
           * state.large_number;
@@ -2268,6 +2424,9 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic derived-state reconstruction",
         [&]
         {
+            const auto transfer_evaluator =
+                RadiolyticGasPhysics::select_bubble_mass_transfer_evaluator(
+                    d_options.mass_transfer_mode);
             const auto pressure_values = d_absolute_pressure.owned_read_view();
             const auto temperature_values = temperature.owned_read_view();
             const auto density_values = density.owned_read_view();
@@ -2296,7 +2455,8 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_
             {
                 const auto properties = cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
                     density_values(owned, 0), viscosity_values(owned, 0));
-                const auto solve_radius = [&](scalar_type number, scalar_type moles)
+                const auto solve_radius = [&](scalar_type number, scalar_type moles,
+                                              std::string_view population)
                 {
                     if (number <= d_options.min_population || moles <= 0.0)
                         return scalar_type{};
@@ -2308,13 +2468,17 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_
                     {
                         if (record_event_statistics)
                             ++d_last_statistics.radius_solver_failures;
-                        return scalar_type{};
+                        throw std::runtime_error("Active " + std::string(population)
+                            + " bubble radius solve failed at rank "
+                            + std::to_string(d_mesh->owned_cell_map()->getComm()->getRank())
+                            + ", cell " + std::to_string(d_mesh->cell_global_id(
+                                static_cast<local_ordinal_type>(owned))) + ".");
                     }
                     return result.radius;
                 };
 
-                const auto micro_radius = solve_radius(micro_number_values(owned, 0), micro_moles_values(owned, 0));
-                const auto large_radius = solve_radius(large_number_values(owned, 0), large_moles_values(owned, 0));
+                const auto micro_radius = solve_radius(micro_number_values(owned, 0), micro_moles_values(owned, 0), "micro-population");
+                const auto large_radius = solve_radius(large_number_values(owned, 0), large_moles_values(owned, 0), "large-population");
                 const auto micro_void =
                     RadiolyticGasPhysics::bubble_void_fraction(micro_number_values(owned, 0), micro_radius);
                 const auto large_void =
@@ -2352,11 +2516,13 @@ void RadiolyticGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_
 
                 if (characteristic_radius > 0.0)
                 {
-                    transfer_coefficient_values(owned, 0) =
-                        RadiolyticGasPhysics::hughmark_mass_transfer_coefficient(properties.diffusivity,
-                            characteristic_radius, properties.density, properties.viscosity,
-                            rise_velocity(characteristic_radius, properties.density, properties.viscosity,
-                                properties.surface_tension));
+                    transfer_coefficient_values(owned, 0) = evaluate_mass_transfer(
+                        transfer_evaluator, static_cast<local_ordinal_type>(owned),
+                        "characteristic-radius K_L",
+                        characteristic_radius, properties.diffusivity,
+                        properties.density, properties.viscosity,
+                        rise_velocity(characteristic_radius, properties.density,
+                            properties.viscosity, properties.surface_tension)).coefficient;
                 }
                 else
                 {
@@ -2407,6 +2573,9 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
     collective_detail::collective_local_validation(*d_mesh, "Radiolytic local-kinetics integration",
         [&]
         {
+            const auto transfer_evaluator =
+                RadiolyticGasPhysics::select_bubble_mass_transfer_evaluator(
+                    d_options.mass_transfer_mode);
             KineticsSubsteps substeps;
             const auto controlling_time = std::min(
                 d_options.microbubble_lifetime, d_options.large_bubble_dissolution_time);
@@ -2459,7 +2628,9 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
                 const auto liquid_fraction = std::max(
                     1.0 - alpha_values(owned, 0), scalar_type{1.0e-15});
                 const auto result = integrate_cell_kinetics(
-                    initial, time_step, production_rate, liquid_fraction, properties, substeps);
+                    initial, static_cast<local_ordinal_type>(owned), transfer_evaluator,
+                    time_step,
+                    production_rate, liquid_fraction, properties, substeps);
                 converted_number_values(owned, 0) = result.converted_number_rate;
                 converted_molar_values(owned, 0) = result.converted_molar_rate;
                 growth_values(owned, 0) = result.large_growth_rate;

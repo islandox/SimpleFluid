@@ -863,6 +863,328 @@ TEST(RadiolyticGasModelTest, TwoPopulationStepConservesHydrogen)
     EXPECT_DOUBLE_EQ(model.last_statistics().cumulative_hydrogen_produced, 0.0);
 }
 
+/** Both diffusivity providers route high-Sc transfer and reconstructed K_L through the selected law. */
+TEST(RadiolyticGasModelTest, HighScSphericalDiffusionUsesSelectedLawAndConservesHydrogen)
+{
+    constexpr double density = 1546.23563;
+    constexpr double viscosity = 0.00243878721;
+    const auto check = [&](bool external, double expected_diffusivity)
+    {
+        auto mesh = make_single_cell_mesh();
+        auto options = sheng_options();
+        options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::SphericalDiffusion;
+        options.hydrogen_diffusivity = 4.5e-9;
+        if (external)
+        {
+            options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+            // Fixed external-provider stand-in. Hydra-TF separately tests Winter2022.
+            options.hydrogen_diffusivity_correlation = +[](double) { return 5.1886e-9; };
+        }
+        options.initial_dissolved_hydrogen = 10.0;
+        options.initial_large_number_density = 1.0e6;
+        options.initial_large_moles = 1.0e-7;
+        options.micro_to_large_conversion_coefficient = 0.0;
+        options.microbubble_lifetime = 1.0e9;
+        options.large_bubble_dissolution_time = 1.0e9;
+        RadiolyticModelType model(mesh, options);
+        FieldType temperature(mesh, 298.85, "temperature");
+        FieldType pressure(mesh, 0.0, "pressure");
+        FieldType power(mesh, 0.0, "qdot_fission");
+        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+        FaceFieldType flux(mesh, 0.0, "flux");
+        auto material = make_water_properties(mesh);
+        material.density.set_owned_value(0, density);
+        material.dynamic_viscosity.set_owned_value(0, viscosity);
+
+        model.initialize_state(0.0, temperature, pressure, velocity, material);
+        const auto initial_radius = model_field(model, "r_large").value(0);
+        ASSERT_GT(initial_radius, 0.0);
+        EXPECT_DOUBLE_EQ(model_field(model, "r_characteristic").value(0), initial_radius);
+        EXPECT_NEAR(model_field(model, "K_L").value(0),
+                    expected_diffusivity / initial_radius,
+                    expected_diffusivity / initial_radius * 1.0e-12);
+        EXPECT_GT(model.evaluate_submerged_bubble_volume(options.reference_pressure), 0.0);
+
+        constexpr double time_step = 1.0e-6;
+        model.advance(time_step, time_step, temperature, pressure, velocity,
+                      flux, material, &power);
+        const auto final_radius = model_field(model, "r_large").value(0);
+        ASSERT_GT(final_radius, 0.0);
+        EXPECT_NEAR(model_field(model, "K_L").value(0),
+                    expected_diffusivity / final_radius,
+                    expected_diffusivity / final_radius * 1.0e-12);
+        EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-12);
+        EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
+        EXPECT_GT(model.large_moles().value(0), 0.0);
+    };
+
+    check(false, 4.5e-9);
+    check(true, 5.1886e-9);
+}
+
+/** Finite-slip Feng endpoint selection reaches population kinetics and K_L at high Sc. */
+TEST(RadiolyticGasModelTest, HighScFengEndpointsTransferAndConserveAtPrescribedSlip)
+{
+    constexpr double density = 1546.23563;
+    constexpr double viscosity = 0.00243878721;
+    constexpr double diffusivity = 4.5e-9;
+    constexpr double slip = 0.0045;
+    const std::array cases{
+        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 0.322},
+        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 0.435}};
+    std::array<double, 2> coefficients{};
+    for (size_t index = 0; index < cases.size(); ++index)
+    {
+        const auto [mode, exponent] = cases[index];
+        auto mesh = make_single_cell_mesh();
+        auto options = sheng_options();
+        options.mass_transfer_mode = mode;
+        options.hydrogen_diffusivity = diffusivity;
+        options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+        options.constant_slip_velocity = slip;
+        options.initial_dissolved_hydrogen = 10.0;
+        options.initial_large_number_density = 1.0e6;
+        // EOS at R=1.2e-4 m, p=1e5 Pa, T=298.85 K, sigma=0.07 N/m.
+        options.initial_large_moles = 0.0002947014976484349;
+        options.micro_to_large_conversion_coefficient = 0.0;
+        options.microbubble_lifetime = 1.0e9;
+        options.large_bubble_dissolution_time = 1.0e9;
+        RadiolyticModelType model(mesh, options);
+        FieldType temperature(mesh, 298.85, "temperature");
+        FieldType pressure(mesh, 0.0, "pressure");
+        FieldType power(mesh, 0.0, "qdot_fission");
+        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+        FaceFieldType flux(mesh, 0.0, "flux");
+        auto material = make_water_properties(mesh);
+        material.density.set_owned_value(0, density);
+        material.dynamic_viscosity.set_owned_value(0, viscosity);
+
+        model.initialize_state(0.0, temperature, pressure, velocity, material);
+        const auto initial_radius = model_field(model, "r_large").value(0);
+        ASSERT_GT(initial_radius, 0.0);
+        const auto initial_peclet_a = slip * initial_radius / diffusivity;
+        const auto initial_reynolds_d = density * slip * 2.0 * initial_radius / viscosity;
+        ASSERT_GE(initial_peclet_a, 100.0);
+        ASSERT_LE(initial_peclet_a, 5000.0);
+        ASSERT_LT(initial_reynolds_d, 1.0);
+        EXPECT_NEAR(model_field(model, "K_L").value(0),
+            1.49 * std::pow(initial_peclet_a, exponent) * diffusivity / (2.0 * initial_radius),
+            1.0e-12);
+        EXPECT_GT(model.evaluate_submerged_bubble_volume(options.reference_pressure), 0.0);
+
+        const auto before = model.global_submerged_hydrogen_moles();
+        const auto initial_large_moles = model.large_moles().value(0);
+        const auto initial_state = model.snapshot();
+        constexpr double time_step = 1.0e-6;
+        model.advance(time_step, time_step, temperature, pressure, velocity,
+                      flux, material, &power);
+        const auto final_radius = model_field(model, "r_large").value(0);
+        ASSERT_GT(final_radius, 0.0);
+        coefficients[index] = model_field(model, "K_L").value(0);
+        EXPECT_NEAR(coefficients[index],
+            1.49 * std::pow(slip * final_radius / diffusivity, exponent)
+                * diffusivity / (2.0 * final_radius),
+            1.0e-12);
+        EXPECT_GT(model.last_statistics().mass_transfer.evaluations, 0);
+        EXPECT_EQ(model.last_statistics().mass_transfer.minimum.model, mode);
+        EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
+        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
+        EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
+        EXPECT_GT(model.large_moles().value(0), 0.0);
+        if (index == 0)
+        {
+            const auto full_large_moles = model.large_moles().value(0);
+            ASSERT_GT(full_large_moles, initial_large_moles);
+            model.restore(initial_state);
+            EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
+            model.advance(time_step / 2.0, time_step / 2.0,
+                          temperature, pressure, velocity, flux, material, &power);
+            EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
+            EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
+            EXPECT_GT(model.large_moles().value(0), 0.0);
+            model.advance(time_step, time_step / 2.0,
+                          temperature, pressure, velocity, flux, material, &power);
+            EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
+            EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
+            EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
+            EXPECT_GT(model.large_moles().value(0), 0.0);
+            // Compare changes, not the much larger initial inventory: the
+            // two schedules should agree within 5% of this step's transfer.
+            const auto transfer = full_large_moles - initial_large_moles;
+            EXPECT_NEAR(model.large_moles().value(0), full_large_moles,
+                        std::max(1.0e-13, 0.05 * transfer));
+        }
+    }
+    EXPECT_GT(coefficients[1], coefficients[0]);
+}
+
+/** The active one-cell path also uses Feng's selected low-Pe Eq. (4) branch. */
+TEST(RadiolyticGasModelTest, HighScFengLowPecletEndpointsTransferAndConserve)
+{
+    constexpr double density = 1546.23563;
+    constexpr double viscosity = 0.00243878721;
+    constexpr double diffusivity = 4.5e-9;
+    constexpr double slip = 9.375e-6; // Pe_d=0.5 at the initial R=1.2e-4 m.
+    const std::array cases{
+        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 1.0 / 8.0},
+        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 1.0 / 12.0}};
+    std::array<double, 2> coefficients{};
+    for (size_t index = 0; index < cases.size(); ++index)
+    {
+        const auto [mode, logarithmic_coefficient] = cases[index];
+        auto mesh = make_single_cell_mesh();
+        auto options = sheng_options();
+        options.mass_transfer_mode = mode;
+        options.hydrogen_diffusivity = diffusivity;
+        options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+        options.constant_slip_velocity = slip;
+        options.initial_dissolved_hydrogen = 10.0;
+        options.initial_large_number_density = 1.0e6;
+        options.initial_large_moles = 0.0002947014976484349;
+        options.micro_to_large_conversion_coefficient = 0.0;
+        options.microbubble_lifetime = 1.0e9;
+        options.large_bubble_dissolution_time = 1.0e9;
+        RadiolyticModelType model(mesh, options);
+        FieldType temperature(mesh, 298.85, "temperature");
+        FieldType pressure(mesh, 0.0, "pressure");
+        FieldType power(mesh, 0.0, "qdot_fission");
+        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+        FaceFieldType flux(mesh, 0.0, "flux");
+        auto material = make_water_properties(mesh);
+        material.density.set_owned_value(0, density);
+        material.dynamic_viscosity.set_owned_value(0, viscosity);
+
+        const auto expected_coefficient = [&](double radius)
+        {
+            const auto peclet_d = 2.0 * slip * radius / diffusivity;
+            return (2.0 + 0.5 * peclet_d
+                    + logarithmic_coefficient * peclet_d * peclet_d * std::log(peclet_d))
+                   * diffusivity / (2.0 * radius);
+        };
+        model.initialize_state(0.0, temperature, pressure, velocity, material);
+        const auto initial_radius = model_field(model, "r_large").value(0);
+        ASSERT_GT(initial_radius, 0.0);
+        const auto initial_peclet_d = 2.0 * slip * initial_radius / diffusivity;
+        ASSERT_GT(initial_peclet_d, 0.0);
+        ASSERT_LT(initial_peclet_d, 1.0);
+        EXPECT_NEAR(initial_peclet_d, 0.5, 1.0e-8);
+        EXPECT_NEAR(model_field(model, "K_L").value(0),
+                    expected_coefficient(initial_radius), 1.0e-12);
+
+        const auto before = model.global_submerged_hydrogen_moles();
+        constexpr double time_step = 1.0e-6;
+        model.advance(time_step, time_step, temperature, pressure, velocity,
+                      flux, material, &power);
+        const auto final_radius = model_field(model, "r_large").value(0);
+        ASSERT_GT(final_radius, 0.0);
+        coefficients[index] = model_field(model, "K_L").value(0);
+        EXPECT_NEAR(coefficients[index], expected_coefficient(final_radius), 1.0e-12);
+        EXPECT_GT(model.last_statistics().mass_transfer.evaluations, 0);
+        EXPECT_EQ(model.last_statistics().mass_transfer.minimum.applicability,
+                  SimpleFluid::RadiolyticGasPhysics::BubbleMassTransferApplicability::SourceLowPeAsymptotic);
+        EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
+        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
+        EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
+        EXPECT_GT(model.large_moles().value(0), 0.0);
+    }
+    EXPECT_GT(coefficients[1], coefficients[0]);
+}
+
+/** One selected law must retain the local Pe regime in every active field cell. */
+TEST(RadiolyticGasModelTest, FengFieldSelectionKeepsBothPecletRegimesCellLocal)
+{
+    constexpr double density = 1546.23563;
+    constexpr double viscosity = 0.00243878721;
+    constexpr double slip = 0.0045;
+    constexpr double fit_diffusivity = 4.5e-9;
+    constexpr double low_peclet_diffusivity = 2.0e-6;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_two_hex_database());
+    auto options = sheng_options();
+    options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
+    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+    // Separate the source-supported Pe branches without changing the chosen law.
+    options.hydrogen_diffusivity_correlation = +[](double temperature)
+    {
+        return temperature < 299.0 ? 4.5e-9 : 2.0e-6;
+    };
+    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = slip;
+    options.initial_dissolved_hydrogen = 10.0;
+    options.initial_large_number_density = 1.0e6;
+    options.initial_large_moles = 0.0002947014976484349;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    options.microbubble_lifetime = 1.0e9;
+    options.large_bubble_dissolution_time = 1.0e9;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 298.85, "temperature");
+    temperature.set_owned_value(1, 300.0);
+    temperature.sync_ghosts();
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        material.density.set_owned_value(cell, density);
+        material.dynamic_viscosity.set_owned_value(cell, viscosity);
+    }
+    material.density.sync_ghosts();
+    material.dynamic_viscosity.sync_ghosts();
+
+    const auto expected_coefficient = [&](size_t owned, double radius)
+    {
+        const auto diffusivity = owned == 0 ? fit_diffusivity : low_peclet_diffusivity;
+        const auto peclet_d = 2.0 * slip * radius / diffusivity;
+        const auto reynolds_d = 2.0 * density * slip * radius / viscosity;
+        EXPECT_LT(reynolds_d, 1.0);
+        if (owned == 0)
+        {
+            EXPECT_GE(peclet_d / 2.0, 100.0);
+            EXPECT_LE(peclet_d / 2.0, 5000.0);
+            return 1.49 * std::pow(peclet_d / 2.0, 0.322)
+                * diffusivity / (2.0 * radius);
+        }
+        EXPECT_GE(peclet_d, 0.0);
+        EXPECT_LT(peclet_d, 1.0);
+        const auto sherwood = 2.0 + 0.5 * peclet_d
+            + 0.125 * peclet_d * peclet_d * std::log(peclet_d);
+        return sherwood * diffusivity / (2.0 * radius);
+    };
+    const auto check_coefficients = [&]
+    {
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto radius = model_field(model, "r_large").value(cell);
+            ASSERT_GT(radius, 0.0);
+            EXPECT_DOUBLE_EQ(model_field(model, "r_characteristic").value(cell), radius);
+            const auto expected = expected_coefficient(owned, radius);
+            EXPECT_NEAR(model_field(model, "K_L").value(cell), expected,
+                        expected * 1.0e-11);
+        }
+    };
+
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+    check_coefficients();
+    const auto hydrogen_before = model.global_submerged_hydrogen_moles();
+    constexpr double time_step = 1.0e-6;
+    model.advance(time_step, time_step, temperature, pressure, velocity,
+                  flux, material, &power);
+    check_coefficients();
+    const auto& transfer = model.last_statistics().mass_transfer;
+    EXPECT_EQ(transfer.evaluations, 2);
+    EXPECT_EQ(transfer.low_peclet_evaluations, 1);
+    EXPECT_EQ(transfer.fit_evaluations, 1);
+    EXPECT_EQ(transfer.minimum.model, options.mass_transfer_mode);
+    EXPECT_EQ(transfer.minimum.applicability,
+              SimpleFluid::RadiolyticGasPhysics::BubbleMassTransferApplicability::MixedSourceRegimes);
+    EXPECT_NEAR(model.global_submerged_hydrogen_moles(), hydrogen_before, 1.0e-10);
+    EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
+}
+
 TEST(RadiolyticGasModelTest, SnapshotRestoresEveryInventoryAndCumulativeLedger)
 {
     auto mesh = make_single_cell_mesh();

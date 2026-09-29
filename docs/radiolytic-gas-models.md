@@ -54,6 +54,9 @@ Hydra-TF connects these callbacks to a submodule which owns Winter's
 hydrogen diffusivity and the relocated surface-tension and nucleation properties.
 Temperature-dependent diffusivity is evaluated per cell for both dissolved
 transport and bubble mass transfer. Dissolved transport uses `alpha_l*D(T)`.
+The selected liquid-side transfer law, its strict domain, and the distinction
+between kinetic and characteristic-radius coefficients are documented in
+[Liquid-side bubble mass transfer](bubble-mass-transfer.md).
 
 The old `sheng2024` surface-tension and diffusivity selectors are removed.
 Database configurations supply constant properties, including an explicit
@@ -233,6 +236,7 @@ radiolytic_heaviside_mode
 bubble_rise_velocity_model
 surface_tension_model
 hydrogen_diffusivity_model
+bubble_mass_transfer_model
 hydrogen_yield_mol_per_j
 gas_release_efficiency
 reference_pressure

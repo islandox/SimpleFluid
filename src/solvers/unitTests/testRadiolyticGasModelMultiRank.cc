@@ -745,6 +745,122 @@ TEST(RadiolyticGasModelMultiRankTest,
     }
 }
 
+/** One owned high-Sc population must fail before any rank enters a later collective. */
+TEST(RadiolyticGasModelMultiRankTest, RankLocalLegacySchmidtLimitThrowsCoherently)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+
+    auto options = sheng_options();
+    options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::LegacyHughmark;
+    options.initial_large_number_density = 1.0e6;
+    options.initial_large_moles = 1.0e-7;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    ASSERT_GT(mesh->num_owned_cells(), 0U);
+    if (comm->getRank() == 0)
+        material.dynamic_viscosity.set_owned_value(0, 3.0e-3);
+    // D=1e-8, rho=1000: one owned cell has Sc=300; all other cells have Sc=100.
+    bool rejected = false;
+    std::string message;
+    try
+    {
+        model.advance(1.0e-6, 1.0e-6, temperature, pressure, velocity,
+                      flux, material, &power);
+    }
+    catch (const std::exception& error)
+    {
+        rejected = true;
+        message = error.what();
+    }
+    EXPECT_TRUE(rejected);
+    if (comm->getRank() == 0)
+    {
+        EXPECT_NE(message.find("Sc < 250"), std::string::npos) << message;
+        EXPECT_NE(message.find("rank 0"), std::string::npos) << message;
+        EXPECT_NE(message.find("cell"), std::string::npos) << message;
+    }
+    else
+    {
+        EXPECT_NE(message.find("another rank"), std::string::npos) << message;
+    }
+}
+
+/** A rank-local finite-Pe state outside the Feng Stokes window fails coherently. */
+TEST(RadiolyticGasModelMultiRankTest, RankLocalFengReynoldsLimitThrowsCoherently)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+
+    auto options = sheng_options();
+    options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
+    options.hydrogen_diffusivity = 4.5e-9;
+    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = 0.0045;
+    options.initial_large_number_density = 1.0e6;
+    options.initial_large_moles = 0.0002947014976484349; // R=1.2e-4 m at 298.85 K.
+    options.microbubble_lifetime = 1.0e9;
+    options.large_bubble_dissolution_time = 1.0e9;
+    options.micro_to_large_conversion_coefficient = 0.0;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 298.85, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    FieldType power(mesh, 0.0, "qdot_fission");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        material.density.set_owned_value(cell, 1546.23563);
+        material.dynamic_viscosity.set_owned_value(cell, 0.00243878721);
+    }
+    material.density.sync_ghosts();
+    material.dynamic_viscosity.sync_ghosts();
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+
+    ASSERT_GT(mesh->num_owned_cells(), 0U);
+    if (comm->getRank() == 0)
+        material.dynamic_viscosity.set_owned_value(0, 1.0e-3);
+    // Only rank 0's owned cell now has Re_d>1; Pe_a remains near 120.
+    bool rejected = false;
+    std::string message;
+    try
+    {
+        model.advance(1.0e-6, 1.0e-6, temperature, pressure, velocity,
+                      flux, material, &power);
+    }
+    catch (const std::exception& error)
+    {
+        rejected = true;
+        message = error.what();
+    }
+    EXPECT_TRUE(rejected);
+    if (comm->getRank() == 0)
+    {
+        EXPECT_NE(message.find("Re_d < 1"), std::string::npos) << message;
+        EXPECT_NE(message.find("rank 0"), std::string::npos) << message;
+        EXPECT_NE(message.find("cell"), std::string::npos) << message;
+    }
+    else
+    {
+        EXPECT_NE(message.find("another rank"), std::string::npos) << message;
+    }
+}
+
 /** Auxiliary transport skips require global zero and resume after local kinetics. */
 TEST(RadiolyticGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesCollectively)
 {
