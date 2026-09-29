@@ -381,14 +381,12 @@ private:
     // Two side descriptors per interface. Structured sides are grouped by
     // native boundary 0..5; only irregular correspondence uses bucket 6.
     struct InterfaceSide { size_t interface; bool first; };
-    // Natural native-ID order, independent of the interface parametrization.
-    // One descriptor per interface replaces rebuilding an indexer at each rank query.
+    // Natural native-ID strides for enumerating structured removals at construction.
     struct PatchFaceIndex
     {
-        ID begin = 0, end = 0;
+        ID begin = 0;
         size_t fast_stride = 0, slow_stride = 0;
         size_t fast_extent = 0, slow_extent = 0, count = 0;
-        size_t count_before(ID face) const noexcept;
     };
     struct StructuredFaceSelection
     {
@@ -400,6 +398,8 @@ private:
         std::array<size_t, 8> offsets{};
         ID removed_faces = 0;
         size_t boundary_begin = 0, boundary_end = 0;
+        // Sorted native IDs for regions whose removals cannot use full-side selection.
+        std::vector<ID> removed_native_faces;
         // Each orientation has normal-fastest runs. Removing complete exterior
         // sides trims the same low/high entries from every run.
         std::array<StructuredFaceSelection, 3> selection{};
