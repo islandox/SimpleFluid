@@ -1,4 +1,7 @@
-/** @file CoupledBlockOperator.hh @brief Coupled action without a monolithic CRS allocation. */
+/**
+ * @file CoupledBlockOperator.hh
+ * @brief  Coupled action without a monolithic CRS allocation.
+ */
 #pragma once
 
 #include "SimpleFluidExport.hh"

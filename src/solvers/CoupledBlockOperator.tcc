@@ -1,4 +1,7 @@
-/** @file CoupledBlockOperator.tcc @brief Template implementations for CoupledBlockOperator. */
+/**
+ * @file CoupledBlockOperator.tcc
+ * @brief  Template implementations for CoupledBlockOperator.
+ */
 #pragma once
 
 #include "solvers/CoupledBlockOperator.hh"

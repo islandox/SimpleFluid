@@ -1,4 +1,7 @@
-/** @file FissionPowerSource.cc @brief Explicit template instantiations. */
+/**
+ * @file FissionPowerSource.cc
+ * @brief  Explicit template instantiations.
+ */
 #include "equations/FissionPowerSource.tcc"
 
 namespace SimpleFluid

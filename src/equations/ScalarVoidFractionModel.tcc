@@ -1,4 +1,7 @@
-/** @file ScalarVoidFractionModel.tcc @brief Compiled template implementations. */
+/**
+ * @file ScalarVoidFractionModel.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "equations/ScalarVoidFractionModel.hh"

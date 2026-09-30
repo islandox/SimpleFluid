@@ -1,4 +1,7 @@
-/** @file SSTSASSource.hh @brief Local SAS omega source for the existing SST-1994 parent. */
+/**
+ * @file SSTSASSource.hh
+ * @brief  Local SAS omega source for the existing SST-1994 parent.
+ */
 #pragma once
 
 #include "equations/turbulence/SSTKOmegaEquation.hh"

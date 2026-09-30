@@ -1,4 +1,7 @@
-/** @file GaussLinearGradientCache.hh @brief Reusable face-ordered Gauss geometry. */
+/**
+ * @file GaussLinearGradientCache.hh
+ * @brief  Reusable face-ordered Gauss geometry.
+ */
 #pragma once
 
 #include "SimpleFluidExport.hh"

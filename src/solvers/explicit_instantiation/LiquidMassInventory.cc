@@ -1,4 +1,7 @@
-/** @file LiquidMassInventory.cc @brief Explicit template instantiations. */
+/**
+ * @file LiquidMassInventory.cc
+ * @brief  Explicit template instantiations.
+ */
 #include "solvers/LiquidMassInventory.tcc"
 
 namespace SimpleFluid

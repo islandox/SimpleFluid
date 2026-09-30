@@ -1,4 +1,7 @@
-/** @file BoilingSourceModel.tcc @brief Compiled template implementations. */
+/**
+ * @file BoilingSourceModel.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "equations/BoilingSourceModel.hh"
