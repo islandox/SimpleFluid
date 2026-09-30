@@ -71,6 +71,13 @@ enum class RadiolyticHeavisideMode
     Smoothed ///< Use a hyperbolic-tangent transition.
 };
 
+/** @brief Local two-population kinetics integration policy. */
+enum class RadiolyticKineticsMode
+{
+    LegacySubcycled, ///< Retain the original source/decay splitting and subcycles.
+    ExactInactive   ///< Integrate subcritical microbubble production/decay exactly; otherwise use legacy subcycles.
+};
+
 /**
  * @brief Bubble slip/rise-velocity correlation selection.
  */
@@ -125,6 +132,7 @@ struct RadiolyticGasOptions
     RadiolyticTransportMode dissolved_transport = RadiolyticTransportMode::NoAdvection;
     BubbleTransportMode bubble_transport = BubbleTransportMode::General;
     RadiolyticHeavisideMode heaviside_mode = RadiolyticHeavisideMode::Exact;
+    RadiolyticKineticsMode kinetics_mode = RadiolyticKineticsMode::LegacySubcycled;
     BubbleRiseVelocityMode rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;
     SurfaceTensionMode surface_tension_mode = SurfaceTensionMode::Constant;
     HydrogenDiffusivityMode diffusivity_mode = HydrogenDiffusivityMode::Constant;

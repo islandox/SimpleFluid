@@ -136,6 +136,18 @@ RadiolyticHeavisideMode parse_heaviside(std::string value)
         "Unknown radiolytic_heaviside_mode; expected exact or smoothed.");
 }
 
+/** @brief Parse the opt-in local kinetics integration policy. */
+RadiolyticKineticsMode parse_kinetics(std::string value)
+{
+    value = normalized(std::move(value));
+    if (value == "legacysubcycled" || value == "legacy_subcycled")
+        return RadiolyticKineticsMode::LegacySubcycled;
+    if (value == "exactinactive" || value == "exact_inactive")
+        return RadiolyticKineticsMode::ExactInactive;
+    throw std::invalid_argument(
+        "Unknown radiolytic_kinetics_mode; expected legacySubcycled or exactInactive.");
+}
+
 /**
  * @brief Parse the bubble rise-velocity correlation.
  * @param value Correlation name.
@@ -276,6 +288,8 @@ RadiolyticGasOptions radiolytic_gas_options_from_database(
             "bubble_transport_mode", "general"));
     options.heaviside_mode = parse_heaviside(reader.value_or<std::string>(
         "radiolytic_heaviside_mode", "exact"));
+    options.kinetics_mode = parse_kinetics(reader.value_or<std::string>(
+        "radiolytic_kinetics_mode", "legacySubcycled"));
     options.rise_velocity_mode =
         parse_rise_velocity(reader.value_or<std::string>(
             "bubble_rise_velocity_model", "zeroSlip"));
@@ -440,6 +454,15 @@ void validate_radiolytic_gas_options(
     }
     if (options.mode == RadiolyticGasMode::IdealGasSource)
         return;
+
+    switch (options.kinetics_mode)
+    {
+    case RadiolyticKineticsMode::LegacySubcycled:
+    case RadiolyticKineticsMode::ExactInactive:
+        break;
+    default:
+        throw std::invalid_argument("Unknown radiolytic kinetics mode.");
+    }
 
     switch (options.mass_transfer_mode)
     {

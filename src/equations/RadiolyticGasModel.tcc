@@ -2277,6 +2277,53 @@ auto RadiolyticGasModel<Pack, MeshType>::integrate_cell_kinetics(
             properties.surface_tension,
             properties.nucleation_radius);
 
+    if (d_options.kinetics_mode == RadiolyticKineticsMode::ExactInactive
+        && initial.large_number == 0.0 && initial.large_moles == 0.0)
+    {
+        const auto total_produced = production_rate * time_step;
+        // Dissolved inventory grows monotonically in this subsystem and cannot
+        // exceed all initially available plus newly produced hydrogen. Round
+        // the bound outward so neither a crossing nor a borderline threshold
+        // can bypass the unchanged active-population integrator below.
+        const auto infinity = std::numeric_limits<scalar_type>::infinity();
+        const auto inventory_bound = std::nextafter(
+            std::nextafter(initial.dissolved_inventory + initial.micro_moles, infinity)
+                + total_produced, infinity);
+        const auto critical_inventory = std::nextafter(
+            liquid_fraction * critical_concentration, scalar_type{});
+        if (std::isfinite(inventory_bound) && inventory_bound < critical_inventory)
+        {
+            const auto ratio = time_step / d_options.microbubble_lifetime;
+            const auto retention = std::exp(-ratio);
+            const auto decay_fraction = -std::expm1(-ratio);
+            // 1 - (1-exp(-x))/x is the fraction of continuous production
+            // dissolved during the interval. Its series avoids cancellation
+            // for small x, including an underflowed x == 0.
+            const auto source_dissolved_fraction = ratio < scalar_type{1.e-3}
+                ? ratio * (scalar_type{0.5} + ratio * (scalar_type{-1.0 / 6.0}
+                    + ratio * (scalar_type{1.0 / 24.0} + ratio * (scalar_type{-1.0 / 120.0}
+                        + ratio * scalar_type{1.0 / 720.0}))))
+                : scalar_type{1} - decay_fraction / ratio;
+            // Select the multiplication order so large time/lifetime ratios
+            // retain the steady S*tau population without overflowing S*tau
+            // in the opposite, small-ratio limit.
+            const auto retained_production = ratio <= scalar_type{1}
+                ? total_produced * (scalar_type{1} - source_dissolved_fraction)
+                : (production_rate * d_options.microbubble_lifetime) * decay_fraction;
+            const auto dissolved = initial.micro_moles * decay_fraction
+                + total_produced * source_dissolved_fraction;
+            state.micro_moles = initial.micro_moles * retention + retained_production;
+            state.micro_number = initial.micro_number * retention
+                + retained_production / properties.nucleation_moles;
+            state.dissolved_inventory += dissolved;
+            result.dissolution_rate = dissolved / time_step;
+            result.inventory_error = (state.dissolved_inventory + state.micro_moles)
+                - (initial.dissolved_inventory + initial.micro_moles) - total_produced;
+            return result;
+        }
+    }
+
+    result.subcycles = substeps.count;
     for (int cycle = 0; cycle < substeps.count; ++cycle)
     {
         state.micro_moles += produced;
@@ -2563,6 +2610,8 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
 
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_donor_tracking_enabled),
         "Radiolytic donor-H tracking selection");
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_options.kinetics_mode),
+        "Radiolytic kinetics integration selection");
     d_last_statistics.hydrogen_before =
         total_hydrogen_inventory(ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes());
     if (d_donor_tracking_enabled)
@@ -2579,8 +2628,11 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
             KineticsSubsteps substeps;
             const auto controlling_time = std::min(
                 d_options.microbubble_lifetime, d_options.large_bubble_dissolution_time);
-            substeps.count = std::clamp(static_cast<int>(
-                std::ceil(time_step / (0.2 * controlling_time))), 1, d_options.max_subcycles);
+            const auto required_substeps = std::ceil(time_step / (0.2 * controlling_time));
+            // Clamp before converting: an exact inactive update may span an
+            // arbitrarily large number of lifetimes, including an infinite ratio.
+            substeps.count = required_substeps >= d_options.max_subcycles
+                ? d_options.max_subcycles : std::max(1, static_cast<int>(required_substeps));
             substeps.duration = time_step / substeps.count;
             substeps.micro_decay_fraction =
                 1.0 - std::exp(-substeps.duration / d_options.microbubble_lifetime);
@@ -2621,8 +2673,6 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
                     * d_options.hydrogen_yield_mol_per_j
                     * std::max(power_values(owned, 0), scalar_type{});
                 production_values(owned, 0) = production_rate;
-                d_last_statistics.maximum_subcycles = std::max(
-                    d_last_statistics.maximum_subcycles, substeps.count);
                 // alpha_g is reconstructed only after all cell kinetics;
                 // its liquid fraction is invariant over these subcycles.
                 const auto liquid_fraction = std::max(
@@ -2631,6 +2681,8 @@ void RadiolyticGasModel<Pack, MeshType>::advance_two_population(
                     initial, static_cast<local_ordinal_type>(owned), transfer_evaluator,
                     time_step,
                     production_rate, liquid_fraction, properties, substeps);
+                d_last_statistics.maximum_subcycles = std::max(
+                    d_last_statistics.maximum_subcycles, result.subcycles);
                 converted_number_values(owned, 0) = result.converted_number_rate;
                 converted_molar_values(owned, 0) = result.converted_molar_rate;
                 growth_values(owned, 0) = result.large_growth_rate;

@@ -154,12 +154,13 @@ void expect_same_on_all_ranks(const MeshType& mesh, double value)
 
 } // namespace
 
-/** Subcycles preserve split-source decay, changing cell inputs and ghost state. */
-TEST(RadiolyticGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInputsAndDonorInventory)
+/** Check analytic source/decay, changing cell inputs and ghost state for either policy. */
+void check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::RadiolyticKineticsMode mode)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(4, 2, 2, 0.25));
     auto options = sheng_options();
+    options.kinetics_mode = mode;
     options.microbubble_lifetime = 1.e-5;
     options.large_bubble_dissolution_time = 2.e-5;
     options.micro_to_large_conversion_coefficient = 0.;
@@ -198,12 +199,15 @@ TEST(RadiolyticGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInput
         const auto substep = dt / expected_subcycles[step];
         const auto retention = std::exp(-dt / options.microbubble_lifetime);
         // Closed-form geometric sum for source impulses preceding each decay.
-        const auto source_retention = substep * std::exp(-substep / options.microbubble_lifetime)
-            * std::expm1(-dt / options.microbubble_lifetime)
-            / std::expm1(-substep / options.microbubble_lifetime);
+        const auto source_retention = mode == SimpleFluid::RadiolyticKineticsMode::ExactInactive
+            ? -options.microbubble_lifetime * std::expm1(-dt / options.microbubble_lifetime)
+            : substep * std::exp(-substep / options.microbubble_lifetime)
+                * std::expm1(-dt / options.microbubble_lifetime)
+                / std::expm1(-substep / options.microbubble_lifetime);
         time += dt;
         model.advance(time, dt, temperature, pressure, velocity, flux, material, &power);
-        EXPECT_EQ(model.last_statistics().maximum_subcycles, expected_subcycles[step]);
+        EXPECT_EQ(model.last_statistics().maximum_subcycles,
+            mode == SimpleFluid::RadiolyticKineticsMode::ExactInactive ? 1 : expected_subcycles[step]);
         double local_total = 0.;
         for (size_t local = 0; local < mesh->num_local_cells(); ++local)
         {
@@ -237,6 +241,38 @@ TEST(RadiolyticGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInput
         EXPECT_NEAR(model.last_statistics().inventory_error, 0., total * 1.e-11);
         EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., total * 1.e-11);
     }
+}
+
+/** Subcycles preserve split-source decay, changing cell inputs and ghost state. */
+TEST(RadiolyticGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInputsAndDonorInventory)
+{
+    check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::RadiolyticKineticsMode::LegacySubcycled);
+}
+
+/** Exact inactive updates preserve continuous production, changing inputs, donors and ghosts. */
+TEST(RadiolyticGasModelMultiRankTest, ExactInactiveRefreshesHeterogeneousInputsAndDonorInventory)
+{
+    check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::RadiolyticKineticsMode::ExactInactive);
+}
+
+/** Direct model users cannot select inconsistent numerical methods across ranks. */
+TEST(RadiolyticGasModelMultiRankTest, KineticsModeMustBeCollective)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 2, 2, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    auto options = sheng_options();
+    if (comm->getRank() == 0)
+        options.kinetics_mode = SimpleFluid::RadiolyticKineticsMode::ExactInactive;
+    RadiolyticModelType model(mesh, options);
+    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0., "flux");
+    auto material = make_water_properties(mesh);
+    EXPECT_THROW(model.advance(1.e-5, 1.e-5, temperature, pressure, velocity, flux, material, &power),
+        std::invalid_argument);
 }
 
 /** @brief Collective policy selection rejects divergent ranks and supports GS. */

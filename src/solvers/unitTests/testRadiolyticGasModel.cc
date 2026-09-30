@@ -1312,6 +1312,145 @@ TEST(RadiolyticGasModelTest, MicrobubbleDecayIsAnalyticAndConservative)
         1.0e-15);
 }
 
+/** @brief Captured local state for analytic kinetics and fallback comparisons. */
+struct LocalKineticsSnapshot
+{
+    std::array<double, 5> state;
+    double initial_inventory, initial_liquid_fraction, initial_donor, dissolution_rate, donor;
+    SimpleFluid::RadiolyticGasStepStatistics<double> statistics;
+};
+
+/** @brief Advance one closed, isothermal cell with an independently specified source. */
+LocalKineticsSnapshot local_kinetics_snapshot(
+    const SimpleFluid::RadiolyticGasOptions& options, double dt, double power_value)
+{
+    auto mesh = make_single_cell_mesh();
+    RadiolyticModelType model(mesh, options);
+    model.enable_donor_hydrogen_deficit_tracking();
+    FieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure"),
+        power(mesh, power_value, "power");
+    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    FaceFieldType flux(mesh, 0.0, "flux");
+    auto material = make_water_properties(mesh);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+    const auto initial_inventory = model.dissolved_hydrogen_inventory().value(0);
+    const auto initial_liquid_fraction = model.alpha_l().value(0);
+    const auto initial_donor = model.donor_hydrogen_deficit().value(0);
+    model.advance(dt, dt, temperature, pressure, velocity, flux, material, &power);
+    return {{model.dissolved_hydrogen_inventory().value(0), model.micro_number_density().value(0),
+                model.micro_moles().value(0), model.large_number_density().value(0), model.large_moles().value(0)},
+        initial_inventory, initial_liquid_fraction, initial_donor, model_field(model, "H2_dissolution_rate").value(0),
+        model.donor_hydrogen_deficit().value(0), model.last_statistics()};
+}
+
+/** @brief Direct C++ configuration rejects invalid integration policies. */
+TEST(RadiolyticGasModelTest, RejectsUnknownKineticsMode)
+{
+    auto options = sheng_options();
+    options.kinetics_mode = static_cast<SimpleFluid::RadiolyticKineticsMode>(-1);
+    EXPECT_THROW(RadiolyticModelType(make_single_cell_mesh(), options), std::invalid_argument);
+}
+
+/** @brief Continuous production/decay is exact across small and very large lifetime ratios. */
+TEST(RadiolyticGasModelTest, ExactInactiveMatchesContinuousProductionAndDecay)
+{
+    for (const double lifetime : {1.e-5, 5.e9, 1.e-300, std::numeric_limits<double>::denorm_min()})
+    {
+        SCOPED_TRACE(lifetime);
+        auto options = sheng_options();
+        options.kinetics_mode = SimpleFluid::RadiolyticKineticsMode::ExactInactive;
+        options.microbubble_lifetime = lifetime;
+        options.initial_micro_number_density = 2.e8;
+        options.initial_micro_moles = 3.e-6;
+        constexpr double dt = 0.005, power = 1.e5;
+        const auto result = local_kinetics_snapshot(options, dt, power);
+        const long double source = options.gas_release_efficiency * options.hydrogen_yield_mol_per_j * power;
+        const long double x = static_cast<long double>(dt) / lifetime;
+        const long double retention = std::exp(-x);
+        const long double source_moles = source * lifetime * (-std::expm1(-x));
+        const long double expected_moles = options.initial_micro_moles * retention + source_moles;
+        const long double radius = options.nucleation_radius;
+        const long double nucleation_moles = 4.L * std::acos(-1.L) / 3.L
+            * (options.reference_pressure * radius * radius * radius
+                + 2.L * options.surface_tension * radius * radius) / (options.gas_constant * 300.L);
+        const long double expected_number = options.initial_micro_number_density * retention
+            + source_moles / nucleation_moles;
+        // Integrate the positive decay flux; a series oracle preserves its tiny
+        // contribution when direct subtraction of total minus gas would cancel.
+        const long double source_decay = x < 1.e-3L
+            ? source * dt * (x / 2.L - x * x / 6.L + x * x * x / 24.L)
+            : source * dt - source_moles;
+        const long double expected_dissolved = options.initial_micro_moles * (-std::expm1(-x)) + source_decay;
+        EXPECT_NEAR(result.state[2], expected_moles,
+            std::max(1.e-315, static_cast<double>(expected_moles) * 2.e-12));
+        EXPECT_NEAR(result.state[1], expected_number,
+            std::max(1.e-290, static_cast<double>(expected_number) * 2.e-12));
+        EXPECT_NEAR(result.state[0] - result.initial_inventory, expected_dissolved,
+            std::max(1.e-30, static_cast<double>(expected_dissolved) * 2.e-12));
+        EXPECT_NEAR(result.dissolution_rate * dt, expected_dissolved,
+            std::max(1.e-30, static_cast<double>(expected_dissolved) * 2.e-12));
+        EXPECT_EQ(result.statistics.maximum_subcycles, 1);
+        EXPECT_DOUBLE_EQ(result.state[3], 0.0);
+        EXPECT_DOUBLE_EQ(result.state[4], 0.0);
+        EXPECT_NEAR(result.donor - result.initial_donor, source * dt, 1.e-18);
+        EXPECT_NEAR(result.statistics.inventory_error, 0.0, 1.e-18);
+        EXPECT_NEAR(result.statistics.donor_inventory_error, 0.0, 1.e-18);
+    }
+}
+
+/** @brief Zero and negative fission power retain only conservative initial-population decay. */
+TEST(RadiolyticGasModelTest, ExactInactiveDecaysInitialPopulationWithoutPositivePower)
+{
+    auto options = sheng_options();
+    options.kinetics_mode = SimpleFluid::RadiolyticKineticsMode::ExactInactive;
+    options.initial_micro_number_density = 2.e8;
+    options.initial_micro_moles = 3.e-6;
+    constexpr double dt = 3.e-6;
+    for (const auto power : {0.0, -1.e5})
+    {
+        const auto result = local_kinetics_snapshot(options, dt, power);
+        const auto retention = std::exp(-dt / options.microbubble_lifetime);
+        EXPECT_NEAR(result.state[2], options.initial_micro_moles * retention, 1.e-18);
+        EXPECT_NEAR(result.state[1], options.initial_micro_number_density * retention, 1.e-5);
+        EXPECT_NEAR(result.state[0], options.initial_micro_moles * (1.0 - retention), 1.e-18);
+        EXPECT_EQ(result.statistics.maximum_subcycles, 1);
+        EXPECT_DOUBLE_EQ(result.donor, result.initial_donor);
+        EXPECT_DOUBLE_EQ(result.statistics.hydrogen_produced, 0.0);
+        EXPECT_NEAR(result.statistics.inventory_error, 0.0, 1.e-18);
+    }
+}
+
+/** @brief Crossing, saturated and populated-large states preserve the legacy local update exactly. */
+TEST(RadiolyticGasModelTest, ExactInactiveFallsBackAtConversionOrExistingLargePopulation)
+{
+    for (int scenario = 0; scenario < 5; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        auto options = sheng_options();
+        const auto critical = critical_concentration(options, options.reference_pressure, 300.0);
+        if (scenario < 2)
+            options.initial_dissolved_hydrogen = critical * (scenario == 0 ? 0.999999 : 1.0);
+        else
+        {
+            // Either member being nonzero disables the exact branch, even
+            // if the other member is zero or the number is below its floor.
+            options.initial_large_number_density = scenario == 3 ? 0.0 : 1.e-41;
+            options.initial_large_moles = scenario == 2 ? 0.0 : 1.e-20;
+        }
+        constexpr double dt = 0.005, power = 1.e6;
+        const auto legacy = local_kinetics_snapshot(options, dt, power);
+        options.kinetics_mode = SimpleFluid::RadiolyticKineticsMode::ExactInactive;
+        const auto exact = local_kinetics_snapshot(options, dt, power);
+        EXPECT_EQ(exact.state, legacy.state);
+        EXPECT_DOUBLE_EQ(exact.dissolution_rate, legacy.dissolution_rate);
+        EXPECT_EQ(exact.statistics.maximum_subcycles, legacy.statistics.maximum_subcycles);
+        EXPECT_GT(exact.statistics.maximum_subcycles, 1);
+        EXPECT_DOUBLE_EQ(exact.statistics.inventory_error, legacy.statistics.inventory_error);
+        if (scenario == 0)
+            EXPECT_GT(exact.state[3], 0.0);
+    }
+}
+
 /**
  * @brief Micro-to-large conversion transfers number and gas inventory.
  */

@@ -147,6 +147,34 @@ analytic and the remaining rates use bounded subcycles. `maximum_subcycles`,
 clipping, pressure-floor events, and radius failures are exposed through
 `RadiolyticGasStepStatistics` and reduced globally across MPI ranks.
 
+`RadiolyticKineticsMode::LegacySubcycled` remains the default. Opting into
+`ExactInactive` (`radiolytic_kinetics_mode = exactInactive` in a database)
+replaces local subcycles by one exact continuous-source update only when both
+large-population inventories are exactly zero and the conservative bound
+`I_H2 + M_micro + production_rate * dt < alpha_l * C_critical` proves that
+conversion cannot activate anywhere in the interval. The bound is rounded
+outward; borderline cases retain the legacy path. It may reject an otherwise
+inactive interval because it deliberately includes all available microbubble
+moles. Existing large populations and possible threshold crossings retain
+the original subcycles, conversion and transfer calculations.
+
+For this inactive subsystem, with frozen source `S` and lifetime `tau`,
+`M_new = exp(-dt/tau)*M_old + S*tau*(1-exp(-dt/tau))`. Number density follows
+the same equation with source `S/nucleation_moles`; dissolved inventory gains
+the complementary hydrogen. Small lifetime ratios use cancellation-safe
+expressions, while large ratios retain the finite `S*tau` population.
+`maximum_subcycles` reports actual local updates, so an entirely inactive
+exact step reports one. Donor production, dissolution diagnostics and total
+hydrogen accounting retain their physical definitions.
+
+This opt-in changes the numerical method: the legacy source-before-decay
+split has a steady microbubble population about 9.67 percent below `S*tau`
+at `substep/tau = 0.2`. Agreement should therefore be assessed against
+analytic and refined solutions, not byte-identical legacy output. Transport
+and kinetics remain split at first order, and this option does not adapt the
+CFD timestep or active-population local error. `local_ode_tolerance` controls
+radius-root solves; it is not a local time-integration error tolerance.
+
 In ideal mode, `S_alpha_rad` is the source applied to the low-order scalar
 model. In two-population mode it is the model-owned net bounded-void rate,
 `(alpha_g_new - alpha_g_previous) / dt`; it includes reconstruction, transport,
@@ -233,6 +261,7 @@ radiolytic_pressure_mode
 dissolved_hydrogen_transport_mode
 bubble_transport_mode
 radiolytic_heaviside_mode
+radiolytic_kinetics_mode
 bubble_rise_velocity_model
 surface_tension_model
 hydrogen_diffusivity_model
