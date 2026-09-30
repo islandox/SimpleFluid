@@ -1,4 +1,7 @@
-/** @file region_scaling_benchmark.cc @brief Independent N/R/P mesh execution diagnostics. */
+/**
+ * @file region_scaling_benchmark.cc 
+ * @brief  Independent N/R/P mesh execution diagnostics.
+ */
 #include "benchmarks/BenchmarkSupport.hh"
 #include "FVM/Operators.hh"
 #include "geometry/MeshHandle.hh"

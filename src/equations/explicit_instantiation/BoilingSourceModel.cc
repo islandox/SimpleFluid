@@ -1,4 +1,7 @@
-/** @file BoilingSourceModel.cc @brief Explicit template instantiations. */
+/**
+ * @file BoilingSourceModel.cc 
+ * @brief  Explicit template instantiations.
+ */
 #include "equations/BoilingSourceModel.tcc"
 
 namespace SimpleFluid

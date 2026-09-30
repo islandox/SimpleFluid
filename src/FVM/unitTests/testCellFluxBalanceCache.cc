@@ -1,4 +1,7 @@
-/** @file testCellFluxBalanceCache.cc @brief Ordered flux balances and mapped view ownership. */
+/**
+ * @file testCellFluxBalanceCache.cc 
+ * @brief  Ordered flux balances and mapped view ownership.
+ */
 #include <gtest/gtest.h>
 
 #include "FVM/CellOperators.hh"

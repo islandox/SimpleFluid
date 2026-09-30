@@ -1,4 +1,7 @@
-/** @file testRegionDiffusionAssembly.cc @brief Production/reference region diffusion parity. */
+/**
+ * @file testRegionDiffusionAssembly.cc 
+ * @brief  Production/reference region diffusion parity.
+ */
 #include <gtest/gtest.h>
 #include "FVM/Operators.hh"
 #include "geometry/MeshHandle.hh"

@@ -1,4 +1,7 @@
-/** @file FissionPowerSource.tcc @brief Compiled template implementations. */
+/**
+ * @file FissionPowerSource.tcc 
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "equations/FissionPowerSource.hh"

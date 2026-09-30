@@ -1,4 +1,7 @@
-/** @file DelayedNeutronPrecursorModel.cc @brief Explicit template instantiations. */
+/**
+ * @file DelayedNeutronPrecursorModel.cc 
+ * @brief  Explicit template instantiations.
+ */
 #include "equations/DelayedNeutronPrecursorModel.tcc"
 
 namespace SimpleFluid

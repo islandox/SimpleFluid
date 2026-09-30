@@ -1,4 +1,7 @@
-/** @file CellGradientCache.tcc @brief Compiled template implementations. */
+/**
+ * @file CellGradientCache.tcc 
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "FVM/CellOperators.hh"

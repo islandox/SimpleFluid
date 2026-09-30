@@ -1,4 +1,7 @@
-/** @file testStoredGradientViews.cc @brief Bulk field and resolved region gradient contracts. */
+/**
+ * @file testStoredGradientViews.cc 
+ * @brief  Bulk field and resolved region gradient contracts.
+ */
 #include "FVM/CellOperators.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/MeshReorderingFactory.hh"

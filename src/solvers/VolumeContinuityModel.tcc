@@ -1,4 +1,7 @@
-/** @file VolumeContinuityModel.tcc @brief Compiled template implementations. */
+/**
+ * @file VolumeContinuityModel.tcc 
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "solvers/VolumeContinuityModel.hh"

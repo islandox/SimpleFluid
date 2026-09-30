@@ -1,4 +1,7 @@
-/** @file testPolyhedralDiffusion.cc @brief Conservative assembly beyond hexahedral row sizes. */
+/**
+ * @file testPolyhedralDiffusion.cc 
+ * @brief  Conservative assembly beyond hexahedral row sizes.
+ */
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/MatrixOperators.hh"
 #include "geometry/MeshHandle.hh"

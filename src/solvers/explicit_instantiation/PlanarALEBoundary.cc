@@ -1,4 +1,7 @@
-/** @file PlanarALEBoundary.cc @brief Explicit template instantiations. */
+/**
+ * @file PlanarALEBoundary.cc 
+ * @brief  Explicit template instantiations.
+ */
 #include "solvers/PlanarALEBoundary.tcc"
 
 namespace SimpleFluid

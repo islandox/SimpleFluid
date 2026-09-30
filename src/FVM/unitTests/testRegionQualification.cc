@@ -1,4 +1,7 @@
-/** @file testRegionQualification.cc @brief Accuracy and decomposition qualification of compact regions. */
+/**
+ * @file testRegionQualification.cc 
+ * @brief  Accuracy and decomposition qualification of compact regions.
+ */
 #include "FVM/FaceFlux.hh"
 #include "FVM/Operators.hh"
 #include "geometry/MeshHandle.hh"

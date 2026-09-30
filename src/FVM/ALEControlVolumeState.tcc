@@ -1,4 +1,6 @@
-/** @file ALEControlVolumeState.tcc @brief Compiled ALE validation. */
+/** 
+ * @file ALEControlVolumeState.tcc 
+ * @brief  Compiled ALE validation.
 #pragma once
 
 #include "FVM/ALEControlVolumeState.hh"

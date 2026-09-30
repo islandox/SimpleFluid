@@ -1,4 +1,7 @@
-/** @file testRegionTransportAssembly.cc @brief Region CFD transport/reference parity. */
+/**
+ * @file testRegionTransportAssembly.cc 
+ * @brief  Region CFD transport/reference parity.
+ */
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"

@@ -1,4 +1,7 @@
-/** @file MomentCorrectedGaussGradient.hh @brief Linearity-preserving Gauss-linear reconstruction. */
+/**
+ * @file MomentCorrectedGaussGradient.hh 
+ * @brief  Linearity-preserving Gauss-linear reconstruction.
+ */
 #pragma once
 #include "FVM/details/VectorLaplacian.hh"
 

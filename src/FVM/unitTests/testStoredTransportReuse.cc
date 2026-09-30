@@ -1,4 +1,7 @@
-/** @file testStoredTransportReuse.cc @brief Repeated mapped transport and immutable graph contracts. */
+/**
+ * @file testStoredTransportReuse.cc 
+ * @brief  Repeated mapped transport and immutable graph contracts.
+ */
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"

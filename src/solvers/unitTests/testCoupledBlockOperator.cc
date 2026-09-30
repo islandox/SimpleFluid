@@ -1,4 +1,7 @@
-/** @file testCoupledBlockOperator.cc @brief Composite algebra, ownership and distributed solves. */
+/**
+ * @file testCoupledBlockOperator.cc 
+ * @brief  Composite algebra, ownership and distributed solves.
+ */
 #include "FVM/FaceFlux.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
 #include "equations/TimeStepperOptions.hh"

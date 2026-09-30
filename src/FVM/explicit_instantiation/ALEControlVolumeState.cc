@@ -1,4 +1,7 @@
-/** @file ALEControlVolumeState.cc @brief Explicit ALE validation instantiations. */
+/**
+ * @file ALEControlVolumeState.cc 
+ * @brief  Explicit ALE validation instantiations.
+ */
 #include "FVM/ALEControlVolumeState.tcc"
 #include "geometry/Mesh.hh"
 #include "geometry/MeshHandle.hh"

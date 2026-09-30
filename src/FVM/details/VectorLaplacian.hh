@@ -1,4 +1,7 @@
-/** @file VectorLaplacian.hh @brief Shared native/legacy host vector Laplacian. */
+/**
+ * @file VectorLaplacian.hh 
+ * @brief  Shared native/legacy host vector Laplacian.
+ */
 #pragma once
 
 #include "FVM/TransportSystem.hh"

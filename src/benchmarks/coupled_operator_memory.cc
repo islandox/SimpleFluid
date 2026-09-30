@@ -1,4 +1,7 @@
-/** @file coupled_operator_memory.cc @brief Opt-in, one-backend-per-process coupled benchmark. */
+/**
+ * @file coupled_operator_memory.cc 
+ * @brief Opt-in, one-backend-per-process coupled benchmark.
+ */
 #include "equations/IncompressibleMomentumEquation.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"

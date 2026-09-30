@@ -1,4 +1,7 @@
-/** @file testSASSupportedPaths.cc @brief Transient and transaction gates for SAS extensions. */
+/**
+ * @file testSASSupportedPaths.cc 
+ * @brief  Transient and transaction gates for SAS extensions.
+ */
 #include <gtest/gtest.h>
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/BoussinesqSolver.hh"

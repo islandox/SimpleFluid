@@ -1,4 +1,7 @@
-/** @file NonOrthogonalConvergenceOptions.hh @brief Steady implicit correction convergence controls. */
+/**
+ * @file NonOrthogonalConvergenceOptions.hh 
+ * @brief  Steady implicit correction convergence controls.
+ */
 #pragma once
 
 #include "solvers/BelosLinearSolver.hh"

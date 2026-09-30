@@ -1,4 +1,7 @@
-/** @file DICPreconditioner.tcc @brief Template implementations for DICPreconditioner. */
+/**
+ * @file DICPreconditioner.tcc 
+ * @brief  Template implementations for DICPreconditioner.
+ */
 #pragma once
 
 #include "solvers/DICPreconditioner.hh"

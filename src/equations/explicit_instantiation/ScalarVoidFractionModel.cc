@@ -1,4 +1,7 @@
-/** @file ScalarVoidFractionModel.cc @brief Explicit template instantiations. */
+/**
+ * @file ScalarVoidFractionModel.cc 
+ * @brief  Explicit template instantiations.
+ */
 #include "equations/ScalarVoidFractionModel.tcc"
 
 namespace SimpleFluid
