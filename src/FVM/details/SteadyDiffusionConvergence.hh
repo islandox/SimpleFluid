@@ -1,4 +1,7 @@
-/** @file SteadyDiffusionConvergence.hh @brief Shared native/mapped steady diffusion convergence. */
+/**
+ * @file SteadyDiffusionConvergence.hh
+ * @brief  Shared native/mapped steady diffusion convergence.
+ */
 #pragma once
 
 #include "FVM/NonOrthogonalConvergenceOptions.hh"

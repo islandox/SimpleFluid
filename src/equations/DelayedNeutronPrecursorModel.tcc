@@ -1,4 +1,7 @@
-/** @file DelayedNeutronPrecursorModel.tcc @brief Compiled template implementations. */
+/**
+ * @file DelayedNeutronPrecursorModel.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "equations/DelayedNeutronPrecursorModel.hh"

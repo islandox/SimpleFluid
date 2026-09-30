@@ -1,4 +1,7 @@
-/** @file testCoupledSolverBackends.cc @brief End-to-end qualification of coupled backend choices. */
+/**
+ * @file testCoupledSolverBackends.cc
+ * @brief  End-to-end qualification of coupled backend choices.
+ */
 #include "FVM/FaceFlux.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"

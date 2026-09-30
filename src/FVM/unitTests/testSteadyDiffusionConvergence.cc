@@ -1,4 +1,7 @@
-/** @file testSteadyDiffusionConvergence.cc @brief Actual steady-helper correction and MPI contracts. */
+/**
+ * @file testSteadyDiffusionConvergence.cc
+ * @brief  Actual steady-helper correction and MPI contracts.
+ */
 #include "FVM/Operators.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"

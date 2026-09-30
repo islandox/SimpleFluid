@@ -1,4 +1,7 @@
-/** @file CoupledBlockOperator.cc @brief Explicit instantiations for CoupledBlockOperator. */
+/**
+ * @file CoupledBlockOperator.cc
+ * @brief  Explicit instantiations for CoupledBlockOperator.
+ */
 
 #include "solvers/CoupledBlockOperator.tcc"
 
