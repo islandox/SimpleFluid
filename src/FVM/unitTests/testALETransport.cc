@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -207,19 +208,19 @@ public:
         d_diagnostics.trial_active = true;
     }
 
-    void corrupt_flux()
+    void corrupt_flux(SimpleFluid::real_t value = 1.0)
     {
         if (d_mesh->num_owned_cells() == 0) return;
         for (const auto face : d_mesh->faces(local_ordinal_type{0}))
         {
             if (d_mesh->is_boundary_face(face))
             {
-                d_flux[static_cast<size_t>(face)] = 1.0;
+                d_flux[static_cast<size_t>(face)] = value;
                 return;
             }
         }
         const auto first = d_mesh->faces(local_ordinal_type{0}).front();
-        d_flux[static_cast<size_t>(first)] = 1.0;
+        d_flux[static_cast<size_t>(first)] = value;
     }
 
     void begin_trial(SimpleFluid::real_t, SimpleFluid::real_t) override {}
@@ -483,5 +484,9 @@ TEST(ALETransportTest, RechecksRankLocalMutableFluxAfterSuccessfulValidation)
     const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
     EXPECT_NO_THROW(ale.validate(*mesh));
     if (mesh->owned_cell_map()->getComm()->getRank() == 0) motion.corrupt_flux();
+    EXPECT_THROW(ale.validate(*mesh), std::invalid_argument);
+    // Rank zero now skips its GCL loop; every rank must still reach both reductions.
+    if (mesh->owned_cell_map()->getComm()->getRank() == 0)
+        motion.corrupt_flux(std::numeric_limits<SimpleFluid::real_t>::quiet_NaN());
     EXPECT_THROW(ale.validate(*mesh), std::invalid_argument);
 }
