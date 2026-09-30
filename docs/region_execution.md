@@ -31,8 +31,8 @@ ALE trial or rollback on all ranks.
 
 MeshHandle setup, gradient geometry construction, transport assembly, face-flux
 kernels, and composite VTU topology generation enter this boundary. Native and
-legacy mesh paths continue through their existing implementations. No per-cell or
-per-face native lookup table is introduced.
+legacy mesh paths continue through their existing implementations. These views
+do not build dense per-cell or per-face native lookup tables.
 
 `execution.visit_regions(visitor)` also dispatches once per region, passing its
 ordinal, canonical cell offset, and original provider pair. This gives kernels
@@ -65,9 +65,12 @@ Each region has seven interface-directory spans: six structured boundary
 orientations and one irregular bucket. There are two side descriptors per
 interface. Boundary queries inspect the addressed region and boundary; irregular
 correspondences retain their existing sorted tables. Canonical face recovery
-translates directly for regions with no removed faces; other regions perform
-rank/select using only their incident removal descriptors. Boundary-name lookup
-also uses a per-region span. Remaining region-offset binary searches cost
+translates directly for regions with no removed faces. Complete structured-side
+removals use arithmetic rank/select. Other removals are enumerated once at
+construction into sorted native face IDs for the affected region; lookup then
+uses a binary search over that region's list, independent of the number of
+interfaces. The list is counted in `storage_report().indexing`. Boundary-name
+lookup also uses a per-region span. Remaining region-offset binary searches cost
 `O(log R)`; this milestone does not claim constant-cost canonical ordinal recovery.
 
 Cartesian validation examines coordinate arrays, native midpoint arithmetic and
