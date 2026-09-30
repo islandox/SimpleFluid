@@ -106,6 +106,30 @@ simplefluid_add_mpi_test(
     LABELS "mpi;multi_region;ale;collective"
     TIMEOUT 20)
 
+simplefluid_add_mpi_test(
+    NAME MultiRegionALE_MultiFaultPriority_2procs
+    TARGET testMultiRegionALE
+    PROCS 2
+    ARGS "--gtest_filter=MultiRegionALETest.RankDivergentFaultsRetainCollectiveErrorPriority"
+    LABELS "mpi;multi_region;ale;collective"
+    TIMEOUT 20)
+
+simplefluid_add_mpi_test(
+    NAME MultiRegionALE_EmptyRankFailure_2procs
+    TARGET testMultiRegionALE
+    PROCS 2
+    ARGS "--gtest_filter=MultiRegionALETest.EmptyRanksReceiveCollectiveGclFailure"
+    LABELS "mpi;multi_region;ale;collective"
+    TIMEOUT 20)
+
+simplefluid_add_mpi_test(
+    NAME ALETrialReplay_2procs
+    TARGET testALETrialReplay
+    PROCS 2
+    ARGS "--gtest_filter=ALETrialReplayTest.SameTargetAndTimeStepRejectRetainedViewOnTwoRanks"
+    LABELS "mpi;ale;replay;collective"
+    TIMEOUT 20)
+
 foreach(_region_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME RegionQualification_${_region_procs}procs TARGET testRegionQualification
         PROCS ${_region_procs} LABELS "mpi;multi_region;accuracy;qualification" TIMEOUT 180)
