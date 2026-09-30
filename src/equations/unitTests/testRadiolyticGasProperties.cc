@@ -476,6 +476,25 @@ TEST(RadiolyticGasPropertiesTest, ParsesMassTransferSelectorAndRejectsUnknownVal
     EXPECT_THROW(SimpleFluid::radiolytic_gas_options_from_database(database), std::invalid_argument);
 }
 
+/** @brief Kinetics selectors retain the legacy default and reject unknown input. */
+TEST(RadiolyticGasPropertiesTest, ParsesKineticsSelectorAndRejectsUnknownValues)
+{
+    using SimpleFluid::RadiolyticKineticsMode;
+    EXPECT_EQ(SimpleFluid::radiolytic_gas_options_from_database({}).kinetics_mode,
+        RadiolyticKineticsMode::LegacySubcycled);
+    SimpleFluid::Database database;
+    database.set("radiolytic_kinetics_mode", std::string{"exactInactive"});
+    EXPECT_EQ(SimpleFluid::radiolytic_gas_options_from_database(database).kinetics_mode,
+        RadiolyticKineticsMode::ExactInactive);
+    database.set("radiolytic_kinetics_mode", std::string{"legacySubcycled"});
+    EXPECT_EQ(SimpleFluid::radiolytic_gas_options_from_database(database).kinetics_mode,
+        RadiolyticKineticsMode::LegacySubcycled);
+    database.set("radiolytic_kinetics_mode", std::string{"unverified"});
+    EXPECT_THROW(SimpleFluid::radiolytic_gas_options_from_database(database), std::invalid_argument);
+    database.set("radiolytic_kinetics_mode", 7);
+    EXPECT_THROW(SimpleFluid::radiolytic_gas_options_from_database(database), std::invalid_argument);
+}
+
 /** @brief Verifies that the Celata bubble-rise velocity balances drag. */
 TEST(RadiolyticGasPropertiesTest, CelataRiseVelocityBalancesDrag)
 {
