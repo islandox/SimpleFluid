@@ -476,6 +476,25 @@ TEST(ReactingGasPropertiesTest, ParsesMassTransferSelectorAndRejectsUnknownValue
     EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
 }
 
+/** @brief Kinetics selectors retain the legacy default and reject unknown input. */
+TEST(ReactingGasPropertiesTest, ParsesKineticsSelectorAndRejectsUnknownValues)
+{
+    using SimpleFluid::ReactingKineticsMode;
+    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database({}).kinetics_mode,
+        ReactingKineticsMode::LegacySubcycled);
+    SimpleFluid::Database database;
+    database.set("reacting_kinetics_mode", std::string{"exactInactive"});
+    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database(database).kinetics_mode,
+        ReactingKineticsMode::ExactInactive);
+    database.set("reacting_kinetics_mode", std::string{"legacySubcycled"});
+    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database(database).kinetics_mode,
+        ReactingKineticsMode::LegacySubcycled);
+    database.set("reacting_kinetics_mode", std::string{"unverified"});
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    database.set("reacting_kinetics_mode", 7);
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+}
+
 /** @brief Verifies that the Celata bubble-rise velocity balances drag. */
 TEST(ReactingGasPropertiesTest, CelataRiseVelocityBalancesDrag)
 {

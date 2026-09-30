@@ -270,6 +270,7 @@ namespace
         scalar(static_cast<int>(gas->dissolved_transport));
         scalar(static_cast<int>(gas->bubble_transport));
         scalar(static_cast<int>(gas->heaviside_mode));
+        scalar(static_cast<int>(gas->kinetics_mode));
         scalar(static_cast<int>(gas->rise_velocity_mode));
         scalar(static_cast<int>(gas->surface_tension_mode));
         scalar(static_cast<int>(gas->diffusivity_mode));

@@ -494,6 +494,7 @@ private:
     struct CellKineticsResult
     {
         CellKineticsState state;
+        int subcycles = 1; ///< Actual local updates, including an exact inactive update.
         scalar_type converted_number_rate = {};
         scalar_type converted_molar_rate = {};
         scalar_type large_growth_rate = {};

@@ -71,6 +71,13 @@ enum class ReactingHeavisideMode
     Smoothed ///< Use a hyperbolic-tangent transition.
 };
 
+/** @brief Local two-population kinetics integration policy. */
+enum class ReactingKineticsMode
+{
+    LegacySubcycled, ///< Retain the original source/decay splitting and subcycles.
+    ExactInactive   ///< Integrate subcritical microbubble production/decay exactly; otherwise use legacy subcycles.
+};
+
 /**
  * @brief Bubble slip/rise-velocity correlation selection.
  */
@@ -125,6 +132,7 @@ struct ReactingGasOptions
     ReactingTransportMode dissolved_transport = ReactingTransportMode::NoAdvection;
     BubbleTransportMode bubble_transport = BubbleTransportMode::General;
     ReactingHeavisideMode heaviside_mode = ReactingHeavisideMode::Exact;
+    ReactingKineticsMode kinetics_mode = ReactingKineticsMode::LegacySubcycled;
     BubbleRiseVelocityMode rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;
     SurfaceTensionMode surface_tension_mode = SurfaceTensionMode::Constant;
     HydrogenDiffusivityMode diffusivity_mode = HydrogenDiffusivityMode::Constant;
