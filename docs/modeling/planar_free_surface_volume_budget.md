@@ -425,6 +425,15 @@ accepted-old and active-trial-new volumes in mesh-local cell order, mesh fluxes
 in mesh-local face order, timestep, concrete geometry identity, and old/new
 epochs. It is valid only while the originating motion trial is active and
 validates sizes, finiteness, positivity, identity, epoch, and the cellwise GCL.
+Repeating a trial with the same target and time step still changes its geometry
+epoch, so a state retained from the earlier trial must be rebuilt.
+
+Validation combines rank-local state failures before any rank throws. The GCL
+pass similarly combines invalid volume or mesh-flux data, mesh traversal
+failures, and cellwise residual failures, so all ranks receive the same exception
+category and message. Mesh execution is held only while local faces are read;
+the lease is released before the collective result is checked. Rank-local
+traversal failures are reported collectively.
 
 For a conservative intensive unknown $q$ with storage weight $a$, advective
 weight $b$, and volumetric source $S$, the Backward-Euler assembly is

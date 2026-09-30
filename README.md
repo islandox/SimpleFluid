@@ -429,12 +429,16 @@ generation.
 
 - C++23 compiler (GCC ≥ 13 or Clang ≥ 17)
 - CMake ≥ 3.21
-- Trilinos 17+ with:
+- Trilinos with:
   - Kokkos, Teuchos, Tpetra
   - STK (IO, Mesh, Topology, Util)
   - Belos, Ifpack2, MueLu, Zoltan2
+  - Optional: NOX together with ThyraCore and ThyraTpetraAdapters (NOX must be built with Thyra support)
 - MPI (OpenMPI or MPICH)
-- Google Test (for unit tests)
+- Boost headers with Multiprecision (`cpp_int`)
+- Google Test (required whenever testing is enabled; testing defaults to `ON`)
+
+CMake does not enforce version floors for Trilinos, MPI, Boost, or GTest.
 
 ### Configure & Build
 
@@ -813,20 +817,29 @@ submerged steam; the inventory is never silently discarded.
 
 ## Dependencies
 
-| Dependency | Role |
-| ---------- | ---- |
-| **MPI** | Distributed-memory parallelism |
-| **Kokkos** | On-node parallelism (CPU/GPU portability) |
-| **Teuchos** | Smart pointers, parameter lists, timers |
-| **Tpetra** | Distributed sparse linear algebra |
-| **STK** | Unstructured mesh I/O (Exodus format) |
-| **Belos** | Krylov subspace iterative solvers |
-| **Ifpack2** | Algebraic preconditioners (block smoothers) |
-| **MueLu** | Algebraic multigrid (AMG) for pressure/Poisson |
-| **Zoltan2** | Graph/hierarchical mesh partitioning |
-| **LAPACK** | Dense linear algebra |
-| **BLAS** | Low-level vector/matrix operations |
-| **GTest** | C++ unit testing framework |
+| Dependency | Role | Version | Requirement |
+| ---------- | ---- | ------- | ----------- |
+| **MPI** | Distributed-memory parallelism | MPI-3.0+ | Required |
+| **Trilinos** | Distributed sparse linear algebra, mesh I/O, iterative solvers, and preconditioners | 17.0+ | Required |
+| **Boost (headers)** | Multiprecision integers for exact geometry predicates | Not specified | Required |
+| **LAPACK** | Dense linear algebra | 3.9+ | Required |
+| **BLAS** | Low-level vector/matrix operations | 3.9+ | Required |
+| **GTest** | C++ unit testing framework | 1.12+ | Optional |
+
+### Required Trilinos components
+
+| Component | Role | Requirement |
+| --------- | ---- | ----------- |
+| **Kokkos** | On-node parallelism (CPU/GPU portability) | Required |
+| **Teuchos** | Smart pointers, parameter lists, timers | Required |
+| **Tpetra** | Distributed sparse linear algebra | Required |
+| **Thyra** | Abstract interfaces for operators, vectors, and nonlinear models | Optional |
+| **STK** | Unstructured mesh I/O (Exodus format) | Required |
+| **Belos** | Krylov subspace iterative solvers | Required |
+| **Ifpack2** | Algebraic preconditioners (block smoothers) | Required |
+| **MueLu** | Algebraic multigrid (AMG) for pressure/Poisson | Required |
+| **NOX** | Coupled nonlinear solver | Optional (Depends on Thyra) |
+| **Zoltan2** | Graph/hierarchical mesh partitioning | Required |
 
 ## Compact region meshes
 

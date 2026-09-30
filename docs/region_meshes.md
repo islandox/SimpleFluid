@@ -99,6 +99,13 @@ creates no cell-face CSR or dense neighbor replacement. The existing gradient,
 diffusion, transport, pressure correction and coupled assembly consume the
 actual subface centroids, areas and adjacent cells.
 
+Face-neighbor matrices allocate each owned row from its logical face count plus
+one diagonal entry. A coarse cell can therefore have more than the usual
+hexahedral number of neighbors after subface expansion. Repeated neighbor
+columns may be inserted separately and combined when matrix assembly completes;
+the capacity is an upper bound for face-neighbor operators, not for extended
+gradient stencils.
+
 `logical_faces(native_face)` returns all logical subfaces. `canonical_face()`
 rejects a subdivided coarse face because it has multiple degrees of freedom.
 `face_flux_weights()` supplies signed area fractions, normalized by total
