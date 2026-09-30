@@ -1,4 +1,7 @@
-/** @file ScalarSourceDecayTransport.cc @brief Explicit template instantiations. */
+/**
+ * @file ScalarSourceDecayTransport.cc
+ * @brief  Explicit template instantiations.
+ */
 #include "equations/ScalarSourceDecayTransport.tcc"
 
 namespace SimpleFluid

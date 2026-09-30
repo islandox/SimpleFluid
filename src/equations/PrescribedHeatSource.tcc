@@ -1,4 +1,7 @@
-/** @file PrescribedHeatSource.tcc @brief Compiled template implementations. */
+/**
+ * @file PrescribedHeatSource.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "equations/PrescribedHeatSource.hh"

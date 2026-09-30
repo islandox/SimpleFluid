@@ -1,4 +1,7 @@
-/** @file PrescribedHeatSource.cc @brief Explicit template instantiations. */
+/**
+ * @file PrescribedHeatSource.cc
+ * @brief  Explicit template instantiations.
+ */
 #include "equations/PrescribedHeatSource.tcc"
 
 namespace SimpleFluid

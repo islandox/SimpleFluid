@@ -1,4 +1,7 @@
-/** @file FieldStateTransaction.hh @brief Lightweight owned-field snapshots. */
+/**
+ * @file FieldStateTransaction.hh
+ * @brief  Lightweight owned-field snapshots.
+ */
 
 #pragma once
 

@@ -1,4 +1,7 @@
-/** @file PlanarALEBoundary.tcc @brief Compiled template implementations. */
+/**
+ * @file PlanarALEBoundary.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "solvers/PlanarALEBoundary.hh"

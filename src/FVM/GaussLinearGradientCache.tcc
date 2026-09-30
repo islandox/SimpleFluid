@@ -1,4 +1,7 @@
-/** @file GaussLinearGradientCache.tcc @brief Template implementations for GaussLinearGradientCache. */
+/**
+ * @file GaussLinearGradientCache.tcc
+ * @brief  Template implementations for GaussLinearGradientCache.
+ */
 #pragma once
 
 #include "FVM/GaussLinearGradientCache.hh"

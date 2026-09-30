@@ -1,4 +1,7 @@
-/** @file testPlanarALEBoundary.cc @brief Moving planar boundary contract tests. */
+/**
+ * @file testPlanarALEBoundary.cc
+ * @brief  Moving planar boundary contract tests.
+ */
 
 #include <gtest/gtest.h>
 

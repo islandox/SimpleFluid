@@ -1,4 +1,7 @@
-/** @file sst_sas_activation.cc @brief Small transient SAS source-activation fixture, not turbulence validation. */
+/**
+ * @file sst_sas_activation.cc
+ * @brief  Small transient SAS source-activation fixture, not turbulence validation.
+ */
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include <Tpetra_Core.hpp>

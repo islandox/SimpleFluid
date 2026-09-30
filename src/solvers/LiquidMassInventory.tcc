@@ -1,4 +1,7 @@
-/** @file LiquidMassInventory.tcc @brief Compiled template implementations. */
+/**
+ * @file LiquidMassInventory.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "solvers/PlanarFreeSurfaceModel.hh"

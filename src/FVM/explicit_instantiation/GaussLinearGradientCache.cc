@@ -1,4 +1,7 @@
-/** @file GaussLinearGradientCache.cc @brief Explicit instantiations for GaussLinearGradientCache. */
+/**
+ * @file GaussLinearGradientCache.cc
+ * @brief  Explicit instantiations for GaussLinearGradientCache.
+ */
 
 #include "FVM/GaussLinearGradientCache.tcc"
 

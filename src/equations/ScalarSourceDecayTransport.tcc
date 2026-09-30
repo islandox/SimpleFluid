@@ -1,4 +1,7 @@
-/** @file ScalarSourceDecayTransport.tcc @brief Compiled template implementations. */
+/**
+ * @file ScalarSourceDecayTransport.tcc
+ * @brief  Compiled template implementations.
+ */
 #pragma once
 
 #include "equations/ScalarSourceDecayTransport.hh"
