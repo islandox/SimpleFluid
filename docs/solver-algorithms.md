@@ -9,6 +9,10 @@ Configure `SIMPLEFLUID_DOCS_ENABLE_DIAGRAMS=ON` to render them. Plain
 documentation builds retain this overview and the explanatory API text but
 omit the images.
 
+The major flow-chart phases also expose cumulative, rank-local wall timings
+through the solver API. See [solver phase timings](solver_timings.md) for
+`Teuchos::Time` instrumentation, caller queries, and rollback semantics.
+
 ## Diagram index
 
 | Diagram | API entry point | Implementation source |

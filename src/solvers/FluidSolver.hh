@@ -24,6 +24,7 @@
 #include "solvers/CoupledPressureVelocitySolver.hh"
 #include "solvers/NoxNonlinearSolver.hh"
 #include "solvers/SolverProgress.hh"
+#include "solvers/SolverTimings.hh"
 
 #include <cstdint>
 #include <optional>
@@ -95,6 +96,14 @@ public:
         TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
 
     virtual ~FluidSolver() = default;
+
+    /** Inclusive rank-local timing since construction/reset, including rejected attempts.
+     * Snapshots contain only scopes that have finished, including unwinding scopes.
+     */
+    SolverTimings::snapshot_type solver_phase_timings() const noexcept;
+    SolverPhaseTiming solver_phase_timing(SolverPhase phase) const;
+    /** Throws if called from a callback while a timed solver stage is active. */
+    void reset_solver_phase_timings();
 
     virtual void step();
     /** @brief Advance one step and print rank-zero convergence progress. */
@@ -467,6 +476,7 @@ protected:
     SP<mesh_type> d_mutable_mesh;
     SP<const legacy_mesh_type> d_legacy_mesh;
     Problem<Pack> d_problem;
+    SolverTimings d_solver_timings;
     scalar_type d_time = 0.0;
     int d_step_index = 0;
     step_statistics_type d_last_step_statistics;
