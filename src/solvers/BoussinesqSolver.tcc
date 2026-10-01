@@ -1918,6 +1918,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::clear_material_update
  */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::refresh_physical_models()
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::PhysicalModels);
     update_context_type context{d_time, d_step_index, *d_mesh, temperature(), pressure(), velocity()};
     stored_material_properties().update(context);
     if (d_free_surface_model && !d_free_surface_model->initialized() && d_material_feedback_model)
@@ -2807,6 +2808,7 @@ void BoussinesqSolver<Pack>::initialize_free_surface_if_needed(
 /** @brief Apply accepted phase change and close the planar volume budget. */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_free_surface(scalar_type time_step)
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::FreeSurface);
     if (!d_free_surface_model)
     {
         return;
@@ -3448,6 +3450,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::validate_step_couplin
  */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_turbulence(scalar_type time_step)
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Turbulence);
     if (auto* turbulence = find_turbulence_model())
     {
         const auto gravity = d_problem.time_options().gravity_vector();
@@ -3474,6 +3477,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_turbulence(sc
  */
 template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::advance_pre_temperature_models(scalar_type time_step)
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::PreTemperatureModels);
     const auto sheng_after_temperature =
         d_radiolytic_gas_model && d_radiolytic_gas_model->enabled() && d_radiolytic_gas_model->supplies_void_fraction();
 
@@ -3483,10 +3487,13 @@ template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::advance_pre_temperatu
         {
             throw std::runtime_error("Ideal radiolysis requires the authoritative scalar void model.");
         }
-        d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
-            projected_face_fluxes(), stored_material_properties(),
-            d_fission_power_source ? &d_fission_power_source->field() : nullptr,
-            d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
+        {
+            const auto gas_timing = this->d_solver_timings.scope(SolverPhase::Gas);
+            d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
+                projected_face_fluxes(), stored_material_properties(),
+                d_fission_power_source ? &d_fission_power_source->field() : nullptr,
+                d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
+        }
     }
 
     if (!sheng_after_temperature)
@@ -3517,6 +3524,7 @@ template<TpetraTypePack Pack> bool BoussinesqSolver<Pack>::advance_pre_temperatu
  */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_temperature_transport(scalar_type time_step)
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Temperature);
     LinearSolveStatistics temperature_statistics;
     if (physical_transport_enabled())
     {
@@ -3566,11 +3574,15 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::advance_temperature_t
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::advance_post_temperature_models(scalar_type time_step, bool sheng_after_temperature)
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::PostTemperatureModels);
     if (sheng_after_temperature)
     {
-        d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
-            projected_face_fluxes(), stored_material_properties(),
-            d_fission_power_source ? &d_fission_power_source->field() : nullptr);
+        {
+            const auto gas_timing = this->d_solver_timings.scope(SolverPhase::Gas);
+            d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
+                projected_face_fluxes(), stored_material_properties(),
+                d_fission_power_source ? &d_fission_power_source->field() : nullptr);
+        }
         update_void_fraction_models(time_step);
     }
 
@@ -3815,6 +3827,7 @@ void BoussinesqSolver<Pack>::set_coupling_interval_energy(
 
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::ALE);
     d_ale_temperature_density = nullptr;
     if (d_step_index == 0)
     {
@@ -4017,15 +4030,19 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     {
         for (int corrector = 1; corrector <= d_free_surface_options.ale.maximum_correctors; ++corrector)
         {
+            const auto trial_timing = this->d_solver_timings.scope(SolverPhase::ALETrial);
             scalar_type local_target_integral{};
             for (const auto value : target_guess) local_target_integral += value;
             scalar_type target_integral{};
             Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
                 1, &local_target_integral, &target_integral);
             candidate_level = accepted_mesh_level + time_step * target_integral / top_area;
-            d_ale_motion->begin_trial(candidate_level, time_step);
-            d_active_ale.emplace(FVM::make_ale_control_volume_state(*d_mesh, *d_ale_motion));
-            refresh_geometry_dependent_state();
+            {
+                const auto geometry_timing = this->d_solver_timings.scope(SolverPhase::ALEGeometry);
+                d_ale_motion->begin_trial(candidate_level, time_step);
+                d_active_ale.emplace(FVM::make_ale_control_volume_state(*d_mesh, *d_ale_motion));
+                refresh_geometry_dependent_state();
+            }
             if (d_fission_power_source && d_fission_power_source->has_interval_energy())
                 d_fission_power_source->refresh_interval_energy(d_time, time_step);
             // Picard data from the preceding outer trial supplies the
@@ -4103,10 +4120,13 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                     offset += volume_weighted_mean_pressure();
                 }
                 d_radiolytic_gas_model->set_absolute_pressure_offset(offset);
-                d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
-                    *d_mesh_relative_face_flux, stored_material_properties(),
-                    d_fission_power_source ? &d_fission_power_source->field() : nullptr, &*d_active_ale,
-                    d_free_surface_options.gravity_axis);
+                {
+                    const auto gas_timing = this->d_solver_timings.scope(SolverPhase::Gas);
+                    d_radiolytic_gas_model->advance(d_time + time_step, time_step, temperature(), pressure(), velocity(),
+                        *d_mesh_relative_face_flux, stored_material_properties(),
+                        d_fission_power_source ? &d_fission_power_source->field() : nullptr, &*d_active_ale,
+                        d_free_surface_options.gravity_axis);
+                }
                 update_void_fraction_models(time_step);
             }
 
@@ -4558,6 +4578,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
  */
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Step);
     this->validate_pressure_velocity_selection();
     validate_step_coupling();
     if (d_fission_power_source && d_fission_power_source->has_interval_energy())

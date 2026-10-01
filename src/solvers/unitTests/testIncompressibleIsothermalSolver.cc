@@ -231,6 +231,12 @@ TEST(IncompressibleIsothermalSolverTest, AdvancesStandardKEpsilonOnNativeMeshHan
 
     ASSERT_NO_THROW(solver.step());
     EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 1u);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::PressureVelocity).calls, 1u);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Turbulence).calls, 1u);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Temperature).calls, 0u);
+    EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds,
+        solver.solver_phase_timing(SimpleFluid::SolverPhase::Turbulence).seconds);
     EXPECT_TRUE(solver.last_step_statistics().converged);
     EXPECT_DOUBLE_EQ(solver.last_step_statistics().temperature, 0.0);
     expect_positive_turbulence_fields(turbulence, std::as_const(solver).material_properties(), reference_density);

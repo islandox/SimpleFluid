@@ -294,6 +294,7 @@ std::unique_ptr<CoupledNonlinearProblem> IncompressibleIsothermalSolver<Pack>::m
 /** @brief Advance pressure, velocity, and optional turbulence one step. */
 template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Step);
     this->validate_pressure_velocity_selection();
     AcceptedStateRollback sas_rollback;
     auto* sas_model = find_turbulence_model();
@@ -330,12 +331,14 @@ template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
             begin_step();
         if (auto* turbulence = find_turbulence_model())
         {
+            const auto refresh_timing = this->d_solver_timings.scope(SolverPhase::PhysicalModels);
             turbulence->refresh_effective_properties(stored_material_properties(), d_reference_density);
         }
 
         solve_pressure_velocity_coupling();
         if (auto* turbulence = find_turbulence_model())
         {
+            const auto turbulence_timing = this->d_solver_timings.scope(SolverPhase::Turbulence);
             const auto statistics = turbulence->advance(velocity(), projected_face_fluxes(),
                 isothermal_velocity_boundary_cache(), d_problem.time_options().time_step, stored_material_properties(),
                 d_reference_density, d_problem.time_options().non_orthogonal_treatment, d_problem.linear_options());

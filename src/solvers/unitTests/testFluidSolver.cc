@@ -380,6 +380,12 @@ TEST(FluidSolverTest, RunsNativeMeshHandlesWithoutLegacyConversion)
 
         solver.run();
         EXPECT_EQ(solver.step_index(), 1);
+        const auto step_timing = solver.solver_phase_timing(SimpleFluid::SolverPhase::Step);
+        EXPECT_EQ(step_timing.calls, 1u);
+        EXPECT_GE(step_timing.seconds, 0.0);
+        EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::PressureVelocity).calls, 1u);
+        EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::Momentum).calls, 0u);
+        EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::PressureProjection).calls, 0u);
         EXPECT_TRUE(std::isfinite(solver.pressure().value(0)));
         const auto velocity = solver.velocity().value(0);
         EXPECT_TRUE(std::isfinite(velocity.x));

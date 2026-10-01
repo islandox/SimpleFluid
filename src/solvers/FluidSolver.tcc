@@ -129,6 +129,27 @@ void record_coupled_result(
 } // namespace fluid_solver_detail
 } // namespace
 
+
+// Keep the caller API out of line: explicit instantiation supplies new DSO
+// symbols, preventing new timing headers from silently using an old layout.
+template<TpetraTypePack Pack>
+SolverTimings::snapshot_type FluidSolver<Pack>::solver_phase_timings() const noexcept
+{
+    return d_solver_timings.snapshot();
+}
+
+template<TpetraTypePack Pack>
+SolverPhaseTiming FluidSolver<Pack>::solver_phase_timing(SolverPhase phase) const
+{
+    return d_solver_timings.query(phase);
+}
+
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::reset_solver_phase_timings()
+{
+    d_solver_timings.reset();
+}
+
 /**
  * @brief Validate and return a legacy mesh pointer.
  *
@@ -1024,6 +1045,7 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Momentum);
     {
         const auto velocity_values = velocity().owned_read_view();
         auto predictor_values = predictor_velocity().owned_write_view();
@@ -1101,6 +1123,7 @@ auto FluidSolver<Pack>::run_pressure_correction(
     bool reuse_cached_predictor_flux)
     -> typename PressureProjectionEquation<Pack>::ProjectionResult
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::PressureProjection);
     if (uses_legacy_backend())
     {
         sync_primary_fields_to_legacy();
@@ -1497,6 +1520,7 @@ void FluidSolver<Pack>::solve_coupled_nonlinear()
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_pressure_velocity_coupling()
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::PressureVelocity);
     if (d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear)
     {
         validate_pressure_velocity_selection();
@@ -1752,12 +1776,16 @@ auto FluidSolver<Pack>::courant_transport_face_fluxes() const -> const face_flux
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::step()
 {
+    const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Step);
     validate_pressure_velocity_selection();
     if (d_problem.time_options().pressure_velocity_coupling == PressureVelocityCoupling::CoupledNonlinear)
     {
         // The nonlinear problem owns all trial fields. Do not reset accepted
         // statistics or publish trial ghosts through begin_step().
-        solve_coupled_nonlinear();
+        {
+            const auto coupling_timing = this->d_solver_timings.scope(SolverPhase::PressureVelocity);
+            solve_coupled_nonlinear();
+        }
         finish_step();
         return;
     }

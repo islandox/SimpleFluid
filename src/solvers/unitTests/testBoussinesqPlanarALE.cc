@@ -1321,6 +1321,7 @@ TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetr
     const auto initial_pool_occupancy_field = capture_owned_values(state.solver->pool_occupancy());
     const auto initial_absolute_flux = capture_owned_face_values(state.solver->pressure_corrected_face_fluxes());
 
+    state.solver->reset_solver_phase_timings();
     const auto valid_pressure_options = state.solver->pressure_linear_solver_options();
     auto invalid_pressure_options = valid_pressure_options;
     invalid_pressure_options.max_iterations = 0;
@@ -1338,6 +1339,11 @@ TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetr
     }
 
     EXPECT_NE(failure.find("BelosLinearSolver requires positive maximum iterations"), std::string::npos) << failure;
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 1u);
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 1u);
+    EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::PressureProjection).calls, 0u);
+    const auto rejected_trial_calls = state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls;
+    EXPECT_GT(rejected_trial_calls, 0u);
     expect_geometry_restored(*state.mesh, geometry);
     expect_primary_restored(*state.solver, primary);
     EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
@@ -1365,6 +1371,9 @@ TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetr
 
     state.solver->set_pressure_linear_solver_options(valid_pressure_options);
     ASSERT_NO_THROW(state.solver->step());
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
+    EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, rejected_trial_calls);
 
     EXPECT_EQ(state.solver->step_index(), initial_step + 1);
     EXPECT_NEAR(state.solver->time(), initial_time + 1.0e-2, 1.0e-15);
@@ -2694,6 +2703,7 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
     solver.add_fission_power_source().initialize_constant(0.0);
     const auto original_geometry = capture_geometry(*state.mesh);
     const auto original_map = state.mesh->owned_cell_map();
+    solver.reset_solver_phase_timings();
     auto checkpoint = solver.create_coupling_checkpoint();
     std::vector<double> energy(state.mesh->num_owned_cells());
     for (size_t owned = 0; owned < energy.size(); ++owned)
@@ -2707,7 +2717,17 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
     solver.step();
     const auto epoch = state.mesh->geometry_epoch();
     EXPECT_GT(boundary_elevation(*state.mesh, state.definition), 1.0);
+    const auto attempt_timings = solver.solver_phase_timings();
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
+    EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, 2u);
     solver.restore_coupling_checkpoint(checkpoint);
+    const auto restored_timings = solver.solver_phase_timings();
+    for (std::size_t phase = 0; phase < attempt_timings.size(); ++phase)
+    {
+        EXPECT_EQ(restored_timings[phase].calls, attempt_timings[phase].calls);
+        EXPECT_EQ(restored_timings[phase].seconds, attempt_timings[phase].seconds);
+    }
     EXPECT_GT(state.mesh->geometry_epoch(), epoch);
     EXPECT_EQ(state.mesh->owned_cell_map().getRawPtr(), original_map.getRawPtr());
     expect_geometry_restored(*state.mesh, original_geometry);
@@ -2724,6 +2744,7 @@ TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnl
     solver.step(); // Create populations that can escape during the coupled interval.
     const auto history_size = solver.free_surface_history().size();
     const auto escape_before = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    solver.reset_solver_phase_timings();
     auto checkpoint = solver.create_coupling_checkpoint();
     std::vector<double> no_energy(state.mesh->num_owned_cells(), 0.0);
     solver.set_coupling_interval_energy(no_energy, 0.02);
@@ -2732,13 +2753,22 @@ TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnl
     const auto escaped = gas->cumulative_submerged_bubble_hydrogen_escaped();
     const auto vented = solver.free_surface_diagnostics().vented_gas_moles.at("H2");
     ASSERT_GT(escaped, escape_before);
+    const auto first_step_seconds = solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds;
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
+    const auto gas_attempts = solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls;
+    EXPECT_GT(gas_attempts, 0u);
     solver.restore_coupling_checkpoint(checkpoint);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
     EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), escape_before);
     EXPECT_EQ(solver.free_surface_history().size(), history_size);
     solver.set_coupling_interval_energy(no_energy, 0.02);
     solver.step();
     solver.step();
     solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 4u);
+    EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
+    EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds, first_step_seconds);
     EXPECT_NEAR(gas->cumulative_submerged_bubble_hydrogen_escaped(), escaped, 1.e-14);
     EXPECT_NEAR(solver.free_surface_diagnostics().vented_gas_moles.at("H2"), vented, 1.e-14);
     EXPECT_EQ(solver.free_surface_history().size(), history_size + 2);
