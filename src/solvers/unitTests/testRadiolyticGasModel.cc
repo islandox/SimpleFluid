@@ -3289,4 +3289,221 @@ TEST(RadiolyticGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssembl
     }
 }
 
+SimpleFluid::RadiolyticGasOptions zero_ale_transport_options()
+{
+    auto options = ale_escape_options();
+    options.initial_dissolved_hydrogen = 0;
+    options.initial_micro_number_density = options.initial_micro_moles = 0;
+    options.initial_large_number_density = options.initial_large_moles = 0;
+    return options;
+}
+
+/** Two independent models share only prescribed mesh/field inputs. */
+struct ALEZeroTransportPair
+{
+    SimpleFluid::SP<ALEMeshType> mesh = std::make_shared<ALEMeshType>(make_gas_composite_column());
+    ALERadiolyticModelType full, reduced;
+    ALEFieldType temperature{mesh, 300., "temperature"}, pressure{mesh, 0., "pressure"}, power{mesh, 0., "power"};
+    ALEVelocityFieldType velocity{mesh, ALEMeshType::Vec3{}, "velocity"};
+    ALEFaceFieldType flux{mesh, 0., "relative_flux"};
+    SimpleFluid::MaterialPropertyFields<Pack, ALEMeshType> material = make_ale_water_properties(mesh);
+    ALEMotionType motion{mesh};
+
+    explicit ALEZeroTransportPair(SimpleFluid::RadiolyticGasOptions options)
+        : full(mesh, options), reduced(mesh, options)
+    {
+        full.enable_donor_hydrogen_deficit_tracking();
+        reduced.enable_donor_hydrogen_deficit_tracking();
+        reduced.set_skip_zero_auxiliary_transport(true);
+        full.initialize_state(0., temperature, pressure, velocity, material);
+        reduced.initialize_state(0., temperature, pressure, velocity, material);
+    }
+
+    void advance(double top, double time, double dt)
+    {
+        motion.begin_trial(top, dt);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        for (auto* model : {&full, &reduced})
+        {
+            model->refresh_geometry();
+            model->advance(time, dt, temperature, pressure, velocity, flux, material, &power, &ale);
+        }
+    }
+
+    void compare() const
+    {
+        for (const auto& [name, field] : full.output_fields())
+        {
+            SCOPED_TRACE(name);
+            const auto* actual = reduced.output_fields().at(name);
+            for (size_t row = 0; row < mesh->num_local_cells(); ++row)
+            {
+                const auto lid = static_cast<Pack::local_ordinal_type>(row);
+                const double expected = field->local_value(lid);
+                EXPECT_NEAR(actual->local_value(lid), expected, std::max(1e-20, std::abs(expected) * 1e-12));
+            }
+        }
+        EXPECT_NEAR(reduced.last_statistics().inventory_error, 0., 1e-12);
+        EXPECT_NEAR(reduced.last_statistics().donor_inventory_error, 0., 1e-12);
+    }
+
+    void rollback(const ALERadiolyticModelType::StateSnapshot& full_state,
+                  const ALERadiolyticModelType::StateSnapshot& reduced_state)
+    {
+        motion.rollback_trial();
+        full.restore(full_state);
+        reduced.restore(reduced_state);
+        full.refresh_geometry();
+        reduced.refresh_geometry();
+    }
+};
+
+TEST(RadiolyticGasModelTest, ALEZeroAuxiliaryMatchesFullAcrossMotionAndReplay)
+{
+    ALEZeroTransportPair state(zero_ale_transport_options());
+    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    for (const double top : {.8, 1.2, .8})
+    {
+        SCOPED_TRACE(top);
+        state.advance(top, .001, .001);
+        state.compare();
+        EXPECT_EQ(state.full.last_statistics().transport_linear.solves, 6);
+        EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 1);
+        EXPECT_EQ(state.reduced.last_statistics().donor_transport_work.skipped, 1);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[1].solves, 1);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[2].solves, 1);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[3].skipped, 1);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 1);
+        EXPECT_DOUBLE_EQ(state.reduced.global_submerged_hydrogen_moles(), 0.);
+        state.rollback(full_start, reduced_start);
+    }
+}
+
+TEST(RadiolyticGasModelTest, ALEZeroAuxiliaryPreservesSharedMicroEscape)
+{
+    auto options = zero_ale_transport_options();
+    options.initial_micro_number_density = 1e10;
+    options.initial_micro_moles = 1e-6;
+    ALEZeroTransportPair state(options);
+    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    for (const double top : {.8, 1.2})
+    {
+        state.advance(top, .01, .01);
+        state.compare();
+        const auto& statistics = state.reduced.last_statistics();
+        EXPECT_EQ(statistics.transport_work[0].skipped, 1);
+        EXPECT_EQ(statistics.transport_work[3].skipped, 1);
+        EXPECT_EQ(statistics.transport_work[4].skipped, 1);
+        EXPECT_GT(statistics.microbubble_hydrogen_escaped, 0.);
+        EXPECT_DOUBLE_EQ(statistics.large_bubble_hydrogen_escaped, 0.);
+        EXPECT_DOUBLE_EQ(statistics.submerged_bubble_hydrogen_escaped, statistics.microbubble_hydrogen_escaped);
+        EXPECT_NEAR(statistics.microbubble_hydrogen_escaped,
+            state.full.last_statistics().microbubble_hydrogen_escaped, 1e-20);
+        state.rollback(full_start, reduced_start);
+    }
+}
+
+TEST(RadiolyticGasModelTest, ALEZeroLargeNumberReassemblesPopulatedMoles)
+{
+    auto options = zero_ale_transport_options();
+    options.initial_large_moles = 1e-6;
+    ALEZeroTransportPair state(options);
+    double time = 0;
+    for (int step = 1; step <= 2; ++step)
+    {
+        const double dt = step * .001;
+        time += dt;
+        state.advance(step == 1 ? 1.2 : .8, time, dt);
+        state.compare();
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[3].skipped, 1);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[4].assemblies, 1);
+        EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 0);
+        EXPECT_GT(state.reduced.global_large_bubble_hydrogen_moles(), 0.);
+        state.motion.accept_trial();
+    }
+}
+
+TEST(RadiolyticGasModelTest, ALEZeroAuxiliaryRetainsMotionAndPostCallbackGCLGuards)
+{
+    auto options = zero_ale_transport_options();
+    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+    options.hydrogen_diffusivity_correlation = &gas_diffusivity_with_gcl_fault;
+    gas_gcl_fault_armed = false;
+    gas_gcl_fault_motion = nullptr;
+    ALEZeroTransportPair state(options);
+    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    constexpr double dt = .001;
+    state.motion.begin_trial(1.2, dt);
+    const auto old = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
+    auto advance = [&](const auto& ale, double step = .001)
+    {
+        state.reduced.advance(dt, step, state.temperature, state.pressure, state.velocity, state.flux,
+            state.material, &state.power, &ale);
+    };
+    EXPECT_THROW(advance(old, 2 * dt), std::invalid_argument);
+    state.motion.rollback_trial();
+    EXPECT_THROW(advance(old), std::logic_error);
+    state.motion.begin_trial(1.1, dt);
+    EXPECT_THROW(advance(old), std::invalid_argument);
+    state.rollback(full_start, reduced_start);
+
+    for (const bool after_callback : {false, true})
+    {
+        SCOPED_TRACE(after_callback);
+        state.motion.begin_trial(1.2, dt);
+        {
+            MutableGasALEView altered(state.mesh, state.motion);
+            const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, altered);
+            state.reduced.refresh_geometry();
+            gas_gcl_fault_motion = &altered;
+            gas_gcl_fault_injected = false;
+            if (after_callback) gas_gcl_fault_armed = true;
+            else altered.invalidate_flux();
+            std::string message;
+            try { advance(ale); }
+            catch (const std::invalid_argument& error) { message = error.what(); }
+            EXPECT_NE(message.find("geometric conservation law"), std::string::npos);
+            if (after_callback) EXPECT_TRUE(gas_gcl_fault_injected);
+            EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
+            EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 0);
+            gas_gcl_fault_armed = false;
+            gas_gcl_fault_motion = nullptr;
+        }
+        state.rollback(full_start, reduced_start);
+    }
+    state.advance(1.1, dt, dt);
+    state.compare();
+    state.rollback(full_start, reduced_start);
+}
+
+TEST(RadiolyticGasModelTest, ALEZeroAuxiliaryRetainsLiquidStorageValidation)
+{
+    ALEZeroTransportPair state(zero_ale_transport_options());
+    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    state.motion.begin_trial(1.1, .001);
+    const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
+    std::array<std::string, 2> messages;
+    int index = 0;
+    for (auto* model : {&state.full, &state.reduced})
+    {
+        model->refresh_geometry();
+        // Test-only corruption of this non-const model's stored coefficient.
+        // The full assembly is the reference for category and diagnostic.
+        const_cast<ALEFieldType&>(model->alpha_l()).put_scalar(std::numeric_limits<double>::quiet_NaN());
+        try
+        {
+            model->advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
+                state.material, &state.power, &ale);
+        }
+        catch (const std::invalid_argument& error) { messages[index] = error.what(); }
+        ++index;
+    }
+    EXPECT_FALSE(messages[0].empty());
+    EXPECT_EQ(messages[0], messages[1]);
+    EXPECT_NE(messages[1].find("finite positive storage"), std::string::npos);
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
+    state.rollback(full_start, reduced_start);
+}
+
 } // namespace

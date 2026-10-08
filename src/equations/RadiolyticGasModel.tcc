@@ -1387,7 +1387,7 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     // incoming physical-boundary flux. Exact global zero is an invariant of
     // this stage, irrespective of kinetics that may populate it afterward.
     // Keep MPI decisions collective: local emptiness alone is insufficient.
-    if (d_skip_zero_auxiliary_transport && ale == nullptr && operator_slot != 1)
+    if (d_skip_zero_auxiliary_transport && operator_slot != 1)
     {
         int local_nonzero = 0, global_nonzero = 0;
         {
@@ -1399,6 +1399,39 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
             *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_nonzero, &global_nonzero);
         if (!global_nonzero)
         {
+            if (ale != nullptr && diffuse)
+            {
+                // The ALE zero solution does not need an assembled operator,
+                // but retain the dissolved field's provider and coefficient
+                // checks. Unit-weight donor/large fields share the carrier
+                // checks performed by the always-active micro transport.
+                int invalid_coefficients = 0;
+                collective_detail::collective_local_validation(*d_mesh, "Radiolytic diffusivity evaluation", [&]
+                    {
+                        const auto temperatures = diffusivity_temperature ? diffusivity_temperature->owned_read_view()
+                            : decltype(field.owned_read_view()){};
+                        const auto liquid_values = d_alpha_l.owned_read_view();
+                        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                        {
+                            const auto liquid_fraction = std::max(liquid_values(owned, 0), 1.0e-15);
+                            const auto cell_diffusivity = diffusivity_temperature
+                                ? RadiolyticGasPhysics::hydrogen_diffusivity(d_options, temperatures(owned, 0)) : diffusivity;
+                            const auto diffusion = liquid_fraction * cell_diffusivity;
+                            invalid_coefficients |= !std::isfinite(liquid_fraction) || liquid_fraction <= 0.0
+                                || !std::isfinite(diffusion) || diffusion < 0.0;
+                        }
+                    });
+                // A provider can invalidate borrowed swept-flux data without
+                // mutating mesh coordinates. Preserve the assembly boundary's
+                // post-provider GCL check even though assembly is skipped.
+                ale->validate(*d_mesh, static_cast<real_t>(time_step));
+                int any_invalid_coefficients = 0;
+                Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                    1, &invalid_coefficients, &any_invalid_coefficients);
+                if (any_invalid_coefficients)
+                    throw std::invalid_argument("weighted_scalar_transport_system requires finite positive storage and finite "
+                                                "non-negative advection and diffusion coefficients.");
+            }
             field.sync_ghosts();
             ++work.skipped;
             work.total_seconds += elapsed(started);

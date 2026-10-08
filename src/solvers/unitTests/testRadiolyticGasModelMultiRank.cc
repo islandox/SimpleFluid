@@ -1005,6 +1005,164 @@ TEST(RadiolyticGasModelMultiRankTest, RankLocalFengReynoldsLimitThrowsCoherently
     }
 }
 
+namespace
+{
+using ZeroALEHandle = SimpleFluid::MeshHandle<Pack>;
+using ZeroALEModel = SimpleFluid::RadiolyticGasModel<Pack, ZeroALEHandle>;
+using ZeroALEScalar = SimpleFluid::ScalarCellFieldStored<Pack, ZeroALEHandle>;
+
+SimpleFluid::SP<ZeroALEHandle> make_zero_ale_composite()
+{
+    using Composite = SimpleFluid::Meshes::MultiRegionMesh;
+    return std::make_shared<ZeroALEHandle>(std::make_shared<Composite>(std::vector<Composite::Region>{
+        SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
+        SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
+        std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
+        SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames));
+}
+
+struct DistributedALEZeroPair
+{
+    SimpleFluid::SP<ZeroALEHandle> mesh = make_zero_ale_composite();
+    ZeroALEModel full, reduced;
+    ZeroALEScalar temperature{mesh, 300., "temperature"}, pressure{mesh, 0., "pressure"}, power{mesh, 0., "power"};
+    SimpleFluid::VectorCellFieldStored<Pack, ZeroALEHandle> velocity{mesh, ZeroALEHandle::Vec3{}, "velocity"};
+    SimpleFluid::ScalarFaceFieldStored<Pack, ZeroALEHandle> flux{mesh, 0., "relative_flux"};
+    SimpleFluid::MaterialPropertyFields<Pack, ZeroALEHandle> material;
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion{mesh};
+
+    explicit DistributedALEZeroPair(SimpleFluid::RadiolyticGasOptions options)
+        : full(mesh, options), reduced(mesh, options), material(mesh, [] {
+            SimpleFluid::BoussinesqModelOptions water;
+            water.reference_density = water.density = 1000.;
+            water.specific_heat_capacity = 4200.;
+            water.dynamic_viscosity = .001;
+            water.thermal_conductivity = .6;
+            return water;
+        }(), SimpleFluid::TimeStepperOptions{})
+    {
+        full.enable_donor_hydrogen_deficit_tracking();
+        reduced.enable_donor_hydrogen_deficit_tracking();
+        reduced.set_skip_zero_auxiliary_transport(true);
+        full.initialize_state(0., temperature, pressure, velocity, material);
+        reduced.initialize_state(0., temperature, pressure, velocity, material);
+    }
+
+    void advance(double top, double time, double dt)
+    {
+        motion.begin_trial(top, dt);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        for (auto* model : {&full, &reduced})
+        {
+            model->refresh_geometry();
+            model->advance(time, dt, temperature, pressure, velocity, flux, material, &power, &ale);
+        }
+    }
+
+    void compare() const
+    {
+        for (const auto& [name, field] : full.output_fields())
+        {
+            SCOPED_TRACE(name);
+            const auto* actual = reduced.output_fields().at(name);
+            for (size_t row = 0; row < mesh->num_local_cells(); ++row)
+            {
+                const auto lid = static_cast<Pack::local_ordinal_type>(row);
+                const double expected = field->local_value(lid);
+                EXPECT_NEAR(actual->local_value(lid), expected, std::max(1e-20, std::abs(expected) * 1e-12));
+            }
+        }
+        EXPECT_NEAR(reduced.last_statistics().inventory_error, 0., 1e-12);
+        EXPECT_NEAR(reduced.last_statistics().donor_inventory_error, 0., 1e-12);
+    }
+};
+} // namespace
+
+TEST(RadiolyticGasModelMultiRankTest, ALEZeroAuxiliaryResumesAfterRankLocalProduction)
+{
+    auto options = sheng_options();
+    options.kinetics_mode = SimpleFluid::RadiolyticKineticsMode::ExactInactive;
+    options.microbubble_lifetime = .01;
+    options.micro_to_large_conversion_coefficient = 0;
+    options.large_bubble_dissolution_time = 1e100;
+    DistributedALEZeroPair state(options);
+    const auto comm = state.mesh->owned_cell_map()->getComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    const int local_owned = state.mesh->num_owned_cells() > 0;
+    int all_owned = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_owned, &all_owned);
+    ASSERT_EQ(all_owned, 1);
+    if (comm->getRank() == 0) state.power.set_owned_value(0, 1000.);
+    state.power.sync_ghosts();
+    for (const auto face : state.flux.owned_face_ids())
+        if (!state.mesh->is_boundary_face(face))
+            state.flux.set_owned_value(face, .05 * state.mesh->face_area_vector(face).x);
+    state.flux.sync_ghosts();
+    double time = 0;
+    for (int step = 1; step <= 3; ++step)
+    {
+        const double dt = step * .001;
+        time += dt;
+        state.advance(step == 2 ? .9 : 1.1, time, dt);
+        state.compare();
+        const auto& work = state.reduced.last_statistics();
+        EXPECT_EQ(work.transport_work[0].skipped, step == 1 ? 1 : 0);
+        EXPECT_EQ(work.donor_transport_work.skipped, step == 1 ? 1 : 0);
+        EXPECT_EQ(work.transport_work[3].skipped, 1);
+        EXPECT_EQ(work.transport_work[4].skipped, 1);
+        EXPECT_EQ(work.transport_work[1].solves, 1);
+        EXPECT_EQ(work.transport_work[2].assemblies, 0);
+        if (step == 1) EXPECT_EQ(work.transport_linear.solves, 2);
+        else
+        {
+            EXPECT_GE(work.transport_work[0].solves, 1);
+            EXPECT_GE(work.donor_transport_work.solves, 1);
+        }
+        EXPECT_GT(state.reduced.global_dissolved_hydrogen_moles(), 0.);
+        state.motion.accept_trial();
+        state.power.put_scalar(0.);
+        state.power.sync_ghosts();
+    }
+}
+
+TEST(RadiolyticGasModelMultiRankTest, ALEZeroAuxiliaryInvalidDiffusivityFailsBeforeSkipping)
+{
+    auto options = sheng_options();
+    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+    options.hydrogen_diffusivity_correlation = +[](double temperature) { return temperature > 325 ? -1. : 1e-8; };
+    DistributedALEZeroPair state(options);
+    const auto comm = state.mesh->owned_cell_map()->getComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    if (comm->getRank() == 0 && state.mesh->num_owned_cells()) state.temperature.set_owned_value(0, 350.);
+    state.temperature.sync_ghosts();
+    state.motion.begin_trial(1.1, .001);
+    const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
+    state.reduced.refresh_geometry();
+    int category = 0;
+    std::string message;
+    try
+    {
+        state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
+            state.material, &state.power, &ale);
+    }
+    catch (const std::invalid_argument& error) { category = 1; message = error.what(); }
+    catch (const std::runtime_error& error) { category = 2; message = error.what(); }
+    EXPECT_EQ(category, comm->getRank() == 0 ? 1 : 2);
+    EXPECT_NE(message.find(comm->getRank() == 0 ? "hydrogen diffusivity" : "another rank"), std::string::npos);
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[1].solves, 0);
+    state.motion.rollback_trial();
+    state.temperature.put_scalar(300.);
+    state.temperature.sync_ghosts();
+    state.full.restore(full_start);
+    state.reduced.restore(reduced_start);
+    state.advance(.9, .001, .001);
+    state.compare();
+    EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
+    state.motion.rollback_trial();
+}
+
 /** Auxiliary transport skips require global zero and resume after local kinetics. */
 TEST(RadiolyticGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesCollectively)
 {
